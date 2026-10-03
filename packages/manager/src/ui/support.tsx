@@ -225,11 +225,12 @@ async function api<T>(
     const data = (await response.json()) as {
       readonly code?: string;
       readonly error?: string;
+      readonly reason?: string;
       readonly retryAfterMilliseconds?: number;
     };
     if (!response.ok) {
       throw ManagerApiError.of(
-        data.error ?? `HTTP ${response.status}`,
+        data.error ?? data.reason ?? `HTTP ${response.status}`,
         response.status,
         data.code,
         data.retryAfterMilliseconds,

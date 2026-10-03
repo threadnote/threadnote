@@ -205,6 +205,7 @@ const checkSelfContained = Effect.gen(function* () {
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-context', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-code-graph', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-memory', 'SKILL.md'),
+      path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-health', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-profiles', 'cursor-cloud-personal', 'agent-instructions.md'),
       path.join(
         root,

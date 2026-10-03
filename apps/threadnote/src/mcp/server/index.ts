@@ -70,6 +70,8 @@ import {
   runNativeHealthTool,
   runNativeRemoveTool,
 } from './memory.js';
+import {runContextMaintenanceScheduler} from '../../memory/context/maintenance.js';
+import {registerContextMaintenanceTools} from './context/maintenance.js';
 import {registerContextHealthTool} from './context/health.js';
 import {registerContextHealthRepairTools} from './context/health_repair.js';
 import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
@@ -141,6 +143,9 @@ export const mcpServerEffect = withAnonymousTelemetry(
         if (system.environment()[MCP_PROCESS_LIFECYCLE_PROBE_ENV] === '1') {
           const runtime = yield* LocalModelRuntime;
           yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
+        }
+        if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
+          yield* Effect.forkScoped(runContextMaintenanceScheduler(config));
         }
         if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
           yield* Effect.forkScoped(monitorSharedRepositories(config));
@@ -389,6 +394,7 @@ function registerTools(
 
   if (capabilities.lifecycle) {
     registerContextHealthTool(server, config);
+    registerContextMaintenanceTools(server, config);
     registerContextHealthRepairTools(server, config);
     registerMaintenanceMetadataTools(server, config);
     registerRecallFeedbackTool(server, config);

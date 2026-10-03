@@ -99,6 +99,36 @@ describe('context health aggregation and schedule contract', () => {
     ]);
   });
 
+  it('retains independently known structural findings from evidence-incomplete reports', () => {
+    const structural = report(1);
+    const incomplete = {
+      ...structural,
+      status: 'unknown' as const,
+      semanticCompleteness: {
+        ...structural.semanticCompleteness,
+        state: 'partial' as const,
+        analyzedRecords: 1,
+        unknownRecords: 1,
+        unknownReasons: [{reason: 'record-limit' as const, count: 1}],
+      },
+    };
+    const aggregate = aggregateContextHealthReportsV1({
+      project: PROJECT,
+      personal: completePersonal(incomplete),
+      teams: [
+        {
+          scope: 'team',
+          team: 'platform',
+          state: 'unknown',
+          reason: 'citation-evidence-unavailable',
+          report: incomplete,
+        },
+      ],
+    });
+    expect(aggregate).toMatchObject({knownFindings: 2, status: 'unknown', exitCode: 2, unknownSources: 2});
+    expect(aggregate.findings.map(finding => finding.sourceKey)).toEqual(['personal', 'team:platform']);
+  });
+
   it('returns findings only after all selected sources are complete', () => {
     const aggregate = aggregateContextHealthReportsV1({
       personal: completePersonal(report()),

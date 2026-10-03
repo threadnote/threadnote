@@ -26,6 +26,7 @@ import {
   runEffectAiConsolidation,
   runNativeAiConsolidation,
 } from '../effect/ai/consolidator.js';
+import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -123,7 +124,6 @@ import {runCodeGraphPurge, runCodeGraphRepair} from '../code_graph/commands.js';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
 import {
   compactCodeGraphStorageIsolated,
-  runCodeGraphAutomaticCompactionScheduler,
   type CodeGraphAutomaticCompactionStatus,
 } from '@threadnote/graph/automatic/compaction';
 import {inspectAllCodeGraphsLocal} from '@threadnote/graph/diagnostics';
@@ -381,11 +381,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
           yield* server.serve(
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope}),
           );
-          yield* Effect.forkScoped(
-            runCodeGraphAutomaticCompactionScheduler(config.agentContextHome, status =>
-              Ref.set(automaticCompactionStatus, status),
-            ),
-          );
+          yield* startManagerContextSchedulers(config, automaticCompactionStatus);
           const actualPort =
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port

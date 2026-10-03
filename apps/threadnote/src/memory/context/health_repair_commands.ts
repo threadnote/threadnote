@@ -4,11 +4,10 @@ import {shellQuote} from '@threadnote/platform/command';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {SystemInfo} from '@threadnote/platform/system';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {
-  forgetResourceWithRetry,
   readMemoryRecordsByUri,
   resourceExists,
   resourceStoreLocation,
@@ -16,6 +15,7 @@ import {
 } from '../../mcp/server/memory.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {memoryIdentityLockKey, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {validateContextHealthMemoryCitations} from '@threadnote/context/citation_validation';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {ContextHealthReportV1} from '@threadnote/context/health';
 import type {ContextHealthFindingCategoryV1} from '@threadnote/context/health';
@@ -34,6 +34,7 @@ import {
 } from './health_repair.js';
 import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import {MemoryOperationError} from '../migrations.js';
+import {discardDeferredCodeAnchorIntentsWithin} from '../deferred/code_anchor.js';
 import {
   contextHealthSelectorCliFlags,
   contextHealthSelectorDescription,
@@ -266,7 +267,7 @@ export const previewContextHealthRepairs = Effect.fn('memory.contextHealthRepair
   });
 });
 
-const captureCitationReplacements = Effect.fn('memory.contextHealthRepair.captureCitations')(function* (
+export const captureCitationReplacements = Effect.fn('memory.contextHealthRepair.captureCitations')(function* (
   config: RuntimeConfig,
   project: string,
   cwd: string,
@@ -277,9 +278,7 @@ const captureCitationReplacements = Effect.fn('memory.contextHealthRepair.captur
   const candidates = report.findings.flatMap(finding => {
     if (
       finding.repair.kind !== 'repair-citation' ||
-      (finding.category !== 'citation-changed' &&
-        finding.category !== 'citation-missing' &&
-        finding.category !== 'citation-unknown')
+      (finding.category !== 'citation-missing' && finding.category !== 'citation-unknown')
     ) {
       return [];
     }
@@ -289,34 +288,72 @@ const captureCitationReplacements = Effect.fn('memory.contextHealthRepair.captur
     const citationId = targetUri.slice(targetUri.lastIndexOf('#') + 1);
     const current = recordsByUri.get(subjectUri)?.metadata.codeCitations?.find(item => item.id === citationId);
     if (current === undefined) return [];
-    return [{current, findingId: finding.id, reference: citationReference(current)}];
+    return [{current, subjectUri, findingId: finding.id, reference: citationReference(current)}];
   });
-  const references = [...new Set(candidates.map(candidate => candidate.reference))];
-  const batches = Array.from({length: Math.ceil(references.length / 8)}, (_, index) =>
-    references.slice(index * 8, index * 8 + 8),
+  if (candidates.length === 0) return new Map<string, MemoryCodeCitationV1>();
+  const validations = yield* validateContextHealthMemoryCitations(
+    config,
+    {callerCwd: cwd, kind: 'repository', project},
+    records
+      .filter(
+        record =>
+          (record.metadata.kind === 'durable' || record.metadata.kind === 'handoff') &&
+          candidates.some(candidate => candidate.subjectUri === record.uri),
+      )
+      .map((record, rank) => ({
+        uri: record.uri,
+        rank,
+        excerpt: '',
+        kind: record.metadata.kind as 'durable' | 'handoff',
+        memoryId: record.metadata.memoryId,
+        project: record.metadata.project,
+        codeCitations: (record.metadata.codeCitations ?? []).filter(citation =>
+          candidates.some(candidate => candidate.subjectUri === record.uri && candidate.current.id === citation.id),
+        ),
+        citationErrorCount: record.metadata.citationErrors?.length ?? 0,
+      })),
+  ).pipe(Effect.orElseSucceed(() => []));
+  const receipts = new Map(
+    validations.flatMap(validation => validation.receipts.map(receipt => [receipt.citationId, receipt] as const)),
   );
-  const capturedBatches = yield* Effect.forEach(
-    batches,
-    refs =>
-      captureMemoryCodeCitations(config, {callerCwd: cwd, omitUnresolved: true, project, refs}).pipe(
-        Effect.orElseSucceed(() => [] as readonly MemoryCodeCitationV1[]),
-      ),
+  const verifiedCandidates = candidates.filter(candidate => {
+    const receipt = receipts.get(candidate.current.id);
+    return (
+      receipt !== undefined &&
+      (receipt.status === 'exact' || receipt.status === 'relocated') &&
+      receipt.coverage === 'current-complete' &&
+      receipt.provenance !== 'historical-verified'
+    );
+  });
+  const captures = yield* Effect.forEach(
+    verifiedCandidates,
+    candidate =>
+      Effect.gen(function* () {
+        const receipt = receipts.get(candidate.current.id)!;
+        const reference = receipt.observedNodeId ?? receipt.observedPath ?? candidate.reference;
+        const captured = yield* captureMemoryCodeCitations(config, {
+          callerCwd: receipt.recovery?.callerCwd ?? cwd,
+          omitUnresolved: true,
+          project,
+          refs: [reference],
+        }).pipe(Effect.orElseSucceed(() => [] as readonly MemoryCodeCitationV1[]));
+        const replacement = captured[0];
+        if (
+          replacement === undefined ||
+          replacement.id === candidate.current.id ||
+          replacement.repositoryId !== candidate.current.repositoryId ||
+          replacement.repositoryIdentityKind !== candidate.current.repositoryIdentityKind
+        )
+          return undefined;
+        const unchangedSupport =
+          replacement.target.kind === 'symbol' && candidate.current.target.kind === 'symbol'
+            ? replacement.target.fragmentHash.value === candidate.current.target.fragmentHash.value
+            : replacement.fileContentHash.value === candidate.current.fileContentHash.value;
+        return unchangedSupport ? ([candidate.findingId, replacement] as const) : undefined;
+      }),
     {concurrency: 4},
   );
-  const capturedByReference = new Map(
-    capturedBatches.flat().map(citation => [citationReference(citation), citation] as const),
-  );
-  return new Map(
-    candidates.flatMap(candidate => {
-      const replacement = capturedByReference.get(candidate.reference);
-      return replacement !== undefined &&
-        replacement.id !== candidate.current.id &&
-        replacement.repositoryId === candidate.current.repositoryId &&
-        replacement.repositoryIdentityKind === candidate.current.repositoryIdentityKind
-        ? ([[candidate.findingId, replacement]] as const)
-        : [];
-    }),
-  );
+  return new Map(captures.filter((item): item is readonly [string, MemoryCodeCitationV1] => item !== undefined));
 });
 
 function citationReference(citation: MemoryCodeCitationV1): string {
@@ -396,6 +433,42 @@ export const applyContextHealthRepair = Effect.fn('memory.contextHealthRepair.ap
   );
 });
 
+export const applyAutomaticContextHealthArchive = Effect.fn('memory.contextHealthRepair.automaticArchive')(function* <
+  E = never,
+  R = never,
+>(
+  config: RuntimeConfig,
+  proposal: ContextHealthRepairProposalV1,
+  cwd: string,
+  timestamp?: string,
+  archiveGuard?: (source: MemoryRecord) => Effect.Effect<void, E, R>,
+) {
+  if (
+    proposal.mutation.kind !== 'archive-memory' ||
+    !['validity-expired', 'exact-duplicate'].includes(proposal.category)
+  ) {
+    return yield* repairError('Automatic archival requires explicit validity or exact duplication evidence.');
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const journalPath = repairJournalPath(path, config.agentContextHome, proposal.proposalId, proposal.revision);
+  return yield* withExclusiveFileLock(
+    fs,
+    `${journalPath}.lock`,
+    REPAIR_LOCK_OPTIONS,
+    applyLocked(config, {
+      cwd,
+      journalPath,
+      project: proposal.project,
+      proposalId: proposal.proposalId,
+      revision: proposal.revision,
+      automaticProposal: proposal,
+      archiveTimestamp: timestamp,
+      archiveGuard,
+    }),
+  );
+});
+
 export const runContextHealthRepairApply = Effect.fn('memory.contextHealthRepair.applyCommand')(function* (
   config: RuntimeConfig,
   options: RunContextHealthRepairApplyOptionsV1,
@@ -405,11 +478,14 @@ export const runContextHealthRepairApply = Effect.fn('memory.contextHealthRepair
   yield* writeFinalCliOutput(options.json ? JSON.stringify(result) : renderContextHealthRepairApply(result));
 });
 
-function applyLocked(
+function applyLocked<E = never, R = never>(
   config: RuntimeConfig,
   input: {
     readonly cwd: string;
     readonly journalPath: string;
+    readonly automaticProposal?: ContextHealthRepairProposalV1;
+    readonly archiveTimestamp?: string;
+    readonly archiveGuard?: (source: MemoryRecord) => Effect.Effect<void, E, R>;
     readonly project: string;
     readonly proposalId: string;
     readonly revision: string;
@@ -441,8 +517,11 @@ function applyLocked(
         return publicApplyResult(verified, proposal);
       }
     } else {
-      const plan = yield* previewContextHealthRepairs(config, input.project, input.cwd, input.selector);
-      const matched = plan.proposals.find(item => item.proposalId === input.proposalId);
+      const proposals =
+        input.automaticProposal === undefined
+          ? (yield* previewContextHealthRepairs(config, input.project, input.cwd, input.selector)).proposals
+          : [input.automaticProposal];
+      const matched = proposals.find(item => item.proposalId === input.proposalId);
       if (!matched) {
         return yield* repairError(
           `Repair proposal ${input.proposalId} is no longer present. Preview context repairs again.`,
@@ -466,7 +545,12 @@ function applyLocked(
       }
       const archive =
         proposal.mutation.kind === 'archive-memory' && subject !== undefined
-          ? repairArchiveJournal(config, proposal, subject, DateTime.formatIso(yield* DateTime.now))
+          ? repairArchiveJournal(
+              config,
+              proposal,
+              subject,
+              input.archiveTimestamp ?? DateTime.formatIso(yield* DateTime.now),
+            )
           : undefined;
       journal = {
         ...(archive === undefined ? {} : {archive}),
@@ -497,16 +581,17 @@ function applyLocked(
       return publicApplyResult(planned, proposal);
     }
 
-    yield* executeRepairMutation(config, proposal, journal);
+    yield* executeRepairMutation(config, proposal, journal, input.archiveGuard);
     yield* writeRepairJournal(input.journalPath, {...journal, receipt: planned.receipt, state: 'applied'});
     return publicApplyResult(planned, proposal);
   });
 }
 
-function executeRepairMutation(
+function executeRepairMutation<E = never, R = never>(
   config: RuntimeConfig,
   proposal: ContextHealthRepairProposalV1,
   journal: ContextHealthRepairJournalV1,
+  archiveGuard?: (source: MemoryRecord) => Effect.Effect<void, E, R>,
 ) {
   return Effect.gen(function* () {
     const mutation = proposal.mutation;
@@ -561,15 +646,37 @@ function executeRepairMutation(
           }
           const store = yield* ResourceStore;
           const location = resourceStoreLocation(config);
-          if (!existingArchive) {
-            yield* store.makeDirectory(location, archive.uri.slice(0, archive.uri.lastIndexOf('/')));
-            yield* store.write(location, archive.uri, content, {mode: 'create'});
-          }
+          const mutations: ResourceStoreMutation[] = [
+            ...(existingArchive
+              ? []
+              : [{type: 'write' as const, uri: archive.uri, content, options: {mode: 'create' as const}}]),
+            {type: 'remove', uri: source.uri, options: {expectedFingerprint: yield* store.fingerprint(source.content)}},
+          ];
+          yield* store.mutateChecked(
+            location,
+            mutations,
+            Effect.gen(function* () {
+              const checked = yield* readMemoryRecordsByUri(config, lockedUris);
+              const checkedPlan = applyContextHealthRepairProposalV1({
+                absentTargetUris: yield* proposalAbsentTargetUris(config, proposal),
+                expectedRevision: proposal.revision,
+                proposal,
+                records: checked,
+              });
+              if (
+                checkedPlan.status !== 'applied' ||
+                current.some(record => checked.find(item => item.uri === record.uri)?.content !== record.content)
+              ) {
+                return yield* repairError('Memory content changed before the approved archive mutation.');
+              }
+              if (archiveGuard !== undefined) yield* archiveGuard(source);
+            }),
+          );
+          yield* discardDeferredCodeAnchorIntentsWithin(config, source.uri);
           const [storedArchive] = yield* readMemoryRecordsByUri(config, [archive.uri]);
           if (!storedArchive || memoryContentHash(storedArchive.content) !== archive.contentHash) {
             return yield* repairError(`Archive verification failed for ${archive.uri}.`);
           }
-          yield* forgetResourceWithRetry(config, source.uri, false, source.content, true);
           if ((yield* readMemoryRecordsByUri(config, [source.uri])).length > 0) {
             return yield* repairError(`Archive was stored, but repair subject ${source.uri} could not be removed.`);
           }
@@ -653,6 +760,20 @@ function recoveredArchiveReceipt(
   };
 }
 
+export function previewAutomaticContextHealthArchiveReceipt(
+  config: RuntimeConfig,
+  proposal: ContextHealthRepairProposalV1,
+  source: MemoryRecord,
+  timestamp: string,
+) {
+  if (proposal.mutation.kind !== 'archive-memory' || !isArchiveRepairableKind(source.metadata.kind))
+    throw new Error('Cannot preview a non-archive receipt.');
+  return {
+    uri: repairArchiveUri(config, proposal, source.metadata.kind),
+    content: repairArchiveContent(proposal, source, timestamp),
+  };
+}
+
 function repairArchiveJournal(
   config: RuntimeConfig,
   proposal: ContextHealthRepairProposalV1,
@@ -679,14 +800,22 @@ function repairArchiveContent(
   if (!isArchiveRepairableKind(source.metadata.kind)) throw new Error('Cannot archive this memory kind.');
   return formatMemoryDocument(
     'MEMORY',
-    memoryArchiveMetadata(source.metadata, {
-      archivedFrom: source.uri,
-      kind: source.metadata.kind,
-      project: proposal.project,
-      sourceAgentClient: 'threadnote',
-      timestamp,
-      topic: source.metadata.topic,
-    }),
+    memoryArchiveMetadata(
+      {
+        ...source.metadata,
+        ...(proposal.mutation.kind === 'archive-memory' && proposal.mutation.survivorUri !== undefined
+          ? {references: [...new Set([...(source.metadata.references ?? []), proposal.mutation.survivorUri])]}
+          : {}),
+      },
+      {
+        archivedFrom: source.uri,
+        kind: source.metadata.kind,
+        project: proposal.project,
+        sourceAgentClient: 'threadnote',
+        timestamp,
+        topic: source.metadata.topic,
+      },
+    ),
     memoryArchiveBody(source.body),
   );
 }

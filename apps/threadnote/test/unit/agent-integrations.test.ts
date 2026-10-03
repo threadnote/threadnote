@@ -241,7 +241,7 @@ describe('agent integrations', () => {
         const cursorRule = yield* fs.readFileString(path.join(userHome, '.cursor', 'rules', 'threadnote.mdc'));
         expect(cursorRule).toContain('alwaysApply: true');
         expect(cursorRule).toContain('Route non-trivial work by situation');
-        for (const skill of ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory']) {
+        for (const skill of ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory', 'threadnote-health']) {
           const installedSkill = yield* fs.readFileString(path.join(userHome, '.cursor', 'skills', skill, 'SKILL.md'));
           expect(installedSkill).toContain(`name: ${skill}`);
           if (skill === 'threadnote-memory') {
@@ -478,7 +478,7 @@ describe('agent integrations', () => {
         expect(yield* fs.readFileString(directRule)).toBe('Keep this note.\n');
         const receipt = (yield* readAgentIntegrationRegistry(config(threadnoteHome)))?.hosts.cursor;
         expect(Object.keys(receipt?.artifacts ?? {})).not.toContain(directRule);
-        expect(Object.keys(receipt?.artifacts ?? {})).toHaveLength(3);
+        expect(Object.keys(receipt?.artifacts ?? {})).toHaveLength(4);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

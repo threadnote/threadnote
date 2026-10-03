@@ -17,6 +17,14 @@ import {
   applyContextHealthRepair,
   previewContextHealthRepairs,
 } from '../memory/context/health_repair_commands.js';
+import {
+  readContextMaintenanceStatus,
+  readContextMaintenancePacket,
+  runContextMaintenance,
+  setContextMaintenancePaused,
+  undoContextMaintenance,
+} from '../memory/context/maintenance.js';
+import {SystemInfo} from '@threadnote/platform/system';
 import {readActiveProjectMemoryRecords} from '../memory/maintenance/records.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
@@ -56,6 +64,43 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   readonly url: URL;
 }) {
   const route = request.url.pathname;
+  if (route === '/api/attention/context-maintenance') {
+    if (request.method === 'GET') {
+      const project = request.url.searchParams.get('project');
+      const caseId = request.url.searchParams.get('caseId');
+      if (caseId !== null) return {status: 200, body: yield* readContextMaintenancePacket(request.config, caseId)};
+      const status = yield* readContextMaintenanceStatus(request.config, project ?? undefined);
+      return {
+        status: 200,
+        body:
+          project === null
+            ? status
+            : {
+                ...status,
+                projects: status.projects.filter(item => item.project === project),
+                cases: status.cases.filter(item => item.project === project),
+                receipts: status.receipts.filter(item => item.project === project),
+              },
+      };
+    }
+    if (request.method !== 'POST') return undefined;
+    const body = yield* request.body;
+    if (body.action === 'pause' || body.action === 'resume')
+      return {status: 200, body: yield* setContextMaintenancePaused(request.config, body.action === 'pause')};
+    if (body.action === 'undo' && typeof body.receiptId === 'string') {
+      const result = yield* undoContextMaintenance(request.config, body.receiptId);
+      return {status: result.status === 'conflict' ? 409 : 200, body: result};
+    }
+    if (body.action === 'run-now')
+      return {
+        status: 200,
+        body: yield* runContextMaintenance(request.config, {
+          cwd: (yield* SystemInfo).currentDirectory(),
+          project: typeof body.project === 'string' ? body.project : undefined,
+        }),
+      };
+    return invalid('Choose run-now, pause, resume, or undo with an exact receipt.');
+  }
   if (route === '/api/context-health/citations/jobs' && request.method === 'GET') {
     const project = request.url.searchParams.get('project') ?? '';
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project)) return invalid('Select a valid project.');

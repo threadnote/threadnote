@@ -47,6 +47,35 @@ describe('context health and value report CLI', () => {
       findings: [],
       limit: 100,
       omittedFindings: 0,
+      maintenance: {
+        version: 2,
+        actionableFindings: 0,
+        affectedMemories: 0,
+        automaticallyManagedFindings: 0,
+        historicalFindings: 0,
+        citationCoverage: {
+          eligible: 0,
+          checked: 0,
+          deferred: 0,
+          currentVerified: 0,
+          historicalVerified: 0,
+          unverified: 0,
+          state: 'complete',
+          reasons: [],
+        },
+        semanticCoverage: {
+          analyzedRecords: 0,
+          claimsAnalyzed: 0,
+          contradictionCount: 0,
+          eligibleRecords: 0,
+          omittedContradictions: 0,
+          pairsCompared: 0,
+          state: 'complete',
+          unknownReasons: [],
+          unknownRecords: 0,
+          version: 1,
+        },
+      },
       project: 'project-a',
       recordsScanned: 0,
       semanticCompleteness: {
@@ -598,7 +627,20 @@ describe('context health and value report CLI', () => {
 
   it('reports locally observed health and Knowledge Delta activity while setup remains explicitly unavailable', async () => {
     const home = await makeHome();
-    await storedMemory(home, 'project-a', 'expired.md', {validTo: '2026-09-16T00:00:00.000Z'});
+    await storedMemory(
+      home,
+      'project-a',
+      'required.md',
+      {},
+      '- Agents must load verified context before implementation.',
+    );
+    await storedMemory(
+      home,
+      'project-a',
+      'forbidden.md',
+      {},
+      '- Agents must not load verified context before implementation.',
+    );
     const closeout: SessionCloseoutInput = {
       decisions: ['Keep value reporting local and count-only.'],
       evidence: ['apps/threadnote/test/integration/context-value-report-cli.test.ts'],

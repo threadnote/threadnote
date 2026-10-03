@@ -87,6 +87,9 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
     healthResult && Result.isSuccess(healthResult)
       ? {
           findingCount: healthResult.success.findings.length + healthResult.success.omittedFindings,
+          decisionMemories: healthResult.success.maintenance?.affectedMemories,
+          automaticCount: healthResult.success.maintenance?.automaticallyManagedFindings,
+          coverage: healthResult.success.maintenance?.citationCoverage.state,
           status: healthResult.success.status,
         }
       : undefined;
@@ -97,7 +100,12 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
       stats: {
         ...(Result.isSuccess(recordsResult) ? {memories: recordsResult.success.length} : {}),
         ...(healthResult && Result.isSuccess(healthResult)
-          ? {coverage: healthResult.success.semanticCompleteness.state, scanned: healthResult.success.recordsScanned}
+          ? {
+              coverage: healthResult.success.semanticCompleteness.state,
+              scanned: healthResult.success.recordsScanned,
+              decisionMemories: healthResult.success.maintenance?.affectedMemories,
+              healthCoverage: healthResult.success.maintenance?.citationCoverage.state,
+            }
           : {}),
         ...(pendingCount === undefined ? {} : {pending: pendingCount}),
         ...(value

@@ -92,3 +92,70 @@ export interface ManagerCitationRepairJobV1 {
 export interface ManagerCitationRepairJobResponseV1 {
   readonly job: ManagerCitationRepairJobV1 | null;
 }
+
+export interface ManagerContextMaintenanceCaseV2 {
+  readonly caseId: string;
+  readonly project: string;
+  readonly memoryId: string;
+  readonly family: string;
+  readonly slot: string;
+  readonly evidenceRevision: string;
+  readonly disposition:
+    | 'queued'
+    | 'repairing'
+    | 'waiting-evidence'
+    | 'needs-decision'
+    | 'resolved'
+    | 'retired'
+    | 'historical'
+    | 'deferred-policy';
+  readonly reason: string;
+  readonly causeKey?: string;
+  readonly repositoryId?: string;
+  readonly firstSeen: string;
+  readonly lastSeen: string;
+  readonly lastChecked: string;
+  readonly attemptCount: number;
+  readonly nextAttemptAt?: string;
+  readonly events: readonly {readonly at: string; readonly reason: string}[];
+}
+
+export interface ManagerContextMaintenanceReceiptV2 {
+  readonly receiptId: string;
+  readonly project: string;
+  readonly subjectUri: string;
+  readonly postHash: string;
+  readonly timestamp: string;
+  readonly state: 'applying' | 'applied' | 'undone' | 'conflict';
+}
+
+export interface ManagerContextMaintenanceStatusV2 {
+  readonly version: 2;
+  readonly paused: boolean;
+  readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
+  readonly generation: string;
+  readonly projects: readonly {
+    readonly project: string;
+    readonly generation: string;
+    readonly cursor: number;
+    readonly eligible: number;
+    readonly checked: number;
+    readonly eligibleCitations: number;
+    readonly checkedCitations: number;
+  }[];
+  readonly cases: readonly ManagerContextMaintenanceCaseV2[];
+  readonly receipts: readonly ManagerContextMaintenanceReceiptV2[];
+  readonly counts?: Readonly<Record<string, number>>;
+  readonly groups?: readonly {
+    readonly causeKey: string;
+    readonly project: string;
+    readonly disposition: ManagerContextMaintenanceCaseV2['disposition'];
+    readonly reason: string;
+    readonly repositoryId?: string;
+    readonly affectedMemories: number;
+    readonly nextAttemptAt?: string;
+  }[];
+  readonly omittedCases?: number;
+  readonly lastProgressAt?: string;
+  readonly error?: {readonly reason: string; readonly at: string};
+}

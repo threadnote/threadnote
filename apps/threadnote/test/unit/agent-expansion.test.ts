@@ -107,9 +107,9 @@ describe('agent expansion conformance', () => {
               if ('skills' in fixture) {
                 const expectedSkills = fixture.skills.replace('{home}', home).replace('{root}', expectedRoot);
                 expect(plan.skillRoot).toBe(expectedSkills);
-                expect(plan.artifacts.filter(artifact => artifact.name.startsWith('skill '))).toHaveLength(3);
+                expect(plan.artifacts.filter(artifact => artifact.name.startsWith('skill '))).toHaveLength(4);
                 expect(plan.artifacts.at(-1)?.path).toBe(
-                  path.join(expectedSkills, 'flat' in fixture ? 'threadnote-memory.md' : 'threadnote-memory/SKILL.md'),
+                  path.join(expectedSkills, 'flat' in fixture ? 'threadnote-health.md' : 'threadnote-health/SKILL.md'),
                 );
               } else expect(plan.artifacts).toHaveLength(1);
               expect((yield* planAgentSurface(config, adapter, {scope})).artifacts).toEqual(plan.artifacts);

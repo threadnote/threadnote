@@ -36,6 +36,8 @@
     "./checkpoint/schema": "./src/checkpoint/schema.ts",
     "./checkpoint/terminal_text": "./src/checkpoint/terminal_text.ts",
     "./citation/primitives": "./src/citation/primitives.ts",
+    "./citation/capsule": "./src/citation/capsule.ts",
+    "./citation/recovery": "./src/citation/recovery.ts",
     "./citation/source": "./src/citation/source.ts",
     "./cli/freshness": "./src/cli/freshness.ts",
     "./cli/progress": "./src/cli/progress.ts",

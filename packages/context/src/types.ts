@@ -80,6 +80,15 @@ export interface ContextBriefCitationValidationReceiptV2 {
   readonly observedNodeId?: string;
   readonly observedPath?: string;
   readonly observedSpan?: CodeGraphSpan;
+  readonly provenance?: 'current-verified' | 'historical-verified' | 'unverified';
+  /** Route absence may recover; a failed closing fence must remain deferred. */
+  readonly repositoryRouteUnavailable?: true;
+  /** Private local recovery route; original citation provenance stays immutable. */
+  readonly recovery?: {
+    readonly callerCwd: string;
+    readonly repositoryId: string;
+    readonly aliasProof?: import('@threadnote/graph/citation/recovery').CodeGraphRepositoryAliasProofV1;
+  };
   readonly reason: ContextBriefCitationValidationReasonV2;
   readonly repositoryId?: string;
   readonly snapshotCommit?: string;

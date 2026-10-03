@@ -11,6 +11,8 @@ interface HomeResponse {
     readonly scanned?: number;
     readonly pending?: number;
     readonly outcomes?: number;
+    readonly decisionMemories?: number;
+    readonly healthCoverage?: string;
   };
   readonly handoffs: readonly {readonly timestamp: string; readonly topic?: string; readonly uri: string}[];
   readonly lanes: readonly ManagerHomeLane[];
@@ -55,7 +57,7 @@ export function ManagerHomePanel({
     setError('');
     void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`)
       .then(result => {
-        if (!cancelled) setHome(result);
+        if (!cancelled && result.project === project) setHome(result);
       })
       .catch(cause => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -104,7 +106,10 @@ export function ManagerHomePanel({
         </div>
       ) : home ? (
         <>
-          <HomeAttentionFlow input={{...(home.stats ?? {}), findings: healthFindingCount}} onOpen={onOpen} />
+          <HomeAttentionFlow
+            input={{...(home.stats ?? {}), findings: healthFindingCount, decisions: home.stats?.decisionMemories}}
+            onOpen={onOpen}
+          />
           <section className="home-handoffs">
             <div className="home-lane-heading">
               <h3>Resume a handoff</h3>

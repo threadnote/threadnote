@@ -339,6 +339,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
+        "@effect/platform-bun": "4.0.0",
         "@effect/vitest": "4.0.0",
         "@threadnote/testing": "workspace:*",
         "fast-check": "4.10.1",

@@ -23,6 +23,7 @@ export interface CodeGraphCitationSourceRequest {
 
 interface CommitBlobObservation extends CodeGraphCitationSourceRequest {
   readonly blobId: string;
+  readonly requiresByteVerification: boolean;
   readonly size: number;
 }
 
@@ -178,7 +179,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   const blobsToRead: CommitBlobObservation[] = [];
   for (const observation of observations) {
     const key = codeGraphCitationSourceKey(observation);
-    if (!observation.requireBytes) {
+    if (!observation.requireBytes && !observation.requiresByteVerification) {
       resolved.set(key, EMPTY_SOURCE_BYTES);
       continue;
     }
@@ -215,7 +216,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
       const observation = batch[index];
       const bytes = blobs[index];
       if (codeGraphFileContentHashMatchesBytes(observation.expectedContentHash, input.objectFormat, bytes)) {
-        resolved.set(codeGraphCitationSourceKey(observation), bytes);
+        resolved.set(codeGraphCitationSourceKey(observation), observation.requireBytes ? bytes : EMPTY_SOURCE_BYTES);
       }
     }
   }
@@ -259,15 +260,15 @@ function parseBatchCheck(
     const match = /^([0-9a-f]+) blob (\d+)$/u.exec(lines[index]);
     if (!match) continue;
     const size = Number(match[2]);
-    if (
-      !Number.isSafeInteger(size) ||
-      size < 0 ||
-      size > CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILE_BYTES ||
-      codeGraphCommittedContentHash(objectFormat, match[1]) !== source.expectedContentHash
-    ) {
+    if (!Number.isSafeInteger(size) || size < 0 || size > CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILE_BYTES) {
       continue;
     }
-    observations.push({...source, blobId: match[1], size});
+    observations.push({
+      ...source,
+      blobId: match[1],
+      requiresByteVerification: codeGraphCommittedContentHash(objectFormat, match[1]) !== source.expectedContentHash,
+      size,
+    });
   }
   return observations;
 }

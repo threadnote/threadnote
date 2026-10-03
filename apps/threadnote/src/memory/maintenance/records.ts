@@ -162,7 +162,7 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
 /** Read every canonical memory document for maintenance evidence, including inactive relation targets. */
 export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRecords')(function* (
   config: RuntimeConfig,
-  options: {readonly personalOnly?: boolean} = {},
+  options: {readonly personalOnly?: boolean; readonly requireReadable?: boolean} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -182,7 +182,16 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
       Effect.gen(function* () {
         const content = yield* fs.readFileString(file.path);
         const relative = path.relative(root, file.path).split(path.sep).join('/');
-        return parseMemoryDocument(`threadnote://user/${uriSegment(config.user)}/memories/${relative}`, content);
+        const record = parseMemoryDocument(
+          `threadnote://user/${uriSegment(config.user)}/memories/${relative}`,
+          content,
+        );
+        if (record === undefined && options.requireReadable === true && !relative.startsWith('shared/')) {
+          return yield* personalProjectReadError(
+            'Maintenance corpus contains an unreadable memory; absence cannot be inferred.',
+          );
+        }
+        return record;
       }),
     {concurrency: MAINTENANCE_READ_CONCURRENCY},
   );

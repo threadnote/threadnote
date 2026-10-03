@@ -1,8 +1,10 @@
-import {DateTime, Effect} from 'effect';
+import {DateTime, Effect, Result} from 'effect';
+import {collectContextMaintenanceCitationEvidence} from './maintenance_evidence.js';
+import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {shellQuote} from '@threadnote/platform/command';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
+import {validateContextHealthMemoryCitations} from '@threadnote/context/citation_validation';
 import type {ContextBriefMemoryCandidateV1} from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -59,7 +61,7 @@ export const runContextHealth = Effect.fn('memory.contextHealth.command')(functi
   });
   if (selector === undefined) {
     yield* recordHealthValueSnapshot(config.agentContextHome, {
-      activeFindings: report.findings.length + report.omittedFindings,
+      activeFindings: report.maintenance?.affectedMemories ?? report.findings.length + report.omittedFindings,
       project,
       timestamp: (yield* DateTime.nowAsDate).toISOString(),
     }).pipe(Effect.ignore);
@@ -68,14 +70,17 @@ export const runContextHealth = Effect.fn('memory.contextHealth.command')(functi
 });
 
 /** Shared read-only evidence collection for health and CI; never prepares a graph. */
-export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(function* (
+export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.collectEvidence')(function* (
   config: RuntimeConfig,
   project: string,
   records: Parameters<typeof buildContextHealthReport>[0]['records'],
   cwd: string,
   options: {
     readonly after?: string;
+    readonly evidenceMode?: 'foreground' | 'worker';
+    readonly citationRecords?: Parameters<typeof buildContextHealthReport>[0]['records'];
     readonly duplicateCorpus?: Parameters<typeof buildContextHealthReport>[0]['records'];
+    readonly includeCitationCoverageFindings?: boolean;
     readonly includeFindingCategories?: Parameters<typeof buildContextHealthReport>[0]['includeFindingCategories'];
     readonly includeFindingCombination?: Parameters<typeof buildContextHealthReport>[0]['includeFindingCombination'];
     readonly includeFindingUris?: readonly string[];
@@ -86,11 +91,22 @@ export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(fu
   const now = yield* DateTime.nowAsDate;
   const includedUris = options.includeFindingUris === undefined ? undefined : new Set(options.includeFindingUris);
   const evidenceRecords = includedUris === undefined ? records : records.filter(record => includedUris.has(record.uri));
-  const citationValidations = yield* validateContextBriefMemoryCitations(
+  const citationRecords = options.citationRecords ?? evidenceRecords;
+  const citationResult = yield* collectContextMaintenanceCitationEvidence(
     config,
-    {callerCwd: cwd, kind: 'repository', project},
-    citationCandidates(evidenceRecords),
-  );
+    project,
+    citationRecords,
+    citationCandidates(citationRecords),
+    cwd,
+    {
+      mode: options.evidenceMode ?? (options.includeCitationCoverageFindings === true ? 'diagnostic' : 'foreground'),
+      validate: selected =>
+        validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository', project}, selected, {
+          fullScan: options.evidenceMode === 'worker',
+        }),
+    },
+  ).pipe(Effect.result);
+  const citationValidations = Result.isSuccess(citationResult) ? citationResult.success : [];
   const relationEvidence = yield* relationStatusEvidence(
     config,
     options.includeFindingCategories?.includes('relation-target-conflicted') === true ? records : evidenceRecords,
@@ -98,12 +114,17 @@ export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(fu
   );
   const candidateEvidence = yield* candidateStatusEvidence(config, project);
   const guidanceEvidence = yield* guidanceHealthEvidence(config, project, cwd);
-  return buildContextHealthReport({
+  const report = buildContextHealthReport({
     after: options.after,
     candidateEvidence,
     guidanceEvidence,
     citationValidations,
+    citationCoverage: contextHealthCitationCoverageV2({
+      records: options.citationRecords ?? evidenceRecords,
+      validations: citationValidations,
+    }),
     duplicateCorpus: options.duplicateCorpus,
+    includeCitationCoverageFindings: options.includeCitationCoverageFindings,
     includeFindingCategories: options.includeFindingCategories,
     includeFindingCombination: options.includeFindingCombination,
     includeFindingUris: options.includeFindingUris,
@@ -113,6 +134,13 @@ export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(fu
     records,
     relationEvidence,
   });
+  return {report, citationValidations};
+});
+
+export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(function* (
+  ...args: Parameters<typeof collectContextHealthEvidence>
+) {
+  return (yield* collectContextHealthEvidence(...args)).report;
 });
 
 function citationCandidates(
@@ -219,23 +247,35 @@ export function renderContextHealth(
   report: ReturnType<typeof buildContextHealthReport>,
   selector?: ContextHealthSelectorV1,
 ): string {
-  const shownFindings = report.findings.length;
+  const visibleFindings =
+    selector === undefined && report.maintenance !== undefined
+      ? report.findings.filter(finding => finding.classification === 'actionable')
+      : report.findings;
+  const shownFindings = visibleFindings.length;
   const totalFindings = shownFindings + report.omittedFindings;
   const lines = [
-    `Context health for ${report.project}: status=${report.status}; ${report.recordsScanned} active record${report.recordsScanned === 1 ? '' : 's'}; ${totalFindings} total finding${totalFindings === 1 ? '' : 's'} (${shownFindings} shown${report.omittedFindings > 0 ? `, ${report.omittedFindings} omitted` : ''}).`,
+    report.maintenance === undefined
+      ? `Context health for ${report.project}: status=${report.status}; ${report.recordsScanned} active records; ${totalFindings} findings (${shownFindings} shown).`
+      : `Context health for ${report.project}: ${report.maintenance.affectedMemories} memories need decisions; ${report.maintenance.automaticallyManagedFindings} automatically managed findings; ${report.recordsScanned} active records.`,
+    ...(report.maintenance === undefined
+      ? []
+      : [
+          `Citation evidence: ${report.maintenance.citationCoverage.state}; ${report.maintenance.citationCoverage.currentVerified} current, ${report.maintenance.citationCoverage.historicalVerified} historical, ${report.maintenance.citationCoverage.deferred} deferred.`,
+          `Maintenance progress: threadnote context maintain --action status --project ${shellQuote(report.project)}`,
+        ]),
     ...(selector === undefined ? [] : [`Active selector: ${contextHealthSelectorDescription(selector)}.`]),
     `Semantic evidence: ${report.semanticCompleteness.state}; ${report.semanticCompleteness.analyzedRecords}/${report.semanticCompleteness.eligibleRecords} durable record(s) analyzed, ${report.semanticCompleteness.unknownRecords} unknown.`,
   ];
-  if (report.findings.length <= 12) {
+  if (visibleFindings.length <= 12) {
     lines.push(
-      ...report.findings.flatMap(finding => [
+      ...visibleFindings.flatMap(finding => [
         `- ${finding.severity} ${finding.category}: ${finding.summary}`,
         ...(findingOwner(finding) === undefined ? [] : [`  owner: ${findingOwner(finding)}`]),
       ]),
     );
   } else {
     lines.push('Shown findings grouped by severity and category:');
-    for (const group of findingGroups(report.findings)) {
+    for (const group of findingGroups(visibleFindings)) {
       const owners = [...new Set(group.findings.flatMap(finding => findingOwner(finding) ?? []))];
       lines.push(
         `- ${group.findings.length} ${group.severity} ${group.category} finding${group.findings.length === 1 ? '' : 's'} across ${owners.length} owning memor${owners.length === 1 ? 'y' : 'ies'}.`,
@@ -271,10 +311,10 @@ export function renderContextHealth(
       );
     }
   }
-  if (report.findings.length > 0) {
-    const reviewable = report.findings.filter(finding => finding.repairability === 'reviewable').length;
-    const manualReview = report.findings.filter(finding => finding.repairability === 'manual-review').length;
-    const requiresEvidence = report.findings.filter(finding => finding.repairability === 'requires-evidence').length;
+  if (visibleFindings.length > 0) {
+    const reviewable = visibleFindings.filter(finding => finding.repairability === 'reviewable').length;
+    const manualReview = visibleFindings.filter(finding => finding.repairability === 'manual-review').length;
+    const requiresEvidence = visibleFindings.filter(finding => finding.repairability === 'requires-evidence').length;
     lines.push('Next steps for the shown findings:');
     if (reviewable > 0) {
       lines.push(

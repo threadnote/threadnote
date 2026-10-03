@@ -48,7 +48,9 @@
     "./process/contracts": "./src/process/contracts.ts",
     "./value-view": "./src/value_view.tsx",
     "./value_view": "./src/value_view.tsx",
-    "./value/contracts": "./src/value/contracts.ts"
+    "./value/contracts": "./src/value/contracts.ts",
+    "./attention/maintenance": "./src/attention/maintenance.ts",
+    "./attention/maintenance-view": "./src/attention/maintenance_view.tsx"
   },
   "dependencies": {
     "@threadnote/integrations": "workspace:*",

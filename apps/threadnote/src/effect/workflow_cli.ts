@@ -18,6 +18,7 @@ import {CONTEXT_BRIEF_CWD_OPTION, type runContextBrief} from '../context_brief/c
 import type {runCompact} from '../memory/commands.js';
 import type {runRecallFeedback} from '../recall/feedback_commands.js';
 import type {runContextHealth} from '../memory/context/health_commands.js';
+import type {runContextMaintainCommand} from '../memory/context/maintenance.js';
 import {CONTEXT_HEALTH_FINDING_CATEGORIES, CONTEXT_HEALTH_MEMORY_KINDS} from '../memory/context/health_selector.js';
 import type {runContextHealthAggregate, runContextHealthSchedule} from '../memory/context/health_aggregate_commands.js';
 import type {
@@ -395,4 +396,30 @@ export function makeProcedurePublishCommand<E, R>(
     },
     handler,
   ).pipe(Command.withDescription('Preview by default; publish verified procedure bytes only after explicit approval'));
+}
+
+export function makeContextMaintainCommand<E, R>(
+  handler: (options: Parameters<typeof runContextMaintainCommand>[1]) => Effect.Effect<void, E, R>,
+) {
+  return Command.make(
+    'maintain',
+    {
+      action: defaultChoice(
+        'action',
+        ['run', 'status', 'pause', 'resume', 'undo', 'packet'],
+        'Local maintenance action',
+        'run',
+      ),
+      json: boolean('json', 'Emit local maintenance progress and decisions as JSON'),
+      maxRecords: optional(
+        integerFlag('max-records').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 100}))),
+        ),
+      ),
+      project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
+      receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
+      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet'),
+    },
+    handler,
+  ).pipe(Command.withDescription('Run bounded local structural maintenance or inspect/pause/undo it'));
 }

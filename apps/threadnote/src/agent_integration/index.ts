@@ -32,9 +32,7 @@ import {readFileIfExists} from '../utils.js';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {resolveAgentHostPaths} from './host_paths.js';
 import {LEGACY_ARTIFACT_TARGETS as HOST_TARGETS} from './adapters/legacy_targets.js';
-
-const AGENT_SKILLS = ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory'] as const;
-const CURSOR_CLOUD_PERSONAL_AGENT_SKILLS = ['threadnote-context', 'threadnote-memory'] as const;
+import {AGENT_SKILLS, CURSOR_CLOUD_PERSONAL_AGENT_SKILLS} from './skills.js';
 
 interface InstallAgentIntegrationOptions {
   readonly cwd?: string;
@@ -554,7 +552,7 @@ function isGeneratedSkillFrontmatter(content: string): boolean {
   const trimmed = content.trim();
   return (
     /^---\n[\s\S]*\n---$/.test(trimmed) &&
-    /^name: threadnote-(?:context|code-graph|memory)$/mu.test(trimmed) &&
+    /^name: threadnote-(?:context|code-graph|memory|health)$/mu.test(trimmed) &&
     /^description: \S.+$/mu.test(trimmed)
   );
 }

@@ -168,11 +168,13 @@ describe('context health semantic contradictions', () => {
     const rendered = renderContextHealth(report);
 
     expect(rendered).toContain(
-      'Context health for threadnote: status=unknown; 2128 active records; 2081 total findings (100 shown, 1981 omitted).',
+      `Context health for threadnote: ${report.maintenance!.affectedMemories} memories need decisions; ${report.maintenance!.automaticallyManagedFindings} automatically managed findings; 2128 active records.`,
     );
-    expect(rendered).toContain('100 critical validity-expired findings across 100 owning memories.');
-    expect(rendered).toContain('Preview 100 reviewable findings with owner metadata:');
-    expect(rendered).toContain('threadnote context repair preview --project threadnote --json');
+    expect(rendered).not.toContain('100 critical validity-expired');
+    expect(rendered).not.toContain('Preview 100 reviewable findings');
+    expect(rendered).toContain(
+      'Maintenance progress: threadnote context maintain --action status --project threadnote',
+    );
     expect(rendered).toContain(`threadnote context health --project threadnote --after ${report.nextCursor}`);
     expect(rendered.split('\n').length).toBeLessThan(20);
   });
