@@ -32,7 +32,10 @@ interface Props {
 }
 
 export function ContextMaintenanceView(props: Props): React.ReactElement {
-  const [snapshot, setSnapshot] = useState<{project: string; status: ManagerContextMaintenanceStatusV2}>();
+  const [snapshot, setSnapshot] = useState<{
+    project: string;
+    status: ManagerContextMaintenanceStatusV2;
+  }>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [conflictSubjectUri, setConflictSubjectUri] = useState<string>();
@@ -141,7 +144,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     try {
       const result = await api<
         ManagerContextMaintenanceStatusV2 | {status: 'undone' | 'already-undone' | 'conflict'; reason?: string}
-      >('/api/attention/context-maintenance', {project, action, ...(receiptId ? {receiptId} : {})});
+      >('/api/attention/context-maintenance', {
+        project,
+        action,
+        ...(receiptId ? {receiptId} : {}),
+      });
       if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
       if ('version' in result) {
         setSnapshot({project, status: result});
@@ -269,12 +276,17 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     item => item.disposition === 'needs-decision' && !representedCases.has(item.caseId),
   );
   return (
-    <section aria-busy={busy} className="panel attention-panel is-active">
+    <section aria-busy={busy} className="panel attention-panel context-health is-active">
       <header className="attention-header">
         <div>
           <p className="eyebrow">Living context</p>
           <h2>Context health</h2>
-          <p role="status" aria-live="polite">
+          <p
+            role="status"
+            aria-live="polite"
+            className="health-overview-status"
+            data-tone={decisionCount > 0 ? 'warning' : coverage === 'complete' ? 'success' : 'info'}
+          >
             {maintenanceStatusLabel({
               decisions: decisionCount,
               coverage,
@@ -300,22 +312,45 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         <Metric
           label="Needs your decision"
           value={`${decisionCount.toLocaleString()} ${decisionCount === 1 ? 'memory' : 'memories'}`}
+          tone={decisionCount > 0 ? 'warning' : 'success'}
         />
-        <Metric label="Automatic work" value={(summary?.automaticallyManagedFindings ?? 0).toLocaleString()} />
-        <Metric label="Evidence coverage" value={coverage} />
+        <Metric
+          label="Automatic work"
+          value={(summary?.automaticallyManagedFindings ?? 0).toLocaleString()}
+          tone={(summary?.automaticallyManagedFindings ?? 0) > 0 ? 'info' : 'neutral'}
+        />
+        <Metric label="Evidence coverage" value={coverage} tone={coverage === 'complete' ? 'success' : 'info'} />
         <Metric
           label="Historical items"
           value={((summary?.historicalFindings ?? 0) + (citation?.historicalVerified ?? 0)).toLocaleString()}
+          tone="neutral"
         />
       </div>
       <section className="attention-bulk-repair" aria-label="Maintenance controls">
         <div>
-          <strong>Automatic maintenance</strong>
+          <div className="health-maintenance-heading">
+            <strong>Automatic maintenance</strong>
+            <span
+              className="health-status-badge"
+              data-tone={status?.paused ? 'neutral' : status?.state === 'failed' ? 'warning' : 'success'}
+            >
+              {status?.paused
+                ? 'Paused'
+                : status?.state === 'failed'
+                  ? 'Stopped'
+                  : status?.state === 'running'
+                    ? 'Running'
+                    : status
+                      ? 'On'
+                      : 'Checking…'}
+            </span>
+          </div>
           <p>Safe local work runs during normal use. Pausing applies to all projects.</p>
         </div>
         <div className="attention-bulk-repair-actions">
           <button
             type="button"
+            className="health-primary-action"
             disabled={busy || !status || status.paused || status.state === 'running'}
             onClick={() => void act('run-now')}
           >
@@ -357,8 +392,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           Maintenance stopped: {status.error.reason}. Progress is preserved; inspect the diagnostic before resuming.
         </p>
       ) : null}
-      <section aria-label="Evidence coverage" className="attention-card">
-        <h3>Evidence coverage</h3>
+      <section aria-label="Evidence coverage" className="attention-card health-coverage-card">
+        <header>
+          <h3>Evidence coverage</h3>
+          <span className="health-status-badge" data-tone={coverage === 'complete' ? 'success' : 'info'}>
+            {coverage}
+          </span>
+        </header>
         <p>
           {citation?.checked.toLocaleString() ?? '0'} of {citation?.eligible.toLocaleString() ?? '0'} citations checked
           against current evidence; {citation?.deferred.toLocaleString() ?? '0'} await evidence checks.
@@ -385,6 +425,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         ) : null}
         <details>
           <summary>Coverage details and scan progress</summary>
+          {status?.preparation?.incompleteReason ? (
+            <p>Inventory check: {status.preparation.incompleteReason.replaceAll('-', ' ')}. Progress is preserved.</p>
+          ) : null}
           <p>
             {props.report.recordsScanned.toLocaleString()} records scanned.{' '}
             {projectProgress
@@ -409,7 +452,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           <p>No supported decisions are waiting in the loaded context. Evidence coverage remains visible above.</p>
         ) : null}
         {groups.map(group => (
-          <article key={group.uri} className="attention-card health-record">
+          <article key={group.uri} className="attention-card health-record health-decision-card">
             <header>
               <div>
                 <h3>{group.preview?.title ?? 'Memory needing a decision'}</h3>
@@ -419,7 +462,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 {group.findings.length} supporting {group.findings.length === 1 ? 'check' : 'checks'}
               </span>
             </header>
-            <button type="button" onClick={() => props.onOpenLibrary(group.uri)}>
+            <button type="button" className="health-quiet-action" onClick={() => props.onOpenLibrary(group.uri)}>
               Open memory
             </button>
             {group.preview?.code.map(code => (
@@ -460,7 +503,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                   {finding.confidence} confidence · {finding.repairability.replaceAll('-', ' ')}. The engine stopped
                   because this requires a supported content or authority decision.
                 </p>
-                <button type="button" onClick={() => setSelected(finding)}>
+                <button type="button" className="health-primary-action" onClick={() => setSelected(finding)}>
                   Compare evidence and preview change
                 </button>
               </section>
@@ -496,7 +539,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           </article>
         ))}
         {unloadedDecisions.map(item => (
-          <article className="attention-card" key={item.caseId}>
+          <article className="attention-card health-decision-card" key={item.caseId}>
             <h4>{item.reason.replaceAll('-', ' ')}</h4>
             <p>{maintenanceRecoveryInstruction(item.reason)}</p>
             <button type="button" onClick={() => void inspectCase(item.caseId)}>
@@ -533,13 +576,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           />
         </section>
       ) : null}
-      <section aria-label="Automatic recovery" className="attention-list">
+      <section aria-label="Automatic recovery" className="attention-list health-recovery-list">
         <h3>Automatic recovery</h3>
         {causes.length === 0 ? (
           <p>No blocked recovery groups are reported. Queued evidence checks are tracked in coverage.</p>
         ) : (
           causes.map(group => (
-            <article key={group.key} className="attention-card">
+            <article key={group.key} className="attention-card health-recovery-card">
               <h4>{group.reason.replaceAll('-', ' ')}</h4>
               <p>
                 {group.count} {status?.groups === undefined ? 'affected anchors or checks' : 'affected memories'}
@@ -560,7 +603,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ))
         )}
       </section>
-      <section aria-label="Recent maintenance and history" className="attention-list">
+      <section aria-label="Recent maintenance and history" className="attention-list health-history-list">
         <h3>Recent maintenance and history</h3>
         <p>
           Last progress:{' '}
@@ -580,21 +623,32 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           </p>
         ) : null}
         {receipts.map(receipt => (
-          <article key={receipt.receiptId} className="attention-card">
+          <article key={receipt.receiptId} className="attention-card health-history-card">
             <p>
               {receipt.state === 'applied'
                 ? 'Safe local structural change applied'
                 : receipt.state.replaceAll('-', ' ')}{' '}
               · {new Date(receipt.timestamp).toLocaleString()}
             </p>
-            <button type="button" onClick={() => props.onOpenLibrary(receipt.archivedUri ?? receipt.subjectUri)}>
-              Inspect changed memory
-            </button>
-            {receipt.state === 'applied' ? (
-              <button type="button" disabled={busy} onClick={() => void act('undo', receipt.receiptId)}>
-                Undo this change
+            <div className="health-record-actions">
+              <button
+                type="button"
+                className="health-quiet-action"
+                onClick={() => props.onOpenLibrary(receipt.archivedUri ?? receipt.subjectUri)}
+              >
+                Inspect changed memory
               </button>
-            ) : null}
+              {receipt.state === 'applied' ? (
+                <button
+                  type="button"
+                  className="health-quiet-action"
+                  disabled={busy}
+                  onClick={() => void act('undo', receipt.receiptId)}
+                >
+                  Undo this change
+                </button>
+              ) : null}
+            </div>
           </article>
         ))}
         {status?.page?.receiptNextCursor ? (
@@ -737,9 +791,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   );
 }
 
-function Metric(props: {readonly label: string; readonly value: string}) {
+function Metric(props: {
+  readonly label: string;
+  readonly value: string;
+  readonly tone: 'warning' | 'success' | 'info' | 'neutral';
+}) {
   return (
-    <div>
+    <div data-tone={props.tone}>
       <span>{props.label}</span>
       <strong>{props.value}</strong>
     </div>

@@ -11,6 +11,7 @@ import {
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
 import {
   resolveCodeGraphCitationRepositoryRoutes,
+  makeCodeGraphCitationRepositoryRouteObservation,
   revalidateCodeGraphCitationRecoveryRoute,
   type CodeGraphCitationRecoveryRouteV1,
 } from '@threadnote/graph/citation/recovery';
@@ -211,6 +212,10 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
 ) {
   const query = yield* CodeGraphQueryService;
   const byUri = new Map(candidates.map(candidate => [candidate.uri, candidate]));
+  const resolve = yield* makeCodeGraphCitationRepositoryRouteObservation({
+    threadnoteHome: config.agentContextHome,
+    ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
+  });
   const routesBySource = new Map<string, Effect.Success<ReturnType<typeof resolveCodeGraphCitationRepositoryRoutes>>>();
   const statuses = new Map<string, CodeGraphStatus | undefined>();
   const routeReceipts = new Map<string, ReadonlyMap<string, ContextBriefCitationValidationReceiptV2>>();
@@ -237,12 +242,10 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
           const sourceKey = `${citation.repositoryId}\0${citation.sourceCommit}`;
           let resolution = routesBySource.get(sourceKey);
           if (resolution === undefined) {
-            resolution = yield* resolveCodeGraphCitationRepositoryRoutes({
-              ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
+            resolution = yield* resolve({
               callerOnly: policy === 'brief',
               repositoryId: citation.repositoryId,
               sourceCommit: citation.sourceCommit,
-              threadnoteHome: config.agentContextHome,
             }).pipe(
               Effect.orElseSucceed(() => ({
                 ambiguous: false,

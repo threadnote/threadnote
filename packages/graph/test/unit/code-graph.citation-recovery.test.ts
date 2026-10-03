@@ -1,8 +1,8 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {
@@ -11,6 +11,7 @@ import {
 } from '@threadnote/graph/local_provenance';
 import {
   resolveCodeGraphCitationRepositoryRoutes,
+  makeCodeGraphCitationRepositoryRouteObservation,
   verifyCodeGraphCitationRepositoryAlias,
   revalidateCodeGraphCitationRecoveryRoute,
 } from '@threadnote/graph/citation/recovery';
@@ -47,6 +48,100 @@ const fixture = Effect.gen(function* () {
 
 describe('citation recovery checkout authority', () => {
   effectIt.layer(platform)(it => {
+    it.effect('shares opening discovery across selectors while keeping mutable alias closing fences fresh', () =>
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const data = yield* fixture;
+          const selectors = Array.from({length: 4}, (_, index) => ({
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: String(index + 1).repeat(40),
+          }));
+          const executor = yield* CommandExecutor;
+          const executeBytes = executor.executeBytes;
+          let commands = 0;
+          const measured = CommandExecutor.of({
+            ...executor,
+            execute: (...args) =>
+              Effect.suspend(() => {
+                commands++;
+                return executor.execute(...args);
+              }),
+            executeBytes:
+              executeBytes === undefined
+                ? undefined
+                : (...args) =>
+                    Effect.suspend(() => {
+                      commands++;
+                      return executeBytes(...args);
+                    }),
+          });
+          const common = {callerCwd: data.repository, threadnoteHome: data.home};
+          const fresh = yield* Effect.forEach(selectors, selector =>
+            resolveCodeGraphCitationRepositoryRoutes({...common, ...selector}),
+          ).pipe(Effect.provideService(CommandExecutor, measured));
+          const separateCommands = commands;
+          commands = 0;
+          const together = yield* Effect.gen(function* () {
+            const observe = yield* makeCodeGraphCitationRepositoryRouteObservation(common);
+            return yield* Effect.forEach(selectors, observe);
+          }).pipe(Effect.provideService(CommandExecutor, measured));
+          expect(together).toEqual(fresh);
+          expect(commands).toBeLessThan(separateCommands);
+          const observe = yield* makeCodeGraphCitationRepositoryRouteObservation(common);
+          const original = yield* observe({
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: data.previous.headCommit,
+          });
+          expect(original.routes[0].aliasProof).toBeDefined();
+          yield* git(data.repository, ['remote', 'set-url', 'origin', 'https://example.invalid/third/repository.git']);
+          expect(
+            (yield* observe({repositoryId: data.previous.repositoryId, sourceCommit: data.previous.headCommit})).routes,
+          ).toEqual([]);
+          const closing = yield* resolveCodeGraphCitationRepositoryRoutes({
+            ...common,
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: data.previous.headCommit,
+          });
+          expect(closing.generation).not.toBe(original.generation);
+        }),
+      ),
+    );
+
+    it.effect.prop(
+      'selector order and unrelated selectors do not alter bounded route results',
+      {
+        reverse: Schema.Boolean,
+        unavailable: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4})),
+      },
+      ({reverse, unavailable}) =>
+        TestClock.withLive(
+          Effect.gen(function* () {
+            const data = yield* fixture;
+            const selectors = [
+              {repositoryId: data.previous.repositoryId, sourceCommit: data.previous.headCommit},
+              ...Array.from({length: unavailable}, (_, index) => ({
+                repositoryId: 'f'.repeat(64),
+                sourceCommit: String(index + 1).repeat(40),
+              })),
+            ];
+            const observe = yield* makeCodeGraphCitationRepositoryRouteObservation({
+              callerCwd: data.repository,
+              threadnoteHome: data.home,
+            });
+            const baseline = yield* observe(selectors[0]);
+            const order = reverse ? [...selectors].reverse() : selectors;
+            const permuted = yield* Effect.forEach(order, selector => observe(selector));
+            expect(permuted[order.indexOf(selectors[0])]).toEqual(baseline);
+            const fresh = yield* makeCodeGraphCitationRepositoryRouteObservation({
+              callerCwd: data.repository,
+              threadnoteHome: data.home,
+            });
+            expect(yield* fresh(selectors[0])).toEqual(baseline);
+          }),
+        ),
+      {timeout: 30_000, arbitrary: {runs: 4, seed: 80405}},
+    );
+
     it.effect(
       'abstains when surviving registrations expose different current histories without a selected caller',
       () =>

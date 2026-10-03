@@ -49,7 +49,11 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
 import {expandPath} from '@threadnote/platform/paths';
 import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
-import {prepareContextMaintenanceInventory} from './maintenance_inventory.js';
+import {
+  contextMaintenanceInventoryPreparation,
+  prepareContextMaintenanceInventory,
+  type ContextMaintenanceInventoryPreparationV2,
+} from './maintenance_inventory.js';
 import {
   readContextMaintenanceSourceEpoch,
   readContextMaintenanceEvidenceRequests,
@@ -178,7 +182,7 @@ export interface ContextMaintenanceStatusV2 {
   readonly paused: boolean;
   readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
   readonly generation: string;
-  readonly preparation?: {readonly complete: boolean; readonly admittedRecords: number};
+  readonly preparation?: ContextMaintenanceInventoryPreparationV2;
   readonly semanticCoverage?: readonly {
     readonly project: string;
     readonly state: 'partial' | 'complete';
@@ -1056,7 +1060,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       ];
       state = {
         ...state,
-        preparation: {complete: snapshot.success.complete, admittedRecords: corpus.length},
+        preparation: contextMaintenanceInventoryPreparation(snapshot.success, corpus.length),
         checkpoints,
         cases,
         receipts: receipts.slice(-MAX_RECEIPTS),

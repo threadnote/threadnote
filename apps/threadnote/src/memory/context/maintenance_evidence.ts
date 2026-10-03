@@ -1,5 +1,5 @@
 import {Crypto, DateTime, Effect, FileSystem, Option, Path} from 'effect';
-import {resolveCodeGraphCitationRepositoryRoutes} from '@threadnote/graph/citation/recovery';
+import {makeCodeGraphCitationRepositoryRouteObservation} from '@threadnote/graph/citation/recovery';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {observationFromCodeGraphStatus} from '@threadnote/graph/query/contract';
@@ -71,12 +71,14 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
   const selectors = [
     ...new Map(citations.map(citation => [`${citation.repositoryId}:${citation.sourceCommit}`, citation])).values(),
   ].sort((a, b) => `${a.repositoryId}:${a.sourceCommit}`.localeCompare(`${b.repositoryId}:${b.sourceCommit}`));
+  const resolve = yield* makeCodeGraphCitationRepositoryRouteObservation({
+    threadnoteHome: config.agentContextHome,
+    callerCwd: cwd,
+  });
   const observations = yield* Effect.forEach(
     selectors.slice(0, MAX_SOURCES),
     citation =>
-      resolveCodeGraphCitationRepositoryRoutes({
-        threadnoteHome: config.agentContextHome,
-        callerCwd: cwd,
+      resolve({
         repositoryId: citation.repositoryId,
         sourceCommit: citation.sourceCommit,
       }).pipe(Effect.orElseSucceed(() => ({generation: 'unavailable', routes: [], complete: false}))),
@@ -253,6 +255,7 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         selected: readonly ContextBriefMemoryCandidateV1[],
       ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
       readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
+      readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;
       readonly skipWorkerValidation?: (
         record: MemoryRecord,
         observation: ContextMaintenanceWorkerObservation,
@@ -366,17 +369,22 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
       candidates.flatMap(candidate => candidate.codeCitations),
       closingSource,
     );
+    const proofGeneration =
+      options.mode === 'worker' && options.workerSubjectFence !== undefined
+        ? yield* options.workerSubjectFence().pipe(Effect.orElseSucceed(() => undefined))
+        : beforeMemory === (yield* mutationGeneration(config))
+          ? beforeMemory
+          : undefined;
     const unchanged =
       association.epoch === closingAssociation.epoch &&
-      beforeMemory !== undefined &&
-      beforeMemory === (yield* mutationGeneration(config)) &&
+      proofGeneration !== undefined &&
       [...sources].every(([root, observation]) => observation.epoch === closing.get(root)?.epoch);
     if (!unchanged) return [];
     if (options.mode === 'worker' && options.observeWorker !== undefined)
       yield* options.observeWorker({
         sourceEpoch: closingAssociation.sourceEpochs[cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, cwd)),
         association: closingAssociation,
-        memoryGeneration: beforeMemory,
+        memoryGeneration: proofGeneration,
       });
     const byUri = new Map(cached.map(validation => [validation.uri, validation]));
     for (const validation of computed) {
@@ -421,7 +429,7 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         `${file}.lock`,
         LOCK,
         Effect.gen(function* () {
-          if (beforeMemory !== (yield* mutationGeneration(config))) return;
+          if (proofGeneration !== (yield* mutationGeneration(config))) return;
           const latest = yield* readProjection(file);
           const merged = new Map((latest?.entries ?? []).map(entry => [entry.uri, entry]));
           for (const entry of additions) {

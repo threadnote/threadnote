@@ -102,7 +102,8 @@ export function mergeMaintenanceWorkerEvidence(
     before !== undefined &&
     after !== undefined &&
     before.sourceEpoch === after.sourceEpoch &&
-    before.memoryGeneration === after.memoryGeneration &&
+    before.memoryGeneration !== undefined &&
+    after.memoryGeneration !== undefined &&
     Object.entries(before.association.bySelector).every(
       ([selector, epoch]) =>
         after.association.bySelector[selector] === undefined || after.association.bySelector[selector] === epoch,
@@ -146,7 +147,29 @@ export function mergeMaintenanceWorkerEvidence(
   return {...right, records, observation, validations};
 }
 
-export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.workerBatch')(function* <R>(
+export const readMaintenanceWorkerSubjectGeneration = Effect.fn('contextMaintenance.workerSubjectFence')(function* (
+  config: RuntimeConfig,
+  records: readonly MemoryRecord[],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const before = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  const current = yield* readMemoryRecordsByUri(
+    config,
+    records.map(record => record.uri),
+  );
+  const after = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  return before === after &&
+    records.every(record =>
+      current.some(
+        next => next.uri === record.uri && next.metadata.status === 'active' && next.content === record.content,
+      ),
+    )
+    ? after
+    : undefined;
+});
+
+export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.workerBatch')(function* <R = never>(
   config: RuntimeConfig,
   tasks: readonly MaintenanceWorkerTask[],
   cwd: string,
@@ -212,6 +235,7 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
   >(config, project, records, candidates, cwd, {
     mode: 'worker',
     skipWorkerValidation: skip,
+    workerSubjectFence: () => readMaintenanceWorkerSubjectGeneration(config, records),
     observeWorker: value =>
       Effect.sync(() => {
         observation = value;
@@ -311,13 +335,6 @@ export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.worke
 ) {
   const observed = evidence.observation;
   if (observed === undefined || observed.memoryGeneration === undefined) return false;
-  const generation = yield* readCanonicalMutationGeneration(
-    yield* FileSystem.FileSystem,
-    yield* Path.Path,
-    config.agentContextHome,
-    config.account,
-  ).pipe(Effect.orElseSucceed(() => undefined));
-  if (generation !== observed.memoryGeneration) return false;
   const association = yield* readContextMaintenanceCitationAssociation(
     config,
     evidence.cwd,
@@ -325,23 +342,11 @@ export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.worke
   );
   const source =
     association.sourceEpochs[evidence.cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, evidence.cwd));
-  const current = yield* readMemoryRecordsByUri(
-    config,
-    evidence.records.map(record => record.uri),
+  const generation = yield* readMaintenanceWorkerSubjectGeneration(config, evidence.records).pipe(
+    Effect.orElseSucceed(() => undefined),
   );
-  const closingGeneration = yield* readCanonicalMutationGeneration(
-    yield* FileSystem.FileSystem,
-    yield* Path.Path,
-    config.agentContextHome,
-    config.account,
-  ).pipe(Effect.orElseSucceed(() => undefined));
   return (
-    closingGeneration === observed.memoryGeneration &&
-    source === observed.sourceEpoch &&
-    association.epoch === observed.association.epoch &&
-    evidence.records.every(record =>
-      current.some(next => next.uri === record.uri && sha256HexSync(next.content) === sha256HexSync(record.content)),
-    )
+    generation !== undefined && source === observed.sourceEpoch && association.epoch === observed.association.epoch
   );
 });
 

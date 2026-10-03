@@ -152,6 +152,11 @@ export interface ManagerContextMaintenanceStatusV2 {
   readonly paused: boolean;
   readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
   readonly generation: string;
+  readonly preparation?: {
+    readonly complete: boolean;
+    readonly admittedRecords: number;
+    readonly incompleteReason?: string;
+  };
   readonly projects: readonly {
     readonly project: string;
     readonly generation: string;

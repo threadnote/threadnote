@@ -200,6 +200,10 @@ describe('persistent context maintenance', () => {
     const merged = mergeMaintenanceWorkerEvidence(parts[0], parts[1]);
     expect(merged.records[0].metadata.codeCitations?.map(item => item.id)).toEqual(citations.map(item => item.id));
     expect(maintenanceWorkerRecordValidations(merged, subject)).toHaveLength(1);
+    const advanced = {...parts[1], observation: {...parts[1].observation, memoryGeneration: 'unrelated-write'}};
+    expect(
+      maintenanceWorkerRecordValidations(mergeMaintenanceWorkerEvidence(parts[0], advanced), subject),
+    ).toHaveLength(1);
     expect(
       mergeMaintenanceWorkerEvidence(parts[0], {...parts[1], records: [{...parts[1].records[0], content: 'changed'}]})
         .observation,
@@ -1491,6 +1495,7 @@ describe('persistent context maintenance', () => {
       expect(result.projects[0].checked).toBe(1);
       expect(result.receipts).toHaveLength(0);
       expect(result.preparation?.complete).toBe(false);
+      expect(result.preparation?.incompleteReason).toBe('inventory-discovery-incomplete');
       expect(result.cases.some(item => item.reason === 'inventory-preparation-incomplete')).toBe(true);
       for (let index = 0; index < 10; index++)
         yield* prepareContextMaintenanceInventory(fixture.config, undefined, 256);
