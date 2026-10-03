@@ -48,6 +48,42 @@ const fixture = Effect.gen(function* () {
 
 describe('citation recovery checkout authority', () => {
   effectIt.layer(platform)(it => {
+    it.effect('rejects unavailable ancestry before capturing mutable worktree registration', () =>
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const data = yield* fixture;
+          const executor = yield* CommandExecutor;
+          const executeBytes = executor.executeBytes;
+          let registrationCommands = 0;
+          let closingChecks = 0;
+          const measured = CommandExecutor.of({
+            ...executor,
+            executeBytes:
+              executeBytes === undefined
+                ? undefined
+                : (...args) =>
+                    Effect.suspend(() => {
+                      registrationCommands++;
+                      return executeBytes(...args);
+                    }),
+          });
+          const alias = yield* verifyCodeGraphCitationRepositoryAlias(
+            data.home,
+            data.prior,
+            data.current,
+            'f'.repeat(40),
+            () =>
+              Effect.sync(() => {
+                closingChecks++;
+              }),
+          ).pipe(Effect.provideService(CommandExecutor, measured));
+          expect(alias).toBeUndefined();
+          expect(registrationCommands).toBe(0);
+          expect(closingChecks).toBe(0);
+        }),
+      ),
+    );
+
     it.effect('shares opening discovery across selectors while keeping mutable alias closing fences fresh', () =>
       TestClock.withLive(
         Effect.gen(function* () {

@@ -81,11 +81,11 @@ const verifyObservedCitationRepositoryAlias = Effect.fn('codeGraph.verifyCitatio
   ancestor: typeof sourceCommitIsAncestor = sourceCommitIsAncestor,
 ) {
   if (prior.checkoutId !== identity.checkoutId || prior.repositoryId === identity.repositoryId) return undefined;
+  if (!(yield* ancestor(identity, sourceCommit))) return undefined;
   const registration = yield* captureCodeGraphGitWorktreeRegistration(identity).pipe(
     Effect.orElseSucceed(() => undefined),
   );
   if (registration === undefined) return undefined;
-  if (!(yield* ancestor(identity, sourceCommit))) return undefined;
   yield* beforeFinalFence?.() ?? Effect.void;
   const [current, stablePrior, finalRegistration] = yield* Effect.all(
     [
