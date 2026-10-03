@@ -896,10 +896,14 @@ export class CodeGraphQueryService extends Context.Service<
               const identity = observation.identity;
               const changed = options.afterIdentityObserved === undefined ? observation.worktreeChanged : undefined;
               const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
-              const result = yield* store.withSession(
-                layout.databasePath,
-                statusForIdentity(threadnoteHome, identity, options, true, changed, cwd).pipe(Effect.flatMap(use)),
-              );
+              const observe = statusForIdentity(threadnoteHome, identity, options, true, changed, cwd);
+              const read = observe.pipe(Effect.flatMap(use));
+              const readSession: typeof read = store.withSession(layout.databasePath, read, {existingOnly: true});
+              const result = yield* (yield* fs.exists(layout.databasePath))
+                ? readSession
+                : observe.pipe(
+                    Effect.flatMap(status => (status.readySnapshot === undefined ? use(status) : readSession)),
+                  );
               if (options.requestMaintenance !== false) yield* requestMaintenance(threadnoteHome, identity);
               return result;
             }),
