@@ -466,6 +466,11 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
 }
 
 async function applicationProgram(arguments_: readonly string[], isMcpServer: boolean, isMcpBroker: boolean) {
+  if ((isMcpServer || isMcpBroker) && mcpServerInvocation.help) {
+    return Effect.sync(() => {
+      process.stdout.write(mcpServerHelp);
+    });
+  }
   if (isMcpBroker) {
     const [runtime, {mcpBrokerEffect}, processDiagnostics, processLease] = await Promise.all([
       import('./effect/runtime-bootstrap.js'),
@@ -490,11 +495,6 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
       ),
       Effect.provide(runtime.StandaloneBrokerLayer),
     );
-  }
-  if (isMcpServer && mcpServerInvocation.help) {
-    return Effect.sync(() => {
-      process.stdout.write(mcpServerHelp);
-    });
   }
   const [runtime, processDiagnostics, processLease] = await Promise.all([
     import('./effect/runtime.js'),

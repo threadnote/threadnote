@@ -58,28 +58,33 @@ describe('MCP launcher invocation', () => {
     );
   });
 
-  it('prints help and exits without starting the adapter or creating a data home', async () => {
-    const fixture = mkdtempSync(join(tmpdir(), 'threadnote-mcp-help-'));
-    const home = join(fixture, 'home');
-    const child = Bun.spawn(
-      [process.execPath, 'apps/threadnote/src/standalone.ts', '--home', home, 'mcp-server', '--help'],
-      {stdin: 'ignore', stdout: 'pipe', stderr: 'pipe'},
-    );
-    try {
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(code).toBe(0);
-      expect(stdout).toContain('Usage: threadnote [--home PATH] mcp-server [--help]');
-      expect(stdout).toContain('THREADNOTE_MANIFEST');
-      expect(stdout).toContain('THREADNOTE_MCP_TOOLSET');
-      expect(stderr).not.toContain('MCP adapter running');
-      expect(existsSync(home)).toBe(false);
-    } finally {
-      child.kill();
-      rmSync(fixture, {recursive: true, force: true});
-    }
-  });
+  it.each(['mcp-server', 'mcp-broker'])(
+    '%s prints help and exits without starting the adapter or creating a data home',
+    async route => {
+      const fixture = mkdtempSync(join(tmpdir(), 'threadnote-mcp-help-'));
+      const home = join(fixture, 'home');
+      const args = route === 'mcp-server' ? ['--home', home, route, '--help'] : [route, '--home', home, '--help'];
+      const child = Bun.spawn([process.execPath, 'apps/threadnote/src/standalone.ts', ...args], {
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      try {
+        const [stdout, stderr, code] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        expect(code).toBe(0);
+        expect(stdout).toContain('Usage: threadnote [--home PATH] mcp-server [--help]');
+        expect(stdout).toContain('THREADNOTE_MANIFEST');
+        expect(stdout).toContain('THREADNOTE_MCP_TOOLSET');
+        expect(stderr).not.toContain('MCP adapter running');
+        expect(existsSync(home)).toBe(false);
+      } finally {
+        child.kill();
+        rmSync(fixture, {recursive: true, force: true});
+      }
+    },
+  );
 });
