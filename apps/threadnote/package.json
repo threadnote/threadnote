@@ -233,6 +233,7 @@
     "./mcp/effect_schema_sdk_tools": "./src/mcp/effect_schema_sdk_tools.ts",
     "./mcp/index": "./src/mcp/index.ts",
     "./mcp/install": "./src/mcp/install.ts",
+    "./mcp/launcher": "./src/mcp/launcher.ts",
     "./mcp/memory_code_citation": "./src/mcp/memory_code_citation.ts",
     "./mcp/server/activation": "./src/mcp/server/activation.ts",
     "./mcp/server/code_graph": "./src/mcp/server/code_graph.ts",
