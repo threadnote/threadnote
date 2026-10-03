@@ -59,6 +59,7 @@ interface BriefRequestSnapshot {
 
 interface ContextPanelProps {
   readonly projectOptions?: readonly string[];
+  readonly refreshGeneration?: number;
 }
 
 export function ContextPanel(props: ContextPanelProps): React.ReactElement {
@@ -143,6 +144,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     const controller = new AbortController();
     void api<ManagerWorksetCatalog>('/api/worksets', undefined, {signal: controller.signal})
       .then(next => {
+        if (controller.signal.aborted) return;
         setCatalog(next);
         setCatalogError('');
       })
@@ -150,7 +152,16 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         if (!controller.signal.aborted) setCatalogError(errorMessage(cause));
       });
     return () => controller.abort();
-  }, []);
+  }, [props.refreshGeneration]);
+
+  useEffect(() => {
+    if (!catalog) return;
+    const repositoryAvailable = !callerCwd || catalog.projects.some(item => item.path === callerCwd);
+    const worksetAvailable = !workset || catalog.definitions.some(item => item.name === workset);
+    if (!repositoryAvailable) setCallerCwd('');
+    if (!worksetAvailable) setWorkset('');
+    if (scopeKind === 'repository' ? !repositoryAvailable : !worksetAvailable) setScope(scopeKind);
+  }, [callerCwd, catalog, scopeKind, workset]);
 
   async function runBrief(overrides: BriefRunOverrides = {}): Promise<void> {
     const nextTask = overrides.task ?? task;
@@ -440,10 +451,13 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
 
   function setScope(next: ContextScopeKind): void {
     briefRequest.current?.abort();
+    graphRecoveryRequest.current?.abort();
+    setGraphRecoveryBusy(false);
     invalidateRecall();
     setScopeKind(next);
     setBriefBusy(false);
     setBrief(undefined);
+    setBriefRequestSnapshot(undefined);
     setBriefError('');
   }
 

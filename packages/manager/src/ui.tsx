@@ -1412,7 +1412,7 @@ function App(): React.ReactElement {
 
         {panel === 'context' ? (
           <section className="panel context-panel is-active">
-            <ContextPanel projectOptions={projectOptions} />
+            <ContextPanel projectOptions={projectOptions} refreshGeneration={attentionRefreshGeneration} />
           </section>
         ) : null}
 
