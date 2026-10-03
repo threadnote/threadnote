@@ -335,7 +335,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 <h3>{group.preview?.title ?? 'Memory needing a decision'}</h3>
                 <p>{group.preview?.excerpt ?? 'Open the memory to read the claim before deciding.'}</p>
               </div>
-              <span className="attention-count">{group.findings.length} supporting checks</span>
+              <span className="attention-count">
+                {group.findings.length} supporting {group.findings.length === 1 ? 'check' : 'checks'}
+              </span>
             </header>
             <button type="button" onClick={() => props.onOpenLibrary(group.uri)}>
               Open memory

@@ -1128,6 +1128,11 @@ body.is-resizing-sidebar * {
   margin: 5px 0 0;
 }
 
+.health-record > header .attention-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .health-memory-preview {
   color: var(--text);
   line-height: 1.55;
