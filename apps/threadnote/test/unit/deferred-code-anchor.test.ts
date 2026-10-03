@@ -185,7 +185,9 @@ describe('deferred code-anchor outbox', () => {
         }
         const fullStatus = selectedFullProjectStatus(graph.status, 'app-a');
         const scopedStatus = selectedProjectStatus(graph.status, 'app-a', 'code-graph-scope:app-a');
-        for (const transitionRead of [3, 4, 5, 6]) {
+        // Admission precedes the scope precheck, citation before/after fences,
+        // and scope postcheck. Exercise each remaining fence independently.
+        for (const transitionRead of [2, 3, 4, 5]) {
           const statusReads = yield* Ref.make(0);
           const fullToScopedToFull = yield* finalizeDeferredCodeAnchors(fullFixture.config).pipe(
             Effect.provideService(
