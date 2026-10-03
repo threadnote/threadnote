@@ -66,22 +66,40 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   const route = request.url.pathname;
   if (route === '/api/attention/context-maintenance') {
     if (request.method === 'GET') {
-      const project = request.url.searchParams.get('project');
+      const project = request.url.searchParams.get('project') ?? undefined;
+      if (project !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project))
+        return invalid('Select a valid project.');
       const caseId = request.url.searchParams.get('caseId');
-      if (caseId !== null) return {status: 200, body: yield* readContextMaintenancePacket(request.config, caseId)};
-      const status = yield* readContextMaintenanceStatus(request.config, project ?? undefined);
-      return {
-        status: 200,
-        body:
-          project === null
-            ? status
-            : {
-                ...status,
-                projects: status.projects.filter(item => item.project === project),
-                cases: status.cases.filter(item => item.project === project),
-                receipts: status.receipts.filter(item => item.project === project),
-              },
-      };
+      if (caseId !== null && request.url.searchParams.get('view') !== 'status') {
+        if (project !== undefined) yield* readContextMaintenanceStatus(request.config, project, {caseId});
+        const startLine = request.url.searchParams.get('startLine');
+        const maximumLines = request.url.searchParams.get('maximumLines');
+        if (
+          (startLine !== null && !/^[1-9][0-9]*$/u.test(startLine)) ||
+          (maximumLines !== null && !/^(?:[1-9]|1[0-9]|2[0-4])$/u.test(maximumLines))
+        )
+          return invalid('Choose a positive source line and 1 to 24 excerpt lines.');
+        return {
+          status: 200,
+          body: yield* readContextMaintenancePacket(request.config, caseId, {
+            citationId: request.url.searchParams.get('citationId') ?? undefined,
+            memoryUri: request.url.searchParams.get('memoryUri') ?? undefined,
+            ...(startLine === null ? {} : {startLine: Number(startLine)}),
+            ...(maximumLines === null ? {} : {maximumLines: Number(maximumLines)}),
+          }),
+        };
+      }
+      const limitText = request.url.searchParams.get('limit');
+      if (limitText !== null && !/^(?:[1-9][0-9]?|100)$/u.test(limitText))
+        return invalid('Choose a page limit from 1 to 100.');
+      const status = yield* readContextMaintenanceStatus(request.config, project, {
+        ...(limitText === null ? {} : {limit: Number(limitText)}),
+        caseCursor: request.url.searchParams.get('caseCursor') ?? undefined,
+        receiptCursor: request.url.searchParams.get('receiptCursor') ?? undefined,
+        caseId: caseId ?? undefined,
+        receiptId: request.url.searchParams.get('receiptId') ?? undefined,
+      });
+      return {status: 200, body: status};
     }
     if (request.method !== 'POST') return undefined;
     const body = yield* request.body;

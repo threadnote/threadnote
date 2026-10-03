@@ -142,6 +142,7 @@ const packageTestClosureEntries = {
   ],
 };
 const packageRuntimeTestEntries = {
+  'packages/context': ['apps/threadnote/src/standalone.ts'],
   'packages/graph': ['apps/threadnote/src/standalone.ts'],
   'packages/manager': ['apps/threadnote/src/standalone.ts'],
   'packages/memory': ['apps/threadnote/src/standalone.ts'],

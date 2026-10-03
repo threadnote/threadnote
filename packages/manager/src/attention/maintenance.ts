@@ -1,7 +1,47 @@
-import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceCaseV2} from './contracts.js';
+import type {
+  ManagerContextHealthResponseV1,
+  ManagerContextMaintenanceCaseV2,
+  ManagerContextMaintenanceStatusV2,
+} from './contracts.js';
 import {classifyContextHealthFindingV2} from '@threadnote/context/health_maintenance';
 
 type Finding = ManagerContextHealthResponseV1['findings'][number];
+
+export function mergeMaintenanceStatusPage(
+  current: ManagerContextMaintenanceStatusV2,
+  page: ManagerContextMaintenanceStatusV2,
+  kind: 'cases' | 'receipts',
+): ManagerContextMaintenanceStatusV2 {
+  if (current.page?.generation !== page.page?.generation)
+    throw new Error('Maintenance history changed. Refresh status from the first page.');
+  const cases =
+    kind === 'cases'
+      ? [...new Map([...current.cases, ...page.cases].map(item => [item.caseId, item])).values()]
+      : current.cases;
+  const receipts =
+    kind === 'receipts'
+      ? [...new Map([...current.receipts, ...page.receipts].map(item => [item.receiptId, item])).values()]
+      : current.receipts;
+  return {
+    ...page,
+    cases,
+    receipts,
+    omittedCases:
+      kind === 'cases'
+        ? Math.max(0, page.cases.length + (page.omittedCases ?? 0) - cases.length)
+        : current.omittedCases,
+    omittedReceipts:
+      kind === 'receipts'
+        ? Math.max(0, page.receipts.length + (page.omittedReceipts ?? 0) - receipts.length)
+        : current.omittedReceipts,
+    page: {
+      ...current.page!,
+      ...(kind === 'cases'
+        ? {caseNextCursor: page.page?.caseNextCursor}
+        : {receiptNextCursor: page.page?.receiptNextCursor}),
+    },
+  };
+}
 
 export function healthDecisionGroups(report: ManagerContextHealthResponseV1) {
   const previews = new Map(report.recordPreviews.map(item => [item.uri, item]));

@@ -5024,6 +5024,13 @@ dd {
     flex-direction: column;
   }
 
+  .manager-connection-alert {
+    align-self: stretch;
+    flex-basis: auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   .primary-nav {
     grid-template-columns: repeat(6, minmax(0, 1fr));
     overflow: visible;

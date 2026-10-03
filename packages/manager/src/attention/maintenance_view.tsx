@@ -1,6 +1,10 @@
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
-import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceStatusV2} from './contracts.js';
+import type {
+  ManagerContextHealthResponseV1,
+  ManagerContextMaintenanceStatusV2,
+  ManagerContextMaintenancePacketV2,
+} from './contracts.js';
 import {
   groupMaintenanceCauses,
   healthDecisionGroups,
@@ -8,6 +12,7 @@ import {
   maintenanceRecoveryInstruction,
   maintenanceStatusLabel,
   maintenanceUndoConflictMessage,
+  mergeMaintenanceStatusPage,
 } from './maintenance.js';
 import {HealthDetail} from '../attention_details.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
@@ -35,6 +40,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [task, setTask] = useState('');
+  const [packet, setPacket] = useState<ManagerContextMaintenancePacketV2>();
+  const [retainedCase, setRetainedCase] = useState<ManagerContextMaintenanceStatusV2['cases'][number]>();
+  const [loadingHistory, setLoadingHistory] = useState(false);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
   if (activeProject.current !== props.project) {
@@ -49,6 +57,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const lastGeneration = useRef<string | undefined>(undefined);
   const status = snapshot?.project === props.project ? snapshot.status : undefined;
   useEffect(() => {
+    setPacket(undefined);
+    setRetainedCase(undefined);
+  }, [status?.page?.generation]);
+  useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
@@ -59,6 +71,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setConflictSubjectUri(undefined);
     setSelected(undefined);
     setTask('');
+    setPacket(undefined);
+    setRetainedCase(undefined);
+    setLoadingHistory(false);
   }, [props.project]);
   useEffect(() => {
     let cancelled = false;
@@ -80,7 +95,23 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         if (cancelled || mutationEpoch.current !== epoch) return;
         if (result.version !== 2)
           throw new Error('Maintenance status is unavailable. Refresh after updating Threadnote.');
-        setSnapshot({project: props.project, status: result});
+        setSnapshot(previous => {
+          const old = previous?.project === props.project ? previous.status : undefined;
+          return {
+            project: props.project,
+            status:
+              old !== undefined && old.page !== undefined && old.page.generation === result.page?.generation
+                ? {
+                    ...result,
+                    cases: old.cases,
+                    receipts: old.receipts,
+                    page: old.page,
+                    omittedCases: old.omittedCases,
+                    omittedReceipts: old.omittedReceipts,
+                  }
+                : result,
+          };
+        });
         setError('');
         if (lastGeneration.current !== undefined && lastGeneration.current !== result.generation) onChanged.current();
         lastGeneration.current = result.generation;
@@ -140,6 +171,55 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         setBusy(false);
         actionBusy.current = false;
       }
+    }
+  }
+
+  async function loadHistory(kind: 'cases' | 'receipts') {
+    const cursor = kind === 'cases' ? status?.page?.caseNextCursor : status?.page?.receiptNextCursor;
+    if (!status || !cursor || loadingHistory) return;
+    const project = props.project;
+    const epoch = projectEpoch.current;
+    const current = status;
+    setLoadingHistory(true);
+    try {
+      const page = await api<ManagerContextMaintenanceStatusV2>(
+        `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&${kind === 'cases' ? 'caseCursor' : 'receiptCursor'}=${encodeURIComponent(cursor)}`,
+      );
+      if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
+      const merged = mergeMaintenanceStatusPage(current, page, kind);
+      setSnapshot(previous =>
+        previous?.status.page?.generation === current.page?.generation ? {project, status: merged} : previous,
+      );
+    } catch (cause) {
+      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
+        setError(errorMessage(cause));
+    } finally {
+      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
+        setLoadingHistory(false);
+    }
+  }
+
+  async function inspectCase(caseId: string, selection?: {memoryUri: string; citationId: string}) {
+    const project = props.project;
+    const epoch = projectEpoch.current;
+    setError('');
+    setPacket(undefined);
+    try {
+      const details = await api<ManagerContextMaintenanceStatusV2>(
+        `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&view=status&caseId=${encodeURIComponent(caseId)}`,
+      );
+      if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
+      setRetainedCase(details.cases?.find(item => item.caseId === caseId));
+      const result = await api<ManagerContextMaintenancePacketV2>(
+        `/api/attention/context-maintenance?project=${encodeURIComponent(project)}&caseId=${encodeURIComponent(caseId)}${selection ? `&memoryUri=${encodeURIComponent(selection.memoryUri)}&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
+      );
+      if (!mounted.current || activeProject.current !== project || projectEpoch.current !== epoch) return;
+      if (result.project !== project || result.caseId !== caseId)
+        throw new Error('The selected maintenance case changed. Refresh status.');
+      setPacket(result);
+    } catch (cause) {
+      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
+        setError(errorMessage(cause));
     }
   }
 
@@ -349,10 +429,26 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                   {code.path}
                   {code.line ? `:${code.line}` : ''}
                 </p>
-                {code.excerpt ? (
+                {code.evidence ? (
+                  code.evidence.excerpts.map(excerpt => (
+                    <section key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
+                      <p>
+                        {excerpt.provenance === 'historical-verified'
+                          ? 'Historical evidence preserved; does not verify current source'
+                          : excerpt.supportsCitation
+                            ? 'Current source supports this citation'
+                            : 'Current source changed; review the claim'}
+                      </p>
+                      <p>
+                        {excerpt.source.path}:{excerpt.startLine} · {excerpt.source.sourceCommit}
+                      </p>
+                      <pre>{excerpt.content}</pre>
+                    </section>
+                  ))
+                ) : code.excerpt ? (
                   <pre>{code.excerpt}</pre>
                 ) : (
-                  <p>Current source is unavailable; historical evidence cannot discharge this claim.</p>
+                  <p>Source evidence is unavailable.</p>
                 )}
               </section>
             ))}
@@ -403,6 +499,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           <article className="attention-card" key={item.caseId}>
             <h4>{item.reason.replaceAll('-', ' ')}</h4>
             <p>{maintenanceRecoveryInstruction(item.reason)}</p>
+            <button type="button" onClick={() => void inspectCase(item.caseId)}>
+              Inspect exact case and evidence
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -488,7 +587,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 : receipt.state.replaceAll('-', ' ')}{' '}
               · {new Date(receipt.timestamp).toLocaleString()}
             </p>
-            <button type="button" onClick={() => props.onOpenLibrary(receipt.subjectUri)}>
+            <button type="button" onClick={() => props.onOpenLibrary(receipt.archivedUri ?? receipt.subjectUri)}>
               Inspect changed memory
             </button>
             {receipt.state === 'applied' ? (
@@ -498,17 +597,131 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             ) : null}
           </article>
         ))}
+        {status?.page?.receiptNextCursor ? (
+          <button type="button" disabled={loadingHistory || busy} onClick={() => void loadHistory('receipts')}>
+            {loadingHistory ? 'Loading history…' : 'Load more retained changes and undo'}
+          </button>
+        ) : null}
         <details>
           <summary>Bounded maintenance diagnostics</summary>
           <p>Evidence generation: {projectProgress?.generation ?? status?.generation ?? 'unavailable'}.</p>
-          {cases.slice(0, 50).map(item => (
+          {cases.map(item => (
             <p key={item.caseId}>
               {item.disposition.replaceAll('-', ' ')}: {item.reason.replaceAll('-', ' ')} · {item.attemptCount} attempts
-              · last checked {item.lastChecked}
+              · last checked {item.lastChecked}{' '}
+              <button type="button" onClick={() => void inspectCase(item.caseId)}>
+                Inspect exact case and evidence
+              </button>
             </p>
           ))}
+          {status?.page?.caseNextCursor ? (
+            <button type="button" disabled={loadingHistory || busy} onClick={() => void loadHistory('cases')}>
+              {loadingHistory ? 'Loading history…' : 'Load more retained cases'}
+            </button>
+          ) : null}
         </details>
       </section>
+      {retainedCase ? (
+        <section className="attention-card" aria-label="Retained maintenance case">
+          <h3>Retained case history</h3>
+          <p>Stable memory identity: {retainedCase.memoryId}</p>
+          {(retainedCase.archivedUri ?? retainedCase.subjectUri) ? (
+            <button
+              type="button"
+              onClick={() => props.onOpenLibrary(retainedCase.archivedUri ?? retainedCase.subjectUri)}
+            >
+              Inspect retained memory
+            </button>
+          ) : null}
+          {!packet ? (
+            <p>
+              This history is read-only. The current record may be inactive, unavailable or changed; refresh maintenance
+              evidence before choosing a repair.
+            </p>
+          ) : null}
+          <p>
+            {retainedCase.caseId} · {retainedCase.disposition}
+          </p>
+          {retainedCase.events.map((event, index) => (
+            <p key={index}>
+              {event.at} — {event.reason}
+            </p>
+          ))}
+          <button
+            type="button"
+            onClick={() => {
+              setRetainedCase(undefined);
+              setPacket(undefined);
+            }}
+          >
+            Close retained case history
+          </button>
+        </section>
+      ) : null}
+      {packet ? (
+        <section className="attention-card" aria-label="Exact maintenance case">
+          <h3>{packet.reason.replaceAll('-', ' ')}</h3>
+          <p>
+            {packet.family} · {packet.slot}
+          </p>
+          <p>Evidence revision: {packet.evidenceRevision}</p>
+          <p>{packet.instructions}</p>
+          {packet.memoryUri ? (
+            <button type="button" onClick={() => props.onOpenLibrary(packet.memoryUri)}>
+              Open selected memory
+            </button>
+          ) : null}
+          {packet.evidenceSelectors?.map(selector => (
+            <button
+              type="button"
+              key={`${selector.memoryUri}:${selector.citationId}`}
+              onClick={() => void inspectCase(packet.caseId, selector)}
+            >
+              Read source for {selector.citationId}
+            </button>
+          ))}
+          {(packet.omittedEvidenceSelectors ?? 0) > 0 ? (
+            <p>
+              Open the selected memories for further citation IDs; each exact source can be read through the case packet
+              selector.
+            </p>
+          ) : null}
+          {packet.evidence?.excerpts.map(excerpt => (
+            <section key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
+              <p>
+                {excerpt.provenance === 'historical-verified'
+                  ? 'Historical evidence; does not verify current source'
+                  : excerpt.supportsCitation
+                    ? 'Current citation support verified'
+                    : 'Changed current source; claim review required'}
+              </p>
+              <p>
+                {excerpt.source.path}:{excerpt.startLine}
+              </p>
+              <pre>{excerpt.content}</pre>
+            </section>
+          ))}
+          {packet.ownerProposal ? (
+            <section aria-label="Shared owner proposal">
+              <p>Read-only owner proposal: {packet.ownerProposal.proposalRevision}</p>
+              {packet.ownerProposal.selectedEdits.map((edit, index) => (
+                <p key={index}>
+                  {edit.operation}: {edit.relation.type} → {edit.relation.uri}
+                </p>
+              ))}
+              <p>{packet.ownerProposal.publication.instructions}</p>
+            </section>
+          ) : null}
+          <ul>
+            {packet.choices.map(choice => (
+              <li key={choice}>{choice}</li>
+            ))}
+          </ul>
+          <button type="button" onClick={() => setPacket(undefined)}>
+            Close case details
+          </button>
+        </section>
+      ) : null}
       {selected ? (
         <HealthDetail
           key={`${props.project}:${selected.caseId ?? selected.id}`}

@@ -1,10 +1,10 @@
-import {Effect, FileSystem, Option, Path, Result} from 'effect';
+import {Effect, Result} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
-import {assertSafeRelativePath, expandPath} from '@threadnote/platform/paths';
+import {expandPath} from '@threadnote/platform/paths';
 import type {
   ManagerContextHealthCodePreviewV1,
   ManagerContextHealthRecordPreviewV1,
@@ -15,6 +15,7 @@ import type {
 import {readActiveProjectMemoryRecords} from '../memory/maintenance/records.js';
 import {collectContextHealth} from '../memory/context/health_commands.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
+import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
 
@@ -92,7 +93,13 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   return {
     body: {
       ...report,
-      recordPreviews: yield* managerContextHealthRecordPreviews(records, report.findings, root.cwd),
+      recordPreviews: yield* managerContextHealthRecordPreviews(
+        records,
+        report.findings,
+        root.cwd,
+        request.config,
+        project,
+      ),
       repositoryEvidence: {state: 'available'},
     },
     status: 200,
@@ -128,6 +135,8 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
   records: readonly MemoryRecord[],
   findings: ManagerContextHealthResponseV1['findings'],
   cwd: string,
+  config: RuntimeConfig,
+  project: string,
 ) {
   const recordsByUri = new Map(records.map(record => [record.uri, record] as const));
   const findingsByRecord = new Map<string, typeof findings>();
@@ -150,11 +159,11 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
         }
         const code = yield* Effect.forEach(
           record.metadata.codeCitations?.filter(citation => citationFindings.has(citation.id)) ?? [],
-          citation => codePreview(cwd, citation, citationFindings.get(citation.id) ?? []),
+          citation => codePreview(config, project, cwd, citation, citationFindings.get(citation.id) ?? []),
           {concurrency: 8},
         );
         return {
-          code: code.filter((item): item is ManagerContextHealthCodePreviewV1 => item !== undefined),
+          code,
           excerpt: memoryExcerpt(record.body),
           kind: record.metadata.kind,
           title: memoryTitle(record),
@@ -167,34 +176,23 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
 });
 
 const codePreview = Effect.fn('managerAttention.codePreview')(function* (
+  config: RuntimeConfig,
+  project: string,
   cwd: string,
   citation: NonNullable<MemoryRecord['metadata']['codeCitations']>[number],
   findingIds: readonly string[],
 ) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const content = yield* Effect.gen(function* () {
-    const relative = yield* Effect.try(() => assertSafeRelativePath(citation.path));
-    const [realRoot, realTarget] = yield* Effect.all([fs.realPath(cwd), fs.realPath(path.join(cwd, relative))]);
-    const contained = path.relative(realRoot, realTarget);
-    if (!contained || contained.startsWith(`..${path.sep}`) || contained === '..' || path.isAbsolute(contained)) {
-      return undefined;
-    }
-    const info = yield* fs.stat(realTarget);
-    if (Number(info.size) > 512 * 1_024) return undefined;
-    return yield* fs.readFileString(realTarget);
-  }).pipe(Effect.option);
-  const source = Option.isSome(content) ? content.value : undefined;
-  const start = citation.target.kind === 'symbol' ? Math.max(1, citation.target.span.line - 2) : 1;
-  const end = citation.target.kind === 'symbol' ? citation.target.span.endLine + 2 : 12;
-  const excerpt = source
-    ?.split(/\r?\n/u)
-    .slice(start - 1, end)
-    .join('\n')
-    .trimEnd();
+  const evidence = yield* readContextHealthCitationEvidence(
+    config,
+    {callerCwd: cwd, kind: 'repository', project},
+    citation,
+    {maximumBytes: 4_000, maximumLines: 24},
+  );
+  const current = evidence.excerpts.find(excerpt => excerpt.provenance === 'current-verified');
   return {
     citationId: citation.id,
-    ...(excerpt === undefined ? {} : {excerpt: excerpt.length > 4_000 ? `${excerpt.slice(0, 3_997)}…` : excerpt}),
+    ...(current === undefined ? {} : {excerpt: current.content}),
+    evidence,
     findingIds,
     ...(citation.target.kind === 'symbol' ? {line: citation.target.span.line} : {}),
     path: citation.path,

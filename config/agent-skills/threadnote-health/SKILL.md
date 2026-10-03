@@ -16,9 +16,18 @@ Read local cases with `context_maintenance_status`, then fetch the selected `cas
 `threadnote context maintain --action packet --case-id <case-id> --json`. These tools require the full local MCP toolset;
 use the installed CLI when that toolset is unavailable.
 
+Compact status retains bounded pages. Follow `page.caseNextCursor` and `page.receiptNextCursor` with the same project
+and corresponding `caseCursor`/`receiptCursor` selector (CLI: `--case-cursor`/`--receipt-cursor`). An exact `caseId` or
+`receiptId` status selector reads retained details. A stale generation requires restarting from the first page.
+
 Read the selected case and its memory pointers. Confirm project, absolute `callerCwd`, evidence revision, and operations
 available on this surface before editing. Refresh a stale packet. Shared or remote authority does not imply access to local
 personal storage.
+
+Packets identify the stable family/slot and exact citation or relation target, original citation provenance, content hash,
+source revision, attempted recovery ladder, policy and budget. Read their bounded evidence excerpts with their hashes,
+coverage and provenance. `supportsCitation=false` means current bytes need claim review; historical bytes never become
+current proof. Keep excerpts bounded and verify revisions again after asynchronous reads before proposing a change.
 
 Compare the engineering claim with authoritative current source and recoverable historical evidence. A new citation hash
 does not validate old prose. An old snapshot proves historical provenance, not current source. Accept a relocation only
@@ -32,6 +41,12 @@ Do not recreate a deleted user worktree merely to recover a reference.
 Use the tool-returned revision-bound repair workflow. Apply deterministic private changes inside the session's existing
 authorization. Ask only for a concrete unresolved semantic choice or an action outside that scope. Shared canonical
 changes use reviewed publication; never export personal context or silently publish a maintenance outcome.
+
+For `ownerProposal`, inspect only its exact selected canonical edits and expected shared content/base revision. This is a
+read-only proposal, not local repair authorization. The owner verifies team target authority, reviews the selected shared
+change through `review_session_context`, explicitly approves/applies the exact candidate, then explicitly approves
+`share_propose` with applied candidate IDs and the current review revision. That exporter binds the shared Git base and
+target content without publishing it. Refresh changed or unavailable base evidence before owner publication review.
 
 Recheck the affected case and source after mutation. A successful write is not a resolved issue. Record what changed,
 verified postconditions, remaining uncertainty, and the event or evidence needed next. If the evidence is unchanged and

@@ -3,10 +3,12 @@ import {describe, expect, it} from 'vitest';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
 import {
   contextHealthCaseIdV2,
+  migrateContextHealthCitationCaseSlotV2,
   contextHealthFindingCaseIdentityV2,
   resolveContextHealthRelationTargetV2,
 } from '@threadnote/context/health_maintenance';
 import type {ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
+import {createMemoryCodeCitation, preserveMemoryCodeCitationAnchor} from '@threadnote/memory/code/citation';
 import {buildContextHealthReport} from '@threadnote/context/health';
 
 const now = new Date('2026-09-17T12:00:00.000Z');
@@ -121,18 +123,22 @@ describe('buildContextHealthReport', () => {
           {uri: item.uri, receipts: [{...receipt('unknown', 'repository-unavailable'), reason, citationId}]},
         ],
       }).findings[0];
-    const first = build(source, 'repository-unavailable', 'old-citation');
-    expect(build(source, 'repository-ambiguous', 'old-citation')?.caseId).toBe(first?.caseId);
+    const original = source.metadata.codeCitations![0];
+    const first = build(source, 'repository-unavailable', original.id);
+    expect(build(source, 'repository-ambiguous', original.id)?.caseId).toBe(first?.caseId);
     const moved = {
       ...source,
       uri: 'threadnote://memory/new-path',
-      metadata: {...source.metadata, codeCitations: [citation('new-citation')]},
+      metadata: {
+        ...source.metadata,
+        codeCitations: [preserveMemoryCodeCitationAnchor(original, citation('new-citation'))],
+      },
     };
-    expect(build(moved, 'repository-unavailable', 'new-citation')?.caseId).toBe(first?.caseId);
+    expect(build(moved, 'repository-unavailable', moved.metadata.codeCitations[0].id)?.caseId).toBe(first?.caseId);
     expect(first?.classification).toBe('coverage');
   });
 
-  it('shares the full canonical anchor ordinal with persisted maintenance cases', () => {
+  it('shares the stable canonical anchor identity with persisted maintenance cases', () => {
     const source = record('threadnote://memory/source', 'source', {
       memoryId: 'tn_source',
       codeCitations: [citation('first'), citation('second'), citation('third')],
@@ -142,14 +148,134 @@ describe('buildContextHealthReport', () => {
       project: 'threadnote',
       records: [source],
       citationValidations: [
-        {uri: source.uri, receipts: [{...receipt('changed', 'source-changed'), citationId: 'second'}]},
+        {
+          uri: source.uri,
+          receipts: [{...receipt('changed', 'source-changed'), citationId: source.metadata.codeCitations![1].id}],
+        },
       ],
     });
     const finding = report.findings[0];
     if (finding === undefined) throw new Error('Expected changed citation finding');
     const identity = contextHealthFindingCaseIdentityV2({project: 'threadnote', finding, records: [source]});
-    expect(identity).toEqual({project: 'threadnote', memoryId: 'tn_source', family: 'citation', slot: 'anchor:1'});
+    expect(identity).toEqual({
+      project: 'threadnote',
+      memoryId: 'tn_source',
+      family: 'citation',
+      slot: `anchor:${source.metadata.codeCitations![1].id}`,
+    });
     expect(contextHealthCaseIdV2(identity)).toBe(finding.caseId);
+  });
+
+  it('keeps B on its own case after removing A', () => {
+    const [a, b] = [citation('A'), citation('B')];
+    const cases = (citations: readonly (typeof a)[]) => {
+      const source = record('threadnote://memory/source', 'claim', {memoryId: 'tn_source', codeCitations: citations});
+      return buildContextHealthReport({
+        now,
+        project: 'threadnote',
+        records: [source],
+        citationValidations: [
+          {
+            uri: source.uri,
+            receipts: citations.map(item => ({...receipt('changed', 'source-changed'), citationId: item.id})),
+          },
+        ],
+      }).findings;
+    };
+    const before = cases([a, b]);
+    const after = cases([b]);
+    const bCase = before.find(item => item.repair.targetUri?.endsWith(`#${b.id}`));
+    const aCase = before.find(item => item.repair.targetUri?.endsWith(`#${a.id}`));
+    expect(after[0]?.caseId).toBe(bCase?.caseId);
+    expect(after[0]?.caseId).not.toBe(aCase?.caseId);
+  });
+
+  it('preserves the independent original-anchor case model under edits and replacement', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(
+          fc.record({
+            label: fc.integer({min: 0, max: 100}),
+            keep: fc.boolean(),
+            rank: fc.integer({min: 0, max: 100}),
+            replacements: fc.integer({min: 0, max: 3}),
+          }),
+          {minLength: 1, maxLength: 6, selector: item => item.label},
+        ),
+        entries => {
+          const original = entries.map(item => ({...item, citation: citation(`original-${item.label}`)}));
+          const report = (citations: readonly ReturnType<typeof citation>[]) => {
+            const source = record('threadnote://memory/source', 'claim', {
+              memoryId: 'tn_source',
+              codeCitations: citations,
+            });
+            return buildContextHealthReport({
+              now,
+              project: 'threadnote',
+              records: [source],
+              citationValidations: [
+                {
+                  uri: source.uri,
+                  receipts: citations.map(item => ({...receipt('changed', 'source-changed'), citationId: item.id})),
+                },
+              ],
+            }).findings;
+          };
+          const before = report(original.map(item => item.citation));
+          const expected = new Map(
+            original.map(item => [
+              item.label,
+              before.find(finding => finding.repair.targetUri?.endsWith(`#${item.citation.id}`))!.caseId,
+            ]),
+          );
+          const survivors = original
+            .filter(item => item.keep)
+            .map(item => {
+              let next = item.citation;
+              for (let generation = 0; generation < item.replacements; generation += 1) {
+                next = preserveMemoryCodeCitationAnchor(next, citation(`replacement-${item.label}-${generation}`));
+              }
+              return {...item, citation: next};
+            })
+            .sort((left, right) => left.rank - right.rank || left.label - right.label);
+          const after = report([citation('unrelated-insertion'), ...survivors.map(item => item.citation)]);
+          for (const item of survivors) {
+            expect(after.find(finding => finding.repair.targetUri?.endsWith(`#${item.citation.id}`))?.caseId).toBe(
+              expected.get(item.label),
+            );
+          }
+          expect(new Set(after.map(item => item.caseId)).size).toBe(after.length);
+        },
+      ),
+      {numRuns: 80},
+    );
+  });
+
+  it('migrates only unique proved citation lineage and refuses ordinal guesses', () => {
+    const original = citation('original');
+    const replacement = preserveMemoryCodeCitationAnchor(original, citation('replacement'));
+    expect(migrateContextHealthCitationCaseSlotV2({slot: 'anchor:0', citations: [replacement]})).toBeUndefined();
+    expect(
+      migrateContextHealthCitationCaseSlotV2({slot: 'anchor:0', citationId: replacement.id, citations: [replacement]}),
+    ).toBe(`anchor:${original.id}`);
+    expect(migrateContextHealthCitationCaseSlotV2({slot: `anchor:${original.id}`, citations: [replacement]})).toBe(
+      `anchor:${original.id}`,
+    );
+    expect(
+      migrateContextHealthCitationCaseSlotV2({slot: 'anchor:0', citationId: original.id, citations: [replacement]}),
+    ).toBe(`anchor:${original.id}`);
+    expect(
+      migrateContextHealthCitationCaseSlotV2({
+        slot: replacement.id,
+        citations: [replacement, {...citation('duplicate'), anchorId: original.id}],
+      }),
+    ).toBeUndefined();
+    expect(
+      migrateContextHealthCitationCaseSlotV2({
+        slot: replacement.id,
+        citations: [{...replacement, anchorId: 'invalid'}],
+      }),
+    ).toBeUndefined();
   });
 
   it('separates completed checks, verified current support, historical provenance and deferred work', () => {
@@ -614,18 +740,17 @@ function receipt(
   };
 }
 
-function citation(id: string) {
-  return {
-    id,
+function citation(name: string) {
+  return createMemoryCodeCitation({
     extractorSet: 'fixture',
     fileContentHash: {algorithm: 'sha256' as const, value: '1'.repeat(64)},
-    path: 'src/source.ts',
-    repositoryId: 'remote:fixture',
+    path: `src/${name}.ts`,
+    repositoryId: '3'.repeat(64),
     repositoryIdentityKind: 'remote' as const,
     sourceCommit: '2'.repeat(40),
     sourceDirty: false,
-    sourceSnapshotId: 'fixture',
+    sourceSnapshotId: `cgsn_${'4'.repeat(40)}`,
     target: {kind: 'file' as const},
     version: 1 as const,
-  };
+  });
 }

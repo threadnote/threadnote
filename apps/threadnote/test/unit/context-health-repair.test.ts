@@ -310,7 +310,7 @@ describe('context health repair proposals', () => {
     });
     expect(applied.status).toBe('applied');
     if (applied.status !== 'applied') throw new Error('expected citation repair to apply');
-    expect(applied.records[0]?.metadata.codeCitations).toEqual([replacement]);
+    expect(applied.records[0]?.metadata.codeCitations).toEqual([{...replacement, anchorId: previous.id}]);
     expect(applied.records[0]?.content).toContain('unknown_header: preserved');
     expect(
       applyContextHealthRepairProposalV1({
@@ -348,7 +348,9 @@ describe('context health repair proposals', () => {
           order.map(index => ({citationId: previous[index].id, replacement: replacements[index]})),
         );
         expect(content).toBe(expected);
-        expect(parseMemoryDocument(source.uri, content ?? '')?.metadata.codeCitations).toEqual(replacements);
+        expect(parseMemoryDocument(source.uri, content ?? '')?.metadata.codeCitations).toEqual(
+          replacements.map((replacement, index) => ({...replacement, anchorId: previous[index].id})),
+        );
       }),
       {numRuns: 20},
     );

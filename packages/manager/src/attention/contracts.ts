@@ -50,6 +50,21 @@ export interface ManagerContextHealthCodePreviewV1 {
   readonly line?: number;
   readonly path: string;
   readonly targetLabel?: string;
+  readonly evidence?: {
+    readonly coverage: 'available' | 'ambiguous' | 'unavailable';
+    readonly generation: string;
+    readonly attemptedSteps: readonly string[];
+    readonly excerpts: readonly {
+      readonly content: string;
+      readonly startLine: number;
+      readonly endLine: number;
+      readonly excerptHash: string;
+      readonly fileBytesHash: string;
+      readonly provenance: 'current-verified' | 'historical-verified';
+      readonly supportsCitation: boolean;
+      readonly source: {readonly path: string; readonly sourceCommit: string; readonly sourceSnapshotId: string};
+    }[];
+  };
 }
 
 export interface ManagerContextHealthRecordPreviewV1 {
@@ -97,6 +112,8 @@ export interface ManagerContextMaintenanceCaseV2 {
   readonly caseId: string;
   readonly project: string;
   readonly memoryId: string;
+  readonly subjectUri?: string;
+  readonly archivedUri?: string;
   readonly family: string;
   readonly slot: string;
   readonly evidenceRevision: string;
@@ -124,6 +141,7 @@ export interface ManagerContextMaintenanceReceiptV2 {
   readonly receiptId: string;
   readonly project: string;
   readonly subjectUri: string;
+  readonly archivedUri?: string;
   readonly postHash: string;
   readonly timestamp: string;
   readonly state: 'applying' | 'applied' | 'undone' | 'conflict';
@@ -156,6 +174,42 @@ export interface ManagerContextMaintenanceStatusV2 {
     readonly nextAttemptAt?: string;
   }[];
   readonly omittedCases?: number;
+  readonly omittedReceipts?: number;
+  readonly page?: {readonly generation: string; readonly caseNextCursor?: string; readonly receiptNextCursor?: string};
   readonly lastProgressAt?: string;
   readonly error?: {readonly reason: string; readonly at: string};
+}
+
+export interface ManagerContextMaintenancePacketV2 {
+  readonly version: 2;
+  readonly caseId: string;
+  readonly project: string;
+  readonly family?: string;
+  readonly slot?: string;
+  readonly callerCwd?: string;
+  readonly memoryUri?: string;
+  readonly evidenceRevision: string;
+  readonly expectedContentHash: string;
+  readonly reason: string;
+  readonly choices: readonly string[];
+  readonly allowedOperations: readonly string[];
+  readonly instructions: string;
+  readonly evidence?: ManagerContextHealthCodePreviewV1['evidence'];
+  readonly evidenceSelectors?: readonly {
+    readonly caseId: string;
+    readonly memoryUri: string;
+    readonly citationId: string;
+    readonly anchorId: string;
+  }[];
+  readonly omittedEvidenceSelectors?: number;
+  readonly ownerProposal?: {
+    readonly proposalRevision: string;
+    readonly expectedContentHash: string;
+    readonly selectedEdits: readonly {
+      readonly operation: string;
+      readonly relation: {readonly type: string; readonly uri: string};
+    }[];
+    readonly omittedEdits: number;
+    readonly publication: {readonly instructions: string};
+  };
 }

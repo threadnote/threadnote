@@ -3,6 +3,7 @@ import type {ContextHealthFindingV1} from './health.js';
 import type {ContextHealthSemanticCompletenessV1} from './health_semantic.js';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {memoryCodeCitationAnchorId, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export type ContextHealthFindingClassificationV2 = 'actionable' | 'automatically-managed' | 'coverage' | 'historical';
@@ -44,6 +45,37 @@ export interface ContextHealthCaseIdentityV2 {
   readonly slot: string;
 }
 
+export function contextHealthCitationCaseSlotV2(citation: MemoryCodeCitationV1): string {
+  return `anchor:${memoryCodeCitationAnchorId(citation)}`;
+}
+
+/** Ordinal alone proves no lineage after insertions, removals or reordering. */
+export function migrateContextHealthCitationCaseSlotV2(input: {
+  readonly slot: string;
+  readonly citationId?: string;
+  readonly citations: readonly MemoryCodeCitationV1[];
+}): string | undefined {
+  const stableId = /^anchor:tncc_[0-9a-f]{40}$/u.test(input.slot) ? input.slot.slice(7) : undefined;
+  const evidenceId = input.citationId ?? (/^tncc_[0-9a-f]{40}$/u.test(input.slot) ? input.slot : undefined);
+  if (stableId === undefined && evidenceId === undefined) return undefined;
+  try {
+    const matches = input.citations.filter(citation =>
+      stableId === undefined
+        ? citation.id === evidenceId || memoryCodeCitationAnchorId(citation) === evidenceId
+        : memoryCodeCitationAnchorId(citation) === stableId,
+    );
+    if (matches.length !== 1) return undefined;
+    const match = matches[0];
+    const anchorId = memoryCodeCitationAnchorId(match);
+    if (evidenceId !== undefined && match.id !== evidenceId && anchorId !== evidenceId) return undefined;
+    if (input.citations.filter(citation => memoryCodeCitationAnchorId(citation) === anchorId).length !== 1)
+      return undefined;
+    return contextHealthCitationCaseSlotV2(match);
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolveContextHealthRelationTargetV2(
   records: readonly MemoryRecord[],
   uri: string,
@@ -75,8 +107,13 @@ export function contextHealthFindingCaseIdentityV2(input: {
   if (finding.category.startsWith('citation-')) {
     family = 'citation';
     const citationId = finding.repair.targetUri?.slice((subjectUri?.length ?? 0) + 1);
-    const ordinal = subject?.metadata.codeCitations?.findIndex(citation => citation.id === citationId) ?? -1;
-    slot = ordinal >= 0 ? `anchor:${ordinal}` : (citationId ?? slot);
+    slot =
+      migrateContextHealthCitationCaseSlotV2({
+        slot: citationId ?? slot,
+        citations: subject?.metadata.codeCitations ?? [],
+      }) ??
+      citationId ??
+      slot;
   } else if (finding.category.startsWith('relation-target-')) {
     family = 'relation';
     slot =

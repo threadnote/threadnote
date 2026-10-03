@@ -1,5 +1,6 @@
 import {DateTime, Effect, Result} from 'effect';
 import {collectContextMaintenanceCitationEvidence} from './maintenance_evidence.js';
+import {maintenanceWorkerRecordValidations, type MaintenanceWorkerEvidence} from './maintenance_batch.js';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {shellQuote} from '@threadnote/platform/command';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
@@ -78,6 +79,7 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   options: {
     readonly after?: string;
     readonly evidenceMode?: 'foreground' | 'worker';
+    readonly workerEvidence?: MaintenanceWorkerEvidence;
     readonly citationRecords?: Parameters<typeof buildContextHealthReport>[0]['records'];
     readonly duplicateCorpus?: Parameters<typeof buildContextHealthReport>[0]['records'];
     readonly includeCitationCoverageFindings?: boolean;
@@ -92,20 +94,26 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   const includedUris = options.includeFindingUris === undefined ? undefined : new Set(options.includeFindingUris);
   const evidenceRecords = includedUris === undefined ? records : records.filter(record => includedUris.has(record.uri));
   const citationRecords = options.citationRecords ?? evidenceRecords;
-  const citationResult = yield* collectContextMaintenanceCitationEvidence(
-    config,
-    project,
-    citationRecords,
-    citationCandidates(citationRecords),
-    cwd,
-    {
-      mode: options.evidenceMode ?? (options.includeCitationCoverageFindings === true ? 'diagnostic' : 'foreground'),
-      validate: selected =>
-        validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository', project}, selected, {
-          fullScan: options.evidenceMode === 'worker',
-        }),
-    },
-  ).pipe(Effect.result);
+  const citationResult =
+    options.evidenceMode === 'worker' && options.workerEvidence !== undefined
+      ? Result.succeed(
+          citationRecords.flatMap(record => maintenanceWorkerRecordValidations(options.workerEvidence!, record)),
+        )
+      : yield* collectContextMaintenanceCitationEvidence(
+          config,
+          project,
+          citationRecords,
+          citationCandidates(citationRecords),
+          cwd,
+          {
+            mode:
+              options.evidenceMode ?? (options.includeCitationCoverageFindings === true ? 'diagnostic' : 'foreground'),
+            validate: selected =>
+              validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository', project}, selected, {
+                fullScan: options.evidenceMode === 'worker',
+              }),
+          },
+        ).pipe(Effect.result);
   const citationValidations = Result.isSuccess(citationResult) ? citationResult.success : [];
   const relationEvidence = yield* relationStatusEvidence(
     config,

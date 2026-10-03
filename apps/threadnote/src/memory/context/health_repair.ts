@@ -20,7 +20,12 @@ import {
   type KnowledgeDeltaItemV1,
   type KnowledgeDeltaV1,
 } from '@threadnote/memory/knowledge_delta';
-import {formatMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
+import {
+  formatMemoryCodeCitation,
+  formatMemoryCodeCitationLines,
+  preserveMemoryCodeCitationAnchor,
+  type MemoryCodeCitationV1,
+} from '@threadnote/memory/code/citation';
 import type {ContextHealthSelectorV1} from './health_selector.js';
 
 export const CONTEXT_HEALTH_REPAIR_VERSION = 1 as const;
@@ -768,16 +773,17 @@ function citationRepairContent(
     if ((record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
     const citations = record.metadata.codeCitations ?? [];
     if (citations.filter(citation => citation.id === citationId).length !== 1) return undefined;
-    const next = citations.map(citation => (citation.id === citationId ? replacement : citation));
-    if (new Set(next.map(citation => citation.id)).size !== next.length) return undefined;
     const current = citations.find(citation => citation.id === citationId);
     if (current === undefined) return undefined;
+    const anchoredReplacement = preserveMemoryCodeCitationAnchor(current, replacement);
+    const next = citations.map(citation => (citation.id === citationId ? anchoredReplacement : citation));
+    formatMemoryCodeCitationLines(next);
     const canonical = canonicalMemoryDocumentContent(record.content).replace(/\r\n?/gu, '\n');
     const separatorIndex = canonical.indexOf('\n\n');
     const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
     const body = separatorIndex === -1 ? '' : canonical.slice(separatorIndex + 2);
     const currentLine = `code_citation: ${formatMemoryCodeCitation(current)}`;
-    const replacementLine = `code_citation: ${formatMemoryCodeCitation(replacement)}`;
+    const replacementLine = `code_citation: ${formatMemoryCodeCitation(anchoredReplacement)}`;
     let replacements = 0;
     const headerLines = header.split('\n').map(line => {
       if (line !== currentLine) return line;
@@ -804,8 +810,13 @@ export function memoryContentWithCitationReplacementsV1(
     if ([...replacementById.keys()].some(id => citations.filter(citation => citation.id === id).length !== 1)) {
       return undefined;
     }
+    for (const citation of citations) {
+      const replacement = replacementById.get(citation.id);
+      if (replacement !== undefined)
+        replacementById.set(citation.id, preserveMemoryCodeCitationAnchor(citation, replacement));
+    }
     const next = citations.map(citation => replacementById.get(citation.id) ?? citation);
-    if (new Set(next.map(citation => citation.id)).size !== next.length) return undefined;
+    formatMemoryCodeCitationLines(next);
     const canonical = canonicalMemoryDocumentContent(record.content).replace(/\r\n?/gu, '\n');
     const separatorIndex = canonical.indexOf('\n\n');
     const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);

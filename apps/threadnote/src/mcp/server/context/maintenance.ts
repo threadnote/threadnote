@@ -9,6 +9,7 @@ import {
   runContextMaintenance,
   setContextMaintenancePaused,
   undoContextMaintenance,
+  retireContextMaintenanceAnchor,
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
 
@@ -19,10 +20,17 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       annotations: {readOnlyHint: true, destructiveHint: false},
       description:
         'Read persistent local maintenance progress, grouped evidence cases and bounded automatic repair receipts. Does not run maintenance.',
-      inputSchema: {project: McpInput.string('Optional project selection')},
+      inputSchema: {
+        project: McpInput.string('Optional project selection'),
+        caseCursor: McpInput.string('Generation-bound next case page'),
+        receiptCursor: McpInput.string('Generation-bound next receipt page'),
+        caseId: McpInput.string('Exact retained case selector'),
+        receiptId: McpInput.string('Exact retained receipt selector'),
+        limit: McpInput.integer('Page size', {minimum: 1, maximum: 100}),
+      },
     },
-    ({project}) =>
-      readContextMaintenanceStatus(config, project).pipe(
+    input =>
+      readContextMaintenanceStatus(config, input.project, input).pipe(
         Effect.map(result => ({
           content: [
             {
@@ -42,11 +50,14 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       description:
         'Run one bounded local maintenance tick, pause/resume default automatic work, or CAS-undo an exact retained repair receipt. Shared canonical knowledge remains review controlled; no network or scheduler installation occurs.',
       inputSchema: {
-        action: McpInput.literals(['run', 'pause', 'resume', 'undo'], 'Defaults to run'),
+        action: McpInput.literals(['run', 'pause', 'resume', 'undo', 'retire-anchor'], 'Defaults to run'),
         callerCwd: McpInput.string('Absolute local repository/worktree evidence root'),
         project: McpInput.string('Optional project; omitted work uses fair home-wide scheduling'),
         maxRecords: McpInput.integer('Bounded work tasks', {minimum: 1, maximum: 100}),
         receiptId: McpInput.string('Exact retained receipt for undo'),
+        caseId: McpInput.string('Exact reviewed deleted-anchor case'),
+        evidenceRevision: McpInput.string('Exact reviewed anchor evidence revision'),
+        expectedContentHash: McpInput.string('Exact reviewed subject hash for anchor retirement'),
       },
     },
     input =>
@@ -54,11 +65,17 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         const cwd = input.callerCwd ?? (yield* SystemInfo).currentDirectory();
         if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('context_maintain callerCwd must be absolute.');
         const result =
-          input.action === 'pause' || input.action === 'resume'
-            ? yield* setContextMaintenancePaused(config, input.action === 'pause')
-            : input.action === 'undo'
-              ? yield* undoContextMaintenance(config, input.receiptId ?? '')
-              : yield* runContextMaintenance(config, {cwd, project: input.project, maxRecords: input.maxRecords});
+          input.action === 'retire-anchor'
+            ? yield* retireContextMaintenanceAnchor(config, {
+                caseId: input.caseId ?? '',
+                evidenceRevision: input.evidenceRevision ?? '',
+                expectedContentHash: input.expectedContentHash ?? '',
+              })
+            : input.action === 'pause' || input.action === 'resume'
+              ? yield* setContextMaintenancePaused(config, input.action === 'pause')
+              : input.action === 'undo'
+                ? yield* undoContextMaintenance(config, input.receiptId ?? '')
+                : yield* runContextMaintenance(config, {cwd, project: input.project, maxRecords: input.maxRecords});
         return {
           content: [
             {
@@ -76,10 +93,16 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       annotations: {readOnlyHint: true, destructiveHint: false},
       description:
         'Read one exact, bounded maintenance decision packet with canonical memory/evidence revisions and reviewed allowable operations.',
-      inputSchema: {caseId: McpInput.string('Exact case ID from context_maintenance_status')},
+      inputSchema: {
+        caseId: McpInput.string('Exact case ID from context_maintenance_status'),
+        citationId: McpInput.string('Exact citation within case subject evidence selectors'),
+        memoryUri: McpInput.string('Exact case subject URI'),
+        startLine: McpInput.integer('First excerpt line', {minimum: 1, maximum: 1000000}),
+        maximumLines: McpInput.integer('Bounded excerpt lines', {minimum: 1, maximum: 24}),
+      },
     },
-    ({caseId}) =>
-      readContextMaintenancePacket(config, caseId ?? '').pipe(
+    input =>
+      readContextMaintenancePacket(config, input.caseId ?? '', input).pipe(
         Effect.map(result => ({
           content: [{type: 'text' as const, text: JSON.stringify(result)}],
           structuredContent: result,

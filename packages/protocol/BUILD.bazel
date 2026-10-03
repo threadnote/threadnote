@@ -91,6 +91,7 @@ bun_test(
         "//packages/graph:src/checkpoint/receiver_admission.ts",
         "//packages/graph:src/checkpoint/schema.ts",
         "//packages/graph:src/checkpoint/terminal_text.ts",
+        "//packages/graph:src/citation/capsule.ts",
         "//packages/graph:src/citation/primitives.ts",
         "//packages/graph:src/citation/source.ts",
         "//packages/graph:src/cli/progress.ts",

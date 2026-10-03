@@ -62,6 +62,14 @@ import type {
 
 export const CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS = 96 as const;
 export const CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES = 32 as const;
+export type {ContextHealthCitationSourceExcerptV1} from './citation/evidence_excerpt.js';
+import {
+  citationSourceExcerpt,
+  historicalCitationBytesMatch,
+  historicalSnapshotCitationMatches,
+  type ContextHealthCitationSourceExcerptV1,
+} from './citation/evidence_excerpt.js';
+
 const RELOCATION_MATCH_LIMIT = 2;
 const VALIDATION_CONCURRENCY = 4;
 const VALIDATION_CACHE_LIMIT = 512;
@@ -235,7 +243,15 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
               repositoryId: citation.repositoryId,
               sourceCommit: citation.sourceCommit,
               threadnoteHome: config.agentContextHome,
-            }).pipe(Effect.orElseSucceed(() => ({ambiguous: false, complete: false, checkoutIds: [], routes: []})));
+            }).pipe(
+              Effect.orElseSucceed(() => ({
+                ambiguous: false,
+                complete: false,
+                checkoutIds: [],
+                generation: 'unavailable',
+                routes: [],
+              })),
+            );
             routesBySource.set(sourceKey, resolution);
           }
           if (resolution.ambiguous) {
@@ -418,12 +434,7 @@ const recoverCapsuleCitationEvidence = Effect.fn('contextHealth.recoverCapsuleCi
       citationEvidenceSource(citation),
     );
     if (retained === undefined) continue;
-    if (citation.target.kind === 'symbol') {
-      const source = decodeUtf8(retained.bytes);
-      if (source === undefined) continue;
-      const fragment = createCodeGraphSourceSpanCanonicalizer(source).fragment(citation.target.span);
-      if (!fragment.ok || fragment.fragment.sha256 !== citation.target.fragmentHash.value) continue;
-    }
+    if (!(yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))) continue;
     return {
       ...original,
       provenance: 'historical-verified' as const,
@@ -434,6 +445,236 @@ const recoverCapsuleCitationEvidence = Effect.fn('contextHealth.recoverCapsuleCi
   return undefined;
 });
 
+const readHistoricalGitCitationBytes = Effect.fn('contextHealth.readHistoricalGitCitationBytes')(function* (
+  config: RuntimeConfig,
+  route: CodeGraphCitationRecoveryRouteV1,
+  citation: MemoryCodeCitationV1,
+) {
+  if (citation.sourceDirty || !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route)))
+    return undefined;
+  const request = {
+    expectedContentHash: citation.fileContentHash.value,
+    repositoryPath: citation.path,
+    requireBytes: true,
+  };
+  const sources = yield* readCodeGraphCitationSources({
+    commitOnly: true,
+    objectFormat: route.identity.objectFormat,
+    repositoryRoot: route.identity.repoRoot,
+    retainedBytesLimit: 4 * 1_048_576,
+    sourceCommit: citation.sourceCommit,
+    sources: [request],
+  });
+  const bytes = sources.get(codeGraphCitationSourceKey(request));
+  if (bytes === undefined || !(yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)))
+    return undefined;
+  if (!(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))) return undefined;
+  return bytes;
+});
+
+/** Exact local evidence for one canonical citation; excerpts are data, never instructions. */
+export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCitationEvidence')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  citation: MemoryCodeCitationV1,
+  options: {readonly maximumBytes?: number; readonly maximumLines?: number; readonly startLine?: number} = {},
+) {
+  const attemptedSteps: string[] = ['verified-repository-routes'];
+  const resolution = yield* resolveCodeGraphCitationRepositoryRoutes({
+    ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
+    repositoryId: citation.repositoryId,
+    sourceCommit: citation.sourceCommit,
+    threadnoteHome: config.agentContextHome,
+  });
+  const excerpts: ContextHealthCitationSourceExcerptV1[] = [];
+  const query = yield* CodeGraphQueryService;
+  const store = yield* CodeGraphStore;
+  if (!resolution.ambiguous)
+    for (const route of resolution.routes) {
+      attemptedSteps.push('current-source');
+      const current = yield* Effect.gen(function* () {
+        const status = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
+          manifestPath: config.manifestPath,
+          ...(scope.project === undefined ? {} : {project: scope.project}),
+          observeWorktree: true,
+          requestMaintenance: false,
+        });
+        if (
+          status.stale ||
+          status.freshness !== 'current' ||
+          status.readySnapshot === undefined ||
+          status.databasePath !== route.databasePath ||
+          status.identity.repositoryId !== route.identity.repositoryId
+        )
+          return undefined;
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const snapshot = status.readySnapshot!;
+            yield* Effect.acquireRelease(store.acquireSnapshotLease(status.databasePath, snapshot.id, 60_000), token =>
+              store.releaseSnapshotLease(status.databasePath, token).pipe(Effect.ignore),
+            );
+            const [checked] = yield* validateRepositoryTasks(
+              {
+                databasePath: status.databasePath,
+                finalFence: revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
+                objectFormat: status.identity.objectFormat,
+                repositoryId: status.identity.repositoryId,
+                snapshot,
+                sourceRoot: route.identity.repoRoot,
+                worktreeId: status.identity.worktreeId,
+              },
+              [{citation, index: 0, uri: ''}],
+              DateTime.formatIso(yield* DateTime.now),
+            );
+            const observedPath = checked.receipt.observedPath ?? citation.path;
+            const evidence = yield* store.effectiveSnapshotCitationEvidence(status.databasePath, snapshot.id, {
+              paths: [observedPath],
+            });
+            const file = evidence.filesByPaths.find(value => value.path === observedPath)?.file;
+            if (file === undefined) return undefined;
+            const request = {expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true};
+            const sources = yield* readCodeGraphCitationSources({
+              allowCommitFallback: false,
+              objectFormat: status.identity.objectFormat,
+              repositoryRoot: route.identity.repoRoot,
+              retainedBytesLimit: 4 * 1_048_576,
+              sourceCommit: snapshot.commit,
+              sources: [request],
+            });
+            const bytes = sources.get(codeGraphCitationSourceKey(request));
+            if (
+              bytes === undefined ||
+              !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
+            )
+              return undefined;
+            const after = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
+              manifestPath: config.manifestPath,
+              ...(scope.project === undefined ? {} : {project: scope.project}),
+              observeWorktree: true,
+              requestMaintenance: false,
+            });
+            if (!sameExactSnapshot(status, after)) return undefined;
+            return citationSourceExcerpt(
+              bytes,
+              {
+                extractorSet: snapshot.extractorSet,
+                fileContentHash: file.contentHash,
+                path: file.path,
+                repositoryId: status.identity.repositoryId,
+                sourceCommit: snapshot.commit,
+                sourceDirty: snapshot.dirty,
+                sourceSnapshotId: snapshot.id,
+              },
+              'current-verified',
+              checked.receipt.status === 'exact' || checked.receipt.status === 'relocated',
+              {
+                ...options,
+                startLine:
+                  options.startLine ??
+                  checked.receipt.observedSpan?.line ??
+                  (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+              },
+            );
+          }),
+        );
+      }).pipe(Effect.orElseSucceed(() => undefined));
+      if (current !== undefined) {
+        excerpts.push(current);
+        break;
+      }
+    }
+  attemptedSteps.push('retained-capsule');
+  let historical: Uint8Array | undefined;
+  for (const checkoutId of resolution.checkoutIds) {
+    const retained = yield* readRetainedCodeGraphCitationEvidence(
+      config.agentContextHome,
+      checkoutId,
+      citationEvidenceSource(citation),
+    );
+    if (
+      retained !== undefined &&
+      (yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))
+    ) {
+      historical = retained.bytes;
+      break;
+    }
+  }
+  if (historical === undefined && !resolution.ambiguous)
+    for (const route of resolution.routes) {
+      attemptedSteps.push('exact-snapshot');
+      historical = yield* Effect.gen(function* () {
+        const snapshot = yield* store.readySnapshotById(route.databasePath, citation.sourceSnapshotId);
+        if (
+          snapshot === undefined ||
+          snapshot.repositoryId !== citation.repositoryId ||
+          snapshot.commit !== citation.sourceCommit ||
+          snapshot.dirty !== citation.sourceDirty ||
+          snapshot.extractorSet !== citation.extractorSet
+        )
+          return undefined;
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>
+              store.releaseSnapshotLease(route.databasePath, token).pipe(Effect.ignore),
+            );
+            const evidence = yield* store.effectiveSnapshotCitationEvidence(route.databasePath, snapshot.id, {
+              paths: [citation.path],
+              symbolIds: citation.target.kind === 'symbol' ? [citation.target.nodeId] : [],
+            });
+            if (!historicalSnapshotCitationMatches(citation, evidence)) return undefined;
+            const request = {
+              expectedContentHash: citation.fileContentHash.value,
+              repositoryPath: citation.path,
+              requireBytes: true,
+            };
+            const sources = yield* readCodeGraphCitationSources({
+              allowCommitFallback: !snapshot.dirty,
+              commitOnly: !snapshot.dirty,
+              objectFormat: route.identity.objectFormat,
+              repositoryRoot: route.identity.repoRoot,
+              sourceCommit: snapshot.commit,
+              sources: [request],
+              retainedBytesLimit: 4 * 1_048_576,
+            });
+            const bytes = sources.get(codeGraphCitationSourceKey(request));
+            return bytes !== undefined &&
+              (yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)) &&
+              (yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
+              ? bytes
+              : undefined;
+          }),
+        );
+      }).pipe(Effect.orElseSucceed(() => undefined));
+      if (historical === undefined) {
+        attemptedSteps.push('exact-clean-git');
+        historical = yield* readHistoricalGitCitationBytes(config, route, citation).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+      }
+      if (historical !== undefined) break;
+    }
+  if (historical !== undefined) {
+    const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
+      ...options,
+      startLine: options.startLine ?? (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+    });
+    if (excerpt !== undefined) excerpts.push(excerpt);
+  }
+  return {
+    attemptedSteps: [...new Set(attemptedSteps)],
+    citationId: citation.id,
+    coverage:
+      excerpts.length > 0
+        ? ('available' as const)
+        : resolution.ambiguous
+          ? ('ambiguous' as const)
+          : ('unavailable' as const),
+    excerpts,
+    generation: resolution.generation,
+    routesComplete: resolution.complete,
+  };
+});
+
 const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistoricalCitationEvidence')(function* (
   config: RuntimeConfig,
   route: CodeGraphCitationRecoveryRouteV1,
@@ -441,25 +682,47 @@ const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistor
   original: ContextBriefCitationValidationReceiptV2,
 ) {
   const store = yield* CodeGraphStore;
-  const exact = yield* store.readySnapshotById(route.databasePath, citation.sourceSnapshotId);
+  const exact = yield* store
+    .readySnapshotById(route.databasePath, citation.sourceSnapshotId)
+    .pipe(Effect.orElseSucceed(() => undefined));
   const snapshot =
     exact ??
     (citation.sourceDirty
       ? undefined
-      : yield* store.readySnapshotForCommit(
-          route.databasePath,
-          citation.repositoryId,
-          citation.sourceCommit,
-          citation.extractorSet,
-        ));
+      : yield* store
+          .readySnapshotForCommit(
+            route.databasePath,
+            citation.repositoryId,
+            citation.sourceCommit,
+            citation.extractorSet,
+          )
+          .pipe(Effect.orElseSucceed(() => undefined)));
   if (
     snapshot === undefined ||
     snapshot.repositoryId !== citation.repositoryId ||
     snapshot.commit !== citation.sourceCommit ||
     snapshot.dirty !== citation.sourceDirty ||
     snapshot.extractorSet !== citation.extractorSet
-  )
-    return undefined;
+  ) {
+    const bytes = yield* readHistoricalGitCitationBytes(config, route, citation);
+    if (bytes === undefined) return undefined;
+    yield* retainCodeGraphCitationEvidence({
+      bytes,
+      checkoutId: route.identity.checkoutId,
+      objectFormat: route.identity.objectFormat,
+      referenceId: sha256HexSync(citation.id),
+      source: citationEvidenceSource(citation),
+      threadnoteHome: config.agentContextHome,
+    });
+    if (!(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))) return undefined;
+    return {
+      ...original,
+      coverage: 'incomplete' as const,
+      provenance: 'historical-verified' as const,
+      snapshotCommit: citation.sourceCommit,
+      snapshotId: citation.sourceSnapshotId,
+    };
+  }
   return yield* Effect.scoped(
     Effect.gen(function* () {
       yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>

@@ -49,6 +49,10 @@ export type MemoryCodeCitationTargetV1 = MemoryCodeCitationFileTargetV1 | Memory
 
 /** Immutable capture-time evidence. Current validation state belongs in a separate receipt. */
 export interface MemoryCodeCitationV1 {
+  /** Original citation identity, preserved when this logical anchor is replaced. */
+  readonly anchorId?: string;
+  /** Capture-time diagnostic only: bounded capsules can later expire or be evicted. */
+  readonly evidenceRetention?: 'capsule-retained' | 'unavailable';
   readonly extractorSet: string;
   readonly fileContentHash: MemoryCodeCitationSha256V1;
   readonly id: string;
@@ -182,6 +186,8 @@ export function createMemoryCodeCitation(input: MemoryCodeCitationInputV1): Memo
   const citation = freezeCitation({
     version: MEMORY_CODE_CITATION_VERSION,
     id: deriveCitationIdFromValidatedInput(validated),
+    ...(validated.anchorId === undefined ? {} : {anchorId: validated.anchorId}),
+    ...(validated.evidenceRetention === undefined ? {} : {evidenceRetention: validated.evidenceRetention}),
     repositoryId: validated.repositoryId,
     repositoryIdentityKind: validated.repositoryIdentityKind,
     sourceCommit: validated.sourceCommit,
@@ -203,6 +209,22 @@ export function deriveMemoryCodeCitationId(input: MemoryCodeCitationInputV1): st
   return deriveCitationIdFromValidatedInput(validateCitationInput(input));
 }
 
+export function memoryCodeCitationAnchorId(citation: Pick<MemoryCodeCitationV1, 'id' | 'anchorId'>): string {
+  return exactString(citation.anchorId ?? citation.id, 45, CITATION_ID);
+}
+
+/** Evidence identity stays capture-derived; replacement carries the original logical anchor. */
+export function preserveMemoryCodeCitationAnchor(
+  current: MemoryCodeCitationV1,
+  replacement: MemoryCodeCitationV1,
+): MemoryCodeCitationV1 {
+  const original = assertMemoryCodeCitation(current);
+  const next = assertMemoryCodeCitation(replacement);
+  const anchorId = memoryCodeCitationAnchorId(original);
+  if (next.anchorId !== undefined && next.anchorId !== anchorId) throw citationError('id-mismatch');
+  return assertMemoryCodeCitation({...next, anchorId});
+}
+
 export function assertMemoryCodeCitation(value: unknown): MemoryCodeCitationV1 {
   const record = requiredRecord(value);
   assertExactKeys(record, citationRootKeys(record));
@@ -214,6 +236,8 @@ export function assertMemoryCodeCitation(value: unknown): MemoryCodeCitationV1 {
   }
   const input = validateCitationInput({
     version: record.version,
+    ...(hasOwn(record, 'anchorId') ? {anchorId: record.anchorId} : {}),
+    ...(hasOwn(record, 'evidenceRetention') ? {evidenceRetention: record.evidenceRetention} : {}),
     repositoryId: record.repositoryId,
     repositoryIdentityKind: record.repositoryIdentityKind,
     sourceCommit: record.sourceCommit,
@@ -231,6 +255,8 @@ export function assertMemoryCodeCitation(value: unknown): MemoryCodeCitationV1 {
   return freezeCitation({
     version: MEMORY_CODE_CITATION_VERSION,
     id: record.id,
+    ...(input.anchorId === undefined ? {} : {anchorId: input.anchorId}),
+    ...(input.evidenceRetention === undefined ? {} : {evidenceRetention: input.evidenceRetention}),
     repositoryId: input.repositoryId,
     repositoryIdentityKind: input.repositoryIdentityKind,
     sourceCommit: input.sourceCommit,
@@ -257,11 +283,14 @@ export function formatMemoryCodeCitationLines(citations: readonly MemoryCodeCita
     throw citationError('too-many-citations');
   }
   const seen = new Set<string>();
+  const anchors = new Set<string>();
   const lines = citations.map(citation => {
     const canonical = formatMemoryCodeCitation(citation);
     const id = assertMemoryCodeCitation(citation).id;
-    if (seen.has(id)) throw citationError('duplicate-id');
+    const anchorId = memoryCodeCitationAnchorId(citation);
+    if (seen.has(id) || anchors.has(anchorId)) throw citationError('duplicate-id');
     seen.add(id);
+    anchors.add(anchorId);
     return `${CODE_CITATION_PREFIX}${canonical}`;
   });
   if (aggregateLineBytes(lines) > MAX_MEMORY_CODE_CITATION_AGGREGATE_BYTES) {
@@ -314,17 +343,20 @@ export function parseMemoryCodeCitationHeaders(
     errors.push({reason: 'aggregate-too-large'});
   }
   const seen = new Set<string>();
+  const anchors = new Set<string>();
   for (const [index, value] of values.slice(0, MAX_MEMORY_CODE_CITATIONS).entries()) {
     const result = parseMemoryCodeCitation(value);
     if (!result.ok) {
       errors.push({...result.error, index});
       continue;
     }
-    if (seen.has(result.citation.id)) {
+    const anchorId = memoryCodeCitationAnchorId(result.citation);
+    if (seen.has(result.citation.id) || anchors.has(anchorId)) {
       errors.push({index, reason: 'duplicate-id'});
       continue;
     }
     seen.add(result.citation.id);
+    anchors.add(anchorId);
     citations.push(result.citation);
   }
   return {
@@ -336,6 +368,12 @@ export function parseMemoryCodeCitationHeaders(
 function validateCitationInput(value: unknown): MemoryCodeCitationInputV1 {
   const record = requiredRecord(value);
   assertExactKeys(record, citationInputKeys(record));
+  const anchorId = hasOwn(record, 'anchorId') ? exactString(record.anchorId, 45, CITATION_ID) : undefined;
+  const evidenceRetention = !hasOwn(record, 'evidenceRetention')
+    ? undefined
+    : record.evidenceRetention === 'capsule-retained' || record.evidenceRetention === 'unavailable'
+      ? record.evidenceRetention
+      : invalidShape();
   if (record.version !== MEMORY_CODE_CITATION_VERSION) throw citationError('unsupported-version');
   const repositoryId = exactString(record.repositoryId, 64, SHA256);
   const repositoryIdentityKind =
@@ -354,6 +392,8 @@ function validateCitationInput(value: unknown): MemoryCodeCitationInputV1 {
   const target = citationTarget(record.target);
   return freezeCitationInput({
     version: MEMORY_CODE_CITATION_VERSION,
+    ...(anchorId === undefined ? {} : {anchorId}),
+    ...(evidenceRetention === undefined ? {} : {evidenceRetention}),
     repositoryId,
     repositoryIdentityKind,
     sourceCommit,
@@ -420,6 +460,8 @@ function citationWire(citation: MemoryCodeCitationV1): Record<string, unknown> {
   return {
     version: citation.version,
     id: citation.id,
+    ...(citation.anchorId === undefined ? {} : {anchorId: citation.anchorId}),
+    ...(citation.evidenceRetention === undefined ? {} : {evidenceRetention: citation.evidenceRetention}),
     repositoryId: citation.repositoryId,
     repositoryIdentityKind: citation.repositoryIdentityKind,
     sourceCommit: citation.sourceCommit,
@@ -483,6 +525,8 @@ function citationRootKeys(record: Record<string, unknown>): readonly string[] {
   return [
     'version',
     'id',
+    ...(hasOwn(record, 'anchorId') ? ['anchorId'] : []),
+    ...(hasOwn(record, 'evidenceRetention') ? ['evidenceRetention'] : []),
     'repositoryId',
     'repositoryIdentityKind',
     'sourceCommit',

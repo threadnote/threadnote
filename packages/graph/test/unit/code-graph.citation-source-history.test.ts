@@ -42,6 +42,13 @@ describe('historical citation source hash compatibility', () => {
               codeGraphCitationSourceKey(source),
             ),
           ).toEqual(new Uint8Array());
+          yield* fs.writeFile(path.join(repository, 'source.ts'), bytes);
+          expect(
+            (yield* readCodeGraphCitationSources({...input, commitOnly: true, sourceCommit: 'f'.repeat(40)})).size,
+          ).toBe(0);
+          expect(
+            (yield* readCodeGraphCitationSources({...input, commitOnly: true})).get(codeGraphCitationSourceKey(source)),
+          ).toEqual(bytes);
         }),
       ),
     );

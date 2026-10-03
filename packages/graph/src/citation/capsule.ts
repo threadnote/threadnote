@@ -1,6 +1,10 @@
 import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate} from 'effect';
 import {fromPromise} from '@threadnote/platform/errors';
-import {runtimePlatform, runtimeReadBoundedStableRegularFile} from '@threadnote/platform/system';
+import {
+  runtimePlatform,
+  runtimeReadBoundedStableRegularFile,
+  runtimeTextDirectoryNamePage,
+} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphFileContentHashMatchesBytes} from '../content_identity.js';
 import {codeGraphRepositoryRoot} from '../layout.js';
@@ -41,7 +45,7 @@ function validSource(source: CodeGraphCitationEvidenceSourceV1): boolean {
     /^[0-9a-f]{64}$/.test(source.repositoryId) &&
     /^[0-9a-f]{64}$/.test(source.fileContentHash) &&
     /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(source.sourceCommit) &&
-    /^cgsn_[0-9a-f]{40}$/.test(source.sourceSnapshotId) &&
+    /^cgsn_[0-9a-f]{40}(?:-direct|-full-[0-9a-f]{16})?$/.test(source.sourceSnapshotId) &&
     typeof source.sourceDirty === 'boolean' &&
     typeof source.extractorSet === 'string' &&
     source.extractorSet.length > 0 &&
@@ -254,6 +258,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
   readonly source: CodeGraphCitationEvidenceSourceV1;
   readonly threadnoteHome: string;
 }) {
+  if (!/^[0-9a-f]{64}$/.test(input.checkoutId)) return false;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const now = yield* Clock.currentTimeMillis;
@@ -283,8 +288,12 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
         references.every(value => previous.capsule.referenceIds.includes(value))
       )
         return true;
-      const names = (yield* fs.readDirectory(directory)).filter(name => /^[0-9a-f]{64}\.json$/.test(name));
-      if (names.length > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumCount + 1) return false;
+      const page = yield* runtimeTextDirectoryNamePage(
+        directory,
+        CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumCount + 1,
+      );
+      if (page.overflow) return false;
+      const names = page.names.filter(name => /^[0-9a-f]{64}\.json$/.test(name));
       const entries = yield* Effect.forEach(
         names,
         name =>

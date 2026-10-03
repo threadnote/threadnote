@@ -1,5 +1,6 @@
+import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Path, Result} from 'effect';
+import {Clock, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -8,6 +9,7 @@ import {
   readContextMaintenanceStatus,
   runContextMaintenance,
   safeRelationRemoval,
+  resolveMaintenanceRelationPolicy,
   selectFairMaintenanceWork,
   setContextMaintenancePaused,
   undoContextMaintenance,
@@ -15,6 +17,11 @@ import {
   duplicateArchiveSafe,
   migrateMaintenanceCases,
   readContextMaintenancePacket,
+  retireContextMaintenanceAnchor,
+  reconcileRepositoryRecoveryCases,
+  maintenanceAnchorChunksComplete,
+  planMaintenanceWorkerBatches,
+  maintenanceWorkerRecordValidations,
 } from '@threadnote/threadnote/memory/context/maintenance';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -32,6 +39,12 @@ import {selectMaintenanceSemanticPairBatch} from '@threadnote/threadnote/memory/
 import {captureCitationReplacements} from '@threadnote/threadnote/memory/context/health_repair_commands';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {readContextMaintenanceEvidenceRequests} from '@threadnote/threadnote/memory/context/maintenance_evidence';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {
+  mergeMaintenanceWorkerEvidence,
+  invalidateMaintenanceWorkerBatch,
+} from '../../src/memory/context/maintenance_batch.js';
 
 const NOW = '2026-10-03T15:00:00.000Z';
 const URI = 'threadnote://user/tester/memories/durable/projects/threadnote/source.md';
@@ -58,6 +71,378 @@ function record(topic: string, metadata: Partial<MemoryMetadata> = {}, body = 'K
 }
 
 describe('persistent context maintenance', () => {
+  it('bounds batches across interleaved projects and binds shared receipts to each exact canonical subject', () => {
+    const citation = {
+      version: 1,
+      repositoryId: 'b'.repeat(64),
+      repositoryIdentityKind: 'local',
+      sourceCommit: 'c'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      extractorSet: 'test',
+      path: 'source.ts',
+      fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+      target: {kind: 'file'},
+    } as const;
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            project: fc.constantFrom('one', 'two', 'three'),
+            commit: fc.integer({min: 0, max: 40}),
+            anchors: fc.integer({min: 1, max: 8}),
+          }),
+          {minLength: 1, maxLength: 100},
+        ),
+        inputs => {
+          const tasks = inputs.map((input, index) => ({
+            project: input.project,
+            record: record(`subject-${index}`, {
+              schemaVersion: 5,
+              project: input.project,
+              codeCitations: Array.from({length: input.anchors}, (_, anchor) =>
+                createMemoryCodeCitation({
+                  ...citation,
+                  path: `path-${anchor}.ts`,
+                  sourceCommit: input.commit.toString(16).padStart(40, '0'),
+                }),
+              ),
+            }),
+            chunk: 0,
+            key: String(index),
+          }));
+          const groups = planMaintenanceWorkerBatches(tasks);
+          expect(
+            groups
+              .flat()
+              .map(task => task.key)
+              .sort(),
+          ).toEqual(tasks.map(task => task.key).sort());
+          for (const group of groups) {
+            expect(new Set(group.map(task => task.project)).size).toBe(1);
+            const citations = group.flatMap(task => task.record.metadata.codeCitations!);
+            expect(citations.length).toBeLessThanOrEqual(96);
+            expect(
+              new Set(citations.map(item => `${item.repositoryId}:${item.sourceCommit}`)).size,
+            ).toBeLessThanOrEqual(32);
+          }
+          const subject = tasks[0].record;
+          const evidence = {
+            project: tasks[0].project,
+            cwd: '/repo',
+            records: [subject],
+            observation: {
+              association: {epoch: 'epoch', roots: [], bySelector: {}, sourceEpochs: {}},
+              memoryGeneration: 'generation',
+            },
+            validations: [{uri: subject.uri, receipts: [], cacheHits: 0}],
+          };
+          expect(maintenanceWorkerRecordValidations(evidence, subject)).toHaveLength(1);
+          expect(
+            maintenanceWorkerRecordValidations(evidence, {...subject, content: `${subject.content}\nChanged prose.`}),
+          ).toEqual([]);
+          expect(maintenanceWorkerRecordValidations(evidence, {...subject, uri: `${subject.uri}-other`})).toEqual([]);
+          expect(maintenanceWorkerRecordValidations({...evidence, project: 'other'}, subject)).toEqual([]);
+          expect(maintenanceWorkerRecordValidations({...evidence, observation: undefined}, subject)).toEqual([]);
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
+  it('slices one logical anchor chunk across bounded selectors and refuses incompatible aggregate observations', () => {
+    const citations = Array.from({length: 64}, (_, index) =>
+      createMemoryCodeCitation({
+        version: 1,
+        repositoryId: 'b'.repeat(64),
+        repositoryIdentityKind: 'local',
+        sourceCommit: index.toString(16).padStart(40, '0'),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        extractorSet: 'test',
+        path: `source-${index}.ts`,
+        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        target: {kind: 'file'},
+      }),
+    );
+    const original = record('source');
+    const subject = {...original, metadata: {...original.metadata, codeCitations: citations}};
+    const groups = planMaintenanceWorkerBatches([{record: subject, project: 'threadnote', chunk: 0, key: 'logical:0'}]);
+    expect(groups).toHaveLength(2);
+    expect(groups.flat().map(task => [task.key, task.chunk])).toEqual([
+      ['logical:0', 0],
+      ['logical:0', 0],
+    ]);
+    expect(groups.flatMap(group => group.flatMap(task => task.citationIds ?? []))).toEqual(
+      citations.map(item => item.id),
+    );
+    const parts = groups.map(group => {
+      const selected = citations.filter(citation => group[0].citationIds?.includes(citation.id));
+      return {
+        project: 'threadnote',
+        cwd: '/repo',
+        records: [{...subject, metadata: {...subject.metadata, codeCitations: selected}}],
+        validations: [{uri: subject.uri, receipts: []}],
+        observation: {
+          sourceEpoch: 'source',
+          memoryGeneration: 'memory',
+          association: {
+            epoch: 'part',
+            roots: ['/repo'],
+            sourceEpochs: {'/repo': 'source'},
+            bySelector: Object.fromEntries(
+              selected.map(citation => [`${citation.repositoryId}:${citation.sourceCommit}`, 'association']),
+            ),
+          },
+        },
+      };
+    });
+    const merged = mergeMaintenanceWorkerEvidence(parts[0], parts[1]);
+    expect(merged.records[0].metadata.codeCitations?.map(item => item.id)).toEqual(citations.map(item => item.id));
+    expect(maintenanceWorkerRecordValidations(merged, subject)).toHaveLength(1);
+    expect(
+      mergeMaintenanceWorkerEvidence(parts[0], {...parts[1], records: [{...parts[1].records[0], content: 'changed'}]})
+        .observation,
+    ).toBeUndefined();
+    expect(
+      mergeMaintenanceWorkerEvidence(parts[0], {
+        ...parts[1],
+        observation: {
+          ...parts[1].observation,
+          association: {...parts[1].observation.association, sourceEpochs: {'/repo': 'changed'}},
+        },
+      }).observation,
+    ).toBeUndefined();
+  });
+
+  it('restores prior support transitions and defers new ones without changing unrelated cases', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('citation', 'citation-coverage', 'current-support'),
+        fc.constantFrom('needs-decision', 'retired', 'resolved', 'historical'),
+        fc.boolean(),
+        (family, disposition, retained) => {
+          const subject = record('source');
+          const original = updateMaintenanceCase(
+            undefined,
+            {
+              project: 'threadnote',
+              memoryId: 'tn_source',
+              family,
+              slot: 'anchor:original',
+              evidenceRevision: 'prior',
+              disposition,
+              reason: 'prior-proof',
+            },
+            NOW,
+          );
+          const tentative = {...original, disposition: 'resolved' as const, reason: 'tentative-proof'};
+          const unrelated = {...original, caseId: 'unrelated', memoryId: 'tn_unrelated'};
+          const cases = new Map<string, typeof original>([
+            [original.caseId, tentative],
+            [unrelated.caseId, unrelated],
+          ]);
+          const checkpoints = {'tn_source:0': 'changed', 'tn_unrelated:0': 'retained'};
+          invalidateMaintenanceWorkerBatch(
+            {project: 'threadnote', cwd: '/repo', records: [subject], validations: []},
+            cases,
+            new Map<string, typeof original>(retained ? [[original.caseId, original]] : []),
+            checkpoints,
+          );
+          if (retained) expect(cases.get(original.caseId)).toEqual(original);
+          else
+            expect(cases.get(original.caseId)).toMatchObject({
+              disposition: 'waiting-evidence',
+              reason: 'worker-evidence-changed',
+            });
+          expect(cases.get(unrelated.caseId)).toEqual(unrelated);
+          expect(checkpoints).toEqual({'tn_unrelated:0': 'retained'});
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
+  effectIt.effect(
+    'consumes bounded admitted work after slow observations and eventually services independent relations',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const {repository, source} = yield* makeCitationRepository(fixture);
+        const relation = record('zz-relation', {
+          relations: [{type: 'references', uri: URI.replace('source.md', 'missing.md')}],
+        });
+        const relationFile = fixture.path.join(fixture.directory, 'zz-relation.md');
+        yield* fixture.fs.writeFileString(relationFile, relation.content);
+        const clock = yield* Clock.Clock;
+        let offset = 0;
+        const slowClock: Clock.Clock = {
+          ...clock,
+          currentTimeMillis: Effect.map(clock.currentTimeMillis, time => time + offset),
+          currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe() + offset,
+          currentTimeNanos: clock.currentTimeNanos,
+          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+          monotonicTimeNanos: clock.monotonicTimeNanos,
+          monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+          sleep: duration => clock.sleep(duration),
+        };
+        const query = yield* CodeGraphQueryService;
+        let observations = 0;
+        const slow = CodeGraphQueryService.of({
+          ...query,
+          status: (home, cwd, options) =>
+            Effect.gen(function* () {
+              const result = yield* query.status(home, cwd, options);
+              if (++observations === 1) offset += 6_000;
+              return result;
+            }),
+        });
+        const first = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1}).pipe(
+          Effect.provideService(CodeGraphQueryService, slow),
+          Effect.provideService(Clock.Clock, slowClock),
+        );
+        expect(observations).toBeGreaterThan(0);
+        expect(offset).toBe(6_000);
+        expect(first.projects[0].checked).toBe(1);
+        expect(first.projects[0].cursor).toBe(1);
+        expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+        const next = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+        expect(next.receipts).toHaveLength(1);
+        expect(
+          parseMemoryDocument(relation.uri, yield* fixture.fs.readFileString(relationFile))!.metadata.relations ?? [],
+        ).toEqual([]);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('rejects a source change after shared validation with a fresh final batch fence', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, file, source} = yield* makeCitationRepository(fixture);
+      yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const before = yield* runContextMaintenance(fixture.config, {cwd: repository});
+      const changed = before.cases.find(item => item.family === 'citation')!;
+      expect(changed.disposition).toBe('needs-decision');
+      yield* retireContextMaintenanceAnchor(fixture.config, {
+        caseId: changed.caseId,
+        evidenceRevision: changed.evidenceRevision,
+        expectedContentHash: changed.subjectContentHashes![0].hash,
+      });
+      const retired = yield* readContextMaintenanceStatus(fixture.config, 'threadnote');
+      const originalCase = retired.cases.find(item => item.caseId === changed.caseId)!;
+      const originalSupport = retired.cases.find(item => item.family === 'current-support')!;
+      expect(originalCase.disposition).toBe('retired');
+      expect(originalSupport.disposition).toBe('needs-decision');
+      yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const query = yield* CodeGraphQueryService;
+      let statusCalls = 0;
+      const racing = CodeGraphQueryService.of({
+        ...query,
+        status: (home, cwd, options) =>
+          Effect.gen(function* () {
+            if (++statusCalls === 3) yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
+            return yield* query.status(home, cwd, options);
+          }),
+      });
+      const result = yield* runContextMaintenance(fixture.config, {cwd: repository}).pipe(
+        Effect.provideService(CodeGraphQueryService, racing),
+      );
+      expect(statusCalls).toBeGreaterThanOrEqual(3);
+      expect(result.projects[0].checked).toBe(0);
+      expect(result.cases.find(item => item.caseId === originalCase.caseId)).toEqual(originalCase);
+      expect(result.cases.find(item => item.caseId === originalSupport.caseId)).toEqual(originalSupport);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      const health = yield* collectContextHealth(fixture.config, 'threadnote', [source], repository);
+      expect(health.maintenance?.citationCoverage.currentVerified).toBe(0);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('pages all retained cases and receipts with exact project-safe selectors and stale cursors', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const cases = Array.from({length: 73}, (_, index) =>
+        updateMaintenanceCase(
+          undefined,
+          {
+            project: 'threadnote',
+            memoryId: `tn_${index}`,
+            family: 'citation',
+            slot: `anchor:${index}`,
+            evidenceRevision: 'revision',
+            disposition: 'historical',
+            reason: 'preserved',
+          },
+          NOW,
+        ),
+      );
+      const receipts = Array.from({length: 100}, (_, index) => ({
+        receiptId: `receipt-${index}`,
+        project: 'threadnote',
+        subjectUri: URI,
+        postHash: 'hash',
+        timestamp: NOW,
+        state: 'applied',
+      }));
+      const state = {
+        version: 2,
+        paused: false,
+        state: 'idle',
+        generation: 'corpus',
+        projects: [],
+        cases,
+        receipts,
+        checkpoints: {},
+      };
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile));
+      yield* fixture.fs.writeFileString(stateFile, JSON.stringify(state));
+      const initial = yield* readContextMaintenanceStatus(fixture.config, 'threadnote');
+      expect(initial.cases).toHaveLength(30);
+      expect(initial.receipts).toHaveLength(10);
+      const foundCases = [...initial.cases];
+      const foundReceipts = [...initial.receipts];
+      let page = initial;
+      while (page.page?.caseNextCursor !== undefined || page.page?.receiptNextCursor !== undefined) {
+        const next = yield* readContextMaintenanceStatus(fixture.config, 'threadnote', {
+          caseCursor: page.page.caseNextCursor,
+          receiptCursor: page.page.receiptNextCursor,
+        });
+        if (page.page.caseNextCursor !== undefined) foundCases.push(...next.cases);
+        if (page.page.receiptNextCursor !== undefined) foundReceipts.push(...next.receipts);
+        page = {
+          ...next,
+          page: {
+            ...next.page!,
+            caseNextCursor: page.page.caseNextCursor === undefined ? undefined : next.page?.caseNextCursor,
+            receiptNextCursor: page.page.receiptNextCursor === undefined ? undefined : next.page?.receiptNextCursor,
+          },
+        };
+      }
+      expect(new Set(foundCases.map(item => item.caseId)).size).toBe(73);
+      expect(new Set(foundReceipts.map(item => item.receiptId)).size).toBe(100);
+      expect(
+        (yield* readContextMaintenanceStatus(fixture.config, 'threadnote', {
+          caseId: cases[72].caseId,
+          receiptId: 'receipt-0',
+        })).receipts[0].receiptId,
+      ).toBe('receipt-0');
+      expect(
+        Result.isFailure(
+          yield* readContextMaintenanceStatus(fixture.config, 'other', {caseId: cases[0].caseId}).pipe(Effect.result),
+        ),
+      ).toBe(true);
+      yield* fixture.fs.writeFileString(stateFile, JSON.stringify({...state, cases: cases.slice(1)}));
+      expect(
+        Result.isFailure(
+          yield* readContextMaintenanceStatus(fixture.config, 'threadnote', {
+            caseCursor: initial.page!.caseNextCursor,
+          }).pipe(Effect.result),
+        ),
+      ).toBe(true);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))),
+  );
+
   effectIt.effect('bounds a scoped one-record tick independently of two thousand unrelated cited records', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -137,6 +522,10 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.makeDirectory(repository);
       const file = fixture.path.join(repository, 'source.ts');
       yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(repository, 'independent.ts'),
+        'export const independent = true;\n',
+      );
       const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
       yield* git(['init', '--quiet']);
       yield* git(['add', '.']);
@@ -159,7 +548,7 @@ describe('persistent context maintenance', () => {
       const citations = yield* captureMemoryCodeCitations(fixture.config, {
         callerCwd: repository,
         project: 'threadnote',
-        refs: ['source.ts'],
+        refs: ['source.ts', 'independent.ts'],
       });
       const source = record('source', {schemaVersion: 5, codeCitations: citations});
       yield* fixture.fs.writeFileString(fixture.source, source.content);
@@ -168,11 +557,69 @@ describe('persistent context maintenance', () => {
       const first = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
       const changed = first.cases.find(item => item.family === 'citation' && item.disposition === 'needs-decision');
       expect(changed, JSON.stringify(first)).toBeDefined();
-      expect((yield* readContextMaintenancePacket(fixture.config, changed!.caseId)).caseId).toBe(changed!.caseId);
+      const selectedPacket = yield* readContextMaintenancePacket(fixture.config, changed!.caseId, {
+        citationId: citations[1].id,
+        memoryUri: source.uri,
+        startLine: 1,
+        maximumLines: 1,
+      });
+      expect('evidence' in selectedPacket && selectedPacket.evidence?.citationId).toBe(citations[1].id);
+      expect(
+        Result.isFailure(
+          yield* readContextMaintenancePacket(fixture.config, changed!.caseId, {
+            citationId: 'tncc_unscoped',
+            memoryUri: source.uri,
+          }).pipe(Effect.result),
+        ),
+      ).toBe(true);
+      expect(
+        Result.isFailure(
+          yield* readContextMaintenancePacket(fixture.config, changed!.caseId, {
+            citationId: citations[1].id,
+            memoryUri: source.uri.replace('source.md', 'outside.md'),
+          }).pipe(Effect.result),
+        ),
+      ).toBe(true);
       const second = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
       expect(second.cases.find(item => item.caseId === changed!.caseId)?.attemptCount).toBe(changed!.attemptCount);
       expect(second.lastProgressAt).toBe(first.lastProgressAt);
       expect((yield* readContextMaintenancePacket(fixture.config, changed!.caseId)).caseId).toBe(changed!.caseId);
+      yield* fixture.fs.remove(file);
+      yield* indexer.index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const deletedStatus = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      const unavailable = deletedStatus.cases.find(
+        item => item.family === 'citation' && item.citationId === citations[0].id,
+      )!;
+      expect(unavailable.reason).toBe('graph-incomplete');
+      const input = {
+        caseId: unavailable.caseId,
+        evidenceRevision: unavailable.evidenceRevision,
+        expectedContentHash: unavailable.subjectContentHashes![0].hash,
+      };
+      expect(
+        Result.isFailure(
+          yield* retireContextMaintenanceAnchor(fixture.config, {...input, expectedContentHash: 'stale'}).pipe(
+            Effect.result,
+          ),
+        ),
+      ).toBe(true);
+      const deleted = unavailable;
+      expect(yield* retireContextMaintenanceAnchor(fixture.config, input)).toMatchObject({
+        status: 'retired',
+        currentSupportRequired: true,
+        canonicalProvenancePreserved: true,
+        permanentLossProven: false,
+      });
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      expect(
+        parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.codeCitations,
+      ).toHaveLength(2);
+      const retired = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(retired.cases.find(item => item.caseId === deleted.caseId)?.disposition).toBe('retired');
+      expect(
+        retired.cases.filter(item => item.family === 'current-support' && item.disposition === 'needs-decision'),
+      ).toHaveLength(1);
+      expect(yield* retireContextMaintenanceAnchor(fixture.config, input)).toMatchObject({status: 'already-retired'});
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('revisits unchanged records at future review and validity deadlines', () =>
@@ -386,6 +833,376 @@ describe('persistent context maintenance', () => {
     ]);
   });
 
+  it('prunes every proven missing private relation type while preserving inactive historical links', () => {
+    fc.assert(
+      fc.property(fc.constantFrom('depends_on', 'references', 'related_to', 'evidence_for', 'supersedes'), type => {
+        const relation = {
+          type,
+          uri: URI.replace('source.md', 'missing.md'),
+        };
+        const source = record('source', {relations: [relation]});
+        expect(safeRelationRemoval(source, [source])).toEqual([relation]);
+        expect(resolveMaintenanceRelationPolicy(source, relation, [source], false).state).toBe('unknown');
+        expect(
+          resolveMaintenanceRelationPolicy(source, {...relation, uri: 'threadnote://memory/tn_missing'}, [source])
+            .state,
+        ).toBe('unknown');
+        const inactive = record('missing', {status: 'archived'});
+        if (type !== 'depends_on') {
+          expect(resolveMaintenanceRelationPolicy(source, relation, [source, inactive]).state).toBe('historical');
+          expect(safeRelationRemoval(source, [source, inactive])).toEqual([]);
+        }
+      }),
+      {numRuns: 25},
+    );
+  });
+
+  effectIt.effect('prunes missing references while preserving existing inactive references', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const archived = record('archive', {status: 'archived'});
+      const source = record('source', {
+        relations: [
+          {type: 'references', uri: URI.replace('source.md', 'missing.md')},
+          {type: 'references', uri: archived.uri},
+        ],
+      });
+      yield* fixture.fs.writeFileString(fixture.source, source.content);
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'archive.md'), archived.content);
+      const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(result.receipts).toHaveLength(1);
+      expect(parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.relations).toEqual([
+        source.metadata.relations![1],
+      ]);
+      expect(result.cases.find(item => item.slot.endsWith('missing.md'))?.disposition).toBe('retired');
+      expect(yield* fixture.fs.readFileString(fixture.path.join(fixture.directory, 'archive.md'))).toBe(
+        archived.content,
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('refuses a rival successor committed by an ordinary writer before the account lock', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const old = record('old', {status: 'superseded'});
+      const successor = record('successor', {relations: [{type: 'supersedes', uri: old.uri}]});
+      const rival = record('rival', {relations: [{type: 'supersedes', uri: old.uri}]});
+      const source = record('source', {relations: [{type: 'depends_on', uri: old.uri}]});
+      for (const item of [source, old, successor])
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${item.metadata.topic}.md`),
+          item.content,
+        );
+      const reachedWrite = yield* Deferred.make<void>();
+      const releaseWrite = yield* Deferred.make<void>();
+      const store = yield* ResourceStore;
+      const pause = (uri: string) =>
+        uri === source.uri
+          ? Deferred.succeed(reachedWrite, undefined).pipe(Effect.andThen(Deferred.await(releaseWrite)))
+          : Effect.void;
+      const guarded = ResourceStore.of({
+        ...store,
+        write: (location, uri, content, options) =>
+          pause(uri).pipe(Effect.andThen(store.write(location, uri, content, options))),
+        writeChecked: (location, uri, content, options, check) =>
+          pause(uri).pipe(Effect.andThen(store.writeChecked(location, uri, content, options, check))),
+      });
+      const worker = yield* runContextMaintenance(fixture.config, {cwd: fixture.home}).pipe(
+        Effect.provideService(ResourceStore, guarded),
+        Effect.forkChild({startImmediately: true}),
+      );
+      yield* Deferred.await(reachedWrite);
+      yield* store.write({account: 'local', home: fixture.home, user: 'tester'}, rival.uri, rival.content, {
+        mode: 'create',
+      });
+      yield* Deferred.succeed(releaseWrite, undefined);
+      const result = yield* Fiber.join(worker);
+      expect(result.receipts).toHaveLength(0);
+      expect(result.cases.some(item => item.reason === 'relation-repair-conflict')).toBe(true);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      expect(yield* store.read({account: 'local', home: fixture.home, user: 'tester'}, rival.uri)).toBe(rival.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('undo refuses a target retired by an ordinary writer before the account lock', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const target = record('target');
+      const source = record('source', {relations: [{type: 'references', uri: target.uri}]});
+      yield* fixture.fs.writeFileString(fixture.source, source.content);
+      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const store = yield* ResourceStore;
+      const location = {account: 'local', home: fixture.home, user: 'tester'};
+      yield* store.write(location, target.uri, target.content, {mode: 'create'});
+      const reachedWrite = yield* Deferred.make<void>();
+      const releaseWrite = yield* Deferred.make<void>();
+      const guarded = ResourceStore.of({
+        ...store,
+        writeChecked: (account, uri, content, options, check) =>
+          Deferred.succeed(reachedWrite, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseWrite)),
+            Effect.andThen(store.writeChecked(account, uri, content, options, check)),
+          ),
+      });
+      const undo = yield* undoContextMaintenance(fixture.config, first.receipts[0].receiptId).pipe(
+        Effect.provideService(ResourceStore, guarded),
+        Effect.forkChild({startImmediately: true}),
+      );
+      yield* Deferred.await(reachedWrite);
+      yield* store.write(location, target.uri, record('target', {status: 'archived'}).content, {mode: 'upsert'});
+      yield* Deferred.succeed(releaseWrite, undefined);
+      expect(yield* Fiber.join(undo)).toMatchObject({status: 'conflict', reason: 'restored-proof-changed'});
+      expect(
+        parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.relations ?? [],
+      ).toEqual([]);
+      expect((yield* readContextMaintenanceStatus(fixture.config)).receipts[0].state).toBe('applied');
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it('requires every bounded anchor chunk to prove the same complete canonical generation', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 130}), fc.integer({min: 0, max: 2}), (anchors, omitted) => {
+        const subject = record('source');
+        const citation = createMemoryCodeCitation({
+          version: 1,
+          repositoryId: 'b'.repeat(64),
+          repositoryIdentityKind: 'local',
+          sourceCommit: 'c'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          extractorSet: 'typescript-v1',
+          path: 'source.ts',
+          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          target: {kind: 'file'},
+        });
+        const chunked = {
+          ...subject,
+          metadata: {...subject.metadata, codeCitations: Array.from({length: anchors}, () => citation)},
+        };
+        const chunks = Math.ceil(anchors / 64);
+        const checks = Object.fromEntries(
+          Array.from({length: chunks}, (_, index) => [
+            `tn_source:${index}`,
+            {inventoryComplete: true, memoryHash: 'same-generation'},
+          ]),
+        );
+        expect(maintenanceAnchorChunksComplete(chunked, checks, 'same-generation')).toBe(true);
+        delete checks[`tn_source:${omitted % chunks}`];
+        expect(maintenanceAnchorChunksComplete(chunked, checks, 'same-generation')).toBe(false);
+        checks[`tn_source:${omitted % chunks}`] = {inventoryComplete: true, memoryHash: 'old-generation'};
+        expect(maintenanceAnchorChunksComplete(chunked, checks, 'same-generation')).toBe(false);
+        checks[`tn_source:${omitted % chunks}`] = {inventoryComplete: false, memoryHash: 'same-generation'};
+        expect(maintenanceAnchorChunksComplete(chunked, checks, 'same-generation')).toBe(false);
+      }),
+      {numRuns: 30},
+    );
+  });
+
+  effectIt.effect('reconciles removed anchors, removed chunks and unprovable ordinals to match clean attention', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const clean = yield* makeFixture();
+      const citations = Array.from({length: 8}, (_, index) =>
+        createMemoryCodeCitation({
+          version: 1,
+          repositoryId: 'b'.repeat(64),
+          repositoryIdentityKind: 'local',
+          sourceCommit: 'c'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          extractorSet: 'typescript-v1',
+          path: `file-${index}.ts`,
+          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          target: {kind: 'file'},
+        }),
+      );
+      const original = record('source', {schemaVersion: 5, codeCitations: citations});
+      const current = record('source', {
+        schemaVersion: 5,
+        codeCitations: citations.filter((_, index) => index !== 0 && index !== 7),
+      });
+      const removed = [citations[0], citations[7]].map(citation => ({
+        ...updateMaintenanceCase(
+          undefined,
+          {
+            project: 'threadnote',
+            memoryId: 'tn_source',
+            family: 'citation',
+            slot: `anchor:${citation.id}`,
+            citationId: citation.id,
+            evidenceRevision: 'old',
+            disposition: 'needs-decision',
+            reason: 'citation-changed',
+          },
+          NOW,
+        ),
+        subjectContentHashes: [{uri: URI, hash: sha256HexSync(original.content)}],
+      }));
+      const legacy = {...removed[0], caseId: 'legacy-case', slot: 'anchor:1', citationId: undefined, attemptCount: 3};
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile));
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({
+          version: 2,
+          paused: false,
+          state: 'needs-decision',
+          generation: '',
+          projects: [],
+          cases: [...removed, legacy, {...legacy, caseId: 'coverage-old', family: 'citation-coverage', slot: '1'}],
+          receipts: [],
+          checkpoints: {},
+        }),
+      );
+      yield* fixture.fs.writeFileString(fixture.source, current.content);
+      yield* clean.fs.writeFileString(clean.source, current.content);
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+      for (let tick = 0; tick < 3; tick++) {
+        yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        yield* runContextMaintenance(clean.config, {cwd: clean.home, maxRecords: 1});
+      }
+      const final = yield* readContextMaintenanceStatus(fixture.config, 'threadnote', {limit: 100});
+      const fresh = yield* readContextMaintenanceStatus(clean.config, 'threadnote', {limit: 100});
+      expect(final.cases.filter(item => item.reason === 'canonical-anchor-removed')).toHaveLength(3);
+      expect(final.cases.find(item => item.slot.startsWith('legacy-unresolved:'))).toMatchObject({
+        disposition: 'resolved',
+        reason: 'legacy-anchor-lineage-unprovable',
+        firstSeen: NOW,
+        attemptCount: 3,
+      });
+      const attention = (status: typeof final) =>
+        status.cases
+          .filter(item => ['needs-decision', 'waiting-evidence'].includes(item.disposition))
+          .map(item => [item.family, item.slot, item.reason])
+          .sort();
+      expect(attention(final)).toEqual(attention(fresh));
+      expect(
+        parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.codeCitations,
+      ).toEqual(current.metadata.codeCitations);
+      expect(
+        final.cases
+          .filter(item => item.reason === 'canonical-anchor-removed')
+          .every(item => item.firstSeen === NOW && item.events.some(event => event.reason === 'citation-changed')),
+      ).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'groups successor redirect and unusable dependency pruning under one journal while preserving references',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const old = record('old', {status: 'superseded'}, 'Historical claim.');
+        const middle = record(
+          'middle',
+          {status: 'superseded', relations: [{type: 'supersedes', uri: old.uri}]},
+          'Intermediate historical replacement.',
+        );
+        const successor = record(
+          'successor',
+          {relations: [{type: 'supersedes', uri: middle.uri}]},
+          'Current replacement.',
+        );
+        const source = record('source', {
+          relations: [
+            {type: 'depends_on', uri: 'threadnote://memory/tn_old'},
+            {type: 'references', uri: 'threadnote://memory/tn_old'},
+            {type: 'depends_on', uri: URI.replace('source.md', 'missing.md')},
+          ],
+        });
+        for (const item of [old, middle, successor, source])
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.directory, `${item.metadata.topic}.md`),
+            item.content,
+          );
+        const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(first.receipts).toHaveLength(1);
+        const repaired = parseMemoryDocument(source.uri, yield* fixture.fs.readFileString(fixture.source))!;
+        expect(repaired.body).toBe(source.body);
+        expect(repaired.metadata.relations).toEqual([
+          {type: 'depends_on', uri: 'threadnote://memory/tn_successor'},
+          {type: 'references', uri: 'threadnote://memory/tn_old'},
+        ]);
+        expect(yield* undoContextMaintenance(fixture.config, first.receipts[0].receiptId)).toMatchObject({
+          status: 'conflict',
+          reason: 'restored-target-not-active',
+        });
+        expect((yield* runContextMaintenance(fixture.config, {cwd: fixture.home})).receipts).toHaveLength(1);
+        expect(yield* fixture.fs.readFileString(fixture.source)).toBe(repaired.content);
+        yield* fixture.fs.writeFileString(fixture.source, source.content);
+        const reintroduced = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(yield* fixture.fs.readFileString(fixture.source)).toBe(repaired.content);
+        expect(reintroduced.receipts).toHaveLength(1);
+        expect(reintroduced.receipts[0].receiptId).toBe(first.receipts[0].receiptId);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it('redirects only a unique explicit active personal successor and preserves historical links', () => {
+    const old = record('old', {status: 'superseded'});
+    const dependency = {type: 'depends_on' as const, uri: 'threadnote://memory/tn_old'};
+    const source = record('source', {relations: [dependency]});
+    const successor = record('new', {relations: [{type: 'supersedes', uri: old.uri}]});
+    expect(resolveMaintenanceRelationPolicy(source, dependency, [source, old, successor]).state).toBe('redirectable');
+    expect(resolveMaintenanceRelationPolicy(source, dependency, [source, old]).state).toBe('prunable');
+    expect(resolveMaintenanceRelationPolicy(source, {...dependency, type: 'references'}, [source, old]).state).toBe(
+      'historical',
+    );
+    const rival = record('rival', {relations: [{type: 'supersedes', uri: old.uri}]});
+    expect(resolveMaintenanceRelationPolicy(source, dependency, [source, old, successor, rival]).state).toBe(
+      'ambiguous',
+    );
+    expect(resolveMaintenanceRelationPolicy(source, dependency, [source]).state).toBe('unknown');
+    const intermediate = record('middle', {status: 'superseded', relations: [{type: 'supersedes', uri: old.uri}]});
+    const final = record('final', {relations: [{type: 'supersedes', uri: intermediate.uri}]});
+    expect(
+      resolveMaintenanceRelationPolicy(source, dependency, [source, old, intermediate, final]).successor?.uri,
+    ).toBe(final.uri);
+    const cycle = record('old', {status: 'superseded', relations: [{type: 'supersedes', uri: intermediate.uri}]});
+    expect(resolveMaintenanceRelationPolicy(source, dependency, [source, cycle, intermediate]).state).toBe('ambiguous');
+
+    fc.assert(
+      fc.property(fc.shuffledSubarray([source, old, successor], {minLength: 3, maxLength: 3}), corpus => {
+        expect(resolveMaintenanceRelationPolicy(source, dependency, corpus).successor?.uri).toBe(successor.uri);
+      }),
+      {numRuns: 30},
+    );
+  });
+
+  it('coalesces repository ambiguity into one stable decision while retaining every anchor', () => {
+    const anchors = Array.from({length: 12}, (_, index) => ({
+      ...updateMaintenanceCase(
+        undefined,
+        {
+          project: 'threadnote',
+          memoryId: `tn_subject${index}`,
+          family: 'citation',
+          slot: `anchor:${index}`,
+          evidenceRevision: `revision${index}`,
+          disposition: 'waiting-evidence',
+          reason: 'repository-ambiguous',
+        },
+        NOW,
+      ),
+      repositoryId: 'repo',
+      subjectContentHashes: [{uri: `${URI}${index}`, hash: `hash${index}`}],
+    }));
+    fc.assert(
+      fc.property(fc.shuffledSubarray(anchors, {minLength: 12, maxLength: 12}), shuffled => {
+        const cases = new Map(shuffled.map(item => [item.caseId, item]));
+        reconcileRepositoryRecoveryCases(cases, NOW);
+        const decisions = [...cases.values()].filter(item => item.disposition === 'needs-decision');
+        expect(decisions).toHaveLength(1);
+        expect(decisions[0].subjectContentHashes).toHaveLength(12);
+        expect([...cases.values()].filter(item => item.family === 'citation')).toHaveLength(12);
+        const before = structuredClone([...cases]);
+        reconcileRepositoryRecoveryCases(cases, NOW);
+        expect([...cases]).toEqual(before);
+        expect(anchors.every(item => item.nextAttemptAt === undefined && item.wake !== undefined)).toBe(true);
+      }),
+      {numRuns: 30},
+    );
+  });
+
   it('keeps one logical case and bounded attempt history when reasons change', () => {
     let current = updateMaintenanceCase(
       undefined,
@@ -406,7 +1223,11 @@ describe('persistent context maintenance', () => {
     expect(current.caseId).toBe(id);
     expect(current.events).toHaveLength(8);
     expect(current.attemptCount).toBe(51);
-    expect(Date.parse(current.nextAttemptAt!) - Date.parse(NOW)).toBeLessThanOrEqual(24 * 60 * 60_000);
+    expect(current.nextAttemptAt).toBeUndefined();
+    expect(current.wake).toEqual({kind: 'evidence-generation', revision: 'revision'});
+    expect(
+      updateMaintenanceCase(current, {...current, evidenceRevision: 'new-revision'}, NOW).nextAttemptAt,
+    ).toBeDefined();
   });
 
   it('preserves every useful relation and anchor before collapsing exact duplicates', () => {
@@ -451,14 +1272,66 @@ describe('persistent context maintenance', () => {
     );
     const coverage = {...original, family: 'citation-coverage', slot: '0', caseId: 'legacy-coverage'};
     const migrated = migrateMaintenanceCases([original, coverage]);
-    expect(migrated).toHaveLength(1);
-    expect(migrated[0].slot).toBe('anchor:0');
+    expect(migrated).toHaveLength(2);
+    expect(migrated[0].slot).toBe('0');
     expect(migrateMaintenanceCases(migrated)).toEqual(migrated);
     expect(
       migrateMaintenanceCases([
         {...original, family: 'review-overdue', slot: 'record', disposition: 'deferred-policy'},
       ])[0].disposition,
     ).toBe('needs-decision');
+  });
+
+  it('migrates an ordinal only with exact unchanged subject proof and never after a citation permutation', () => {
+    const citations = ['first.ts', 'second.ts'].map(path =>
+      createMemoryCodeCitation({
+        version: 1,
+        repositoryId: 'b'.repeat(64),
+        repositoryIdentityKind: 'local',
+        sourceCommit: 'c'.repeat(40),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        extractorSet: 'typescript-v1',
+        path,
+        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        target: {kind: 'file'},
+      }),
+    );
+    const original = record('source', {schemaVersion: 5, codeCitations: citations});
+    const legacy = {
+      ...updateMaintenanceCase(
+        undefined,
+        {
+          project: 'threadnote',
+          memoryId: 'tn_source',
+          family: 'citation',
+          slot: 'anchor:0',
+          evidenceRevision: 'legacy',
+          disposition: 'waiting-evidence',
+          reason: 'repository-unavailable',
+        },
+        NOW,
+      ),
+      subjectContentHashes: [{uri: original.uri, hash: sha256HexSync(original.content)}],
+    };
+    const migrated = migrateMaintenanceCases([legacy], [original]);
+    expect(migrated[0].slot).toBe(`anchor:${citations[0].id}`);
+    expect(migrated[0].firstSeen).toBe(legacy.firstSeen);
+    expect(migrated[0].attemptCount).toBe(legacy.attemptCount);
+    const newer = {
+      ...migrated[0],
+      firstSeen: '2026-10-03T15:01:00.000Z',
+      lastChecked: '2026-10-03T15:02:00.000Z',
+      attemptCount: 5,
+    };
+    const merged = migrateMaintenanceCases([legacy, newer], [original]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0].firstSeen).toBe(legacy.firstSeen);
+    expect(merged[0].attemptCount).toBe(5);
+
+    const reordered = record('source', {schemaVersion: 5, codeCitations: [...citations].reverse()});
+    expect(migrateMaintenanceCases([legacy], [reordered])[0].slot).toBe(`legacy-unresolved:${legacy.caseId}`);
+    expect(migrateMaintenanceCases(migrated, [reordered])[0].slot).toBe(migrated[0].slot);
   });
 
   effectIt.effect('stores one unavailable anchor case matching core identity and a bounded packet', () =>
@@ -552,6 +1425,20 @@ describe('persistent context maintenance', () => {
       expect(
         (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
       ).not.toContain(source.uri);
+      yield* TestClock.adjust('4 minutes');
+      const exhausted = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+      const terminalWait = exhausted.cases.find(item => item.caseId === waiting.caseId)!;
+      expect(terminalWait.attemptCount).toBe(3);
+      expect(terminalWait.nextAttemptAt).toBeUndefined();
+      expect(terminalWait.wake).toMatchObject({kind: 'evidence-generation'});
+      yield* TestClock.adjust('1 day');
+      yield* collectContextHealth(fixture.config, 'threadnote', [source], fixture.home);
+      const unchanged = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+      expect(unchanged.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(3);
+      expect(unchanged.cases).toHaveLength(exhausted.cases.length);
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.home, 'source.ts'), 'New source generation.');
+      const awakened = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+      expect(awakened.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(1);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
@@ -641,23 +1528,23 @@ describe('persistent context maintenance', () => {
       const anchors = before.cases.filter(item => item.slot.startsWith('anchor:'));
       expect(anchors).toHaveLength(8);
       expect(new Set(anchors.map(item => item.caseId)).size).toBe(8);
-      expect(anchors.some(item => item.slot === 'anchor:7')).toBe(true);
+      expect(anchors.some(item => item.slot === `anchor:${citations[7].id}`)).toBe(true);
       yield* fixture.fs.writeFileString(fixture.path.join(fixture.home, 'source-7.ts'), 'Source event.');
       const staleSourcePacket = yield* readContextMaintenancePacket(
         fixture.config,
-        anchors.find(item => item.slot === 'anchor:7')!.caseId,
+        anchors.find(item => item.slot === `anchor:${citations[7].id}`)!.caseId,
       ).pipe(Effect.result);
       expect(Result.isFailure(staleSourcePacket) && staleSourcePacket.failure.message).toContain(
         'Source evidence changed',
       );
       yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 2});
       const after = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as typeof before;
-      expect(after.cases.find(item => item.slot === 'anchor:7')).toMatchObject({
-        caseId: anchors.find(item => item.slot === 'anchor:7')!.caseId,
+      expect(after.cases.find(item => item.slot === `anchor:${citations[7].id}`)).toMatchObject({
+        caseId: anchors.find(item => item.slot === `anchor:${citations[7].id}`)!.caseId,
         attemptCount: 1,
       });
-      expect(after.cases.find(item => item.slot === 'anchor:7')!.evidenceRevision).not.toBe(
-        anchors.find(item => item.slot === 'anchor:7')!.evidenceRevision,
+      expect(after.cases.find(item => item.slot === `anchor:${citations[7].id}`)!.evidenceRevision).not.toBe(
+        anchors.find(item => item.slot === `anchor:${citations[7].id}`)!.evidenceRevision,
       );
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
@@ -874,7 +1761,7 @@ describe('persistent context maintenance', () => {
   effectIt.effect('undo requires the exact post-repair CAS even after the target becomes readable', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
-      const source = record('source', {relations: [{type: 'references', uri: URI.replace('source.md', 'missing.md')}]});
+      const source = record('source', {relations: [{type: 'depends_on', uri: URI.replace('source.md', 'missing.md')}]});
       yield* fixture.fs.writeFileString(fixture.source, source.content);
       const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'missing.md'), record('missing').content);
@@ -914,5 +1801,32 @@ function makeFixture() {
       user: 'tester',
     };
     return {fs, path, home, directory, source: path.join(directory, 'source.md'), config};
+  });
+}
+
+function makeCitationRepository(fixture: Effect.Success<ReturnType<typeof makeFixture>>) {
+  return Effect.gen(function* () {
+    const repositoryPath = fixture.path.join(fixture.home, 'repository');
+    yield* fixture.fs.makeDirectory(repositoryPath);
+    const repository = yield* fixture.fs.realPath(repositoryPath);
+    const file = fixture.path.join(repository, 'source.ts');
+    yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
+    const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+    yield* git(['init', '--quiet']);
+    yield* git(['add', '.']);
+    yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'source']);
+    yield* fixture.fs.writeFileString(
+      fixture.config.manifestPath,
+      `version: 1\nprojects:\n  - name: threadnote\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/threadnote\n    seed: []\n`,
+    );
+    yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+    const citations = yield* captureMemoryCodeCitations(fixture.config, {
+      callerCwd: repository,
+      project: 'threadnote',
+      refs: ['source.ts'],
+    });
+    const source = record('source', {schemaVersion: 5, codeCitations: citations});
+    yield* fixture.fs.writeFileString(fixture.source, source.content);
+    return {repository, file, source};
   });
 }

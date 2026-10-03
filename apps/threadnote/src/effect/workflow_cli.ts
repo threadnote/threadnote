@@ -406,7 +406,7 @@ export function makeContextMaintainCommand<E, R>(
     {
       action: defaultChoice(
         'action',
-        ['run', 'status', 'pause', 'resume', 'undo', 'packet'],
+        ['run', 'status', 'pause', 'resume', 'undo', 'packet', 'retire-anchor'],
         'Local maintenance action',
         'run',
       ),
@@ -418,7 +418,26 @@ export function makeContextMaintainCommand<E, R>(
       ),
       project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
       receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
-      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet'),
+      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet or status selector'),
+      caseCursor: optionalString('case-cursor', 'Generation-bound next retained case page'),
+      receiptCursor: optionalString('receipt-cursor', 'Generation-bound next retained receipt page'),
+      citationId: optionalString('citation-id', 'Exact scoped citation evidence selector'),
+      memoryUri: optionalString('memory-uri', 'Exact scoped case subject evidence selector'),
+      startLine: optional(
+        integerFlag('start-line').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 1000000}))),
+        ),
+      ),
+      maximumLines: optional(
+        integerFlag('maximum-lines').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 24}))),
+        ),
+      ),
+      evidenceRevision: optionalString('evidence-revision', 'Exact reviewed anchor evidence revision'),
+      expectedContentHash: optionalString('expected-content-hash', 'Exact reviewed subject hash for anchor retirement'),
+      limit: optional(
+        integerFlag('limit').pipe(Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 100})))),
+      ),
     },
     handler,
   ).pipe(Command.withDescription('Run bounded local structural maintenance or inspect/pause/undo it'));

@@ -107,6 +107,99 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it('loads retained case and receipt pages and opens exact evidence and old undo', async () => {
+    const item = {
+      caseId: 'old-case',
+      project: 'threadnote',
+      memoryId: 'old-memory',
+      family: 'citation',
+      slot: 'anchor:old',
+      disposition: 'historical' as const,
+      evidenceRevision: 'revision',
+      reason: 'historical-verified',
+      firstSeen: '2026-10-03',
+      lastSeen: '2026-10-03',
+      lastChecked: '2026-10-03',
+      attemptCount: 2,
+      events: [],
+    };
+    const receipt = {
+      receiptId: 'old-receipt',
+      project: 'threadnote',
+      subjectUri: 'threadnote://memory/old',
+      postHash: 'hash',
+      timestamp: '2026-10-03',
+      state: 'applied' as const,
+    };
+    const calls: URL[] = [];
+    let undone = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        calls.push(url);
+        if (init?.method === 'POST') {
+          undone = JSON.parse(String(init.body)).receiptId === 'old-receipt';
+          return new Response(JSON.stringify({status: 'undone'}));
+        }
+        if (url.searchParams.has('caseId'))
+          return new Response(
+            JSON.stringify({
+              version: 2,
+              project: 'threadnote',
+              caseId: 'old-case',
+              evidenceRevision: 'revision',
+              expectedContentHash: 'hash',
+              reason: 'historical-verified',
+              choices: ['Review original claim'],
+              allowedOperations: ['read_context'],
+              instructions: 'Historical evidence does not verify current source.',
+              evidence: {
+                coverage: 'available',
+                generation: 'source',
+                attemptedSteps: [],
+                excerpts: [
+                  {
+                    content: 'retained historical declaration',
+                    provenance: 'historical-verified',
+                    excerptHash: 'hash',
+                    supportsCitation: true,
+                    startLine: 1,
+                    source: {path: 'old.ts'},
+                  },
+                ],
+              },
+            }),
+          );
+        return new Response(
+          JSON.stringify({
+            ...status(),
+            cases: url.searchParams.has('caseCursor') ? [item] : [],
+            receipts: url.searchParams.has('receiptCursor') ? [receipt] : [],
+            page: {
+              generation: 'history',
+              caseNextCursor: url.searchParams.has('caseCursor') ? undefined : 'cases-2',
+              receiptNextCursor: url.searchParams.has('receiptCursor') ? undefined : 'receipts-2',
+            },
+          }),
+        );
+      }),
+    );
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    const click = async (label: string) => {
+      const button = [...document.querySelectorAll('button')].find(value => value.textContent === label);
+      expect(button).toBeDefined();
+      await act(async () => button!.click());
+    };
+    await click('Load more retained cases');
+    await click('Load more retained changes and undo');
+    await click('Inspect exact case and evidence');
+    expect(document.body.textContent).toContain('retained historical declaration');
+    expect(calls.filter(url => url.searchParams.has('caseId'))[0].searchParams.get('project')).toBe('threadnote');
+    await click('Undo this change');
+    expect(undone).toBe(true);
+  });
+
   it('continues polling after a hidden tab becomes visible', async () => {
     vi.useFakeTimers();
     const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true);

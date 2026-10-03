@@ -7,7 +7,10 @@ import {
   formatMemoryCodeCitation,
   formatMemoryCodeCitationLines,
   MAX_MEMORY_CODE_CITATIONS,
+  memoryCodeCitationAnchorId,
   parseMemoryCodeCitation,
+  parseMemoryCodeCitationHeaders,
+  preserveMemoryCodeCitationAnchor,
   type MemoryCodeCitationInputV1,
   type MemoryCodeCitationTargetV1,
 } from '@threadnote/memory/code/citation';
@@ -78,6 +81,76 @@ const citationInput: fc.Arbitrary<MemoryCodeCitationInputV1> = fc
   }));
 
 describe('memory code citation properties', () => {
+  it('round-trips retention coverage without changing evidence or logical anchor identity', () => {
+    fc.assert(
+      fc.property(
+        citationInput,
+        fc.constantFrom('capsule-retained' as const, 'unavailable' as const),
+        (input, evidenceRetention) => {
+          const original = createMemoryCodeCitation(input);
+          const retained = createMemoryCodeCitation({...input, evidenceRetention});
+          expect(retained.id).toBe(original.id);
+          expect(memoryCodeCitationAnchorId(retained)).toBe(memoryCodeCitationAnchorId(original));
+          const encoded = formatMemoryCodeCitation(retained);
+          expect(parseMemoryCodeCitation(encoded)).toEqual({ok: true, citation: retained});
+          expect(formatMemoryCodeCitation(original)).not.toContain('evidenceRetention');
+        },
+      ),
+      {numRuns: 100},
+    );
+    const original = createMemoryCodeCitation(sampleCitationInput);
+    for (const evidenceRetention of ['', 'forever', null, false])
+      expect(parseMemoryCodeCitation(JSON.stringify({...original, evidenceRetention}))).toMatchObject({
+        ok: false,
+        error: {reason: 'invalid-shape'},
+      });
+  });
+  it('round-trips original identity through arbitrary bounded replacement chains without changing evidence identity', () => {
+    fc.assert(
+      fc.property(citationInput, fc.array(citationInput, {minLength: 1, maxLength: 4}), (input, replacements) => {
+        const original = createMemoryCodeCitation(input);
+        const originalWire = formatMemoryCodeCitation(original);
+        let current = original;
+        for (const replacementInput of replacements) {
+          const captured = createMemoryCodeCitation(replacementInput);
+          current = preserveMemoryCodeCitationAnchor(current, captured);
+          expect(current.id).toBe(captured.id);
+          const parsed = parseMemoryCodeCitation(formatMemoryCodeCitation(current));
+          expect(parsed.ok).toBe(true);
+          if (!parsed.ok) throw new Error('Expected canonical citation');
+          current = parsed.citation;
+          expect(memoryCodeCitationAnchorId(current)).toBe(original.id);
+          expect(current.fileContentHash).toEqual(captured.fileContentHash);
+        }
+        expect(formatMemoryCodeCitation(original)).toBe(originalWire);
+      }),
+      {numRuns: 80},
+    );
+  });
+
+  it('rejects duplicate anchor lineage, malformed IDs and conflicting replacement lineage', () => {
+    const original = createMemoryCodeCitation(sampleCitationInput);
+    const replacement = preserveMemoryCodeCitationAnchor(
+      original,
+      createMemoryCodeCitation({...sampleCitationInput, path: 'src/new.ts'}),
+    );
+    expect(() => formatMemoryCodeCitationLines([original, replacement])).toThrow('unique');
+    expect(
+      parseMemoryCodeCitationHeaders([formatMemoryCodeCitation(original), formatMemoryCodeCitation(replacement)], 5)
+        .errors,
+    ).toEqual([{index: 1, reason: 'duplicate-id'}]);
+    for (const anchorId of ['', 'tncc_short', `tncc_${'A'.repeat(40)}`, `${original.id}\n`]) {
+      expect(parseMemoryCodeCitation(JSON.stringify({...replacement, anchorId}))).toMatchObject({
+        ok: false,
+        error: {reason: 'invalid-shape'},
+      });
+    }
+    const unrelated = createMemoryCodeCitation({...sampleCitationInput, path: 'src/unrelated.ts'});
+    expect(() => preserveMemoryCodeCitationAnchor(original, {...replacement, anchorId: unrelated.id})).toThrow(
+      'identity',
+    );
+  });
+
   it('round-trips canonical citations and derives the same identity regardless of object key insertion order', () => {
     fc.assert(
       fc.property(citationInput, input => {

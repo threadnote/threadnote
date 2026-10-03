@@ -1,6 +1,6 @@
-import {Effect, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {SystemInfo} from '@threadnote/platform/system';
+import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   inspectCodeGraphLocalProvenanceInventory,
@@ -8,17 +8,18 @@ import {
   readPersistedCodeGraphLocalAssociation,
   type CodeGraphLocalReconciliationEvidence,
 } from '../local_provenance.js';
-import {codeGraphDatabasePaths} from '../maintenance.js';
-import {codeGraphLayout} from '../layout.js';
+import {codeGraphLayout, codeGraphRepositoriesRoot} from '../layout.js';
 import {resolveRepositoryIdentity, revalidateRepositoryIdentityFence} from '../repository.js';
 import type {RepositoryIdentity} from '../types.js';
 import {
   captureCodeGraphGitWorktreeRegistration,
   sameCodeGraphGitWorktreeRegistration,
+  type CodeGraphGitWorktreeRegistration,
 } from '../git/worktree/registration.js';
 
 const MAXIMUM_RECOVERY_CHECKOUTS = 64;
 const MAXIMUM_RECOVERY_PATHS = 32;
+const MAXIMUM_RECOVERY_ASSOCIATIONS_PER_CHECKOUT = 32;
 
 export interface CodeGraphRepositoryAliasProofV1 {
   readonly checkoutId: string;
@@ -34,6 +35,7 @@ export interface CodeGraphCitationRecoveryRouteV1 {
   readonly aliasProof?: CodeGraphRepositoryAliasProofV1;
   readonly databasePath: string;
   readonly identity: RepositoryIdentity;
+  readonly registration: CodeGraphGitWorktreeRegistration;
   readonly prior?: Extract<CodeGraphLocalReconciliationEvidence, {readonly state: 'verified'}>;
 }
 
@@ -129,6 +131,11 @@ export const revalidateCodeGraphCitationRecoveryRoute = Effect.fn('codeGraph.rev
       Effect.orElseSucceed(() => undefined),
     );
     if (current === undefined || !sameIdentity(route.identity, current)) return false;
+    const registration = yield* captureCodeGraphGitWorktreeRegistration(current).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    if (registration === undefined || !sameCodeGraphGitWorktreeRegistration(route.registration, registration))
+      return false;
     if (route.aliasProof === undefined) return true;
     if (route.prior === undefined) return false;
     const proof = yield* verifyCodeGraphCitationRepositoryAlias(
@@ -151,15 +158,21 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
     readonly threadnoteHome: string;
   }) {
     const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
     const caller =
       input.callerCwd === undefined
         ? undefined
         : yield* resolveRepositoryIdentity(input.callerCwd).pipe(Effect.orElseSucceed(() => undefined));
-    const databases = yield* codeGraphDatabasePaths(input.threadnoteHome);
+    const repositoryRoot = codeGraphRepositoriesRoot(path, input.threadnoteHome);
+    const inventoryPage = yield* Effect.gen(function* () {
+      if (Option.isSome(yield* fs.readLink(repositoryRoot).pipe(Effect.option))) return undefined;
+      if (!(yield* fs.exists(repositoryRoot))) return {names: [], overflow: false};
+      return yield* runtimeTextDirectoryNamePage(repositoryRoot, MAXIMUM_RECOVERY_CHECKOUTS);
+    }).pipe(Effect.orElseSucceed(() => undefined));
     const checkoutIds = [
       ...new Set([
         ...(caller === undefined ? [] : [caller.checkoutId]),
-        ...databases.map(database => path.basename(path.dirname(database))),
+        ...(inventoryPage?.names ?? []).filter(name => /^[0-9a-f]{64}$/.test(name)),
       ]),
     ].slice(0, MAXIMUM_RECOVERY_CHECKOUTS);
     const observations = yield* Effect.forEach(
@@ -167,9 +180,9 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
       checkoutId =>
         Effect.gen(function* () {
           const inventory = yield* inspectCodeGraphLocalProvenanceInventory(input.threadnoteHome, checkoutId);
-          if (inventory.state !== 'ready') return [];
-          return yield* Effect.forEach(
-            inventory.worktreeIds,
+          if (inventory.state !== 'ready') return {complete: false, records: [], revision: [checkoutId, 'unavailable']};
+          const records = yield* Effect.forEach(
+            inventory.worktreeIds.slice(0, MAXIMUM_RECOVERY_ASSOCIATIONS_PER_CHECKOUT),
             worktreeId =>
               Effect.gen(function* () {
                 const target = {checkoutId, worktreeId};
@@ -184,10 +197,33 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
               }),
             {concurrency: 4},
           );
+          return {
+            complete:
+              inventory.worktreeIds.length <= MAXIMUM_RECOVERY_ASSOCIATIONS_PER_CHECKOUT &&
+              records.every(record => record.evidence.state === 'verified'),
+            records,
+            revision: [
+              checkoutId,
+              inventory.worktreeIds,
+              records.map(record => [
+                record.association.available,
+                'path' in record.association ? record.association.path : undefined,
+                record.evidence.state,
+                record.evidence.state === 'verified'
+                  ? [
+                      record.evidence.repositoryId,
+                      record.evidence.worktreeId,
+                      record.evidence.checkoutId,
+                      record.evidence.registration,
+                    ]
+                  : undefined,
+              ]),
+            ],
+          };
         }),
       {concurrency: 4},
     );
-    const records = observations.flat();
+    const records = observations.flatMap(observation => observation.records);
     const paths = [
       ...new Set([
         ...(caller === undefined ? [] : [caller.repoRoot]),
@@ -209,6 +245,10 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
     const routes: CodeGraphCitationRecoveryRouteV1[] = [];
     for (const identity of identities) {
       if (identity === undefined) continue;
+      const registration = yield* captureCodeGraphGitWorktreeRegistration(identity).pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (registration === undefined) continue;
       const databasePath = codeGraphLayout(
         path,
         input.threadnoteHome,
@@ -216,7 +256,7 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
         identity.worktreeId,
       ).databasePath;
       if (identity.repositoryId === input.repositoryId) {
-        routes.push({databasePath, identity});
+        routes.push({databasePath, identity, registration});
         continue;
       }
       for (const prior of priors.filter(prior => prior.checkoutId === identity.checkoutId)) {
@@ -227,7 +267,7 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
           input.sourceCommit,
         ).pipe(Effect.orElseSucceed(() => undefined));
         if (aliasProof !== undefined) {
-          routes.push({aliasProof, databasePath, identity, prior});
+          routes.push({aliasProof, databasePath, identity, prior, registration});
           break;
         }
       }
@@ -236,8 +276,33 @@ export const resolveCodeGraphCitationRepositoryRoutes = Effect.fn('codeGraph.res
     const authorities = new Set(routes.map(route => `${route.identity.repositoryId}\0${route.identity.headCommit}`));
     return {
       ambiguous: preferred === undefined && authorities.size > 1,
-      complete: databases.length <= MAXIMUM_RECOVERY_CHECKOUTS && paths.length < MAXIMUM_RECOVERY_PATHS,
+      complete:
+        inventoryPage !== undefined &&
+        !inventoryPage.overflow &&
+        observations.every(observation => observation.complete) &&
+        paths.length < MAXIMUM_RECOVERY_PATHS,
       checkoutIds,
+      generation: sha256HexSync(
+        JSON.stringify([
+          input.repositoryId,
+          input.sourceCommit,
+          inventoryPage,
+          observations.map(observation => observation.revision),
+          identities,
+          routes.map(route => [
+            route.identity,
+            route.registration,
+            route.aliasProof === undefined
+              ? undefined
+              : [
+                  route.aliasProof.sourceRepositoryId,
+                  route.aliasProof.sourceWorktreeId,
+                  route.aliasProof.targetRepositoryId,
+                  route.aliasProof.sourceCommit,
+                ],
+          ]),
+        ]),
+      ),
       routes: preferred === undefined ? (input.callerOnly ? [] : routes) : [preferred],
     };
   },

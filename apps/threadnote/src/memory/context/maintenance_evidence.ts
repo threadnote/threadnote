@@ -1,4 +1,6 @@
 import {Crypto, DateTime, Effect, FileSystem, Option, Path} from 'effect';
+import {resolveCodeGraphCitationRepositoryRoutes} from '@threadnote/graph/citation/recovery';
+import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {observationFromCodeGraphStatus} from '@threadnote/graph/query/contract';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -36,12 +38,19 @@ interface Entry {
   readonly uri: string;
   readonly contentHash: string;
   readonly sources: Readonly<Record<string, string>>;
+  readonly associations?: Readonly<Record<string, string>>;
   readonly receipts: ContextBriefMemoryCitationValidationV2['receipts'];
 }
 interface Projection {
   readonly version: 1;
   readonly policy: string;
   readonly entries: readonly Entry[];
+}
+
+export interface ContextMaintenanceWorkerObservation {
+  readonly sourceEpoch?: string;
+  readonly association: Effect.Success<ReturnType<typeof readContextMaintenanceCitationAssociation>>;
+  readonly memoryGeneration?: string;
 }
 
 /** Published identities and real source observations, never SQLite/WAL or lease/cache writes. */
@@ -51,6 +60,60 @@ export const readContextMaintenanceSourceEpoch = Effect.fn('contextMaintenance.s
   project?: string,
 ) {
   return (yield* observeSource(config, cwd, project)).epoch;
+});
+
+export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaintenance.citationAssociation')(function* (
+  config: RuntimeConfig,
+  cwd: string,
+  citations: readonly MemoryCodeCitationV1[],
+  observe?: (root: string) => ReturnType<typeof observeSource>,
+) {
+  const selectors = [
+    ...new Map(citations.map(citation => [`${citation.repositoryId}:${citation.sourceCommit}`, citation])).values(),
+  ].sort((a, b) => `${a.repositoryId}:${a.sourceCommit}`.localeCompare(`${b.repositoryId}:${b.sourceCommit}`));
+  const observations = yield* Effect.forEach(
+    selectors.slice(0, MAX_SOURCES),
+    citation =>
+      resolveCodeGraphCitationRepositoryRoutes({
+        threadnoteHome: config.agentContextHome,
+        callerCwd: cwd,
+        repositoryId: citation.repositoryId,
+        sourceCommit: citation.sourceCommit,
+      }).pipe(Effect.orElseSucceed(() => ({generation: 'unavailable', routes: [], complete: false}))),
+    {concurrency: 4},
+  );
+  const roots = [
+    ...new Set(observations.flatMap(observation => observation.routes.map(route => route.identity.repoRoot))),
+  ]
+    .sort()
+    .slice(0, MAX_SOURCES);
+  const sources = yield* Effect.forEach(
+    roots,
+    root => (observe?.(root) ?? observeSource(config, root)).pipe(Effect.map(source => [root, source.epoch] as const)),
+    {concurrency: 4},
+  );
+  const sourceMap = new Map(sources);
+  const bySelector = Object.fromEntries(
+    observations.map((observation, index) => [
+      `${selectors[index].repositoryId}:${selectors[index].sourceCommit}`,
+      sha256HexSync(
+        JSON.stringify([
+          observation.generation,
+          observation.complete,
+          observation.routes.map(route => [
+            route.identity.repoRoot,
+            sourceMap.get(route.identity.repoRoot) ?? 'unobserved',
+          ]),
+        ]),
+      ),
+    ]),
+  );
+  return {
+    epoch: sha256HexSync(JSON.stringify([selectors.length, bySelector])),
+    roots,
+    bySelector,
+    sourceEpochs: Object.fromEntries(sources),
+  };
 });
 
 const observeSource = Effect.fn('contextMaintenance.observeSource')(function* (
@@ -122,6 +185,7 @@ export function projectMaintenanceCitationReceipts(input: {
   readonly records: readonly MemoryRecord[];
   readonly sources: ReadonlyMap<string, SourceObservation>;
   readonly now: number;
+  readonly associations?: Readonly<Record<string, string>>;
 }): readonly ContextBriefMemoryCitationValidationV2[] {
   const entries = new Map(input.entries.map(entry => [entry.uri, entry]));
   return input.records.flatMap(record => {
@@ -129,12 +193,26 @@ export function projectMaintenanceCitationReceipts(input: {
     if (
       entry === undefined ||
       entry.contentHash !== memoryHash(record) ||
+      (input.associations !== undefined &&
+        (entry.associations === undefined ||
+          !Object.entries(entry.associations).every(
+            ([selector, epoch]) => input.associations?.[selector] === epoch,
+          ))) ||
       !Object.entries(entry.sources).every(([cwd, epoch]) => input.sources.get(cwd)?.epoch === epoch)
     )
       return [];
     const ids = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
     const receipts = entry.receipts.filter(
       receipt =>
+        (input.associations === undefined ||
+          (record.metadata.codeCitations ?? []).some(citation => {
+            const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
+            return (
+              citation.id === receipt.citationId &&
+              entry.associations?.[selector] !== undefined &&
+              entry.associations[selector] === input.associations?.[selector]
+            );
+          })) &&
         ids.has(receipt.citationId) &&
         (receipt.status === 'unknown' ||
           receipt.provenance === 'historical-verified' ||
@@ -174,6 +252,11 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
       readonly validate: (
         selected: readonly ContextBriefMemoryCandidateV1[],
       ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
+      readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
+      readonly skipWorkerValidation?: (
+        record: MemoryRecord,
+        observation: ContextMaintenanceWorkerObservation,
+      ) => Effect.Effect<boolean, unknown, R>;
     },
   ) {
     if (!candidates.some(candidate => candidate.codeCitations.length > 0)) return [];
@@ -199,25 +282,64 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
       );
       return [];
     }
-    const roots = [...new Set([cwd, ...entries.flatMap(entry => Object.keys(entry.sources))])].slice(0, MAX_SOURCES);
     const sources = new Map<string, SourceObservation>();
-    for (const root of roots) sources.set(root, yield* observeSource(config, root, root === cwd ? project : undefined));
-    const cached =
-      options.mode === 'worker' ? [] : projectMaintenanceCitationReceipts({entries, records, sources, now});
+    const openingObservations = new Map<string, SourceObservation>();
+    const openingSource = (root: string) =>
+      Effect.gen(function* () {
+        const previous = openingObservations.get(root);
+        if (previous !== undefined) return previous;
+        const source = yield* observeSource(config, root);
+        openingObservations.set(root, source);
+        return source;
+      });
+    const association = yield* readContextMaintenanceCitationAssociation(
+      config,
+      cwd,
+      candidates.flatMap(candidate => candidate.codeCitations),
+      openingSource,
+    );
+    const roots = [
+      ...new Set([cwd, ...association.roots, ...entries.flatMap(entry => Object.keys(entry.sources))]),
+    ].slice(0, MAX_SOURCES);
+    for (const root of roots) sources.set(root, yield* openingSource(root));
+    const cached = projectMaintenanceCitationReceipts({
+      entries,
+      records,
+      sources,
+      now,
+      associations: association.bySelector,
+    });
     const receiptIds = new Map(
       cached.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
     );
-    const pending = candidates.map(candidate => ({
-      ...candidate,
-      codeCitations: candidate.codeCitations.filter(citation => !receiptIds.get(candidate.uri)?.has(citation.id)),
-    }));
+    const pending = yield* Effect.forEach(candidates, candidate =>
+      Effect.gen(function* () {
+        const record = records.find(record => record.uri === candidate.uri);
+        const skip =
+          options.mode === 'worker' && options.skipWorkerValidation !== undefined && record !== undefined
+            ? yield* options.skipWorkerValidation(record, {
+                sourceEpoch: association.sourceEpochs[cwd] ?? sources.get(cwd)?.epoch,
+                association,
+                memoryGeneration: beforeMemory,
+              })
+            : false;
+        return {
+          ...candidate,
+          codeCitations: skip
+            ? []
+            : candidate.codeCitations.filter(citation => !receiptIds.get(candidate.uri)?.has(citation.id)),
+        };
+      }),
+    );
     const selected =
       options.mode === 'worker'
         ? pending
         : options.mode === 'diagnostic'
           ? planContextHealthCitationBatch(pending).candidates
           : [];
-    const computed = selected.length === 0 ? [] : yield* options.validate(selected);
+    const computed = selected.some(candidate => candidate.codeCitations.length > 0)
+      ? yield* options.validate(selected)
+      : [];
     // Current recovery receipts can depend on an alternate checkout. Observe those
     // published identities too; overflow remains deferred, never cache-certified.
     for (const root of new Set(
@@ -225,16 +347,37 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         validation.receipts.flatMap(receipt => (receipt.recovery === undefined ? [] : [receipt.recovery.callerCwd])),
       ),
     )) {
-      if (!sources.has(root) && sources.size < MAX_SOURCES) sources.set(root, yield* observeSource(config, root));
+      if (!sources.has(root) && sources.size < MAX_SOURCES) sources.set(root, yield* openingSource(root));
     }
     const closing = new Map<string, SourceObservation>();
-    for (const [root] of sources)
-      closing.set(root, yield* observeSource(config, root, root === cwd ? project : undefined));
+    const closingObservations = new Map<string, SourceObservation>();
+    const closingSource = (root: string) =>
+      Effect.gen(function* () {
+        const previous = closingObservations.get(root);
+        if (previous !== undefined) return previous;
+        const source = yield* observeSource(config, root);
+        closingObservations.set(root, source);
+        return source;
+      });
+    for (const [root] of sources) closing.set(root, yield* closingSource(root));
+    const closingAssociation = yield* readContextMaintenanceCitationAssociation(
+      config,
+      cwd,
+      candidates.flatMap(candidate => candidate.codeCitations),
+      closingSource,
+    );
     const unchanged =
+      association.epoch === closingAssociation.epoch &&
       beforeMemory !== undefined &&
       beforeMemory === (yield* mutationGeneration(config)) &&
       [...sources].every(([root, observation]) => observation.epoch === closing.get(root)?.epoch);
     if (!unchanged) return [];
+    if (options.mode === 'worker' && options.observeWorker !== undefined)
+      yield* options.observeWorker({
+        sourceEpoch: closingAssociation.sourceEpochs[cwd] ?? (yield* readContextMaintenanceSourceEpoch(config, cwd)),
+        association: closingAssociation,
+        memoryGeneration: beforeMemory,
+      });
     const byUri = new Map(cached.map(validation => [validation.uri, validation]));
     for (const validation of computed) {
       const previous = byUri.get(validation.uri);
@@ -261,6 +404,13 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
           uri: record.uri,
           contentHash: memoryHash(record),
           sources: Object.fromEntries([...closing].map(([root, source]) => [root, source.epoch])),
+          associations: Object.fromEntries(
+            (record.metadata.codeCitations ?? []).flatMap(citation => {
+              const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
+              const epoch = closingAssociation.bySelector[selector];
+              return epoch === undefined ? [] : [[selector, epoch]];
+            }),
+          ),
           receipts,
         },
       ];
@@ -278,7 +428,8 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
             const previous = merged.get(entry.uri);
             const compatible =
               previous?.contentHash === entry.contentHash &&
-              JSON.stringify(previous.sources) === JSON.stringify(entry.sources);
+              JSON.stringify(previous.sources) === JSON.stringify(entry.sources) &&
+              JSON.stringify(previous.associations) === JSON.stringify(entry.associations);
             const receipts = new Map(
               [...(compatible ? previous.receipts : []), ...entry.receipts].map(receipt => [
                 receipt.citationId,
@@ -372,6 +523,12 @@ function decodeProjection(value: unknown): Projection | undefined {
       Object.keys(entry.sources).length === 0 ||
       Object.keys(entry.sources).length > MAX_SOURCES ||
       !Object.values(entry.sources).every(epoch => typeof epoch === 'string') ||
+      (entry.associations !== undefined &&
+        (entry.associations === null ||
+          typeof entry.associations !== 'object' ||
+          Array.isArray(entry.associations) ||
+          Object.keys(entry.associations).length > MAX_SOURCES ||
+          !Object.values(entry.associations).every(epoch => typeof epoch === 'string'))) ||
       !Array.isArray(entry.receipts)
     )
       return undefined;

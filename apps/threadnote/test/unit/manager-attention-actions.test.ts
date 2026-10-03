@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   save: vi.fn(),
   lock: vi.fn(),
   indexGraph: vi.fn(),
+  maintenanceStatus: vi.fn(),
+  maintenancePacket: vi.fn(),
 }));
 vi.mock('@threadnote/memory/candidate', async importOriginal => ({
   ...(await importOriginal<typeof import('@threadnote/memory/candidate')>()),
@@ -38,6 +40,13 @@ vi.mock('../../src/memory/context/health_repair_commands.js', () => ({
   applyContextHealthCitationRepairBatch: mocks.applyBatch,
   previewContextHealthRepairs: mocks.preview,
   applyContextHealthRepair: mocks.apply,
+}));
+vi.mock('../../src/memory/context/maintenance.js', () => ({
+  readContextMaintenanceStatus: mocks.maintenanceStatus,
+  readContextMaintenancePacket: mocks.maintenancePacket,
+  runContextMaintenance: vi.fn(),
+  setContextMaintenancePaused: vi.fn(),
+  undoContextMaintenance: vi.fn(),
 }));
 vi.mock('../../src/manager/attention.js', () => ({managerAttentionProjectRoot: mocks.root}));
 vi.mock('../../src/memory/maintenance/records.js', () => ({readActiveProjectMemoryRecords: mocks.records}));
@@ -127,6 +136,35 @@ beforeEach(() => {
 });
 
 describe('Manager reviewed action adapters', () => {
+  effectIt.effect('routes project-safe retained status pages and exact packets through the GET adapter', () =>
+    Effect.gen(function* () {
+      const status = {version: 2, cases: [], receipts: [], projects: [], page: {generation: 'bound'}};
+      mocks.maintenanceStatus.mockReturnValue(Effect.succeed(status));
+      mocks.maintenancePacket.mockReturnValue(Effect.succeed({caseId: 'case-42', project: 'threadnote'}));
+      const get = (query: string) =>
+        handleManagerAttentionAction({
+          config,
+          method: 'GET',
+          body: Effect.succeed({}),
+          url: new URL(`http://manager.test/api/attention/context-maintenance?project=threadnote&${query}`),
+        });
+      expect((yield* get('caseCursor=case-page&receiptCursor=receipt-page&limit=40'))?.body).toEqual(status);
+      expect(mocks.maintenanceStatus).toHaveBeenLastCalledWith(config, 'threadnote', {
+        caseCursor: 'case-page',
+        receiptCursor: 'receipt-page',
+        limit: 40,
+        caseId: undefined,
+        receiptId: undefined,
+      });
+      yield* get('caseId=case-42');
+      expect(mocks.maintenanceStatus).toHaveBeenLastCalledWith(config, 'threadnote', {caseId: 'case-42'});
+      expect(mocks.maintenancePacket).toHaveBeenLastCalledWith(config, 'case-42', {
+        citationId: undefined,
+        memoryUri: undefined,
+      });
+      expect((yield* get('limit=1000'))?.status).toBe(400);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect.prop(
     'never applies an arbitrary stale revision',
     {revision: Schema.Int.check(Schema.isBetween({minimum: 5, maximum: 100000}))},
