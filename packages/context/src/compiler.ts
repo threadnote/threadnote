@@ -11,6 +11,7 @@ import {projectContextBrief} from './projector.js';
 import type {
   ContextBriefGraphEvidenceV1,
   ContextBriefCitationValidationFenceV2,
+  ContextBriefMemoryCandidateV1,
   ContextBriefMemoryRetrievalV1,
   ContextBriefLogicalResultV1,
   ContextBriefPlanV1,
@@ -76,7 +77,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     ],
     {concurrency: 4},
   );
-  const graph =
+  const initialGraph =
     eagerGraph ??
     (yield* dependencies.graphEvidence(
       withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit),
@@ -87,12 +88,68 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     plan.memory.candidateLimit,
     plan.codeAnchors.candidateLimit,
   );
-  const citationValidations = dependencies.citationValidation
-    ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
+  const initialValidations = dependencies.citationValidation
+    ? yield* dependencies.citationValidation(plan.scope, memory.candidates, initialGraph.citationValidationFence)
     : memory.citationValidations;
+  let graph = initialGraph;
+  let validatedMemory =
+    initialValidations === undefined ? memory : {...memory, citationValidations: initialValidations};
+  if (plan.mode === 'resume' && plan.graph.codeRefs.length === 0) {
+    const initialLogical = assembleContextBriefLogicalResult({
+      graph,
+      memory: validatedMemory,
+      observedAt,
+      plan,
+      verifiedProcedureGaps: procedureEvidence.gaps,
+      verifiedProcedures: procedureEvidence.procedures,
+    });
+    const selected = memory.candidates.find(candidate => candidate.uri === initialLogical.activeHandoffs[0]?.uri);
+    const selectedPlan = withSelectedResumeGraphAnchors(plan.graph, selected, plan.codeAnchors.candidateLimit);
+    const initialPlan = withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit);
+    if (!sameCodeRefs(selectedPlan.codeRefs, initialPlan.codeRefs)) {
+      graph = yield* dependencies.graphEvidence(selectedPlan);
+      if (!sameGraphValidationFence(initialGraph, graph)) {
+        const refreshedValidations = dependencies.citationValidation
+          ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
+          : undefined;
+        validatedMemory =
+          refreshedValidations === undefined
+            ? {...memory, citationValidations: undefined}
+            : {...memory, citationValidations: refreshedValidations};
+      }
+      const refreshedLogical = assembleContextBriefLogicalResult({
+        graph,
+        memory: validatedMemory,
+        observedAt,
+        plan,
+        verifiedProcedureGaps: procedureEvidence.gaps,
+        verifiedProcedures: procedureEvidence.procedures,
+      });
+      const refreshedSelected = memory.candidates.find(
+        candidate => candidate.uri === refreshedLogical.activeHandoffs[0]?.uri,
+      );
+      if (
+        !sameCodeRefs(
+          selectedPlan.codeRefs,
+          withSelectedResumeGraphAnchors(plan.graph, refreshedSelected, plan.codeAnchors.candidateLimit).codeRefs,
+        )
+      ) {
+        // A generation change can alter the selected handoff. Do not publish cards from the
+        // now unrelated anchored read as if they supported that continuation.
+        graph = {
+          ...graph,
+          cards: [],
+          contracts: [],
+          coverage: {...graph.coverage, complete: false},
+          gaps: [...graph.gaps, 'resume-anchor-validation-changed'],
+          sourceExcerpts: [],
+        };
+      }
+    }
+  }
   const logical = assembleContextBriefLogicalResult({
     graph,
-    memory: citationValidations === undefined ? memory : {...memory, citationValidations},
+    memory: validatedMemory,
     observedAt,
     plan,
     verifiedProcedureGaps: procedureEvidence.gaps,
@@ -118,7 +175,15 @@ function withResumeMemoryGraphAnchors(
         left.rank - right.rank ||
         (left.uri === right.uri ? 0 : left.uri < right.uri ? -1 : 1),
     )[0];
-  if (handoff === undefined) return graphPlan;
+  return withSelectedResumeGraphAnchors(graphPlan, handoff, maximumRefs);
+}
+
+function withSelectedResumeGraphAnchors(
+  graphPlan: ContextBriefPlanV1['graph'],
+  handoff: ContextBriefMemoryCandidateV1 | undefined,
+  maximumRefs: number,
+): ContextBriefPlanV1['graph'] {
+  if (handoff === undefined || graphPlan.codeRefs.length > 0) return graphPlan;
   const codeRefs = [
     ...new Set(
       handoff.codeCitations.map(citation =>
@@ -129,4 +194,23 @@ function withResumeMemoryGraphAnchors(
     ),
   ].slice(0, maximumRefs);
   return codeRefs.length === 0 ? graphPlan : {...graphPlan, codeRefs};
+}
+
+function sameCodeRefs(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((ref, index) => ref === right[index]);
+}
+
+function sameGraphValidationFence(left: ContextBriefGraphEvidenceV1, right: ContextBriefGraphEvidenceV1): boolean {
+  const a = left.citationValidationFence;
+  const b = right.citationValidationFence;
+  if (a?.kind !== b?.kind) return false;
+  if (a?.kind === 'repository' && b?.kind === 'repository') {
+    return a.repositoryId === b.repositoryId && a.snapshotId === b.snapshotId;
+  }
+  if (a?.kind === 'workset' && b?.kind === 'workset') {
+    return (
+      a.workset === b.workset && a.generation.id === b.generation.id && a.generation.digest === b.generation.digest
+    );
+  }
+  return JSON.stringify(left.resolvedSnapshots) === JSON.stringify(right.resolvedSnapshots);
 }

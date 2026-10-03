@@ -1,5 +1,5 @@
 import fc from 'fast-check';
-import {Effect} from 'effect';
+import {Effect, Schema} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
 import {compileContextBriefWith} from '../../src/compiler.js';
@@ -124,6 +124,208 @@ describe('Context Brief continuation contracts', () => {
 
       expect(observedPlans).toEqual([[currentPath]]);
       expect(result.structuredContent.activeHandoffs[0]?.uri).toBe(current.uri);
+    }),
+  );
+
+  effectIt.effect('anchors the cited fresh continuation selected after citation validation', () =>
+    Effect.gen(function* () {
+      const citedPath = 'packages/context/src/planner.ts';
+      const staleAligned = {
+        ...handoff('d'.repeat(40)),
+        continuationCard: {
+          nextStep: 'continue the two-arm canary',
+          task: 'Continue the automated-context two-arm canary.',
+        },
+        rank: 0,
+        uri: 'threadnote://user/test/memories/handoffs/active/threadnote/stale-aligned.md',
+      };
+      const freshCited = {
+        ...handoff(),
+        codeCitations: [fileCitation(citedPath)],
+        continuationCard: {nextStep: 'check the planner', task: 'Continue the verified repair.'},
+        rank: 1,
+        uri: 'threadnote://user/test/memories/handoffs/active/threadnote/fresh-cited.md',
+      };
+      const observedPlans: Array<readonly string[]> = [];
+      let validationCalls = 0;
+      const result = yield* compileContextBriefWith(
+        {
+          graphEvidence: plan =>
+            Effect.sync(() => {
+              observedPlans.push(plan.codeRefs);
+              return {
+                ...graphForPath(plan.codeRefs[0] ?? 'apps/threadnote/src/release/check.ts'),
+                citationValidationFence: {
+                  generation: {digest: 'same-digest', id: 'same-generation'},
+                  kind: 'workset' as const,
+                  workset: 'threadnote',
+                },
+              };
+            }),
+          memoryEvidence: () =>
+            Effect.succeed({
+              ...emptyMemory(),
+              candidates: [staleAligned, freshCited],
+              consideredCandidates: 2,
+            }),
+          citationValidation: () =>
+            Effect.sync(() => {
+              validationCalls += 1;
+              return [exactCitationValidation(freshCited.uri, freshCited.codeCitations[0].id, citedPath)];
+            }),
+        },
+        {...request('resume'), task: 'Continue the automated-context two-arm canary.'},
+      );
+
+      expect(result.structuredContent.activeHandoffs[0]?.uri).toBe(freshCited.uri);
+      expect(observedPlans.at(-1)).toEqual([citedPath]);
+      expect(observedPlans.length).toBeLessThanOrEqual(2);
+      expect(validationCalls).toBe(1);
+      expect(result.structuredContent.graph.cards[0]?.symbol.path).toBe(citedPath);
+      expect(result.structuredContent.graph.contracts[0]?.evidence.path).toBe(citedPath);
+      expect(result.structuredContent.graph.sources?.[0]?.path).toBe(citedPath);
+    }),
+  );
+
+  effectIt.effect.prop(
+    'keeps the final fresh cited handoff and resume anchor coherent across recall ranks and cited paths',
+    [
+      Schema.Literals([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+      Schema.Literals(['packages/context/src/compiler.ts', 'packages/context/src/planner.ts']),
+    ],
+    ([staleRank, citedPath]) =>
+      Effect.gen(function* () {
+        const stale = {
+          ...handoff('d'.repeat(40)),
+          continuationCard: {
+            nextStep: 'continue the two-arm canary',
+            task: 'Continue the automated-context two-arm canary.',
+          },
+          rank: staleRank,
+          uri: 'threadnote://user/test/memories/handoffs/active/threadnote/stale-property.md',
+        };
+        const fresh = {
+          ...handoff(),
+          codeCitations: [fileCitation(citedPath)],
+          rank: 13,
+          uri: 'threadnote://user/test/memories/handoffs/active/threadnote/fresh-property.md',
+        };
+        const observedPlans: Array<readonly string[]> = [];
+        const result = yield* compileContextBriefWith(
+          {
+            graphEvidence: plan =>
+              Effect.sync(() => {
+                observedPlans.push(plan.codeRefs);
+                return graphForPath(plan.codeRefs[0] ?? 'apps/threadnote/src/release/check.ts');
+              }),
+            memoryEvidence: () =>
+              Effect.succeed({...emptyMemory(), candidates: [stale, fresh], consideredCandidates: 2}),
+            citationValidation: () =>
+              Effect.succeed([
+                {
+                  uri: fresh.uri,
+                  receipts: [
+                    {
+                      candidateCount: 1,
+                      citationId: fresh.codeCitations[0].id,
+                      coverage: 'current-complete' as const,
+                      kind: 'file' as const,
+                      observedAt: '2026-10-03T00:00:00.000Z',
+                      observedPath: citedPath,
+                      reason: 'exact' as const,
+                      status: 'exact' as const,
+                      strategy: 'file-path' as const,
+                      validatorVersion: 1 as const,
+                    },
+                  ],
+                },
+              ]),
+          },
+          {...request('resume'), task: 'Continue the automated-context two-arm canary.'},
+        );
+        expect(result.structuredContent.activeHandoffs[0]?.uri).toBe(fresh.uri);
+        expect(observedPlans.at(-1)).toEqual([citedPath]);
+        expect(observedPlans.length).toBeLessThanOrEqual(2);
+        expect(result.structuredContent.graph.cards[0]?.symbol.path).toBe(citedPath);
+        expect(result.structuredContent.graph.contracts[0]?.evidence.path).toBe(citedPath);
+        expect(result.structuredContent.graph.sources?.[0]?.path).toBe(citedPath);
+      }),
+    {arbitrary: {runs: 30}},
+  );
+
+  effectIt.effect('withholds anchored cards when a changed citation fence changes the selected handoff', () =>
+    Effect.gen(function* () {
+      const citedPath = 'packages/context/src/planner.ts';
+      const stale = {
+        ...handoff('d'.repeat(40)),
+        continuationCard: {
+          nextStep: 'continue the two-arm canary',
+          task: 'Continue the automated-context two-arm canary.',
+        },
+        rank: 0,
+        uri: 'threadnote://user/test/memories/handoffs/active/threadnote/stale-fence.md',
+      };
+      const cited = {
+        ...handoff(),
+        codeCitations: [fileCitation(citedPath)],
+        rank: 1,
+        uri: 'threadnote://user/test/memories/handoffs/active/threadnote/cited-fence.md',
+      };
+      const plans: Array<readonly string[]> = [];
+      let logicalGaps: readonly string[] = [];
+      let validationCalls = 0;
+      const result = yield* compileContextBriefWith(
+        {
+          graphEvidence: plan =>
+            Effect.sync(() => {
+              plans.push(plan.codeRefs);
+              return {
+                ...graphForPath(plan.codeRefs[0] ?? 'apps/threadnote/src/release/check.ts'),
+                citationValidationFence: {
+                  kind: 'repository' as const,
+                  repositoryId: REPOSITORY_ID,
+                  snapshotId: `cgsn_${plans.length}`,
+                },
+              };
+            }),
+          memoryEvidence: () => Effect.succeed({...emptyMemory(), candidates: [stale, cited], consideredCandidates: 2}),
+          citationValidation: () =>
+            Effect.sync(() => {
+              validationCalls += 1;
+              return [
+                {
+                  uri: cited.uri,
+                  receipts: [
+                    {
+                      candidateCount: validationCalls === 1 ? 1 : 0,
+                      citationId: cited.codeCitations[0].id,
+                      coverage: validationCalls === 1 ? ('current-complete' as const) : ('incomplete' as const),
+                      kind: 'file' as const,
+                      observedAt: '2026-10-03T00:00:00.000Z',
+                      reason: validationCalls === 1 ? ('exact' as const) : ('repository-unavailable' as const),
+                      status: validationCalls === 1 ? ('exact' as const) : ('unknown' as const),
+                      strategy: validationCalls === 1 ? ('file-path' as const) : ('none' as const),
+                      validatorVersion: 1 as const,
+                    },
+                  ],
+                },
+              ];
+            }),
+          projection: (logical, maximumEstimatedTokens, responseFormat) =>
+            Effect.sync(() => {
+              logicalGaps = logical.coverage.gaps;
+              return projectContextBrief(logical, maximumEstimatedTokens, responseFormat);
+            }),
+        },
+        {...request('resume'), task: 'Continue the automated-context two-arm canary.'},
+      );
+      expect(plans).toEqual([[], [citedPath]]);
+      expect(validationCalls).toBe(2);
+      expect(result.structuredContent.graph.cards).toEqual([]);
+      expect(result.structuredContent.graph.contracts).toEqual([]);
+      expect(result.structuredContent.graph.sources).toBeUndefined();
+      expect(result.structuredContent.coverage.graph.complete).toBe(false);
+      expect(logicalGaps).toContain('resume-anchor-validation-changed');
     }),
   );
 
@@ -916,6 +1118,69 @@ function graph(withSource: boolean): ContextBriefGraphEvidenceV1 {
       : {}),
     trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
     warnings: [],
+  };
+}
+
+function graphForPath(path: string): ContextBriefGraphEvidenceV1 {
+  const base = graph(true);
+  const discriminator = path.includes('planner') ? '2' : path.includes('release/check') ? '3' : '1';
+  const ref = `cgs_${discriminator.repeat(32)}`;
+  return {
+    ...base,
+    cards: [
+      {
+        ...base.cards[0],
+        id: `card-${discriminator}`,
+        ref,
+        symbol: {
+          ...base.cards[0].symbol,
+          name: `symbol-${discriminator}`,
+          path,
+          qualifiedName: `symbol-${discriminator}`,
+        },
+      },
+    ],
+    contracts: [
+      {
+        authority: 'authoritative',
+        evidence: {line: 1, path, repositoryKey: 'threadnote'},
+        id: `contract-${discriminator}`,
+        provenance: 'resolved',
+        rank: 0,
+        relation: 'references',
+        sourceRef: ref,
+        targetRef: ref,
+      },
+    ],
+    sourceExcerpts: [
+      {
+        ...base.sourceExcerpts![0],
+        content: `export const symbol${discriminator} = () => undefined;`,
+        coveredGraphRefs: [ref],
+        id: `source-${discriminator}`,
+        path,
+      },
+    ],
+  };
+}
+
+function exactCitationValidation(uri: string, citationId: string, path: string) {
+  return {
+    uri,
+    receipts: [
+      {
+        candidateCount: 1,
+        citationId,
+        coverage: 'current-complete' as const,
+        kind: 'file' as const,
+        observedAt: '2026-10-03T00:00:00.000Z',
+        observedPath: path,
+        reason: 'exact' as const,
+        status: 'exact' as const,
+        strategy: 'file-path' as const,
+        validatorVersion: 1 as const,
+      },
+    ],
   };
 }
 
