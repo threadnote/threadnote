@@ -141,9 +141,12 @@ describe('Context Health graph observation', () => {
       const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
       expect(yield* fs.exists(layout.databasePath)).toBe(false);
       const report = yield* collectContextHealth(config, 'fixture-health', [record], unindexed);
-      expect(report.findings).toEqual(
-        expect.arrayContaining([expect.objectContaining({category: 'citation-unknown'})]),
-      );
+      expect(report.findings).toEqual([]);
+      expect(report.status).toBe('unknown');
+      expect(report.maintenance).toMatchObject({
+        actionableFindings: 0,
+        citationCoverage: {eligible: 1, currentVerified: 0, deferred: 1, state: 'unavailable'},
+      });
       expect(yield* fs.exists(layout.databasePath)).toBe(false);
       expect(yield* store.read(location, uri)).toBe(content);
       expect(yield* fs.readFileString(path.join(indexed, 'src/price.ts'))).toBe(SOURCE);
