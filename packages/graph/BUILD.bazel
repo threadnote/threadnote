@@ -1392,6 +1392,7 @@ bun_test(
         "//apps/threadnote:src/mcp/effect_schema_sdk_tools.ts",
         "//apps/threadnote:src/mcp/index.ts",
         "//apps/threadnote:src/mcp/install.ts",
+        "//apps/threadnote:src/mcp/launcher.ts",
         "//apps/threadnote:src/mcp/memory_code_citation.ts",
         "//apps/threadnote:src/mcp/server/activation.ts",
         "//apps/threadnote:src/mcp/server/code_graph.ts",

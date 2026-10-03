@@ -4,6 +4,7 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, Layer, Runtime} from 'effect';
 import {withCliOutputConsole} from './effect/cli/output.js';
+import {inspectMcpServerInvocation, mcpServerHelp} from './mcp/launcher.js';
 import type {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {telemetryChildEnvironmentPolicyLayer} from './telemetry/session.js';
@@ -41,7 +42,8 @@ const isOAuthM2MPublisherRegistryCredentialHelper =
 const isGraphOAuthUserHelper = arguments_[0] === '__graph-auth0-helper' || arguments_[0] === '__graph-oauth-helper';
 const isOAuthUserRegistryCredentialHelper =
   arguments_[0] === '__credential-registry-auth0-user' || arguments_[0] === '__credential-registry-oauth-user';
-const isMcpServer = executableName?.startsWith('threadnote-mcp-server') === true || arguments_[0] === 'mcp-server';
+const mcpServerInvocation = inspectMcpServerInvocation(arguments_, executableName);
+const isMcpServer = mcpServerInvocation.selected;
 const oauthM2MHelperIO = {
   stdin: process.stdin,
   writeStderr: (text: string) => {
@@ -464,6 +466,11 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
 }
 
 async function applicationProgram(arguments_: readonly string[], isMcpServer: boolean, isMcpBroker: boolean) {
+  if ((isMcpServer || isMcpBroker) && mcpServerInvocation.help) {
+    return Effect.sync(() => {
+      process.stdout.write(mcpServerHelp);
+    });
+  }
   if (isMcpBroker) {
     const [runtime, {mcpBrokerEffect}, processDiagnostics, processLease] = await Promise.all([
       import('./effect/runtime-bootstrap.js'),
