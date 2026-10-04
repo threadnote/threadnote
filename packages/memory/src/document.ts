@@ -99,56 +99,60 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   const separatorIndex = parseable.indexOf('\n\n');
   const header = separatorIndex === -1 ? parseable : parseable.slice(0, separatorIndex);
   const body = separatorIndex === -1 ? '' : stripLegacyMemoryFieldsTrailer(parseable.slice(separatorIndex + 2)).trim();
-  const firstLine = header.split('\n')[0]?.trim();
+  const lines = header.split('\n');
+  const firstLine = lines[0]?.trim();
   if (firstLine !== 'MEMORY' && firstLine !== 'HANDOFF') {
     return undefined;
   }
-  const kind = parseMemoryKind(memoryHeaderValue(header, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined);
+  const kind =
+    parseMemoryKind(memoryHeaderValueFromLines(lines, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined);
   if (!kind) {
     return undefined;
   }
-  const schemaVersion = parseSchemaVersion(memoryHeaderValue(header, 'schema_version'));
+  const schemaVersion = parseSchemaVersion(memoryHeaderValueFromLines(lines, 'schema_version'));
   const codeCitationMetadata = parseMemoryCodeCitationHeaders(
-    memoryCodeCitationHeaderValues(header),
-    canonicalCodeCitationSchemaVersion(header, schemaVersion),
+    memoryCodeCitationHeaderValues(lines),
+    canonicalCodeCitationSchemaVersion(lines, schemaVersion),
   );
   return {
     body,
     content: trimmed,
     headerTitle: firstLine,
     metadata: {
-      archivedFrom: canonicalOptionalResourceInput(memoryHeaderValue(header, 'archived_from')),
-      authority: parseMemoryAuthority(memoryHeaderValue(header, 'authority')),
-      candidateId: memoryHeaderValue(header, 'candidate_id'),
+      archivedFrom: canonicalOptionalResourceInput(memoryHeaderValueFromLines(lines, 'archived_from')),
+      authority: parseMemoryAuthority(memoryHeaderValueFromLines(lines, 'authority')),
+      candidateId: memoryHeaderValueFromLines(lines, 'candidate_id'),
       codeCitations: codeCitationMetadata.citations,
       citationErrors: codeCitationMetadata.errors,
-      createdAt: memoryHeaderValue(header, 'created_at'),
-      evidence: canonicalResourceInputs(memoryHeaderValues(header, 'evidence')),
+      createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
+      evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
       kind,
-      keywords: memoryHeaderValues(header, 'keywords'),
-      lastReviewed: memoryHeaderValue(header, 'last_reviewed'),
-      memoryId: memoryHeaderValue(header, 'memory_id'),
-      owner: normalizeOptionalMetadata(memoryHeaderValue(header, 'owner')),
-      project: normalizeOptionalMetadata(memoryHeaderValue(header, 'project') ?? memoryHeaderValue(header, 'repo')),
-      references: canonicalResourceInputs(memoryHeaderValues(header, 'references')),
-      reviewAfter: parseIsoDate(memoryHeaderValue(header, 'review_after')),
-      relations: parseMemoryRelations(memoryHeaderValues(header, 'relation')),
+      keywords: memoryHeaderValues(lines, 'keywords'),
+      lastReviewed: memoryHeaderValueFromLines(lines, 'last_reviewed'),
+      memoryId: memoryHeaderValueFromLines(lines, 'memory_id'),
+      owner: normalizeOptionalMetadata(memoryHeaderValueFromLines(lines, 'owner')),
+      project: normalizeOptionalMetadata(
+        memoryHeaderValueFromLines(lines, 'project') ?? memoryHeaderValueFromLines(lines, 'repo'),
+      ),
+      references: canonicalResourceInputs(memoryHeaderValues(lines, 'references')),
+      reviewAfter: parseIsoDate(memoryHeaderValueFromLines(lines, 'review_after')),
+      relations: parseMemoryRelations(memoryHeaderValues(lines, 'relation')),
       schemaVersion,
-      sourceHash: memoryHeaderValue(header, 'source_hash'),
-      sourceAgentClient: memoryHeaderValue(header, 'source_agent_client') ?? 'unknown',
-      sourceCommit: memoryHeaderValue(header, 'source_commit'),
-      sourceObservedAt: memoryHeaderValue(header, 'source_observed_at'),
-      sourceSessionId: memoryHeaderValue(header, 'source_session_id'),
-      status: parseMemoryStatus(memoryHeaderValue(header, 'status')) ?? 'active',
-      supersedes: canonicalOptionalResourceInput(memoryHeaderValue(header, 'supersedes')),
-      timestamp: memoryHeaderValue(header, 'timestamp') ?? new Date(0).toISOString(),
-      topic: normalizeOptionalMetadata(memoryHeaderValue(header, 'topic')),
-      trust: parseMemoryTrust(memoryHeaderValue(header, 'trust')),
-      updatedAt: memoryHeaderValue(header, 'updated_at'),
-      validFrom: memoryHeaderValue(header, 'valid_from'),
-      validTo: memoryHeaderValue(header, 'valid_to'),
-      visibility: parseMemoryVisibility(memoryHeaderValue(header, 'visibility')),
-      workspaceScope: normalizeOptionalMetadata(memoryHeaderValue(header, 'workspace_scope')),
+      sourceHash: memoryHeaderValueFromLines(lines, 'source_hash'),
+      sourceAgentClient: memoryHeaderValueFromLines(lines, 'source_agent_client') ?? 'unknown',
+      sourceCommit: memoryHeaderValueFromLines(lines, 'source_commit'),
+      sourceObservedAt: memoryHeaderValueFromLines(lines, 'source_observed_at'),
+      sourceSessionId: memoryHeaderValueFromLines(lines, 'source_session_id'),
+      status: parseMemoryStatus(memoryHeaderValueFromLines(lines, 'status')) ?? 'active',
+      supersedes: canonicalOptionalResourceInput(memoryHeaderValueFromLines(lines, 'supersedes')),
+      timestamp: memoryHeaderValueFromLines(lines, 'timestamp') ?? new Date(0).toISOString(),
+      topic: normalizeOptionalMetadata(memoryHeaderValueFromLines(lines, 'topic')),
+      trust: parseMemoryTrust(memoryHeaderValueFromLines(lines, 'trust')),
+      updatedAt: memoryHeaderValueFromLines(lines, 'updated_at'),
+      validFrom: memoryHeaderValueFromLines(lines, 'valid_from'),
+      validTo: memoryHeaderValueFromLines(lines, 'valid_to'),
+      visibility: parseMemoryVisibility(memoryHeaderValueFromLines(lines, 'visibility')),
+      workspaceScope: normalizeOptionalMetadata(memoryHeaderValueFromLines(lines, 'workspace_scope')),
     },
     uri: canonicalResourceInput(uri),
   };
@@ -389,49 +393,53 @@ function canonicalResourceInput(uri: string): string {
 export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
   const parseable = normalizeMemoryDocumentLineEndings(memory);
   const header = parseable.slice(0, Math.max(0, parseable.indexOf('\n\n')) || parseable.length);
-  const firstLine = header.split('\n')[0]?.trim();
-  const schemaVersion = parseSchemaVersion(memoryHeaderValue(header, 'schema_version'));
+  const lines = header.split('\n');
+  const firstLine = lines[0]?.trim();
+  const schemaVersion = parseSchemaVersion(memoryHeaderValueFromLines(lines, 'schema_version'));
   const codeCitationMetadata = parseMemoryCodeCitationHeaders(
-    memoryCodeCitationHeaderValues(header),
-    canonicalCodeCitationSchemaVersion(header, schemaVersion),
+    memoryCodeCitationHeaderValues(lines),
+    canonicalCodeCitationSchemaVersion(lines, schemaVersion),
   );
   return {
-    archivedFrom: canonicalOptionalResourceInput(memoryHeaderValue(header, 'archived_from')),
-    authority: parseMemoryAuthority(memoryHeaderValue(header, 'authority')),
-    candidateId: memoryHeaderValue(header, 'candidate_id'),
+    archivedFrom: canonicalOptionalResourceInput(memoryHeaderValueFromLines(lines, 'archived_from')),
+    authority: parseMemoryAuthority(memoryHeaderValueFromLines(lines, 'authority')),
+    candidateId: memoryHeaderValueFromLines(lines, 'candidate_id'),
     codeCitations: codeCitationMetadata.citations,
     citationErrors: codeCitationMetadata.errors,
-    createdAt: memoryHeaderValue(header, 'created_at'),
-    evidence: canonicalResourceInputs(memoryHeaderValues(header, 'evidence')),
-    kind: parseMemoryKind(memoryHeaderValue(header, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined),
-    keywords: memoryHeaderValues(header, 'keywords'),
-    lastReviewed: memoryHeaderValue(header, 'last_reviewed'),
-    memoryId: memoryHeaderValue(header, 'memory_id'),
-    owner: normalizeOptionalMetadata(memoryHeaderValue(header, 'owner')),
+    createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
+    evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
+    kind:
+      parseMemoryKind(memoryHeaderValueFromLines(lines, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined),
+    keywords: memoryHeaderValues(lines, 'keywords'),
+    lastReviewed: memoryHeaderValueFromLines(lines, 'last_reviewed'),
+    memoryId: memoryHeaderValueFromLines(lines, 'memory_id'),
+    owner: normalizeOptionalMetadata(memoryHeaderValueFromLines(lines, 'owner')),
     project: normalizeOptionalMetadata(
-      memoryHeaderValue(header, 'project') ??
-        memoryHeaderValue(header, 'repo') ??
-        memoryHeaderValue(header, 'repo_path'),
+      memoryHeaderValueFromLines(lines, 'project') ??
+        memoryHeaderValueFromLines(lines, 'repo') ??
+        memoryHeaderValueFromLines(lines, 'repo_path'),
     ),
-    references: canonicalResourceInputs(memoryHeaderValues(header, 'references')),
-    reviewAfter: parseIsoDate(memoryHeaderValue(header, 'review_after')),
-    relations: parseMemoryRelations(memoryHeaderValues(header, 'relation')),
+    references: canonicalResourceInputs(memoryHeaderValues(lines, 'references')),
+    reviewAfter: parseIsoDate(memoryHeaderValueFromLines(lines, 'review_after')),
+    relations: parseMemoryRelations(memoryHeaderValues(lines, 'relation')),
     schemaVersion,
-    sourceHash: memoryHeaderValue(header, 'source_hash'),
-    sourceAgentClient: memoryHeaderValue(header, 'source_agent_client'),
-    sourceCommit: memoryHeaderValue(header, 'source_commit'),
-    sourceObservedAt: memoryHeaderValue(header, 'source_observed_at'),
-    sourceSessionId: memoryHeaderValue(header, 'source_session_id'),
-    status: parseMemoryStatus(memoryHeaderValue(header, 'status')),
-    supersedes: canonicalOptionalResourceInput(memoryHeaderValue(header, 'supersedes')),
-    timestamp: memoryHeaderValue(header, 'timestamp'),
-    topic: normalizeOptionalMetadata(memoryHeaderValue(header, 'topic') ?? memoryHeaderValue(header, 'task')),
-    trust: parseMemoryTrust(memoryHeaderValue(header, 'trust')),
-    updatedAt: memoryHeaderValue(header, 'updated_at'),
-    validFrom: memoryHeaderValue(header, 'valid_from'),
-    validTo: memoryHeaderValue(header, 'valid_to'),
-    visibility: parseMemoryVisibility(memoryHeaderValue(header, 'visibility')),
-    workspaceScope: normalizeOptionalMetadata(memoryHeaderValue(header, 'workspace_scope')),
+    sourceHash: memoryHeaderValueFromLines(lines, 'source_hash'),
+    sourceAgentClient: memoryHeaderValueFromLines(lines, 'source_agent_client'),
+    sourceCommit: memoryHeaderValueFromLines(lines, 'source_commit'),
+    sourceObservedAt: memoryHeaderValueFromLines(lines, 'source_observed_at'),
+    sourceSessionId: memoryHeaderValueFromLines(lines, 'source_session_id'),
+    status: parseMemoryStatus(memoryHeaderValueFromLines(lines, 'status')),
+    supersedes: canonicalOptionalResourceInput(memoryHeaderValueFromLines(lines, 'supersedes')),
+    timestamp: memoryHeaderValueFromLines(lines, 'timestamp'),
+    topic: normalizeOptionalMetadata(
+      memoryHeaderValueFromLines(lines, 'topic') ?? memoryHeaderValueFromLines(lines, 'task'),
+    ),
+    trust: parseMemoryTrust(memoryHeaderValueFromLines(lines, 'trust')),
+    updatedAt: memoryHeaderValueFromLines(lines, 'updated_at'),
+    validFrom: memoryHeaderValueFromLines(lines, 'valid_from'),
+    validTo: memoryHeaderValueFromLines(lines, 'valid_to'),
+    visibility: parseMemoryVisibility(memoryHeaderValueFromLines(lines, 'visibility')),
+    workspaceScope: normalizeOptionalMetadata(memoryHeaderValueFromLines(lines, 'workspace_scope')),
   };
 }
 
@@ -440,18 +448,20 @@ function normalizeMemoryDocumentLineEndings(content: string): string {
 }
 
 export function memoryHeaderValue(header: string, key: string): string | undefined {
+  return memoryHeaderValueFromLines(header.split('\n'), key);
+}
+
+function memoryHeaderValueFromLines(lines: readonly string[], key: string): string | undefined {
   const prefix = `${key}:`;
-  return header
-    .split('\n')
+  return lines
     .find(line => line.startsWith(prefix))
     ?.slice(prefix.length)
     .trim();
 }
 
-function memoryHeaderValues(header: string, key: string): readonly string[] | undefined {
+function memoryHeaderValues(lines: readonly string[], key: string): readonly string[] | undefined {
   const prefix = `${key}:`;
-  const values = header
-    .split('\n')
+  const values = lines
     .filter(line => line.startsWith(prefix))
     .map(line => line.slice(prefix.length).trim())
     .filter(value => value.length > 0);
@@ -459,10 +469,9 @@ function memoryHeaderValues(header: string, key: string): readonly string[] | un
 }
 
 /** Preserve citation whitespace so a non-canonical header cannot become authoritative after trimming. */
-function memoryCodeCitationHeaderValues(header: string): readonly string[] | undefined {
+function memoryCodeCitationHeaderValues(lines: readonly string[]): readonly string[] | undefined {
   const prefix = `${MEMORY_CODE_CITATION_HEADER}:`;
-  const values = header
-    .split('\n')
+  const values = lines
     .filter(line => line.trimStart().startsWith(prefix))
     .map(line => {
       const trimmedStart = line.trimStart();
@@ -473,10 +482,13 @@ function memoryCodeCitationHeaderValues(header: string): readonly string[] | und
   return values.length > 0 ? values : undefined;
 }
 
-function canonicalCodeCitationSchemaVersion(header: string, schemaVersion: number | undefined): number | undefined {
+function canonicalCodeCitationSchemaVersion(
+  lines: readonly string[],
+  schemaVersion: number | undefined,
+): number | undefined {
   if (schemaVersion === undefined) return undefined;
-  const lines = header.split('\n').filter(line => line.startsWith('schema_version:'));
-  return lines.length === 1 && lines[0] === `schema_version: ${schemaVersion}` ? schemaVersion : undefined;
+  const schemas = lines.filter(line => line.startsWith('schema_version:'));
+  return schemas.length === 1 && schemas[0] === `schema_version: ${schemaVersion}` ? schemaVersion : undefined;
 }
 
 function parseMemoryKind(value: string | undefined): MemoryKind | undefined {

@@ -30,17 +30,22 @@ export interface MaintenanceWorkerEvidence {
   readonly observation?: ContextMaintenanceWorkerObservation;
 }
 
+export const MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT = 16;
+export const MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT = 8;
+
 export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(tasks: readonly T[]) {
   const groups: (T & MaintenanceWorkerTask)[][] = [];
   const current = new Map<string, (T & MaintenanceWorkerTask)[]>();
   const slices = tasks.flatMap(task => {
-    const citations = task.record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? [];
+    const citations = maintenanceTaskCitations(task, task.record);
     const parts: (typeof citations)[number][][] = [];
     for (const citation of citations) {
       const part = parts.at(-1);
       if (
         part === undefined ||
-        new Set([...part, citation].map(item => `${item.repositoryId}:${item.sourceCommit}`)).size > 32
+        part.length >= MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
+        new Set([...part, citation].map(item => `${item.repositoryId}:${item.sourceCommit}`)).size >
+          MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
       )
         parts.push([citation]);
       else part.push(citation);
@@ -55,8 +60,9 @@ export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(ta
     const anchors = together.flatMap(item => maintenanceTaskCitations(item, item.record));
     if (
       previous === undefined ||
-      anchors.length > 96 ||
-      new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size > 32
+      anchors.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
+      new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
+        MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
     ) {
       const group = [task];
       groups.push(group);
@@ -202,7 +208,13 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
           },
         ],
   );
-  const citations = candidates.flatMap(candidate => candidate.codeCitations);
+  const citations = records.flatMap(record => record.metadata.codeCitations ?? []);
+  if (
+    citations.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
+    new Set(citations.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
+      MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
+  )
+    return {project, cwd, records, validations: [], observation: undefined} satisfies MaintenanceWorkerEvidence;
   if (candidates.length === 0) {
     const association = yield* readContextMaintenanceCitationAssociation(
       config,
@@ -224,11 +236,6 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
       observation: {association, sourceEpoch, memoryGeneration},
     } satisfies MaintenanceWorkerEvidence;
   }
-  if (
-    citations.length > 96 ||
-    new Set(citations.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size > 32
-  )
-    return {project, cwd, records, validations: [], observation: undefined} satisfies MaintenanceWorkerEvidence;
   let observation: ContextMaintenanceWorkerObservation | undefined;
   const validations = yield* collectContextMaintenanceCitationEvidence<
     R | Effect.Services<ReturnType<typeof validateContextHealthMemoryCitations>>

@@ -44,6 +44,8 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {
   mergeMaintenanceWorkerEvidence,
   invalidateMaintenanceWorkerBatch,
+  prepareMaintenanceWorkerBatches,
+  collectMaintenanceWorkerBatch,
 } from '../../src/memory/context/maintenance_batch.js';
 
 const NOW = '2026-10-03T15:00:00.000Z';
@@ -70,7 +72,142 @@ function record(topic: string, metadata: Partial<MemoryMetadata> = {}, body = 'K
   )!;
 }
 
+function legacyBatchSubject(index: number, project: string, selectors: readonly number[]) {
+  const uri = `threadnote://user/tester/memories/durable/projects/${project}/subject-${index}.md`;
+  const original = parseMemoryDocument(
+    uri,
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project,
+        topic: `subject-${index}`,
+        sourceAgentClient: 'test',
+        timestamp: NOW,
+      },
+      'Synthetic legacy subject.',
+    ),
+  )!;
+  return {
+    ...original,
+    metadata: {
+      ...original.metadata,
+      codeCitations: selectors.map((selector, anchor) =>
+        createMemoryCodeCitation({
+          version: 1,
+          repositoryId: 'b'.repeat(64),
+          repositoryIdentityKind: 'local',
+          sourceCommit: selector.toString(16).padStart(40, '0'),
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          extractorSet: 'test',
+          path: `source-${index}-${anchor}.ts`,
+          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          target: {kind: 'file'},
+        }),
+      ),
+    },
+  };
+}
+
 describe('persistent context maintenance', () => {
+  it('splits a legacy 64-anchor single-selector task into four complete bounded parts', () => {
+    const record = legacyBatchSubject(
+      0,
+      'one',
+      Array.from({length: 64}, () => 0),
+    );
+    const task = {record, project: 'one', chunk: 0, key: 'legacy:0'};
+    const before = structuredClone(task);
+    const groups = planMaintenanceWorkerBatches([task]);
+    expect(groups).toHaveLength(4);
+    expect(groups.map(group => group[0].citationIds?.length)).toEqual([16, 16, 16, 16]);
+    expect(groups.flatMap(group => group.flatMap(part => part.citationIds ?? []))).toEqual(
+      record.metadata.codeCitations.map(citation => citation.id),
+    );
+    expect(groups.flat().every(part => part.key === task.key && part.chunk === 0)).toBe(true);
+    expect(task).toEqual(before);
+  });
+
+  it('preserves every selected legacy anchor and per-project task order under independent batch bounds', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            project: fc.constantFrom('one', 'two', 'three'),
+            selectors: fc.array(fc.integer({min: 0, max: 20}), {maxLength: 130}),
+            selectedOnly: fc.boolean(),
+            parity: fc.integer({min: 0, max: 1}),
+          }),
+          {minLength: 1, maxLength: 8},
+        ),
+        inputs => {
+          const tasks = inputs.flatMap((input, index) => {
+            const record = legacyBatchSubject(index, input.project, input.selectors);
+            return Array.from({length: Math.max(1, Math.ceil(input.selectors.length / 64))}, (_, chunk) => ({
+              record,
+              project: input.project,
+              chunk,
+              key: `${index}:${chunk}`,
+              citationIds: input.selectedOnly
+                ? record.metadata.codeCitations
+                    .slice(chunk * 64, (chunk + 1) * 64)
+                    .filter((_, anchor) => anchor % 2 === input.parity)
+                    .map(citation => citation.id)
+                : undefined,
+            }));
+          });
+          const before = structuredClone(tasks);
+          const expected = tasks.map(task => ({
+            ...task,
+            ids: task.record.metadata.codeCitations
+              .filter((_, index) => Math.floor(index / 64) === task.chunk)
+              .filter(citation => task.citationIds === undefined || task.citationIds.includes(citation.id))
+              .map(citation => citation.id),
+          }));
+          const groups = planMaintenanceWorkerBatches(tasks);
+          for (const group of groups) {
+            expect(new Set(group.map(task => task.project)).size).toBe(1);
+            const anchors = group.flatMap(task =>
+              task.record.metadata.codeCitations
+                .filter((_, index) => Math.floor(index / 64) === task.chunk)
+                .filter(citation => task.citationIds === undefined || task.citationIds.includes(citation.id)),
+            );
+            expect(anchors.length).toBeGreaterThan(0);
+            expect(anchors.length).toBeLessThanOrEqual(16);
+            expect(
+              new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size,
+            ).toBeLessThanOrEqual(8);
+          }
+          for (const task of expected) {
+            const actual = groups.flat().filter(part => part.key === task.key);
+            const ids = actual.flatMap(part =>
+              part.record.metadata.codeCitations
+                .filter((_, index) => Math.floor(index / 64) === part.chunk)
+                .filter(citation => part.citationIds === undefined || part.citationIds.includes(citation.id))
+                .map(citation => citation.id),
+            );
+            expect(ids).toEqual(task.ids);
+          }
+          for (const project of ['one', 'two', 'three']) {
+            const actualKeys = groups
+              .flat()
+              .filter(task => task.project === project)
+              .map(task => task.key);
+            const consecutiveKeys = actualKeys.filter((key, index) => index === 0 || key !== actualKeys[index - 1]);
+            expect(consecutiveKeys).toEqual(
+              expected.filter(task => task.project === project && task.ids.length > 0).map(task => task.key),
+            );
+          }
+          expect(tasks).toEqual(before);
+          expect(planMaintenanceWorkerBatches(tasks)).toEqual(groups);
+        },
+      ),
+      {numRuns: 40, seed: 120416},
+    );
+  });
+
   effectIt.effect('logical checkpoint coverage converges with trailing newlines and managed legacy footers', () =>
     Effect.gen(function* () {
       for (const envelope of ['\n', '\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->']) {
@@ -153,10 +290,10 @@ describe('persistent context maintenance', () => {
           for (const group of groups) {
             expect(new Set(group.map(task => task.project)).size).toBe(1);
             const citations = group.flatMap(task => task.record.metadata.codeCitations!);
-            expect(citations.length).toBeLessThanOrEqual(96);
+            expect(citations.length).toBeLessThanOrEqual(16);
             expect(
               new Set(citations.map(item => `${item.repositoryId}:${item.sourceCommit}`)).size,
-            ).toBeLessThanOrEqual(32);
+            ).toBeLessThanOrEqual(8);
           }
           const subject = tasks[0].record;
           const evidence = {
@@ -200,11 +337,8 @@ describe('persistent context maintenance', () => {
     const original = record('source');
     const subject = {...original, metadata: {...original.metadata, codeCitations: citations}};
     const groups = planMaintenanceWorkerBatches([{record: subject, project: 'threadnote', chunk: 0, key: 'logical:0'}]);
-    expect(groups).toHaveLength(2);
-    expect(groups.flat().map(task => [task.key, task.chunk])).toEqual([
-      ['logical:0', 0],
-      ['logical:0', 0],
-    ]);
+    expect(groups).toHaveLength(8);
+    expect(groups.flat().map(task => [task.key, task.chunk])).toEqual(Array.from({length: 8}, () => ['logical:0', 0]));
     expect(groups.flatMap(group => group.flatMap(task => task.citationIds ?? []))).toEqual(
       citations.map(item => item.id),
     );
@@ -229,7 +363,7 @@ describe('persistent context maintenance', () => {
         },
       };
     });
-    const merged = mergeMaintenanceWorkerEvidence(parts[0], parts[1]);
+    const merged = parts.slice(1).reduce(mergeMaintenanceWorkerEvidence, parts[0]);
     expect(merged.records[0].metadata.codeCitations?.map(item => item.id)).toEqual(citations.map(item => item.id));
     expect(maintenanceWorkerRecordValidations(merged, subject)).toHaveLength(1);
     const advanced = {...parts[1], observation: {...parts[1].observation, memoryGeneration: 'unrelated-write'}};
@@ -298,6 +432,153 @@ describe('persistent context maintenance', () => {
       {numRuns: 24},
     );
   });
+
+  effectIt.effect('collects all fresh subjects in bounded groups and refuses oversized direct collection', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const subjects = [source];
+      for (let index = 1; index < 17; index++) {
+        const next = record(`subject-${index}`, {schemaVersion: 5, codeCitations: source.metadata.codeCitations});
+        yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, `subject-${index}.md`), next.content);
+        subjects.push(next);
+      }
+      const tasks = subjects.map((record, index) => ({record, project: 'threadnote', chunk: 0, key: String(index)}));
+      const oversized = yield* collectMaintenanceWorkerBatch(fixture.config, tasks, repository);
+      expect(oversized.observation).toBeUndefined();
+      expect(oversized.validations).toEqual([]);
+      const groups = planMaintenanceWorkerBatches(tasks);
+      expect(groups.map(group => group.length)).toEqual([16, 1]);
+      const evidence = yield* Effect.forEach(groups, group =>
+        collectMaintenanceWorkerBatch(fixture.config, group, repository),
+      );
+      expect(evidence.every(batch => batch.observation !== undefined)).toBe(true);
+      expect(evidence.flatMap(batch => batch.records).map(record => record.uri)).toEqual(
+        subjects.map(record => record.uri),
+      );
+      expect(
+        evidence
+          .flatMap(batch => batch.validations)
+          .map(validation => validation.uri)
+          .sort(),
+      ).toEqual(subjects.map(record => record.uri).sort());
+      expect(evidence.flatMap(batch => batch.validations).flatMap(validation => validation.receipts)).toHaveLength(17);
+      for (const subject of subjects) {
+        const file = fixture.path.join(fixture.directory, subject.uri.split('/').at(-1)!);
+        expect(yield* fixture.fs.readFileString(file)).toBe(subject.content);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('bounds every fresh anchor before unsupported or mixed subject association discovery', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const {id: _id, ...original} = source.metadata.codeCitations![0];
+      for (const kind of ['incident', 'preference', 'mixed'] as const) {
+        for (const boundary of ['anchors', 'selectors'] as const) {
+          const count = boundary === 'anchors' ? 17 : 9;
+          const subjects = [];
+          for (let index = 0; index < count; index++) {
+            const citation =
+              boundary === 'selectors' && index > 0
+                ? createMemoryCodeCitation({...original, sourceCommit: index.toString(16).padStart(40, '0')})
+                : source.metadata.codeCitations![0];
+            const topic = `admission-${kind}-${boundary}-${index}`;
+            const next = record(topic, {
+              kind: kind === 'mixed' ? (index === 0 ? 'durable' : 'incident') : kind,
+              schemaVersion: 5,
+              codeCitations: [citation],
+            });
+            yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, `${topic}.md`), next.content);
+            subjects.push(next);
+          }
+          const tasks = subjects.map((record, index) => ({
+            record,
+            project: 'threadnote',
+            chunk: 0,
+            key: String(index),
+          }));
+          const oversized = yield* collectMaintenanceWorkerBatch(fixture.config, tasks, repository);
+          expect(oversized.observation, `${kind}:${boundary}`).toBeUndefined();
+          expect(oversized.validations).toEqual([]);
+          expect(oversized.records.map(record => record.uri).sort()).toEqual(subjects.map(record => record.uri).sort());
+          for (const subject of subjects)
+            expect(
+              yield* fixture.fs.readFileString(fixture.path.join(fixture.directory, subject.uri.split('/').at(-1)!)),
+            ).toBe(subject.content);
+        }
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('finishes every bounded part of the first legacy task before yielding its time budget', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const {id: _id, ...citation} = source.metadata.codeCitations![0];
+      const legacy = {
+        ...source,
+        metadata: {
+          ...source.metadata,
+          codeCitations: [
+            source.metadata.codeCitations![0],
+            ...Array.from({length: 63}, (_, index) =>
+              createMemoryCodeCitation({...citation, path: `legacy-${index}.ts`}),
+            ),
+          ],
+        },
+      };
+      const clock = yield* Clock.Clock;
+      let offset = 0;
+      const slowClock: Clock.Clock = {
+        ...clock,
+        currentTimeMillis: Effect.map(clock.currentTimeMillis, time => time + offset),
+        currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe() + offset,
+        currentTimeNanos: clock.currentTimeNanos,
+        currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+        monotonicTimeNanos: clock.monotonicTimeNanos,
+        monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+        sleep: duration => clock.sleep(duration),
+      };
+      const query = yield* CodeGraphQueryService;
+      const slow = CodeGraphQueryService.of({
+        ...query,
+        status: (home, cwd, options) =>
+          Effect.gen(function* () {
+            const result = yield* query.status(home, cwd, options);
+            offset = 6_000;
+            return result;
+          }),
+      });
+      const started = yield* Clock.currentTimeMillis;
+      const prepared = yield* prepareMaintenanceWorkerBatches(
+        fixture.config,
+        [
+          {record: legacy, project: 'threadnote', chunk: 0, key: 'first'},
+          {record: source, project: 'threadnote', chunk: 0, key: 'tail'},
+        ],
+        new Map([['threadnote', repository]]),
+        repository,
+        started,
+        NOW,
+        {},
+        new Map(),
+      ).pipe(Effect.provideService(CodeGraphQueryService, slow), Effect.provideService(Clock.Clock, slowClock));
+      expect(offset).toBe(6_000);
+      expect(prepared.batches).toHaveLength(4);
+      expect([...prepared.batchByTask.keys()]).toEqual(['first']);
+      const evidence = prepared.batchByTask.get('first')!;
+      expect(evidence.observation).toBeUndefined();
+      // A fresh canonical read retains the authored citation cap; the synthetic
+      // legacy planner metadata must not invent aggregate authority for its other anchors.
+      expect(evidence.records[0].metadata.codeCitations).toEqual(source.metadata.codeCitations);
+      expect(
+        evidence.validations.flatMap(validation => validation.receipts).map(receipt => receipt.citationId),
+      ).toEqual(source.metadata.codeCitations!.map(anchor => anchor.id));
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   effectIt.effect('consumes prepared work without spending its application budget on slow observations', () =>
     Effect.gen(function* () {
