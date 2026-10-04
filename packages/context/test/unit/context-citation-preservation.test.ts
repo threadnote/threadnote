@@ -154,11 +154,7 @@ const fixture = (dirty = false, capturedSource?: string) =>
       provide(
         validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository'}, [
           {
-            citationErrorCount: 0,
             codeCitations: [anchor],
-            excerpt: '',
-            kind: 'durable',
-            rank: 0,
             uri: 'threadnote://memory/proof',
           },
         ]),

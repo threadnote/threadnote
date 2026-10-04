@@ -59,6 +59,7 @@ import type {
   ContextBriefMemoryCandidateV1,
   ContextBriefMemoryCitationValidationV2,
   ContextBriefScopeV1,
+  ContextHealthCitationSubjectV1,
 } from './types.js';
 
 export const CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS = 96 as const;
@@ -129,10 +130,10 @@ export interface ContextHealthCitationBatchOptionsV1 {
 
 /** A stable identity cursor survives deletions; new entries before it belong to the next scan generation. */
 export function planContextHealthCitationBatch(
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   options: ContextHealthCitationBatchOptionsV1 = {},
 ): {
-  readonly candidates: readonly ContextBriefMemoryCandidateV1[];
+  readonly candidates: readonly ContextHealthCitationSubjectV1[];
   readonly checkpoint: ContextHealthCitationCheckpointV1;
   readonly eligible: number;
   readonly checked: number;
@@ -167,7 +168,7 @@ export function planContextHealthCitationBatch(
     repositories.add(task.citation.repositoryId);
     selected.push(task);
   }
-  const grouped = new Map<string, ContextBriefMemoryCandidateV1>();
+  const grouped = new Map<string, ContextHealthCitationSubjectV1>();
   for (const task of selected) {
     const existing = grouped.get(task.candidate.uri);
     grouped.set(task.candidate.uri, {
@@ -187,7 +188,7 @@ export function planContextHealthCitationBatch(
 export const validateContextHealthCitationBatch = Effect.fn('contextHealth.validateCitationBatch')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   options: ContextHealthCitationBatchOptionsV1 = {},
 ) {
   const batch = planContextHealthCitationBatch(candidates, options);
@@ -205,7 +206,7 @@ export const validateContextHealthCitationBatch = Effect.fn('contextHealth.valid
 const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCitationEvidence')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   direct: readonly ContextBriefMemoryCitationValidationV2[],
   policy: 'health' | 'brief' = 'health',
   fence?: ContextBriefCitationValidationFenceV2,
@@ -791,7 +792,7 @@ const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistor
 export const validateContextHealthMemoryCitations = Effect.fn('contextHealth.validateMemoryCitations')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   options: {readonly fullScan?: boolean} = {},
 ) {
   if (!options.fullScan) return (yield* validateContextHealthCitationBatch(config, scope, candidates)).validations;
@@ -872,7 +873,7 @@ interface ValidatedCitation {
 const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMemoryCitations')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   fence?: ContextBriefCitationValidationFenceV2,
   retentionHome?: string,
 ) {

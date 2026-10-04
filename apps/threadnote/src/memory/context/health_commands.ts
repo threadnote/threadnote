@@ -9,7 +9,7 @@ import {shellQuote} from '@threadnote/platform/command';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {validateContextHealthMemoryCitations} from '@threadnote/context/citation_validation';
-import type {ContextBriefMemoryCandidateV1} from '@threadnote/context/types';
+import type {ContextHealthCitationSubjectV1} from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {classifyMemoryIdentityCandidates} from '@threadnote/recall/memory/identity';
@@ -106,7 +106,7 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
           config,
           project,
           citationRecords,
-          citationCandidates(citationRecords),
+          citationCandidates(citationRecords, project),
           cwd,
           {
             mode:
@@ -158,22 +158,13 @@ export const collectContextHealth = Effect.fn('memory.contextHealth.collect')(fu
 
 function citationCandidates(
   records: Parameters<typeof buildContextHealthReport>[0]['records'],
-): readonly ContextBriefMemoryCandidateV1[] {
-  return records.flatMap((record, rank) => {
-    if (record.metadata.kind !== 'durable' && record.metadata.kind !== 'handoff') return [];
-    return [
-      {
-        citationErrorCount: record.metadata.citationErrors?.length ?? 0,
-        codeCitations: record.metadata.codeCitations ?? [],
-        excerpt: '',
-        kind: record.metadata.kind,
-        ...(record.metadata.memoryId === undefined ? {} : {memoryId: record.metadata.memoryId}),
-        project: record.metadata.project,
-        rank,
-        uri: record.uri,
-      },
-    ];
-  });
+  project: string,
+): readonly ContextHealthCitationSubjectV1[] {
+  return records.flatMap(record =>
+    record.metadata.status === 'active' && record.metadata.project === project && record.metadata.codeCitations?.length
+      ? [{codeCitations: record.metadata.codeCitations, uri: record.uri}]
+      : [],
+  );
 }
 
 const relationStatusEvidence = Effect.fn('memory.contextHealth.relationEvidence')(function* (

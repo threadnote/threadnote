@@ -299,6 +299,12 @@ export interface ContextBriefMemoryCandidateV1 {
   readonly uri: string;
 }
 
+/** Canonical memory identity and explicit anchors supplied to citation validation by Context Health. */
+export interface ContextHealthCitationSubjectV1 {
+  readonly codeCitations: readonly MemoryCodeCitationV1[];
+  readonly uri: string;
+}
+
 /** Explicit, bounded author-supplied guidance; never executable instructions. */
 export interface ContextBriefMemoryActionCardV1 {
   readonly appliesTo: string;

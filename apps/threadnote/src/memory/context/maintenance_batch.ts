@@ -19,7 +19,7 @@ import {
   type ContextMaintenanceWorkerObservation,
 } from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
-import {recordSourceRevision} from './maintenance_source.js';
+import {maintenanceCitationAdmissionCurrent, recordSourceRevision} from './maintenance_source.js';
 
 export interface MaintenanceWorkerTask {
   readonly record: MemoryRecord;
@@ -38,12 +38,6 @@ export interface MaintenanceWorkerEvidence {
 
 export const MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT = 16;
 export const MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT = 8;
-
-function validatesCitationCandidate(
-  record: MemoryRecord,
-): record is MemoryRecord & {readonly metadata: MemoryRecord['metadata'] & {readonly kind: 'durable' | 'handoff'}} {
-  return record.metadata.kind === 'durable' || record.metadata.kind === 'handoff';
-}
 
 export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(tasks: readonly T[]) {
   const groups: (T & MaintenanceWorkerTask)[][] = [];
@@ -72,7 +66,6 @@ export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(ta
     const anchors = together.flatMap(item => maintenanceTaskCitations(item, item.record));
     if (
       previous === undefined ||
-      validatesCitationCandidate(previous[0].record) !== validatesCitationCandidate(task.record) ||
       anchors.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
       new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
         MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
@@ -205,22 +198,10 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
         .flatMap(task => maintenanceTaskCitations(task, record)),
     },
   }));
-  const candidates = records.flatMap((record, rank) =>
-    !validatesCitationCandidate(record)
-      ? []
-      : [
-          {
-            citationErrorCount: record.metadata.citationErrors?.length ?? 0,
-            codeCitations: record.metadata.codeCitations ?? [],
-            excerpt: '',
-            kind: record.metadata.kind,
-            memoryId: record.metadata.memoryId,
-            project: record.metadata.project,
-            rank,
-            uri: record.uri,
-          },
-        ],
-  );
+  const candidates = records.map(record => ({
+    codeCitations: record.metadata.codeCitations ?? [],
+    uri: record.uri,
+  }));
   const citations = records.flatMap(record => record.metadata.codeCitations ?? []);
   if (
     citations.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
@@ -280,6 +261,7 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
       string,
       {
         readonly memoryHash?: string;
+        readonly citationAdmissionVersion?: number;
         readonly sourceEpoch?: string;
         readonly retryAt?: string;
         readonly revision: string;
@@ -300,6 +282,7 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
     const batch = yield* collectMaintenanceWorkerBatch(config, group, root, (record, observation) =>
       Effect.gen(function* () {
         const checks = group.filter(task => task.record.uri === record.uri).map(task => checkpoints[task.key]);
+        if (checks.some(check => !maintenanceCitationAdmissionCurrent(record, check))) return false;
         if (
           !checks.every(
             check =>
@@ -347,6 +330,35 @@ export function maintenanceWorkerRecordValidations(evidence: MaintenanceWorkerEv
   return evidence.validations
     .filter(validation => validation.uri === record.uri)
     .map(validation => ({...validation, receipts: validation.receipts.filter(receipt => ids.has(receipt.citationId))}));
+}
+
+export function maintenanceWorkerCheckpointReusable(
+  record: MemoryRecord,
+  check:
+    | {
+        readonly revision: string;
+        readonly checkedCitations?: number;
+        readonly citationAdmissionVersion?: number;
+        readonly retryAt?: string;
+      }
+    | undefined,
+  evidence: MaintenanceWorkerEvidence | undefined,
+  revision: string,
+  now: string,
+  legacy: boolean,
+) {
+  if (legacy || !maintenanceCitationAdmissionCurrent(record, check)) return false;
+  const observedCitations =
+    evidence === undefined
+      ? 0
+      : maintenanceWorkerRecordValidations(evidence, record)
+          .flatMap(validation => validation.receipts)
+          .filter(receipt => receipt.status !== 'unknown' || receipt.provenance === 'historical-verified').length;
+  return (
+    check?.revision === revision &&
+    observedCitations <= (check.checkedCitations ?? 0) &&
+    (check.retryAt === undefined || check.retryAt > now)
+  );
 }
 
 export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.workerClosingFence')(function* (

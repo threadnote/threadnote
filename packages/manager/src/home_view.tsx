@@ -53,9 +53,13 @@ export function ManagerHomePanel({
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError('');
-    void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`)
+    void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
+      signal: controller.signal,
+      timeoutMilliseconds: 8_000,
+    })
       .then(result => {
         if (!cancelled && result.project === project) setHome(result);
       })
@@ -67,6 +71,7 @@ export function ManagerHomePanel({
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [project, generation]);
 
@@ -115,7 +120,9 @@ export function ManagerHomePanel({
               <h3>Resume a handoff</h3>
               <button onClick={() => onOpen('memory')}>Open Library</button>
             </div>
-            {home.handoffs.length === 0 ? (
+            {home.stats?.memories === undefined ? (
+              <p className="muted">Handoffs are unavailable. Refresh to retry.</p>
+            ) : home.handoffs.length === 0 ? (
               <p className="muted">No active handoffs for {home.project}.</p>
             ) : (
               <ul>

@@ -1,13 +1,65 @@
 import {Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertSafeRelativePath} from '@threadnote/platform/paths';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {readContextMaintenanceCitationAssociation} from './maintenance_evidence.js';
+import {
+  readContextMaintenanceCitationAssociation,
+  readContextMaintenanceSourceEpoch,
+  type ContextMaintenanceWorkerObservation,
+} from './maintenance_evidence.js';
+import {resolveMaintenanceRelationPolicy, resolveRelationTarget} from './maintenance_policy.js';
 
 export type MaintenanceCitationAssociation = Effect.Success<
   ReturnType<typeof readContextMaintenanceCitationAssociation>
 >;
+
+export const CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION = 1;
+
+/** Older checkpoints never admitted explicit citations on non-brief memory kinds. */
+export function maintenanceCitationAdmissionCurrent(
+  record: MemoryRecord,
+  checkpoint: {readonly citationAdmissionVersion?: number} | undefined,
+) {
+  return (
+    (record.metadata.codeCitations?.length ?? 0) === 0 ||
+    record.metadata.kind === 'durable' ||
+    record.metadata.kind === 'handoff' ||
+    checkpoint?.citationAdmissionVersion === CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION
+  );
+}
+
+export function maintenanceRecordRevision(
+  record: MemoryRecord,
+  corpus: readonly MemoryRecord[],
+  inventoryComplete: boolean,
+  sourceEpoch: string | undefined,
+  sourceRevision: string | undefined,
+) {
+  const contentHash = (content: string) => sha256HexSync(canonicalMemoryDocumentContent(content));
+  const relations = (record.metadata.relations ?? [])
+    .map(relation => {
+      const target = resolveRelationTarget(corpus, relation.uri);
+      const policy = resolveMaintenanceRelationPolicy(record, relation, corpus, inventoryComplete);
+      const successors = corpus
+        .filter(
+          candidate =>
+            candidate.metadata.status === 'active' &&
+            (candidate.metadata.relations ?? []).some(
+              link =>
+                link.type === 'supersedes' &&
+                resolveRelationTarget(corpus, link.uri).record?.uri === target.record?.uri,
+            ),
+        )
+        .map(candidate => [candidate.uri, contentHash(candidate.content)])
+        .sort();
+      return `${relation.type}:${relation.uri}:${target.state}:${target.record?.content ?? ''}:${policy.state}:${JSON.stringify(successors)}:${JSON.stringify(policy.lineage?.map(item => [item.uri, contentHash(item.content)]))}`;
+    })
+    .join('|');
+  return sha256HexSync(
+    `${inventoryComplete}:${contentHash(record.content)}:${sourceEpoch ?? ''}:${sourceRevision ?? ''}:${relations}`,
+  );
+}
 
 const readRecordSourceAssociation = Effect.fn('contextMaintenance.recordAssociation')(function* (
   config: RuntimeConfig,
@@ -84,4 +136,16 @@ export const recordSourceRevision = Effect.fn('contextMaintenance.recordSourceRe
         {concurrency: 16},
       )).join('\n'),
   );
+});
+
+export const maintenanceRecordSourceObservation = Effect.fn('contextMaintenance.recordSourceObservation')(function* (
+  config: RuntimeConfig,
+  record: MemoryRecord,
+  root: string,
+  previousEpoch: string | undefined,
+  observed?: ContextMaintenanceWorkerObservation,
+) {
+  const epoch = observed?.sourceEpoch ?? previousEpoch ?? (yield* readContextMaintenanceSourceEpoch(config, root));
+  const revision = yield* recordSourceRevision(config, record, root, observed?.association);
+  return {epoch, revision};
 });

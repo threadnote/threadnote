@@ -10,6 +10,23 @@ import type {ContextMaintenanceCaseV2} from './maintenance.js';
 
 const MAX_EVENTS = 8;
 
+export function duplicateArchiveSafe(subject: MemoryRecord, survivor: MemoryRecord | undefined): boolean {
+  if (
+    survivor === undefined ||
+    survivor.uri === subject.uri ||
+    isSharedMemoryUri(survivor.uri) ||
+    subject.body.trim() !== survivor.body.trim()
+  )
+    return false;
+  if (subject.metadata.memoryId === undefined || survivor.metadata.memoryId === undefined) return false;
+  const relations = new Set((survivor.metadata.relations ?? []).map(item => `${item.type}:${item.uri}`));
+  const citations = new Set((survivor.metadata.codeCitations ?? []).map(item => item.id));
+  return (
+    (subject.metadata.relations ?? []).every(item => relations.has(`${item.type}:${item.uri}`)) &&
+    (subject.metadata.codeCitations ?? []).every(item => citations.has(item.id))
+  );
+}
+
 export function maintenanceCheckpointCurrent(
   check: {readonly memoryHash?: string; readonly sourceEpoch?: string; readonly retryAt?: string} | undefined,
   hash: string | undefined,

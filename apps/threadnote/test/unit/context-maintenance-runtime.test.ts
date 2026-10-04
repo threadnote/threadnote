@@ -66,6 +66,7 @@ import {
   invalidateMaintenanceWorkerBatch,
   prepareMaintenanceWorkerBatches,
   collectMaintenanceWorkerBatch,
+  runRequestedMaintenanceProjection,
   selectRelationBoundedMaintenanceWindow,
   selectRequestedMaintenanceUris,
 } from '../../src/memory/context/maintenance_batch.js';
@@ -186,7 +187,7 @@ describe('persistent context maintenance', () => {
     expect(task).toEqual(before);
   });
 
-  it('keeps incident citations out of a candidate batch while preserving their own closing scope', () => {
+  it('keeps all cited memory kinds in the same bounded citation scope', () => {
     const records = [
       legacyBatchSubject(0, 'one', [0, 0, 0, 0]),
       legacyBatchSubject(1, 'one', [0, 0, 0, 0]),
@@ -197,7 +198,7 @@ describe('persistent context maintenance', () => {
     }));
     const tasks = records.map((value, index) => ({record: value, project: 'one', chunk: 0, key: `${index}:0`}));
     const groups = planMaintenanceWorkerBatches(tasks);
-    expect(groups.map(group => group.map(task => task.key))).toEqual([['0:0', '1:0'], ['2:0']]);
+    expect(groups.map(group => group.map(task => task.key))).toEqual([['0:0', '1:0', '2:0']]);
     expect(
       groups.flatMap(group =>
         group.flatMap(
@@ -205,6 +206,41 @@ describe('persistent context maintenance', () => {
         ),
       ),
     ).toEqual(records.flatMap(record => record.metadata.codeCitations?.map(citation => citation.id) ?? []));
+  });
+
+  it('keeps worker association scopes invariant when cited memory kinds change', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('durable', 'handoff', 'incident', 'preference', 'smoke'), {maxLength: 40}),
+        kinds => {
+          const baseline = kinds.map((_, index) => ({
+            record: legacyBatchSubject(index, 'one', [index % 12]),
+            project: 'one',
+            chunk: 0,
+            key: String(index),
+          }));
+          const varied = baseline.map((task, index) => ({
+            ...task,
+            record: {...task.record, metadata: {...task.record.metadata, kind: kinds[index]}},
+          }));
+          const scopes = (tasks: typeof baseline) =>
+            planMaintenanceWorkerBatches(tasks).map(group => ({
+              keys: group.map(task => task.key),
+              selectors: [
+                ...new Set(
+                  group.flatMap(task =>
+                    task.record.metadata.codeCitations.map(
+                      citation => `${citation.repositoryId}:${citation.sourceCommit}`,
+                    ),
+                  ),
+                ),
+              ].sort(),
+            }));
+          expect(scopes(varied)).toEqual(scopes(baseline));
+        },
+      ),
+      {numRuns: 50},
+    );
   });
 
   it('preserves every selected legacy anchor and per-project task order under independent batch bounds', () => {
@@ -248,7 +284,6 @@ describe('persistent context maintenance', () => {
           const groups = planMaintenanceWorkerBatches(tasks);
           for (const group of groups) {
             expect(new Set(group.map(task => task.project)).size).toBe(1);
-            expect(new Set(group.map(task => ['durable', 'handoff'].includes(task.record.metadata.kind))).size).toBe(1);
             const anchors = group.flatMap(task =>
               task.record.metadata.codeCitations
                 .filter((_, index) => Math.floor(index / 64) === task.chunk)
@@ -602,6 +637,171 @@ describe('persistent context maintenance', () => {
         const file = fixture.path.join(fixture.directory, subject.uri.split('/').at(-1)!);
         expect(yield* fixture.fs.readFileString(file)).toBe(subject.content);
       }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('validates an incident citation alongside a durable citation in bounded worker batches', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const {incident, file: incidentFile} = yield* makeIncidentCitationSubject(fixture, source);
+      const tasks = [source, incident].map((record, index) => ({
+        record,
+        project: 'threadnote',
+        chunk: 0,
+        key: String(index),
+      }));
+      const groups = planMaintenanceWorkerBatches(tasks);
+      const evidence = yield* Effect.forEach(groups, group =>
+        collectMaintenanceWorkerBatch(fixture.config, group, repository),
+      );
+      expect(evidence.every(batch => batch.observation !== undefined)).toBe(true);
+      const validations = evidence.flatMap(batch => batch.validations);
+      expect(validations.map(validation => validation.uri).sort()).toEqual([source.uri, incident.uri].sort());
+      expect(validations.flatMap(validation => validation.receipts)).toHaveLength(2);
+      expect(validations.every(validation => validation.receipts[0]?.status === 'exact')).toBe(true);
+      const health = yield* collectContextHealth(fixture.config, 'threadnote', [source, incident], repository, {
+        includeCitationCoverageFindings: true,
+      });
+      expect(health.maintenance?.citationCoverage.eligible).toBe(2);
+      expect(health.maintenance?.citationCoverage.currentVerified).toBe(2);
+      expect(yield* fixture.fs.readFileString(incidentFile)).toBe(incident.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('upgrades an old incident checkpoint only after a requested receipt is consumed', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const {incident} = yield* makeIncidentCitationSubject(fixture, source);
+      yield* fixture.fs.remove(fixture.source);
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      let initial = {} as {checkpoints?: Record<string, Record<string, unknown>>};
+      for (let tick = 0; tick < 6; tick++) {
+        yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+        initial = JSON.parse(yield* fixture.fs.readFileString(stateFile));
+        if (initial.checkpoints?.['tn_incident:0'] !== undefined) break;
+      }
+      const previous = initial.checkpoints?.['tn_incident:0'];
+      expect(previous?.checkedCitations).toBe(1);
+      const {citationAdmissionVersion: _version, ...oldCheckpoint} = previous!;
+      const caseInput = {
+        project: 'threadnote',
+        memoryId: 'tn_incident',
+        family: 'citation-coverage',
+        slot: '0',
+        evidenceRevision: String(oldCheckpoint.revision),
+        disposition: 'waiting-evidence' as const,
+        reason: 'not-checked',
+      };
+      let oldCase = updateMaintenanceCase(undefined, caseInput, NOW);
+      oldCase = updateMaintenanceCase(oldCase, caseInput, NOW);
+      oldCase = updateMaintenanceCase(oldCase, caseInput, NOW);
+      expect(oldCase).toMatchObject({attemptCount: 3, wake: {revision: oldCheckpoint.revision}});
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({
+          ...initial,
+          cases: [
+            {
+              ...oldCase,
+              subjectUri: incident.uri,
+              subjectContentHashes: [{uri: incident.uri, hash: sha256HexSync(incident.content)}],
+            },
+          ],
+          checkpoints: {
+            ...initial.checkpoints,
+            'tn_incident:0': {...oldCheckpoint, checkedCitations: 0, retryAt: undefined},
+          },
+        }),
+      );
+      const evidenceFile = fixture.path.join(
+        fixture.home,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`threadnote\0${repository}`)}.json`,
+      );
+      yield* fixture.fs.remove(evidenceFile);
+      const foreground = yield* collectContextHealth(fixture.config, 'threadnote', [incident], repository);
+      expect(foreground.maintenance?.citationCoverage.currentVerified).toBe(0);
+      const request = (yield* readContextMaintenanceEvidenceRequests(fixture.config)).find(value =>
+        value.uris.includes(incident.uri),
+      );
+      expect(request).toBeDefined();
+      yield* runRequestedMaintenanceProjection(fixture.config, request!, [incident], [incident], true);
+      let upgraded = yield* readContextMaintenanceStatus(fixture.config, 'threadnote');
+      for (let tick = 0; tick < 6; tick++) {
+        upgraded = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+        if (upgraded.cases.find(item => item.caseId === oldCase.caseId)?.disposition === 'resolved') break;
+      }
+      expect(upgraded.cases.find(item => item.caseId === oldCase.caseId)).toMatchObject({
+        disposition: 'resolved',
+        reason: 'postcondition-verified',
+      });
+      expect(upgraded.projects[0]?.checkedCitations).toBe(1);
+      const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile));
+      expect(saved.checkpoints['tn_incident:0'].checkedCitations).toBe(1);
+      const replay = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(replay.cases.find(item => item.caseId === oldCase.caseId)?.attemptCount).toBe(
+        upgraded.cases.find(item => item.caseId === oldCase.caseId)?.attemptCount,
+      );
+      expect(replay.projects[0]?.checkedCitations).toBe(1);
+      expect(replay.generation).toBe(upgraded.generation);
+      expect(JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints['tn_incident:0']).toEqual(
+        saved.checkpoints['tn_incident:0'],
+      );
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({
+          ...saved,
+          cases: [oldCase],
+          checkpoints: {
+            ...saved.checkpoints,
+            'tn_incident:0': {...saved.checkpoints['tn_incident:0'], checkedCitations: 0, retryAt: undefined},
+          },
+        }),
+      );
+      yield* fixture.fs.remove(evidenceFile);
+      const laterEvidence = yield* collectMaintenanceWorkerBatch(
+        fixture.config,
+        [{record: incident, project: 'threadnote', chunk: 0, key: 'tn_incident:0'}],
+        repository,
+      );
+      expect(laterEvidence.validations[0]?.receipts[0]?.status).toBe('exact');
+      let later = yield* readContextMaintenanceStatus(fixture.config, 'threadnote');
+      for (let tick = 0; tick < 6; tick++) {
+        later = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+        if (later.cases.find(item => item.caseId === oldCase.caseId)?.disposition === 'resolved') break;
+      }
+      expect(later.cases.find(item => item.caseId === oldCase.caseId)?.disposition).toBe('resolved');
+      expect(later.projects[0]?.checkedCitations).toBe(1);
+      const checked = yield* collectMaintenanceWorkerBatch(
+        fixture.config,
+        [{record: incident, project: 'threadnote', chunk: 0, key: 'tn_incident:0'}],
+        repository,
+      );
+      const historical = yield* collectContextHealth(fixture.config, 'threadnote', [incident], repository, {
+        evidenceMode: 'worker',
+        workerEvidence: {
+          ...checked,
+          validations: checked.validations.map(validation => ({
+            ...validation,
+            receipts: validation.receipts.map(receipt => ({
+              ...receipt,
+              status: 'unknown' as const,
+              coverage: 'incomplete' as const,
+              provenance: 'historical-verified' as const,
+              reason: 'repository-unavailable' as const,
+            })),
+          })),
+        },
+      });
+      expect(historical.maintenance?.citationCoverage).toMatchObject({
+        eligible: 1,
+        checked: 0,
+        historicalVerified: 1,
+        currentVerified: 0,
+      });
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
@@ -3037,5 +3237,47 @@ function makeCitationRepository(fixture: Effect.Success<ReturnType<typeof makeFi
     const source = record('source', {schemaVersion: 5, codeCitations: citations});
     yield* fixture.fs.writeFileString(fixture.source, source.content);
     return {repository, file, source};
+  });
+}
+
+function makeIncidentCitationSubject(
+  fixture: Effect.Success<ReturnType<typeof makeFixture>>,
+  source: ReturnType<typeof record>,
+) {
+  return Effect.gen(function* () {
+    const uri = 'threadnote://user/tester/memories/incidents/active/threadnote/incident.md';
+    const incident = parseMemoryDocument(
+      uri,
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'incident',
+          schemaVersion: 5,
+          memoryId: 'tn_incident',
+          project: 'threadnote',
+          sourceAgentClient: 'test',
+          status: 'active',
+          timestamp: NOW,
+          topic: 'incident',
+          codeCitations: source.metadata.codeCitations,
+        },
+        'Incident with an explicit code citation.',
+      ),
+    )!;
+    const file = fixture.path.join(
+      fixture.home,
+      'data',
+      'local',
+      'user',
+      'tester',
+      'memories',
+      'incidents',
+      'active',
+      'threadnote',
+      'incident.md',
+    );
+    yield* fixture.fs.makeDirectory(fixture.path.dirname(file), {recursive: true});
+    yield* fixture.fs.writeFileString(file, incident.content);
+    return {incident, file};
   });
 }

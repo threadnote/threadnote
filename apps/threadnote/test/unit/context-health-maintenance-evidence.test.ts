@@ -20,7 +20,11 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
-import type {ContextBriefMemoryCandidateV1, ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
+import type {
+  ContextBriefMemoryCandidateV1,
+  ContextBriefCitationValidationReceiptV2,
+  ContextHealthCitationSubjectV1,
+} from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
@@ -603,7 +607,7 @@ describe('generation-bound maintenance citation evidence', () => {
               );
             },
           } as unknown as CodeGraphQueryService['Service']);
-          const validate = (selected: readonly ContextBriefMemoryCandidateV1[]) =>
+          const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
             Effect.gen(function* () {
               validations += selected.reduce((count, value) => count + value.codeCitations.length, 0);
               const now = (yield* DateTime.nowAsDate).toISOString();
@@ -685,7 +689,7 @@ describe('generation-bound maintenance citation evidence', () => {
               );
             }),
         } as unknown as CodeGraphQueryService['Service']);
-        const validate = (selected: readonly ContextBriefMemoryCandidateV1[]) =>
+        const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
           Effect.gen(function* () {
             validations += selected.length;
             const now = (yield* DateTime.nowAsDate).toISOString();
@@ -818,7 +822,7 @@ describe('generation-bound maintenance citation evidence', () => {
                 attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
               ),
           } as unknown as CodeGraphQueryService['Service']);
-          const validate = (selected: readonly ContextBriefMemoryCandidateV1[]) =>
+          const validate = (selected: readonly ContextHealthCitationSubjectV1[]) =>
             Effect.gen(function* () {
               validations += selected.length;
               const now = (yield* DateTime.nowAsDate).toISOString();

@@ -14,7 +14,7 @@ import {planContextHealthCitationBatch} from '@threadnote/context/citation_valid
 import {
   CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION,
   type ContextBriefCitationValidationReceiptV2,
-  type ContextBriefMemoryCandidateV1,
+  type ContextHealthCitationSubjectV1,
   type ContextBriefMemoryCitationValidationV2,
 } from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -266,13 +266,13 @@ function expiredUnknownAttempt(receipt: ContextBriefCitationValidationReceiptV2,
 export function foregroundReceiptCandidates(
   entries: readonly Entry[],
   records: readonly MemoryRecord[],
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   _now: number,
 ) {
   const byEntry = new Map(entries.map(entry => [entry.uri, entry]));
   const byRecord = new Map(records.map(record => [record.uri, record]));
   const selectedEntries: Entry[] = [];
-  const selectedCandidates: ContextBriefMemoryCandidateV1[] = [];
+  const selectedCandidates: ContextHealthCitationSubjectV1[] = [];
   for (const candidate of candidates) {
     const entry = byEntry.get(candidate.uri);
     const record = byRecord.get(candidate.uri);
@@ -304,12 +304,12 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
     config: RuntimeConfig,
     project: string,
     records: readonly MemoryRecord[],
-    candidates: readonly ContextBriefMemoryCandidateV1[],
+    candidates: readonly ContextHealthCitationSubjectV1[],
     cwd: string,
     options: {
       readonly mode?: 'foreground' | 'worker' | 'diagnostic';
       readonly validate: (
-        selected: readonly ContextBriefMemoryCandidateV1[],
+        selected: readonly ContextHealthCitationSubjectV1[],
       ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
       readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
       readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;

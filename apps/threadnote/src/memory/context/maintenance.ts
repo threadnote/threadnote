@@ -2,6 +2,7 @@ import {publicStatus, renderContextMaintenanceStatus} from './maintenance_projec
 import {
   selectFairMaintenanceWork,
   maintenanceCheckpointCurrent,
+  duplicateArchiveSafe,
   reconcileRepositoryRecoveryCases,
   mergeMaintenanceCaseLineage,
   upsertCase,
@@ -23,6 +24,7 @@ export {
   resolveMaintenanceRelationPolicy,
   safeRelationRemoval,
   maintenanceAnchorChunksComplete,
+  duplicateArchiveSafe,
 } from './maintenance_policy.js';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -85,12 +87,18 @@ import {
 } from './health_repair_commands.js';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {buildContextMaintenancePacket} from './maintenance_packet.js';
-import {recordSourceRevision} from './maintenance_source.js';
+import {
+  CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION,
+  maintenanceRecordSourceObservation,
+  maintenanceRecordRevision,
+  recordSourceRevision,
+} from './maintenance_source.js';
 import {
   prepareMaintenanceWorkerBatches,
   runRequestedMaintenanceProjection,
   selectRelationBoundedMaintenanceWindow,
   maintenanceWorkerBatchCurrent,
+  maintenanceWorkerCheckpointReusable,
   invalidateMaintenanceWorkerBatch,
 } from './maintenance_batch.js';
 const MAX_RECEIPTS = 100;
@@ -173,6 +181,7 @@ interface UndoJournal extends ContextMaintenanceReceiptV2 {
 
 interface WorkCheckpoint {
   readonly revision: string;
+  readonly citationAdmissionVersion?: number;
   readonly checkedAt: string;
   readonly retryAt?: string;
   readonly checkedCitations?: number;
@@ -502,61 +511,36 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           lastTaskByProject: {...state.lastTaskByProject, [task.project]: task.key},
         };
         if ((record.metadata.codeCitations?.length ?? 0) > 0) {
-          const observed = batchByTask.get(task.key)?.observation;
-          if (observed?.sourceEpoch !== undefined) sourceRevisions.set(task.project, observed.sourceEpoch);
-          else if (!sourceRevisions.has(task.project))
-            sourceRevisions.set(task.project, yield* sourceGeneration(config, roots.get(task.project) ?? options.cwd));
-          recordSourceRevisions.set(
-            record.uri,
-            yield* recordSourceRevision(
-              config,
-              record,
-              roots.get(task.project) ?? options.cwd,
-              batchByTask.get(task.key)?.observation?.association,
-            ),
+          const source = yield* maintenanceRecordSourceObservation(
+            config,
+            record,
+            roots.get(task.project) ?? options.cwd,
+            sourceRevisions.get(task.project),
+            batchByTask.get(task.key)?.observation,
           );
+          sourceRevisions.set(task.project, source.epoch);
+          recordSourceRevisions.set(record.uri, source.revision);
         }
         const relationCorpus =
           snapshot.success.complete && (record.metadata.relations?.length ?? 0) > 0
             ? yield* readMaintenanceMemoryRecords(config, {requireReadable: true})
             : corpus;
-        task.revision = sha256HexSync(
-          `${snapshot.success.complete}:${contentHash(record.content)}:${sourceRevisions.get(task.project) ?? ''}:${recordSourceRevisions.get(record.uri) ?? ''}:${(
-            record.metadata.relations ?? []
-          )
-            .map(relation => {
-              const target = resolveRelationTarget(relationCorpus, relation.uri);
-              const policy = resolveMaintenanceRelationPolicy(
-                record,
-                relation,
-                relationCorpus,
-                snapshot.success.complete,
-              );
-              const successors = relationCorpus
-                .filter(
-                  candidate =>
-                    candidate.metadata.status === 'active' &&
-                    (candidate.metadata.relations ?? []).some(
-                      link =>
-                        link.type === 'supersedes' &&
-                        resolveRelationTarget(relationCorpus, link.uri).record?.uri === target.record?.uri,
-                    ),
-                )
-                .map(candidate => [candidate.uri, contentHash(candidate.content)])
-                .sort();
-              return `${relation.type}:${relation.uri}:${target.state}:${target.record?.content ?? ''}:${policy.state}:${JSON.stringify(successors)}:${JSON.stringify(policy.lineage?.map(item => [item.uri, contentHash(item.content)]))}`;
-            })
-            .join('|')}`,
+        task.revision = maintenanceRecordRevision(
+          record,
+          relationCorpus,
+          snapshot.success.complete,
+          sourceRevisions.get(task.project),
+          recordSourceRevisions.get(record.uri),
         );
         const check = checkpoints[task.key];
+        const workerEvidence = batchByTask.get(task.key);
         const legacy = state.cases.some(
           item =>
             item.memoryId === memoryId &&
             ['needs-decision', 'waiting-evidence'].includes(item.disposition) &&
             item.subjectContentHashes === undefined,
         );
-        if (!legacy && check?.revision === task.revision && (check.retryAt === undefined || check.retryAt > now))
-          continue;
+        if (maintenanceWorkerCheckpointReusable(record, check, workerEvidence, task.revision, now, legacy)) continue;
         const previousCases = [...caseMap.values()].filter(
           item =>
             item.project === task.project &&
@@ -953,6 +937,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           });
         }
         checkpoints[task.key] = {
+          ...(batchByTask.get(task.key)?.observation !== undefined && Result.isSuccess(report)
+            ? {citationAdmissionVersion: CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION}
+            : {}),
           inventoryComplete: snapshot.success.complete,
           memoryHash: postMutationHash ?? contentHash(record.content),
           sourceEpoch: sourceRevisions.get(task.project),
@@ -1491,9 +1478,8 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
 export const runContextMaintenanceScheduler = Effect.fn('contextMaintenance.scheduler')(function* (
   config: RuntimeConfig,
 ) {
-  const cwd = (yield* SystemInfo).currentDirectory();
   for (;;) {
-    yield* runContextMaintenance(config, {cwd}).pipe(Effect.ignore);
+    yield* wakeContextMaintenance(config).pipe(Effect.ignore);
     yield* Effect.sleep('30 seconds');
   }
 });
@@ -1718,23 +1704,6 @@ export const proveAutomaticDuplicateArchive = Effect.fn('contextMaintenance.dupl
   if (before !== after || activeIncomingDependency(subject, records))
     return yield* fail('Duplicate dependency proof changed or found an active incoming dependency.');
 });
-
-export function duplicateArchiveSafe(subject: MemoryRecord, survivor: MemoryRecord | undefined): boolean {
-  if (
-    survivor === undefined ||
-    survivor.uri === subject.uri ||
-    isSharedMemoryUri(survivor.uri) ||
-    subject.body.trim() !== survivor.body.trim()
-  )
-    return false;
-  if (subject.metadata.memoryId === undefined || survivor.metadata.memoryId === undefined) return false;
-  const relations = new Set((survivor.metadata.relations ?? []).map(item => `${item.type}:${item.uri}`));
-  const citations = new Set((survivor.metadata.codeCitations ?? []).map(item => item.id));
-  return (
-    (subject.metadata.relations ?? []).every(item => relations.has(`${item.type}:${item.uri}`)) &&
-    (subject.metadata.codeCitations ?? []).every(item => citations.has(item.id))
-  );
-}
 
 export function nextMaintenanceDeadline(record: MemoryRecord, now: string): string | undefined {
   return [record.metadata.validTo, record.metadata.reviewAfter]

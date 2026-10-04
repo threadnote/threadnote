@@ -79,4 +79,30 @@ describe('Context Health citation traversal', () => {
       {numRuns: 50},
     );
   });
+
+  it('selects the same citation identities and selectors regardless of the cited memory kind', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('durable', 'handoff', 'incident', 'preference', 'smoke'), {maxLength: 120}),
+        kinds => {
+          const expected = kinds.map((_, index) => candidate(index));
+          const varied = expected.map((subject, index) => ({...subject, kind: kinds[index]}));
+          let after: {uri: string; citationId: string} | undefined;
+          for (let step = 0; step <= kinds.length; step += 1) {
+            const baseline = planContextHealthCitationBatch(expected, {after, batchSize: 13});
+            const actual = planContextHealthCitationBatch(varied, {after, batchSize: 13});
+            const identities = (batch: typeof actual) =>
+              batch.candidates.flatMap(subject =>
+                subject.codeCitations.map(citation => `${subject.uri}\0${citation.id}\0${citation.repositoryId}`),
+              );
+            expect(identities(actual)).toEqual(identities(baseline));
+            expect(actual.checkpoint).toEqual(baseline.checkpoint);
+            if (actual.checkpoint.complete) break;
+            after = actual.checkpoint.after;
+          }
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
 });
