@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
+import {DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -506,6 +506,88 @@ describe('generation-bound maintenance citation evidence', () => {
     expect(selected.entries).toHaveLength(198);
   });
   effectIt.layer(narrow)(test => {
+    test.effect('bounds foreground evidence, interrupts its source read, and persists every cited URI', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-budget-'});
+        const config = {
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+          account: 'fixture',
+        } as RuntimeConfig;
+        const records = [record(0), record(1)];
+        const candidates = records.map(candidate);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const interrupted = yield* Ref.make(false);
+        let block = false;
+        const query = CodeGraphQueryService.of({
+          status: () =>
+            block
+              ? Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.onInterrupt(() => Ref.set(interrupted, true)),
+                  Effect.as(
+                    attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+                  ),
+                )
+              : Effect.succeed(
+                  attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+                ),
+        } as unknown as CodeGraphQueryService['Service']);
+        const collect = (mode: 'diagnostic' | 'foreground') =>
+          collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
+            mode,
+            validate: selected =>
+              Effect.gen(function* () {
+                const now = (yield* DateTime.nowAsDate).toISOString();
+                return selected.map(value => ({uri: value.uri, receipts: [receipt(now)]}));
+              }),
+          }).pipe(Effect.provideService(CodeGraphQueryService, query));
+        expect(yield* collect('diagnostic')).toHaveLength(2);
+        expect(yield* collect('foreground')).toHaveLength(2);
+        block = true;
+        const foreground = yield* Effect.forkScoped(collect('foreground'));
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust('3100 millis');
+        expect(yield* Fiber.join(foreground)).toEqual([]);
+        expect(yield* Ref.get(interrupted)).toBe(true);
+        const requests = yield* readContextMaintenanceEvidenceRequests(config);
+        expect(new Set(requests.flatMap(request => request.uris))).toEqual(new Set(records.map(record => record.uri)));
+      }),
+    );
+
+    test.effect('keeps worker evidence untimed past the foreground budget', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-worker-budget-'});
+        const config = {
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+          account: 'fixture',
+        } as RuntimeConfig;
+        const value = record(0);
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const query = CodeGraphQueryService.of({
+          status: () => Effect.succeed(status),
+        } as unknown as CodeGraphQueryService['Service']);
+        const worker = yield* Effect.forkScoped(
+          collectContextMaintenanceCitationEvidence(config, 'fixture', [value], [candidate(value, 0)], repository, {
+            mode: 'worker',
+            validate: () =>
+              Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as([])),
+          }).pipe(Effect.provideService(CodeGraphQueryService, query)),
+        );
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust('4 seconds');
+        expect(worker.pollUnsafe()).toBeUndefined();
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(worker)).toEqual([]);
+      }),
+    );
     test.effect('routes every distinct source selector while keeping report roots bounded', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;

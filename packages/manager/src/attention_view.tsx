@@ -477,7 +477,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                           {code.line === undefined ? '' : `:${code.line}`}
                         </span>
                       </header>
-                      {code.excerpt ? <pre>{code.excerpt}</pre> : <p>Current source excerpt is unavailable.</p>}
+                      {code.excerpt ? <pre>{code.excerpt}</pre> : <p>Review this finding to check source evidence.</p>}
                     </section>
                   ))}
                   <div className="health-issues">

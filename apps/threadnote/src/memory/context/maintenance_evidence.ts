@@ -59,6 +59,19 @@ export interface ContextMaintenanceWorkerObservation {
   readonly memoryGeneration?: string;
 }
 
+type CitationEvidenceOptions<R> = {
+  readonly mode?: 'foreground' | 'worker' | 'diagnostic';
+  readonly validate: (
+    selected: readonly ContextHealthCitationSubjectV1[],
+  ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
+  readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
+  readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;
+  readonly skipWorkerValidation?: (
+    record: MemoryRecord,
+    observation: ContextMaintenanceWorkerObservation,
+  ) => Effect.Effect<boolean, unknown, R>;
+};
+
 /** Published identities and real source observations, never SQLite/WAL or lease/cache writes. */
 export const readContextMaintenanceSourceEpoch = Effect.fn('contextMaintenance.sourceEpoch')(function* (
   config: RuntimeConfig,
@@ -299,25 +312,14 @@ export function foregroundReceiptCandidates(
  * Explicit diagnostics admit one 96-citation batch. The worker supplies bounded record chunks;
  * its validated receipts accumulate independently of report pagination.
  */
-export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaintenance.collectCitationEvidence')(
+const collectContextMaintenanceCitationEvidenceInner = Effect.fn('contextMaintenance.collectCitationEvidenceInner')(
   function* <R>(
     config: RuntimeConfig,
     project: string,
     records: readonly MemoryRecord[],
     candidates: readonly ContextHealthCitationSubjectV1[],
     cwd: string,
-    options: {
-      readonly mode?: 'foreground' | 'worker' | 'diagnostic';
-      readonly validate: (
-        selected: readonly ContextHealthCitationSubjectV1[],
-      ) => Effect.Effect<readonly ContextBriefMemoryCitationValidationV2[], unknown, R>;
-      readonly observeWorker?: (observation: ContextMaintenanceWorkerObservation) => Effect.Effect<void, never, R>;
-      readonly workerSubjectFence?: () => Effect.Effect<string | undefined, unknown, R>;
-      readonly skipWorkerValidation?: (
-        record: MemoryRecord,
-        observation: ContextMaintenanceWorkerObservation,
-      ) => Effect.Effect<boolean, unknown, R>;
-    },
+    options: CitationEvidenceOptions<R>,
   ) {
     if (!candidates.some(candidate => candidate.codeCitations.length > 0)) return [];
     const fs = yield* FileSystem.FileSystem;
@@ -611,6 +613,34 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         candidates.map(candidate => candidate.uri),
       );
     return returnedValidations;
+  },
+);
+
+export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaintenance.collectCitationEvidence')(
+  function* <R>(
+    config: RuntimeConfig,
+    project: string,
+    records: readonly MemoryRecord[],
+    candidates: readonly ContextHealthCitationSubjectV1[],
+    cwd: string,
+    options: CitationEvidenceOptions<R>,
+  ) {
+    const collect = collectContextMaintenanceCitationEvidenceInner(config, project, records, candidates, cwd, options);
+    if (options.mode === 'worker' || options.mode === 'diagnostic') return yield* collect;
+    const result = yield* collect.pipe(Effect.timeoutOption(3_000));
+    if (Option.isSome(result)) return result.value;
+    const uris = candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri);
+    if (uris.length > 0) {
+      const path = yield* Path.Path;
+      const file = path.join(
+        config.agentContextHome,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`${project}\0${cwd}`)}.json`,
+      );
+      yield* enqueueEvidenceRequest(file, project, cwd, uris);
+    }
+    return [];
   },
 );
 

@@ -569,7 +569,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 ) : code.excerpt ? (
                   <pre>{code.excerpt}</pre>
                 ) : (
-                  <p>Source evidence is unavailable.</p>
+                  <p>Open the review to compare source evidence.</p>
                 )}
               </section>
             ))}
