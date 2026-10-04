@@ -153,6 +153,53 @@ describe('context health aggregate runtime', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  fcEffectProp(
+    effectIt,
+    'returns the same canonical snapshot across directory and file-read interleavings without mutating content',
+    {
+      ids: fc.uniqueArray(fc.integer({min: 0, max: 9}), {minLength: 2, maxLength: 6}),
+      reverse: fc.boolean(),
+    },
+    ({ids, reverse}) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* makeFixture([]);
+          const directory = personalProjectDirectory(fixture, 'durable', 'threadnote');
+          const expected = ids
+            .map(id => ({
+              body: `Synthetic record ${id}.`,
+              topic: `interleaving-${id}`,
+            }))
+            .sort((left, right) => left.topic.localeCompare(right.topic));
+          for (const record of expected) {
+            yield* writePersonalMemory(fixture, record.topic, record.body);
+          }
+          const reorderedFileSystem = FileSystem.FileSystem.of({
+            ...fixture.fs,
+            readDirectory: target =>
+              fixture.fs
+                .readDirectory(target)
+                .pipe(Effect.map(entries => (target === directory && reverse ? [...entries].reverse() : entries))),
+            open: (file, options) =>
+              Effect.gen(function* () {
+                if (file.endsWith(`${ids[0]}.md`)) yield* Effect.yieldNow;
+                return yield* fixture.fs.open(file, options);
+              }),
+          });
+          const snapshot = yield* readPersonalProjectMemoryRecords(fixture.config, 'threadnote').pipe(
+            Effect.provideService(FileSystem.FileSystem, reorderedFileSystem),
+          );
+          expect(snapshot.map(record => ({body: record.body, topic: record.metadata.topic}))).toEqual(expected);
+          for (const record of expected) {
+            expect(yield* fixture.fs.readFileString(fixture.path.join(directory, `${record.topic}.md`))).toBe(
+              personalMemory(record.topic, record.body),
+            );
+          }
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 12}},
+  );
+
   effectIt.effect('accepts writer-compatible personal topics, headers, and legacy visibility', () =>
     Effect.scoped(
       Effect.gen(function* () {
