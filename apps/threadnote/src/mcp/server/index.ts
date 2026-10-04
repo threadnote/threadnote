@@ -394,7 +394,7 @@ function registerTools(
 
   if (capabilities.lifecycle) {
     registerContextHealthTool(server, config);
-    registerContextMaintenanceTools(server, config);
+    if (toolset === 'full') registerContextMaintenanceTools(server, config);
     registerContextHealthRepairTools(server, config);
     registerMaintenanceMetadataTools(server, config);
     registerRecallFeedbackTool(server, config);

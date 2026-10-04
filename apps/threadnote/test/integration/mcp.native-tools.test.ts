@@ -109,6 +109,9 @@ const CORE_TOOL_NAMES = [
 ];
 
 const ADVANCED_TOOL_NAMES = [
+  'context_maintenance_status',
+  'context_maintain',
+  'context_maintenance_packet',
   'search',
   'read',
   'list',
@@ -5264,6 +5267,11 @@ describe('Threadnote MCP toolsets', () => {
   it('applies an MCP repair only with the exact normalized preview selector', async () => {
     await withMcpClient(
       async (client, fixture) => {
+        const paused = await client.callTool({
+          arguments: {action: 'pause', callerCwd: fixture.root},
+          name: 'context_maintain',
+        });
+        expect(paused.isError).not.toBe(true);
         await writeCanonicalMemory(
           fixture.home,
           'mcp-selector.md',

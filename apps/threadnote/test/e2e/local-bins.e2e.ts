@@ -401,7 +401,11 @@ describe('built self-contained distribution', () => {
   });
 
   it('previews an issue with production logs without requiring or invoking gh', async () => {
-    const logPath = join(home, 'logs', 'threadnote.log');
+    const previewHome = join(temporaryRoot, 'report-preview-home');
+    const logPath = join(previewHome, 'logs', 'threadnote.log');
+    await mkdir(dirname(logPath), {recursive: true});
+    await copyFile(join(home, 'layout.json'), join(previewHome, 'layout.json'));
+    await runCli(['--log-level', 'info', 'logs'], {}, previewHome);
     const logBeforePreview = await readFile(logPath, 'utf8');
     const output = await runCli(
       [
@@ -415,6 +419,7 @@ describe('built self-contained distribution', () => {
         '--include-logs',
       ],
       {PATH: ''},
+      previewHome,
     );
 
     expect(output).toContain('GitHub issue preview: threadnote/threadnote');
@@ -1259,8 +1264,12 @@ async function activeVectorRevision(): Promise<string> {
   }
 }
 
-async function runCli(args: readonly string[], environment: NodeJS.ProcessEnv = {}): Promise<string> {
-  const result = await runCliOutput(args, environment);
+async function runCli(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv = {},
+  targetHome = home,
+): Promise<string> {
+  const result = await runCliOutput(args, environment, targetHome);
   return `${result.stdout}${result.stderr}`;
 }
 
@@ -1273,9 +1282,10 @@ async function runCliJson<T>(args: readonly string[], environment: NodeJS.Proces
 async function runCliOutput(
   args: readonly string[],
   environment: NodeJS.ProcessEnv = {},
+  targetHome = home,
 ): Promise<{readonly stderr: string; readonly stdout: string}> {
   try {
-    const result = await execute(cli, ['--home', home, ...args], {
+    const result = await execute(cli, ['--home', targetHome, ...args], {
       cwd: root,
       env: {
         ...process.env,
@@ -1301,7 +1311,7 @@ async function runCliOutput(
       cause,
       message: [
         `Packaged Threadnote command exited with ${String(failure.code ?? 'an unknown status')}:`,
-        `${cli} --home ${home} ${args.join(' ')}`,
+        `${cli} --home ${targetHome} ${args.join(' ')}`,
         `stdout:\n${boundedFailureOutput(failure.stdout)}`,
         `stderr:\n${boundedFailureOutput(failure.stderr)}`,
       ].join('\n'),
