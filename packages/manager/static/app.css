@@ -453,8 +453,13 @@ body.is-resizing-sidebar * {
   border-top: 1px solid var(--line-soft);
   display: flex;
   gap: 10px;
+  flex-shrink: 0;
   margin-top: auto;
   padding: 16px 7px 4px;
+}
+
+.sidebar-product-note > div {
+  min-width: 0;
 }
 
 .sidebar-product-note strong {
@@ -465,6 +470,7 @@ body.is-resizing-sidebar * {
   color: var(--muted);
   font-size: 10px;
   margin: 3px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .status-pulse {
