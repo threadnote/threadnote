@@ -719,35 +719,59 @@ function handoffBodyFields(body: string): Map<string, string[]> {
   const lines = body.split(/\r?\n/);
   const fields = new Map<string, string[]>();
   for (let index = 0; index < lines.length; index += 1) {
-    const match = /^\s*(?:[-*]\s+)?(status|next_step|blockers?):\s*(.*?)\s*$/i.exec(lines[index] ?? '');
-    if (!match?.[1]) {
+    const line = stripHandoffBullet((lines[index] ?? '').trim());
+    const colon = line.indexOf(':');
+    if (colon < 0) {
       continue;
     }
-    let value = match[2] ?? '';
+    const name = line.slice(0, colon);
+    if (!/^(?:status|next_step|blockers?)$/i.test(name)) {
+      continue;
+    }
+    const key = name.toLowerCase();
+    let value = line.slice(colon + 1).trim();
+    if (/[\r\u2028\u2029]/.test(value)) {
+      continue;
+    }
     if (!value) {
-      const followingLine = lines
-        .slice(index + 1)
-        .find(line => line.trim().length > 0)
-        ?.trim();
-      if (followingLine && !/^\s*(?:[-*]\s+)?[\w -]+\s*:/.test(followingLine)) {
-        value = followingLine.replace(/^[-*]\s+/, '');
+      let followingLine = '';
+      for (let followingIndex = index + 1; followingIndex < lines.length; followingIndex += 1) {
+        followingLine = lines[followingIndex].trim();
+        if (followingLine) break;
+      }
+      if (followingLine && !isHandoffHeader(followingLine)) {
+        value = stripHandoffBullet(followingLine);
       }
     }
-    const key = match[1].toLowerCase();
-    fields.set(key, [...(fields.get(key) ?? []), value]);
+    const values = fields.get(key) ?? [];
+    values.push(value);
+    fields.set(key, values);
   }
   return fields;
 }
 
+function stripHandoffBullet(line: string): string {
+  return (line[0] === '-' || line[0] === '*') && line.length > 1 && line[1].trim().length === 0
+    ? line.slice(1).trimStart()
+    : line;
+}
+
+function isHandoffHeader(line: string): boolean {
+  const colon = line.indexOf(':');
+  if (colon < 0) return false;
+  const prefix = line.slice(0, colon);
+  if (/^[\w -]+$/.test(prefix.trimEnd())) return true;
+  if ((prefix[0] !== '-' && prefix[0] !== '*') || prefix.length < 2 || prefix[1].trim().length !== 0) {
+    return false;
+  }
+  const remainder = prefix.slice(2);
+  const label = remainder.trim();
+  return label ? /^[\w -]+$/.test(label) : remainder.includes(' ');
+}
+
 function normalizedFieldValues(values: readonly string[] | undefined): readonly string[] {
   return (values ?? [])
-    .map(value =>
-      value
-        .trim()
-        .toLowerCase()
-        .replace(/[.!;:]+$/g, '')
-        .replace(/\s+/g, ' '),
-    )
+    .map(value => trimTrailingCharacters(value.trim().toLowerCase(), '.!;:').replace(/\s+/g, ' '))
     .filter(value => value.length > 0);
 }
 
