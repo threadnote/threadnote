@@ -290,30 +290,47 @@ export function reconcileAbsentMaintenanceAnchors(
   const anchors = new Set((record.metadata.codeCitations ?? []).map(contextHealthCitationCaseSlotV2));
   const chunks = Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64));
   for (const [id, item] of cases) {
-    if (
-      item.memoryId !== (record.metadata.memoryId ?? record.uri) ||
-      item.project !== (record.metadata.project ?? 'unscoped') ||
-      item.disposition === 'resolved' ||
-      item.disposition === 'retired'
-    )
-      continue;
+    if (!absentMaintenanceAnchorCase(item, record, anchors, chunks)) continue;
     const unresolved = item.slot.startsWith('legacy-unresolved:');
-    const absent = ['citation', 'current-support'].includes(item.family) && !anchors.has(item.slot);
-    const removedChunk = item.family === 'citation-coverage' && /^\d+$/u.test(item.slot) && Number(item.slot) >= chunks;
-    if (absent || removedChunk)
-      cases.set(id, {
-        ...item,
-        disposition: 'resolved',
-        reason: unresolved ? 'legacy-anchor-lineage-unprovable' : 'canonical-anchor-removed',
-        lastChecked: now,
-        nextAttemptAt: undefined,
-        wake: undefined,
-        events: [
-          ...item.events,
-          {at: now, reason: unresolved ? 'legacy-anchor-lineage-unprovable' : 'canonical-anchor-removed'},
-        ].slice(-MAX_EVENTS),
-      });
+    cases.set(id, {
+      ...item,
+      disposition: 'resolved',
+      reason: unresolved ? 'legacy-anchor-lineage-unprovable' : 'canonical-anchor-removed',
+      lastChecked: now,
+      nextAttemptAt: undefined,
+      wake: undefined,
+      events: [
+        ...item.events,
+        {at: now, reason: unresolved ? 'legacy-anchor-lineage-unprovable' : 'canonical-anchor-removed'},
+      ].slice(-MAX_EVENTS),
+    });
   }
+}
+
+export function hasAbsentMaintenanceAnchors(cases: Iterable<ContextMaintenanceCaseV2>, record: MemoryRecord): boolean {
+  const anchors = new Set((record.metadata.codeCitations ?? []).map(contextHealthCitationCaseSlotV2));
+  const chunks = Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64));
+  for (const item of cases) if (absentMaintenanceAnchorCase(item, record, anchors, chunks)) return true;
+  return false;
+}
+
+function absentMaintenanceAnchorCase(
+  item: ContextMaintenanceCaseV2,
+  record: MemoryRecord,
+  anchors: ReadonlySet<string>,
+  chunks: number,
+) {
+  if (
+    item.memoryId !== (record.metadata.memoryId ?? record.uri) ||
+    item.project !== (record.metadata.project ?? 'unscoped') ||
+    item.disposition === 'resolved' ||
+    item.disposition === 'retired'
+  )
+    return false;
+  return (
+    (['citation', 'current-support'].includes(item.family) && !anchors.has(item.slot)) ||
+    (item.family === 'citation-coverage' && /^\d+$/u.test(item.slot) && Number(item.slot) >= chunks)
+  );
 }
 
 export function maintenanceAnchorChunksComplete(

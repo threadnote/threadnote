@@ -9,6 +9,7 @@ import {
   resolveMaintenanceRelationPolicy,
   maintenanceRelationPolicyMatches,
   reconcileAbsentMaintenanceAnchors,
+  hasAbsentMaintenanceAnchors,
   maintenanceAnchorChunksComplete,
   type MaintenanceRelationPolicy,
 } from './maintenance_policy.js';
@@ -987,14 +988,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           record => options.project === undefined || record.metadata.project === options.project,
         )) {
           if (!maintenanceAnchorChunksComplete(record, checkpoints, logicalHashes.get(record.uri))) continue;
-          if (
-            ![...caseMap.values()].some(
-              item =>
-                item.memoryId === (record.metadata.memoryId ?? record.uri) &&
-                ['citation', 'current-support', 'citation-coverage'].includes(item.family),
-            )
-          )
-            continue;
+          if (!hasAbsentMaintenanceAnchors(caseMap.values(), record)) continue;
           const fresh = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
           if (fresh?.metadata.status === 'active' && contentHash(fresh.content) === logicalHashes.get(record.uri))
             reconcileAbsentMaintenanceAnchors(caseMap, fresh, now);

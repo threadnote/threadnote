@@ -23,8 +23,14 @@ import {
   planMaintenanceWorkerBatches,
   maintenanceWorkerRecordValidations,
 } from '@threadnote/threadnote/memory/context/maintenance';
-import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
+import {
+  canonicalMemoryDocumentContent,
+  formatMemoryDocument,
+  parseMemoryDocument,
+  type MemoryMetadata,
+} from '@threadnote/memory/document';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {contextHealthCitationCaseSlotV2} from '@threadnote/context/health_maintenance';
 import {readMaintenanceMemoryRecords} from '@threadnote/threadnote/memory/maintenance/records';
 import {collectContextHealth} from '@threadnote/threadnote/memory/context/health_commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -58,6 +64,10 @@ import {
   selectRelationBoundedMaintenanceWindow,
   selectRequestedMaintenanceUris,
 } from '../../src/memory/context/maintenance_batch.js';
+import {
+  hasAbsentMaintenanceAnchors,
+  reconcileAbsentMaintenanceAnchors,
+} from '../../src/memory/context/maintenance_policy.js';
 
 const NOW = '2026-10-03T15:00:00.000Z';
 const URI = 'threadnote://user/tester/memories/durable/projects/threadnote/source.md';
@@ -1868,6 +1878,65 @@ describe('persistent context maintenance', () => {
     );
   });
 
+  it('prefilters exactly the cases that absent-anchor reconciliation would change', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({min: 0, max: 7}), {maxLength: 8}),
+        fc.array(
+          fc.record({
+            family: fc.constantFrom('citation', 'current-support', 'citation-coverage', 'relation'),
+            project: fc.constantFrom('threadnote', 'other'),
+            memoryId: fc.constantFrom('tn_source', 'tn_other'),
+            disposition: fc.constantFrom('waiting-evidence', 'needs-decision', 'resolved', 'retired'),
+            slot: fc.constantFrom('present', 'missing', 'legacy-unresolved:0', '0', '1', '3', '-1', 'other'),
+          }),
+          {maxLength: 12},
+        ),
+        (indexes, inputs) => {
+          const citations = indexes.map(index =>
+            createMemoryCodeCitation({
+              version: 1,
+              repositoryId: 'b'.repeat(64),
+              repositoryIdentityKind: 'local',
+              sourceCommit: 'c'.repeat(40),
+              sourceDirty: false,
+              sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+              extractorSet: 'typescript-v1',
+              path: `file-${index}.ts`,
+              fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+              target: {kind: 'file'},
+            }),
+          );
+          const subject = record('source', {schemaVersion: 5, codeCitations: citations});
+          const cases = new Map(
+            inputs.map((input, index) => {
+              const slot =
+                input.slot === 'present' && citations[0] ? contextHealthCitationCaseSlotV2(citations[0]) : input.slot;
+              const item = updateMaintenanceCase(
+                undefined,
+                {
+                  ...input,
+                  slot,
+                  citationId: undefined,
+                  evidenceRevision: String(index),
+                  reason: 'fixture',
+                },
+                NOW,
+              );
+              return [item.caseId, item] as const;
+            }),
+          );
+          const before = JSON.stringify([...cases]);
+          const predicted = hasAbsentMaintenanceAnchors(cases.values(), subject);
+          expect(JSON.stringify([...cases])).toBe(before);
+          reconcileAbsentMaintenanceAnchors(cases, subject, NOW);
+          expect(predicted).toBe(JSON.stringify([...cases]) !== before);
+        },
+      ),
+      {numRuns: 80},
+    );
+  });
+
   effectIt.effect('reconciles removed anchors, removed chunks and unprovable ordinals to match clean attention', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -1898,7 +1967,7 @@ describe('persistent context maintenance', () => {
             project: 'threadnote',
             memoryId: 'tn_source',
             family: 'citation',
-            slot: `anchor:${citation.id}`,
+            slot: contextHealthCitationCaseSlotV2(citation),
             citationId: citation.id,
             evidenceRevision: 'old',
             disposition: 'needs-decision',
@@ -1954,6 +2023,99 @@ describe('persistent context maintenance', () => {
           .filter(item => item.reason === 'canonical-anchor-removed')
           .every(item => item.firstSeen === NOW && item.events.some(event => event.reason === 'citation-changed')),
       ).toBe(true);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('does not reread complete canonical subjects whose anchor cases cannot change', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const citation = createMemoryCodeCitation({
+        version: 1,
+        repositoryId: 'b'.repeat(64),
+        repositoryIdentityKind: 'local',
+        sourceCommit: 'c'.repeat(40),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        extractorSet: 'typescript-v1',
+        path: 'source.ts',
+        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        target: {kind: 'file'},
+      });
+      const subjects = Array.from({length: 64}, (_, index) =>
+        record(`complete-${index}`, {schemaVersion: 5, codeCitations: [citation]}, `Unique body ${index}.`),
+      );
+      const cases = subjects.map(subject =>
+        updateMaintenanceCase(
+          undefined,
+          {
+            project: 'threadnote',
+            memoryId: subject.metadata.memoryId!,
+            family: 'citation',
+            slot: contextHealthCitationCaseSlotV2(citation),
+            citationId: citation.id,
+            evidenceRevision: 'current',
+            disposition: 'waiting-evidence',
+            reason: 'repository-unavailable',
+          },
+          NOW,
+        ),
+      );
+      const checkpoints = Object.fromEntries(
+        subjects.map(subject => [
+          `${subject.metadata.memoryId}:0`,
+          {
+            revision: 'current',
+            memoryHash: sha256HexSync(canonicalMemoryDocumentContent(subject.content)),
+            inventoryComplete: true,
+            checkedAt: NOW,
+            retryAt: '2099-01-01T00:00:00.000Z',
+          },
+        ]),
+      );
+      for (const subject of subjects) expect(hasAbsentMaintenanceAnchors(cases, subject)).toBe(false);
+      const migrated = migrateMaintenanceCases(
+        cases,
+        subjects,
+        new Map(subjects.map(subject => [subject.uri, sha256HexSync(subject.content)])),
+      );
+      for (const subject of subjects) expect(hasAbsentMaintenanceAnchors(migrated, subject)).toBe(false);
+      for (const subject of subjects)
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      const prepared = yield* prepareContextMaintenanceInventory(fixture.config, undefined, 1600);
+      expect(prepared.records).toHaveLength(64);
+      for (const subject of prepared.records) expect(hasAbsentMaintenanceAnchors(migrated, subject)).toBe(false);
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      yield* fixture.fs.makeDirectory(fixture.path.dirname(stateFile), {recursive: true});
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({
+          version: 2,
+          paused: false,
+          state: 'running',
+          generation: '',
+          projects: [],
+          cases,
+          receipts: [],
+          checkpoints,
+        }),
+      );
+      let canonicalRereads = 0;
+      const countedFs = FileSystem.FileSystem.of({
+        ...fixture.fs,
+        readFileString: (file, encoding) => {
+          if (file.startsWith(fixture.directory) && file.endsWith('.md')) {
+            canonicalRereads++;
+          }
+          return fixture.fs.readFileString(file, encoding);
+        },
+      });
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100}).pipe(
+        Effect.provideService(FileSystem.FileSystem, countedFs),
+      );
+      expect(canonicalRereads).toBeLessThan(20);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
