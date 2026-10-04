@@ -333,7 +333,7 @@ const STATIC_FILES: Readonly<
       readonly contentType: string;
       readonly directory?: 'assets/brand' | 'manager';
       readonly path: string;
-      readonly sourceDirectory?: 'manager' | 'packages/manager/static';
+      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static';
     }
   >
 > = {
@@ -348,7 +348,7 @@ const STATIC_FILES: Readonly<
     path: 'app.css',
     sourceDirectory: 'packages/manager/static',
   },
-  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js'},
+  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
   '/threadnote-logo.svg': {
     contentType: 'image/svg+xml; charset=utf-8',
     directory: 'assets/brand',
