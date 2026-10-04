@@ -267,55 +267,54 @@ describe('persistent context maintenance', () => {
     );
   });
 
-  effectIt.effect(
-    'consumes bounded admitted work after slow observations and eventually services independent relations',
-    () =>
-      Effect.gen(function* () {
-        const fixture = yield* makeFixture();
-        const {repository, source} = yield* makeCitationRepository(fixture);
-        const relation = record('zz-relation', {
-          relations: [{type: 'references', uri: URI.replace('source.md', 'missing.md')}],
-        });
-        const relationFile = fixture.path.join(fixture.directory, 'zz-relation.md');
-        yield* fixture.fs.writeFileString(relationFile, relation.content);
-        const clock = yield* Clock.Clock;
-        let offset = 0;
-        const slowClock: Clock.Clock = {
-          ...clock,
-          currentTimeMillis: Effect.map(clock.currentTimeMillis, time => time + offset),
-          currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe() + offset,
-          currentTimeNanos: clock.currentTimeNanos,
-          currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
-          monotonicTimeNanos: clock.monotonicTimeNanos,
-          monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
-          sleep: duration => clock.sleep(duration),
-        };
-        const query = yield* CodeGraphQueryService;
-        let observations = 0;
-        const slow = CodeGraphQueryService.of({
-          ...query,
-          status: (home, cwd, options) =>
-            Effect.gen(function* () {
-              const result = yield* query.status(home, cwd, options);
-              if (++observations === 1) offset += 6_000;
-              return result;
-            }),
-        });
-        const first = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1}).pipe(
-          Effect.provideService(CodeGraphQueryService, slow),
-          Effect.provideService(Clock.Clock, slowClock),
-        );
-        expect(observations).toBeGreaterThan(0);
-        expect(offset).toBe(6_000);
-        expect(first.projects[0].checked).toBe(1);
-        expect(first.projects[0].cursor).toBe(1);
-        expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
-        const next = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
-        expect(next.receipts).toHaveLength(1);
-        expect(
-          parseMemoryDocument(relation.uri, yield* fixture.fs.readFileString(relationFile))!.metadata.relations ?? [],
-        ).toEqual([]);
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  effectIt.effect('consumes prepared work without spending its application budget on slow observations', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, source} = yield* makeCitationRepository(fixture);
+      const relation = record('zz-relation', {
+        relations: [{type: 'references', uri: URI.replace('source.md', 'missing.md')}],
+      });
+      const relationFile = fixture.path.join(fixture.directory, 'zz-relation.md');
+      yield* fixture.fs.writeFileString(relationFile, relation.content);
+      const clock = yield* Clock.Clock;
+      let offset = 0;
+      const slowClock: Clock.Clock = {
+        ...clock,
+        currentTimeMillis: Effect.map(clock.currentTimeMillis, time => time + offset),
+        currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe() + offset,
+        currentTimeNanos: clock.currentTimeNanos,
+        currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+        monotonicTimeNanos: clock.monotonicTimeNanos,
+        monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+        sleep: duration => clock.sleep(duration),
+      };
+      const query = yield* CodeGraphQueryService;
+      let observations = 0;
+      const slow = CodeGraphQueryService.of({
+        ...query,
+        status: (home, cwd, options) =>
+          Effect.gen(function* () {
+            const result = yield* query.status(home, cwd, options);
+            if (++observations === 1) offset += 6_000;
+            return result;
+          }),
+      });
+      const first = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 2}).pipe(
+        Effect.provideService(CodeGraphQueryService, slow),
+        Effect.provideService(Clock.Clock, slowClock),
+      );
+      expect(observations).toBeGreaterThan(0);
+      expect(offset).toBe(6_000);
+      expect(first.projects[0].checked).toBe(1);
+      expect(first.projects[0].cursor).toBe(1);
+      expect(first.receipts).toHaveLength(1);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      const next = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(next.receipts).toHaveLength(1);
+      expect(
+        parseMemoryDocument(relation.uri, yield* fixture.fs.readFileString(relationFile))!.metadata.relations ?? [],
+      ).toEqual([]);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('rejects a source change after shared validation with a fresh final batch fence', () =>

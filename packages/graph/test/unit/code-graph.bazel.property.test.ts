@@ -3,6 +3,7 @@ import {describe, expect, it} from '@effect/vitest';
 import {Effect, Option} from 'effect';
 import * as FC from 'fast-check';
 import {extractBazelFacts} from '@threadnote/graph/languages/bazel/extractor';
+import {parseBazelSyntax} from '@threadnote/graph/languages/bazel/syntax';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
 
@@ -30,6 +31,37 @@ const permutedFiles = FC.array(FC.integer({max: 10_000, min: -10_000}), {
 );
 
 describe('Bazel workspace properties', () => {
+  fcProp(
+    it,
+    'preserves decoded literal values and UTF-16 offsets through comments and strings',
+    {
+      value: FC.array(FC.constantFrom('a', '🧠', '\\', '"', '\n', '\r', '\t', '\u2028', '\u2029', '#', '('), {
+        maxLength: 128,
+      }).map(characters => characters.join('')),
+      comment: FC.array(FC.constantFrom('x', '🧠', '"', "'", '#', '(', ')'), {maxLength: 64}).map(characters =>
+        characters.join(''),
+      ),
+    },
+    ({value, comment}) => {
+      const prefix = `# fake(${comment})\r\n`;
+      const call = `rule(name = ${JSON.stringify(value)})`;
+      const parsed = parseBazelSyntax(`${prefix}${call}`);
+      expect(parsed.calls).toHaveLength(1);
+      expect(parsed.calls[0]).toMatchObject({callee: 'rule', start: prefix.length, end: prefix.length + call.length});
+      expect(parsed.calls[0].strings.map(literal => literal.value)).toEqual([value]);
+      expect(parsed.calls[0].attributes[0].strings.map(literal => literal.value)).toEqual([value]);
+    },
+    {fastCheck: {numRuns: 150}},
+  );
+
+  it('preserves raw and multiline literal boundaries without treating embedded calls as code', () => {
+    const source = 'rule(name = r"raw\\n", doc = """🧠\n# fake()\nline\\tend""")\nnext()';
+    const parsed = parseBazelSyntax(source);
+    expect(parsed.calls.map(call => call.callee)).toEqual(['rule', 'next']);
+    expect(parsed.calls[0].strings.map(literal => literal.value)).toEqual(['raw\\n', '🧠\n# fake()\nline\tend']);
+    expect(parsed.calls[1].start).toBe(source.indexOf('next()'));
+  });
+
   fcEffectProp(
     it,
     'keeps nested workspace ownership and target dependencies deterministic across inventory permutations',

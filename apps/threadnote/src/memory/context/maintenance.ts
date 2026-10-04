@@ -405,18 +405,18 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       });
       state = {...state, generation, state: 'running', error: undefined};
       yield* writeState(config, state);
-      const workStarted = started;
       const selected = selectFairMaintenanceWork(rotated, state.lastProject, maxRecords);
       const {batches, batchByTask} = yield* prepareMaintenanceWorkerBatches(
         config,
         selected,
         roots,
         options.cwd,
-        workStarted,
+        started,
         now,
         checkpoints,
         caseMap,
       );
+      const workStarted = yield* Clock.currentTimeMillis;
       const previousCitationCases = new Map(caseMap);
       for (const task of selected) {
         if (task !== selected[0] && (yield* Clock.currentTimeMillis) - workStarted > 5_000) break;
