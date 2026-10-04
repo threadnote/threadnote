@@ -299,7 +299,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         return publicStatus(state);
       }
       const corpus = snapshot.success.records;
-      state = {...state, cases: migrateMaintenanceCases(state.cases, corpus, snapshot.success.hashes)};
+      const logicalHashes = snapshot.success.canonicalContentHashes;
+      state = {...state, cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes)};
       const active = corpus
         .filter(record => record.metadata.status === 'active')
         .map(record =>
@@ -394,7 +395,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
               (check.retryAt !== undefined && check.retryAt <= now))
           )
             return 2;
-          return check?.memoryHash !== snapshot.success.hashes.get(task.record.uri) ? 1 : 0;
+          return check?.memoryHash !== logicalHashes.get(task.record.uri) ? 1 : 0;
         };
         if (priority(left) !== priority(right)) return priority(right) - priority(left);
         if (left.project !== right.project) return left.project.localeCompare(right.project);
@@ -1015,7 +1016,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         for (const record of active.filter(
           record => options.project === undefined || record.metadata.project === options.project,
         )) {
-          if (!maintenanceAnchorChunksComplete(record, checkpoints, snapshot.success.hashes.get(record.uri))) continue;
+          if (!maintenanceAnchorChunksComplete(record, checkpoints, logicalHashes.get(record.uri))) continue;
           if (
             ![...caseMap.values()].some(
               item =>
@@ -1025,10 +1026,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           )
             continue;
           const fresh = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
-          if (
-            fresh?.metadata.status === 'active' &&
-            contentHash(fresh.content) === snapshot.success.hashes.get(record.uri)
-          )
+          if (fresh?.metadata.status === 'active' && contentHash(fresh.content) === logicalHashes.get(record.uri))
             reconcileAbsentMaintenanceAnchors(caseMap, fresh, now);
         }
       }
@@ -1072,7 +1070,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 tasks.every(task =>
                   maintenanceCheckpointCurrent(
                     checkpoints[task.key],
-                    snapshot.success.hashes.get(task.record.uri),
+                    logicalHashes.get(task.record.uri),
                     sourceRevisions.get(task.project),
                     now,
                   ),
@@ -1084,7 +1082,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           const checked = selected.filter(task =>
             maintenanceCheckpointCurrent(
               checkpoints[task.key],
-              snapshot.success.hashes.get(task.record.uri),
+              logicalHashes.get(task.record.uri),
               sourceRevisions.get(project),
               now,
             ),

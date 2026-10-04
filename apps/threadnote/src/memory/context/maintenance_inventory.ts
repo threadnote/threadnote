@@ -1,5 +1,10 @@
 import {Clock, Crypto, Effect, Equal, FileSystem, Option, Path} from 'effect';
-import {parseMemoryDocument, type MemoryMetadata, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  canonicalMemoryDocumentContent,
+  parseMemoryDocument,
+  type MemoryMetadata,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
@@ -12,7 +17,10 @@ interface InventoryEntry {
   readonly uri: string;
   readonly path: string;
   readonly signature: string;
+  /** Exact bytes for inventory authority and physical generation. */
   readonly hash: string;
+  /** Approved payload identity; absent in older V2 scheduling hints until read afresh. */
+  readonly canonicalContentHash?: string;
   readonly bodyHash: string;
   readonly headerTitle: MemoryRecord['headerTitle'];
   readonly metadata: MemoryMetadata;
@@ -108,6 +116,8 @@ function decodeInventory(raw: string, root: string, user: string): Inventory | u
         contained(entry.path) &&
         typeof entry.signature === 'string' &&
         /^[a-f0-9]{64}$/u.test(entry.hash) &&
+        (entry.canonicalContentHash === undefined ||
+          (typeof entry.canonicalContentHash === 'string' && /^[a-f0-9]{64}$/u.test(entry.canonicalContentHash))) &&
         /^[a-f0-9]{64}$/u.test(entry.bodyHash) &&
         typeof entry.headerTitle === 'string' &&
         entry.metadata !== null &&
@@ -250,6 +260,7 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
               path: candidate,
               signature: signature(after),
               hash: sha256HexSync(raw),
+              canonicalContentHash: sha256HexSync(canonicalMemoryDocumentContent(content)),
               bodyHash: sha256HexSync(record.body),
               headerTitle: record.headerTitle,
               metadata: record.metadata,
@@ -457,7 +468,8 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
       } else if (info.value.type === 'File' && name.endsWith('.md')) {
         yield* checkAuthority(fs, path, canonicalRoot, candidate);
         const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
-        if (entries[uri]?.signature === signature(info.value)) continue;
+        if (entries[uri]?.signature === signature(info.value) && entries[uri]?.canonicalContentHash !== undefined)
+          continue;
         const read = yield* readEntry(fs, path, root, canonicalRoot, candidate, uri, project, info.value);
         if (read.entry === undefined) delete entries[uri];
         else entries[uri] = read.entry;
@@ -517,6 +529,11 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     reconciliation,
     generation: sha256HexSync(ordered.map(entry => `${entry.uri}:${entry.hash}`).join('|')),
     hashes: new Map(ordered.map(entry => [entry.uri, entry.hash])),
+    canonicalContentHashes: new Map(
+      ordered.flatMap(entry =>
+        entry.canonicalContentHash === undefined ? [] : [[entry.uri, entry.canonicalContentHash] as const],
+      ),
+    ),
     bodyHashes: new Map(ordered.map(entry => [entry.uri, entry.bodyHash])),
     records: ordered.map(
       entry =>

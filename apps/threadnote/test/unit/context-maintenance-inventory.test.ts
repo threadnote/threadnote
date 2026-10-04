@@ -155,6 +155,31 @@ describe('maintenance inventory authority and fairness', () => {
       const result = yield* f.prepare(8);
       expect(result.complete).toBe(true);
       expect(result.hashes.get(uri(0))).toBe(sha256HexSync(changed));
+      expect(result.canonicalContentHashes.get(uri(0))).toBe(sha256HexSync(changed));
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('legacy v2 hints cannot invent canonical identity before a fresh bounded read', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([0]);
+      const raw = `${content(0)}\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->`;
+      yield* f.store.write(f.location, uri(0), raw, {mode: 'replace'});
+      yield* settle(f, 8);
+      const cacheFile = f.path.join(f.home, 'context-maintenance', 'inventory', `${sha256HexSync('selected')}.json`);
+      const prior = JSON.parse(yield* f.fs.readFileString(cacheFile));
+      for (const entry of Object.values<{canonicalContentHash?: string}>(prior.entries))
+        delete entry.canonicalContentHash;
+      prior.complete = false;
+      prior.queue = [{directory: prior.root, offset: 0}];
+      yield* f.fs.writeFileString(cacheFile, JSON.stringify(prior));
+      const partial = yield* f.prepare(1);
+      expect(partial.complete).toBe(false);
+      expect(partial.hashes.get(uri(0))).toBe(sha256HexSync(raw));
+      expect(partial.canonicalContentHashes.has(uri(0))).toBe(false);
+      const fresh = yield* settle(f, 8);
+      expect(fresh.result.hashes.get(uri(0))).toBe(sha256HexSync(raw));
+      expect(fresh.result.canonicalContentHashes.get(uri(0))).toBe(sha256HexSync(content(0)));
+      expect(yield* f.store.read(f.location, uri(0))).toBe(raw);
     }).pipe(TestClock.withLive, provide),
   );
 
@@ -320,14 +345,21 @@ describe('maintenance inventory authority and fairness', () => {
       ),
       budget: fc.integer({min: 1, max: 8}),
       crlf: fc.boolean(),
+      prefix: fc.constantFrom('', ' \n\t'),
+      suffix: fc.constantFrom('', '\n', '\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->'),
     },
-    ({order, budget, crlf}) =>
+    ({order, budget, crlf, prefix, suffix}) =>
       Effect.gen(function* () {
         const f = yield* fixture(order);
         const reverse = yield* fixture([...order].reverse());
-        const changed = crlf
+        const logical = crlf
           ? content(11, 'selected', 'Independent β tail.').replaceAll('\n', '\r\n')
           : content(11, 'selected', 'Independent β tail.');
+        const changed = `${prefix}${logical}${suffix}`;
+        const logicalModel = new Map(
+          order.filter(index => index !== 10).map(index => [uri(index), sha256HexSync(content(index))]),
+        );
+        logicalModel.set(uri(11), sha256HexSync(logical));
         for (const candidate of [f, reverse]) {
           yield* candidate.store.write(candidate.location, uri(11), changed, {mode: 'replace'});
           yield* candidate.store.remove(candidate.location, uri(10));
@@ -339,11 +371,14 @@ describe('maintenance inventory authority and fairness', () => {
         expect(pairs(a.result.hashes)).toEqual(pairs(f.model));
         expect(pairs(b.result.hashes)).toEqual(pairs(reverse.model));
         expect(pairs(a.result.hashes)).toEqual(pairs(b.result.hashes));
+        expect(pairs(a.result.canonicalContentHashes)).toEqual(pairs(logicalModel));
+        expect(pairs(b.result.canonicalContentHashes)).toEqual(pairs(logicalModel));
         expect(a.result.generation).toBe(b.result.generation);
         const before = yield* f.store.read(f.location, uri(11));
         const again = yield* f.prepare(budget);
         expect(again.complete).toBe(true);
         expect(pairs(again.hashes)).toEqual(pairs(f.model));
+        expect(pairs(again.canonicalContentHashes)).toEqual(pairs(logicalModel));
         expect(yield* f.store.read(f.location, uri(11))).toBe(before);
       }).pipe(TestClock.withLive, provide),
     {fastCheck: {numRuns: 8, seed: 80408}, timeout: 30000},

@@ -1,5 +1,5 @@
 import {Clock, Effect, FileSystem, Path} from 'effect';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -283,7 +283,7 @@ export const prepareMaintenanceWorkerBatches = Effect.fn('contextMaintenance.pre
         if (
           !checks.every(
             check =>
-              check?.memoryHash === sha256HexSync(record.content) &&
+              check?.memoryHash === sha256HexSync(canonicalMemoryDocumentContent(record.content)) &&
               check.sourceEpoch === observation.sourceEpoch &&
               (check.retryAt === undefined || check.retryAt > now),
           )

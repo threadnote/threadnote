@@ -71,6 +71,38 @@ function record(topic: string, metadata: Partial<MemoryMetadata> = {}, body = 'K
 }
 
 describe('persistent context maintenance', () => {
+  effectIt.effect('logical checkpoint coverage converges with trailing newlines and managed legacy footers', () =>
+    Effect.gen(function* () {
+      for (const envelope of ['\n', '\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->']) {
+        const fixture = yield* makeFixture();
+        const source = record('source');
+        const raw = `${source.content}${envelope}`;
+        yield* fixture.fs.writeFileString(fixture.source, raw);
+        const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+        const checkpoint = JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints['tn_source:0'];
+        expect(checkpoint).toBeDefined();
+        expect(checkpoint.memoryHash).toBe(sha256HexSync(source.content));
+        const inventory = yield* prepareContextMaintenanceInventory(fixture.config, 'threadnote', 256);
+        expect(inventory.complete).toBe(true);
+        expect(inventory.hashes.get(URI)).toBe(sha256HexSync(raw));
+        expect(first.projects[0]).toMatchObject({eligible: 1, checked: 1, checkedCitations: 0});
+        expect(first.state).toBe('idle');
+        for (let replay = 0; replay < 2; replay++) {
+          const again = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+          expect(again.projects[0]).toMatchObject({eligible: 1, checked: 1, checkedCitations: 0});
+          expect(again.cases).toEqual(first.cases);
+          expect(again.receipts).toEqual(first.receipts);
+          expect(JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints['tn_source:0']).toEqual(
+            checkpoint,
+          );
+          expect(yield* fixture.fs.readFileString(fixture.source)).toBe(raw);
+          expect(parseMemoryDocument(URI, raw)?.body).toBe(source.body);
+        }
+      }
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it('bounds batches across interleaved projects and binds shared receipts to each exact canonical subject', () => {
     const citation = {
       version: 1,
@@ -554,10 +586,13 @@ describe('persistent context maintenance', () => {
         refs: ['source.ts', 'independent.ts'],
       });
       const source = record('source', {schemaVersion: 5, codeCitations: citations});
-      yield* fixture.fs.writeFileString(fixture.source, source.content);
+      const raw = `${source.content}\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->`;
+      yield* fixture.fs.writeFileString(fixture.source, raw);
       yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
       yield* indexer.index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
       const first = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(first.projects[0]).toMatchObject({eligible: 1, checked: 1});
+      expect(first.projects[0].checkedCitations).toBeGreaterThan(0);
       const changed = first.cases.find(item => item.family === 'citation' && item.disposition === 'needs-decision');
       expect(changed, JSON.stringify(first)).toBeDefined();
       const selectedPacket = yield* readContextMaintenancePacket(fixture.config, changed!.caseId, {
@@ -584,6 +619,7 @@ describe('persistent context maintenance', () => {
         ),
       ).toBe(true);
       const second = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(second.projects[0]).toEqual(first.projects[0]);
       expect(second.cases.find(item => item.caseId === changed!.caseId)?.attemptCount).toBe(changed!.attemptCount);
       expect(second.lastProgressAt).toBe(first.lastProgressAt);
       expect((yield* readContextMaintenancePacket(fixture.config, changed!.caseId)).caseId).toBe(changed!.caseId);
@@ -613,7 +649,7 @@ describe('persistent context maintenance', () => {
         canonicalProvenancePreserved: true,
         permanentLossProven: false,
       });
-      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(raw);
       expect(
         parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.codeCitations,
       ).toHaveLength(2);
