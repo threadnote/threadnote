@@ -46,6 +46,11 @@ export interface BazelSyntax {
 const MAX_BAZEL_CALLS = 8_000;
 const MAX_BAZEL_DECLARATIONS = 4_000;
 const MAX_BAZEL_STRING_LITERALS = 16_000;
+const WHITESPACE = /\s/u;
+const WHITESPACE_OR_COMMA = /[\s,]/u;
+const STRING_PREFIX_CHARACTER = /[rRbBuUfF]/u;
+const IDENTIFIER_START = /[A-Za-z_]/u;
+const IDENTIFIER_PART = /[A-Za-z0-9_]/u;
 
 export function parseBazelSyntax(content: string): BazelSyntax {
   const masked = maskBazelNonCode(content);
@@ -62,7 +67,7 @@ export function parseBazelSyntax(content: string): BazelSyntax {
       index = scanDottedIdentifier(masked, index);
       const callee = masked.slice(start, index);
       let open = index;
-      while (/\s/u.test(masked[open] ?? '')) open += 1;
+      while (WHITESPACE.test(masked[open] ?? '')) open += 1;
       if (masked[open] === '(' && !isDefinitionName(masked, start)) {
         const close = findMatchingDelimiter(masked, open, '(', ')');
         if (close !== undefined) {
@@ -185,7 +190,7 @@ function scanAttributes(content: string, masked: string, start: number, end: num
   const output: BazelAttribute[] = [];
   let cursor = start;
   while (cursor < end) {
-    while (cursor < end && /[\s,]/u.test(masked[cursor] ?? '')) cursor += 1;
+    while (cursor < end && WHITESPACE_OR_COMMA.test(masked[cursor] ?? '')) cursor += 1;
     if (!isIdentifierStart(masked[cursor] ?? '')) {
       cursor = nextTopLevelComma(masked, cursor, end) + 1;
       continue;
@@ -193,7 +198,7 @@ function scanAttributes(content: string, masked: string, start: number, end: num
     const nameStart = cursor;
     cursor = scanIdentifier(masked, cursor);
     const name = masked.slice(nameStart, cursor);
-    while (/\s/u.test(masked[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(masked[cursor] ?? '')) cursor += 1;
     if (masked[cursor] !== '=') {
       cursor = nextTopLevelComma(masked, cursor, end) + 1;
       continue;
@@ -241,9 +246,10 @@ function stringPrefixAt(
 ): Option.Option<{readonly quoteStart: number; readonly raw: boolean}> {
   const character = content[index];
   if (character === '"' || character === "'") return Option.some({quoteStart: index, raw: false});
-  if (!/[rRbBuUfF]/u.test(character ?? '') || !isTokenBoundary(content[index - 1] ?? '')) return Option.none();
+  if (!STRING_PREFIX_CHARACTER.test(character ?? '') || !isTokenBoundary(content[index - 1] ?? ''))
+    return Option.none();
   let cursor = index;
-  while (cursor < end && /[rRbBuUfF]/u.test(content[cursor] ?? '') && cursor - index < 3) cursor += 1;
+  while (cursor < end && STRING_PREFIX_CHARACTER.test(content[cursor] ?? '') && cursor - index < 3) cursor += 1;
   if (content[cursor] !== '"' && content[cursor] !== "'") return Option.none();
   return Option.some({quoteStart: cursor, raw: /r/iu.test(content.slice(index, cursor))});
 }
@@ -354,10 +360,10 @@ function scanDottedIdentifier(source: string, start: number): number {
   let cursor = scanIdentifier(source, start);
   for (;;) {
     const dot = cursor;
-    while (/\s/u.test(source[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(source[cursor] ?? '')) cursor += 1;
     if (source[cursor] !== '.') return dot;
     cursor += 1;
-    while (/\s/u.test(source[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(source[cursor] ?? '')) cursor += 1;
     if (!isIdentifierStart(source[cursor] ?? '')) return dot;
     cursor = scanIdentifier(source, cursor);
   }
@@ -404,11 +410,11 @@ function dirname(path: string): string {
 }
 
 function isIdentifierStart(character: string): boolean {
-  return /[A-Za-z_]/u.test(character);
+  return IDENTIFIER_START.test(character);
 }
 
 function isIdentifierPart(character: string): boolean {
-  return /[A-Za-z0-9_]/u.test(character);
+  return IDENTIFIER_PART.test(character);
 }
 
 function isTokenBoundary(character: string): boolean {

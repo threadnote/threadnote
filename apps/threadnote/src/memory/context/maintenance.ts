@@ -1668,14 +1668,13 @@ const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: s
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
-  const text = JSON.stringify(value);
-  if (new TextEncoder().encode(text).length > MAX_STATE_BYTES)
-    return yield* fail('Maintenance state exceeds its write boundary.');
+  const encoded = new TextEncoder().encode(JSON.stringify(value));
+  if (encoded.length > MAX_STATE_BYTES) return yield* fail('Maintenance state exceeds its write boundary.');
   const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});
-      yield* handle.writeAll(new TextEncoder().encode(text));
+      yield* handle.writeAll(encoded);
       yield* handle.sync;
     }),
   ).pipe(
