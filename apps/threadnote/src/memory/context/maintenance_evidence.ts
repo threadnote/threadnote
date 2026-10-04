@@ -13,6 +13,7 @@ import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/mem
 import {planContextHealthCitationBatch} from '@threadnote/context/citation_validation';
 import {
   CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION,
+  type ContextBriefCitationValidationReceiptV2,
   type ContextBriefMemoryCandidateV1,
   type ContextBriefMemoryCitationValidationV2,
 } from '@threadnote/context/types';
@@ -195,11 +196,6 @@ export function projectMaintenanceCitationReceipts(input: {
     if (
       entry === undefined ||
       entry.contentHash !== memoryHash(record) ||
-      (input.associations !== undefined &&
-        (entry.associations === undefined ||
-          !Object.entries(entry.associations).every(
-            ([selector, epoch]) => input.associations?.[selector] === epoch,
-          ))) ||
       !Object.entries(entry.sources).every(([cwd, epoch]) => input.sources.get(cwd)?.epoch === epoch)
     )
       return [];
@@ -227,14 +223,56 @@ export function projectMaintenanceCitationReceipts(input: {
               receipt.snapshotId === source.snapshotId
             );
           })) &&
-        (receipt.status !== 'unknown' ||
-          receipt.provenance === 'historical-verified' ||
-          (Number.isFinite(Date.parse(receipt.observedAt)) &&
-            input.now - Date.parse(receipt.observedAt) >= 0 &&
-            input.now - Date.parse(receipt.observedAt) < UNKNOWN_RETRY_MILLISECONDS)),
+        receiptWithinRetryWindow(receipt, input.now),
     );
     return receipts.length === 0 ? [] : [{uri: record.uri, receipts, cacheHits: receipts.length}];
   });
+}
+
+function receiptWithinRetryWindow(receipt: ContextBriefCitationValidationReceiptV2, now: number): boolean {
+  return (
+    receipt.status !== 'unknown' ||
+    receipt.provenance === 'historical-verified' ||
+    (Number.isFinite(Date.parse(receipt.observedAt)) &&
+      now - Date.parse(receipt.observedAt) >= 0 &&
+      now - Date.parse(receipt.observedAt) < UNKNOWN_RETRY_MILLISECONDS)
+  );
+}
+
+/** A receipt must have a live subject and its own published association before foreground route probing. */
+export function foregroundReceiptCandidates(
+  entries: readonly Entry[],
+  records: readonly MemoryRecord[],
+  candidates: readonly ContextBriefMemoryCandidateV1[],
+  now: number,
+) {
+  const byEntry = new Map(entries.map(entry => [entry.uri, entry]));
+  const byRecord = new Map(records.map(record => [record.uri, record]));
+  const selectedEntries: Entry[] = [];
+  const selectedCandidates: ContextBriefMemoryCandidateV1[] = [];
+  for (const candidate of candidates) {
+    const entry = byEntry.get(candidate.uri);
+    const record = byRecord.get(candidate.uri);
+    if (entry === undefined || record === undefined || entry.contentHash !== memoryHash(record)) continue;
+    const canonicalCitations = new Map((record.metadata.codeCitations ?? []).map(citation => [citation.id, citation]));
+    const eligibleIds = new Set(
+      entry.receipts.flatMap(receipt =>
+        canonicalCitations.has(receipt.citationId) && receiptWithinRetryWindow(receipt, now)
+          ? [receipt.citationId]
+          : [],
+      ),
+    );
+    const codeCitations = candidate.codeCitations.flatMap(citation => {
+      const canonical = canonicalCitations.get(citation.id);
+      if (canonical === undefined || !eligibleIds.has(citation.id)) return [];
+      const selector = `${canonical.repositoryId}:${canonical.sourceCommit}`;
+      return entry.associations?.[selector] === undefined ? [] : [canonical];
+    });
+    if (codeCitations.length === 0) continue;
+    selectedEntries.push(entry);
+    selectedCandidates.push({...candidate, codeCitations});
+  }
+  return {entries: selectedEntries, candidates: selectedCandidates};
 }
 
 /**
@@ -276,7 +314,9 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
     const stored = yield* readProjection(file);
     const recordUris = new Set(records.map(record => record.uri));
     const entries = stored?.entries.filter(entry => recordUris.has(entry.uri)) ?? [];
-    if ((options.mode === undefined || options.mode === 'foreground') && entries.length === 0) {
+    const foreground = options.mode === undefined || options.mode === 'foreground';
+    const eligible = foreground ? foregroundReceiptCandidates(entries, records, candidates, now) : undefined;
+    if (foreground && eligible?.candidates.length === 0) {
       yield* enqueueEvidenceRequest(
         file,
         project,
@@ -298,20 +338,49 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
     const association = yield* readContextMaintenanceCitationAssociation(
       config,
       cwd,
-      candidates.flatMap(candidate => candidate.codeCitations),
+      (eligible?.candidates ?? candidates).flatMap(candidate => candidate.codeCitations),
       openingSource,
     );
     const roots = [
-      ...new Set([cwd, ...association.roots, ...entries.flatMap(entry => Object.keys(entry.sources))]),
+      ...new Set([
+        cwd,
+        ...association.roots,
+        ...(eligible?.entries ?? entries).flatMap(entry => Object.keys(entry.sources)),
+      ]),
     ].slice(0, MAX_SOURCES);
     for (const root of roots) sources.set(root, yield* openingSource(root));
-    const cached = projectMaintenanceCitationReceipts({
-      entries,
+    const projected = projectMaintenanceCitationReceipts({
+      entries: eligible?.entries ?? entries,
       records,
       sources,
       now,
       associations: association.bySelector,
     });
+    const candidateIds = foreground ? new Map<string, Set<string>>() : undefined;
+    if (candidateIds !== undefined)
+      for (const candidate of candidates) {
+        const ids = candidateIds.get(candidate.uri) ?? new Set<string>();
+        for (const citation of candidate.codeCitations) ids.add(citation.id);
+        candidateIds.set(candidate.uri, ids);
+      }
+    const cached =
+      candidateIds === undefined
+        ? projected
+        : projected.flatMap(validation => {
+            const receipts = validation.receipts.filter(receipt =>
+              candidateIds.get(validation.uri)?.has(receipt.citationId),
+            );
+            return receipts.length === 0 ? [] : [{...validation, receipts, cacheHits: receipts.length}];
+          });
+    if (foreground && cached.length === 0) {
+      yield* enqueueEvidenceRequest(
+        file,
+        project,
+        cwd,
+        candidates.map(candidate => candidate.uri),
+      );
+      return [];
+    }
     const receiptIds = new Map(
       cached.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
     );
@@ -363,10 +432,23 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         return source;
       });
     for (const [root] of sources) closing.set(root, yield* closingSource(root));
+    const canonicalByUri = new Map(records.map(record => [record.uri, record]));
+    const returnedCitations = foreground
+      ? [...cached, ...computed].flatMap(validation =>
+          validation.receipts.map(receipt =>
+            canonicalByUri
+              .get(validation.uri)
+              ?.metadata.codeCitations?.find(citation => citation.id === receipt.citationId),
+          ),
+        )
+      : [];
+    const closingCitations = foreground
+      ? returnedCitations.filter(citation => citation !== undefined)
+      : candidates.flatMap(candidate => candidate.codeCitations);
     const closingAssociation = yield* readContextMaintenanceCitationAssociation(
       config,
       cwd,
-      candidates.flatMap(candidate => candidate.codeCitations),
+      closingCitations,
       closingSource,
     );
     const proofGeneration =
@@ -376,7 +458,14 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
           ? beforeMemory
           : undefined;
     const unchanged =
-      association.epoch === closingAssociation.epoch &&
+      (foreground
+        ? returnedCitations.length === closingCitations.length &&
+          closingCitations.every(citation => {
+            const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
+            const opening = association.bySelector[selector];
+            return opening !== undefined && opening === closingAssociation.bySelector[selector];
+          })
+        : association.epoch === closingAssociation.epoch) &&
       proofGeneration !== undefined &&
       [...sources].every(([root, observation]) => observation.epoch === closing.get(root)?.epoch);
     if (!unchanged) return [];

@@ -7,8 +7,16 @@ import {describe, expect, it} from 'vitest';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import type {CodeGraphStatus} from '@threadnote/graph/types';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
+import {codeGraphLayout} from '@threadnote/graph/layout';
+import {
+  recordVerifiedCodeGraphLocalAssociation,
+  readCodeGraphLocalReconciliationEvidence,
+} from '@threadnote/graph/local_provenance';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -18,10 +26,24 @@ import {contextHealthCitationCoverageV2} from '@threadnote/context/health_mainte
 import {
   collectContextMaintenanceCitationEvidence,
   clearContextMaintenanceEvidenceRequest,
+  foregroundReceiptCandidates,
   readContextMaintenanceEvidenceRequests,
   projectMaintenanceCitationReceipts,
   sourceObservation,
 } from '@threadnote/threadnote/memory/context/maintenance_evidence';
+
+const citationEnvironmentPolicy = Layer.mergeAll(
+  Layer.succeed(ChildEnvironmentPolicy, {
+    preserveIntendedChild: environment => environment,
+    sanitizeExternal: environment => environment,
+  }),
+  Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: '/test/threadnote.ts'}),
+);
+const citationSystemLayer = SystemInfo.layer.pipe(Layer.provide(citationEnvironmentPolicy));
+const citationPlatformLayer = Layer.mergeAll(
+  citationSystemLayer,
+  CommandExecutor.layer.pipe(Layer.provideMerge(citationSystemLayer), Layer.provide(citationEnvironmentPolicy)),
+).pipe(Layer.provideMerge(BunServices.layer));
 
 const repository = '/synthetic/repository';
 const status: CodeGraphStatus = {
@@ -69,6 +91,9 @@ function record(index: number) {
   return recordWithCitation(index, citation);
 }
 function recordWithCitation(index: number, codeCitation: ReturnType<typeof createMemoryCodeCitation>) {
+  return recordWithCitations(index, [codeCitation]);
+}
+function recordWithCitations(index: number, codeCitations: readonly ReturnType<typeof createMemoryCodeCitation>[]) {
   const content = formatMemoryDocument(
     'MEMORY',
     {
@@ -80,7 +105,7 @@ function recordWithCitation(index: number, codeCitation: ReturnType<typeof creat
       sourceAgentClient: 'test',
       timestamp: '1970-01-01T00:00:00.000Z',
       visibility: 'personal',
-      codeCitations: [codeCitation],
+      codeCitations: [...codeCitations],
     },
     `Supported claim ${index}.`,
   );
@@ -129,6 +154,55 @@ const narrow = Layer.mergeAll(
 );
 
 describe('generation-bound maintenance citation evidence', () => {
+  it('selects only live published receipt selectors from a 200-selector foreground corpus', () => {
+    const values = Array.from({length: 200}, (_, index) => {
+      const codeCitation = createMemoryCodeCitation({
+        extractorSet: 'test',
+        fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+        path: 'source.ts',
+        repositoryId: status.identity.repositoryId,
+        repositoryIdentityKind: 'remote',
+        sourceCommit: index.toString(16).padStart(40, '0'),
+        sourceDirty: false,
+        sourceSnapshotId: status.readySnapshot!.id,
+        target: {kind: 'file'},
+        version: 1,
+      });
+      return recordWithCitation(index, codeCitation);
+    });
+    const candidates = values.map(candidate);
+    const entries: Parameters<typeof foregroundReceiptCandidates>[0] = values.map((value, index) => {
+      const codeCitation = value.metadata.codeCitations![0];
+      const selector = `${codeCitation.repositoryId}:${codeCitation.sourceCommit}`;
+      const original = receipt('1970-01-01T00:00:00.000Z');
+      return {
+        uri: value.uri,
+        contentHash: index === 198 ? 'stale-content' : sha256HexSync(canonicalMemoryDocumentContent(value.content)),
+        sources: {[repository]: 'source-epoch'},
+        associations: {[selector]: 'published-association'},
+        receipts: [
+          {
+            ...original,
+            citationId: codeCitation.id,
+            ...(index === 1 ? {provenance: 'historical-verified' as const} : {}),
+            ...(index >= 2 && index < 198
+              ? {
+                  status: 'unknown' as const,
+                  provenance: 'unverified' as const,
+                  coverage: 'incomplete' as const,
+                  reason: 'graph-stale' as const,
+                }
+              : {}),
+          },
+        ],
+      };
+    });
+    const selected = foregroundReceiptCandidates(entries, values.slice(0, 199), candidates, 61_000);
+    expect(candidates.flatMap(value => value.codeCitations)).toHaveLength(200);
+    expect(selected.candidates.map(value => value.uri)).toEqual([values[0].uri, values[1].uri]);
+    expect(selected.candidates.flatMap(value => value.codeCitations)).toHaveLength(2);
+    expect(selected.entries).toHaveLength(2);
+  });
   effectIt.layer(narrow)(test => {
     test.effect('routes every distinct source selector while keeping report roots bounded', () =>
       Effect.gen(function* () {
@@ -330,6 +404,101 @@ describe('generation-bound maintenance citation evidence', () => {
         expect(validations).toBe(1);
       }),
     );
+    test.effect('retains a current receipt beside an expired anchor and closes both returned proofs', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-partial-'});
+        const config = {
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+          account: 'fixture',
+        } as RuntimeConfig;
+        const expiredCitation = createMemoryCodeCitation({
+          extractorSet: 'test',
+          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          path: 'expired.ts',
+          repositoryId: citation.repositoryId,
+          repositoryIdentityKind: 'remote',
+          sourceCommit: '6'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: status.readySnapshot!.id,
+          target: {kind: 'file'},
+          version: 1,
+        });
+        const historicalCitation = createMemoryCodeCitation({
+          extractorSet: 'test',
+          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          path: 'historical.ts',
+          repositoryId: citation.repositoryId,
+          repositoryIdentityKind: 'remote',
+          sourceCommit: '7'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: status.readySnapshot!.id,
+          target: {kind: 'file'},
+          version: 1,
+        });
+        const records = [
+          recordWithCitations(0, [citation, expiredCitation]),
+          recordWithCitation(1, historicalCitation),
+        ];
+        const candidates = records.map(candidate);
+        let calls = 0;
+        let race = false;
+        const query = CodeGraphQueryService.of({
+          status: () =>
+            Effect.sync(() => {
+              calls++;
+              const current =
+                race && calls >= 2
+                  ? {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'5'.repeat(40)}`}}
+                  : status;
+              return attachCodeGraphStatusObservation(
+                {...current},
+                {identity: current.identity, overlay: {dirty: false}},
+              );
+            }),
+        } as unknown as CodeGraphQueryService['Service']);
+        const collect = (mode: 'worker' | 'foreground') =>
+          collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
+            mode,
+            validate: selected =>
+              Effect.gen(function* () {
+                const now = (yield* DateTime.nowAsDate).toISOString();
+                return selected.map(value => ({
+                  uri: value.uri,
+                  receipts: value.codeCitations.map(codeCitation => ({
+                    ...receipt(now),
+                    citationId: codeCitation.id,
+                    ...(codeCitation.id === expiredCitation.id
+                      ? {
+                          status: 'unknown' as const,
+                          provenance: 'unverified' as const,
+                          coverage: 'incomplete' as const,
+                          reason: 'graph-stale' as const,
+                        }
+                      : codeCitation.id === historicalCitation.id
+                        ? {provenance: 'historical-verified' as const}
+                        : {}),
+                  })),
+                }));
+              }),
+          }).pipe(Effect.provideService(CodeGraphQueryService, query));
+        expect((yield* collect('worker')).flatMap(value => value.receipts)).toHaveLength(3);
+        yield* TestClock.adjust('61 seconds');
+        calls = 0;
+        const reused = yield* collect('foreground');
+        expect(
+          reused
+            .flatMap(value => value.receipts)
+            .map(value => value.citationId)
+            .sort(),
+        ).toEqual([citation.id, historicalCitation.id].sort());
+        race = true;
+        calls = 0;
+        expect(yield* collect('foreground')).toEqual([]);
+      }),
+    );
     test.effect(
       'reuses recent unknown receipts without certifying coverage and retries after the bounded deadline',
       () =>
@@ -427,6 +596,134 @@ describe('generation-bound maintenance citation evidence', () => {
     );
   });
 
+  effectIt.layer(citationPlatformLayer)(test => {
+    test.effect.each(['selected', 'omitted'] as const)(
+      'does not accept %s alias proof drift through another candidate',
+      scenario =>
+        TestClock.withLive(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-partial-route-'});
+            const home = path.join(root, 'home');
+            const repo = path.join(root, 'repository');
+            const linked = path.join(root, 'linked');
+            yield* fs.makeDirectory(home);
+            yield* fs.makeDirectory(repo);
+            const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
+            yield* git(repo, ['init', '--quiet']);
+            yield* git(repo, ['config', 'user.name', 'Test']);
+            yield* git(repo, ['config', 'user.email', 'test@example.invalid']);
+            yield* fs.writeFileString(path.join(repo, 'source.ts'), 'export const supported = true;\n');
+            yield* git(repo, ['add', '.']);
+            yield* git(repo, ['commit', '--quiet', '-m', 'fixture']);
+            yield* git(repo, ['remote', 'add', 'origin', 'https://example.invalid/old/repository.git']);
+            yield* git(repo, ['worktree', 'add', '--quiet', '--detach', linked]);
+            const previous = yield* resolveRepositoryIdentity(linked);
+            expect((yield* recordVerifiedCodeGraphLocalAssociation(home, previous)).state).toBe('verified');
+            const prior = yield* readCodeGraphLocalReconciliationEvidence(home, previous);
+            if (prior.state !== 'verified') return yield* Effect.die('Expected prior association.');
+            yield* git(repo, ['worktree', 'remove', '--force', linked]);
+            yield* git(repo, ['remote', 'set-url', 'origin', 'https://example.invalid/new/repository.git']);
+            const current = yield* resolveRepositoryIdentity(repo);
+            const config = {
+              agentContextHome: home,
+              manifestPath: path.join(home, 'manifest'),
+              account: 'fixture',
+            } as RuntimeConfig;
+            const makeCitation = (repositoryId: string, sourceCommit: string, file: string) =>
+              createMemoryCodeCitation({
+                extractorSet: 'test',
+                fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+                path: file,
+                repositoryId,
+                repositoryIdentityKind: 'remote',
+                sourceCommit,
+                sourceDirty: false,
+                sourceSnapshotId: status.readySnapshot!.id,
+                target: {kind: 'file'},
+                version: 1,
+              });
+            const a = makeCitation(current.repositoryId, current.headCommit, 'a.ts');
+            const b = makeCitation(previous.repositoryId, previous.headCommit, 'b.ts');
+            const t = makeCitation(previous.repositoryId, previous.headCommit, 'q.ts');
+            const records = [recordWithCitations(0, [a, b]), recordWithCitation(1, t)];
+            const ready = {
+              ...status,
+              identity: current,
+              readySnapshot: {
+                ...status.readySnapshot!,
+                commit: current.headCommit,
+                repositoryId: current.repositoryId,
+                worktreeId: current.worktreeId,
+              },
+            };
+            const layout = codeGraphLayout(path, home, prior.checkoutId, prior.worktreeId);
+            const priorFile = path.join(
+              layout.repositoryRoot,
+              'local-context',
+              'worktrees',
+              `${prior.worktreeId}.json`,
+            );
+            let mutatePrior = false;
+            let statusCalls = 0;
+            const query = CodeGraphQueryService.of({
+              status: () =>
+                Effect.gen(function* () {
+                  statusCalls++;
+                  if (mutatePrior && statusCalls === 1) yield* fs.writeFileString(priorFile, '{}');
+                  return attachCodeGraphStatusObservation({...ready}, {identity: current, overlay: {dirty: false}});
+                }),
+            } as unknown as CodeGraphQueryService['Service']);
+            const collect = (mode: 'worker' | 'foreground', selected: readonly ContextBriefMemoryCandidateV1[]) =>
+              collectContextMaintenanceCitationEvidence(config, 'fixture', records, selected, repo, {
+                mode,
+                validate: values =>
+                  Effect.gen(function* () {
+                    const now = (yield* DateTime.nowAsDate).toISOString();
+                    return values.map(value => ({
+                      uri: value.uri,
+                      receipts: value.codeCitations.map(codeCitation => ({
+                        ...receipt(now),
+                        citationId: codeCitation.id,
+                        repositoryId: codeCitation.repositoryId,
+                        ...(codeCitation.id === a.id ? {} : {provenance: 'historical-verified' as const}),
+                      })),
+                    }));
+                  }),
+              }).pipe(Effect.provideService(CodeGraphQueryService, query));
+            const allCandidates = records.map(candidate);
+            expect((yield* collect('worker', allCandidates)).flatMap(value => value.receipts)).toHaveLength(3);
+            const projection = path.join(
+              home,
+              'context-maintenance',
+              'evidence',
+              `${sha256HexSync(`fixture\0${repo}`)}.json`,
+            );
+            const stored = JSON.parse(yield* fs.readFileString(projection));
+            const qEntry = stored.entries.find((entry: {uri: string}) => entry.uri === records[1].uri);
+            if (qEntry === undefined) return yield* Effect.die('Expected Q projection.');
+            qEntry.sources = Object.fromEntries(Object.keys(qEntry.sources).map(root => [root, 'incompatible-source']));
+            yield* fs.writeFileString(projection, JSON.stringify(stored));
+            const stable = yield* collect('foreground', allCandidates);
+            expect(
+              stable
+                .flatMap(value => value.receipts)
+                .map(value => value.citationId)
+                .sort(),
+            ).toEqual([a.id, b.id].sort());
+            const partial = [{...allCandidates[0], codeCitations: [a]}, allCandidates[1]];
+            mutatePrior = true;
+            statusCalls = 0;
+            const raced = yield* collect('foreground', scenario === 'selected' ? allCandidates : partial);
+            expect(raced.flatMap(value => value.receipts).map(value => value.citationId)).toEqual(
+              scenario === 'selected' ? [] : [a.id],
+            );
+          }),
+        ),
+    );
+  });
+
   it('never promotes historical or unknown evidence and rejects every changed memory/source epoch', () => {
     fc.assert(
       fc.property(fc.string(), fc.constantFrom('historical', 'unknown', 'current'), (suffix, provenance) => {
@@ -481,6 +778,61 @@ describe('generation-bound maintenance citation evidence', () => {
         ).toEqual([]);
       }),
       {numRuns: 100},
+    );
+  });
+
+  it('keeps a receipt bound to its own association across unrelated selector changes', () => {
+    fc.assert(
+      fc.property(fc.string(), suffix => {
+        const other = createMemoryCodeCitation({
+          extractorSet: 'test',
+          fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+          path: 'other.ts',
+          repositoryId: citation.repositoryId,
+          repositoryIdentityKind: 'remote',
+          sourceCommit: '6'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: status.readySnapshot!.id,
+          target: {kind: 'file'},
+          version: 1,
+        });
+        const value = recordWithCitations(0, [citation, other]);
+        const selected = `${citation.repositoryId}:${citation.sourceCommit}`;
+        const unrelated = `${other.repositoryId}:${other.sourceCommit}`;
+        const entry = {
+          uri: value.uri,
+          contentHash: sha256HexSync(canonicalMemoryDocumentContent(value.content)),
+          sources: {[repository]: 'source-epoch'},
+          associations: {[selected]: 'stable', [unrelated]: 'prior'},
+          receipts: [receipt('1970-01-01T00:00:00.000Z')],
+        };
+        const sources = new Map([
+          [
+            repository,
+            {
+              epoch: 'source-epoch',
+              current: true,
+              repositoryId: status.identity.repositoryId,
+              snapshotId: status.readySnapshot!.id,
+            },
+          ],
+        ]);
+        const associations = {[selected]: 'stable', [unrelated]: `changed-${suffix}`};
+        expect(
+          projectMaintenanceCitationReceipts({entries: [entry], records: [value], sources, now: 0, associations})[0]
+            ?.receipts,
+        ).toHaveLength(1);
+        expect(
+          projectMaintenanceCitationReceipts({
+            entries: [entry],
+            records: [value],
+            sources,
+            now: 0,
+            associations: {...associations, [selected]: `changed-${suffix}`},
+          }),
+        ).toEqual([]);
+      }),
+      {numRuns: 24},
     );
   });
   it('ignores physical graph metadata while invalidating source, snapshot, and runtime policy changes', () => {

@@ -35,6 +35,7 @@ export function publicStatus(
     policyOverrides: _policyOverrides,
     decisionCheckpoints: _decisionCheckpoints,
     semanticProgress: _semanticProgress,
+    workSchedule: _workSchedule,
     ...status
   } = state;
   const counts: Record<string, number> = {

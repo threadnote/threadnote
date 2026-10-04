@@ -1,10 +1,13 @@
 import {Effect} from 'effect';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
+import {contextHealthFindingCaseIdentityV2} from '@threadnote/context/health_maintenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
+import {upsertCase} from './maintenance_policy.js';
+import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 
 export const readMaintenanceCandidateDecisions = Effect.fn('contextMaintenance.candidateDecisions')(function* (
   config: RuntimeConfig,
@@ -61,9 +64,131 @@ export function selectMaintenanceSemanticPairBatch<A>(records: readonly A[], cur
     records: [
       ...new Set([...records.slice(left * 64, (left + 1) * 64), ...records.slice(right * 64, (right + 1) * 64)]),
     ],
-    totalBatches: pairs.length,
+    totalBatches: maintenanceSemanticWindowCount(records.length),
   };
 }
+
+export function maintenanceSemanticWindowCount(records: number): number {
+  const blocks = Math.max(1, Math.ceil(records / 64));
+  return (blocks * (blocks + 1)) / 2;
+}
+
+export function prepareMaintenanceSemanticProgress(
+  active: readonly MemoryRecord[],
+  hashes: ReadonlyMap<string, string>,
+  previous: MaintenanceState['semanticProgress'],
+  projectScope?: string,
+) {
+  const projects = [
+    ...new Set(
+      active
+        .filter(record => record.metadata.kind === 'durable')
+        .filter(record => projectScope === undefined || record.metadata.project === projectScope)
+        .map(record => record.metadata.project!),
+    ),
+  ].sort();
+  const generations = new Map(
+    projects.map(project => [
+      project,
+      sha256HexSync(
+        active
+          .filter(record => record.metadata.project === project)
+          .map(record => `${record.uri}:${hashes.get(record.uri)}`)
+          .join('|'),
+      ),
+    ]),
+  );
+  const progress = Object.fromEntries(
+    Object.entries(previous ?? {}).filter(
+      ([project]) => (projectScope !== undefined && project !== projectScope) || projects.includes(project),
+    ),
+  );
+  for (const project of projects) {
+    const generation = generations.get(project)!;
+    if (progress[project]?.generation === generation) continue;
+    const eligibleRecords = active.filter(
+      record => record.metadata.kind === 'durable' && record.metadata.project === project,
+    ).length;
+    progress[project] = {
+      generation,
+      cursor: 0,
+      totalBatches: maintenanceSemanticWindowCount(eligibleRecords),
+      eligibleRecords,
+      partial: false,
+    };
+  }
+  const pending = projects.filter(project => progress[project].cursor < progress[project].totalBatches);
+  return {projects, generations, progress, pending};
+}
+
+export interface MaintenanceWorkSchedule {
+  readonly nextPhase: 'records' | 'semantic';
+  readonly lastSemanticProject?: string;
+}
+
+export function selectMaintenanceWorkPhase(
+  previous: MaintenanceWorkSchedule | undefined,
+  pendingSemanticProjects: readonly string[],
+  hasRecordTasks: boolean,
+): {readonly phase: 'records' | 'semantic'; readonly project?: string; readonly next: MaintenanceWorkSchedule} {
+  const projects = [...new Set(pendingSemanticProjects)].sort();
+  const semantic = projects.length > 0 && (previous?.nextPhase === 'semantic' || !hasRecordTasks);
+  if (!semantic) return {phase: 'records', next: {...previous, nextPhase: 'semantic'}};
+  const after = previous?.lastSemanticProject;
+  const index = after === undefined ? -1 : projects.indexOf(after);
+  const project = projects[(index + 1) % projects.length];
+  return {phase: 'semantic', project, next: {nextPhase: 'records', lastSemanticProject: project}};
+}
+
+export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semanticWindow')(function* (
+  config: RuntimeConfig,
+  project: string,
+  inventory: readonly MemoryRecord[],
+  revision: string,
+  cursor: number,
+  wasPartial: boolean,
+  cases: Map<string, ContextMaintenanceCaseV2>,
+  now: string,
+) {
+  const batch = yield* readMaintenanceSemanticRecords(config, project, inventory, cursor);
+  const subjects = batch.records;
+  const semantic = buildMaintenanceSemanticReport(project, subjects, now);
+  const semanticIds = new Set<string>();
+  for (const finding of semantic.findings.filter(finding => finding.category === 'semantic-contradiction')) {
+    const identity = contextHealthFindingCaseIdentityV2({project, finding, records: subjects});
+    const item = upsertCase(
+      cases,
+      {...identity, evidenceRevision: revision, disposition: 'needs-decision', reason: 'opposing-canonical-claims'},
+      now,
+    );
+    semanticIds.add(item.caseId);
+    cases.set(item.caseId, {
+      ...item,
+      subjectContentHashes: subjects
+        .filter(subject =>
+          [finding.semanticEvidence?.left.recordUri, finding.semanticEvidence?.right.recordUri].includes(subject.uri),
+        )
+        .map(subject => ({uri: subject.uri, hash: sha256HexSync(canonicalMemoryDocumentContent(subject.content))})),
+    });
+  }
+  for (const [id, item] of cases)
+    if (
+      item.project === project &&
+      item.family === 'semantic-contradiction' &&
+      semantic.semanticCompleteness?.state === 'complete' &&
+      !semanticIds.has(id) &&
+      item.subjectContentHashes?.length === 2 &&
+      item.subjectContentHashes.every(subject => subjects.some(record => record.uri === subject.uri))
+    )
+      cases.set(id, {...item, disposition: 'resolved', reason: 'semantic-postcondition-verified', lastChecked: now});
+  return {
+    generation: revision,
+    cursor: cursor + 1,
+    totalBatches: batch.totalBatches,
+    eligibleRecords: batch.eligibleRecords,
+    partial: wasPartial || semantic.semanticCompleteness?.state !== 'complete',
+  };
+});
 
 export function buildMaintenanceSemanticReport(project: string, records: readonly MemoryRecord[], now: string) {
   return buildContextHealthReport({

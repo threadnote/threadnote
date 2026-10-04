@@ -61,9 +61,11 @@ import {
 } from './maintenance_evidence.js';
 import {
   activeIncomingDependency,
-  buildMaintenanceSemanticReport,
+  prepareMaintenanceSemanticProgress,
   readMaintenanceCandidateDecisions,
-  readMaintenanceSemanticRecords,
+  runMaintenanceSemanticWindow,
+  selectMaintenanceWorkPhase,
+  type MaintenanceWorkSchedule,
 } from './maintenance_decisions.js';
 import {readMemoryRecordsByUri, resourceExists} from '../../mcp/server/memory.js';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
@@ -235,6 +237,7 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
       }
     >
   >;
+  readonly workSchedule?: MaintenanceWorkSchedule;
 }
 
 export interface ContextMaintenanceReadOptions {
@@ -404,11 +407,40 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         const rightAfter = cursor === undefined || right.key > cursor;
         return Number(rightAfter) - Number(leftAfter) || left.key.localeCompare(right.key);
       });
-      state = {...state, generation, state: 'running', error: undefined};
+      const {
+        projects: semanticProjects,
+        generations: semanticGenerations,
+        progress: semanticProgress,
+        pending: pendingSemanticProjects,
+      } = prepareMaintenanceSemanticProgress(active, snapshot.success.hashes, state.semanticProgress, options.project);
+      const work = selectMaintenanceWorkPhase(state.workSchedule, pendingSemanticProjects, tasks.length > 0);
+      state = {...state, generation, semanticProgress, workSchedule: work.next, state: 'running', error: undefined};
       yield* writeState(config, state);
-      // Bound the expensive per-record citation work in one tick. maxRecords
-      // still controls inventory pagination, and checkpoints rotate across ticks.
-      const selected = selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4));
+      if (work.phase === 'semantic') {
+        const project = work.project!;
+        const revision = semanticGenerations.get(project)!;
+        const progress = semanticProgress[project];
+        state = {
+          ...state,
+          decisionCheckpoints: {...state.decisionCheckpoints, [project]: revision},
+          semanticProgress: {
+            ...state.semanticProgress,
+            [project]: yield* runMaintenanceSemanticWindow(
+              config,
+              project,
+              active,
+              revision,
+              progress.cursor,
+              progress.partial === true,
+              caseMap,
+              now,
+            ),
+          },
+        };
+      }
+      // maxRecords still controls inventory pagination; record work remains four per tick.
+      const selected =
+        work.phase === 'records' ? selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4)) : [];
       const {batches, batchByTask} = yield* prepareMaintenanceWorkerBatches(
         config,
         selected,
@@ -431,75 +463,6 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             : currentRecord;
         const memoryId = record.metadata.memoryId ?? record.uri;
         let postMutationHash: string | undefined;
-        const decisionRevision = sha256HexSync(
-          active
-            .filter(item => item.metadata.project === task.project)
-            .map(item => `${item.uri}:${snapshot.success.hashes.get(item.uri)}`)
-            .join('|'),
-        );
-        const semanticProgress = state.semanticProgress?.[task.project];
-        const semanticCursor = semanticProgress?.generation === decisionRevision ? semanticProgress.cursor : 0;
-        if (semanticProgress?.generation !== decisionRevision || semanticCursor < semanticProgress.totalBatches) {
-          const semanticBatch = yield* readMaintenanceSemanticRecords(config, task.project, active, semanticCursor);
-          const subjects = semanticBatch.records;
-          const semantic = buildMaintenanceSemanticReport(task.project, subjects, now);
-          const semanticIds = new Set<string>();
-          for (const finding of semantic.findings.filter(finding => finding.category === 'semantic-contradiction')) {
-            const identity = contextHealthFindingCaseIdentityV2({project: task.project, finding, records: subjects});
-            const item = upsertCase(
-              caseMap,
-              {
-                ...identity,
-                evidenceRevision: decisionRevision,
-                disposition: 'needs-decision',
-                reason: 'opposing-canonical-claims',
-              },
-              now,
-            );
-            semanticIds.add(item.caseId);
-            caseMap.set(item.caseId, {
-              ...item,
-              subjectContentHashes: subjects
-                .filter(subject =>
-                  [finding.semanticEvidence?.left.recordUri, finding.semanticEvidence?.right.recordUri].includes(
-                    subject.uri,
-                  ),
-                )
-                .map(subject => ({uri: subject.uri, hash: contentHash(subject.content)})),
-            });
-          }
-          for (const [id, item] of caseMap)
-            if (
-              item.project === task.project &&
-              item.family === 'semantic-contradiction' &&
-              semantic.semanticCompleteness?.state === 'complete' &&
-              !semanticIds.has(id) &&
-              item.subjectContentHashes?.length === 2 &&
-              item.subjectContentHashes.every(subject => subjects.some(record => record.uri === subject.uri))
-            )
-              caseMap.set(id, {
-                ...item,
-                disposition: 'resolved',
-                reason: 'semantic-postcondition-verified',
-                lastChecked: now,
-              });
-          state = {
-            ...state,
-            decisionCheckpoints: {...state.decisionCheckpoints, [task.project]: decisionRevision},
-            semanticProgress: {
-              ...state.semanticProgress,
-              [task.project]: {
-                generation: decisionRevision,
-                cursor: semanticCursor + 1,
-                totalBatches: semanticBatch.totalBatches,
-                eligibleRecords: semanticBatch.eligibleRecords,
-                partial:
-                  (semanticProgress?.generation === decisionRevision && semanticProgress.partial === true) ||
-                  semantic.semanticCompleteness?.state !== 'complete',
-              },
-            },
-          };
-        }
         state = {
           ...state,
           lastProject: task.project,
@@ -1058,6 +1021,29 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         ),
         ...terminal,
       ];
+      const closingSourceEpochs = new Map<string, string>();
+      for (const task of tasks) {
+        if (
+          (options.project !== undefined && task.project !== options.project) ||
+          (task.record.metadata.codeCitations?.length ?? 0) === 0 ||
+          sourceRevisions.has(task.project)
+        )
+          continue;
+        const root = roots.get(task.project) ?? options.cwd;
+        let epoch = closingSourceEpochs.get(root);
+        if (epoch === undefined) {
+          epoch = yield* sourceGeneration(config, root);
+          closingSourceEpochs.set(root, epoch);
+        }
+        sourceRevisions.set(task.project, epoch);
+      }
+      const semanticStillPending = semanticProjects.some(project => {
+        const progress = state.semanticProgress?.[project];
+        return progress === undefined || progress.cursor < progress.totalBatches;
+      });
+      const semanticEvidencePartial = semanticProjects.some(
+        project => state.semanticProgress?.[project]?.partial === true,
+      );
       state = {
         ...state,
         preparation: contextMaintenanceInventoryPreparation(snapshot.success, corpus.length),
@@ -1069,6 +1055,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           : cases.some(item => item.disposition === 'waiting-evidence')
             ? 'waiting-evidence'
             : snapshot.success.complete &&
+                !semanticStillPending &&
                 tasks.every(task =>
                   maintenanceCheckpointCurrent(
                     checkpoints[task.key],
@@ -1077,7 +1064,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                     now,
                   ),
                 )
-              ? 'idle'
+              ? semanticEvidencePartial
+                ? 'waiting-evidence'
+                : 'idle'
               : 'running',
         projects: [...new Set(active.map(record => record.metadata.project!))].sort().map(project => {
           const selected = tasks.filter(task => task.project === project);

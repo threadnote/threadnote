@@ -35,7 +35,11 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {selectMaintenanceSemanticPairBatch} from '@threadnote/threadnote/memory/context/maintenance_decisions';
+import {
+  maintenanceSemanticWindowCount,
+  selectMaintenanceSemanticPairBatch,
+  selectMaintenanceWorkPhase,
+} from '@threadnote/threadnote/memory/context/maintenance_decisions';
 import {captureCitationReplacements} from '@threadnote/threadnote/memory/context/health_repair_commands';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {readContextMaintenanceEvidenceRequests} from '@threadnote/threadnote/memory/context/maintenance_evidence';
@@ -222,7 +226,7 @@ describe('persistent context maintenance', () => {
       for (let tick = 0; tick < 17 && checked < 17; tick++) {
         const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
         const current = result.projects.find(project => project.project === 'threadnote')?.checked ?? 0;
-        expect(current - checked).toBeGreaterThan(0);
+        expect(current - checked).toBeGreaterThanOrEqual(0);
         expect(current - checked).toBeLessThanOrEqual(4);
         checked = current;
       }
@@ -251,10 +255,11 @@ describe('persistent context maintenance', () => {
         expect(inventory.complete).toBe(true);
         expect(inventory.hashes.get(URI)).toBe(sha256HexSync(raw));
         expect(first.projects[0]).toMatchObject({eligible: 1, checked: 1, checkedCitations: 0});
-        expect(first.state).toBe('idle');
+        expect(first.state).toBe('running');
         for (let replay = 0; replay < 2; replay++) {
           const again = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
           expect(again.projects[0]).toMatchObject({eligible: 1, checked: 1, checkedCitations: 0});
+          expect(again.state).toBe('idle');
           expect(again.cases).toEqual(first.cases);
           expect(again.receipts).toEqual(first.receipts);
           expect(JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints['tn_source:0']).toEqual(
@@ -678,6 +683,8 @@ describe('persistent context maintenance', () => {
       expect(originalSupport.disposition).toBe('needs-decision');
       yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
       yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      // The resumed semantic phase advances separately before the next citation phase.
+      yield* runContextMaintenance(fixture.config, {cwd: repository});
       const query = yield* CodeGraphQueryService;
       let statusCalls = 0;
       const racing = CodeGraphQueryService.of({
@@ -969,6 +976,57 @@ describe('persistent context maintenance', () => {
       expect(yield* retireContextMaintenanceAnchor(fixture.config, input)).toMatchObject({status: 'already-retired'});
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
+
+  effectIt.effect('does not count an E0 citation checkpoint as current on an E1 semantic tick', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const repository = fixture.path.join(fixture.home, 'repository');
+      yield* fixture.fs.makeDirectory(repository);
+      yield* fixture.fs.writeFileString(fixture.path.join(repository, 'source.ts'), 'export const value = 1;\n');
+      const independent = fixture.path.join(repository, 'independent.ts');
+      yield* fixture.fs.writeFileString(independent, 'export const other = 1;\n');
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+      yield* git(['init', '--quiet']);
+      yield* git(['add', '.']);
+      yield* git([
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--quiet',
+        '-m',
+        'source',
+      ]);
+      yield* fixture.fs.writeFileString(
+        fixture.config.manifestPath,
+        `version: 1\nprojects:\n  - name: threadnote\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/threadnote\n    seed: []\n`,
+      );
+      const indexer = yield* CodeGraphIndexer;
+      yield* indexer.index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const citations = yield* captureMemoryCodeCitations(fixture.config, {
+        callerCwd: repository,
+        project: 'threadnote',
+        refs: ['source.ts'],
+      });
+      yield* fixture.fs.writeFileString(
+        fixture.source,
+        record('source', {schemaVersion: 5, codeCitations: citations}).content,
+      );
+      const first = yield* runContextMaintenance(fixture.config, {cwd: repository});
+      expect(first.projects[0]).toMatchObject({checked: 1, checkedCitations: 1});
+      expect(first.semanticCoverage?.[0].state).toBe('partial');
+      yield* fixture.fs.writeFileString(independent, 'export const other = 2;\n');
+      yield* indexer.index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const semantic = yield* runContextMaintenance(fixture.config, {cwd: repository});
+      expect(semantic.semanticCoverage?.[0].state).toBe('complete');
+      expect(semantic.projects[0]).toMatchObject({checked: 0, checkedCitations: 0});
+      expect(semantic.state).not.toBe('idle');
+      const reconciled = yield* runContextMaintenance(fixture.config, {cwd: repository});
+      expect(reconciled.projects[0]).toMatchObject({checked: 1, checkedCitations: 1});
+      expect(reconciled.state).toBe('idle');
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('revisits unchanged records at future review and validity deadlines', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -977,11 +1035,13 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.writeFileString(fixture.source, source.content);
       expect((yield* runContextMaintenance(fixture.config, {cwd: fixture.home})).counts?.decisionMemories).toBe(0);
       yield* TestClock.adjust('2 days');
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       const overdue = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       expect(overdue.cases.find(item => item.family === 'review-overdue')?.disposition, JSON.stringify(overdue)).toBe(
         'needs-decision',
       );
       yield* TestClock.adjust('2 days');
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       expect((yield* runContextMaintenance(fixture.config, {cwd: fixture.home})).receipts).toHaveLength(1);
       expect(yield* fixture.fs.exists(fixture.source)).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer)),
@@ -1148,6 +1208,7 @@ describe('persistent context maintenance', () => {
         const records = Array.from({length: size}, (_, index) => index);
         const original = [...records];
         const first = selectMaintenanceSemanticPairBatch(records, 0);
+        expect(first.totalBatches).toBe(maintenanceSemanticWindowCount(size));
         const windows = Array.from(
           {length: first.totalBatches},
           (_, cursor) => selectMaintenanceSemanticPairBatch(records, cursor).records,
@@ -1161,6 +1222,56 @@ describe('persistent context maintenance', () => {
       {numRuns: 20},
     );
   });
+
+  it('alternates record and semantic phases and visits every pending project without mutating inputs', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.integer({min: 0, max: 7}), {minLength: 1, maxLength: 8}), ids => {
+        const projects = ids.map(id => `project-${id}`);
+        const original = [...projects];
+        let schedule: Parameters<typeof selectMaintenanceWorkPhase>[0];
+        const selected: string[] = [];
+        for (let tick = 0; tick < projects.length * 2; tick++) {
+          const work = selectMaintenanceWorkPhase(schedule, projects, true);
+          expect(work.phase).toBe(tick % 2 === 0 ? 'records' : 'semantic');
+          if (work.project !== undefined) selected.push(work.project);
+          schedule = work.next;
+        }
+        expect(new Set(selected)).toEqual(new Set(projects));
+        expect(projects).toEqual(original);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  effectIt.effect('resumes old state and reopens semantic coverage when the durable corpus changes', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(first.semanticCoverage?.[0]).toMatchObject({state: 'partial', checkedBatches: 0, totalBatches: 1});
+      expect(first.state).not.toBe('idle');
+
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const oldState = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as Record<string, unknown>;
+      delete oldState.workSchedule;
+      yield* fixture.fs.writeFileString(stateFile, JSON.stringify(oldState));
+      const resumedRecords = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(resumedRecords.semanticCoverage?.[0].checkedBatches).toBe(0);
+      const resumedSemantic = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(resumedSemantic.semanticCoverage?.[0]).toMatchObject({state: 'complete', checkedBatches: 1});
+
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, 'new-subject.md'),
+        record('new-subject').content,
+      );
+      const changed = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(changed.semanticCoverage?.[0]).toMatchObject({state: 'partial', checkedBatches: 0, totalBatches: 1});
+      expect(changed.state).not.toBe('idle');
+      const covered = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(covered.semanticCoverage?.[0]).toMatchObject({state: 'complete', checkedBatches: 1});
+      expect('workSchedule' in covered).toBe(false);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   it('requires personal target authority and preserves inactive historical relations', () => {
     const archived = record('archive', {status: 'archived', archivedFrom: URI.replace('source.md', 'old.md')});
@@ -1842,6 +1953,7 @@ describe('persistent context maintenance', () => {
       expect(result.cases.some(item => item.reason === 'inventory-preparation-incomplete')).toBe(true);
       for (let index = 0; index < 10; index++)
         yield* prepareContextMaintenanceInventory(fixture.config, undefined, 256);
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
       const prepared = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
       expect(prepared.receipts).toHaveLength(1);
       expect(result.cases.find(item => item.family === 'review-overdue')?.disposition).toBe('needs-decision');
@@ -1885,6 +1997,7 @@ describe('persistent context maintenance', () => {
       expect(Result.isFailure(staleSourcePacket) && staleSourcePacket.failure.message).toContain(
         'Source evidence changed',
       );
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 2});
       yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 2});
       const after = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as typeof before;
       expect(after.cases.find(item => item.slot === `anchor:${citations[7].id}`)).toMatchObject({
@@ -1942,6 +2055,7 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.writeFileString(targetFile, target.content);
       const health = yield* collectContextHealth(fixture.config, 'threadnote', [source, target], fixture.home);
       const semantic = health.findings.find(item => item.category === 'semantic-contradiction')!;
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       const maintained = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       expect(maintained.cases.find(item => item.caseId === semantic.caseId)?.disposition).toBe('needs-decision');
       expect(maintained.counts?.decisionMemories).toBe(2);
@@ -1974,6 +2088,7 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.writeFileString(targetFile, target.content);
       const health = yield* collectContextHealth(fixture.config, 'threadnote', [source, target], fixture.home);
       const caseId = health.findings.find(item => item.category === 'semantic-contradiction')!.caseId!;
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       const maintained = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       const semantic = maintained.cases.find(item => item.caseId === caseId)!;
       expect(semantic.disposition).toBe('needs-decision');
