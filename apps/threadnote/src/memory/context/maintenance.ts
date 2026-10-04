@@ -53,6 +53,7 @@ import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import {
   contextMaintenanceInventoryPreparation,
   prepareContextMaintenanceInventory,
+  pruneAbsentMaintenanceCheckpoints,
   type ContextMaintenanceInventoryPreparationV2,
 } from './maintenance_inventory.js';
 import {
@@ -393,7 +394,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         }));
       });
       const keys = new Set(tasks.map(task => task.key));
-      for (const key of Object.keys(checkpoints)) if (!keys.has(key)) delete checkpoints[key];
+      pruneAbsentMaintenanceCheckpoints(checkpoints, keys, {
+        project: options.project,
+        complete: snapshot.success.complete,
+      });
       const pending = tasks.filter(task => options.project === undefined || task.project === options.project);
       const rotated = [...pending].sort((left, right) => {
         const priority = (task: typeof left) => {

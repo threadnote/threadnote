@@ -452,7 +452,7 @@ describe('generation-bound maintenance citation evidence', () => {
       }),
     );
   });
-  it('selects only live published receipt selectors from a 200-selector foreground corpus', () => {
+  it('selects subject-current published last-attempt selectors from a 200-selector foreground corpus', () => {
     const values = Array.from({length: 200}, (_, index) => {
       const codeCitation = createMemoryCodeCitation({
         extractorSet: 'test',
@@ -497,9 +497,9 @@ describe('generation-bound maintenance citation evidence', () => {
     });
     const selected = foregroundReceiptCandidates(entries, values.slice(0, 199), candidates, 61_000);
     expect(candidates.flatMap(value => value.codeCitations)).toHaveLength(200);
-    expect(selected.candidates.map(value => value.uri)).toEqual([values[0].uri, values[1].uri]);
-    expect(selected.candidates.flatMap(value => value.codeCitations)).toHaveLength(2);
-    expect(selected.entries).toHaveLength(2);
+    expect(selected.candidates.map(value => value.uri)).toEqual(values.slice(0, 198).map(value => value.uri));
+    expect(selected.candidates.flatMap(value => value.codeCitations)).toHaveLength(198);
+    expect(selected.entries).toHaveLength(198);
   });
   effectIt.layer(narrow)(test => {
     test.effect('routes every distinct source selector while keeping report roots bounded', () =>
@@ -791,7 +791,7 @@ describe('generation-bound maintenance citation evidence', () => {
             .flatMap(value => value.receipts)
             .map(value => value.citationId)
             .sort(),
-        ).toEqual([citation.id, historicalCitation.id].sort());
+        ).toEqual([citation.id, expiredCitation.id, historicalCitation.id].sort());
         race = true;
         calls = 0;
         expect(yield* collect('foreground')).toEqual([]);
@@ -853,6 +853,73 @@ describe('generation-bound maintenance citation evidence', () => {
           yield* collect();
           expect(validations).toBe(2);
         }),
+    );
+    test.effect('reports an expired unknown attempt while keeping its citation queued for fresh work', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-last-attempt-'});
+        const config = {
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+          account: 'fixture',
+        } as RuntimeConfig;
+        const value = record(0);
+        let race = false;
+        let checks = 0;
+        const query = CodeGraphQueryService.of({
+          status: () =>
+            Effect.sync(() => {
+              checks += 1;
+              const current =
+                race && checks % 2 === 0
+                  ? {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'5'.repeat(40)}`}}
+                  : status;
+              return attachCodeGraphStatusObservation(
+                {...current},
+                {identity: current.identity, overlay: {dirty: false}},
+              );
+            }),
+        } as unknown as CodeGraphQueryService['Service']);
+        const collect = (records: readonly ReturnType<typeof record>[], mode: 'diagnostic' | 'foreground') =>
+          collectContextMaintenanceCitationEvidence(config, 'fixture', records, [candidate(value, 0)], repository, {
+            mode,
+            validate: selected =>
+              Effect.gen(function* () {
+                const now = (yield* DateTime.nowAsDate).toISOString();
+                return selected.map(item => ({
+                  uri: item.uri,
+                  receipts: [
+                    {
+                      ...receipt(now),
+                      status: 'unknown' as const,
+                      provenance: 'unverified' as const,
+                      coverage: 'incomplete' as const,
+                      reason: 'graph-stale' as const,
+                    },
+                  ],
+                }));
+              }),
+          }).pipe(Effect.provideService(CodeGraphQueryService, query));
+        yield* collect([value], 'diagnostic');
+        yield* TestClock.adjust('61 seconds');
+        expect(yield* readContextMaintenanceEvidenceRequests(config)).toEqual([]);
+        race = true;
+        checks = 0;
+        expect(yield* collect([value], 'foreground')).toEqual([]);
+        expect(yield* readContextMaintenanceEvidenceRequests(config)).toEqual([
+          expect.objectContaining({project: 'fixture', cwd: repository, uris: [value.uri]}),
+        ]);
+        yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [value.uri]);
+        race = false;
+        checks = 0;
+        const stale = yield* collect([value], 'foreground');
+        expect(stale[0]?.receipts[0]).toMatchObject({status: 'unknown', reason: 'graph-stale'});
+        expect(yield* readContextMaintenanceEvidenceRequests(config)).toEqual([
+          expect.objectContaining({project: 'fixture', cwd: repository, uris: [value.uri]}),
+        ]);
+        expect(yield* collect([{...value, content: `${value.content}\nChanged`}], 'foreground')).toEqual([]);
+      }),
     );
     test.effect('binds cache publication to the canonical memory mutation generation', () =>
       Effect.gen(function* () {

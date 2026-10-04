@@ -39,6 +39,12 @@ export interface MaintenanceWorkerEvidence {
 export const MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT = 16;
 export const MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT = 8;
 
+function validatesCitationCandidate(
+  record: MemoryRecord,
+): record is MemoryRecord & {readonly metadata: MemoryRecord['metadata'] & {readonly kind: 'durable' | 'handoff'}} {
+  return record.metadata.kind === 'durable' || record.metadata.kind === 'handoff';
+}
+
 export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(tasks: readonly T[]) {
   const groups: (T & MaintenanceWorkerTask)[][] = [];
   const current = new Map<string, (T & MaintenanceWorkerTask)[]>();
@@ -66,6 +72,7 @@ export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(ta
     const anchors = together.flatMap(item => maintenanceTaskCitations(item, item.record));
     if (
       previous === undefined ||
+      validatesCitationCandidate(previous[0].record) !== validatesCitationCandidate(task.record) ||
       anchors.length > MAINTENANCE_WORKER_BATCH_ANCHOR_LIMIT ||
       new Set(anchors.map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)).size >
         MAINTENANCE_WORKER_BATCH_SELECTOR_LIMIT
@@ -199,7 +206,7 @@ export const collectMaintenanceWorkerBatch = Effect.fn('contextMaintenance.worke
     },
   }));
   const candidates = records.flatMap((record, rank) =>
-    record.metadata.kind !== 'durable' && record.metadata.kind !== 'handoff'
+    !validatesCitationCandidate(record)
       ? []
       : [
           {

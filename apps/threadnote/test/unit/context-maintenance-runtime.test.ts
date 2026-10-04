@@ -35,7 +35,10 @@ import {readMaintenanceMemoryRecords} from '@threadnote/threadnote/memory/mainte
 import {collectContextHealth} from '@threadnote/threadnote/memory/context/health_commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
-import {prepareContextMaintenanceInventory} from '@threadnote/threadnote/memory/context/maintenance_inventory';
+import {
+  prepareContextMaintenanceInventory,
+  pruneAbsentMaintenanceCheckpoints,
+} from '@threadnote/threadnote/memory/context/maintenance_inventory';
 import {buildCandidateReview, candidateReviewWithState, saveCandidateReview} from '@threadnote/memory/candidate';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -135,6 +138,36 @@ function legacyBatchSubject(index: number, project: string, selectors: readonly 
 }
 
 describe('persistent context maintenance', () => {
+  it('prunes absent checkpoints only after a complete unscoped inventory', () => {
+    const keys = new Set(['selected:0']);
+    const scoped = {'selected:0': 1, 'other:0': 2};
+    pruneAbsentMaintenanceCheckpoints(scoped, keys, {project: 'selected', complete: true});
+    expect(scoped).toEqual({'selected:0': 1, 'other:0': 2});
+    pruneAbsentMaintenanceCheckpoints(scoped, keys, {complete: false});
+    expect(scoped).toEqual({'selected:0': 1, 'other:0': 2});
+    pruneAbsentMaintenanceCheckpoints(scoped, keys, {complete: true});
+    expect(scoped).toEqual({'selected:0': 1});
+  });
+
+  it('preserves every checkpoint outside a scoped or incomplete inventory', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.string({minLength: 1, maxLength: 20}), {maxLength: 30}),
+        fc.boolean(),
+        (names, complete) => {
+          const before = Object.fromEntries(names.map((name, index) => [name, index]));
+          const checkpoints = {...before};
+          pruneAbsentMaintenanceCheckpoints(checkpoints, new Set(names.slice(0, names.length / 2)), {
+            project: complete ? 'selected' : undefined,
+            complete,
+          });
+          expect(checkpoints).toEqual(before);
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+
   it('splits a legacy 64-anchor single-selector task into four complete bounded parts', () => {
     const record = legacyBatchSubject(
       0,
@@ -153,12 +186,34 @@ describe('persistent context maintenance', () => {
     expect(task).toEqual(before);
   });
 
+  it('keeps incident citations out of a candidate batch while preserving their own closing scope', () => {
+    const records = [
+      legacyBatchSubject(0, 'one', [0, 0, 0, 0]),
+      legacyBatchSubject(1, 'one', [0, 0, 0, 0]),
+      legacyBatchSubject(2, 'one', [1]),
+    ].map((item, index) => ({
+      ...item,
+      metadata: {...item.metadata, kind: index === 2 ? ('incident' as const) : ('handoff' as const)},
+    }));
+    const tasks = records.map((value, index) => ({record: value, project: 'one', chunk: 0, key: `${index}:0`}));
+    const groups = planMaintenanceWorkerBatches(tasks);
+    expect(groups.map(group => group.map(task => task.key))).toEqual([['0:0', '1:0'], ['2:0']]);
+    expect(
+      groups.flatMap(group =>
+        group.flatMap(
+          task => task.citationIds ?? task.record.metadata.codeCitations?.map(citation => citation.id) ?? [],
+        ),
+      ),
+    ).toEqual(records.flatMap(record => record.metadata.codeCitations?.map(citation => citation.id) ?? []));
+  });
+
   it('preserves every selected legacy anchor and per-project task order under independent batch bounds', () => {
     fc.assert(
       fc.property(
         fc.array(
           fc.record({
             project: fc.constantFrom('one', 'two', 'three'),
+            kind: fc.constantFrom('durable', 'handoff', 'incident'),
             selectors: fc.array(fc.integer({min: 0, max: 20}), {maxLength: 130}),
             selectedOnly: fc.boolean(),
             parity: fc.integer({min: 0, max: 1}),
@@ -167,7 +222,8 @@ describe('persistent context maintenance', () => {
         ),
         inputs => {
           const tasks = inputs.flatMap((input, index) => {
-            const record = legacyBatchSubject(index, input.project, input.selectors);
+            const original = legacyBatchSubject(index, input.project, input.selectors);
+            const record = {...original, metadata: {...original.metadata, kind: input.kind}};
             return Array.from({length: Math.max(1, Math.ceil(input.selectors.length / 64))}, (_, chunk) => ({
               record,
               project: input.project,
@@ -192,6 +248,7 @@ describe('persistent context maintenance', () => {
           const groups = planMaintenanceWorkerBatches(tasks);
           for (const group of groups) {
             expect(new Set(group.map(task => task.project)).size).toBe(1);
+            expect(new Set(group.map(task => ['durable', 'handoff'].includes(task.record.metadata.kind))).size).toBe(1);
             const anchors = group.flatMap(task =>
               task.record.metadata.codeCitations
                 .filter((_, index) => Math.floor(index / 64) === task.chunk)
@@ -256,6 +313,33 @@ describe('persistent context maintenance', () => {
         checked: 17,
       });
     }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'keeps an unrelated completed checkpoint across scoped ticks, then prunes proven absence globally',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const foreignDirectory = fixture.path.join(fixture.directory, '..', 'foreign');
+        yield* fixture.fs.makeDirectory(foreignDirectory, {recursive: true});
+        yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+        const foreign = fixture.path.join(foreignDirectory, 'foreign.md');
+        yield* fixture.fs.writeFileString(foreign, record('foreign', {project: 'foreign'}).content);
+        const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+        let checkpoints: Record<string, unknown> = {};
+        for (let tick = 0; tick < 8 && checkpoints['tn_foreign:0'] === undefined; tick++) {
+          yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+          checkpoints = JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints;
+        }
+        expect(checkpoints['tn_foreign:0']).toBeDefined();
+        yield* fixture.fs.remove(foreign);
+        yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+        checkpoints = JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints;
+        expect(checkpoints['tn_foreign:0']).toBeDefined();
+        yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        checkpoints = JSON.parse(yield* fixture.fs.readFileString(stateFile)).checkpoints;
+        expect(checkpoints['tn_foreign:0']).toBeUndefined();
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('logical checkpoint coverage converges with trailing newlines and managed legacy footers', () =>

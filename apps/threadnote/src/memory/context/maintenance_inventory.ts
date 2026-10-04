@@ -547,3 +547,11 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     ),
   };
 });
+export function pruneAbsentMaintenanceCheckpoints<T>(
+  checkpoints: Record<string, T>,
+  activeKeys: ReadonlySet<string>,
+  scope: {readonly project?: string; readonly complete: boolean},
+): void {
+  if (scope.project !== undefined || !scope.complete) return;
+  for (const key of Object.keys(checkpoints)) if (!activeKeys.has(key)) delete checkpoints[key];
+}
