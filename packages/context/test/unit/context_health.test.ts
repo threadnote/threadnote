@@ -3,6 +3,7 @@ import {describe, expect, it} from 'vitest';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
 import {
   contextHealthCaseIdV2,
+  contextHealthCitationCoverageV2,
   migrateContextHealthCitationCaseSlotV2,
   contextHealthFindingCaseIdentityV2,
   resolveContextHealthRelationTargetV2,
@@ -314,12 +315,92 @@ describe('buildContextHealthReport', () => {
       checked: 3,
       currentVerified: 1,
       historicalVerified: 1,
+      pending: 1,
+      unavailable: 0,
       deferred: 2,
       unverified: 3,
       state: 'partial',
     });
     expect(report.findings.map(item => item.category)).toEqual(['citation-changed', 'citation-missing']);
     expect(report.status).toBe('unknown');
+  });
+
+  it('counts missing and admission-deferred citations as pending and source failures as unavailable', () => {
+    const source = record('threadnote://memory/coverage-buckets', 'source', {
+      codeCitations: [
+        {id: 'missing'} as never,
+        {id: 'queued'} as never,
+        {id: 'limited'} as never,
+        {id: 'blocked'} as never,
+      ],
+    });
+    const coverage = contextHealthCitationCoverageV2({
+      records: [source],
+      validations: [
+        {
+          uri: source.uri,
+          receipts: [
+            {...receipt('unknown', 'source-changed'), citationId: 'queued', reason: 'citation-limit'},
+            {...receipt('unknown', 'source-changed'), citationId: 'limited', reason: 'citation-limit'},
+            {...receipt('unknown', 'repository-unavailable'), citationId: 'blocked'},
+          ],
+        },
+      ],
+    });
+    expect(coverage).toMatchObject({eligible: 4, checked: 0, historicalVerified: 0, pending: 3, unavailable: 1});
+  });
+
+  it('partitions each eligible citation into checked, historical, pending or unavailable buckets', () => {
+    const scenarios = fc.array(
+      fc.record({
+        status: fc.constantFrom('changed' as const, 'deleted' as const, 'unknown' as const, 'missing' as const),
+        reason: fc.constantFrom('citation-limit', 'repository-unavailable', 'source-changed'),
+        historical: fc.boolean(),
+      }),
+      {minLength: 0, maxLength: 40},
+    );
+    fc.assert(
+      fc.property(scenarios, cases => {
+        const source = record('threadnote://memory/coverage-property', 'source', {
+          codeCitations: cases.map((_, index) => ({id: `c${index}`}) as never),
+        });
+        const receipts = cases.flatMap((item, index) =>
+          item.status === 'missing'
+            ? []
+            : [
+                {
+                  ...receipt(item.status === 'unknown' ? 'unknown' : item.status, 'source-changed'),
+                  citationId: `c${index}`,
+                  reason: item.reason,
+                  ...(item.historical ? {provenance: 'historical-verified' as const} : {}),
+                },
+              ],
+        );
+        const coverage = contextHealthCitationCoverageV2({
+          records: [source],
+          validations: [{uri: source.uri, receipts}],
+        });
+        const expected = cases.reduce(
+          (counts, item) => {
+            if (item.historical && item.status !== 'missing') counts.historical += 1;
+            else if (item.status === 'missing') counts.pending += 1;
+            else if (item.status !== 'unknown') counts.checked += 1;
+            else if (item.reason === 'citation-limit') counts.pending += 1;
+            else counts.unavailable += 1;
+            return counts;
+          },
+          {checked: 0, historical: 0, pending: 0, unavailable: 0},
+        );
+        expect(coverage.checked).toBe(expected.checked);
+        expect(coverage.historicalVerified).toBe(expected.historical);
+        expect(coverage.pending ?? 0).toBe(expected.pending);
+        expect(coverage.unavailable ?? 0).toBe(expected.unavailable);
+        expect(
+          coverage.checked + coverage.historicalVerified + (coverage.pending ?? 0) + (coverage.unavailable ?? 0),
+        ).toBe(coverage.eligible);
+      }),
+      {numRuns: 100},
+    );
   });
 
   it('completes valid current checks that find changed or deleted support without verifying the claims', () => {

@@ -20,6 +20,8 @@ export type ContextHealthCaseDispositionV2 =
 export interface ContextHealthCitationCoverageV2 {
   readonly eligible: number;
   readonly checked: number;
+  readonly pending?: number;
+  readonly unavailable?: number;
   readonly deferred: number;
   readonly currentVerified: number;
   readonly historicalVerified: number;
@@ -161,6 +163,8 @@ export function contextHealthCitationCoverageV2(input: {
   const validations = new Map(input.validations.map(validation => [validation.uri, validation]));
   let eligible = 0;
   let checked = 0;
+  let pending = 0;
+  let unavailable = 0;
   let completeChecks = 0;
   let currentVerified = 0;
   let historicalVerified = 0;
@@ -178,6 +182,11 @@ export function contextHealthCitationCoverageV2(input: {
       const receipt = receipts.get(citationId);
       const historical = receipt?.provenance === 'historical-verified';
       const completed = receipt !== undefined && receipt.status !== 'unknown' && !historical;
+      if (!historical && !completed) {
+        if (receipt === undefined || (receipt.status === 'unknown' && receipt.reason === 'citation-limit'))
+          pending += 1;
+        else unavailable += 1;
+      }
       const completeEvidence = completed && receipt.coverage === 'current-complete';
       if (completed) checked += 1;
       if (completeEvidence) completeChecks += 1;
@@ -199,6 +208,8 @@ export function contextHealthCitationCoverageV2(input: {
   return {
     eligible,
     checked,
+    pending,
+    unavailable,
     deferred: eligible - checked,
     currentVerified,
     historicalVerified,

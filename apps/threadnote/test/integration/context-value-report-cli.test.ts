@@ -56,6 +56,8 @@ describe('context health and value report CLI', () => {
         citationCoverage: {
           eligible: 0,
           checked: 0,
+          pending: 0,
+          unavailable: 0,
           deferred: 0,
           currentVerified: 0,
           historicalVerified: 0,

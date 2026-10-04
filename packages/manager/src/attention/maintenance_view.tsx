@@ -57,7 +57,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const actionBusy = useRef(false);
   const onChanged = useRef(props.onChanged);
   onChanged.current = props.onChanged;
-  const lastGeneration = useRef<string | undefined>(undefined);
+  const lastReportRevision = useRef<string | undefined>(undefined);
   const status = snapshot?.project === props.project ? snapshot.status : undefined;
   useEffect(() => {
     setPacket(undefined);
@@ -84,7 +84,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setError('');
     setBusy(false);
     actionBusy.current = false;
-    lastGeneration.current = undefined;
+    lastReportRevision.current = undefined;
     const poll = async () => {
       const epoch = mutationEpoch.current;
       if (actionBusy.current) {
@@ -116,8 +116,14 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           };
         });
         setError('');
-        if (lastGeneration.current !== undefined && lastGeneration.current !== result.generation) onChanged.current();
-        lastGeneration.current = result.generation;
+        const reportRevision = JSON.stringify([
+          result.generation,
+          result.page?.generation,
+          result.projects.find(item => item.project === props.project),
+        ]);
+        if (lastReportRevision.current !== undefined && lastReportRevision.current !== reportRevision)
+          onChanged.current();
+        lastReportRevision.current = reportRevision;
         if (!result.paused && result.state !== 'failed')
           timer = window.setTimeout(() => void poll(), result.state === 'running' ? 1_000 : 30_000);
       } catch (cause) {
@@ -251,6 +257,19 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         ? 'unavailable'
         : 'partial';
   const projectProgress = status?.projects.find(item => item.project === props.project);
+  const scanComplete =
+    projectProgress !== undefined &&
+    projectProgress.checked === projectProgress.eligible &&
+    status?.preparation?.complete !== false;
+  const scanLabel = status?.paused
+    ? 'Paused'
+    : status?.state === 'failed'
+      ? 'Stopped'
+      : !status
+        ? 'Checking…'
+        : scanComplete
+          ? 'Caught up'
+          : 'Scanning';
   const causes =
     status?.groups === undefined
       ? groupMaintenanceCauses((status?.cases ?? []).filter(item => item.project === props.project))
@@ -399,28 +418,82 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             {coverage}
           </span>
         </header>
-        <p>
-          {citation?.checked.toLocaleString() ?? '0'} of {citation?.eligible.toLocaleString() ?? '0'} citations checked
-          against current evidence; {citation?.deferred.toLocaleString() ?? '0'} await evidence checks.
-        </p>
-        {citation && citation.eligible > 0 ? (
-          <progress aria-label="Current citation evidence coverage" value={citation.checked} max={citation.eligible} />
+        <div className="health-scan-progress" aria-label="Background scan">
+          <header>
+            <strong>Background scan</strong>
+            <span className="health-status-badge" data-tone={scanComplete ? 'success' : 'info'}>
+              {scanLabel}
+            </span>
+          </header>
+          {projectProgress ? (
+            <>
+              <p>
+                <strong>{projectProgress.checked.toLocaleString()}</strong> of{' '}
+                {projectProgress.eligible.toLocaleString()} background checks completed
+                {projectProgress.eligible > 0
+                  ? ` · ${Math.round((projectProgress.checked / projectProgress.eligible) * 100)}%`
+                  : ''}
+              </p>
+              <progress
+                aria-label="Background maintenance progress"
+                value={projectProgress.checked}
+                max={Math.max(1, projectProgress.eligible)}
+              />
+              <p>
+                {projectProgress.checkedCitations.toLocaleString()} citation evidence checks completed, including
+                retained historical evidence.
+              </p>
+            </>
+          ) : (
+            <progress aria-label="Preparing background maintenance" />
+          )}
+          <p>
+            {status?.paused
+              ? 'Resume automatic maintenance to continue scanning.'
+              : status?.state === 'failed'
+                ? 'Progress is preserved. See the maintenance diagnostic above.'
+                : scanComplete
+                  ? 'The scan is caught up. Evidence may remain unavailable until a usable source becomes available.'
+                  : 'Checks continue automatically while Threadnote is running. You do not need to keep starting them.'}
+          </p>
+          {status?.lastProgressAt ? (
+            <small>
+              Last progress:{' '}
+              <time dateTime={status.lastProgressAt}>{new Date(status.lastProgressAt).toLocaleTimeString()}</time>
+            </small>
+          ) : null}
+        </div>
+        {citation ? (
+          <div className="attention-metrics health-evidence-metrics">
+            <Metric label="Current source checks" value={citation.checked.toLocaleString()} tone="info" />
+            <Metric label="Verified historically" value={citation.historicalVerified.toLocaleString()} tone="neutral" />
+            <Metric
+              label="Pending checks"
+              value={(
+                citation.pending ?? Math.max(0, citation.deferred - citation.historicalVerified)
+              ).toLocaleString()}
+              tone="info"
+            />
+            <Metric
+              label="Waiting for source evidence"
+              value={citation.unavailable?.toLocaleString() ?? '—'}
+              tone="neutral"
+            />
+          </div>
         ) : null}
         <p>
-          {semantic.analyzedRecords?.toLocaleString() ?? '0'} of {semantic.eligibleRecords?.toLocaleString() ?? '0'}{' '}
-          durable memories fully analyzed; {semantic.unknownRecords?.toLocaleString() ?? '0'} durable memories remain
-          outside the completed heuristic checks. Partial coverage is not a content defect.
+          Historical evidence preserves an earlier source; it does not verify today’s code. Missing source evidence is
+          retried automatically when sources change.
+        </p>
+        <p>
+          This report fully analyzes claims in {semantic.analyzedRecords?.toLocaleString() ?? '0'} of{' '}
+          {semantic.eligibleRecords?.toLocaleString() ?? '0'} durable memories. Heuristic coverage can remain partial
+          after scanning finishes. Only supported conflicts need your decision.
         </p>
         {props.report.repositoryEvidence.state === 'unavailable' ? (
           <p>
             Current repository evidence is unavailable. Memory and relation checks remain useful; local evidence
             recovery continues when a verified source becomes available.
-          </p>
-        ) : null}
-        {citation && citation.historicalVerified > 0 ? (
-          <p>
-            {citation.historicalVerified} anchors have verified historical provenance. They do not verify today’s
-            source.
           </p>
         ) : null}
         <details>

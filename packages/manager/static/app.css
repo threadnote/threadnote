@@ -1359,6 +1359,50 @@ body.is-resizing-sidebar * {
   border-color: color-mix(in srgb, var(--health-info) 20%, var(--line));
 }
 
+.health-scan-progress {
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: var(--radius);
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.health-scan-progress > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.health-scan-progress p {
+  margin: 0;
+}
+
+.health-scan-progress p > strong {
+  color: var(--accent);
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+
+.health-scan-progress small {
+  color: var(--muted);
+}
+
+.context-health .health-evidence-metrics > div {
+  padding: 12px;
+}
+
+.context-health .health-scan-progress progress {
+  accent-color: var(--accent);
+  height: 9px;
+}
+
+.context-health .health-scan-progress progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
 .context-health progress {
   accent-color: var(--health-info);
   height: 6px;

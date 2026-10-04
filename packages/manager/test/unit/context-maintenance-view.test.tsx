@@ -212,6 +212,32 @@ describe('context maintenance view', () => {
     expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it('refreshes evidence when background proof advances without a corpus change', async () => {
+    vi.useFakeTimers();
+    const onChanged = vi.fn();
+    let advanced = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...status(),
+              page: {generation: advanced ? 'evidence-two' : 'evidence-one'},
+              projects: [{...status().projects[0], checked: advanced ? 104 : 96}],
+            }),
+          ),
+      ),
+    );
+    await render(<ContextMaintenanceView {...props} onChanged={onChanged} project="threadnote" report={report()} />);
+    expect(onChanged).not.toHaveBeenCalled();
+    advanced = true;
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
   it('shows full aggregate recovery and history when decision details are truncated', async () => {
     const snapshot: ManagerContextMaintenanceStatusV2 = {
       ...status(),
@@ -338,8 +364,9 @@ describe('context maintenance view', () => {
     );
     await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
     expect(document.body.textContent).toContain('No decisions needed; evidence checks are incomplete');
-    expect(document.body.textContent).toContain('96 of 2,013');
-    expect(document.body.textContent).toContain('373 durable memories remain outside the completed heuristic checks');
+    expect(document.body.textContent).toContain('96 of 1,712 background checks completed');
+    expect(document.body.textContent).toContain('Current source checks96');
+    expect(document.body.textContent).toContain('Heuristic coverage can remain partial after scanning finishes');
     expect(document.body.textContent).toContain('Run maintenance now');
     expect(document.body.textContent).not.toContain('Repair all');
     expect(document.body.textContent).not.toContain('2,013 issues');

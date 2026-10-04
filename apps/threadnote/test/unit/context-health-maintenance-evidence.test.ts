@@ -66,6 +66,9 @@ const citation = createMemoryCodeCitation({
   version: 1,
 });
 function record(index: number) {
+  return recordWithCitation(index, citation);
+}
+function recordWithCitation(index: number, codeCitation: ReturnType<typeof createMemoryCodeCitation>) {
   const content = formatMemoryDocument(
     'MEMORY',
     {
@@ -77,7 +80,7 @@ function record(index: number) {
       sourceAgentClient: 'test',
       timestamp: '1970-01-01T00:00:00.000Z',
       visibility: 'personal',
-      codeCitations: [citation],
+      codeCitations: [codeCitation],
     },
     `Supported claim ${index}.`,
   );
@@ -127,6 +130,82 @@ const narrow = Layer.mergeAll(
 
 describe('generation-bound maintenance citation evidence', () => {
   effectIt.layer(narrow)(test => {
+    test.effect('routes every distinct source selector while keeping report roots bounded', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-evidence-selectors-'});
+        const config = {
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+          account: 'fixture',
+        } as RuntimeConfig;
+        yield* fs.writeFileString(config.manifestPath, 'stable manifest');
+        const records = Array.from({length: 120}, (_, index) => {
+          const sourceCommit = index.toString(16).padStart(40, '0');
+          const value = createMemoryCodeCitation({
+            extractorSet: 'test',
+            fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
+            path: 'source.ts',
+            repositoryId: status.identity.repositoryId,
+            repositoryIdentityKind: 'remote',
+            sourceCommit,
+            sourceDirty: false,
+            sourceSnapshotId: status.readySnapshot!.id,
+            target: {kind: 'file'},
+            version: 1,
+          });
+          return recordWithCitation(index, value);
+        });
+        const candidates = records.map(candidate);
+        let validations = 0;
+        let sourceChecks = 0;
+        const query = CodeGraphQueryService.of({
+          status: () => {
+            sourceChecks += 1;
+            return Effect.succeed(
+              attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+            );
+          },
+        } as unknown as CodeGraphQueryService['Service']);
+        const collect = (
+          selectedRecords: readonly ReturnType<typeof record>[],
+          selectedCandidates: readonly ContextBriefMemoryCandidateV1[],
+          mode: 'worker' | undefined,
+        ) =>
+          collectContextMaintenanceCitationEvidence(
+            config,
+            'fixture',
+            selectedRecords,
+            selectedCandidates,
+            repository,
+            {
+              mode,
+              validate: selected =>
+                Effect.gen(function* () {
+                  validations += selected.reduce((count, value) => count + value.codeCitations.length, 0);
+                  const now = (yield* DateTime.nowAsDate).toISOString();
+                  return selected.map(value => ({
+                    uri: value.uri,
+                    receipts: value.codeCitations.map(codeCitation => ({
+                      ...receipt(now),
+                      citationId: codeCitation.id,
+                    })),
+                  }));
+                }),
+            },
+          ).pipe(Effect.provideService(CodeGraphQueryService, query));
+
+        for (let offset = 0; offset < records.length; offset += 16)
+          yield* collect(records.slice(offset, offset + 16), candidates.slice(offset, offset + 16), 'worker');
+        expect(validations).toBe(120);
+        const beforeReport = sourceChecks;
+        const report = yield* collect(records, candidates, undefined);
+        expect(report.flatMap(value => value.receipts)).toHaveLength(120);
+        expect(sourceChecks - beforeReport).toBe(2);
+        expect(validations).toBe(120);
+      }),
+    );
     test.effect(
       'enqueues cold reads without source validation and reuses worker receipts across repeated 2,000-record pages',
       () =>

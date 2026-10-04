@@ -76,7 +76,7 @@ export const readContextMaintenanceCitationAssociation = Effect.fn('contextMaint
     callerCwd: cwd,
   });
   const observations = yield* Effect.forEach(
-    selectors.slice(0, MAX_SOURCES),
+    selectors,
     citation =>
       resolve({
         repositoryId: citation.repositoryId,
