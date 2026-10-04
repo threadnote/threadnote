@@ -89,7 +89,7 @@ it('preserves legacy retention decisions across bounded generated handoff lines'
   const whitespace = fc
     .array(fc.constantFrom(' ', '\t', '\r', '\u2028', '\u2029', '\ufeff'), {maxLength: 5})
     .map(characters => characters.join(''));
-  const value = fc.constantFrom(
+  const plainValue = fc.constantFrom(
     '',
     'completed',
     'None.',
@@ -109,6 +109,14 @@ it('preserves legacy retention decisions across bounded generated handoff lines'
     '*\t : ignored',
     '---:',
   );
+  const pendingValue = fc
+    .tuple(
+      fc.constantFrom('awaiting', 'waiting', 'AWAITING', 'WAITING', 'waitingreview'),
+      whitespace,
+      fc.constantFrom('', 'review', 'for review', '.!', 'completed.!'),
+    )
+    .map(parts => parts.join(''));
+  const value = fc.oneof(plainValue, pendingValue);
   const field = fc
     .tuple(
       whitespace,
@@ -140,6 +148,11 @@ it('preserves legacy retention decisions across bounded generated handoff lines'
 it.each([
   ['star whitespace-only header', 'status: completed\nnext_step:\n*  : ignored', [true, false, true, false]],
   ['confusable header casing', 'blocKer: finish review', [false, false, true, false]],
+  ['awaiting tabs and suffix', `status: awaiting${'\t'.repeat(100_000)}review`, [false, false, false, true]],
+  ['waiting tabs and suffix', `status: waiting${'\t'.repeat(100_000)}review`, [false, false, false, true]],
+  ['waiting trailing tabs', `status: waiting${'\t'.repeat(100_000)}`, [false, false, false, true]],
+  ['waiting punctuation-only suffix', `status: waiting${'\t'.repeat(100_000)}.!`, [false, false, true, false]],
+  ['waiting without separator', 'status: waitingreview', [false, false, true, false]],
   ['inline line terminator after tabs', `status:${'\t'.repeat(100_000)}x\rx`, [false, false, true, false]],
   ['non-header after interior spaces', `status:\na${' '.repeat(100_000)}?`, [false, false, true, false]],
   ['header after interior spaces', `next_step:\na${' '.repeat(100_000)}:`, [false, false, true, false]],

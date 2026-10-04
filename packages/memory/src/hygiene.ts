@@ -694,7 +694,7 @@ function hasExplicitPendingHandoffState(body: string): boolean {
   const blockers = normalizedFieldValues([...(fields.get('blockers') ?? []), ...(fields.get('blocker') ?? [])]);
   if (
     statuses.some(status =>
-      /^(?:active|awaiting(?:\s+.+)?|blocked|in[ _-]?progress|open|pending|waiting(?:\s+.+)?)$/.test(status),
+      /^(?:active|awaiting(?: .+)?|blocked|in[ _-]?progress|open|pending|waiting(?: .+)?)$/.test(status),
     )
   ) {
     return true;
