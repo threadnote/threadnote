@@ -28,8 +28,10 @@ import {
   clearContextMaintenanceEvidenceRequest,
   foregroundReceiptCandidates,
   readContextMaintenanceEvidenceRequests,
+  requestedRootProjectionComplete,
   projectMaintenanceCitationReceipts,
   sourceObservation,
+  type ContextMaintenanceWorkerObservation,
 } from '@threadnote/threadnote/memory/context/maintenance_evidence';
 
 const citationEnvironmentPolicy = Layer.mergeAll(
@@ -154,6 +156,109 @@ const narrow = Layer.mergeAll(
 );
 
 describe('generation-bound maintenance citation evidence', () => {
+  effectIt.layer(citationPlatformLayer)(layerIt => {
+    layerIt.effect('queues only records with citation work on a cold foreground read', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citations-'});
+        const config = {
+          account: 'fixture',
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+        } as RuntimeConfig;
+        const cited = recordWithCitations(0, [citation]);
+        const plain = recordWithCitations(1, []);
+        const query = CodeGraphQueryService.of({
+          status: () => Effect.succeed(status),
+        } as unknown as CodeGraphQueryService['Service']);
+        expect(
+          yield* collectContextMaintenanceCitationEvidence(
+            config,
+            'fixture',
+            [cited, plain],
+            [candidate(cited, 0), candidate(plain, 1)],
+            repository,
+            {validate: () => Effect.succeed([])},
+          ).pipe(Effect.provideService(CodeGraphQueryService, query)),
+        ).toEqual([]);
+        expect((yield* readContextMaintenanceEvidenceRequests(config))[0]?.uris).toEqual([cited.uri]);
+        const firstRevision = (yield* readContextMaintenanceEvidenceRequests(config))[0]?.revision;
+        expect(firstRevision).toBeDefined();
+        const later = recordWithCitations(2, [citation]);
+        yield* collectContextMaintenanceCitationEvidence(
+          config,
+          'fixture',
+          [later],
+          [candidate(later, 0)],
+          repository,
+          {validate: () => Effect.succeed([])},
+        ).pipe(Effect.provideService(CodeGraphQueryService, query));
+        expect((yield* readContextMaintenanceEvidenceRequests(config))[0]?.uris).toEqual([cited.uri, later.uri]);
+        yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [cited.uri], firstRevision);
+        expect((yield* readContextMaintenanceEvidenceRequests(config))[0]?.uris).toEqual([cited.uri, later.uri]);
+        yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [later.uri]);
+        expect((yield* readContextMaintenanceEvidenceRequests(config))[0]?.uris).toEqual([cited.uri]);
+      }),
+    );
+    layerIt.effect('acknowledges a fully fenced unavailable attempt but retains a graph-stale race', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const record = recordWithCitations(0, [citation]);
+        for (const reason of ['repository-unavailable', 'graph-stale'] as const) {
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-evidence-'});
+          const config = {
+            account: 'fixture',
+            agentContextHome: home,
+            manifestPath: path.join(home, 'manifest'),
+          } as RuntimeConfig;
+          yield* fs.writeFileString(config.manifestPath, 'stable manifest');
+          const query = CodeGraphQueryService.of({
+            status: () =>
+              Effect.succeed(
+                attachCodeGraphStatusObservation({...status}, {identity: status.identity, overlay: {dirty: false}}),
+              ),
+          } as unknown as CodeGraphQueryService['Service']);
+          let observation: ContextMaintenanceWorkerObservation | undefined;
+          const now = (yield* DateTime.nowAsDate).toISOString();
+          yield* collectContextMaintenanceCitationEvidence(
+            config,
+            'fixture',
+            [record],
+            [candidate(record, 0)],
+            repository,
+            {
+              mode: 'worker',
+              observeWorker: value =>
+                Effect.sync(() => {
+                  observation = value;
+                }),
+              validate: selected =>
+                Effect.succeed(
+                  selected.map(value => ({
+                    uri: value.uri,
+                    receipts: value.codeCitations.map(codeCitation => ({
+                      ...receipt(now),
+                      citationId: codeCitation.id,
+                      coverage: 'incomplete' as const,
+                      provenance: 'unverified' as const,
+                      reason,
+                      status: 'unknown' as const,
+                      strategy: 'none' as const,
+                    })),
+                  })),
+                ),
+            },
+          ).pipe(Effect.provideService(CodeGraphQueryService, query));
+          expect(observation).toBeDefined();
+          expect(yield* requestedRootProjectionComplete(config, 'fixture', repository, record, observation!)).toBe(
+            reason === 'repository-unavailable',
+          );
+        }
+      }),
+    );
+  });
   it('selects only live published receipt selectors from a 200-selector foreground corpus', () => {
     const values = Array.from({length: 200}, (_, index) => {
       const codeCitation = createMemoryCodeCitation({

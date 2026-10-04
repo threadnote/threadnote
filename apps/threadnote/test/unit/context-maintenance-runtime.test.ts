@@ -42,7 +42,12 @@ import {
 } from '@threadnote/threadnote/memory/context/maintenance_decisions';
 import {captureCitationReplacements} from '@threadnote/threadnote/memory/context/health_repair_commands';
 import {buildContextHealthReport} from '@threadnote/context/health';
-import {readContextMaintenanceEvidenceRequests} from '@threadnote/threadnote/memory/context/maintenance_evidence';
+import {
+  advanceContextMaintenanceEvidenceRequestDiscovery,
+  advanceContextMaintenanceEvidenceRequestExecution,
+  contextMaintenanceEvidenceDiscoveryPending,
+  readContextMaintenanceEvidenceRequests,
+} from '@threadnote/threadnote/memory/context/maintenance_evidence';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {
@@ -50,6 +55,8 @@ import {
   invalidateMaintenanceWorkerBatch,
   prepareMaintenanceWorkerBatches,
   collectMaintenanceWorkerBatch,
+  selectRelationBoundedMaintenanceWindow,
+  selectRequestedMaintenanceUris,
 } from '../../src/memory/context/maintenance_batch.js';
 
 const NOW = '2026-10-03T15:00:00.000Z';
@@ -652,10 +659,11 @@ describe('persistent context maintenance', () => {
       expect(offset).toBe(6_000);
       expect(first.projects[0].checked).toBe(1);
       expect(first.projects[0].cursor).toBe(1);
-      expect(first.receipts).toHaveLength(1);
+      expect(first.receipts).toHaveLength(0);
       expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
-      const next = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
-      expect(next.receipts).toHaveLength(1);
+      yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      const relationPass = yield* runContextMaintenance(fixture.config, {cwd: repository, maxRecords: 1});
+      expect(relationPass.receipts).toHaveLength(1);
       expect(
         parseMemoryDocument(relation.uri, yield* fixture.fs.readFileString(relationFile))!.metadata.relations ?? [],
       ).toEqual([]);
@@ -1027,6 +1035,194 @@ describe('persistent context maintenance', () => {
       expect(reconciled.state).toBe('idle');
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
+
+  effectIt.effect('projects requested evidence in the caller worktree and retires a proven deleted URI', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const repository = fixture.path.join(fixture.home, 'repository');
+      const linked = fixture.path.join(fixture.home, 'linked');
+      yield* fixture.fs.makeDirectory(repository);
+      yield* fixture.fs.writeFileString(fixture.path.join(repository, 'source.ts'), 'export const value = 1;\n');
+      yield* fixture.fs.writeFileString(fixture.path.join(repository, 'independent.ts'), 'export const other = 1;\n');
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+      yield* git(['init', '--quiet']);
+      yield* git(['add', '.']);
+      yield* git([
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--quiet',
+        '-m',
+        'source',
+      ]);
+      yield* git(['worktree', 'add', '--quiet', '--detach', linked]);
+      yield* fixture.fs.writeFileString(fixture.path.join(linked, 'independent.ts'), 'export const other = 2;\n');
+      yield* fixture.fs.writeFileString(
+        fixture.config.manifestPath,
+        `version: 1\nprojects:\n  - name: threadnote\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/threadnote\n    seed: []\n`,
+      );
+      const indexer = yield* CodeGraphIndexer;
+      yield* indexer.index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      yield* indexer.index({cwd: linked, threadnoteHome: fixture.home, ensureVectors: false});
+      const citations = yield* captureMemoryCodeCitations(fixture.config, {
+        callerCwd: repository,
+        project: 'threadnote',
+        refs: ['source.ts'],
+      });
+      const source = record('source', {schemaVersion: 5, codeCitations: citations}, 'Source claim.');
+      const missing = record('missing', {schemaVersion: 5, codeCitations: citations}, 'Other claim.');
+      yield* fixture.fs.writeFileString(fixture.source, source.content);
+      const missingFile = fixture.path.join(fixture.directory, 'missing.md');
+      yield* fixture.fs.writeFileString(missingFile, missing.content);
+      yield* collectContextHealth(fixture.config, 'threadnote', [source, missing], linked);
+      const requested = () => readContextMaintenanceEvidenceRequests(fixture.config);
+      expect((yield* requested())[0]).toMatchObject({
+        project: 'threadnote',
+        cwd: linked,
+        uris: [source.uri, missing.uri],
+      });
+      yield* fixture.fs.remove(missingFile);
+      yield* runContextMaintenance(fixture.config, {cwd: repository});
+      expect((yield* requested())[0]?.uris).toContain(source.uri);
+      yield* runContextMaintenance(fixture.config, {cwd: repository});
+      yield* runContextMaintenance(fixture.config, {cwd: repository});
+      const requestedFile = fixture.path.join(
+        fixture.home,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`threadnote\0${linked}`)}.json`,
+      );
+      const projection = JSON.parse(yield* fixture.fs.readFileString(requestedFile)) as {
+        entries: Array<{uri: string; receipts: Array<{citationId: string}>}>;
+      };
+      expect(yield* requested()).toEqual([]);
+      expect(
+        projection.entries.find(entry => entry.uri === source.uri)?.receipts.map(receipt => receipt.citationId),
+      ).toEqual(citations.map(citation => citation.id));
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('retains and defers an unprovable requested URI after completing its sibling', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* TestClock.setTime(Date.parse(NOW));
+      const citation = createMemoryCodeCitation({
+        extractorSet: 'typescript-v1',
+        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        path: 'source.ts',
+        repositoryId: 'b'.repeat(64),
+        repositoryIdentityKind: 'local',
+        sourceCommit: 'c'.repeat(40),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        target: {kind: 'file'},
+        version: 1,
+      });
+      const source = record('source', {schemaVersion: 5, codeCitations: [citation]});
+      yield* fixture.fs.writeFileString(fixture.source, source.content);
+      yield* collectContextHealth(fixture.config, 'threadnote', [source], fixture.home);
+      const pendingFile = fixture.path.join(
+        fixture.home,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`threadnote\0${fixture.home}`)}.json.pending`,
+      );
+      const pending = JSON.parse(yield* fixture.fs.readFileString(pendingFile)) as {uris: string[]};
+      const unprovable = 'threadnote://unreadable/subject';
+      yield* fixture.fs.writeFileString(pendingFile, JSON.stringify({...pending, uris: [...pending.uris, unprovable]}));
+      for (let tick = 0; tick < 3; tick++) yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const retained = (yield* readContextMaintenanceEvidenceRequests(fixture.config))[0];
+      expect(retained.uris).toEqual([unprovable]);
+      expect(Date.parse(retained.deferredUntil?.[unprovable] ?? '')).toBeGreaterThan(Date.parse(NOW));
+      for (let tick = 0; tick < 3; tick++) yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect((yield* readContextMaintenanceEvidenceRequests(fixture.config))[0]).toEqual(retained);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('discovers a scoped request beyond 64 other-project files without claiming idle', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+      const directory = fixture.path.join(fixture.home, 'context-maintenance', 'evidence');
+      yield* fixture.fs.makeDirectory(directory, {recursive: true});
+      const target = Array.from({length: 256}, (_, index) => fixture.path.join(fixture.home, `target-${index}`)).find(
+        cwd => sha256HexSync(`threadnote\0${cwd}`).startsWith('f'),
+      );
+      if (target === undefined) return yield* Effect.die(new Error('Missing bounded target root.'));
+      const targetHash = sha256HexSync(`threadnote\0${target}`);
+      const others = Array.from({length: 512}, (_, index) => fixture.path.join(fixture.home, `other-${index}`))
+        .filter(cwd => sha256HexSync(`other\0${cwd}`) < targetHash)
+        .slice(0, 64);
+      expect(others).toHaveLength(64);
+      const uri = 'threadnote://unreadable/subject';
+      const writeRequest = (project: string, cwd: string) =>
+        fixture.fs.writeFileString(
+          fixture.path.join(directory, `${sha256HexSync(`${project}\0${cwd}`)}.json.pending`),
+          JSON.stringify({project, cwd, uris: [uri], policy: 'health-receipts-v1:validator-1'}),
+        );
+      for (const cwd of others) yield* writeRequest('other', cwd);
+      yield* writeRequest('threadnote', target);
+      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+      expect(first.state).not.toBe('idle');
+      let second = first;
+      for (let tick = 0; tick < 4; tick++)
+        second = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+      expect(second.state).not.toBe('idle');
+      const discovered = (yield* readContextMaintenanceEvidenceRequests(fixture.config)).find(
+        request => request.cwd === target,
+      );
+      // The public reader itself is bounded to the first 64 files.
+      expect(discovered).toBeUndefined();
+      const targetFile = fixture.path.join(directory, `${targetHash}.json.pending`);
+      const pending = JSON.parse(yield* fixture.fs.readFileString(targetFile)) as {
+        deferredUntil?: Record<string, string>;
+      };
+      expect(pending.deferredUntil?.[uri]).toBeDefined();
+      yield* fixture.fs.remove(targetFile);
+      let settled = second;
+      for (let tick = 0; tick < 4 && settled.state !== 'idle'; tick++)
+        settled = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+      expect(settled.state).toBe('idle');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('executes eligible roots on both sides of a 128-file page boundary despite expiring backoff', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* TestClock.setTime(Date.parse(NOW));
+      yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+      const directory = fixture.path.join(fixture.home, 'context-maintenance', 'evidence');
+      yield* fixture.fs.makeDirectory(directory, {recursive: true});
+      const roots = Array.from({length: 128}, (_, index) => fixture.path.join(fixture.home, `root-${index}`))
+        .map(cwd => ({cwd, file: `${sha256HexSync(`threadnote\0${cwd}`)}.json.pending`}))
+        .sort((left, right) => left.file.localeCompare(right.file));
+      const uri = 'threadnote://unreadable/subject';
+      const eligible = [roots[0], roots[64], roots[65]];
+      for (const [index, root] of roots.entries())
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(directory, root.file),
+          JSON.stringify({
+            project: 'threadnote',
+            cwd: root.cwd,
+            uris: [uri],
+            policy: 'health-receipts-v1:validator-1',
+            ...(index === 0 || index === 64 || index === 65
+              ? {}
+              : {deferredUntil: {[uri]: '2099-01-01T00:00:00.000Z'}}),
+          }),
+        );
+      for (let tick = 0; tick < 10; tick++) {
+        yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+        yield* TestClock.adjust('121 seconds');
+      }
+      for (const root of eligible) {
+        const pending = JSON.parse(yield* fixture.fs.readFileString(fixture.path.join(directory, root.file))) as {
+          deferredUntil?: Record<string, string>;
+        };
+        expect(Date.parse(pending.deferredUntil?.[uri] ?? '')).toBeGreaterThan(Date.parse(NOW));
+      }
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('revisits unchanged records at future review and validity deadlines', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -1242,6 +1438,222 @@ describe('persistent context maintenance', () => {
       {numRuns: 50},
     );
   });
+
+  it('fairly rotates bounded requested roots and URIs without changing caller lists', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.integer({min: 0, max: 15}), {minLength: 1, maxLength: 12}), ids => {
+        const roots = ids.map(id => `project-${id}\0/worktree-${id}`);
+        const uris = ids.map(id => `threadnote://memory/${id}`);
+        const rootInput = [...roots];
+        const uriInput = [...uris];
+        let schedule: Parameters<typeof selectMaintenanceWorkPhase>[0];
+        let uriCursor: string | undefined;
+        const visitedRoots = new Set<string>();
+        const visitedUris = new Set<string>();
+        for (let tick = 0; tick < roots.length * 3; tick++) {
+          const work = selectMaintenanceWorkPhase(schedule, ['semantic'], true, roots);
+          expect(work.phase).toBe(['records', 'semantic', 'requested'][tick % 3]);
+          if (work.root !== undefined) visitedRoots.add(work.root);
+          schedule = work.next;
+          const selected = selectRequestedMaintenanceUris(uris, uriCursor, 4);
+          expect(selected.length).toBeLessThanOrEqual(4);
+          selected.forEach(uri => visitedUris.add(uri));
+          uriCursor = selected.at(-1);
+        }
+        expect(visitedRoots).toEqual(new Set(roots));
+        expect(visitedUris).toEqual(new Set(uris));
+        expect(roots).toEqual(rootInput);
+        expect(uris).toEqual(uriInput);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  it('advances request discovery through every bounded page, including empty eligible pages', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 256}), total => {
+        let discovery: ReturnType<typeof advanceContextMaintenanceEvidenceRequestDiscovery> | undefined;
+        for (let offset = 0; offset < total; offset += 64) {
+          const scanned = Math.min(64, total - offset);
+          discovery = advanceContextMaintenanceEvidenceRequestDiscovery(
+            discovery,
+            {
+              requests: [],
+              files: [`file-${offset + scanned - 1}`],
+              namesHash: 'unchanged',
+              total,
+              scanned,
+              lastFile: `file-${offset + scanned - 1}`,
+              unreadable: false,
+            },
+            'selected',
+          );
+          expect(discovery.scanned).toBe(Math.min(total, offset + scanned));
+          expect(discovery.scopedPending).toBe(false);
+        }
+        expect(discovery?.scanned).toBe(total);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  it('invalidates absence authority when a pinned request page changes scope', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .tuple(
+            fc.option(fc.constantFrom('A', 'B'), {nil: undefined}),
+            fc.option(fc.constantFrom('A', 'B'), {nil: undefined}),
+          )
+          .filter(([before, after]) => before !== after),
+        ([before, after]) => {
+          const previous = {namesHash: 'same-files', scope: before, scanned: 1, lastFile: 'file', scopedPending: false};
+          const page = {
+            requests: [{project: after ?? 'B', cwd: '/worktree', uris: ['subject']}],
+            files: ['file'],
+            namesHash: 'same-files',
+            total: 1,
+            scanned: 1,
+            lastFile: 'file',
+            unreadable: false,
+          };
+          const pinned = advanceContextMaintenanceEvidenceRequestExecution(previous, page, after, true);
+          expect(pinned?.scope).toBe(after);
+          expect(pinned?.scanned).toBe(0);
+          expect(pinned?.scopedPending).toBe(true);
+          expect(pinned?.lastFile).toBe(previous.lastFile);
+          expect(previous.scope).toBe(before);
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
+  effectIt.effect('rejects a complete absence certificate from another project at the closing fence', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const previous = {namesHash: sha256HexSync(''), scope: 'A', scanned: 0, scopedPending: false};
+      expect(yield* contextMaintenanceEvidenceDiscoveryPending(fixture.config, previous, 0, 'A')).toBe(false);
+      expect(yield* contextMaintenanceEvidenceDiscoveryPending(fixture.config, previous, 0, 'B')).toBe(true);
+      expect(yield* contextMaintenanceEvidenceDiscoveryPending(fixture.config, previous, 0)).toBe(true);
+    }).pipe(provideTestLayer(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))),
+  );
+
+  it('visits eligible roots across rotating pages when record phases intervene', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 65, max: 192}), total => {
+        const files = Array.from({length: total}, (_, index) => `project\0/root-${index}`)
+          .map(root => ({root, file: `${sha256HexSync(root)}.json.pending`}))
+          .sort((left, right) => left.file.localeCompare(right.file));
+        const eligible = new Set([files[0].root, files[Math.floor(total / 2)].root, files.at(-1)!.root]);
+        const visited = new Set<string>();
+        let discovery: ReturnType<typeof advanceContextMaintenanceEvidenceRequestDiscovery> | undefined;
+        for (let tick = 0; tick < total * 4 && visited.size < eligible.size; tick++) {
+          const start =
+            discovery?.lastFile === undefined ? 0 : files.findIndex(item => item.file > discovery!.lastFile!);
+          const rotated = [...files.slice(Math.max(0, start)), ...files.slice(0, Math.max(0, start))].slice(0, 64);
+          const next = rotated.find(item => eligible.has(item.root));
+          const executed = tick % 2 === 1 ? next?.root : undefined;
+          if (executed !== undefined) visited.add(executed);
+          discovery = advanceContextMaintenanceEvidenceRequestExecution(
+            discovery,
+            {
+              requests: rotated.map(item => ({project: 'project', cwd: item.root, uris: ['subject']})),
+              files: rotated.map(item => item.file),
+              namesHash: 'stable',
+              total,
+              scanned: rotated.length,
+              lastFile: rotated.at(-1)?.file,
+              unreadable: false,
+            },
+            'project',
+            next !== undefined,
+            executed,
+          );
+        }
+        expect(visited).toEqual(eligible);
+      }),
+      {numRuns: 40},
+    );
+  });
+
+  it('consumes relation-bearing work alone through nonempty ordered prefixes', () => {
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 20}), flags => {
+        const tasks = flags.map((hasRelation, index) => ({
+          record: record(`relation-${index}`, hasRelation ? {relations: [{type: 'references', uri: URI}]} : {}),
+          index,
+        }));
+        const original = [...tasks];
+        let remaining = tasks;
+        const visited: number[] = [];
+        while (remaining.length > 0) {
+          const selected = selectRelationBoundedMaintenanceWindow(remaining.slice(0, 4));
+          expect(selected.length).toBeGreaterThan(0);
+          expect(selected.length).toBeLessThanOrEqual(4);
+          expect(selected).toEqual(remaining.slice(0, selected.length));
+          if (selected.some(task => (task.record.metadata.relations?.length ?? 0) > 0))
+            expect(selected).toHaveLength(1);
+          visited.push(...selected.map(task => task.index));
+          remaining = remaining.slice(selected.length);
+        }
+        expect(visited).toEqual(tasks.map(task => task.index));
+        expect(tasks).toEqual(original);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  effectIt.effect('schedules an inventoried relation-bearing record alone', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, 'a-relation.md'),
+        record('a-relation', {relations: [{type: 'references', uri: URI.replace('source.md', 'z-independent.md')}]})
+          .content,
+      );
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, 'z-independent.md'),
+        record('z-independent').content,
+      );
+      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      expect(first.projects[0]).toMatchObject({eligible: 2, checked: 1});
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      const later = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      expect(later.projects[0].checked).toBe(2);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('defers a newly added relation before admitting later selected records', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const firstFile = fixture.path.join(fixture.directory, 'a-first.md');
+      const before = record('a-first');
+      const after = record('a-first', {relations: [{type: 'references', uri: URI.replace('source.md', 'z-later.md')}]});
+      yield* fixture.fs.writeFileString(firstFile, before.content);
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'z-later.md'), record('z-later').content);
+      let changed = false;
+      const racingFs = FileSystem.FileSystem.of({
+        ...fixture.fs,
+        readFileString: (file, encoding) =>
+          file !== firstFile || changed
+            ? fixture.fs.readFileString(file, encoding)
+            : Effect.gen(function* () {
+                changed = true;
+                yield* fixture.fs.writeFileString(firstFile, after.content);
+                return yield* fixture.fs.readFileString(file, encoding);
+              }),
+      });
+      const raced = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100}).pipe(
+        Effect.provideService(FileSystem.FileSystem, racingFs),
+      );
+      expect(changed).toBe(true);
+      expect(raced.projects[0]).toMatchObject({eligible: 2, checked: 0});
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      const alone = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      expect(alone.projects[0].checked).toBe(1);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   effectIt.effect('resumes old state and reopens semantic coverage when the durable corpus changes', () =>
     Effect.gen(function* () {
@@ -1588,7 +2000,9 @@ describe('persistent context maintenance', () => {
         expect((yield* runContextMaintenance(fixture.config, {cwd: fixture.home})).receipts).toHaveLength(1);
         expect(yield* fixture.fs.readFileString(fixture.source)).toBe(repaired.content);
         yield* fixture.fs.writeFileString(fixture.source, source.content);
-        const reintroduced = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        let reintroduced = first;
+        for (let tick = 0; tick < 6 && (yield* fixture.fs.readFileString(fixture.source)) !== repaired.content; tick++)
+          reintroduced = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
         expect(yield* fixture.fs.readFileString(fixture.source)).toBe(repaired.content);
         expect(reintroduced.receipts).toHaveLength(1);
         expect(reintroduced.receipts[0].receiptId).toBe(first.receipts[0].receiptId);
@@ -1829,75 +2243,79 @@ describe('persistent context maintenance', () => {
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('keeps expired unknown projection requests queued until the unchanged worker retry deadline', () =>
-    Effect.gen(function* () {
-      const fixture = yield* makeFixture();
-      yield* TestClock.setTime(Date.parse(NOW));
-      const citation = createMemoryCodeCitation({
-        extractorSet: 'typescript-v1',
-        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
-        path: 'source.ts',
-        repositoryId: 'b'.repeat(64),
-        repositoryIdentityKind: 'local',
-        sourceCommit: 'c'.repeat(40),
-        sourceDirty: false,
-        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
-        target: {kind: 'file'},
-        version: 1,
-      });
-      const source = record('source', {schemaVersion: 5, codeCitations: [citation]});
-      yield* fixture.fs.writeFileString(fixture.source, source.content);
-      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      const waiting = first.cases.find(item => item.disposition === 'waiting-evidence')!;
-      expect(waiting.nextAttemptAt).toBe('2026-10-03T15:02:00.000Z');
-      const projectionFile = fixture.path.join(
-        fixture.home,
-        'context-maintenance',
-        'evidence',
-        `${sha256HexSync(`threadnote\0${fixture.home}`)}.json`,
-      );
-      const projection = yield* fixture.fs.readFileString(projectionFile);
-      yield* TestClock.adjust('61 seconds');
-      const foreground = yield* collectContextHealth(fixture.config, 'threadnote', [source], fixture.home);
-      expect(foreground.maintenance?.citationCoverage.state).toBe('unavailable');
-      expect(
-        (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
-      ).toContain(source.uri);
-      const beforeDeadline = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      expect(beforeDeadline.cases.find(item => item.caseId === waiting.caseId)).toMatchObject({
-        disposition: 'waiting-evidence',
-        attemptCount: waiting.attemptCount,
-        nextAttemptAt: waiting.nextAttemptAt,
-      });
-      expect(beforeDeadline.lastProgressAt).toBe(first.lastProgressAt);
-      expect(yield* fixture.fs.readFileString(projectionFile)).toBe(projection);
-      expect(
-        (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
-      ).toContain(source.uri);
-      yield* TestClock.adjust('59 seconds');
-      const atDeadline = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      expect(atDeadline.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(
-        waiting.attemptCount + 1,
-      );
-      expect(yield* fixture.fs.readFileString(projectionFile)).not.toBe(projection);
-      expect(
-        (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
-      ).not.toContain(source.uri);
-      yield* TestClock.adjust('4 minutes');
-      const exhausted = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      const terminalWait = exhausted.cases.find(item => item.caseId === waiting.caseId)!;
-      expect(terminalWait.attemptCount).toBe(3);
-      expect(terminalWait.nextAttemptAt).toBeUndefined();
-      expect(terminalWait.wake).toMatchObject({kind: 'evidence-generation'});
-      yield* TestClock.adjust('1 day');
-      yield* collectContextHealth(fixture.config, 'threadnote', [source], fixture.home);
-      const unchanged = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      expect(unchanged.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(3);
-      expect(unchanged.cases).toHaveLength(exhausted.cases.length);
-      yield* fixture.fs.writeFileString(fixture.path.join(fixture.home, 'source.ts'), 'New source generation.');
-      const awakened = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
-      expect(awakened.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(1);
-    }).pipe(provideTestLayer(ApplicationLayer)),
+  effectIt.effect(
+    'acknowledges an unavailable requested projection without advancing the canonical retry deadline',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        yield* TestClock.setTime(Date.parse(NOW));
+        const citation = createMemoryCodeCitation({
+          extractorSet: 'typescript-v1',
+          fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+          path: 'source.ts',
+          repositoryId: 'b'.repeat(64),
+          repositoryIdentityKind: 'local',
+          sourceCommit: 'c'.repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+          target: {kind: 'file'},
+          version: 1,
+        });
+        const source = record('source', {schemaVersion: 5, codeCitations: [citation]});
+        yield* fixture.fs.writeFileString(fixture.source, source.content);
+        const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        const waiting = first.cases.find(item => item.disposition === 'waiting-evidence')!;
+        expect(waiting.nextAttemptAt).toBe('2026-10-03T15:02:00.000Z');
+        const projectionFile = fixture.path.join(
+          fixture.home,
+          'context-maintenance',
+          'evidence',
+          `${sha256HexSync(`threadnote\0${fixture.home}`)}.json`,
+        );
+        const projection = yield* fixture.fs.readFileString(projectionFile);
+        yield* TestClock.adjust('61 seconds');
+        const foreground = yield* collectContextHealth(fixture.config, 'threadnote', [source], fixture.home);
+        expect(foreground.maintenance?.citationCoverage.state).toBe('unavailable');
+        expect(
+          (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
+        ).toContain(source.uri);
+        const beforeDeadline = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        expect(beforeDeadline.cases.find(item => item.caseId === waiting.caseId)).toMatchObject({
+          disposition: 'waiting-evidence',
+          attemptCount: waiting.attemptCount,
+          nextAttemptAt: waiting.nextAttemptAt,
+        });
+        expect(beforeDeadline.lastProgressAt).toBe(first.lastProgressAt);
+        expect(yield* fixture.fs.readFileString(projectionFile)).toBe(projection);
+        expect(
+          (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
+        ).toContain(source.uri);
+        yield* TestClock.adjust('59 seconds');
+        const requestedAttempt = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        expect(requestedAttempt.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(
+          waiting.attemptCount,
+        );
+        expect(yield* fixture.fs.readFileString(projectionFile)).not.toBe(projection);
+        expect(
+          (yield* readContextMaintenanceEvidenceRequests(fixture.config)).flatMap(request => request.uris),
+        ).not.toContain(source.uri);
+        const atDeadline = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        expect(atDeadline.cases.find(item => item.caseId === waiting.caseId)?.attemptCount).toBe(
+          waiting.attemptCount + 1,
+        );
+        yield* TestClock.adjust('4 minutes');
+        let exhausted = atDeadline;
+        for (
+          let tick = 0;
+          tick < 4 && exhausted.cases.find(item => item.caseId === waiting.caseId)?.attemptCount !== 3;
+          tick++
+        )
+          exhausted = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 1});
+        const terminalWait = exhausted.cases.find(item => item.caseId === waiting.caseId)!;
+        expect(terminalWait.attemptCount).toBe(3);
+        expect(terminalWait.nextAttemptAt).toBeUndefined();
+        expect(terminalWait.wake).toMatchObject({kind: 'evidence-generation'});
+      }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('archives only explicit expiry and retains memory identity and historical edges', () =>

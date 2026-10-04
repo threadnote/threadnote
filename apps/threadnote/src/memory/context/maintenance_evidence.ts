@@ -321,7 +321,7 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         file,
         project,
         cwd,
-        candidates.map(candidate => candidate.uri),
+        candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
       );
       return [];
     }
@@ -377,7 +377,7 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         file,
         project,
         cwd,
-        candidates.map(candidate => candidate.uri),
+        candidates.filter(candidate => candidate.codeCitations.length > 0).map(candidate => candidate.uri),
       );
       return [];
     }
@@ -564,7 +564,13 @@ export const collectContextMaintenanceCitationEvidence = Effect.fn('contextMaint
         .slice(0, 100)
         .map(candidate => candidate.uri);
       yield* enqueueEvidenceRequest(file, project, cwd, uris);
-    } else yield* fs.remove(`${file}.pending`, {force: true}).pipe(Effect.ignore);
+    } else
+      yield* clearContextMaintenanceEvidenceRequest(
+        config,
+        project,
+        cwd,
+        candidates.map(candidate => candidate.uri),
+      );
     return validations;
   },
 );
@@ -686,30 +692,167 @@ export interface ContextMaintenanceEvidenceRequest {
   readonly project: string;
   readonly cwd: string;
   readonly uris: readonly string[];
+  readonly cursor?: string;
+  readonly deferredUntil?: Readonly<Record<string, string>>;
+  readonly revision?: string;
 }
-export const readContextMaintenanceEvidenceRequests = Effect.fn('contextMaintenance.readEvidenceRequests')(function* (
+export interface ContextMaintenanceEvidenceRequestPage {
+  readonly requests: readonly ContextMaintenanceEvidenceRequest[];
+  readonly files: readonly string[];
+  readonly namesHash: string;
+  readonly total: number;
+  readonly scanned: number;
+  readonly lastFile?: string;
+  readonly unreadable: boolean;
+}
+export interface ContextMaintenanceEvidenceRequestDiscovery {
+  readonly namesHash: string;
+  readonly scope?: string;
+  readonly scanned: number;
+  readonly lastFile?: string;
+  readonly scopedPending: boolean;
+}
+export const pendingContextMaintenanceEvidenceRoots = Effect.fn('contextMaintenance.pendingRequestRoots')(function* (
+  requests: readonly ContextMaintenanceEvidenceRequest[],
+  now: number,
+  project?: string,
+) {
+  const path = yield* Path.Path;
+  return requests
+    .filter(request => project === undefined || request.project === project)
+    .filter(
+      request =>
+        path.isAbsolute(request.cwd) &&
+        request.uris.some(uri => !(Date.parse(request.deferredUntil?.[uri] ?? '') > now)),
+    )
+    .map(request => `${request.project}\0${request.cwd}`);
+});
+export function advanceContextMaintenanceEvidenceRequestDiscovery(
+  previous: ContextMaintenanceEvidenceRequestDiscovery | undefined,
+  page: ContextMaintenanceEvidenceRequestPage,
+  scope?: string,
+): ContextMaintenanceEvidenceRequestDiscovery {
+  if (previous?.namesHash !== page.namesHash || previous.scope !== scope)
+    return {
+      namesHash: page.namesHash,
+      scope,
+      scanned: previous === undefined || page.lastFile === undefined ? page.scanned : 0,
+      lastFile: previous === undefined ? page.lastFile : undefined,
+      scopedPending: page.unreadable || page.requests.some(request => scope === undefined || request.project === scope),
+    };
+  return {
+    namesHash: page.namesHash,
+    scope,
+    scanned: Math.min(page.total, previous.scanned + page.scanned),
+    lastFile: page.lastFile,
+    scopedPending:
+      previous.scopedPending ||
+      page.unreadable ||
+      page.requests.some(request => scope === undefined || request.project === scope),
+  };
+}
+export function advanceContextMaintenanceEvidenceRequestExecution(
+  previous: ContextMaintenanceEvidenceRequestDiscovery | undefined,
+  page: ContextMaintenanceEvidenceRequestPage,
+  scope: string | undefined,
+  hasEligible: boolean,
+  executedRoot?: string,
+) {
+  const pinned = () => ({
+    ...advanceContextMaintenanceEvidenceRequestDiscovery(
+      previous,
+      {...page, scanned: 0, lastFile: previous?.lastFile},
+      scope,
+    ),
+    lastFile: previous?.lastFile,
+  });
+  // Keep eligible filenames in view across record and semantic phases; advance only past work actually attempted.
+  if (hasEligible && executedRoot === undefined) return pinned();
+  const index =
+    executedRoot === undefined
+      ? page.files.length - 1
+      : page.files.indexOf(`${sha256HexSync(executedRoot)}.json.pending`);
+  if (executedRoot !== undefined && index < 0) return pinned();
+  return {
+    ...advanceContextMaintenanceEvidenceRequestDiscovery(
+      previous,
+      {...page, scanned: index + 1, lastFile: page.files[index]},
+      scope,
+    ),
+    lastFile: page.files[index],
+  };
+}
+export const readContextMaintenanceEvidenceRequestPage = Effect.fn('contextMaintenance.readEvidenceRequestPage')(
+  function* (config: RuntimeConfig, afterFile?: string) {
+    const path = yield* Path.Path;
+    const directory = path.join(config.agentContextHome, 'context-maintenance', 'evidence');
+    const names = yield* readEvidenceRequestFileNames(config);
+    const requests: ContextMaintenanceEvidenceRequest[] = [];
+    const ordered = names ?? [];
+    const next = afterFile === undefined ? 0 : ordered.findIndex(name => name > afterFile);
+    const rotated = next < 0 ? ordered : [...ordered.slice(next), ...ordered.slice(0, next)];
+    const selected = rotated.slice(0, MAX_PROJECTIONS);
+    let unreadable = names === undefined;
+    for (const name of selected) {
+      const request = yield* readEvidenceRequest(path.join(directory, name));
+      if (request !== undefined && name === `${sha256HexSync(`${request.project}\0${request.cwd}`)}.json.pending`)
+        requests.push(request);
+      else unreadable = true;
+    }
+    return {
+      requests,
+      files: selected,
+      namesHash: names === undefined ? 'unreadable' : sha256HexSync(ordered.join('\0')),
+      total: ordered.length,
+      scanned: selected.length,
+      lastFile: selected.at(-1),
+      unreadable,
+    } satisfies ContextMaintenanceEvidenceRequestPage;
+  },
+);
+export const readContextMaintenanceEvidenceRequestNamesHash = Effect.fn('contextMaintenance.requestNamesHash')(
+  function* (config: RuntimeConfig) {
+    const names = yield* readEvidenceRequestFileNames(config);
+    return names === undefined ? undefined : sha256HexSync(names.join('\0'));
+  },
+);
+export const contextMaintenanceEvidenceDiscoveryPending = Effect.fn('contextMaintenance.requestDiscoveryPending')(
+  function* (
+    config: RuntimeConfig,
+    discovery: ContextMaintenanceEvidenceRequestDiscovery | undefined,
+    total: number,
+    scope?: string,
+  ) {
+    return (
+      discovery === undefined ||
+      discovery.scope !== scope ||
+      discovery.scanned < total ||
+      discovery.scopedPending ||
+      discovery.namesHash !== (yield* readContextMaintenanceEvidenceRequestNamesHash(config))
+    );
+  },
+);
+const readEvidenceRequestFileNames = Effect.fn('contextMaintenance.requestFileNames')(function* (
   config: RuntimeConfig,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const directory = path.join(config.agentContextHome, 'context-maintenance', 'evidence');
-  const names = yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => []));
-  const requests: ContextMaintenanceEvidenceRequest[] = [];
-  for (const name of names
-    .filter(name => /^[0-9a-f]{64}\.json\.pending$/u.test(name))
-    .sort()
-    .slice(0, MAX_PROJECTIONS)) {
-    const request = yield* readEvidenceRequest(path.join(directory, name));
-    if (request !== undefined && name === `${sha256HexSync(`${request.project}\0${request.cwd}`)}.json.pending`)
-      requests.push(request);
-  }
-  return requests;
+  const names = yield* fs
+    .readDirectory(path.join(config.agentContextHome, 'context-maintenance', 'evidence'))
+    .pipe(Effect.orElseSucceed(error => (error.reason._tag === 'NotFound' ? [] : undefined)));
+  return names?.filter(name => /^[0-9a-f]{64}\.json\.pending$/u.test(name)).sort();
+});
+export const readContextMaintenanceEvidenceRequests = Effect.fn('contextMaintenance.readEvidenceRequests')(function* (
+  config: RuntimeConfig,
+) {
+  return (yield* readContextMaintenanceEvidenceRequestPage(config)).requests;
 });
 export const clearContextMaintenanceEvidenceRequest = Effect.fn('contextMaintenance.ackEvidenceRequest')(function* (
   config: RuntimeConfig,
   project: string,
   cwd: string,
   acknowledgedUris: readonly string[],
+  expectedRevision?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -726,12 +869,115 @@ export const clearContextMaintenanceEvidenceRequest = Effect.fn('contextMaintena
     Effect.gen(function* () {
       const request = yield* readEvidenceRequest(`${file}.pending`);
       if (request === undefined) return;
+      if (expectedRevision !== undefined && request.revision !== expectedRevision) return;
       const acknowledged = new Set(acknowledgedUris);
       const uris = request.uris.filter(uri => !acknowledged.has(uri));
       if (uris.length === 0) yield* fs.remove(`${file}.pending`, {force: true});
-      else yield* atomicWrite(`${file}.pending`, JSON.stringify({...request, policy: POLICY, uris}));
+      else
+        yield* atomicWrite(
+          `${file}.pending`,
+          JSON.stringify({
+            ...request,
+            policy: POLICY,
+            uris,
+            deferredUntil: Object.fromEntries(
+              Object.entries(request.deferredUntil ?? {}).filter(([uri]) => !acknowledged.has(uri)),
+            ),
+          }),
+        );
     }),
   ).pipe(Effect.ignore);
+});
+export const deferContextMaintenanceEvidenceRequest = Effect.fn('contextMaintenance.deferEvidenceRequest')(function* (
+  config: RuntimeConfig,
+  project: string,
+  cwd: string,
+  uris: readonly string[],
+  retryAt: string,
+  expectedRevision?: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(
+    config.agentContextHome,
+    'context-maintenance',
+    'evidence',
+    `${sha256HexSync(`${project}\0${cwd}`)}.json`,
+  );
+  yield* withExclusiveFileLock(
+    fs,
+    `${file}.lock`,
+    LOCK,
+    Effect.gen(function* () {
+      const request = yield* readEvidenceRequest(`${file}.pending`);
+      if (request === undefined || (expectedRevision !== undefined && request.revision !== expectedRevision)) return;
+      const pending = new Set(request.uris);
+      const deferredUntil = {...request.deferredUntil};
+      for (const uri of uris) if (pending.has(uri)) deferredUntil[uri] = retryAt;
+      yield* atomicWrite(`${file}.pending`, JSON.stringify({...request, deferredUntil}));
+    }),
+  ).pipe(Effect.ignore);
+});
+export const advanceContextMaintenanceEvidenceRequest = Effect.fn('contextMaintenance.advanceEvidenceRequest')(
+  function* (config: RuntimeConfig, project: string, cwd: string, cursor: string, expectedRevision?: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const file = path.join(
+      config.agentContextHome,
+      'context-maintenance',
+      'evidence',
+      `${sha256HexSync(`${project}\0${cwd}`)}.json`,
+    );
+    yield* withExclusiveFileLock(
+      fs,
+      `${file}.lock`,
+      LOCK,
+      Effect.gen(function* () {
+        const request = yield* readEvidenceRequest(`${file}.pending`);
+        if (
+          request !== undefined &&
+          (expectedRevision === undefined || request.revision === expectedRevision) &&
+          request.uris.includes(cursor)
+        )
+          yield* atomicWrite(`${file}.pending`, JSON.stringify({...request, cursor}));
+      }),
+    ).pipe(Effect.ignore);
+  },
+);
+
+export const requestedRootProjectionComplete = Effect.fn('contextMaintenance.requestedProjectionComplete')(function* (
+  config: RuntimeConfig,
+  project: string,
+  cwd: string,
+  record: MemoryRecord,
+  observation: ContextMaintenanceWorkerObservation,
+) {
+  const path = yield* Path.Path;
+  const file = path.join(
+    config.agentContextHome,
+    'context-maintenance',
+    'evidence',
+    `${sha256HexSync(`${project}\0${cwd}`)}.json`,
+  );
+  const projection = yield* readProjection(file);
+  const entry = projection?.entries.find(item => item.uri === record.uri);
+  if (entry === undefined || entry.contentHash !== memoryHash(record)) return false;
+  if (entry.sources[cwd] !== observation.sourceEpoch) return false;
+  const now = (yield* DateTime.nowAsDate).getTime();
+  const receipts = new Map(entry.receipts.map(receipt => [receipt.citationId, receipt]));
+  return (record.metadata.codeCitations ?? []).every(citation => {
+    const selector = `${citation.repositoryId}:${citation.sourceCommit}`;
+    const receipt = receipts.get(citation.id);
+    return (
+      receipt !== undefined &&
+      receiptWithinRetryWindow(receipt, now) &&
+      (receipt.status !== 'unknown' ||
+        (!['validation-error', 'citation-limit'].includes(receipt.reason) &&
+          (receipt.reason !== 'graph-stale' || receipt.repositoryRouteUnavailable === true))) &&
+      entry.associations?.[selector] !== undefined &&
+      entry.associations[selector] === observation.association.bySelector[selector]
+    );
+  });
 });
 const readEvidenceRequest = Effect.fn('contextMaintenance.readEvidenceRequest')(function* (file: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -746,6 +992,14 @@ const readEvidenceRequest = Effect.fn('contextMaintenance.readEvidenceRequest')(
         value.policy === POLICY &&
         typeof value.project === 'string' &&
         typeof value.cwd === 'string' &&
+        (value.cursor === undefined || typeof value.cursor === 'string') &&
+        (value.revision === undefined || typeof value.revision === 'string') &&
+        (value.deferredUntil === undefined ||
+          (value.deferredUntil !== null &&
+            typeof value.deferredUntil === 'object' &&
+            Object.entries(value.deferredUntil).every(
+              ([uri, date]) => typeof uri === 'string' && typeof date === 'string',
+            ))) &&
         Array.isArray(value.uris) &&
         value.uris.length <= 100 &&
         value.uris.every(uri => typeof uri === 'string')
@@ -761,7 +1015,26 @@ const enqueueEvidenceRequest = Effect.fn('contextMaintenance.enqueueEvidenceRequ
   cwd: string,
   uris: readonly string[],
 ) {
-  const request = JSON.stringify({project, cwd, uris: uris.slice(0, 100), policy: POLICY});
-  if (new TextEncoder().encode(request).byteLength <= MAX_REQUEST_BYTES)
-    yield* atomicWrite(`${file}.pending`, request).pipe(Effect.ignore);
+  const fs = yield* FileSystem.FileSystem;
+  yield* withExclusiveFileLock(
+    fs,
+    `${file}.lock`,
+    LOCK,
+    Effect.gen(function* () {
+      const previous = yield* readEvidenceRequest(`${file}.pending`);
+      const combined = [...new Set([...(previous?.uris ?? []), ...uris])].slice(0, 100);
+      if (combined.length === 0) return;
+      const request = JSON.stringify({
+        project,
+        cwd,
+        uris: combined,
+        policy: POLICY,
+        cursor: previous?.cursor,
+        deferredUntil: previous?.deferredUntil,
+        revision: yield* (yield* Crypto.Crypto).randomUUIDv4,
+      });
+      if (new TextEncoder().encode(request).byteLength <= MAX_REQUEST_BYTES)
+        yield* atomicWrite(`${file}.pending`, request);
+    }),
+  ).pipe(Effect.ignore);
 });

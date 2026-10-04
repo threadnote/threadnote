@@ -55,16 +55,16 @@ import {
   type ContextMaintenanceInventoryPreparationV2,
 } from './maintenance_inventory.js';
 import {
+  contextMaintenanceEvidenceDiscoveryPending,
+  readContextMaintenanceEvidenceRequestPage,
   readContextMaintenanceSourceEpoch,
-  readContextMaintenanceEvidenceRequests,
-  clearContextMaintenanceEvidenceRequest,
 } from './maintenance_evidence.js';
 import {
   activeIncomingDependency,
   prepareMaintenanceSemanticProgress,
   readMaintenanceCandidateDecisions,
   runMaintenanceSemanticWindow,
-  selectMaintenanceWorkPhase,
+  selectMaintenanceWorkAndRequestCursor,
   type MaintenanceWorkSchedule,
 } from './maintenance_decisions.js';
 import {readMemoryRecordsByUri, resourceExists} from '../../mcp/server/memory.js';
@@ -85,10 +85,11 @@ import {buildContextMaintenancePacket} from './maintenance_packet.js';
 import {recordSourceRevision} from './maintenance_source.js';
 import {
   prepareMaintenanceWorkerBatches,
+  runRequestedMaintenanceProjection,
+  selectRelationBoundedMaintenanceWindow,
   maintenanceWorkerBatchCurrent,
   invalidateMaintenanceWorkerBatch,
 } from './maintenance_batch.js';
-
 const MAX_RECEIPTS = 100;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
 const LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000, waitTimeoutMilliseconds: 50};
@@ -323,8 +324,11 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       const checkpoints = {...state.checkpoints};
       const caseMap = new Map(state.cases.map(item => [item.caseId, item]));
-      const evidenceRequests = yield* readContextMaintenanceEvidenceRequests(config);
-      const requestedUris = new Set(evidenceRequests.flatMap(request => request.uris));
+      const evidencePage = yield* readContextMaintenanceEvidenceRequestPage(
+        config,
+        state.workSchedule?.requestDiscovery?.lastFile,
+      );
+      const evidenceRequests = evidencePage.requests;
       const candidateDecisions = yield* readMaintenanceCandidateDecisions(config, options.project);
       const pendingCandidateIds = new Set<string>();
       for (const decision of candidateDecisions) {
@@ -413,8 +417,22 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         progress: semanticProgress,
         pending: pendingSemanticProjects,
       } = prepareMaintenanceSemanticProgress(active, snapshot.success.hashes, state.semanticProgress, options.project);
-      const work = selectMaintenanceWorkPhase(state.workSchedule, pendingSemanticProjects, tasks.length > 0);
-      state = {...state, generation, semanticProgress, workSchedule: work.next, state: 'running', error: undefined};
+      const {work, requestDiscovery} = yield* selectMaintenanceWorkAndRequestCursor(
+        state.workSchedule,
+        pendingSemanticProjects,
+        tasks.length > 0,
+        evidencePage,
+        started,
+        options.project,
+      );
+      state = {
+        ...state,
+        generation,
+        semanticProgress,
+        workSchedule: {...work.next, requestDiscovery},
+        state: 'running',
+        error: undefined,
+      };
       yield* writeState(config, state);
       if (work.phase === 'semantic') {
         const project = work.project!;
@@ -438,9 +456,17 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           },
         };
       }
+      if (work.phase === 'requested') {
+        const request = evidenceRequests.find(item => `${item.project}\0${item.cwd}` === work.root)!;
+        yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
+      }
       // maxRecords still controls inventory pagination; record work remains four per tick.
       const selected =
-        work.phase === 'records' ? selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4)) : [];
+        work.phase === 'records'
+          ? selectRelationBoundedMaintenanceWindow(
+              selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4)),
+            )
+          : [];
       const {batches, batchByTask} = yield* prepareMaintenanceWorkerBatches(
         config,
         selected,
@@ -461,6 +487,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           currentRecord.metadata.project === undefined
             ? {...currentRecord, metadata: {...currentRecord.metadata, project: 'unscoped'}}
             : currentRecord;
+        if (selected.length > 1 && (record.metadata.relations?.length ?? 0) > 0) break;
         const memoryId = record.metadata.memoryId ?? record.uri;
         let postMutationHash: string | undefined;
         state = {
@@ -522,24 +549,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             ['needs-decision', 'waiting-evidence'].includes(item.disposition) &&
             item.subjectContentHashes === undefined,
         );
-        const waitingForEvidenceDeadline =
-          check?.retryAt !== undefined &&
-          check.retryAt > now &&
-          [...caseMap.values()].some(
-            item =>
-              item.project === task.project && item.memoryId === memoryId && item.disposition === 'waiting-evidence',
-          );
-        if (
-          (!requestedUris.has(record.uri) ||
-            waitingForEvidenceDeadline ||
-            [...caseMap.values()].some(
-              item =>
-                item.project === task.project && item.memoryId === memoryId && item.wake?.revision === task.revision,
-            )) &&
-          !legacy &&
-          check?.revision === task.revision &&
-          (check.retryAt === undefined || check.retryAt > now)
-        )
+        if (!legacy && check?.revision === task.revision && (check.retryAt === undefined || check.retryAt > now))
           continue;
         const previousCases = [...caseMap.values()].filter(
           item =>
@@ -710,11 +720,6 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             citationRecords: [{...record, metadata: {...record.metadata, codeCitations: citations}}],
           },
         ).pipe(Effect.result);
-        if (Result.isSuccess(collected))
-          for (const request of evidenceRequests.filter(
-            request => request.project === task.project && request.uris.includes(record.uri),
-          ))
-            yield* clearContextMaintenanceEvidenceRequest(config, request.project, request.cwd, [record.uri]);
         const report = Result.isSuccess(collected)
           ? Result.succeed(collected.success.report)
           : Result.fail(collected.failure);
@@ -1044,6 +1049,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       const semanticEvidencePartial = semanticProjects.some(
         project => state.semanticProgress?.[project]?.partial === true,
       );
+      const requestedStillPending = yield* contextMaintenanceEvidenceDiscoveryPending(
+        config,
+        requestDiscovery,
+        evidencePage.total,
+        options.project,
+      );
       state = {
         ...state,
         preparation: contextMaintenanceInventoryPreparation(snapshot.success, corpus.length),
@@ -1056,6 +1067,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             ? 'waiting-evidence'
             : snapshot.success.complete &&
                 !semanticStillPending &&
+                !requestedStillPending &&
                 tasks.every(task =>
                   maintenanceCheckpointCurrent(
                     checkpoints[task.key],

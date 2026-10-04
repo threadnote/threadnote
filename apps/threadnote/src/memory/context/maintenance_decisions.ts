@@ -7,6 +7,12 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {upsertCase} from './maintenance_policy.js';
+import {
+  advanceContextMaintenanceEvidenceRequestExecution,
+  pendingContextMaintenanceEvidenceRoots,
+  type ContextMaintenanceEvidenceRequestDiscovery,
+  type ContextMaintenanceEvidenceRequestPage,
+} from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 
 export const readMaintenanceCandidateDecisions = Effect.fn('contextMaintenance.candidateDecisions')(function* (
@@ -122,23 +128,64 @@ export function prepareMaintenanceSemanticProgress(
 }
 
 export interface MaintenanceWorkSchedule {
-  readonly nextPhase: 'records' | 'semantic';
+  readonly nextPhase: 'records' | 'semantic' | 'requested';
   readonly lastSemanticProject?: string;
+  readonly lastRequestedRoot?: string;
+  readonly requestDiscovery?: ContextMaintenanceEvidenceRequestDiscovery;
 }
 
 export function selectMaintenanceWorkPhase(
   previous: MaintenanceWorkSchedule | undefined,
   pendingSemanticProjects: readonly string[],
   hasRecordTasks: boolean,
-): {readonly phase: 'records' | 'semantic'; readonly project?: string; readonly next: MaintenanceWorkSchedule} {
+  pendingRequestedRoots: readonly string[] = [],
+): {
+  readonly phase: 'records' | 'semantic' | 'requested';
+  readonly project?: string;
+  readonly root?: string;
+  readonly next: MaintenanceWorkSchedule;
+} {
   const projects = [...new Set(pendingSemanticProjects)].sort();
-  const semantic = projects.length > 0 && (previous?.nextPhase === 'semantic' || !hasRecordTasks);
-  if (!semantic) return {phase: 'records', next: {...previous, nextPhase: 'semantic'}};
-  const after = previous?.lastSemanticProject;
-  const index = after === undefined ? -1 : projects.indexOf(after);
-  const project = projects[(index + 1) % projects.length];
-  return {phase: 'semantic', project, next: {nextPhase: 'records', lastSemanticProject: project}};
+  const roots = [...new Set(pendingRequestedRoots)];
+  const order = ['records', 'semantic', 'requested'] as const;
+  const start = Math.max(0, order.indexOf(previous?.nextPhase ?? 'records'));
+  const phase =
+    [...order.slice(start), ...order.slice(0, start)].find(
+      item =>
+        (item === 'records' && hasRecordTasks) ||
+        (item === 'semantic' && projects.length > 0) ||
+        (item === 'requested' && roots.length > 0),
+    ) ?? 'records';
+  const nextPhase = order[(order.indexOf(phase) + 1) % order.length];
+  if (phase === 'records') return {phase, next: {...previous, nextPhase}};
+  if (phase === 'semantic') {
+    const index = previous?.lastSemanticProject === undefined ? -1 : projects.indexOf(previous.lastSemanticProject);
+    const project = projects[(index + 1) % projects.length];
+    return {phase, project, next: {...previous, nextPhase, lastSemanticProject: project}};
+  }
+  const index = previous?.lastRequestedRoot === undefined ? -1 : roots.indexOf(previous.lastRequestedRoot);
+  const root = roots[(index + 1) % roots.length];
+  return {phase, root, next: {...previous, nextPhase, lastRequestedRoot: root}};
 }
+export const selectMaintenanceWorkAndRequestCursor = Effect.fn('contextMaintenance.workAndRequestCursor')(function* (
+  previous: MaintenanceWorkSchedule | undefined,
+  semanticProjects: readonly string[],
+  hasRecordTasks: boolean,
+  page: ContextMaintenanceEvidenceRequestPage,
+  now: number,
+  scope?: string,
+) {
+  const roots = yield* pendingContextMaintenanceEvidenceRoots(page.requests, now, scope);
+  const work = selectMaintenanceWorkPhase(previous, semanticProjects, hasRecordTasks, roots.slice(0, 1));
+  const requestDiscovery = advanceContextMaintenanceEvidenceRequestExecution(
+    previous?.requestDiscovery,
+    page,
+    scope,
+    roots.length > 0,
+    work.root,
+  );
+  return {work, requestDiscovery};
+});
 
 export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semanticWindow')(function* (
   config: RuntimeConfig,

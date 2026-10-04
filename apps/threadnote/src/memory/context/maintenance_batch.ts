@@ -1,15 +1,21 @@
-import {Clock, Effect, FileSystem, Path} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {uriSegment} from '@threadnote/workspace/manifest';
 import {validateContextHealthMemoryCitations} from '@threadnote/context/citation_validation';
 import type {ContextBriefMemoryCitationValidationV2} from '@threadnote/context/types';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {
+  advanceContextMaintenanceEvidenceRequest,
+  clearContextMaintenanceEvidenceRequest,
   collectContextMaintenanceCitationEvidence,
+  deferContextMaintenanceEvidenceRequest,
   readContextMaintenanceCitationAssociation,
   readContextMaintenanceSourceEpoch,
+  requestedRootProjectionComplete,
+  type ContextMaintenanceEvidenceRequest,
   type ContextMaintenanceWorkerObservation,
 } from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
@@ -354,6 +360,142 @@ export const maintenanceWorkerBatchCurrent = Effect.fn('contextMaintenance.worke
   );
   return (
     generation !== undefined && source === observed.sourceEpoch && association.epoch === observed.association.epoch
+  );
+});
+
+export function selectRequestedMaintenanceUris(uris: readonly string[], cursor: string | undefined, limit: number) {
+  const ordered = [...new Set(uris)].sort();
+  const following = cursor === undefined ? -1 : ordered.findIndex(uri => uri > cursor);
+  const after = following < 0 ? 0 : following;
+  return [...ordered.slice(after), ...ordered.slice(0, after)].slice(0, limit);
+}
+
+export function selectRelationBoundedMaintenanceWindow<T extends {readonly record: MemoryRecord}>(
+  candidates: readonly T[],
+): readonly T[] {
+  const relation = candidates.findIndex(task => (task.record.metadata.relations?.length ?? 0) > 0);
+  return relation < 0 ? candidates : candidates.slice(0, Math.max(1, relation));
+}
+
+export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.requestedRoot')(function* (
+  config: RuntimeConfig,
+  request: ContextMaintenanceEvidenceRequest,
+  active: readonly MemoryRecord[],
+  inventory: readonly MemoryRecord[],
+  inventoryComplete: boolean,
+) {
+  const byUri = new Map(active.map(record => [record.uri, record]));
+  const now = yield* Clock.currentTimeMillis;
+  const eligible = request.uris.filter(uri => !(Date.parse(request.deferredUntil?.[uri] ?? '') > now));
+  const selected = selectRequestedMaintenanceUris(eligible, request.cursor, 4);
+  if (selected.length > 0)
+    yield* advanceContextMaintenanceEvidenceRequest(
+      config,
+      request.project,
+      request.cwd,
+      selected.at(-1)!,
+      request.revision,
+    );
+  const completed = new Set<string>();
+  for (const uri of selected) {
+    const record = byUri.get(uri);
+    if (record !== undefined && (record.metadata.codeCitations?.length ?? 0) > 0) continue;
+    if (yield* requestedSubjectObsolete(config, uri, inventory, inventoryComplete)) {
+      yield* clearContextMaintenanceEvidenceRequest(config, request.project, request.cwd, [uri], request.revision);
+      completed.add(uri);
+    }
+  }
+  const tasks = selected.flatMap(uri => {
+    const record = byUri.get(uri);
+    return record === undefined ||
+      record.metadata.status !== 'active' ||
+      record.metadata.project !== request.project ||
+      (record.metadata.codeCitations?.length ?? 0) === 0 ||
+      (record.metadata.citationErrors?.length ?? 0) > 0
+      ? []
+      : [{record, project: request.project, chunk: 0, key: uri}];
+  });
+  for (const group of planMaintenanceWorkerBatches(tasks)) {
+    const evidence = yield* collectMaintenanceWorkerBatch(config, group, request.cwd);
+    if (evidence.observation === undefined || !(yield* maintenanceWorkerBatchCurrent(config, evidence))) continue;
+    for (const task of group) {
+      const current = evidence.records.find(record => record.uri === task.record.uri);
+      if (current === undefined || sha256HexSync(current.content) !== task.record.content) continue;
+      const expected = new Set((current.metadata.codeCitations ?? []).map(citation => citation.id));
+      const validated = new Set(
+        evidence.validations
+          .filter(validation => validation.uri === current.uri)
+          .flatMap(validation => validation.receipts.map(receipt => receipt.citationId)),
+      );
+      if (
+        expected.size !== validated.size ||
+        [...expected].some(id => !validated.has(id)) ||
+        !(yield* requestedRootProjectionComplete(config, request.project, request.cwd, current, evidence.observation))
+      )
+        continue;
+      yield* clearContextMaintenanceEvidenceRequest(
+        config,
+        request.project,
+        request.cwd,
+        [current.uri],
+        request.revision,
+      );
+      completed.add(current.uri);
+    }
+  }
+  const failed = selected.filter(uri => !completed.has(uri));
+  if (failed.length > 0)
+    yield* deferContextMaintenanceEvidenceRequest(
+      config,
+      request.project,
+      request.cwd,
+      failed,
+      DateTime.formatIso(DateTime.makeUnsafe(now + 120_000)),
+      request.revision,
+    );
+});
+
+const requestedSubjectObsolete = Effect.fn('contextMaintenance.requestedSubjectObsolete')(function* (
+  config: RuntimeConfig,
+  uri: string,
+  inventory: readonly MemoryRecord[],
+  complete: boolean,
+) {
+  if (!complete) return false;
+  const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
+  if (!uri.startsWith(prefix)) return false;
+  const relative = uri.slice(prefix.length);
+  if (relative.startsWith('/') || relative.split('/').some(segment => segment === '..' || segment.length === 0))
+    return false;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(
+    config.agentContextHome,
+    'data',
+    config.account,
+    'user',
+    uriSegment(config.user),
+    'memories',
+    relative,
+  );
+  const before = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  const first = yield* fs.stat(file).pipe(Effect.result);
+  if (Result.isFailure(first)) {
+    if (first.failure.reason._tag !== 'NotFound' || inventory.some(record => record.uri === uri)) return false;
+    return before === (yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account));
+  }
+  if (first.success.type !== 'File' || Option.isSome(yield* fs.readLink(file).pipe(Effect.option))) return false;
+  const current = (yield* readMemoryRecordsByUri(config, [uri]))[0];
+  const last = yield* fs.stat(file).pipe(Effect.option);
+  const after = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  return (
+    current !== undefined &&
+    (current.metadata.status !== 'active' || (current.metadata.codeCitations?.length ?? 0) === 0) &&
+    (current.metadata.citationErrors?.length ?? 0) === 0 &&
+    Option.isSome(last) &&
+    first.success.size === last.value.size &&
+    JSON.stringify(first.success.mtime) === JSON.stringify(last.value.mtime) &&
+    before === after
   );
 });
 
