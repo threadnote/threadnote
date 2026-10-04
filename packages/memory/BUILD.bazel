@@ -534,6 +534,7 @@ bun_test(
         "//packages/graph:src/indexer/types.ts",
         "//packages/graph:src/inventory.ts",
         "//packages/graph:src/inventory/batching.ts",
+        "//packages/graph:src/inventory/committed_overlay_basis.ts",
         "//packages/graph:src/inventory/contained_file.ts",
         "//packages/graph:src/inventory/content.ts",
         "//packages/graph:src/inventory/error.ts",

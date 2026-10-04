@@ -371,6 +371,22 @@ describe('context maintenance view', () => {
     expect(document.body.textContent).not.toContain('Repair all');
     expect(document.body.textContent).not.toContain('2,013 issues');
   });
+  it.each([false, true])('only marks an empty project caught up after inventory completes (%s)', async complete => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({...status(), projects: [], preparation: {complete, admittedRecords: 0}}), {
+            headers: {'content-type': 'application/json'},
+          }),
+      ),
+    );
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={{...report(), recordsScanned: 0}} />);
+    expect(document.querySelector('[aria-label="Background scan"]')?.textContent).toContain(
+      complete ? 'Caught up' : 'Scanning',
+    );
+    expect(document.querySelector('[aria-label="Preparing background maintenance"]') === null).toBe(complete);
+  });
   it('keeps run and pause actions on the canonical maintenance endpoint', async () => {
     const actions: string[] = [];
     vi.stubGlobal(

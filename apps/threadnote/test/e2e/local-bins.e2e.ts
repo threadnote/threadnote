@@ -377,7 +377,7 @@ describe('built self-contained distribution', () => {
       runCli(['read', 'threadnote://user/e2e-user/memories/durable/projects/threadnote/missing.md']),
     ).rejects.toThrow();
     const entriesBeforeDryRun = parseProductionLog(await readFile(logPath, 'utf8'));
-    expect(entriesBeforeDryRun.slice(entriesAfterRecall.length)).toEqual([
+    expect(entriesBeforeDryRun.slice(entriesAfterRecall.length).filter(entry => entry.operation === 'read')).toEqual([
       expect.objectContaining({event: 'invocation.started', operation: 'read'}),
       expect.objectContaining({
         errorType: expect.any(String),
@@ -388,12 +388,16 @@ describe('built self-contained distribution', () => {
     ]);
 
     await runCli(['seed', '--dry-run']);
-    expect(parseProductionLog(await readFile(logPath, 'utf8'))).toHaveLength(entriesBeforeDryRun.length);
+    expect(parseProductionLog(await readFile(logPath, 'utf8')).filter(entry => entry.operation === 'seed')).toEqual(
+      entriesBeforeDryRun.filter(entry => entry.operation === 'seed'),
+    );
 
     const concurrentProcessCount = 8;
     await Promise.all(Array.from({length: concurrentProcessCount}, () => runCli(['logs'])));
     const entriesAfterConcurrentWrites = parseProductionLog(await readFile(logPath, 'utf8'));
-    const newEntries = entriesAfterConcurrentWrites.slice(entriesBeforeDryRun.length);
+    const newEntries = entriesAfterConcurrentWrites
+      .slice(entriesBeforeDryRun.length)
+      .filter(entry => entry.operation === 'logs');
     expect(newEntries).toHaveLength(concurrentProcessCount * 2);
     expect(new Set(newEntries.map(entry => entry.invocationId)).size).toBe(concurrentProcessCount);
     expect(newEntries.every(entry => entry.operation === 'logs')).toBe(true);

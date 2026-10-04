@@ -30,7 +30,11 @@ export function selectFairMaintenanceWork<T extends {readonly project: string}>(
   limit: number,
 ): readonly T[] {
   const groups = new Map<string, T[]>();
-  for (const item of items) groups.set(item.project, [...(groups.get(item.project) ?? []), item]);
+  for (const item of items) {
+    const group = groups.get(item.project);
+    if (group === undefined) groups.set(item.project, [item]);
+    else group.push(item);
+  }
   const projects = [...groups.keys()].sort();
   const start = lastProject === undefined ? 0 : (projects.indexOf(lastProject) + 1) % Math.max(1, projects.length);
   const ordered = [...projects.slice(start), ...projects.slice(0, start)];

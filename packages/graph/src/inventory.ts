@@ -25,6 +25,7 @@ import {
 import {CodeGraphInventoryError} from './inventory/error.js';
 import {parseNameStatus, parsePorcelainV1Status} from './inventory/porcelain.js';
 import {worktreeStatusWithPrivateCache} from './git/status_cache.js';
+import {committedOverlayBasis, parseGitTree, policyExclusionsForEntries} from './inventory/committed_overlay_basis.js';
 import {
   codeGraphAttributionContextFilesForReceipt,
   codeGraphInventoryReuseContract,
@@ -86,6 +87,7 @@ export type {
 export {codeGraphInventoryExclusionReason} from './inventory/policy.js';
 export {codeGraphCatFileBatches} from './inventory/batching.js';
 export {parseNameStatus} from './inventory/porcelain.js';
+export {parseGitTree, policyExclusionsForEntries} from './inventory/committed_overlay_basis.js';
 export {readContainedStableRegularFile, type ContainedReadInterlock} from './inventory/contained_file.js';
 export {shouldOmitRepositoryContent} from './inventory/content.js';
 export {
@@ -882,21 +884,8 @@ export const worktreeOverlayState = Effect.fn('codeGraph.worktreeOverlayState')(
   if (porcelain.stdout.length === 0) return {dirty: false, fingerprint: undefined};
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const allTreeEntries = isZeroObjectId(identity.headCommit)
-    ? []
-    : parseGitTree(
-        (yield* runCommandEffect('git', ['-C', identity.repoRoot, 'ls-tree', '-r', '-l', '-z', identity.headCommit], {
-          maxOutputBytes: 0,
-          timeoutMs: 0,
-        })).stdout,
-      );
-  const committedPolicyExclusions = policyExclusionsForEntries(allTreeEntries);
-  const committedTreeEntries = new Map(allTreeEntries.map(entry => [entry.path, entry]));
-  const policyAdmittedTreeEntries = allTreeEntries.filter(entry => !committedPolicyExclusions.has(entry.path));
-  const declaredWorkspace = yield* discoverDeclaredSourceRoots(
-    identity,
-    policyAdmittedTreeEntries,
-    BUILTIN_LANGUAGE_PACK_REGISTRY,
+  const basis = yield* committedOverlayBasis(identity, entries =>
+    discoverDeclaredSourceRoots(identity, entries, BUILTIN_LANGUAGE_PACK_REGISTRY),
   );
   const ignoreSources = yield* readThreadnoteIgnoreSources(fs, path, identity.repoRoot);
   const ignoreRules = compileThreadnoteIgnore(ignoreSources.committed, ignoreSources.local);
@@ -907,10 +896,10 @@ export const worktreeOverlayState = Effect.fn('codeGraph.worktreeOverlayState')(
     ignoreRules,
     new Set(),
     BUILTIN_LANGUAGE_PACK_REGISTRY,
-    declaredWorkspace.projectRoots,
-    declaredWorkspace.sourceRoots,
-    committedPolicyExclusions,
-    committedTreeEntries,
+    basis.projectRoots,
+    basis.sourceRoots,
+    basis.committedPolicyExclusions,
+    basis.committedTreeEntries,
   );
   return {dirty: overlay.dirty, fingerprint: overlay.fingerprint};
 });
@@ -1028,28 +1017,6 @@ export const worktreeBuildRequestState = Effect.fn('codeGraph.worktreeBuildReque
 ) {
   return (yield* worktreeBuildRequestObservation(identity, threadnoteHome, scope)).state;
 });
-
-export function parseGitTree(output: string): readonly GitTreeEntry[] {
-  const entries: GitTreeEntry[] = [];
-  for (const record of output.split('\0')) {
-    if (!record) continue;
-    const match = /^([0-7]{6}) (blob|commit) ([0-9a-f]+) +(-|\d+)\t([\s\S]+)$/.exec(record);
-    if (!match || match[2] !== 'blob' || match[1] === '120000' || match[4] === '-') continue;
-    const size = Number(match[4]);
-    if (!Number.isSafeInteger(size) || size < 0) continue;
-    entries.push({blobId: match[3], mode: match[1], path: normalizeRepositoryPath(match[5]), size});
-  }
-  return entries;
-}
-
-export function policyExclusionsForEntries(entries: readonly GitTreeEntry[]): Map<string, PolicyExclusionEntry> {
-  const exclusions = new Map<string, PolicyExclusionEntry>();
-  for (const entry of entries) {
-    const reason = codeGraphInventoryExclusionReason(entry.path, entry.size);
-    if (reason !== undefined) exclusions.set(entry.path, {reason, size: entry.size});
-  }
-  return exclusions;
-}
 
 function summarizePolicyExclusions(
   exclusions: ReadonlyMap<string, PolicyExclusionEntry>,

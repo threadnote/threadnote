@@ -257,10 +257,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         ? 'unavailable'
         : 'partial';
   const projectProgress = status?.projects.find(item => item.project === props.project);
+  const emptyProject =
+    projectProgress === undefined && status?.preparation?.complete === true && props.report.recordsScanned === 0;
   const scanComplete =
-    projectProgress !== undefined &&
-    projectProgress.checked === projectProgress.eligible &&
-    status?.preparation?.complete !== false;
+    emptyProject ||
+    (projectProgress !== undefined &&
+      projectProgress.checked === projectProgress.eligible &&
+      status?.preparation?.complete !== false);
   const scanLabel = status?.paused
     ? 'Paused'
     : status?.state === 'failed'
@@ -444,6 +447,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 retained historical evidence.
               </p>
             </>
+          ) : emptyProject ? (
+            <p>No eligible background checks.</p>
           ) : (
             <progress aria-label="Preparing background maintenance" />
           )}

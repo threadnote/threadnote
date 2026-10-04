@@ -406,7 +406,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       });
       state = {...state, generation, state: 'running', error: undefined};
       yield* writeState(config, state);
-      const selected = selectFairMaintenanceWork(rotated, state.lastProject, maxRecords);
+      // Bound the expensive per-record citation work in one tick. maxRecords
+      // still controls inventory pagination, and checkpoints rotate across ticks.
+      const selected = selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4));
       const {batches, batchByTask} = yield* prepareMaintenanceWorkerBatches(
         config,
         selected,

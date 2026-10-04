@@ -266,6 +266,61 @@ const observeCitationRouteInventory = Effect.fn('codeGraph.citationRouteInventor
 export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGraph.citationRouteObservation')(
   function* (common: {readonly callerCwd?: string; readonly threadnoteHome: string}) {
     const inventory = yield* Effect.cached(observeCitationRouteInventory(common));
+    const preferredCaller = yield* Effect.cached(
+      Effect.gen(function* () {
+        if (common.callerCwd === undefined) return undefined;
+        const identity = yield* resolveRepositoryIdentity(common.callerCwd).pipe(Effect.orElseSucceed(() => undefined));
+        if (identity === undefined) return undefined;
+        const registration = yield* captureCodeGraphGitWorktreeRegistration(identity).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (registration === undefined) return undefined;
+        return {identity, registration};
+      }),
+    );
+    // Capsule recovery still needs every bounded checkout candidate, even when
+    // the preferred route lets us skip probing their mutable Git identities.
+    const checkoutIdsForPreferredRoute = yield* Effect.cached(
+      Effect.gen(function* () {
+        const caller = yield* preferredCaller;
+        if (caller === undefined) return [];
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = codeGraphRepositoriesRoot(path, common.threadnoteHome);
+        const page = yield* Effect.gen(function* () {
+          if (Option.isSome(yield* fs.readLink(root).pipe(Effect.option))) return undefined;
+          if (!(yield* fs.exists(root))) return {names: [], overflow: false};
+          return yield* runtimeTextDirectoryNamePage(root, MAXIMUM_RECOVERY_CHECKOUTS);
+        }).pipe(Effect.orElseSucceed(() => undefined));
+        return [
+          ...new Set([caller.identity.checkoutId, ...(page?.names ?? []).filter(name => /^[0-9a-f]{64}$/.test(name))]),
+        ].slice(0, MAXIMUM_RECOVERY_CHECKOUTS);
+      }),
+    );
+    const callerPriors = yield* Effect.cached(
+      Effect.gen(function* () {
+        const caller = yield* preferredCaller;
+        if (caller === undefined) return [];
+        const checkout = yield* inspectCodeGraphLocalProvenanceInventory(
+          common.threadnoteHome,
+          caller.identity.checkoutId,
+        );
+        if (checkout.state !== 'ready') return [];
+        const records = yield* Effect.forEach(
+          checkout.worktreeIds.slice(0, MAXIMUM_RECOVERY_ASSOCIATIONS_PER_CHECKOUT),
+          worktreeId =>
+            readCodeGraphLocalReconciliationEvidence(common.threadnoteHome, {
+              checkoutId: caller.identity.checkoutId,
+              worktreeId,
+            }),
+          {concurrency: 4},
+        );
+        return records.filter(
+          (record): record is Extract<CodeGraphLocalReconciliationEvidence, {readonly state: 'verified'}> =>
+            record.state === 'verified',
+        );
+      }),
+    );
     const ancestors = new Map<string, ReturnType<typeof sourceCommitIsAncestor>>();
     const ancestor = Effect.fn('codeGraph.observedCitationSourceAncestor')(function* (
       identity: RepositoryIdentity,
@@ -288,6 +343,71 @@ export const makeCodeGraphCitationRepositoryRouteObservation = Effect.fn('codeGr
     }) {
       const input = {...common, ...selector};
       const path = yield* Path.Path;
+      const preferredIdentity = yield* preferredCaller;
+      let callerRoute: CodeGraphCitationRecoveryRouteV1 | undefined;
+      if (preferredIdentity !== undefined) {
+        const databasePath = codeGraphLayout(
+          path,
+          input.threadnoteHome,
+          preferredIdentity.identity.checkoutId,
+          preferredIdentity.identity.worktreeId,
+        ).databasePath;
+        if (preferredIdentity.identity.repositoryId === input.repositoryId)
+          callerRoute = {databasePath, ...preferredIdentity};
+        else {
+          for (const prior of (yield* callerPriors).filter(prior => prior.repositoryId === input.repositoryId)) {
+            const aliasProof = yield* verifyObservedCitationRepositoryAlias(
+              input.threadnoteHome,
+              prior,
+              preferredIdentity.identity,
+              input.sourceCommit,
+              undefined,
+              ancestor,
+            ).pipe(Effect.orElseSucceed(() => undefined));
+            if (aliasProof !== undefined) {
+              callerRoute = {aliasProof, databasePath, ...preferredIdentity, prior};
+              break;
+            }
+          }
+        }
+      }
+      if (callerRoute !== undefined)
+        return {
+          ambiguous: false,
+          // Only this caller was observed; global discovery has not been completed.
+          complete: false,
+          checkoutIds: yield* checkoutIdsForPreferredRoute,
+          generation: sha256HexSync(
+            JSON.stringify([
+              input.repositoryId,
+              input.sourceCommit,
+              callerRoute.identity,
+              callerRoute.registration,
+              callerRoute.aliasProof,
+              callerRoute.prior === undefined
+                ? undefined
+                : [callerRoute.prior.recordIdentity, callerRoute.prior.recordDigest],
+            ]),
+          ),
+          routes: [callerRoute],
+        };
+      const observedCaller = yield* preferredCaller;
+      if (observedCaller !== undefined) {
+        const currentCaller = yield* revalidateRepositoryIdentityFence(
+          observedCaller.identity.repoRoot,
+          observedCaller.identity,
+        ).pipe(Effect.orElseSucceed(() => undefined));
+        if (currentCaller === undefined || !sameIdentity(currentCaller, observedCaller.identity))
+          return {
+            ambiguous: false,
+            complete: false,
+            checkoutIds: [observedCaller.identity.checkoutId],
+            generation: sha256HexSync(
+              JSON.stringify([input.repositoryId, input.sourceCommit, observedCaller, 'caller-changed']),
+            ),
+            routes: [] as CodeGraphCitationRecoveryRouteV1[],
+          };
+      }
       const {caller, inventoryPage, checkoutIds, observations, records, paths, identities, registrations} =
         yield* inventory;
       const priors = records.flatMap(record =>

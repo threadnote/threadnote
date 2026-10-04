@@ -143,6 +143,74 @@ describe('citation recovery checkout authority', () => {
       ),
     );
 
+    it.effect('keeps a verified caller route stable across unrelated checkout changes', () =>
+      TestClock.withLive(
+        Effect.gen(function* () {
+          const data = yield* fixture;
+          const selector = {
+            callerCwd: data.repository,
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: data.previous.headCommit,
+            threadnoteHome: data.home,
+          };
+          const first = yield* resolveCodeGraphCitationRepositoryRoutes(selector);
+          expect(first.complete).toBe(false);
+          expect(first.routes[0].aliasProof).toBeDefined();
+          const globalBefore = yield* resolveCodeGraphCitationRepositoryRoutes({
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: data.previous.headCommit,
+            threadnoteHome: data.home,
+          });
+
+          const unrelated = data.path.join(data.root, 'unrelated');
+          yield* data.fs.makeDirectory(unrelated);
+          yield* git(unrelated, ['init', '--quiet']);
+          yield* git(unrelated, ['config', 'user.name', 'Test']);
+          yield* git(unrelated, ['config', 'user.email', 'test@example.invalid']);
+          yield* data.fs.writeFileString(data.path.join(unrelated, 'source.ts'), 'export const other = 1;\n');
+          yield* git(unrelated, ['add', '.']);
+          yield* git(unrelated, ['commit', '--quiet', '-m', 'unrelated']);
+          const otherIdentity = yield* resolveRepositoryIdentity(unrelated);
+          yield* recordVerifiedCodeGraphLocalAssociation(data.home, otherIdentity);
+          yield* data.fs.writeFileString(data.path.join(unrelated, 'source.ts'), 'export const other = 2;\n');
+          yield* git(unrelated, ['add', '.']);
+          yield* git(unrelated, ['commit', '--quiet', '-m', 'unrelated change']);
+
+          const second = yield* resolveCodeGraphCitationRepositoryRoutes(selector);
+          expect(second.generation).toBe(first.generation);
+          expect(second.routes).toEqual(first.routes);
+          expect(second.checkoutIds).toEqual([data.current.checkoutId, otherIdentity.checkoutId]);
+          const global = yield* resolveCodeGraphCitationRepositoryRoutes({
+            repositoryId: data.previous.repositoryId,
+            sourceCommit: data.previous.headCommit,
+            threadnoteHome: data.home,
+          });
+          expect(global.generation).not.toBe(globalBefore.generation);
+
+          yield* data.fs.writeFileString(
+            data.path.join(data.repository, 'source.ts'),
+            'export const supported = false;\n',
+          );
+          yield* git(data.repository, ['add', '.']);
+          yield* git(data.repository, ['commit', '--quiet', '-m', 'caller change']);
+          const changed = yield* resolveCodeGraphCitationRepositoryRoutes(selector);
+          expect(changed.generation).not.toBe(first.generation);
+          expect(changed.routes[0].identity.headCommit).not.toBe(first.routes[0].identity.headCommit);
+          yield* git(data.repository, ['remote', 'set-url', 'origin', 'https://example.invalid/third/repository.git']);
+          const repointed = yield* resolveCodeGraphCitationRepositoryRoutes(selector);
+          expect(repointed.generation).not.toBe(changed.generation);
+          expect(yield* revalidateCodeGraphCitationRecoveryRoute(data.home, changed.routes[0])).toBe(false);
+          const layout = codeGraphLayout(data.path, data.home, data.prior.checkoutId, data.prior.worktreeId);
+          yield* data.fs.writeFileString(
+            data.path.join(layout.repositoryRoot, 'local-context', 'worktrees', `${data.prior.worktreeId}.json`),
+            '{}',
+          );
+          const corrupted = yield* resolveCodeGraphCitationRepositoryRoutes(selector);
+          expect(corrupted.routes).toEqual([]);
+        }),
+      ),
+    );
+
     it.effect.prop(
       'selector order and unrelated selectors do not alter bounded route results',
       {

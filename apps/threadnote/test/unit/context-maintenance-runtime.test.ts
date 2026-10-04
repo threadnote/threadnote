@@ -208,6 +208,33 @@ describe('persistent context maintenance', () => {
     );
   });
 
+  effectIt.effect('visits every record with a four-task window even when the caller requests 100', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      for (let index = 0; index < 17; index++) {
+        const subject = record(`window-${String(index).padStart(2, '0')}`);
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `window-${String(index).padStart(2, '0')}.md`),
+          subject.content,
+        );
+      }
+      let checked = 0;
+      for (let tick = 0; tick < 17 && checked < 17; tick++) {
+        const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+        const current = result.projects.find(project => project.project === 'threadnote')?.checked ?? 0;
+        expect(current - checked).toBeGreaterThan(0);
+        expect(current - checked).toBeLessThanOrEqual(4);
+        checked = current;
+      }
+      expect(checked).toBe(17);
+      const replay = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 100});
+      expect(replay.projects.find(project => project.project === 'threadnote')).toMatchObject({
+        eligible: 17,
+        checked: 17,
+      });
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('logical checkpoint coverage converges with trailing newlines and managed legacy footers', () =>
     Effect.gen(function* () {
       for (const envelope of ['\n', '\n\n<!-- MEMORY_FIELDS\nversion: 1\n-->']) {
