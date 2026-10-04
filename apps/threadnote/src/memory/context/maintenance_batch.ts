@@ -395,13 +395,21 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
       request.cwd,
       selected.at(-1)!,
       request.revision,
+      request.page,
     );
   const completed = new Set<string>();
   for (const uri of selected) {
     const record = byUri.get(uri);
     if (record !== undefined && (record.metadata.codeCitations?.length ?? 0) > 0) continue;
     if (yield* requestedSubjectObsolete(config, uri, inventory, inventoryComplete)) {
-      yield* clearContextMaintenanceEvidenceRequest(config, request.project, request.cwd, [uri], request.revision);
+      yield* clearContextMaintenanceEvidenceRequest(
+        config,
+        request.project,
+        request.cwd,
+        [uri],
+        request.revision,
+        request.page,
+      );
       completed.add(uri);
     }
   }
@@ -439,6 +447,7 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
         request.cwd,
         [current.uri],
         request.revision,
+        request.page,
       );
       completed.add(current.uri);
     }
@@ -452,6 +461,7 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
       failed,
       DateTime.formatIso(DateTime.makeUnsafe(now + 120_000)),
       request.revision,
+      request.page,
     );
 });
 

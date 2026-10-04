@@ -1,5 +1,8 @@
 import {DateTime, Effect, Result} from 'effect';
-import {collectContextMaintenanceCitationEvidence} from './maintenance_evidence.js';
+import {
+  collectContextMaintenanceCitationEvidence,
+  ContextMaintenanceEvidenceRequestError,
+} from './maintenance_evidence.js';
 import {maintenanceWorkerRecordValidations, type MaintenanceWorkerEvidence} from './maintenance_batch.js';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {shellQuote} from '@threadnote/platform/command';
@@ -114,6 +117,8 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
               }),
           },
         ).pipe(Effect.result);
+  if (Result.isFailure(citationResult) && citationResult.failure instanceof ContextMaintenanceEvidenceRequestError)
+    return yield* citationResult.failure;
   const citationValidations = Result.isSuccess(citationResult) ? citationResult.success : [];
   const relationEvidence = yield* relationStatusEvidence(
     config,

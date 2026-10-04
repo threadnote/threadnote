@@ -52,6 +52,8 @@ import {
   advanceContextMaintenanceEvidenceRequestDiscovery,
   advanceContextMaintenanceEvidenceRequestExecution,
   contextMaintenanceEvidenceDiscoveryPending,
+  contextMaintenanceEvidenceRequestFileName,
+  contextMaintenanceEvidenceRequestKey,
   readContextMaintenanceEvidenceRequests,
 } from '@threadnote/threadnote/memory/context/maintenance_evidence';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -1150,6 +1152,49 @@ describe('persistent context maintenance', () => {
       expect((yield* readContextMaintenanceEvidenceRequests(fixture.config))[0]).toEqual(retained);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
+  effectIt.effect('reaches the last foreground-requested page without another foreground call', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const citation = createMemoryCodeCitation({
+        extractorSet: 'typescript-v1',
+        fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
+        path: 'source.ts',
+        repositoryId: 'b'.repeat(64),
+        repositoryIdentityKind: 'local',
+        sourceCommit: 'c'.repeat(40),
+        sourceDirty: false,
+        sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+        target: {kind: 'file'},
+        version: 1,
+      });
+      const requested = Array.from({length: 101}, (_, index) =>
+        record(`requested-${String(index).padStart(3, '0')}`, {schemaVersion: 5, codeCitations: [citation]}),
+      );
+      const last = requested.at(-1)!;
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, `${last.metadata.topic}.md`),
+        last.content,
+      );
+      yield* collectContextHealth(fixture.config, 'threadnote', requested, fixture.home);
+      const pages = yield* readContextMaintenanceEvidenceRequests(fixture.config);
+      expect(pages.flatMap(page => page.uris)).toHaveLength(101);
+      const laterPage = pages.find(page => page.uris.includes(last.uri))!;
+      expect(laterPage.page).toBe(1);
+      for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const pending = yield* readContextMaintenanceEvidenceRequests(fixture.config);
+      expect(pending.flatMap(page => page.uris)).not.toContain(last.uri);
+      const projectionFile = fixture.path.join(
+        fixture.home,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`threadnote\0${fixture.home}`)}.json`,
+      );
+      const projection = JSON.parse(yield* fixture.fs.readFileString(projectionFile)) as {
+        entries: Array<{uri: string}>;
+      };
+      expect(projection.entries.some(entry => entry.uri === last.uri)).toBe(true);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('discovers a scoped request beyond 64 other-project files without claiming idle', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -1231,6 +1276,38 @@ describe('persistent context maintenance', () => {
         };
         expect(Date.parse(pending.deferredUntil?.[uri] ?? '')).toBeGreaterThan(Date.parse(NOW));
       }
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect('discovers the eligible page beyond 64 deferred pages of the same requested root', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      yield* TestClock.setTime(Date.parse(NOW));
+      yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+      const directory = fixture.path.join(fixture.home, 'context-maintenance', 'evidence');
+      yield* fixture.fs.makeDirectory(directory, {recursive: true});
+      const cwd = fixture.path.join(fixture.home, 'requested-root');
+      const hash = sha256HexSync(`threadnote\0${cwd}`);
+      const uri = 'threadnote://unreadable/subject';
+      for (let page = 1; page <= 65; page++)
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(directory, `${hash}.${String(page).padStart(6, '0')}.json.pending`),
+          JSON.stringify({
+            project: 'threadnote',
+            cwd,
+            page,
+            uris: [uri],
+            policy: 'health-receipts-v1:validator-1',
+            ...(page < 65 ? {deferredUntil: {[uri]: '2099-01-01T00:00:00.000Z'}} : {}),
+          }),
+        );
+      const first = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+      expect(first.state).not.toBe('idle');
+      for (let tick = 0; tick < 5; tick++)
+        yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'threadnote'});
+      const last = JSON.parse(
+        yield* fixture.fs.readFileString(fixture.path.join(directory, `${hash}.000065.json.pending`)),
+      ) as {deferredUntil?: Record<string, string>};
+      expect(Date.parse(last.deferredUntil?.[uri] ?? '')).toBeGreaterThan(Date.parse(NOW));
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
   effectIt.effect('revisits unchanged records at future review and validity deadlines', () =>
@@ -1552,9 +1629,14 @@ describe('persistent context maintenance', () => {
   it('visits eligible roots across rotating pages when record phases intervene', () => {
     fc.assert(
       fc.property(fc.integer({min: 65, max: 192}), total => {
-        const files = Array.from({length: total}, (_, index) => `project\0/root-${index}`)
-          .map(root => ({root, file: `${sha256HexSync(root)}.json.pending`}))
-          .sort((left, right) => left.file.localeCompare(right.file));
+        const files = Array.from({length: total}, (_, index) => {
+          const request = {project: 'project', cwd: `/root-${index}`, uris: ['subject']};
+          return {
+            request,
+            root: contextMaintenanceEvidenceRequestKey(request),
+            file: contextMaintenanceEvidenceRequestFileName(request),
+          };
+        }).sort((left, right) => left.file.localeCompare(right.file));
         const eligible = new Set([files[0].root, files[Math.floor(total / 2)].root, files.at(-1)!.root]);
         const visited = new Set<string>();
         let discovery: ReturnType<typeof advanceContextMaintenanceEvidenceRequestDiscovery> | undefined;
@@ -1568,7 +1650,7 @@ describe('persistent context maintenance', () => {
           discovery = advanceContextMaintenanceEvidenceRequestExecution(
             discovery,
             {
-              requests: rotated.map(item => ({project: 'project', cwd: item.root, uris: ['subject']})),
+              requests: rotated.map(item => item.request),
               files: rotated.map(item => item.file),
               namesHash: 'stable',
               total,

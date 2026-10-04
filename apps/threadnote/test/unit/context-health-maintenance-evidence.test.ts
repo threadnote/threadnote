@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Layer, Path} from 'effect';
+import {DateTime, Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -22,17 +22,25 @@ import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocumen
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import type {ContextBriefMemoryCandidateV1, ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {contextHealthCitationCoverageV2} from '@threadnote/context/health_maintenance';
 import {
   collectContextMaintenanceCitationEvidence,
+  ContextMaintenanceEvidenceRequestError,
   clearContextMaintenanceEvidenceRequest,
+  contextMaintenanceEvidenceRequestFileName,
+  contextMaintenanceEvidenceRequestKey,
+  deferContextMaintenanceEvidenceRequest,
   foregroundReceiptCandidates,
+  readContextMaintenanceEvidenceRequestPage,
   readContextMaintenanceEvidenceRequests,
   requestedRootProjectionComplete,
   projectMaintenanceCitationReceipts,
   sourceObservation,
   type ContextMaintenanceWorkerObservation,
 } from '@threadnote/threadnote/memory/context/maintenance_evidence';
+import {collectContextHealthEvidence} from '@threadnote/threadnote/memory/context/health_commands';
+import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const citationEnvironmentPolicy = Layer.mergeAll(
   Layer.succeed(ChildEnvironmentPolicy, {
@@ -154,9 +162,194 @@ const narrow = Layer.mergeAll(
     processStartIdentity: () => Effect.succeed('fixture'),
   } as unknown as SystemInfo['Service']),
 );
+const coldQuery = CodeGraphQueryService.of({
+  status: () => Effect.succeed(status),
+} as unknown as CodeGraphQueryService['Service']);
 
 describe('generation-bound maintenance citation evidence', () => {
+  it('keeps bounded request page identities distinct while preserving legacy page zero', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.integer({min: 1, max: 999_999}), {minLength: 1, maxLength: 64}), pages => {
+        const root = {project: 'fixture', cwd: repository, uris: []};
+        const legacy = contextMaintenanceEvidenceRequestFileName(root);
+        expect(contextMaintenanceEvidenceRequestFileName({...root, page: 0})).toBe(legacy);
+        const names = pages.map(page => contextMaintenanceEvidenceRequestFileName({...root, page}));
+        const keys = pages.map(page => contextMaintenanceEvidenceRequestKey({...root, page}));
+        expect(new Set([legacy, ...names]).size).toBe(pages.length + 1);
+        expect(new Set([contextMaintenanceEvidenceRequestKey(root), ...keys]).size).toBe(pages.length + 1);
+      }),
+      {numRuns: 80},
+    );
+  });
   effectIt.layer(citationPlatformLayer)(layerIt => {
+    layerIt.effect('surfaces a poisoned owner request page through context health', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-poisoned-'});
+        const config = {
+          account: 'fixture',
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+        } as RuntimeConfig;
+        const subject = recordWithCitations(0, [citation]);
+        const canonical = parseMemoryDocument(
+          'threadnote://user/tester/memories/durable/projects/fixture/fixture-0.md',
+          subject.content,
+        )!;
+        const directory = path.join(home, 'context-maintenance', 'evidence');
+        yield* fs.makeDirectory(directory, {recursive: true});
+        yield* fs.writeFileString(
+          path.join(directory, `${sha256HexSync(`fixture\0${repository}`)}.json.pending`),
+          '{malformed-request',
+        );
+        const result = yield* collectContextHealthEvidence(config, 'fixture', [canonical], repository).pipe(
+          Effect.result,
+        );
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result)) expect(result.failure).toBeInstanceOf(ContextMaintenanceEvidenceRequestError);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+    layerIt.effect.prop(
+      'persists exactly the explicit URI union across bounded pages and repeat enqueues',
+      {
+        count: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 130})),
+        reverse: Schema.Boolean,
+      },
+      ({count, reverse}) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-union-'});
+          const config = {
+            account: 'fixture',
+            agentContextHome: home,
+            manifestPath: path.join(home, 'manifest'),
+          } as RuntimeConfig;
+          const unique = Array.from({length: count}, (_, index) => recordWithCitations(index, [citation]));
+          const ordered = reverse ? [...unique].reverse() : unique;
+          const records = [...ordered, ...ordered.slice(0, Math.floor(count / 3))];
+          const enqueue = () =>
+            collectContextMaintenanceCitationEvidence(config, 'fixture', records, records.map(candidate), repository, {
+              validate: () => Effect.succeed([]),
+            }).pipe(Effect.provideService(CodeGraphQueryService, coldQuery));
+          yield* enqueue();
+          const first = yield* readContextMaintenanceEvidenceRequestPage(config);
+          const expected = new Set(unique.map(record => record.uri));
+          expect(new Set(first.requests.flatMap(request => request.uris))).toEqual(expected);
+          expect(first.requests.reduce((count, request) => count + request.uris.length, 0)).toBe(expected.size);
+          yield* enqueue();
+          expect((yield* readContextMaintenanceEvidenceRequestPage(config)).requests).toEqual(first.requests);
+        }),
+      {arbitrary: {runs: 8, seed: 26004}},
+    );
+    layerIt.effect('persists every explicitly requested URI beyond one bounded request page', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-pages-'});
+        const config = {
+          account: 'fixture',
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+        } as RuntimeConfig;
+        const records = Array.from({length: 125}, (_, index) => recordWithCitations(index, [citation]));
+        const candidates = records.map(candidate);
+        const query = CodeGraphQueryService.of({
+          status: () => Effect.succeed(status),
+        } as unknown as CodeGraphQueryService['Service']);
+        yield* collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
+          validate: () => Effect.succeed([]),
+        }).pipe(Effect.provideService(CodeGraphQueryService, query));
+        const page = yield* readContextMaintenanceEvidenceRequestPage(config);
+        expect(new Set(page.requests.flatMap(request => request.uris))).toEqual(
+          new Set(records.map(record => record.uri)),
+        );
+        expect(page.requests.every(request => request.project === 'fixture' && request.cwd === repository)).toBe(true);
+        expect(page.requests).toHaveLength(2);
+        const before = new Map(page.requests.map(request => [request.page ?? 0, request]));
+        yield* collectContextMaintenanceCitationEvidence(config, 'fixture', records, candidates, repository, {
+          validate: () => Effect.succeed([]),
+        }).pipe(Effect.provideService(CodeGraphQueryService, query));
+        const repeated = yield* readContextMaintenanceEvidenceRequestPage(config);
+        expect(repeated.requests).toEqual(page.requests);
+        const first = before.get(0)!;
+        const second = before.get(1)!;
+        const secondUri = second.uris[0];
+        yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [secondUri], first.revision, 1);
+        yield* deferContextMaintenanceEvidenceRequest(
+          config,
+          'fixture',
+          repository,
+          [secondUri],
+          '2099-01-01T00:00:00.000Z',
+          first.revision,
+          1,
+        );
+        expect((yield* readContextMaintenanceEvidenceRequestPage(config)).requests).toEqual(page.requests);
+        yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [secondUri], second.revision, 1);
+        const after = yield* readContextMaintenanceEvidenceRequestPage(config);
+        expect(after.requests.find(request => (request.page ?? 0) === 0)).toEqual(first);
+        expect(after.requests.find(request => request.page === 1)?.uris).not.toContain(secondUri);
+      }),
+    );
+    layerIt.effect('bounds UTF-8 request pages while admitting the full explicit scope', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-byte-pages-'});
+        const config = {
+          account: 'fixture',
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+        } as RuntimeConfig;
+        const records = Array.from({length: 50}, (_, index) => {
+          const value = recordWithCitations(index, [citation]);
+          return {...value, uri: `${value.uri}/${'é'.repeat(2_000)}`};
+        });
+        yield* collectContextMaintenanceCitationEvidence(
+          config,
+          'fixture',
+          records,
+          records.map(candidate),
+          repository,
+          {validate: () => Effect.succeed([])},
+        ).pipe(Effect.provideService(CodeGraphQueryService, coldQuery));
+        const page = yield* readContextMaintenanceEvidenceRequestPage(config);
+        expect(page.requests.length).toBeGreaterThan(1);
+        expect(new Set(page.requests.flatMap(request => request.uris))).toEqual(
+          new Set(records.map(record => record.uri)),
+        );
+        for (const name of page.files) {
+          const info = yield* fs.stat(path.join(home, 'context-maintenance', 'evidence', name));
+          expect(Number(info.size)).toBeLessThanOrEqual(256 * 1024);
+        }
+      }),
+    );
+    layerIt.effect('reports a URI that cannot fit one request page instead of silently losing it', () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'requested-citation-oversize-'});
+        const config = {
+          account: 'fixture',
+          agentContextHome: home,
+          manifestPath: path.join(home, 'manifest'),
+        } as RuntimeConfig;
+        const subject = recordWithCitations(0, [citation]);
+        const oversized = {...subject, uri: `${subject.uri}/${'x'.repeat(100_000)}`};
+        const result = yield* collectContextMaintenanceCitationEvidence(
+          config,
+          'fixture',
+          [oversized],
+          [candidate(oversized, 0)],
+          repository,
+          {validate: () => Effect.succeed([])},
+        ).pipe(Effect.provideService(CodeGraphQueryService, coldQuery), Effect.result);
+        expect(Result.isFailure(result)).toBe(true);
+        expect(yield* readContextMaintenanceEvidenceRequests(config)).toEqual([]);
+      }),
+    );
     layerIt.effect('queues only records with citation work on a cold foreground read', () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -441,7 +634,7 @@ describe('generation-bound maintenance citation evidence', () => {
             state: 'unavailable',
           });
           const requests = yield* readContextMaintenanceEvidenceRequests(config);
-          expect(requests[0]?.uris).toHaveLength(100);
+          expect(requests.flatMap(request => request.uris)).toHaveLength(2_000);
           const acknowledged = requests[0]?.uris[0];
           if (acknowledged === undefined) return yield* Effect.die(new Error('Missing queued citation work.'));
           yield* clearContextMaintenanceEvidenceRequest(config, 'fixture', repository, [acknowledged]);

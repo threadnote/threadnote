@@ -58,6 +58,7 @@ import {
 import {
   contextMaintenanceEvidenceDiscoveryPending,
   readContextMaintenanceEvidenceRequestPage,
+  contextMaintenanceEvidenceRequestKey,
   readContextMaintenanceSourceEpoch,
 } from './maintenance_evidence.js';
 import {
@@ -458,7 +459,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         };
       }
       if (work.phase === 'requested') {
-        const request = evidenceRequests.find(item => `${item.project}\0${item.cwd}` === work.root)!;
+        const request = evidenceRequests.find(item => contextMaintenanceEvidenceRequestKey(item) === work.root)!;
         yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
       }
       // maxRecords still controls inventory pagination; record work remains four per tick.
