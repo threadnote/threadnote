@@ -12,7 +12,7 @@ import type {
   ManagerRepositoryEvidenceUnavailableReasonV1,
   ManagerReviewInboxResponseV1,
 } from '@threadnote/manager/attention/contracts';
-import {readActiveProjectMemoryRecords} from '../memory/maintenance/records.js';
+import {readMaintenanceMemoryRecords} from '../memory/maintenance/records.js';
 import {collectContextHealth} from '../memory/context/health_commands.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
@@ -78,7 +78,8 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   }
 
   const selector = normalizeContextHealthSelector({after: request.url.searchParams.get('after') ?? undefined});
-  const records = yield* readActiveProjectMemoryRecords(request.config, project);
+  const corpus = yield* readMaintenanceMemoryRecords(request.config);
+  const records = corpus.filter(record => record.metadata.status === 'active' && record.metadata.project === project);
   const root = yield* managerAttentionProjectRoot(request.config, project);
   if (root.state === 'unavailable') {
     return {
@@ -89,6 +90,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   const report = yield* collectContextHealth(request.config, project, records, root.cwd, {
     after: selector?.after,
     duplicateCorpus: records,
+    relationCorpus: corpus,
   });
   return {
     body: {

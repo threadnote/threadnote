@@ -171,6 +171,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [generation, setGeneration] = useState(0);
   const requestEpoch = useRef(0);
+  const requestController = useRef<AbortController | undefined>(undefined);
   const [report, setReport] = useState<ManagerContextHealthResponseV1>();
   const [nextCursor, setNextCursor] = useState<string>();
   const [error, setError] = useState('');
@@ -195,10 +196,19 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    requestController.current = controller;
     setLoading(true);
     setLoadingMore(false);
     setError('');
-    void api<ManagerContextHealthResponseV1>(`/api/context-health?project=${encodeURIComponent(props.project)}`)
+    void api<ManagerContextHealthResponseV1>(
+      `/api/context-health?project=${encodeURIComponent(props.project)}`,
+      undefined,
+      {
+        signal: controller.signal,
+        timeoutMilliseconds: 8_000,
+      },
+    )
       .then(result => {
         if (!cancelled && result.project === props.project) {
           setReport(result);
@@ -213,6 +223,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [props.project, props.refreshGeneration, generation]);
 
@@ -283,6 +294,8 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     setError('');
     void api<ManagerContextHealthResponseV1>(
       `/api/context-health?project=${encodeURIComponent(props.project)}&after=${encodeURIComponent(nextCursor)}`,
+      undefined,
+      {signal: requestController.current?.signal, timeoutMilliseconds: 8_000},
     )
       .then(next => {
         if (epoch !== requestEpoch.current || next.project !== props.project) return;

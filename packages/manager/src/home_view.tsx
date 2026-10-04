@@ -120,7 +120,7 @@ export function ManagerHomePanel({
               <h3>Resume a handoff</h3>
               <button onClick={() => onOpen('memory')}>Open Library</button>
             </div>
-            {home.stats?.memories === undefined ? (
+            {home.stats?.memories === undefined && home.handoffs.length === 0 ? (
               <p className="muted">Handoffs are unavailable. Refresh to retry.</p>
             ) : home.handoffs.length === 0 ? (
               <p className="muted">No active handoffs for {home.project}.</p>
