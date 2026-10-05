@@ -611,7 +611,7 @@ describe('standalone updater', () => {
         usedCache: false,
         version: 1,
       });
-    }).pipe(provideTestLayer(ApplicationLayer)),
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('updates an installed beta to a newer stable release without an explicit channel flag', () =>
