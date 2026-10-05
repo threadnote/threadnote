@@ -4872,6 +4872,35 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
+  it('names replaceUri on rejected writes and preserves the canonical memory before a full URI replacement', async () => {
+    await withMcpClient(async (client, fixture) => {
+      const compact = 'memories/handoffs/active/threadnote/uri-validation.md';
+      const uri = `threadnote://user/test-user/${compact}`;
+      const memoryPath = join(fixture.home, 'data', 'local', 'user', 'test-user', compact);
+      const input = {kind: 'handoff', project: 'threadnote', topic: 'uri-validation'};
+      await callText(client, 'remember_context', {...input, text: 'Original synthetic memory.'});
+      const original = await readFile(memoryPath, 'utf8');
+      const files = await readdir(join(fixture.home, 'data'), {recursive: true});
+
+      for (const replaceUri of [
+        compact,
+        'https://example.invalid/status.md',
+        'threadnote://user/test-user/../status.md',
+      ]) {
+        await expect(
+          callErrorText(client, 'remember_context', {...input, replaceUri, text: 'Rejected synthetic replacement.'}),
+        ).resolves.toContain('optional "replaceUri" must be a threadnote:// URI');
+        await expect(readFile(memoryPath, 'utf8')).resolves.toBe(original);
+        await expect(readdir(join(fixture.home, 'data'), {recursive: true})).resolves.toEqual(files);
+      }
+
+      await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
+      const replaced = await readFile(memoryPath, 'utf8');
+      expect(replaced).toContain('Accepted synthetic replacement.');
+      expect(replaced).not.toContain('Original synthetic memory.');
+    });
+  });
+
   it('requires remember_context replaceUri for same-topic schema rewrites and citation clearing', async () => {
     await withMcpClient(
       async (client, fixture) => {

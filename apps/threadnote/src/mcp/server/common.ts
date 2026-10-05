@@ -211,7 +211,11 @@ export function requiredResourceUri(value: string | undefined, toolName: string,
   }
 }
 
-export function optionalResourceUri(value: string | undefined, toolName: string): CheckedOptionalText {
+export function optionalResourceUri(
+  value: string | undefined,
+  toolName: string,
+  fieldName = 'uri',
+): CheckedOptionalText {
   const normalized = value?.trim();
   if (!normalized) {
     return {ok: true, value: undefined};
@@ -221,7 +225,7 @@ export function optionalResourceUri(value: string | undefined, toolName: string)
   } catch {
     return {
       error: argumentError(
-        `Threadnote MCP tool "${toolName}" optional "uri" must be a threadnote:// URI. Received: ${normalized}`,
+        `Threadnote MCP tool "${toolName}" optional "${fieldName}" must be a threadnote:// URI. Received: ${normalized}`,
       ),
       ok: false,
     };

@@ -121,7 +121,7 @@ export function registerStoreTool(
       if (!checkedText.ok) {
         return checkedText.error;
       }
-      const checkedReplaceUri = optionalResourceUri(replaceUri, name);
+      const checkedReplaceUri = optionalResourceUri(replaceUri, name, 'replaceUri');
       if (!checkedReplaceUri.ok) {
         return checkedReplaceUri.error;
       }
