@@ -683,6 +683,96 @@ describe('MCP session broker', () => {
       {numRuns: 15},
     );
   });
+
+  it('drops non-JSON child stdout lines instead of forwarding them to the client', async () => {
+    const clientInput = new AsyncByteQueue();
+    const clientOutput = new AsyncByteQueue();
+    const release = {releaseRoot: '/threadnote/versions/4.2.2', version: '4.2.2'};
+    const spawned: FakeMcpChild[] = [];
+    const running = runMcpBroker({
+      input: clientInput,
+      readActiveRelease: async () => release,
+      spawn: release => {
+        const child = new FakeMcpChild(release.version);
+        spawned.push(child);
+        return child;
+      },
+      writeOutput: async line => clientOutput.pushLine(line),
+    });
+
+    clientInput.pushLine(JSON.stringify({id: 1, jsonrpc: '2.0', method: 'initialize', params: {}}));
+    expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
+      id: 1,
+      result: {serverInfo: {version: '4.2.2'}},
+    });
+    const child = await waitForSpawnedChild(spawned, 0);
+    // A pretty-logger warning that escaped to the child's stdout must never
+    // reach the client: Cursor fails the transport on the first non-JSON
+    // line ("Expected ',' or ']' after array element in JSON at position 3"
+    // for a "[14:26:..." prefix).
+    child.emitRawLine(
+      '[14:26:54.868] WARN (#755): Code graph background refresh deferred (unknown; recovery: diagnose).',
+    );
+    clientInput.pushLine(JSON.stringify({id: 2, jsonrpc: '2.0', method: 'tools/call', params: {name: 'health'}}));
+    expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
+      id: 2,
+      result: {version: '4.2.2'},
+    });
+    expect(clientOutput.availableLines()).toBe(0);
+
+    clientInput.end();
+    await running;
+  });
+
+  it('only forwards JSON-parseable child lines to the client', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(
+          fc.oneof(
+            fc.constant(
+              '[14:26:54.868] WARN (#755): Code graph background refresh deferred (unknown; recovery: diagnose).',
+            ),
+            fc.string({maxLength: 120}).filter(isNonJsonLine),
+          ),
+          {maxLength: 10},
+        ),
+        async rawLines => {
+          const clientInput = new AsyncByteQueue();
+          const clientOutput = new AsyncByteQueue();
+          const release = {releaseRoot: '/threadnote/versions/4.2.2', version: '4.2.2'};
+          const spawned: FakeMcpChild[] = [];
+          const running = runMcpBroker({
+            input: clientInput,
+            readActiveRelease: async () => release,
+            spawn: release => {
+              const child = new FakeMcpChild(release.version);
+              spawned.push(child);
+              return child;
+            },
+            writeOutput: async line => clientOutput.pushLine(line),
+          });
+
+          clientInput.pushLine(JSON.stringify({id: 1, jsonrpc: '2.0', method: 'initialize', params: {}}));
+          expect(JSON.parse(await clientOutput.nextLine())).toMatchObject({
+            id: 1,
+            result: {serverInfo: {version: '4.2.2'}},
+          });
+          const child = await waitForSpawnedChild(spawned, 0);
+          for (const line of rawLines) child.emitRawLine(line);
+          clientInput.pushLine(JSON.stringify({id: 2, jsonrpc: '2.0', method: 'tools/call', params: {name: 'health'}}));
+          for (;;) {
+            // Must never throw: every line the broker forwards parses as JSON.
+            const parsed = JSON.parse(await clientOutput.nextLine()) as {readonly id?: unknown};
+            if (parsed.id === 2) break;
+          }
+
+          clientInput.end();
+          await running;
+        },
+      ),
+      {numRuns: 20},
+    );
+  });
 });
 
 async function expectInFlightToolResultAfterDroppedProgress(progressFrames: number): Promise<void> {
@@ -786,6 +876,10 @@ class FakeMcpChild implements McpBrokerChild {
     this.#output.pushLine(JSON.stringify({id, jsonrpc: '2.0', method: 'sampling/createMessage', params: {}}));
   }
 
+  emitRawLine(line: string): void {
+    this.#output.pushLine(line);
+  }
+
   #handle(line: string): void {
     if (this.#ended) throw new Error('Child input is closed.');
     this.received.push(line);
@@ -830,6 +924,16 @@ class FakeMcpChild implements McpBrokerChild {
     this.#ended = true;
     this.#output.end();
     this.#resolveExit(0);
+  }
+}
+
+function isNonJsonLine(line: string): boolean {
+  if (line.length === 0) return false;
+  try {
+    JSON.parse(line);
+    return false;
+  } catch {
+    return true;
   }
 }
 

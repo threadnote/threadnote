@@ -1,7 +1,7 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';

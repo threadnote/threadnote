@@ -1,5 +1,5 @@
 import {Context, Option} from 'effect';
-import {CliOutput, Command, type HelpDoc} from 'effect/unstable/cli';
+import {CliOutput, Command, type HelpDoc} from 'effect/cli';
 
 class DefaultActionSubcommand extends Context.Service<DefaultActionSubcommand, true>()(
   '@threadnote/threadnote/effect/cli/help/DefaultActionSubcommand',

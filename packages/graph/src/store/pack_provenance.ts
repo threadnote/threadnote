@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphLanguagePackProvenance} from './models.js';
 import {configureConnection, tableExists} from './session.js';
 import {CODE_GRAPH_EXTRACTOR_GENERATION, CodeGraphStoreError} from '../types.js';

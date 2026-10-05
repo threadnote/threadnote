@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "taskId": "tsk_47e3cb3faf2da9c58a8faa14",
+  "reviewTiming": "before-provider-outcomes",
+  "sourceSlice": "entire GitHub body, title excluded",
+  "sufficiency": "sufficient",
+  "rationale": "The body supplies a complete protocol reproduction, observed exception, and desired tolerant behavior without naming the patch.",
+  "outcomeVisible": false,
+  "solutionVisible": false,
+  "independentBlindReviewConfirmed": true
+}

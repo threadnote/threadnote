@@ -83,8 +83,16 @@ async function makeRuntime(): Promise<ShareRuntime> {
 
 function mockPublishCommands(sourcePath: string, pushResult: CommandResult, sourcePresentAtPush: boolean[]): void {
   vi.mocked(utils.runCommand).mockImplementation((executable, args) => {
+    if (executable === 'git' && args.includes('rev-parse') && args.includes('--git-path')) {
+      return Effect.succeed(
+        ok(Array.from({length: 6}, (_, index) => `${sourcePath}.git-operation-${index}`).join('\n')),
+      );
+    }
     if (executable === 'git' && args.includes('add')) {
       return Effect.succeed(ok());
+    }
+    if (executable === 'git' && args.includes('diff') && args.includes('--cached')) {
+      return Effect.succeed(ok('durable/projects/foo/bar.md\0'));
     }
     if (executable === 'git' && args.includes('commit')) {
       return Effect.succeed(ok('[main abc123] share'));
@@ -160,6 +168,12 @@ describe('runSharePublish transaction ordering', () => {
     await runSharePublish(config, sourceUri, {});
 
     expect(sourcePresentAtPush).toEqual([true]);
+    const gitCommands = vi.mocked(utils.runCommand).mock.calls.filter(([executable]) => executable === 'git');
+    const commitIndex = gitCommands.findIndex(([, args]) => args.includes('commit'));
+    const pushIndex = gitCommands.findIndex(([, args]) => args.includes('push'));
+    expect(commitIndex).toBeGreaterThanOrEqual(0);
+    expect(pushIndex).toBeGreaterThanOrEqual(0);
+    expect(commitIndex).toBeLessThan(pushIndex);
     expect(existsSync(sourcePath)).toBe(false);
     expect(existsSync(targetPath)).toBe(true);
     expect(existsSync(worktreeTargetPath)).toBe(true);

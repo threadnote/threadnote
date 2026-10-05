@@ -1,5 +1,5 @@
 import {Effect, Predicate} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   canonicalCodeGraphScopeReceiptIds,
   CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY,

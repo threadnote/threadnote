@@ -199,7 +199,7 @@ const DraftFields = {
       safeFirstAction: Schema.Literals(['disable-writes', 'withdraw-route', 'pause-worker', 'retain-isolation']),
       rollback: Schema.Literal('keep-writes-disabled-restore-reviewed-baseline'),
     }),
-  ).check(Schema.isLengthBetween(OPERATIONS_ALERTS.length, OPERATIONS_ALERTS.length)),
+  ).check(Schema.isMinLength(OPERATIONS_ALERTS.length), Schema.isMaxLength(OPERATIONS_ALERTS.length)),
 } as const;
 export const OperationsDraftSchema = Schema.Struct(DraftFields);
 export const OperationsManifestSchema = Schema.Struct({...DraftFields, manifestDigest: Digest});
@@ -224,7 +224,8 @@ export const OperationsEvidenceSchema = Schema.Struct({
   drillId: OperationsOpaqueId,
   isolatedTargetId: OperationsOpaqueId,
   checks: Schema.Array(ObservationSchema).check(
-    Schema.isLengthBetween(OPERATIONS_CHECKS.length, OPERATIONS_CHECKS.length),
+    Schema.isMinLength(OPERATIONS_CHECKS.length),
+    Schema.isMaxLength(OPERATIONS_CHECKS.length),
   ),
 });
 export type OperationsEvidence = typeof OperationsEvidenceSchema.Type;
@@ -246,7 +247,7 @@ export const OperationsReceiptSchema = Schema.Struct({
       check: Check,
       status: Schema.Literals(['verified', 'pending', 'blocked']),
     }),
-  ).check(Schema.isLengthBetween(OPERATIONS_CHECKS.length, OPERATIONS_CHECKS.length)),
+  ).check(Schema.isMinLength(OPERATIONS_CHECKS.length), Schema.isMaxLength(OPERATIONS_CHECKS.length)),
 });
 export type OperationsReceipt = typeof OperationsReceiptSchema.Type;
 

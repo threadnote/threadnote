@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   CODE_GRAPH_REMOVED_VIEW_CLEANUP_BLOCKED_CODES,
   CODE_GRAPH_REMOVED_VIEW_CLEANUP_PHASES,

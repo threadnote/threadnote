@@ -356,8 +356,11 @@ and unsafe-integer version components. Stable tags follow the same protected-mai
    checkout with its verified managed development runtime. `--mode plan` is a non-executing preview; only
    `--mode execute` creates the disposable fixtures, launches the candidate MCP hosts, and writes passing evidence.
    Keep the new output file outside source control. The harness accepts no caller-supplied observations.
-5. Review the candidate's retained production-large and heavy-tail evidence plus required PR checks when assessing
-   graph correctness and performance. The tag starts one separate exact-tag production-large capacity classification
+5. Review required PR checks and any available production-large or heavy-tail evidence when assessing
+   graph correctness and performance. Local heavy-tail attestation is optional and is not a publication gate for
+   stable or beta releases. Missing local samples, insufficient workstation capacity, or an optional ratchet failure
+   must not block tagging or publication; investigate reported regressions as product defects without representing
+   failed or missing evidence as a performance pass. The tag starts one separate exact-tag production-large capacity classification
    and, on an admitted runner, one `code-graph-production-large-n1` observation automatically. When the hosted runner
    lacks the governed 120 GiB floor but has at least 20 GiB, it must instead complete the separately governed
    3,000-file / 110,000-symbol production-shaped observation. Its retained artifact identifies the measured profile;
@@ -365,47 +368,8 @@ and unsafe-integer version components. Stable tags follow the same protected-mai
    full-shape evidence is needed. Do not dispatch a duplicate hosted run for a tag; the event SHA must match the
    exact tagged checkout for governed release evidence.
    Hosted GitHub Actions heavy-tail artifacts are explicitly `correctness-only`; they must never be treated as
-   performance evidence. Final release readiness additionally requires a fresh, exactly three-run governed heavy-tail
-   ratchet on the matching local release runner, with every run from the same clean frozen candidate **C** and the
-   checked numeric thresholds unchanged. Bind the capture to an explicit non-fallback runner class and stable local
-   runner identity; `local-unclassified` and `local` are release-ineligible. The independently chosen release window
-   below admits evidence at the exact not-before, maximum-age, maximum-span, and future-skew boundaries, and the output
-   retains all five policy values. Generate it only after the three runs complete and retain the inputs for replay:
-
-   ```sh
-   export THREADNOTE_BENCHMARK_RUNNER_CLASS=apple-m1-max-64g-internal
-   export THREADNOTE_BENCHMARK_RUNNER_ID=local-apple-m1-max
-   RELEASE_NOT_BEFORE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   for run in 1 2 3; do
-     bun run bench:code-graph:heavy-tail -- --governed \
-       --candidate-commit <candidate-sha> \
-       --evidence-class governed-performance \
-       --ratchet apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json \
-       --output artifacts/heavy-tail-<candidate-sha>-$run.json
-   done
-   RELEASE_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   bun run bench:code-graph:heavy-tail:ratchet -- \
-     --candidate-commit <candidate-sha> \
-     --runner-class "$THREADNOTE_BENCHMARK_RUNNER_CLASS" \
-     --runner-identity "$THREADNOTE_BENCHMARK_RUNNER_ID" \
-     --ratchet apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json \
-     --release-not-before "$RELEASE_NOT_BEFORE" \
-     --release-observed-at "$RELEASE_OBSERVED_AT" \
-     --maximum-evidence-age-ms 86400000 \
-     --maximum-run-span-ms 21600000 \
-     --future-skew-ms 300000 \
-     --output artifacts/heavy-tail-ratchet-<candidate-sha>.json \
-     artifacts/heavy-tail-<candidate-sha>-1.json \
-     artifacts/heavy-tail-<candidate-sha>-2.json \
-     artifacts/heavy-tail-<candidate-sha>-3.json
-   ```
-
-   The generator strictly validates the outer assertions, storage, managed exact-HEAD runtime provenance, and every
-   duplicated embedded binding before admission. It enforces every source run against the checked ratchet and rejects
-   a generated numeric bound that is weaker than the checked bound. A hosted run, a correctness-only artifact, a
-   fourth sample, a mismatched candidate or runner identity, an out-of-window timestamp, or a changed threshold policy
-   is release-ineligible. This ratchet covers parser/cache heavy-tail behavior only; production-scale materialization
-   still requires the unchanged 73,000-file / 59,936-eligible production-large shape contract below.
+   performance evidence. The [optional local heavy-tail procedure](#optional-local-heavy-tail-performance-evidence)
+   remains available for performance investigations, independently of release readiness.
 
 6. Confirm immutable releases are enabled, the Apple signing secrets below are configured, an active `v*` tag ruleset
    forbids tag updates and deletion, and the protected-main ruleset requires signed linear reviewed merges. These controls
@@ -453,6 +417,55 @@ exact-release evidence.
 The tag workflow fails before building or signing when its versioned release-notes file is absent, empty, or does not
 start with the required heading. It prepends this checked-in copy to GitHub's automatically generated changelog, so
 every release preserves a curated summary even when the release branch has no merged pull requests.
+
+## Optional local heavy-tail performance evidence
+
+Local heavy-tail attestation is optional and is not a publication gate for stable or beta releases. Do not dispatch
+it solely to satisfy release readiness. CI, the functional dogfood gates above, signing, and immutable publication
+remain required; this optional parser/cache benchmark neither replaces nor adds to them.
+
+When collecting governed performance evidence, use exactly three fresh runs from the same clean frozen candidate
+**C** with the checked numeric thresholds unchanged. Bind the capture to an explicit non-fallback runner class and
+stable local runner identity; `local-unclassified` and `local` are ineligible for governed performance claims. Choose
+the observation window independently. The generator admits evidence at the exact not-before, maximum-age,
+maximum-span, and future-skew boundaries and retains all five policy values. Generate it only after the three runs
+complete and retain the inputs for replay:
+
+```sh
+export THREADNOTE_BENCHMARK_RUNNER_CLASS=apple-m1-max-64g-internal
+export THREADNOTE_BENCHMARK_RUNNER_ID=local-apple-m1-max
+EVIDENCE_NOT_BEFORE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+for run in 1 2 3; do
+  bun run bench:code-graph:heavy-tail -- --governed \
+    --candidate-commit <candidate-sha> \
+    --evidence-class governed-performance \
+    --ratchet apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json \
+    --output artifacts/heavy-tail-<candidate-sha>-$run.json
+done
+EVIDENCE_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+bun run bench:code-graph:heavy-tail:ratchet -- \
+  --candidate-commit <candidate-sha> \
+  --runner-class "$THREADNOTE_BENCHMARK_RUNNER_CLASS" \
+  --runner-identity "$THREADNOTE_BENCHMARK_RUNNER_ID" \
+  --ratchet apps/threadnote/test/evaluation/baselines/code-graph-v1/heavy-tail-scheduler-ratchet.json \
+  --release-not-before "$EVIDENCE_NOT_BEFORE" \
+  --release-observed-at "$EVIDENCE_OBSERVED_AT" \
+  --maximum-evidence-age-ms 86400000 \
+  --maximum-run-span-ms 21600000 \
+  --future-skew-ms 300000 \
+  --output artifacts/heavy-tail-ratchet-<candidate-sha>.json \
+  artifacts/heavy-tail-<candidate-sha>-1.json \
+  artifacts/heavy-tail-<candidate-sha>-2.json \
+  artifacts/heavy-tail-<candidate-sha>-3.json
+```
+
+The generator strictly validates the outer assertions, storage, managed exact-HEAD runtime provenance, and every
+duplicated embedded binding before admitting optional performance evidence. It enforces every source run against
+the checked ratchet and rejects a generated numeric bound that is weaker than the checked bound. A hosted run, a
+correctness-only artifact, a fourth sample, a mismatched candidate or runner identity, an out-of-window timestamp, or
+a changed threshold policy is ineligible for governed performance claims, not a publication blocker. This ratchet
+covers parser/cache heavy-tail behavior only; full production-scale materialization evidence still requires the
+unchanged 73,000-file / 59,936-eligible production-large shape contract above.
 
 ## Testing Apple signing without publishing
 

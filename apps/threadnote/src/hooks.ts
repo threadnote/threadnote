@@ -9,6 +9,7 @@ import {
   THREADNOTE_HOOK_MARKER_VALUE,
 } from './constants.js';
 import {runCursorHooksInstall} from './cursor/hooks.js';
+import {runCodexHooksInstall} from './codex/hooks.js';
 import {runOmpHooksInstall} from './omp_hooks.js';
 import {parseAgentClient} from './mcp/index.js';
 import {captureConsole} from './effect/console.js';
@@ -65,7 +66,7 @@ export function runHooksInstall(config: RuntimeConfig, agent: AgentClient, optio
         yield* runClaudeHooksInstall({apply, remove});
         return;
       case 'codex':
-        yield* printCodexHooksNotice(remove);
+        yield* runCodexHooksInstall(options);
         return;
       case 'cursor':
         yield* runCursorHooksInstall(options);
@@ -168,19 +169,6 @@ function ensureMutableObject(value: unknown): Record<string, unknown> {
 
 function ensureMutableArray(value: unknown): unknown[] {
   return Array.isArray(value) ? [...value] : [];
-}
-
-function printCodexHooksNotice(remove: boolean) {
-  if (remove) {
-    return Console.log('Codex CLI does not expose a managed hook surface today, so there is nothing to remove.');
-  }
-  return Console.log(
-    [
-      'Codex CLI does not currently expose lifecycle hooks (no PreCompact or SessionStart analog).',
-      'Threadnote already installs Codex user instructions at ~/.codex/AGENTS.md; that remains the active guidance surface.',
-      'If a future Codex release adds hook events, threadnote will pick them up via `install-hooks codex`.',
-    ].join('\n'),
-  );
 }
 
 function printNoHooksSupported(agent: AgentClient, remove: boolean) {
@@ -423,6 +411,7 @@ export const readHookPayload = Effect.fn('hooks.readPayload')(function* () {
   }
   return {
     cwd: typeof parsed.cwd === 'string' ? parsed.cwd : undefined,
+    hookEventName: typeof parsed.hook_event_name === 'string' ? parsed.hook_event_name : undefined,
     filePath:
       isJsonObject(parsed.tool_input) && typeof parsed.tool_input.file_path === 'string'
         ? parsed.tool_input.file_path
@@ -434,6 +423,8 @@ export const readHookPayload = Effect.fn('hooks.readPayload')(function* () {
         : typeof parsed.conversation_id === 'string'
           ? parsed.conversation_id
           : undefined,
+    prompt: typeof parsed.prompt === 'string' ? parsed.prompt : undefined,
+    turnId: typeof parsed.turn_id === 'string' ? parsed.turn_id : undefined,
     workspaceRoots:
       Array.isArray(parsed.workspace_roots) && parsed.workspace_roots.every(root => typeof root === 'string')
         ? parsed.workspace_roots

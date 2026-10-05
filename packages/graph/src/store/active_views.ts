@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphActiveViewFence, type CodeGraphActiveViewIdentity} from './models.js';
 import {CODE_GRAPH_SNAPSHOT_ID, validCanonicalTimestamp} from './reconciliation/core.js';
 import {MAXIMUM_CANONICAL_DATE_MILLISECONDS} from './removed/view_schema_contracts.js';

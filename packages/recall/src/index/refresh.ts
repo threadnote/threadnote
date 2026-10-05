@@ -1,5 +1,5 @@
 import {Effect, FileSystem, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-id';

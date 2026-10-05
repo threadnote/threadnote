@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_WORKSET_CATALOG_SCHEMA_VERSION} from './layout.js';
 import {migrateWorksetScopeReceipts} from './scope_receipt.js';
 import {

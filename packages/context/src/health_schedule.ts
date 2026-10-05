@@ -64,6 +64,7 @@ export type ContextHealthAggregateSourceV1 =
     ) & {
       readonly evidenceRevision?: string;
       readonly reason: ContextHealthAggregateUnknownReasonV1;
+      readonly report?: ContextHealthReportV1;
       readonly state: 'unknown';
     });
 
@@ -95,6 +96,8 @@ export type ContextHealthAggregateSourceSummaryV1 =
     }
   | {
       readonly evidenceRevision?: string;
+      readonly findingCount?: number;
+      readonly recordsScanned?: number;
       readonly reason: ContextHealthAggregateUnknownReasonV1;
       readonly sourceKey: string;
       readonly state: 'unknown';
@@ -136,9 +139,7 @@ export function aggregateContextHealthReportsV1(input: {
   );
   if (sources.length === 0) fail('Context health aggregation requires at least one evidence source.');
   const findings = sources
-    .flatMap(source =>
-      source.state === 'complete' ? source.findingIds.map(findingId => ({findingId, sourceKey: source.sourceKey})) : [],
-    )
+    .flatMap(source => (source.findingIds ?? []).map(findingId => ({findingId, sourceKey: source.sourceKey})))
     .sort(compareFinding);
   const sourceSummaries: ContextHealthAggregateSourceSummaryV1[] = sources.map(source =>
     source.state === 'complete'
@@ -151,16 +152,16 @@ export function aggregateContextHealthReportsV1(input: {
         }
       : {
           ...(source.evidenceRevision === undefined ? {} : {evidenceRevision: source.evidenceRevision}),
+          ...(source.findingCount === undefined
+            ? {}
+            : {findingCount: source.findingCount, recordsScanned: source.recordsScanned}),
           reason: source.reason,
           sourceKey: source.sourceKey,
           state: 'unknown',
         },
   );
   const unknownSources = sourceSummaries.filter(source => source.state === 'unknown').length;
-  const knownFindings = sources.reduce(
-    (count, source) => count + (source.state === 'complete' ? source.findingCount : 0),
-    0,
-  );
+  const knownFindings = sources.reduce((count, source) => count + (source.findingCount ?? 0), 0);
   const status = unknownSources > 0 ? 'unknown' : knownFindings > 0 ? 'findings' : 'clean';
   const exitCode = status === 'unknown' ? 2 : status === 'findings' ? 1 : 0;
   const unsigned = {
@@ -251,6 +252,9 @@ type CanonicalSource =
     }
   | {
       readonly evidenceRevision?: string;
+      readonly findingCount?: number;
+      readonly findingIds?: readonly string[];
+      readonly recordsScanned?: number;
       readonly reason: ContextHealthAggregateUnknownReasonV1;
       readonly sourceKey: string;
       readonly state: 'unknown';
@@ -269,6 +273,7 @@ function canonicalSource(source: ContextHealthAggregateSourceV1, project: string
     }
     return {
       ...(source.evidenceRevision === undefined ? {} : {evidenceRevision: source.evidenceRevision}),
+      ...(source.report === undefined ? {} : canonicalKnownFindings(source.report, project, sourceKey)),
       reason: source.reason,
       sourceKey,
       state: 'unknown',
@@ -276,26 +281,34 @@ function canonicalSource(source: ContextHealthAggregateSourceV1, project: string
   }
   if (!SHA256.test(source.evidenceRevision))
     fail(`Context health source ${sourceKey} has an invalid evidence revision.`);
-  validateReport(source.report, project, sourceKey);
+  const knownFindings = canonicalKnownFindings(source.report, project, sourceKey);
   if (source.report.status === 'unknown') {
     return {
       evidenceRevision: source.evidenceRevision,
+      ...(knownFindings.findingCount === 0 ? {} : knownFindings),
       reason: 'evidence-incomplete',
       sourceKey,
       state: 'unknown',
     };
   }
-  const findingIds = source.report.findings.map(finding => finding.id).sort(compareText);
+  return {
+    evidenceRevision: source.evidenceRevision,
+    ...knownFindings,
+    sourceKey,
+    state: 'complete',
+  };
+}
+
+function canonicalKnownFindings(report: ContextHealthReportV1, project: string, sourceKey: string) {
+  validateReport(report, project, sourceKey);
+  const findingIds = report.findings.map(finding => finding.id).sort(compareText);
   if (new Set(findingIds).size !== findingIds.length) {
     fail(`Context health source ${sourceKey} contains a duplicate finding ID.`);
   }
   return {
-    evidenceRevision: source.evidenceRevision,
-    findingCount: source.report.findings.length + source.report.omittedFindings,
+    findingCount: report.findings.length + report.omittedFindings,
     findingIds,
-    recordsScanned: source.report.recordsScanned,
-    sourceKey,
-    state: 'complete',
+    recordsScanned: report.recordsScanned,
   };
 }
 
@@ -381,7 +394,9 @@ function validateReport(report: ContextHealthReportV1, project: string, sourceKe
   }
   validateSemanticCompleteness(report.semanticCompleteness, report.recordsScanned, sourceKey);
   const findingCount = report.findings.length + report.omittedFindings;
-  const semanticComplete = report.semanticCompleteness.state === 'complete';
+  const semanticComplete =
+    report.semanticCompleteness.state === 'complete' &&
+    (report.maintenance?.citationCoverage.state ?? 'complete') === 'complete';
   if (
     (report.status === 'clean' && (!semanticComplete || findingCount !== 0)) ||
     (report.status === 'findings' && (!semanticComplete || findingCount === 0)) ||

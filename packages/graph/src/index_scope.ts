@@ -18,6 +18,13 @@ export interface CodeGraphWorkspaceCatalog {
   readonly workspace: CodeGraphWorkspace;
 }
 
+const WORKSPACE_CATALOG_CACHE_MAXIMUM = 8;
+const WORKSPACE_CATALOG_CACHE_BYTES = 4 * 1_024 * 1_024;
+const workspaceCatalogs = new WeakMap<
+  CodeGraphLanguagePackRegistryShape,
+  Map<string, {readonly serialized: string; readonly bytes: number}>
+>();
+
 export interface ResolvedCodeGraphIndexScope {
   readonly admittedPrefixes: readonly string[];
   readonly closureDigest: string;
@@ -95,12 +102,34 @@ export function resolveCodeGraphWorkspaceCatalog(
     .sort((left, right) => compareCodeUnits(left.path, right.path));
   const fingerprint = workspaceCatalogFingerprint(contexts);
   if (cached?.fingerprint === fingerprint) return Effect.succeed(cached);
+  const retained = workspaceCatalogs.get(languagePacks);
+  const previous = retained?.get(fingerprint);
+  if (previous !== undefined) {
+    retained!.delete(fingerprint);
+    retained!.set(fingerprint, previous);
+    return Effect.sync(() => JSON.parse(previous.serialized) as CodeGraphWorkspaceCatalog);
+  }
   return languagePacks.discoverWorkspace(contexts).pipe(
-    Effect.map(workspace => ({
-      fingerprint,
-      resolutionContextPaths: contexts.map(file => file.path),
-      workspace,
-    })),
+    Effect.map(workspace => {
+      const catalog = {fingerprint, resolutionContextPaths: contexts.map(file => file.path), workspace};
+      const serialized = JSON.stringify(catalog);
+      const bytes = serialized.length * 2;
+      if (bytes <= WORKSPACE_CATALOG_CACHE_BYTES) {
+        const entries =
+          workspaceCatalogs.get(languagePacks) ??
+          new Map<string, {readonly serialized: string; readonly bytes: number}>();
+        entries.delete(fingerprint);
+        entries.set(fingerprint, {serialized, bytes});
+        let retainedBytes = [...entries.values()].reduce((total, entry) => total + entry.bytes, 0);
+        while (entries.size > WORKSPACE_CATALOG_CACHE_MAXIMUM || retainedBytes > WORKSPACE_CATALOG_CACHE_BYTES) {
+          const oldest = entries.keys().next().value!;
+          retainedBytes -= entries.get(oldest)!.bytes;
+          entries.delete(oldest);
+        }
+        workspaceCatalogs.set(languagePacks, entries);
+      }
+      return catalog;
+    }),
   );
 }
 

@@ -1,4 +1,4 @@
-import {Cause, Effect, Queue, Schema} from 'effect';
+import {Cause, Effect, Logger, Queue, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {activeInstalledRelease} from '../installations.js';
 import {McpBrokerError, runMcpBroker, type McpBrokerChild, type McpBrokerFailureEvent} from '../mcp/broker.js';
@@ -79,7 +79,16 @@ const mcpBrokerProgram = Effect.gen(function* () {
   });
 });
 
-export const mcpBrokerEffect = withAnonymousTelemetry({component: 'mcp', operation: 'mcp-broker'}, mcpBrokerProgram);
+export const mcpBrokerEffect = withAnonymousTelemetry(
+  {component: 'mcp', operation: 'mcp-broker'},
+  mcpBrokerProgram,
+).pipe(
+  // The broker's stdout is the client's JSON-RPC transport. Keep Effect logs
+  // on stderr so future diagnostics can never interleave with protocol output
+  // (the broker already drops non-JSON child lines, but its own logs bypass
+  // that guard).
+  Effect.provideService(Logger.LogToStderr, true),
+);
 
 /** @internal Emits one closed, privacy-safe broker recovery observation. */
 export function emitMcpBrokerFailureEvent(event: McpBrokerFailureEvent): Effect.Effect<void> {

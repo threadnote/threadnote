@@ -1,0 +1,234 @@
+{
+  "version": 1,
+  "corpusId": "threadnote-token-efficiency-historical-v1",
+  "capturePolicy": {
+    "promptFormat": "GitHub title, two LF bytes, then body; CRLF normalized to LF",
+    "promptSourcesMustBeUnedited": true,
+    "capturedAt": "2026-09-29",
+    "admissionReviewBeforeProviderOutcomes": true,
+    "fixesUsedOnlyForHiddenVerification": true
+  },
+  "contextAssessmentPolicy": {
+    "independentBlindReview": true,
+    "reviewInput": "GitHub title and unedited body only",
+    "solutionVisible": false,
+    "providerOutcomesVisible": false,
+    "allowedLabels": ["none", "lacking", "sufficient", "excessive"]
+  },
+  "memoryAuthoringPolicy": {
+    "blinded": true,
+    "sourceOnly": true,
+    "taskPromptsVisible": false,
+    "gitHistoryVisible": false,
+    "networkVisible": false,
+    "method": "One general onboarding memory per subsystem, authored from a git-archive export of the pre-fix tree."
+  },
+  "repositories": [
+    {
+      "clusterId": "cluster_1cb105bddc7aa63e7ad8aa01",
+      "repository": "python-hyper/h11",
+      "repositoryUrl": "https://github.com/python-hyper/h11.git",
+      "license": "MIT",
+      "baseRevision": "15ec7da4d5e1a95ea8320ff0c05c3c5c89b8cdaf",
+      "fixRevision": "26ec787d44aacbff8fbc0fc1af7e3213dd993d46",
+      "repositoryFixtureHash": "db7c68bd7fe3710829db1f6b27943c909ca357a95741c3b1d544a21fb8d09d82",
+      "repositoryIdentityHash": "bedc970f7b68c9d9d498c494bceba1110d1c9f8e71745962b6f15d5eb2afb960"
+    },
+    {
+      "clusterId": "cluster_88eb6af05f9865e035ee5dac",
+      "repository": "python-hyper/hpack",
+      "repositoryUrl": "https://github.com/python-hyper/hpack.git",
+      "license": "MIT",
+      "baseRevision": "da26ef448423872c8e07f9dbea0e67f603510050",
+      "fixRevision": "99e56587ddd9ac4f1d8eb5539759e262d456f013",
+      "repositoryFixtureHash": "b5df5e2d915dd2a765e5a4cbd8d35ca73ad0b394a2a18ed7900490c82dfe02e7",
+      "repositoryIdentityHash": "d5ddb415bfe5d85a5455ce73e82501926a2c2152e52a3332a729cef5479e6e52"
+    },
+    {
+      "clusterId": "cluster_a694b9d977daf3429b17c928",
+      "repository": "python-attrs/attrs",
+      "repositoryUrl": "https://github.com/python-attrs/attrs.git",
+      "license": "MIT",
+      "baseRevision": "f38b8a3f1625060aa4245930822c34c11c252f83",
+      "fixRevision": "f53fc5440d7f86aac4328aec7a563eb48634177f",
+      "repositoryFixtureHash": "1fb4775d41a062e575c8d311a8dd37de8b9284eea109d519e798471a89c424f3",
+      "repositoryIdentityHash": "09cb6bba890544b937343bc8f0e6af1b731050d2ae7760705dc960bdfa158cbb"
+    },
+    {
+      "clusterId": "cluster_958ec85708a02f92a5e78925",
+      "repository": "pallets/click",
+      "repositoryUrl": "https://github.com/pallets/click.git",
+      "license": "BSD-3-Clause",
+      "baseRevision": "04ef3a6f473deb2499721a8d11f92a7d2c0912f2",
+      "fixRevision": "1458800409ed12076f18451889b0857db36aa522",
+      "repositoryFixtureHash": "90bbd433be0b3400c4a5bad22fc935939050af63bec1ab0aa1a30a9e3e008f5c",
+      "repositoryIdentityHash": "60bb20143d5c034afb55cc5e18cdaf27168572a4ddb2b15a749f0eef4f994318"
+    },
+    {
+      "clusterId": "cluster_7359813157084e1d46c09d8c",
+      "repository": "pallets/werkzeug",
+      "repositoryUrl": "https://github.com/pallets/werkzeug.git",
+      "license": "BSD-3-Clause",
+      "baseRevision": "fa93b5cee027bc9baadba67f21360a8a39b2317b",
+      "fixRevision": "b5c57f308465deb39bcc801017c4edde1f81d6ea",
+      "repositoryFixtureHash": "b8024c914c6cc0d9acdc166d6b65b858b572e78a3f7f8a565cf660ba116733af",
+      "repositoryIdentityHash": "acf4478302b96a5cd541901acf91734992c895c6697e0eec4aaaff7fceb1ebe5"
+    },
+    {
+      "clusterId": "cluster_ca1ad8db09a60c883e57db78",
+      "repository": "pypa/packaging",
+      "repositoryUrl": "https://github.com/pypa/packaging.git",
+      "license": "Apache-2.0-or-BSD-2-Clause",
+      "baseRevision": "c4fb81ff6eba16fdd24d50e9d9d002fdbece6dd4",
+      "fixRevision": "0a85b41e24c9b55b83f05ae696d73e8294a5b094",
+      "repositoryFixtureHash": "e042361da3d9f38d6fabedd4339c37d381aecd63d9c1fa5d0d9cefdce40dfc2f",
+      "repositoryIdentityHash": "cebf57c9dc188f711b86f5ce6df68d3d62d0ef6a15fc7b156a99c840275765d6"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "tsk_47e3cb3faf2da9c58a8faa14",
+      "slug": "h11-133",
+      "targetRepository": "python-hyper/h11",
+      "promptSource": {
+        "kind": "issue",
+        "url": "https://github.com/python-hyper/h11/issues/133",
+        "createdAt": "2021-07-06T12:49:52Z",
+        "updatedAt": "2022-09-25T15:40:38Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": "tasks/h11-133/as-issued-context.md",
+        "assessmentFile": "tasks/h11-133/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "sufficient"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "h11",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    },
+    {
+      "taskId": "tsk_ed9ebce266025c8aa067cc03",
+      "slug": "hpack-1219",
+      "targetRepository": "python-hyper/hpack",
+      "promptSource": {
+        "kind": "issue",
+        "url": "https://github.com/python-hyper/h2/issues/1219",
+        "createdAt": "2020-03-23T05:06:16Z",
+        "updatedAt": "2020-08-06T01:14:10Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": "tasks/hpack-1219/as-issued-context.md",
+        "assessmentFile": "tasks/hpack-1219/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "lacking"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "hpack",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    },
+    {
+      "taskId": "tsk_1c391a7896906b29202da55b",
+      "slug": "attrs-1606",
+      "targetRepository": "python-attrs/attrs",
+      "promptSource": {
+        "kind": "pull-request",
+        "url": "https://github.com/python-attrs/attrs/pull/1606",
+        "createdAt": "2026-08-02T10:57:31Z",
+        "updatedAt": "2026-08-02T11:47:00Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": "tasks/attrs-1606/as-issued-context.md",
+        "assessmentFile": "tasks/attrs-1606/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "sufficient"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "attrs",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    },
+    {
+      "taskId": "tsk_a7db0fa0dae5f2fca06e5bd8",
+      "slug": "click-3298",
+      "targetRepository": "pallets/click",
+      "promptSource": {
+        "kind": "issue",
+        "url": "https://github.com/pallets/click/issues/3298",
+        "createdAt": "2026-04-01T10:56:20Z",
+        "updatedAt": "2026-04-23T00:40:01Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": "tasks/click-3298/as-issued-context.md",
+        "assessmentFile": "tasks/click-3298/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "excessive"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "click",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    },
+    {
+      "taskId": "tsk_40aa8260ce35eb0588e0d85f",
+      "slug": "werkzeug-3295",
+      "targetRepository": "pallets/werkzeug",
+      "promptSource": {
+        "kind": "issue",
+        "url": "https://github.com/pallets/werkzeug/issues/3295",
+        "createdAt": "2026-09-25T03:53:01Z",
+        "updatedAt": "2026-09-25T04:37:10Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": null,
+        "assessmentFile": "tasks/werkzeug-3295/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "none"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "werkzeug",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    },
+    {
+      "taskId": "tsk_f88853b19227dfc208075dc9",
+      "slug": "packaging-1315",
+      "targetRepository": "pypa/packaging",
+      "promptSource": {
+        "kind": "issue",
+        "url": "https://github.com/pypa/packaging/issues/1315",
+        "createdAt": "2026-07-06T00:46:39Z",
+        "updatedAt": "2026-07-06T12:42:48Z",
+        "lastEditedAt": null
+      },
+      "contextAssessment": {
+        "contentFile": "tasks/packaging-1315/as-issued-context.md",
+        "assessmentFile": "tasks/packaging-1315/assessment.json",
+        "extraction": "Entire GitHub body, excluding the title.",
+        "sufficiency": "sufficient"
+      },
+      "verifier": {
+        "runner": "verifiers/verify.py",
+        "selector": "packaging",
+        "expectedBaseExit": 1,
+        "expectedFixExit": 0
+      }
+    }
+  ]
+}

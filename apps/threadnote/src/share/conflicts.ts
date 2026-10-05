@@ -1,6 +1,10 @@
 import {Console, Effect, Result} from 'effect';
 
 import {applyScrubber} from '@threadnote/platform/scrubber';
+import {uriSegment} from '@threadnote/workspace/manifest';
+import {classifyMemoryIdentityCandidates} from '@threadnote/recall/memory/identity';
+import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {
   memoryCodeCitationContentSharingBlocker,
   memoryCodeCitationSharingBlockerMessage,
@@ -28,22 +32,23 @@ import {
   assertShareTeamWritable,
   autoShareState,
   canonicalResourceInput,
+  establishedSharedMemoryIdentity,
   ensureSharedDirectoryChain,
   isRegularFileNoSymlink,
   loadPendingReindexes,
   mkdir,
-  pathDirname,
   pathJoin,
   prepareSharedInboundContentEffect,
   readFile,
   readMemoryContent,
   readSharedInboundFileContent,
   readTeamsFile,
+  reconcileMissingSharedMemoryIdentity,
   removeMemoryUri,
   resolveTeam,
   resourceExistsStrict,
   resourceUriToWorktreeRelative,
-  sharedMemoryIdentityContinuityIssue,
+  sharedMemoryIdentityConflict,
   sharedMemoryContentsEquivalent,
   sharedTeamNameForUri,
   stripPersonalProvenanceForSharedPublication,
@@ -54,7 +59,13 @@ import {
   writePendingReindexes,
 } from './core.js';
 
-import {gitFileContent, publishShareGitChange} from './git.js';
+import {
+  assertSharedWorktreeFileReady,
+  gitFileContent,
+  gitOutput,
+  publishShareGitChange,
+  writeSharedWorktreeFile,
+} from './git.js';
 
 export const runShareConflicts = Effect.fn('share.runShareConflicts')(function* (
   config: ShareRuntime,
@@ -74,7 +85,9 @@ export const runShareConflicts = Effect.fn('share.runShareConflicts')(function* 
     yield* Console.log(`  status: ${conflict.status}`);
     yield* Console.log(`  reason: ${conflict.reason}`);
     yield* Console.log(`  show: threadnote share conflict show ${conflict.id}`);
-    yield* Console.log(`  take shared: threadnote share conflict resolve ${conflict.id} --take shared`);
+    if (shareConflictCanTakeShared(conflict)) {
+      yield* Console.log(`  take shared: threadnote share conflict resolve ${conflict.id} --take shared`);
+    }
     yield* Console.log(`  take local: threadnote share conflict resolve ${conflict.id} --take local`);
     yield* Console.log(`  merged file: threadnote share conflict resolve ${conflict.id} --from-file merged.md`);
   }
@@ -114,7 +127,11 @@ export const runShareConflictResolve = Effect.fn('share.runShareConflictResolve'
   for (const message of result.gitMessages) {
     yield* Console.log(message);
   }
-  yield* Console.log(`Resolved shared memory conflict: ${result.id}`);
+  yield* Console.log(
+    options.dryRun === true
+      ? `Would resolve shared memory conflict: ${result.id}`
+      : `Resolved shared memory conflict: ${result.id}`,
+  );
 });
 
 export const listShareConflicts = Effect.fn('share.listShareConflicts')(function* (
@@ -147,7 +164,7 @@ export const showShareConflict = Effect.fn('share.showShareConflict')(function* 
   return {
     ...inspected,
     diff: formatShareConflictDiff(inspected),
-    resolutionGuidance: shareConflictResolutionGuidance(inspected.id),
+    resolutionGuidance: shareConflictResolutionGuidance(inspected),
   };
 });
 
@@ -176,34 +193,51 @@ export const resolveShareConflict = Effect.fn('share.resolveShareConflict')(func
   const ov = NATIVE_RESOURCE_BACKEND;
   const messages: string[] = [];
   const gitMessages: string[] = [];
+  const takeSharedPlan =
+    take === 'shared' && inspected.status !== 'removed'
+      ? yield* prepareTakeSharedPlan(config, conflict.team, inspected, options.push)
+      : undefined;
   const backupPath = dryRun ? undefined : yield* backupShareConflict(config, inspected);
 
   if (take === 'shared') {
     if (inspected.status === 'removed') {
       if (inspected.hasLocalContent) {
         yield* removeMemoryUri(config, ov, inspected.uri, dryRun);
-        messages.push(`Accepted shared deletion for ${inspected.uri}.`);
+        messages.push(`${dryRun ? 'Would accept' : 'Accepted'} shared deletion for ${inspected.uri}.`);
       } else {
-        messages.push(`Shared deletion was already reflected in native canonical store for ${inspected.uri}.`);
+        messages.push(
+          `Shared deletion ${dryRun ? 'is' : 'was'} already reflected in native canonical store for ${inspected.uri}.`,
+        );
       }
     } else {
-      if (inspected.sharedContent === undefined) {
-        throw ShareOperationError.make({message: `Cannot take shared for ${inspected.id}: ${inspected.reason}.`});
-      }
-      if (inspected.localContent !== undefined) {
-        assertSharedMemoryIdentityContinuity(inspected.uri, inspected.localContent, inspected.sharedContent);
+      if (!takeSharedPlan) throw ShareOperationError.make({message: `Cannot take shared for ${inspected.id}.`});
+      if (takeSharedPlan.writeWorktree) {
+        yield* writeSharedConflictFile(conflict.team, inspected, takeSharedPlan.acceptedContent, dryRun);
       }
       yield* ensureSharedDirectoryChain(config, ov, inspected.uri, dryRun);
       yield* writeMemoryFileChecked(
         config,
         ov,
         inspected.uri,
-        inspected.sharedContent,
+        takeSharedPlan.acceptedContent,
         inspected.hasLocalContent ? 'replace' : 'create',
         dryRun,
-        verifySharedMemoryIdentityContinuity(config, inspected.uri, inspected.sharedContent),
+        verifySharedMemoryIdentityContinuity(config, inspected.uri, takeSharedPlan.acceptedContent),
       );
-      messages.push(`Accepted shared file content for ${inspected.uri}.`);
+      if (takeSharedPlan.publishIdentityRepair) {
+        gitMessages.push(
+          ...(yield* publishShareGitChange(
+            conflict.team.config.worktree,
+            inspected.relativePath,
+            `share: repair identity ${inspected.relativePath}`,
+            {
+              dryRun,
+              push: options.push,
+            },
+          )),
+        );
+      }
+      messages.push(`${dryRun ? 'Would accept' : 'Accepted'} shared file content for ${inspected.uri}.`);
     }
   } else {
     const content = yield* conflictResolutionContent(inspected, take, fromFile, mergedContent);
@@ -230,8 +264,8 @@ export const resolveShareConflict = Effect.fn('share.resolveShareConflict')(func
     );
     messages.push(
       take === 'local'
-        ? `Published local native canonical store content for ${inspected.uri}.`
-        : `Applied merged content for ${inspected.uri}.`,
+        ? `${dryRun ? 'Would publish' : 'Published'} local native canonical store content for ${inspected.uri}.`
+        : `${dryRun ? 'Would apply' : 'Applied'} merged content for ${inspected.uri}.`,
     );
   }
 
@@ -239,6 +273,200 @@ export const resolveShareConflict = Effect.fn('share.resolveShareConflict')(func
     yield* clearPendingShareConflict(config, conflict.team.name, inspected.relativePath);
   }
   return {backupPath, gitMessages, id: inspected.id, messages, team: inspected.team, uri: inspected.uri};
+});
+
+interface TakeSharedPlan {
+  readonly acceptedContent: string;
+  readonly publishIdentityRepair: boolean;
+  readonly writeWorktree: boolean;
+}
+
+const prepareTakeSharedPlan = Effect.fn('share.prepareTakeSharedPlan')(function* (
+  config: ShareRuntime,
+  team: ResolvedTeam,
+  conflict: InspectedShareConflict,
+  push: boolean | undefined,
+) {
+  if (conflict.sharedContent === undefined) {
+    throw ShareOperationError.make({message: `Cannot take shared for ${conflict.id}: ${conflict.reason}.`});
+  }
+  reconcileMissingSharedMemoryIdentity(
+    conflict.uri,
+    conflict.localContent,
+    conflict.sharedContent,
+    conflict.previousContent,
+  );
+  const establishedMemoryId = establishedSharedMemoryIdentity(
+    conflict.uri,
+    conflict.localContent,
+    conflict.previousContent,
+  );
+  if (establishedMemoryId === undefined) {
+    return {
+      acceptedContent: conflict.sharedContent,
+      publishIdentityRepair: false,
+      writeWorktree: false,
+    } satisfies TakeSharedPlan;
+  }
+  const headRawContent = yield* gitFileContent(team.config.worktree, 'HEAD', conflict.relativePath);
+  if (headRawContent === undefined) {
+    throw ShareOperationError.make({
+      message: `Cannot verify committed shared content for ${conflict.id}. Sync the shared worktree and retry.`,
+    });
+  }
+  const headContent = yield* prepareSharedInboundContentEffect(conflict.uri, headRawContent);
+  const acceptedContent = reconcileMissingSharedMemoryIdentity(
+    conflict.uri,
+    conflict.localContent,
+    headContent,
+    conflict.previousContent,
+  );
+  const repairsHead = !sharedMemoryContentsEquivalent(headContent, acceptedContent);
+  const ahead =
+    push === false
+      ? 0
+      : Number.parseInt(
+          (yield* gitOutput(team.config.worktree, ['rev-list', '--count', '@{u}..HEAD'], false)) ?? '',
+          10,
+        );
+  if (push !== false && !Number.isSafeInteger(ahead)) {
+    throw ShareOperationError.make({
+      message: `Cannot verify unpublished shared commits for ${conflict.id}. Inspect the shared worktree upstream and retry.`,
+    });
+  }
+  const upstreamState =
+    !repairsHead && ahead > 0 ? yield* classifyUpstreamIdentityRepair(team, conflict, acceptedContent) : undefined;
+  if (upstreamState === 'divergent') {
+    throw ShareOperationError.make({
+      message: `Refusing shared identity repair for ${conflict.id}: upstream content diverged from the unpublished local repair. Sync or rebase the shared worktree and inspect the conflict again.`,
+    });
+  }
+  const publishIdentityRepair = repairsHead || upstreamState === 'exact-repair-needed';
+  if (publishIdentityRepair) {
+    assertShareTeamWritable(team, 'repair shared memory identity');
+  }
+  yield* assertSharedWorktreeFileReady(
+    team.config.worktree,
+    conflict.relativePath,
+    headContent,
+    false,
+    sharedMemoryContentsEquivalent,
+    {
+      allowCleanTrackedReplacement: true,
+      exactRetryContent: acceptedContent,
+    },
+  );
+  if (publishIdentityRepair) {
+    yield* assertSharedMemoryIdentityAvailable(
+      config,
+      team,
+      conflict.uri,
+      establishedMemoryId,
+      conflict.hasLocalContent,
+    );
+  }
+  return {
+    acceptedContent,
+    publishIdentityRepair,
+    writeWorktree: !sharedMemoryContentsEquivalent(conflict.sharedContent, acceptedContent),
+  } satisfies TakeSharedPlan;
+});
+
+type UpstreamIdentityRepairState = 'already-repaired' | 'divergent' | 'exact-repair-needed';
+
+const classifyUpstreamIdentityRepair = Effect.fn('share.classifyUpstreamIdentityRepair')(function* (
+  team: ResolvedTeam,
+  conflict: InspectedShareConflict,
+  acceptedContent: string,
+) {
+  const upstreamRawContent = yield* gitFileContent(team.config.worktree, '@{u}', conflict.relativePath);
+  if (upstreamRawContent === undefined) {
+    throw ShareOperationError.make({
+      message: `Cannot verify unpublished shared identity repair for ${conflict.id}. Inspect the shared worktree upstream and retry.`,
+    });
+  }
+  const upstreamContent = yield* prepareSharedInboundContentEffect(conflict.uri, upstreamRawContent);
+  const reconciledUpstream = reconcileMissingSharedMemoryIdentity(
+    conflict.uri,
+    conflict.localContent,
+    upstreamContent,
+    conflict.previousContent,
+  );
+  if (sharedMemoryContentsEquivalent(upstreamContent, acceptedContent)) {
+    return 'already-repaired' satisfies UpstreamIdentityRepairState;
+  }
+  if (
+    sharedMemoryContentsEquivalent(acceptedContent, reconciledUpstream) &&
+    !sharedMemoryContentsEquivalent(upstreamContent, reconciledUpstream)
+  ) {
+    return 'exact-repair-needed' satisfies UpstreamIdentityRepairState;
+  }
+  return 'divergent' satisfies UpstreamIdentityRepairState;
+});
+
+const assertSharedMemoryIdentityAvailable = Effect.fn('share.assertSharedMemoryIdentityAvailable')(function* (
+  config: ShareRuntime,
+  team: ResolvedTeam,
+  uri: string,
+  memoryId: string,
+  hasLocalContent: boolean,
+) {
+  const scope = `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team.name)}/durable/projects`;
+  const candidates = yield* loadRecallMemoryIdentities(config, {
+    allowedUriScopes: [scope],
+    memoryIds: [memoryId],
+    validateNow: true,
+  });
+  const resolution = classifyMemoryIdentityCandidates(candidates, memoryId, [scope]);
+  const nativeIdentityAvailable =
+    (resolution.state === 'not-found' && !hasLocalContent) ||
+    (resolution.state === 'resolved' && resolution.uri === uri);
+  if (!nativeIdentityAvailable) {
+    throw ShareOperationError.make({
+      message: `Refusing shared identity repair for ${uri}: stable memory_id ${memoryId} is already owned or ambiguous in team ${team.name}.`,
+    });
+  }
+  yield* assertSharedGitIdentityAvailable(config, team, uri, memoryId);
+});
+
+const assertSharedGitIdentityAvailable = Effect.fn('share.assertSharedGitIdentityAvailable')(function* (
+  config: ShareRuntime,
+  team: ResolvedTeam,
+  uri: string,
+  memoryId: string,
+) {
+  const head = yield* gitOutput(team.config.worktree, ['rev-parse', 'HEAD'], false);
+  const listing =
+    head === undefined
+      ? undefined
+      : yield* gitOutput(
+          team.config.worktree,
+          ['ls-tree', '-r', '--name-only', '-z', head, '--', ...SHAREABLE_MEMORY_KIND_DIRS],
+          false,
+        );
+  if (head === undefined || listing === undefined) {
+    throw ShareOperationError.make({
+      message: `Cannot verify stable memory_id ownership in shared team ${team.name}. Inspect the shared worktree and retry.`,
+    });
+  }
+  for (const candidate of listing.split('\0').filter(Boolean)) {
+    const relativePath = assertSafeShareRelativePath(candidate);
+    if (!relativePath.endsWith('.md')) continue;
+    const rawContent = yield* gitFileContent(team.config.worktree, head, relativePath);
+    if (rawContent === undefined) {
+      throw ShareOperationError.make({
+        message: `Cannot verify stable memory_id ownership for shared file ${relativePath}. Inspect the shared worktree and retry.`,
+      });
+    }
+    const candidatePath = yield* pathJoin(team.config.worktree, ...relativePath.split('/'));
+    const candidateUri = yield* workfileToResourceUri(config, team.config, candidatePath);
+    const record = parseMemoryDocument(candidateUri, rawContent);
+    if (record?.metadata.status === 'active' && record.metadata.memoryId === memoryId && candidateUri !== uri) {
+      throw ShareOperationError.make({
+        message: `Refusing shared identity repair for ${uri}: stable memory_id ${memoryId} is already owned by ${candidateUri} in team ${team.name}.`,
+      });
+    }
+  }
 });
 
 const teamsForShareQuery = Effect.fn('share.teamsForShareQuery')(function* (
@@ -338,9 +566,11 @@ const buildShareConflictSummary = Effect.fn('share.buildShareConflictSummary')(f
 ) {
   const inspected = yield* inspectShareConflict(config, team, change);
   return {
+    establishedMemoryId: inspected.establishedMemoryId,
     hasLocalContent: inspected.hasLocalContent,
     hasPreviousContent: inspected.hasPreviousContent,
     hasSharedContent: inspected.hasSharedContent,
+    identityConflict: inspected.identityConflict,
     id: inspected.id,
     reason: inspected.reason,
     relativePath: inspected.relativePath,
@@ -360,14 +590,21 @@ const inspectShareConflict = Effect.fn('share.inspectShareConflict')(function* (
   const localContent = yield* readOptionalMemoryContent(config, ov, uri);
   const shared = yield* readOptionalSharedConflictContent(uri, change);
   const previous = yield* readOptionalPreviousConflictContent(team.config.worktree, uri, change);
+  const establishedMemoryId = establishedSharedMemoryIdentity(uri, localContent, previous.content);
+  const identityConflict =
+    shared.content !== undefined
+      ? sharedMemoryIdentityConflict(uri, localContent, shared.content, previous.content)?.kind
+      : undefined;
   const identityIssue =
-    localContent !== undefined && shared.content !== undefined
-      ? sharedMemoryIdentityContinuityIssue(uri, localContent, shared.content)
+    shared.content !== undefined
+      ? sharedMemoryIdentityConflict(uri, localContent, shared.content, previous.content)?.message
       : undefined;
   return {
+    establishedMemoryId,
     hasLocalContent: localContent !== undefined,
     hasPreviousContent: previous.content !== undefined,
     hasSharedContent: shared.content !== undefined,
+    identityConflict,
     id: conflictId(team.name, change.relativePath),
     localContent,
     previousContent: previous.content,
@@ -525,8 +762,7 @@ const writeSharedConflictFile = Effect.fn('share.writeSharedConflictFile')(funct
     yield* Console.log(`Would write shared file: ${yield* portablePath(filePath)}`);
     return;
   }
-  yield* mkdir(yield* pathDirname(filePath), {recursive: true});
-  yield* writeFile(filePath, content, 'utf8');
+  yield* writeSharedWorktreeFile(team.config.worktree, conflict.relativePath, content);
 });
 
 const backupShareConflict = Effect.fn('share.backupShareConflict')(function* (
@@ -584,25 +820,32 @@ function conflictId(team: string, relativePath: string): string {
   return `${team}:${relativePath}`;
 }
 
-function shareConflictResolutionGuidance(id: string): readonly string[] {
+function shareConflictResolutionGuidance(conflict: ShareConflictSummary): readonly string[] {
   return [
-    `threadnote share conflict resolve ${id} --take shared`,
-    `threadnote share conflict resolve ${id} --take local`,
-    `threadnote share conflict resolve ${id} --from-file merged.md`,
+    ...(shareConflictCanTakeShared(conflict) ? [`threadnote share conflict resolve ${conflict.id} --take shared`] : []),
+    `threadnote share conflict resolve ${conflict.id} --take local`,
+    `threadnote share conflict resolve ${conflict.id} --from-file merged.md`,
   ];
 }
 
-function formatShareConflictNextSteps(teamName: string, changes: readonly ChangedFile[]): string {
-  const ids = changes.filter(isShareableMemoryChange).map(change => conflictId(teamName, change.relativePath));
+function shareConflictCanTakeShared(
+  conflict: Pick<ShareConflictSummary, 'hasSharedContent' | 'identityConflict' | 'status'>,
+): boolean {
+  return conflict.identityConflict !== 'changed' && (conflict.status === 'removed' || conflict.hasSharedContent);
+}
+
+function formatShareConflictNextSteps(teamName: string, conflicts: readonly ShareConflictSummary[]): string {
+  const entries = conflicts.map(conflict => ({conflict, id: conflictId(teamName, conflict.relativePath)}));
+  const ids = entries.map(({id}) => id);
   if (ids.length === 0) {
     return `Run \`threadnote share conflicts --team ${teamName}\` to inspect pending reindexes.`;
   }
   return [
     `Resolve pending shared memory conflicts with:`,
     `  threadnote share conflicts --team ${teamName}`,
-    ...ids.flatMap(id => [
+    ...entries.flatMap(({conflict, id}) => [
       `  threadnote share conflict show ${id}`,
-      `  threadnote share conflict resolve ${id} --take shared`,
+      ...(shareConflictCanTakeShared(conflict) ? [`  threadnote share conflict resolve ${id} --take shared`] : []),
       `  threadnote share conflict resolve ${id} --take local`,
       `  threadnote share conflict resolve ${id} --from-file merged.md`,
     ]),
@@ -662,4 +905,11 @@ function splitDiffLines(content: string | undefined): readonly string[] {
   return lines;
 }
 
-export {conflictId, formatShareConflictNextSteps, isShareableMemoryChange, normalizePendingChange, teamsForShareQuery};
+export {
+  conflictId,
+  formatShareConflictNextSteps,
+  isShareableMemoryChange,
+  normalizePendingChange,
+  shareConflictCanTakeShared,
+  teamsForShareQuery,
+};

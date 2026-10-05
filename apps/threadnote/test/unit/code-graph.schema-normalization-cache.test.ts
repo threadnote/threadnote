@@ -3,7 +3,7 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect, Result} from 'effect';
 import * as FC from 'fast-check';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {inspectCodeGraphQueryIndexes} from '@threadnote/graph/store/query/indexes';
 import {normalizeSchemaDefinition} from '@threadnote/graph/store/schema/normalization';
 import {normalizeSchemaDefinition as normalizeUncachedVectorSchema} from '@threadnote/graph/vector/retirement/inspection';

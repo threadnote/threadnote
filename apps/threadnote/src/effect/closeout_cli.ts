@@ -1,5 +1,5 @@
 import {Console, Effect, Schema} from 'effect';
-import {Command, Flag} from 'effect/unstable/cli';
+import {Command, Flag} from 'effect/cli';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runCloseoutApply, runCloseoutPreview} from '../memory/closeout.js';
 import {applicationError} from '@threadnote/platform/errors';

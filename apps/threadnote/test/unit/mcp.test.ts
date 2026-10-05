@@ -1052,7 +1052,7 @@ describe('MCP agent executable resolution', () => {
         status: 'current',
       });
       const instructionPath = join(userHome, agent === 'codex' ? '.codex/AGENTS.md' : '.claude/CLAUDE.md');
-      expect(await readFile(instructionPath, 'utf8'), agent).toContain('Use the installed Threadnote skills');
+      expect(await readFile(instructionPath, 'utf8'), agent).toContain('Route non-trivial work by situation');
       await rm(callsPath, {force: true});
     }
   });

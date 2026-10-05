@@ -183,6 +183,86 @@ describe('share administration', () => {
     );
   });
 
+  it('skips a scoped commit when every ignored removal path is already absent', async () => {
+    const config = await makeRuntime();
+    homes.push(config.agentContextHome);
+    vi.mocked(utils.runCommand).mockImplementation((_executable, args) => {
+      if (args.includes('diff')) return Effect.succeed(ok(''));
+      return Effect.succeed(ok());
+    });
+
+    const preview = await publishShareGitChange(
+      join(config.agentContextHome, 'share-worktree'),
+      ['durable/missing-a.md', 'durable/missing-b.md'],
+      'remove missing memories',
+      {dryRun: true, ignoreMissingRemovePaths: true, push: false, verb: 'rm'},
+    ).pipe(captureConsole, runEffect);
+
+    const messages = await runEffect(
+      publishShareGitChange(
+        join(config.agentContextHome, 'share-worktree'),
+        ['durable/missing-a.md', 'durable/missing-b.md'],
+        'remove missing memories',
+        {ignoreMissingRemovePaths: true, push: false, verb: 'rm'},
+      ),
+    );
+
+    expect(preview.output).toContain('Would inspect requested paths staged by the planned git rm.');
+    expect(preview.output).toContain(
+      'Would commit only concrete staged requested paths with message: remove missing memories; would skip the commit when none remain.',
+    );
+    expect(preview.output).not.toContain('git commit');
+    expect(messages).toContain('git commit: nothing to commit (requested paths already absent)');
+    expect(vi.mocked(utils.runCommand).mock.calls.some(([, args]) => args.includes('commit'))).toBe(false);
+  });
+
+  it('commits only staged members of a mixed ignored-removal path set', async () => {
+    const config = await makeRuntime();
+    homes.push(config.agentContextHome);
+    const existing = 'durable/existing.md';
+    const missing = 'durable/missing.md';
+    vi.mocked(utils.runCommand).mockImplementation((_executable, args) => {
+      if (args.includes('diff')) return Effect.succeed(ok(`${existing}\0`));
+      if (args.includes('commit')) return Effect.succeed(ok('[main abc123] remove existing'));
+      return Effect.succeed(ok());
+    });
+
+    const preview = await publishShareGitChange(
+      join(config.agentContextHome, 'share-worktree'),
+      [existing, missing],
+      'remove memories',
+      {dryRun: true, ignoreMissingRemovePaths: true, push: false, verb: 'rm'},
+    ).pipe(captureConsole, runEffect);
+
+    await runEffect(
+      publishShareGitChange(join(config.agentContextHome, 'share-worktree'), [existing, missing], 'remove memories', {
+        ignoreMissingRemovePaths: true,
+        push: false,
+        verb: 'rm',
+      }),
+    );
+
+    expect(preview.output).toContain('Would inspect requested paths staged by the planned git rm.');
+    expect(preview.output).toContain(
+      'Would commit only concrete staged requested paths with message: remove memories; would skip the commit when none remain.',
+    );
+    expect(preview.output).not.toContain('git commit');
+    expect(vi.mocked(utils.runCommand)).toHaveBeenCalledWith(
+      'git',
+      [
+        '-C',
+        join(config.agentContextHome, 'share-worktree'),
+        'commit',
+        '-m',
+        'remove memories',
+        '--only',
+        '--',
+        existing,
+      ],
+      {allowFailure: true},
+    );
+  });
+
   it('bounds automatic share fetch and upstream inspection commands', async () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);

@@ -202,7 +202,7 @@ describe('Effect architecture boundaries', () => {
   it('isolates unstable Effect AI imports inside the AI adapter directory', async () => {
     for (const path of await sourceFiles()) {
       const source = await readFile(path, 'utf8');
-      if (!source.includes('effect/unstable/ai')) {
+      if (!/['"]effect\/ai(?:\/|['"])/u.test(source)) {
         continue;
       }
       expect(relative(repoRoot, path)).toMatch(

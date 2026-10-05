@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   REMOVED_VIEW_CLEANUP_ADMISSION_CURSOR_KEY,
   REMOVED_VIEW_CLEANUP_EPOCH_SEQUENCE_KEY,

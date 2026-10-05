@@ -154,18 +154,40 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
   }
 
   if (dryRun) {
-    yield* Console.log(`Would run: ${formatShellCommand(git, ['-C', worktree, 'commit', '-m', commitMessage])}`);
+    yield* Console.log(`Would inspect requested paths staged by the planned git ${verb}.`);
+    yield* Console.log(
+      `Would commit only concrete staged requested paths with message: ${commitMessage}; would skip the commit when none remain.`,
+    );
   } else {
-    const commitResult = yield* runCommand(git, ['-C', worktree, 'commit', '-m', commitMessage], {allowFailure: true});
-    if (commitResult.exitCode !== 0) {
-      const detail = commitResult.stdout.trim() || commitResult.stderr.trim();
-      if (/nothing to commit|no changes added/i.test(detail)) {
-        messages.push('git commit: nothing to commit (file already in tree)');
-      } else {
-        throw ShareOperationError.make({message: `git commit failed: ${detail || 'unknown error'}`});
-      }
+    const staged = yield* runCommand(
+      git,
+      ['-C', worktree, 'diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD', '--', ...paths],
+      {allowFailure: true},
+    );
+    if (staged.exitCode !== 0) {
+      throw ShareOperationError.make({
+        message: `Could not inspect staged shared changes: ${staged.stderr.trim() || staged.stdout.trim() || 'git diff failed'}`,
+      });
+    }
+    const commitPaths = staged.stdout.split('\0').filter(Boolean);
+    if (commitPaths.length === 0) {
+      messages.push('git commit: nothing to commit (requested paths already absent)');
     } else {
-      messages.push(`git commit: ${commitResult.stdout.trim().split('\n').slice(0, 2).join(' ')}`);
+      const commitResult = yield* runCommand(
+        git,
+        ['-C', worktree, 'commit', '-m', commitMessage, '--only', '--', ...commitPaths],
+        {allowFailure: true},
+      );
+      if (commitResult.exitCode !== 0) {
+        const detail = commitResult.stdout.trim() || commitResult.stderr.trim();
+        if (/nothing to commit|no changes added/i.test(detail)) {
+          messages.push('git commit: nothing to commit (file already in tree)');
+        } else {
+          throw ShareOperationError.make({message: `git commit failed: ${detail || 'unknown error'}`});
+        }
+      } else {
+        messages.push(`git commit: ${commitResult.stdout.trim().split('\n').slice(0, 2).join(' ')}`);
+      }
     }
   }
 
@@ -244,7 +266,11 @@ export function assertSharedWorktreeFileReady(
   dryRun = false,
   contentEquivalent: (currentContent: string, expectedContent: string) => boolean = (currentContent, expected) =>
     canonicalMemoryDocumentContent(currentContent) === canonicalMemoryDocumentContent(expected),
-): Effect.Effect<void, unknown, CommandExecutor | FileSystem.FileSystem | Path.Path | SystemInfo> {
+  options: {
+    readonly allowCleanTrackedReplacement?: boolean;
+    readonly exactRetryContent?: string;
+  } = {},
+): Effect.Effect<string | undefined, unknown, CommandExecutor | FileSystem.FileSystem | Path.Path | SystemInfo> {
   return Effect.gen(function* () {
     if (dryRun) return;
     const safeRelativePath = assertSafeShareRelativePath(relativePath);
@@ -262,9 +288,40 @@ export function assertSharedWorktreeFileReady(
         message: `Refusing to overwrite unmerged shared worktree file: ${safeRelativePath}. Resolve the conflict first.`,
       });
     }
-    const targetPath = yield* pathJoin(worktree, ...safeRelativePath.split('/'));
     const fs = yield* FileSystem.FileSystem;
-    if (!(yield* fs.exists(targetPath))) return;
+    let tracked = false;
+    let dirty = false;
+    if (options.allowCleanTrackedReplacement === true) {
+      if (yield* isShareGitOperationInProgress(git, worktree)) {
+        return yield* ShareOperationError.make({
+          message: `Refusing to overwrite shared worktree file during an in-progress Git operation: ${safeRelativePath}. Resolve the operation first.`,
+        });
+      }
+      const trackedResult = yield* runCommand(
+        git,
+        ['-C', worktree, 'ls-files', '--error-unmatch', '--', safeRelativePath],
+        {allowFailure: true},
+      );
+      tracked = trackedResult.exitCode === 0 && trackedResult.stdout.trim().length > 0;
+      const status = yield* runCommand(
+        git,
+        ['-C', worktree, 'status', '--porcelain=v1', '--untracked-files=all', '--', safeRelativePath],
+        {allowFailure: true},
+      );
+      if (status.exitCode !== 0) {
+        return yield* ShareOperationError.make({
+          message: `Could not verify shared worktree state for ${safeRelativePath}: ${status.stderr.trim() || status.stdout.trim() || 'git status failed'}.`,
+        });
+      }
+      dirty = status.stdout.trim().length > 0;
+    }
+    const targetPath = yield* pathJoin(worktree, ...safeRelativePath.split('/'));
+    if (!(yield* fs.exists(targetPath))) {
+      if (options.allowCleanTrackedReplacement !== true || (!tracked && !dirty)) return;
+      return yield* ShareOperationError.make({
+        message: `Refusing to overwrite changed shared worktree file: ${safeRelativePath}. Sync or resolve the worktree conflict first.`,
+      });
+    }
     if (Option.isSome(yield* fs.readLink(targetPath).pipe(Effect.option))) {
       return yield* ShareOperationError.make({
         message: `Refusing to replace a shared worktree symbolic link: ${targetPath}`,
@@ -275,11 +332,26 @@ export function assertSharedWorktreeFileReady(
       return yield* ShareOperationError.make({message: `Shared worktree target is not a regular file: ${targetPath}`});
     }
     const currentContent = yield* fs.readFileString(targetPath);
-    if (expectedContent === undefined || !contentEquivalent(currentContent, expectedContent)) {
+    if (options.exactRetryContent !== undefined && options.allowCleanTrackedReplacement === true) {
+      if (tracked && !dirty) return;
+      if (tracked && dirty) {
+        const index = yield* runCommand(git, ['-C', worktree, 'show', `:${safeRelativePath}`], {allowFailure: true});
+        const allowed = (content: string) =>
+          (expectedContent !== undefined && contentEquivalent(content, expectedContent)) ||
+          contentEquivalent(content, options.exactRetryContent!);
+        if (index.exitCode === 0 && allowed(currentContent) && allowed(index.stdout)) return;
+      }
       return yield* ShareOperationError.make({
         message: `Refusing to overwrite changed shared worktree file: ${safeRelativePath}. Sync or resolve the worktree conflict first.`,
       });
     }
+    if (expectedContent !== undefined && contentEquivalent(currentContent, expectedContent)) return;
+    if (expectedContent === undefined && options.allowCleanTrackedReplacement === true && tracked && !dirty) {
+      return currentContent;
+    }
+    return yield* ShareOperationError.make({
+      message: `Refusing to overwrite changed shared worktree file: ${safeRelativePath}. Sync or resolve the worktree conflict first.`,
+    });
   });
 }
 

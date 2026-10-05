@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "taskId": "tsk_f88853b19227dfc208075dc9",
+  "reviewTiming": "before-provider-outcomes",
+  "sourceSlice": "entire GitHub body, title excluded",
+  "sufficiency": "sufficient",
+  "rationale": "The body gives a minimal reproduction and semantic round-trip invariant but does not disclose the formatter's nesting-state defect or patch.",
+  "outcomeVisible": false,
+  "solutionVisible": false,
+  "independentBlindReviewConfirmed": true
+}

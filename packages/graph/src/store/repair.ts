@@ -1,5 +1,5 @@
 import {Clock, Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDatabaseRepair} from './models.js';
 import {CodeGraphStoreError} from '../types.js';
 import {diagnoseDatabase} from './diagnostics.js';

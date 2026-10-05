@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../ordering.js';
 import {configureConnection} from './session.js';
 import {type CodeGraphEdge, type CodeGraphProvenance, type CodeGraphQueryNode} from '../types.js';

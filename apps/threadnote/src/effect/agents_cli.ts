@@ -1,5 +1,5 @@
 import {Clock, Console, DateTime, Effect} from 'effect';
-import {Argument, Command} from 'effect/unstable/cli';
+import {Argument, Command} from 'effect/cli';
 import {AGENT_ADAPTERS, getAgentAdapter} from '../agent_integration/adapters.js';
 import {agentAdapterStatuses, runAgentAdapterAction} from '../agent_integration/adapter_actions.js';
 import type {AgentAdapter, AgentAdapterAction} from '../agent_integration/adapters/contract.js';

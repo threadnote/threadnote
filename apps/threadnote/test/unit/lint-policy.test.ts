@@ -28,6 +28,7 @@ const EFFECT_APPLICATION_BOUNDARY_RULES = [
   'effecttsgo/process-env',
   'effecttsgo/schema-sync',
   'effecttsgo/strict-boolean-expressions',
+  'effecttsgo/unstable-api-usage',
 ] as const;
 
 function officialEffectRules(): readonly string[] {

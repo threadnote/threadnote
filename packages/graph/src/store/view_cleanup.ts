@@ -1,5 +1,5 @@
 import {Clock, DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   type CodeGraphRemovedViewCleanupEvidence,
   type CodeGraphSnapshotPurgeStoreResult,

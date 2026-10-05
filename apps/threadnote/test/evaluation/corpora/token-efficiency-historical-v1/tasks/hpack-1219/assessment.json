@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "taskId": "tsk_ed9ebce266025c8aa067cc03",
+  "reviewTiming": "before-provider-outcomes",
+  "sourceSlice": "entire GitHub body, title excluded",
+  "sufficiency": "lacking",
+  "rationale": "The report supplies logs, a guess, and an h2 call-site link, but it does not explain hpack's one-shot iterable contract or establish whether encoding is preserved.",
+  "outcomeVisible": false,
+  "solutionVisible": false,
+  "independentBlindReviewConfirmed": true
+}

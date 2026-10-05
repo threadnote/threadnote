@@ -1,7 +1,7 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {SystemInfo} from '@threadnote/platform/system';

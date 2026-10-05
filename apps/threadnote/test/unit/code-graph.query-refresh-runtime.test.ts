@@ -5,7 +5,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Effect, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import * as FC from 'fast-check';
 import {describe, expect} from 'vitest';
 import {

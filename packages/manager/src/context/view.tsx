@@ -1,5 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+  CONTEXT_BRIEF_MODES,
   CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
   CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
@@ -58,6 +59,7 @@ interface BriefRequestSnapshot {
 
 interface ContextPanelProps {
   readonly projectOptions?: readonly string[];
+  readonly refreshGeneration?: number;
 }
 
 export function ContextPanel(props: ContextPanelProps): React.ReactElement {
@@ -142,6 +144,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     const controller = new AbortController();
     void api<ManagerWorksetCatalog>('/api/worksets', undefined, {signal: controller.signal})
       .then(next => {
+        if (controller.signal.aborted) return;
         setCatalog(next);
         setCatalogError('');
       })
@@ -149,7 +152,16 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
         if (!controller.signal.aborted) setCatalogError(errorMessage(cause));
       });
     return () => controller.abort();
-  }, []);
+  }, [props.refreshGeneration]);
+
+  useEffect(() => {
+    if (!catalog) return;
+    const repositoryAvailable = !callerCwd || catalog.projects.some(item => item.path === callerCwd);
+    const worksetAvailable = !workset || catalog.definitions.some(item => item.name === workset);
+    if (!repositoryAvailable) setCallerCwd('');
+    if (!worksetAvailable) setWorkset('');
+    if (scopeKind === 'repository' ? !repositoryAvailable : !worksetAvailable) setScope(scopeKind);
+  }, [callerCwd, catalog, scopeKind, workset]);
 
   async function runBrief(overrides: BriefRunOverrides = {}): Promise<void> {
     const nextTask = overrides.task ?? task;
@@ -439,10 +451,13 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
 
   function setScope(next: ContextScopeKind): void {
     briefRequest.current?.abort();
+    graphRecoveryRequest.current?.abort();
+    setGraphRecoveryBusy(false);
     invalidateRecall();
     setScopeKind(next);
     setBriefBusy(false);
     setBrief(undefined);
+    setBriefRequestSnapshot(undefined);
     setBriefError('');
   }
 
@@ -583,7 +598,7 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
                 onChange={event => setMode(event.target.value as ContextBriefMode)}
                 value={mode}
               >
-                {(['brief', 'locate', 'explain', 'trace', 'impact'] as const).map(value => (
+                {CONTEXT_BRIEF_MODES.map(value => (
                   <option key={value}>{value}</option>
                 ))}
               </select>
@@ -1491,21 +1506,6 @@ function FollowUpAction(props: {
         type="button"
       >
         {codeRefs === undefined ? 'Narrow Workset and rerun' : 'Inspect node and rerun'}
-      </button>
-    );
-  }
-  if (followUp.operation === 'prepare-workset') {
-    return (
-      <button
-        onClick={() =>
-          props.onRerun({
-            task: `Explain the current readiness and evidence gaps for Workset ${followUp.workset}.`,
-            workset: followUp.workset,
-          })
-        }
-        type="button"
-      >
-        Switch to {followUp.workset} scope and rerun
       </button>
     );
   }

@@ -62,6 +62,7 @@ export function codeGraphInspectionObservation(
     ...(observation.borrowedSnapshotId === undefined ? {} : {borrowedSnapshotId: observation.borrowedSnapshotId}),
     ...(observation.manifestPath === undefined ? {} : {manifestPath: observation.manifestPath}),
     ...(observation.projectScope === undefined ? {} : {projectScope: observation.projectScope}),
+    ...(observation.readySnapshotId === undefined ? {} : {readySnapshotId: observation.readySnapshotId}),
   };
 }
 
@@ -137,6 +138,8 @@ export interface CodeGraphStatusObservation {
   readonly projectScope?: CodeGraphQueryScope;
   /** Read-only shared evidence selected without changing this worktree's active pointer. */
   readonly borrowedSnapshotId?: string;
+  /** Exact ready snapshot selected by the parent status pass. */
+  readonly readySnapshotId?: string;
   readonly identity: RepositoryIdentity;
   /** Present only when status performed an exact worktree observation. */
   readonly overlay?: {readonly dirty: boolean; readonly fingerprint?: string};
@@ -196,10 +199,15 @@ export function attachCodeGraphStatusObservation(
   observation: CodeGraphStatusObservation | undefined,
 ): CodeGraphStatus {
   if (observation === undefined) return status;
+  const {readySnapshotId: _readySnapshotId, ...baseObservation} = observation;
+  const selectedObservation =
+    status.readySnapshot === undefined
+      ? baseObservation
+      : {...baseObservation, readySnapshotId: status.readySnapshot.id};
   Object.defineProperty(status, CODE_GRAPH_STATUS_OBSERVATION, {
     configurable: false,
     enumerable: false,
-    value: observation,
+    value: selectedObservation,
     writable: false,
   });
   return status;

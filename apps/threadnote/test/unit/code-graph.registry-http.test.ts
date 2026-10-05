@@ -3,7 +3,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';

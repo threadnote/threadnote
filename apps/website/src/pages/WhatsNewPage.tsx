@@ -7,12 +7,19 @@ import {Icon} from '../components/Icons';
 import {PostShare} from '../components/PostShare';
 import {SiteShell} from '../components/SiteShell';
 import {
+  filterWebsiteUpdatesByKind,
   orderWebsiteUpdatesDescending,
   websiteSocialImageForArticle,
   websiteSocialImageForRelease,
   type WebsiteSocialImage,
 } from '../content/websiteArticles';
-import {whatsNewArticlePath, whatsNewPostForPathname, whatsNewReleasePath} from '../lib/routes';
+import {
+  whatsNewArticlePath,
+  whatsNewIndexViewForSearch,
+  whatsNewPostForPathname,
+  whatsNewReleasePath,
+  type WhatsNewIndexView,
+} from '../lib/routes';
 import {docsArticleHref, setDocumentMeta, siteHref, whatsNewArticleHref, whatsNewReleaseHref} from '../lib/site';
 
 const postDate = new Intl.DateTimeFormat('en', {
@@ -97,8 +104,11 @@ function UpdateDetail({update}: {readonly update: WebsiteUpdate}) {
   return (
     <SiteShell page="whats-new" fullBleed>
       <article className="post-detail">
-        <a className="post-detail__back" href={siteHref('whats-new/')}>
-          <span aria-hidden="true">←</span> All articles and releases
+        <a
+          className="post-detail__back"
+          href={siteHref(`whats-new/?view=${update.kind === 'article' ? 'articles' : 'releases'}`)}
+        >
+          <span aria-hidden="true">←</span> {update.kind === 'article' ? 'All articles' : 'All release notes'}
         </a>
         <header className="post-detail__header">
           <UpdateMeta update={update} />
@@ -120,26 +130,73 @@ function UpdateDetail({update}: {readonly update: WebsiteUpdate}) {
   );
 }
 
-function WhatsNewIndex({updates}: {readonly updates: readonly WebsiteUpdate[]}) {
-  const latest = updates[0];
-  const earlier = updates.slice(1);
+function UpdateSwitch({updates, view}: {readonly updates: readonly WebsiteUpdate[]; readonly view: WhatsNewIndexView}) {
+  const articleCount = filterWebsiteUpdatesByKind(updates, 'article').length;
+  const releaseCount = filterWebsiteUpdatesByKind(updates, 'release').length;
+
+  return (
+    <nav className="update-switch" aria-label="What's new content">
+      <span className="update-switch__label">Browse</span>
+      <div className="update-switch__options">
+        <a href={siteHref('whats-new/?view=articles')} aria-current={view === 'articles' ? 'page' : undefined}>
+          Articles <span>{articleCount}</span>
+        </a>
+        <a href={siteHref('whats-new/?view=releases')} aria-current={view === 'releases' ? 'page' : undefined}>
+          Release notes <span>{releaseCount}</span>
+        </a>
+      </div>
+    </nav>
+  );
+}
+
+function WhatsNewIndex({
+  updates,
+  view,
+}: {
+  readonly updates: readonly WebsiteUpdate[];
+  readonly view: WhatsNewIndexView;
+}) {
+  const kind = view === 'articles' ? 'article' : 'release';
+  const visibleUpdates = filterWebsiteUpdatesByKind(updates, kind);
+  const latest = visibleUpdates[0];
+  const earlier = visibleUpdates.slice(1);
+  const isArticles = view === 'articles';
 
   useEffect(() => {
     setDocumentMeta(
-      "What's new",
-      'Threadnote articles, stable releases, engineering stories, and upgrade highlights.',
-      latest.socialImage,
+      isArticles ? 'Threadnote articles' : 'Threadnote release notes',
+      isArticles
+        ? 'Engineering stories from building Threadnote, including the experiments that do not ship.'
+        : 'Stable Threadnote releases, upgrade notes, and the changes worth knowing about.',
+      latest?.socialImage,
     );
   }, [
-    latest.socialImage.alt,
-    latest.socialImage.height,
-    latest.socialImage.type,
-    latest.socialImage.url,
-    latest.socialImage.width,
+    isArticles,
+    latest?.socialImage.alt,
+    latest?.socialImage.height,
+    latest?.socialImage.type,
+    latest?.socialImage.url,
+    latest?.socialImage.width,
   ]);
+
+  if (!latest) {
+    return (
+      <SiteShell page="whats-new" fullBleed>
+        <UpdateSwitch updates={updates} view={view} />
+        <section className="release-archive" aria-labelledby="empty-updates-title">
+          <header className="release-archive__heading">
+            <h1 id="empty-updates-title">{isArticles ? 'No articles yet.' : 'No release notes yet.'}</h1>
+            <p>Check back for the next update from Threadnote.</p>
+          </header>
+        </section>
+      </SiteShell>
+    );
+  }
 
   return (
     <SiteShell page="whats-new" fullBleed>
+      <UpdateSwitch updates={updates} view={view} />
+
       <section className="release-hero" aria-labelledby="latest-update-title">
         <div className="release-hero__intro">
           <UpdateMeta update={latest} />
@@ -159,8 +216,8 @@ function WhatsNewIndex({updates}: {readonly updates: readonly WebsiteUpdate[]}) 
 
         <div className="release-hero__highlights" aria-label={`${latest.title} highlights`}>
           <div className="release-hero__index">
-            <span>Latest {latest.kind}</span>
-            <strong>{latest.kind === 'article' ? 'A' : 'R'}</strong>
+            <span>{isArticles ? 'Latest article' : 'Latest release'}</span>
+            <strong>{isArticles ? 'A' : 'R'}</strong>
           </div>
           <ol>
             {latest.highlights.slice(0, 4).map((highlight, index) => (
@@ -176,12 +233,14 @@ function WhatsNewIndex({updates}: {readonly updates: readonly WebsiteUpdate[]}) 
       <section className="release-archive" aria-labelledby="release-archive-title">
         <header className="release-archive__heading">
           <div>
-            <span className="eyebrow">Articles and releases</span>
-            <h2 id="release-archive-title">The Threadnote timeline.</h2>
+            <span className="eyebrow">{isArticles ? 'More articles' : 'Release notes'}</span>
+            <h2 id="release-archive-title">
+              {isArticles ? 'Engineering stories. No launch confetti.' : 'Earlier releases.'}
+            </h2>
           </div>
           <p>
-            {updates.length} public posts, ordered by publication time. Each article and stable release has its own
-            permanent, shareable page.
+            {visibleUpdates.length} public {visibleUpdates.length === 1 ? 'post' : 'posts'}, ordered by publication
+            time. Each has its own permanent, shareable page.
           </p>
         </header>
 
@@ -216,6 +275,7 @@ function WhatsNewIndex({updates}: {readonly updates: readonly WebsiteUpdate[]}) 
 export default function WhatsNewPage() {
   const updates = websiteUpdates();
   const route = whatsNewPostForPathname(window.location.pathname, import.meta.env.BASE_URL);
+  const view = whatsNewIndexViewForSearch(window.location.search);
   const selected = route
     ? updates.find(update =>
         route.kind === 'article'
@@ -224,5 +284,5 @@ export default function WhatsNewPage() {
       )
     : undefined;
 
-  return selected ? <UpdateDetail update={selected} /> : <WhatsNewIndex updates={updates} />;
+  return selected ? <UpdateDetail update={selected} /> : <WhatsNewIndex updates={updates} view={view} />;
 }

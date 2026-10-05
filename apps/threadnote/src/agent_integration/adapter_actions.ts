@@ -110,11 +110,13 @@ export const removeRegisteredAgentAdaptersInTransaction = Effect.fn('agentAdapte
 export const agentAdapterDoctorChecks = Effect.fn('agentAdapters.doctor')(function* (
   config: RuntimeConfig,
   inferredClients: readonly AgentClient[] = [],
+  options: {readonly includeRetainedUnsupported?: boolean} = {},
 ) {
   const context = yield* makeStatusContext(config, inferredClients, false);
   const checks: DoctorCheck[] = [...context.legacyChecks];
   for (const id of Object.keys(context.registry?.surfaces ?? {})) {
     const adapter = getAgentAdapter(id);
+    if (!adapter && options.includeRetainedUnsupported === false) continue;
     const result = adapter
       ? yield* adapter.actions.status(config, adapter, context)
       : {state: 'unsupported', detail: 'Adapter no longer registered; receipt retained.'};

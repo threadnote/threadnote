@@ -3,7 +3,7 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path, Result} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES} from '@threadnote/graph/materialization/spool/apply_surfaces';
 import {

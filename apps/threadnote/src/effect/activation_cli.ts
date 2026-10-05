@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import {runActivationProductionCommandV1, type ActivationProductionCommandV1} from '../activation/production.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {boolean, optionalString, requiredString} from './cli/flags.js';

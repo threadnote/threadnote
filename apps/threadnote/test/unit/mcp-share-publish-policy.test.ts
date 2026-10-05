@@ -8,6 +8,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {runSharePublishTool} from '@threadnote/threadnote/mcp/server/share';
+import {runForget} from '@threadnote/threadnote/memory/commands';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
@@ -282,6 +283,125 @@ describe('MCP share-publish citation policy', () => {
         expect(publishedText).toContain(`Published ${sourceUri}`);
         expect(yield* fs.exists(sourcePath)).toBe(false);
         expect(yield* fs.exists(pendingPath)).toBe(false);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  it.effect('republishes over a forgotten canonical target when its tracked worktree file is clean', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-share-republish-'});
+        const worktree = path.join(home, 'share', 'worktrees', 'default');
+        const gitdir = path.join(home, 'share', 'teams', 'default.gitdir');
+        const sourceUri = 'threadnote://user/tester/memories/durable/projects/threadnote/replacement-cycle.md';
+        const targetUri =
+          'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/replacement-cycle.md';
+        const relativePath = 'durable/projects/threadnote/replacement-cycle.md';
+        const sourcePath = path.join(
+          home,
+          'data',
+          'local',
+          'user',
+          'tester',
+          'memories',
+          'durable',
+          'projects',
+          'threadnote',
+          'replacement-cycle.md',
+        );
+        const targetPath = path.join(
+          home,
+          'data',
+          'local',
+          'user',
+          'tester',
+          'memories',
+          'shared',
+          'default',
+          relativePath,
+        );
+        const worktreePath = path.join(worktree, relativePath);
+        const previous = [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          'visibility: shared',
+          'project: threadnote',
+          'topic: replacement-cycle',
+          'memory_id: tn_replacement_cycle',
+          '',
+          'Previous reviewed body.',
+        ].join('\n');
+        const replacement = previous
+          .replace('visibility: shared', 'visibility: personal')
+          .replace('Previous reviewed body.', 'Replacement reviewed body.');
+        const config: RuntimeConfig = {
+          account: 'local',
+          agentContextHome: home,
+          agentId: 'threadnote',
+          manifestPath: path.join(home, 'seed-manifest.yaml'),
+          user: 'tester',
+        };
+        yield* fs.makeDirectory(path.dirname(sourcePath), {recursive: true});
+        yield* fs.makeDirectory(path.dirname(targetPath), {recursive: true});
+        yield* fs.makeDirectory(path.dirname(worktreePath), {recursive: true});
+        yield* fs.makeDirectory(path.join(home, 'share'), {recursive: true});
+        yield* fs.writeFileString(sourcePath, replacement);
+        yield* fs.writeFileString(targetPath, previous);
+        yield* fs.writeFileString(worktreePath, previous);
+        yield* fs.writeFileString(
+          path.join(home, 'share', 'teams.json'),
+          `${JSON.stringify(
+            {
+              defaultTeam: 'default',
+              teams: {
+                default: {
+                  addedAt: '2026-08-26T20:00:00.000Z',
+                  gitdir,
+                  name: 'default',
+                  remote: 'git@example.com:team/memories.git',
+                  worktree,
+                },
+              },
+              version: 1,
+            },
+            undefined,
+            2,
+          )}\n`,
+        );
+        yield* runCommandEffect('git', ['init', '--quiet'], {cwd: worktree});
+        yield* runCommandEffect('git', ['-C', worktree, 'config', 'user.email', 'threadnote@example.test']);
+        yield* runCommandEffect('git', ['-C', worktree, 'config', 'user.name', 'Threadnote Test']);
+        yield* runCommandEffect('git', ['-C', worktree, 'add', '--', relativePath]);
+        yield* runCommandEffect('git', ['-C', worktree, 'commit', '--quiet', '--message', 'previous shared memory']);
+
+        const refused = yield* runSharePublishTool(config, sourceUri, {push: false});
+        expect(refused.isError).toBe(true);
+        expect(refused.content.map(item => (item.type === 'text' ? item.text : '')).join('\n')).toContain(
+          'already exists in the shared namespace',
+        );
+        yield* runForget(config, targetUri, {dryRun: true});
+        expect(yield* fs.exists(targetPath)).toBe(true);
+        yield* runForget(config, targetUri, {});
+        expect((yield* runCommandEffect('git', ['-C', worktree, 'status', '--porcelain'])).stdout.trim()).toBe('');
+        yield* fs.writeFileString(path.join(worktree, 'unrelated.md'), 'Unrelated staged work.\n');
+        yield* runCommandEffect('git', ['-C', worktree, 'add', '--', 'unrelated.md']);
+
+        const published = yield* runSharePublishTool(config, sourceUri, {push: false});
+        const publishedText = published.content.map(item => (item.type === 'text' ? item.text : '')).join('\n');
+        expect(published.isError, publishedText).not.toBe(true);
+        expect(publishedText).toContain(`Published ${sourceUri} -> ${targetUri}`);
+        expect(yield* fs.exists(sourcePath)).toBe(false);
+        expect(yield* fs.readFileString(targetPath)).toContain('Replacement reviewed body.');
+        expect(yield* fs.readFileString(worktreePath)).toContain('Replacement reviewed body.');
+        expect(
+          (yield* runCommandEffect('git', ['-C', worktree, 'diff', '--cached', '--name-only'])).stdout.trim(),
+        ).toBe('unrelated.md');
+        expect(
+          (yield* runCommandEffect('git', ['-C', worktree, 'ls-tree', '--name-only', 'HEAD', 'unrelated.md'])).stdout,
+        ).toBe('');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

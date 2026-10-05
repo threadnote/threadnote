@@ -605,7 +605,7 @@ describe('Effect CLI', () => {
     expect(contextBrief.stdout).toContain('cgr_ unsupported');
     expect(contextBrief.stdout).toContain('repeat up to eight times');
     expect(contextBrief.stdout).toContain('--workset string');
-    expect(contextBrief.stdout).toContain('choices: brief, locate, explain, trace, impact');
+    expect(contextBrief.stdout).toContain('choices: brief, locate, explain, trace, impact, resume');
     expect(analyze.stdout).toContain('--view choice');
     expect(analyze.stdout).toContain(
       'choices: stats, communities, community, groups, hubs, surprises, confidence, full',

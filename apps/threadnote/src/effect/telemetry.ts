@@ -1,9 +1,9 @@
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
-import * as HttpClientResponse from 'effect/unstable/http/HttpClientResponse';
-import {OtlpSerialization, OtlpTracer} from 'effect/unstable/observability';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientResponse from 'effect/http/HttpClientResponse';
+import {OtlpSerialization, OtlpTracer} from 'effect/observability';
 import {Cause, Clock, ConfigProvider, Context, Effect, Exit, Layer, Result, Tracer} from 'effect';
-import type * as Headers from 'effect/unstable/http/Headers';
+import type * as Headers from 'effect/http/Headers';
 import type * as Duration from 'effect/Duration';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {
@@ -181,7 +181,14 @@ const ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_FRESHNESS = ['current', 'deferred', 'st
 const ANONYMOUS_TELEMETRY_GRAPH_SNAPSHOT_SELECTIONS = ['active', 'borrowed', 'none', 'promoted'] as const;
 export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_SCOPES = ['local', 'workset'] as const;
 export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CONTRACTS = ['code-anchored-v3', 'task-only-v2'] as const;
-export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_MODES = ['brief', 'explain', 'impact', 'locate', 'trace'] as const;
+export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_MODES = [
+  'brief',
+  'explain',
+  'impact',
+  'locate',
+  'resume',
+  'trace',
+] as const;
 export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_CODE_ANCHOR_COVERAGES = ['complete', 'partial', 'unavailable'] as const;
 export const ANONYMOUS_TELEMETRY_CONTEXT_BRIEF_GAP_CLASSES = [
   'mixed',

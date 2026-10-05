@@ -1,18 +1,21 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import {describe, expect} from 'vitest';
-import {resolveCodeGraphCliReadContinuity} from '@threadnote/graph/commands/read_continuity';
+import {
+  readCodeGraphCliWithContinuity,
+  resolveCodeGraphCliReadContinuity,
+} from '@threadnote/graph/commands/read_continuity';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
-import type {CodeGraphStatus} from '@threadnote/graph/types';
+import {CodeGraphSnapshotUnavailable, type CodeGraphQueryResult, type CodeGraphStatus} from '@threadnote/graph/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 describe('code graph CLI shared-read continuity', () => {
-  effectIt.effect('serves a borrowed scoped query without waiting for a foreground refresh', () =>
+  effectIt.effect('keeps clean same-commit borrowed evidence on the strict bounded current path', () =>
     Effect.gen(function* () {
-      const initial = attachCodeGraphStatusObservation(scopedStatus(false), statusObservation());
+      const initial = attachCodeGraphStatusObservation(scopedStatus(false), statusObservation(false));
       const borrowed = attachCodeGraphStatusObservation(scopedStatus(true), {
-        ...statusObservation(),
+        ...statusObservation(false),
         borrowedSnapshotId: 'scope-snapshot',
       });
       const service = CodeGraphQueryService.of({
@@ -27,13 +30,143 @@ describe('code graph CLI shared-read continuity', () => {
       const result = yield* resolveCodeGraphCliReadContinuity(CONFIG, service, initial, 'query', 'current');
 
       expect(result.borrowedContinuity).toBe(true);
-      expect(result.readPlan).toEqual({refresh: false, strictFreshness: false, unavailable: false});
+      expect(result.readPlan).toEqual({refresh: true, strictFreshness: true, unavailable: false});
       expect(result.status.readySnapshot?.id).toBe('scope-snapshot');
+    }),
+  );
+
+  effectIt.effect('does not treat same-commit evidence as continuity for a dirty target worktree', () =>
+    Effect.gen(function* () {
+      const initial = attachCodeGraphStatusObservation(scopedStatus(false), statusObservation(true));
+      const borrowed = attachCodeGraphStatusObservation(scopedStatus(true), {
+        ...statusObservation(true),
+        borrowedSnapshotId: 'scope-snapshot',
+      });
+      const service = CodeGraphQueryService.of({
+        attachSharedReadySnapshot: () => Effect.succeed(borrowed),
+        inspect: () => Effect.die('Unexpected graph inspection.'),
+        purge: () => Effect.die('Unexpected graph purge.'),
+        status: () => Effect.die('Unexpected graph status.'),
+        statusForIdentity: () => Effect.die('Unexpected identity status.'),
+        statusForPublishedIdentity: () => Effect.die('Unexpected published identity status.'),
+      });
+
+      const result = yield* resolveCodeGraphCliReadContinuity(CONFIG, service, initial, 'query', 'current');
+
+      expect(result.borrowedContinuity).toBe(false);
+      expect(result.readPlan).toEqual({refresh: true, strictFreshness: true, unavailable: false});
+    }),
+  );
+
+  effectIt.effect('keeps an older borrowed snapshot on the strict current refresh path', () =>
+    Effect.gen(function* () {
+      const initial = attachCodeGraphStatusObservation(scopedStatus(false), statusObservation(false));
+      const borrowed = attachCodeGraphStatusObservation(scopedStatus(true, 'a'.repeat(40)), {
+        ...statusObservation(false),
+        borrowedSnapshotId: 'scope-snapshot',
+      });
+      const service = CodeGraphQueryService.of({
+        attachSharedReadySnapshot: () => Effect.succeed(borrowed),
+        inspect: () => Effect.die('Unexpected graph inspection.'),
+        purge: () => Effect.die('Unexpected graph purge.'),
+        status: () => Effect.die('Unexpected graph status.'),
+        statusForIdentity: () => Effect.die('Unexpected identity status.'),
+        statusForPublishedIdentity: () => Effect.die('Unexpected published identity status.'),
+      });
+
+      const result = yield* resolveCodeGraphCliReadContinuity(CONFIG, service, initial, 'query', 'current');
+
+      expect(result.borrowedContinuity).toBe(false);
+      expect(result.readPlan).toEqual({refresh: true, strictFreshness: true, unavailable: false});
+    }),
+  );
+
+  effectIt.effect('serves unchanged borrowed evidence without starting a refresh', () =>
+    Effect.gen(function* () {
+      const plans: Array<{refresh: boolean; strictFreshness: boolean; unavailable: boolean}> = [];
+      const reusedObservations: boolean[] = [];
+      const result = yield* readCodeGraphCliWithContinuity(
+        {borrowedContinuity: true, readPlan: {refresh: true, strictFreshness: true, unavailable: false}},
+        (plan, reuseStatusObservation) => {
+          plans.push(plan);
+          reusedObservations.push(reuseStatusObservation);
+          return Effect.succeed(queryResult('current'));
+        },
+      );
+
+      expect(result.borrowedContinuity).toBe(true);
+      expect(result.result.freshness).toBe('current');
+      expect(plans).toEqual([{refresh: false, strictFreshness: true, unavailable: false}]);
+      expect(reusedObservations).toEqual([true]);
+    }),
+  );
+
+  effectIt.effect('falls back to a strict refresh when the target changes during a borrowed read', () =>
+    Effect.gen(function* () {
+      const plans: Array<{refresh: boolean; strictFreshness: boolean; unavailable: boolean}> = [];
+      const reusedObservations: boolean[] = [];
+      const result = yield* readCodeGraphCliWithContinuity(
+        {borrowedContinuity: true, readPlan: {refresh: true, strictFreshness: true, unavailable: false}},
+        (plan, reuseStatusObservation) => {
+          plans.push(plan);
+          reusedObservations.push(reuseStatusObservation);
+          return Effect.succeed(queryResult(plans.length === 1 ? 'stale' : 'current'));
+        },
+      );
+
+      expect(result.borrowedContinuity).toBe(false);
+      expect(result.result.freshness).toBe('current');
+      expect(plans).toEqual([
+        {refresh: false, strictFreshness: true, unavailable: false},
+        {refresh: true, strictFreshness: true, unavailable: false},
+      ]);
+      expect(reusedObservations).toEqual([true, false]);
+    }),
+  );
+
+  effectIt.effect('falls back to a strict refresh when borrowed evidence becomes incompatible', () =>
+    Effect.gen(function* () {
+      const plans: Array<{refresh: boolean; strictFreshness: boolean; unavailable: boolean}> = [];
+      const reusedObservations: boolean[] = [];
+      const result = yield* readCodeGraphCliWithContinuity(
+        {borrowedContinuity: true, readPlan: {refresh: true, strictFreshness: true, unavailable: false}},
+        (plan, reuseStatusObservation) => {
+          plans.push(plan);
+          reusedObservations.push(reuseStatusObservation);
+          return plans.length === 1
+            ? CodeGraphSnapshotUnavailable.make({message: 'Project scope changed during the borrowed read.'})
+            : Effect.succeed(queryResult('current'));
+        },
+      );
+
+      expect(result.borrowedContinuity).toBe(false);
+      expect(result.result.freshness).toBe('current');
+      expect(plans).toHaveLength(2);
+      expect(reusedObservations).toEqual([true, false]);
     }),
   );
 });
 
-function scopedStatus(ready: boolean): CodeGraphStatus {
+function queryResult(freshness: CodeGraphQueryResult['freshness']): CodeGraphQueryResult {
+  return {
+    edges: [],
+    freshness,
+    nodes: [],
+    operation: 'query',
+    repository: {displayName: 'fixture', repositoryId: 'a'.repeat(64)},
+    snapshot: {
+      commit: 'b'.repeat(40),
+      dirty: false,
+      id: 'scope-snapshot',
+      worktreeId: 'fresh-worktree',
+    },
+    trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+    version: 1,
+    warnings: [],
+  };
+}
+
+function scopedStatus(ready: boolean, snapshotCommit = 'b'.repeat(40)): CodeGraphStatus {
   const status: CodeGraphStatus = {
     databasePath: '/threadnote/code-graph.sqlite',
     freshness: 'stale',
@@ -63,7 +196,7 @@ function scopedStatus(ready: boolean): CodeGraphStatus {
     ...(ready
       ? {
           readySnapshot: {
-            commit: 'a'.repeat(40),
+            commit: snapshotCommit,
             dirty: false,
             edgeCount: 1,
             extractorSet: 'extractor',
@@ -82,10 +215,11 @@ function scopedStatus(ready: boolean): CodeGraphStatus {
   return status;
 }
 
-function statusObservation() {
+function statusObservation(dirty: boolean) {
   return {
     identity: scopedStatusIdentity(),
     manifestPath: '/threadnote/manifest.yaml',
+    overlay: {dirty},
     projectScope: {
       project: {
         graph: {closure: 'dependencies' as const, roots: ['apps/docs']},

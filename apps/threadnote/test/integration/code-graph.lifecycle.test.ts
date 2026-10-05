@@ -25,7 +25,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Clock, Context, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
 import {runCodeGraphExport} from '@threadnote/threadnote/code_graph/commands';
 import {readAllCodeGraphBuildStatuses, selectCodeGraphBuildStatuses} from '@threadnote/graph/build_status';

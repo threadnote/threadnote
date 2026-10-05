@@ -7,7 +7,10 @@ import {
   formatMemoryDocument,
   formatMemoryDocumentWithKeywords,
   inferMemoryMetadata,
+  isAgentArtifactUri,
+  isAgentArtifactPath,
   isIsoDateOrCanonicalIsoInstant,
+  memoryHeaderValue,
   parseMemoryDocument,
   type MemoryMetadata,
 } from '@threadnote/memory/document';
@@ -23,6 +26,132 @@ import {
 import {migrateMemoryDocumentV4ToV5} from '@threadnote/memory/migrations';
 
 describe('memory document contract', () => {
+  it('recognizes reserved artifact roots without treating a basename or nested directory as an artifact', () => {
+    for (const relative of [
+      'agent-artifacts',
+      'agent-artifacts/skills/claude/review-pr/SKILL.md',
+      'shared/default/agent-artifacts/packs/team/README.md',
+    ]) {
+      expect(isAgentArtifactUri(`threadnote://user/tester/memories/${relative}`)).toBe(true);
+      expect(isAgentArtifactUri(`viking://user/tester/memories/${relative}`)).toBe(true);
+    }
+    for (const relative of [
+      'durable/projects/test/SKILL.md',
+      'durable/agent-artifacts/bad.md',
+      'agent-artifacts-old/bad.md',
+      'shared/agent-artifacts/bad.md',
+    ])
+      expect(isAgentArtifactUri(`threadnote://user/tester/memories/${relative}`)).toBe(false);
+    expect(isAgentArtifactUri('file:///memories/agent-artifacts/skill.md')).toBe(false);
+    expect(isAgentArtifactPath(['agent-artifacts', 'skills', 'local?tool'])).toBe(true);
+    expect(isAgentArtifactPath(['shared', 'default', 'agent-artifacts', 'local?tool'])).toBe(true);
+    expect(isAgentArtifactPath(['durable', 'agent-artifacts', 'tool'])).toBe(false);
+  });
+
+  it('projects constructed headers independently of field order, duplicates, empties and line endings (property)', () => {
+    const citation = createMemoryCodeCitation(citationInput('src/header-property.ts'));
+    const encoded = formatMemoryCodeCitation(citation);
+    const optionalScalar = fc.option(fc.constantFrom('', 'first-value'), {nil: undefined});
+    fc.assert(
+      fc.property(
+        fc.record({
+          title: fc.constantFrom('MEMORY' as const, 'HANDOFF' as const),
+          emptyKind: fc.boolean(),
+          candidate: fc.constantFrom('', 'first-candidate'),
+          agent: optionalScalar,
+          timestamp: fc.option(fc.constantFrom('', '2026-10-04T00:00:00.000Z'), {nil: undefined}),
+          project: optionalScalar,
+          repo: optionalScalar,
+          topic: optionalScalar,
+          keywords: fc.array(fc.constantFrom('', 'one', 'β', 'one'), {maxLength: 6}),
+          schema: fc.constantFrom('canonical', 'duplicate', 'spaced'),
+          citation: fc.constantFrom('canonical', 'extra-space', 'indented', 'missing-space'),
+          ending: fc.constantFrom('\n', '\r\n', '\r'),
+          footer: fc.boolean(),
+          order: fc.shuffledSubarray([0, 1, 2, 3, 4, 5, 6], {minLength: 7, maxLength: 7}),
+        }),
+        input => {
+          const kind = input.title === 'HANDOFF' && input.emptyKind ? 'handoff' : 'durable';
+          const citationLine = {
+            canonical: `code_citation: ${encoded}`,
+            'extra-space': `code_citation:  ${encoded}`,
+            indented: ` code_citation: ${encoded}`,
+            'missing-space': `code_citation:${encoded}`,
+          }[input.citation];
+          const groups = [
+            [
+              `candidate_id: ${input.candidate}`,
+              'candidate_id: ignored',
+              ...(input.agent === undefined
+                ? []
+                : [`source_agent_client: ${input.agent}`, 'source_agent_client: ignored']),
+              ...(input.timestamp === undefined ? [] : [`timestamp: ${input.timestamp}`, 'timestamp: ignored']),
+            ],
+            [
+              ...(input.project === undefined ? [] : [`project: ${input.project}`, 'project: ignored']),
+              ...(input.repo === undefined ? [] : [`repo: ${input.repo}`, 'repo: ignored']),
+              'repo_path: legacy-path',
+            ],
+            [...(input.topic === undefined ? [] : [`topic: ${input.topic}`, 'topic: ignored']), 'task: legacy-task'],
+            input.keywords.map(value => `keywords: ${value}`),
+            [
+              `schema_version: ${input.schema === 'spaced' ? ' ' : ''}${MEMORY_SCHEMA_VERSION}`,
+              ...(input.schema === 'duplicate' ? [`schema_version: ${MEMORY_SCHEMA_VERSION + 1}`] : []),
+            ],
+            [citationLine],
+            [`kind: ${kind === 'handoff' ? '' : 'durable'}`, 'kind: preference', 'status: active'],
+          ];
+          const header = [input.title, ...input.order.flatMap(index => groups[index])];
+          const body = 'Payload remains readable.\nproject: body-only\nkeywords: hidden';
+          const raw = [
+            ...header,
+            '',
+            ...body.split('\n'),
+            ...(input.footer ? ['', '<!-- MEMORY_FIELDS', 'version: 1', '-->'] : []),
+          ].join(input.ending);
+          const uri = 'threadnote://user/me/memories/durable/projects/headers/property.md';
+          const parsed = parseMemoryDocument(uri, raw)!;
+          const inferred = inferMemoryMetadata(raw);
+          const project = input.project ?? input.repo;
+          const keywords = input.keywords.filter(value => value !== '');
+          const errors = [
+            ...(input.schema === 'canonical' ? [] : [{reason: 'schema-version-mismatch'}]),
+            ...(input.citation === 'canonical' ? [] : [{index: 0, reason: 'non-canonical'}]),
+          ];
+          const common = {
+            kind,
+            candidateId: input.candidate,
+            keywords: keywords.length === 0 ? undefined : keywords,
+            schemaVersion: MEMORY_SCHEMA_VERSION,
+            codeCitations: input.citation === 'canonical' ? [citation] : undefined,
+            citationErrors: errors.length === 0 ? undefined : errors,
+            status: 'active',
+          };
+          expect(parsed.metadata).toMatchObject({
+            ...common,
+            project: project || undefined,
+            topic: input.topic || undefined,
+            sourceAgentClient: input.agent ?? 'unknown',
+            timestamp: input.timestamp ?? new Date(0).toISOString(),
+          });
+          expect(inferred).toMatchObject({
+            ...common,
+            project: (project ?? 'legacy-path') || undefined,
+            topic: (input.topic ?? 'legacy-task') || undefined,
+            sourceAgentClient: input.agent,
+            timestamp: input.timestamp,
+          });
+          expect(memoryHeaderValue(header.join('\n'), 'candidate_id')).toBe(input.candidate);
+          expect(parsed.headerTitle).toBe(input.title);
+          expect(parsed.body).toBe(body);
+          expect(parsed.content).toBe(raw);
+          expect(parsed.uri).toBe(uri);
+        },
+      ),
+      {numRuns: 80, seed: 110411},
+    );
+  });
+
   it('preserves the legacy document format when versioned metadata is absent', () => {
     const metadata: MemoryMetadata = {
       kind: 'durable',

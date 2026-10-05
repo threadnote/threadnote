@@ -582,6 +582,14 @@ describe('Manager Worksets interaction fencing', () => {
     );
   });
 
+  it('offers resume in the Workset Context Brief mode selector', async () => {
+    await renderWorksets();
+    await clickButton('Context brief');
+    const mode = await waitForElement<HTMLSelectElement>('#worksets-panel-brief select');
+
+    expect([...mode.options].map(option => option.value)).toContain('resume');
+  });
+
   it('keeps the six-section nav and Worksets editor usable at narrow widths', async () => {
     const css = await readFile(join(process.cwd(), 'packages', 'manager', 'static', 'app.css'), 'utf8');
     expect(css).toMatch(

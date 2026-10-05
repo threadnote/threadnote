@@ -93,6 +93,8 @@ import {
   type CompiledIgnoreRule,
 } from './threadnote_ignore.js';
 import {makeKeyedBackgroundScheduler} from './watcher_resume_scheduler.js';
+import {makeCodeGraphWatchReconciliation} from './watcher_reconciliation.js';
+export {makeCodeGraphWatchReconciliation};
 
 export interface CodeGraphWatchOptions {
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
@@ -1842,6 +1844,11 @@ export const watchRepository = Effect.fn('codeGraph.watchRepository')(function* 
     ),
   );
   const reconciliation = Stream.fromSchedule(Schedule.spaced('5 minutes')).pipe(Stream.map(() => 'periodic' as const));
+  const {reconcile, scheduleSettled: scheduleSettledReconciliation} = yield* makeCodeGraphWatchReconciliation({
+    probe: reconciliationHooks.periodicRefreshRequired,
+    reload: ignorePolicy.reload,
+    requestRefresh,
+  });
   yield* Stream.merge(changes, reconciliation).pipe(
     Stream.runForEach(event =>
       event === 'change'
@@ -1858,16 +1865,9 @@ export const watchRepository = Effect.fn('codeGraph.watchRepository')(function* 
                 Effect.flatMap(refreshRequired => (refreshRequired ? requestRefresh() : Effect.void)),
               ),
             ),
+            Effect.andThen(scheduleSettledReconciliation),
           )
-        : ignorePolicy.reload.pipe(
-            Effect.ignore,
-            Effect.andThen(reconciliationHooks.periodicRefreshRequired),
-            Effect.match({
-              onFailure: () => false,
-              onSuccess: refreshRequired => refreshRequired,
-            }),
-            Effect.flatMap(refreshRequired => (refreshRequired ? requestRefresh() : Effect.void)),
-          ),
+        : reconcile,
     ),
   );
 });

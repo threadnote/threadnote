@@ -97,7 +97,10 @@ import {
   renderCodeGraphReadySnapshotStatus as renderReadySnapshotStatus,
 } from '@threadnote/graph/status/render';
 import {inspectAllCodeGraphsLocal, renderCodeGraphDiagnostics} from '@threadnote/graph/diagnostics';
-import {resolveCodeGraphCliReadContinuity} from '@threadnote/graph/commands/read_continuity';
+import {
+  readCodeGraphCliWithContinuity,
+  resolveCodeGraphCliReadContinuity,
+} from '@threadnote/graph/commands/read_continuity';
 export {runCodeGraphInventory} from './commands/inventory.js';
 import {removeCodeGraphView} from '@threadnote/graph/view_removal';
 import {
@@ -1204,26 +1207,32 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
     );
     return;
   }
-  const inspect = (onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void>) =>
+  const inspect = (
+    plan: CodeGraphCliReadPlan,
+    reuseStatusObservation: boolean,
+    onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void>,
+  ) =>
     service.inspect({
       ...effectiveOptions,
       cwd,
       manifestPath: config.manifestPath,
       onProgress,
-      refresh: readPlan.refresh,
-      statusObservation,
-      strictFreshness: readPlan.strictFreshness,
+      refresh: plan.refresh,
+      ...(reuseStatusObservation ? {statusObservation} : {}),
+      strictFreshness: plan.strictFreshness,
       threadnoteHome: config.agentContextHome,
     });
   const reportProgress = effectiveOptions.json ? yield* makeCodeGraphJsonProgressReporter() : undefined;
   const formatProgress = effectiveOptions.json ? undefined : yield* makeCodeGraphHumanProgressReporter();
-  const read = effectiveOptions.json
-    ? inspect(reportProgress)
-    : readPlan.refresh
-      ? withProgressLine('Scanning repository source from Git.', update =>
-          inspect(state => formatProgress!(state).pipe(Effect.flatMap(update))),
-        )
-      : inspect();
+  const read = readCodeGraphCliWithContinuity({borrowedContinuity, readPlan}, (plan, reuseStatusObservation) =>
+    effectiveOptions.json
+      ? inspect(plan, reuseStatusObservation, reportProgress)
+      : plan.refresh
+        ? withProgressLine('Scanning repository source from Git.', update =>
+            inspect(plan, reuseStatusObservation, state => formatProgress!(state).pipe(Effect.flatMap(update))),
+          )
+        : inspect(plan, reuseStatusObservation),
+  );
   const readTimeoutMilliseconds = options.readTimeoutMilliseconds ?? CODE_GRAPH_CLI_READ_TIMEOUT_MILLISECONDS;
   const result = yield* read.pipe(
     Effect.asSome,
@@ -1245,15 +1254,15 @@ export const runCodeGraphInspect = Effect.fn('codeGraph.command.inspect')(functi
     );
     return;
   }
-  const output = borrowedContinuity
+  const output = result.value.borrowedContinuity
     ? {
-        ...result.value,
+        ...result.value.result,
         warnings: [
-          ...result.value.warnings,
+          ...result.value.result.warnings,
           'Serving compatible shared graph evidence. Run graph index to create a current snapshot for this worktree.',
         ],
       }
-    : result.value;
+    : result.value.result;
   yield* writeFinalCliOutput(options.json ? JSON.stringify(output) : renderCodeGraphResult(output).trimEnd());
 });
 

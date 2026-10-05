@@ -1,7 +1,7 @@
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {codeGraphScopeAuthorityInstalled} from './scope/schema.js';
 import {Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../ordering.js';
 import {
   type CodeGraphVisualizationCatalog,

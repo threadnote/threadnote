@@ -3,7 +3,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {CommandExecutor} from '@threadnote/platform/command';
 
 import {enrollGraphControlClient} from '@threadnote/graph/sharing/client/enrollment';

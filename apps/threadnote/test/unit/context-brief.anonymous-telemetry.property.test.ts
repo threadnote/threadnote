@@ -455,6 +455,34 @@ describe('Context Brief anonymous telemetry', () => {
     }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
   });
 
+  effectIt.effect('admits resume as a closed Context Brief telemetry mode', () => {
+    const capture = capturingTracer();
+    const reporter = makeContextBriefAnonymousTelemetryReporter('local', {
+      contract: 'task-only-v2',
+      mode: 'resume',
+    });
+
+    return Effect.gen(function* () {
+      yield* withAnonymousTelemetry(
+        {component: 'mcp', operation: 'context_brief'},
+        Effect.gen(function* () {
+          yield* reporter.annotate;
+          return yield* reporter.projection(Effect.succeed('brief'), false);
+        }),
+      );
+
+      expect(capture.spans).toHaveLength(2);
+      expect(spanAttributes(capture.spans[0])).toMatchObject({
+        'threadnote.context_brief.mode': 'resume',
+        'threadnote.phase': 'context.brief.projection',
+      });
+      expect(spanAttributes(capture.spans[1])).toMatchObject({
+        'threadnote.context_brief.mode': 'resume',
+        'threadnote.event': 'completion',
+      });
+    }).pipe(provideTestLayer(anonymousTelemetryTestLayer({system: systemInfoStub(), tracer: capture.tracer})));
+  });
+
   effectIt.effect('preserves failures and strips successful citation results from a failed terminal envelope', () => {
     const capture = capturingTracer();
     const reporter = makeContextBriefAnonymousTelemetryReporter('local');

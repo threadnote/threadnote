@@ -24,6 +24,9 @@ export {
   normalizeTeamName,
   parentUri,
   personalUriFor,
+  establishedSharedMemoryIdentity,
+  reconcileMissingSharedMemoryIdentity,
+  sharedMemoryIdentityConflict,
   readTeamsFile,
   removeMemoryUri,
   resolveTeam,
@@ -59,6 +62,7 @@ export {
   runShareConflictResolve,
   runShareConflicts,
   runShareConflictShow,
+  shareConflictCanTakeShared,
   showShareConflict,
 } from './conflicts.js';
 export {

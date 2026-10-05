@@ -1,6 +1,6 @@
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../../index_scope.js';
 import {DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphContentIdentity} from '../../graph_identity.js';
 import {
   saturatingCapacityAdd,

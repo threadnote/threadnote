@@ -358,9 +358,11 @@ export interface AutoShareSyncResult {
 }
 
 export interface ShareConflictSummary {
+  readonly establishedMemoryId?: string;
   readonly hasLocalContent: boolean;
   readonly hasPreviousContent: boolean;
   readonly hasSharedContent: boolean;
+  readonly identityConflict?: 'missing' | 'changed';
   readonly id: string;
   readonly reason: string;
   readonly relativePath: string;
@@ -1170,12 +1172,77 @@ function sharedMemoryIdentityContinuityIssue(
   currentContent: string,
   incomingContent: string,
 ): string | undefined {
-  const currentMemoryId = parseMemoryDocument(uri, currentContent)?.metadata.memoryId;
-  if (currentMemoryId === undefined) return;
-  const incomingMemoryId = parseMemoryDocument(uri, incomingContent)?.metadata.memoryId;
-  if (incomingMemoryId !== currentMemoryId) {
-    return `Refusing shared update for ${uri}: remote content cannot drop or change stable memory_id ${currentMemoryId}.`;
+  return sharedMemoryIdentityConflict(uri, currentContent, incomingContent)?.message;
+}
+
+export function sharedMemoryIdentityConflict(
+  uri: string,
+  currentContent: string | undefined,
+  incomingContent: string,
+  previousContent?: string,
+): {readonly kind: 'missing' | 'changed'; readonly message: string} | undefined {
+  const currentMemoryId = currentContent ? parseMemoryDocument(uri, currentContent)?.metadata.memoryId : undefined;
+  const previousMemoryId = previousContent ? parseMemoryDocument(uri, previousContent)?.metadata.memoryId : undefined;
+  if (currentMemoryId !== undefined && previousMemoryId !== undefined && currentMemoryId !== previousMemoryId) {
+    return {
+      kind: 'changed',
+      message: `Refusing shared update for ${uri}: local stable memory_id ${currentMemoryId} differs from previous shared memory_id ${previousMemoryId}.`,
+    };
   }
+  const establishedMemoryId = previousMemoryId ?? currentMemoryId;
+  if (establishedMemoryId === undefined) return;
+  const incomingMemoryId = parseMemoryDocument(uri, incomingContent)?.metadata.memoryId;
+  if (incomingMemoryId === undefined) {
+    return {
+      kind: 'missing',
+      message: `Refusing shared update for ${uri}: remote content is missing established stable memory_id ${establishedMemoryId}.`,
+    };
+  }
+  if (incomingMemoryId !== establishedMemoryId) {
+    return {
+      kind: 'changed',
+      message: `Refusing shared update for ${uri}: remote content cannot drop or change stable memory_id ${establishedMemoryId}; incoming content changed stable memory_id to ${incomingMemoryId}.`,
+    };
+  }
+}
+
+export function establishedSharedMemoryIdentity(
+  uri: string,
+  currentContent: string | undefined,
+  previousContent?: string,
+): string | undefined {
+  const currentMemoryId = currentContent ? parseMemoryDocument(uri, currentContent)?.metadata.memoryId : undefined;
+  const previousMemoryId = previousContent ? parseMemoryDocument(uri, previousContent)?.metadata.memoryId : undefined;
+  if (currentMemoryId !== undefined && previousMemoryId !== undefined && currentMemoryId !== previousMemoryId) {
+    return undefined;
+  }
+  return previousMemoryId ?? currentMemoryId;
+}
+
+/** Keep an established identity when an explicit conflict resolution accepts a legacy shared document. */
+export function reconcileMissingSharedMemoryIdentity(
+  uri: string,
+  localContent: string | undefined,
+  sharedContent: string,
+  previousContent?: string,
+): string {
+  const identityConflict = sharedMemoryIdentityConflict(uri, localContent, sharedContent, previousContent);
+  if (identityConflict?.kind === 'changed') {
+    throw ShareOperationError.make({message: identityConflict.message});
+  }
+  if (identityConflict === undefined) return sharedContent;
+  const establishedMemoryId = establishedSharedMemoryIdentity(uri, localContent, previousContent);
+  if (establishedMemoryId === undefined) return sharedContent;
+  const sharedRecord = parseMemoryDocument(uri, sharedContent);
+  if (sharedRecord === undefined) {
+    throw ShareOperationError.make({message: `Cannot preserve stable memory_id for unreadable shared memory ${uri}.`});
+  }
+  const separator = /\r?\n\r?\n/.exec(sharedContent);
+  if (!separator || separator.index === undefined) {
+    throw ShareOperationError.make({message: `Cannot preserve stable memory_id for unreadable shared memory ${uri}.`});
+  }
+  const newline = separator[0].startsWith('\r') ? '\r\n' : '\n';
+  return `${sharedContent.slice(0, separator.index)}${newline}memory_id: ${establishedMemoryId}${sharedContent.slice(separator.index)}`;
 }
 
 /** Re-read the live canonical bytes while ResourceStore holds its mutation lock. */
@@ -1191,6 +1258,21 @@ export const verifySharedMemoryIdentityContinuity = Effect.fn('share.verifyMemor
   );
   if (Option.isSome(currentContent)) {
     assertSharedMemoryIdentityContinuity(uri, currentContent.value, incomingContent);
+  }
+});
+
+/** Re-read the live canonical bytes while ResourceStore holds its mutation lock. */
+export const verifySharedMemoryContentUnchanged = Effect.fn('share.verifyMemoryContentUnchanged')(function* (
+  config: ShareRuntime,
+  uri: string,
+  expectedContent: string,
+) {
+  const store = yield* ResourceStore;
+  const currentContent = yield* store.read(resourceStoreLocation(config), uri);
+  if (!sharedMemoryContentsEquivalent(currentContent, expectedContent)) {
+    throw ShareOperationError.make({
+      message: `Refusing shared update for ${uri}: native canonical content changed while applying the remote update.`,
+    });
   }
 });
 

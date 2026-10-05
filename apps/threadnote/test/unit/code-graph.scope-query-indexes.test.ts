@@ -1,7 +1,7 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';

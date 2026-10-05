@@ -7,28 +7,25 @@ description: Load relevant Threadnote decisions, handoffs, and graph-backed cont
 
 # Threadnote context
 
-For non-trivial repository work, call MCP `context_brief` with the task, absolute `callerCwd`, and a mode (`brief`,
-`locate`, `trace`, `impact`, or `explain`). If MCP is unavailable, run `threadnote context brief --cwd <cwd> --task <task>`. Add canonical `codeRefs` (repository-relative POSIX paths or exact `cgs_` IDs) when
-current anchors are known. This is the normal Context Brief lifecycle. For memory-focused retrieval, use
-`recall_context` with project and absolute `callerCwd`, then `read_context` every relevant `threadnote://` pointer before
-relying on it. Recall output is pointers, not evidence.
+Own the initial route for non-trivial repository work. Call MCP `context_brief` with task, absolute `callerCwd`, and mode
+(`brief`, `locate`, `trace`, `impact`, `explain`, or `resume`); fallback:
+`threadnote context brief --cwd <cwd> --task <task>`. Add known canonical `codeRefs` (repository-relative POSIX paths or
+exact `cgs_` IDs). This is the Context Brief lifecycle.
 
-For ordinary model-facing reads, omit `responseFormat`: current servers default Context Brief and recall to the
-schema-aware `agent` text projection, and `read_context` to text plus non-duplicated structured metadata. Explicit
-budgets apply after final formatting and semantic truncation. Request `dual` when canonical structured content is
-needed. Inspect the tool schema and use dual on older servers that do not advertise agent format.
+Same active session/native context can continue without repeating brief/recall unless the work state is stale/missing, after
+compaction/handoff/new agent, or the user explicitly asks. After handoff/new session use `mode=resume`; carry task, decisions,
+verification, blockers, and next step, not history.
 
-Use `memoryRefs` and optional typed `relationTypes` for deliberate one-hop navigation; this is not recursive discovery.
-Follow memory citations back through the current graph and exact source, and feed current graph anchors back into
-`context_brief.codeRefs` for the graph-to-memory round trip. Treat historical citations and bounded/truncated results as
-provenance, not proof of current code or absence. If a brief retains a selector, rerun narrowly; if it retains
-`graph-status`, inspect status before retrying. Do not tight-poll active, queued, or deferred refreshes.
+For memory retrieval/closeout use `threadnote-memory`, which owns `recall_context`, `read_context`, and handoff. Pointers
+are not evidence until read. For graph work use `threadnote-code-graph`; routine exact-path/literal checks may skip it.
 
-Call `inspect_code_graph`/`analyze_code_graph` through the code-graph skill before broad search, then verify claims in
-exact source. `cgr_` handles are for graph inspection, not `codeRefs`; use up to eight canonical anchors. Named Worksets
-use only their published ready generation; prepare one explicitly when needed. Preserve a Context Brief's `project`
-selector in later graph calls. If project coverage is partial, ambiguous, or excludes a requested path, follow the
-reported action instead of silently widening to the full repository. If graph tooling is unavailable, say so and use
-targeted search. Skip graph for known exact paths/symbols, remote reviews without a checkout, or binary/visual evidence.
+Reads: omit `responseFormat` for schema-aware text-only `agent` output; `read_context` adds non-duplicated metadata. Budgets
+apply after formatting/truncation. Request `dual` for canonical structured content and inspect older schemas. Use
+`memoryRefs`/typed `relationTypes` only for deliberate one-hop navigation. Follow citations through current graph/source;
+historical or bounded results are provenance, not proof. Rerun retained selectors narrowly, inspect `graph-status`, and
+never tight-poll active/queued/deferred refreshes.
+
+If project coverage is partial, ambiguous, or excludes a path, follow its action; never silently widen. If unavailable,
+disclose and search narrowly. Carry consequential anchors into the handoff.
 
 <!-- END THREADNOTE USER INSTRUCTIONS -->

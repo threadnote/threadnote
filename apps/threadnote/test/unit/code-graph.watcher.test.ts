@@ -12,6 +12,7 @@ import {
   codeGraphWatcherSnapshotStale,
   driveCodeGraphBackgroundDemand,
   handoffCodeGraphPreparedDemand,
+  makeCodeGraphWatchReconciliation,
   makeCodeGraphResumeScheduler,
   makeCodeGraphWatcher,
   persistedRefreshStatus,
@@ -1460,6 +1461,109 @@ describe('CodeGraphWatcher', () => {
       expect(watchOptions).toEqual({recursive: true});
       expect(yield* Ref.get(events)).toEqual(['change-maintenance', 'refresh']);
       yield* Fiber.interrupt(fiber);
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect('reconciles the latest target after an adjacent filesystem event is lost', () =>
+    Effect.gen(function* () {
+      const latestTarget = yield* Ref.make('f2');
+      const requestedTargets = yield* Ref.make<string[]>([]);
+      const fiber = yield* watchRepository(
+        {watch: () => Stream.make({path: 'source.ts'})} as never,
+        {
+          isAbsolute: (value: string) => value.startsWith('/'),
+          join: (...values: string[]) => values.join('/'),
+          relative: () => 'source.ts',
+          sep: '/',
+        } as never,
+        options,
+        false,
+        () =>
+          Ref.get(latestTarget).pipe(
+            Effect.flatMap(target => Ref.update(requestedTargets, current => [...current, target])),
+          ),
+        {
+          changeRefreshRequired: Effect.succeed(true),
+          periodicRefreshRequired: Effect.succeed(true),
+          requestAfterChange: Effect.void,
+          requestInitial: Effect.void,
+        },
+      ).pipe(Effect.forkScoped);
+
+      yield* TestClock.adjust('751 millis');
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(requestedTargets)).toEqual(['f2']);
+
+      // Model a second write whose native watch event was lost.
+      yield* Ref.set(latestTarget, 'f3');
+      yield* TestClock.adjust('44 seconds');
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(requestedTargets)).toEqual(['f2']);
+
+      yield* TestClock.adjust('1 second');
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(requestedTargets)).toEqual(['f2', 'f3']);
+      yield* Fiber.interrupt(fiber);
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect.prop(
+    'keeps one restartable quiet-window reconciliation across delivered changes',
+    {changes: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 20}))},
+    ({changes}) =>
+      Effect.gen(function* () {
+        const probes = yield* Ref.make(0);
+        const refreshes = yield* Ref.make(0);
+        const {scheduleSettled} = yield* makeCodeGraphWatchReconciliation({
+          probe: Ref.update(probes, count => count + 1).pipe(Effect.as(true)),
+          reload: Effect.void,
+          requestRefresh: () => Ref.update(refreshes, count => count + 1),
+        });
+        yield* Effect.forEach(
+          Array.from({length: changes}, (_, index) => index),
+          index =>
+            scheduleSettled.pipe(Effect.andThen(index === changes - 1 ? Effect.void : TestClock.adjust('1 second'))),
+          {discard: true},
+        );
+        yield* TestClock.adjust('44 seconds');
+        expect(yield* Ref.get(probes)).toBe(0);
+        expect(yield* Ref.get(refreshes)).toBe(0);
+        yield* TestClock.adjust('1 second');
+        yield* Effect.yieldNow;
+        expect(yield* Ref.get(probes)).toBe(1);
+        expect(yield* Ref.get(refreshes)).toBe(1);
+      }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect('interrupts a pending quiet-window reconciliation with its watcher', () =>
+    Effect.gen(function* () {
+      const refreshes = yield* Ref.make(0);
+      const fiber = yield* watchRepository(
+        {watch: () => Stream.make({path: 'source.ts'})} as never,
+        {
+          isAbsolute: (value: string) => value.startsWith('/'),
+          join: (...values: string[]) => values.join('/'),
+          relative: () => 'source.ts',
+          sep: '/',
+        } as never,
+        options,
+        false,
+        () => Ref.update(refreshes, count => count + 1),
+        {
+          changeRefreshRequired: Effect.succeed(true),
+          periodicRefreshRequired: Effect.succeed(true),
+          requestAfterChange: Effect.void,
+          requestInitial: Effect.void,
+        },
+      ).pipe(Effect.forkScoped);
+
+      yield* TestClock.adjust('751 millis');
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(refreshes)).toBe(1);
+      yield* Fiber.interrupt(fiber);
+      yield* TestClock.adjust('45 seconds');
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(refreshes)).toBe(1);
     }).pipe(Effect.scoped),
   );
 

@@ -37,11 +37,7 @@ import {
   type CodeMemoryLinkTaskPacketV1,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
-import {
-  parseContextBriefAgentViewText,
-  parseContextBriefV1,
-  renderContextBriefText,
-} from '@threadnote/context/projector';
+import {parseContextBriefJsonText, parseContextBriefV1, renderContextBriefText} from '@threadnote/context/projector';
 
 const HASH_A = 'a'.repeat(64);
 const GOLD_CITATION_ID = `tncc_${'1'.repeat(40)}`;
@@ -453,7 +449,7 @@ describe('Code Memory Link real-agent protocol', () => {
       const canonical = canonicalizeCodeMemoryLinkContextBriefResultV1(structured, {requireAgentView: true});
       const expectedText = renderContextBriefText(parseContextBriefV1(canonical.structuredContent));
       expect(canonical.content).toEqual([{text: expectedText, type: 'text'}]);
-      expect(parseContextBriefAgentViewText(expectedText)).toMatchObject({
+      expect(parseContextBriefJsonText(expectedText)).toMatchObject({
         briefVersion: version,
         durableDecisions: [expect.objectContaining({excerpt: memory.excerpt})],
         type: 'context-brief-agent-view',
@@ -469,6 +465,35 @@ describe('Code Memory Link real-agent protocol', () => {
     );
     expect(empty.content).toHaveLength(1);
     expect(JSON.parse(empty.content[0].text)).toEqual(empty.structuredContent);
+  });
+
+  it('preserves the brief version independently of optional code-anchor coverage', () => {
+    fc.assert(
+      fc.property(fc.constantFrom(2 as const, 3 as const), fc.boolean(), (version, includeCodeAnchors) => {
+        const structured = contextBriefStructuredContent();
+        structured.version = version;
+        (structured.output as Record<string, unknown>).projectorVersion = version;
+        const memory = (structured.durableDecisions as Array<Record<string, unknown>>)[0];
+        if (version === 2) {
+          delete memory.codeRelations;
+          delete memory.selectionBasis;
+        }
+        const coverage = structured.coverage as Record<string, unknown>;
+        const memoryCoverage = coverage.memory as Record<string, unknown>;
+        if (includeCodeAnchors) {
+          memoryCoverage.codeAnchors = {complete: true, matchedMemories: 1, requested: 1, resolved: 1};
+        } else {
+          delete memoryCoverage.codeAnchors;
+        }
+
+        const canonical = canonicalizeCodeMemoryLinkContextBriefResultV1(structured, {requireAgentView: true});
+        const projected = JSON.parse(canonical.content[0].text) as Record<string, unknown>;
+
+        expect(parseContextBriefJsonText(canonical.content[0].text).briefVersion).toBe(version);
+        expect(Object.hasOwn(projected, 'briefVersion')).toBe(version !== 3 || !includeCodeAnchors);
+      }),
+      {numRuns: 20},
+    );
   });
 
   it('treats MCP content object-key order as insignificant while preserving exact content', () => {

@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM} from '../../fact/budget.js';
 import {hasSameCodeGraphResolutionSurface, type CodeGraphResolutionSurfaceSymbol} from '../../resolution/surface.js';
 import {

@@ -458,20 +458,20 @@ export const docsSections: DocsSection[] = [
           {
             type: 'code',
             language: 'sh',
-            code: `threadnote install-hooks claude --dry-run
+            code: `threadnote install-hooks codex --dry-run
+threadnote install-hooks codex --apply
+threadnote install-hooks claude --dry-run
 threadnote install-hooks claude --apply
 threadnote install-hooks cursor --dry-run
 threadnote install-hooks cursor --apply
-# Project hooks for hosted Cursor Cloud:
 threadnote install-hooks cursor --target cloud --project . --apply
-# Remove only Threadnote entries with the same target/project selection:
 threadnote install-hooks cursor --target cloud --project . --remove --apply
 # Or install home, instructions, and Claude hooks together:
 threadnote install --with-hooks`,
           },
           {
             type: 'paragraph',
-            text: 'Claude Code supports managed SessionStart and PreCompact hooks. Cursor desktop supports managed sessionStart and preCompact hooks in ~/.cursor/hooks.json, or in a repository with --project. Cursor hosted Cloud uses --target cloud --project: only the preCompact command hook is installed. Commit .cursor/hooks.json and provision threadnote on the Cloud VM PATH. Local user hooks do not carry into Cloud VMs; sessionStart, sessionEnd, and workspaceOpen are unavailable there, and hooks begin only once the environment is writable. Cloud session recall remains instruction-driven. Cursor snapshots are state-only; its transcript format is not parsed. Desktop session recall uses additional_context, with the first workspace_roots entry selecting the repository in multi-root workspaces. Installation is explicit and preserves unrelated hooks; --remove removes only Threadnote entries. See the [Cursor hook reference](https://cursor.com/docs/hooks) for provider capabilities. Every supported host uses its native user-level instruction and skill surfaces. The optional Cursor Marketplace plugin can provide Cursor instructions instead. Threadnote never injects a Cursor plugin under ~/.cursor/plugins/local. Hooks do not replace agent judgment or start a Threadnote daemon.',
+            text: 'Codex supports a managed UserPromptSubmit hook in ~/.codex/hooks.json. Threadnote uses it to preload one bounded, source-current continuation before the first eligible turn in a session, then suppresses repeats while repository evidence is unchanged. Partial, stale, unknown, or missing handoffs are never injected, and THREADNOTE_CODEX_RESUME_PRELOAD=off disables the preload for controlled evaluations. Claude Code supports managed SessionStart and PreCompact hooks. Cursor desktop supports managed sessionStart and preCompact hooks in ~/.cursor/hooks.json, or in a repository with --project. Cursor hosted Cloud uses --target cloud --project: only the preCompact command hook is installed. Commit .cursor/hooks.json and provision threadnote on the Cloud VM PATH. Local user hooks do not carry into Cloud VMs; sessionStart, sessionEnd, and workspaceOpen are unavailable there, and hooks begin only once the environment is writable. Cloud session recall remains instruction-driven. Cursor snapshots are state-only; its transcript format is not parsed. Desktop session recall uses additional_context, with the first workspace_roots entry selecting the repository in multi-root workspaces. Installation is explicit and preserves unrelated hooks; --remove removes only Threadnote entries. See the [Codex hook reference](https://learn.chatgpt.com/docs/hooks) and [Cursor hook reference](https://cursor.com/docs/hooks) for provider capabilities. Every supported host uses its native user-level instruction and skill surfaces. The optional Cursor Marketplace plugin can provide Cursor instructions instead. Threadnote never injects a Cursor plugin under ~/.cursor/plugins/local. Hooks do not replace agent judgment or start a Threadnote daemon.',
           },
         ],
       },

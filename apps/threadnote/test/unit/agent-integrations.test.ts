@@ -240,8 +240,8 @@ describe('agent integrations', () => {
         });
         const cursorRule = yield* fs.readFileString(path.join(userHome, '.cursor', 'rules', 'threadnote.mdc'));
         expect(cursorRule).toContain('alwaysApply: true');
-        expect(cursorRule).toContain('Use the installed Threadnote skills');
-        for (const skill of ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory']) {
+        expect(cursorRule).toContain('Route non-trivial work by situation');
+        for (const skill of ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory', 'threadnote-health']) {
           const installedSkill = yield* fs.readFileString(path.join(userHome, '.cursor', 'skills', skill, 'SKILL.md'));
           expect(installedSkill).toContain(`name: ${skill}`);
           if (skill === 'threadnote-memory') {
@@ -278,10 +278,10 @@ describe('agent integrations', () => {
         }
 
         expect(yield* fs.readFileString(path.join(userHome, '.codex', 'AGENTS.md'))).toContain(
-          'Use the installed Threadnote skills',
+          'Route non-trivial work by situation',
         );
         expect(yield* fs.readFileString(path.join(userHome, '.claude', 'CLAUDE.md'))).toContain(
-          'Use the installed Threadnote skills',
+          'Route non-trivial work by situation',
         );
         expect(yield* fs.readFileString(path.join(userHome, '.cursor', 'rules', 'threadnote.mdc'))).toContain(
           'alwaysApply: true',
@@ -290,7 +290,7 @@ describe('agent integrations', () => {
           yield* fs.readFileString(path.join(userHome, '.copilot', 'instructions', 'threadnote.instructions.md')),
         ).toContain('applyTo: "**"');
         expect(yield* fs.readFileString(path.join(userHome, '.omp', 'agent', 'AGENTS.md'))).toContain(
-          'Use the installed Threadnote skills',
+          'Route non-trivial work by situation',
         );
         expect(yield* fs.exists(path.join(userHome, '.agents', 'AGENTS.md'))).toBe(false);
       }),
@@ -357,7 +357,7 @@ describe('agent integrations', () => {
         expect(yield* fs.readFileString(codexInstructions)).toBe('Keep this Codex note.\n');
         const migratedClaude = yield* fs.readFileString(claudeInstructions);
         expect(migratedClaude).toContain('Keep this Claude note.');
-        expect(migratedClaude).toContain('Use the installed Threadnote skills');
+        expect(migratedClaude).toContain('Route non-trivial work by situation');
         expect(Object.keys((yield* readAgentIntegrationRegistry(config(threadnoteHome)))?.hosts ?? {})).toEqual([
           'claude',
         ]);
@@ -444,7 +444,7 @@ describe('agent integrations', () => {
         expect(migrated).toContain('description: User-maintained Cursor rule');
         expect(migrated).toContain('Keep this user preface.');
         expect(migrated).toContain('Keep this user appendix.');
-        expect(migrated).toContain('Use the installed Threadnote skills');
+        expect(migrated).toContain('Route non-trivial work by situation');
         expect(migrated).not.toContain('Legacy dense instructions.');
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
@@ -478,7 +478,7 @@ describe('agent integrations', () => {
         expect(yield* fs.readFileString(directRule)).toBe('Keep this note.\n');
         const receipt = (yield* readAgentIntegrationRegistry(config(threadnoteHome)))?.hosts.cursor;
         expect(Object.keys(receipt?.artifacts ?? {})).not.toContain(directRule);
-        expect(Object.keys(receipt?.artifacts ?? {})).toHaveLength(3);
+        expect(Object.keys(receipt?.artifacts ?? {})).toHaveLength(4);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

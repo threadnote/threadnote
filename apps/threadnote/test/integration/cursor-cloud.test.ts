@@ -237,8 +237,7 @@ describe('Cursor Cloud integration', () => {
 
       await withCloudMcp(fixture, ['engineering', 'docs'], async client => {
         await callText(client, 'list_context', {recursive: true, team: 'engineering'});
-        const allSharesRemoteUri =
-          'threadnote://user/cloud-user/memories/shared/docs/durable/projects/threadnote/remote-all-shares.md';
+        const allSharesRemoteUri = 'memories/shared/docs/durable/projects/threadnote/remote-all-shares.md';
         await pushRemoteMemory(
           fixture.root,
           docsRemote,
@@ -612,8 +611,7 @@ describe('Cursor Cloud integration', () => {
         })}\n`,
         {mode: 0o600},
       );
-      const referencedSourceUri =
-        'threadnote://user/cloud-user/memories/shared/engineering/durable/projects/threadnote/reference-scope-source.md';
+      const referencedSourceUri = 'memories/shared/engineering/durable/projects/threadnote/reference-scope-source.md';
       await pushRemoteMemory(
         fixture.root,
         fixture.remote,

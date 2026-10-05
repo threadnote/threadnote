@@ -1,5 +1,5 @@
 import {DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {CodeGraphVisualizationScopeEdge} from './models.js';
 import {configureConnection, tableExists} from './session.js';

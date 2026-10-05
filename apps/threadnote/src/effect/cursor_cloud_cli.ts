@@ -1,5 +1,5 @@
 import type {Effect} from 'effect';
-import {Command, Flag} from 'effect/unstable/cli';
+import {Command, Flag} from 'effect/cli';
 import {boolean, optionalString, repeatedString} from './cli/flags.js';
 
 export interface CursorCloudAttestCliOptions {

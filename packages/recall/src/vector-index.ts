@@ -1,6 +1,6 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Layer, Option, Path, Result, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';

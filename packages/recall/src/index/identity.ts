@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import type * as SqlClient from 'effect/unstable/sql/SqlClient';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import type {RecallEligibilityPolicy} from '../eligibility.js';
 import {recallEligibilityPredicate} from './eligibility.js';
 import type {RecallCandidate} from '../rank.js';

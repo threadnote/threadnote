@@ -1,6 +1,6 @@
 import {DateTime, Effect, Path, Predicate, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {compareCodeUnits} from '../ordering.js';

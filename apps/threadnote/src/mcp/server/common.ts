@@ -257,6 +257,7 @@ export function requiredResourceUriList(
   value: readonly string[] | string | undefined,
   toolName: string,
   exampleUri: string,
+  options: {readonly personalMemoryUser?: string} = {},
 ): CheckedTextArray {
   const rawValues = Array.isArray(value) ? value : value === undefined ? [] : [value];
   const uris = rawValues.map(uri => uri.trim()).filter(Boolean);
@@ -275,15 +276,67 @@ export function requiredResourceUriList(
   const canonicalUris: string[] = [];
   for (const uri of uris) {
     try {
-      canonicalUris.push(parseResourceId(uri).canonicalUri);
+      canonicalUris.push(parseResourceId(expandPersonalMemoryReference(uri, options.personalMemoryUser)).canonicalUri);
     } catch {
       return {
-        error: argumentError(`Threadnote MCP tool "${toolName}" needs threadnote:// URI values. Received: ${uri}`),
+        error: argumentError(
+          `Threadnote MCP tool "${toolName}" needs threadnote:// URI values${options.personalMemoryUser === undefined ? '' : ' or compact memories/ paths returned by Threadnote'}. Received: ${uri}`,
+        ),
         ok: false,
       };
     }
   }
   return {ok: true, value: [...new Set(canonicalUris)]};
+}
+
+export function compactPersonalMemoryReferences(text: string, user: string, enabled = true): string {
+  return enabled
+    ? text.replaceAll(/threadnote:\/\/[^\s`)\]}>"']+/gu, candidate => compactPersonalMemoryReference(candidate, user))
+    : text;
+}
+
+/** Recursively compacts current-user memory URIs in JSON-compatible MCP structured content without mutating the input. */
+export function compactPersonalMemoryStructuredReferences<T>(value: T, user: string): T {
+  if (typeof value === 'string') return compactPersonalMemoryReferences(value, user) as T;
+  if (Array.isArray(value)) {
+    return value.map(item => compactPersonalMemoryStructuredReferences(item, user)) as T;
+  }
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, compactPersonalMemoryStructuredReferences(item, user)]),
+  ) as T;
+}
+
+function compactPersonalMemoryReference(candidate: string, user: string): string {
+  let trailingStart = candidate.length;
+  while (trailingStart > 0 && isCompactReferenceTrailingPunctuation(candidate[trailingStart - 1])) {
+    trailingStart -= 1;
+  }
+  const trailingPunctuation = candidate.slice(trailingStart);
+  const uri = candidate.slice(0, trailingStart);
+  try {
+    const parsed = parseResourceId(uri);
+    const currentUserSegment = uriSegment(user);
+    if (
+      parsed.namespace !== 'user' ||
+      (parsed.segments[0] !== user && parsed.segments[0] !== currentUserSegment) ||
+      parsed.segments[1] !== 'memories'
+    ) {
+      return candidate;
+    }
+    const prefix = `threadnote://user/${encodeURIComponent(parsed.segments[0])}/`;
+    return `${parsed.canonicalUri.slice(prefix.length)}${trailingPunctuation}`;
+  } catch {
+    return candidate;
+  }
+}
+
+function isCompactReferenceTrailingPunctuation(value: string | undefined): boolean {
+  return value === '.' || value === ',' || value === ';' || value === ':';
+}
+
+function expandPersonalMemoryReference(value: string, user: string | undefined): string {
+  return user !== undefined && value.startsWith('memories/') ? `threadnote://user/${uriSegment(user)}/${value}` : value;
 }
 
 export function argumentError(text: string): CallToolResult {

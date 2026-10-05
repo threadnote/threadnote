@@ -1,6 +1,6 @@
 import {DateTime, Effect, Exit, FileSystem, Path, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {
   CODE_GRAPH_WORKSET_EVIDENCE_PROJECTOR_VERSION,

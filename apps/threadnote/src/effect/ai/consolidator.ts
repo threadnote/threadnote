@@ -1,7 +1,7 @@
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {OpenAiClient, OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {Context, Effect, Layer, Redacted, Schema} from 'effect';
-import {LanguageModel} from 'effect/unstable/ai';
+import {LanguageModel} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {generateWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 

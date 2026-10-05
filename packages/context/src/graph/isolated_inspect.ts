@@ -38,6 +38,7 @@ export const inspectContextBriefGraphIsolated = Effect.fn('contextBrief.inspectG
       manifestPath: options.manifestPath,
       ...(options.baseCommit === undefined ? {} : {baseCommit: options.baseCommit}),
       ...(observation?.borrowedSnapshotId === undefined ? {} : {borrowedSnapshotId: observation.borrowedSnapshotId}),
+      ...(observation?.readySnapshotId === undefined ? {} : {readySnapshotId: observation.readySnapshotId}),
       cwd: options.cwd,
       depth: options.depth,
       direction: options.direction,

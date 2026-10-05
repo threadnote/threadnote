@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {LEGACY_BUILDING_REFERENCES_V3_TABLE} from './schema/contracts.js';
 import {tableExists} from './session.js';
 import {CodeGraphStoreError} from '../types.js';

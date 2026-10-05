@@ -1,6 +1,6 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   codeGraphExtractorSetIdentityFromPackProvenance,
   createCodeGraphContentIdentityAccumulator,

@@ -1,7 +1,7 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Cause, Context, Effect, Layer, Option, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
-import * as SqlError from 'effect/unstable/sql/SqlError';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as SqlError from 'effect/sql/SqlError';
 import type {
   CodeGraphDatabaseSessionOptions,
   CodeGraphSqliteWriterSettings,

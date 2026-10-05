@@ -17,6 +17,7 @@ import type {AgentAdapter} from './adapters/contract.js';
 import type {AgentArtifact} from './index.js';
 import type {AgentSurfaceReceipt} from './registry.js';
 import {AgentSurfaceError} from './surfaces.js';
+import {AGENT_SKILLS} from './skills.js';
 
 export interface SurfaceInstallOptions {
   readonly apply?: boolean;
@@ -144,9 +145,7 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
             ),
           },
         ];
-  for (const skill of strategy.skillRoot === 'none'
-    ? []
-    : ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory']) {
+  for (const skill of strategy.skillRoot === 'none' ? [] : AGENT_SKILLS) {
     const content = `${(yield* fs.readFileString(path.join(templateRoot, 'agent-skills', skill, 'SKILL.md'))).trim()}\n`;
     artifacts.push({
       content,

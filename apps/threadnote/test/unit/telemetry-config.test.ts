@@ -1,6 +1,7 @@
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Encoding, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import * as FC from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -23,7 +24,7 @@ import {
 } from '@threadnote/threadnote/telemetry/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
-const FIXED_SESSION_SALT = Encoding.encodeBase64Url(new Uint8Array(32).fill(7));
+const FIXED_SESSION_SALT = Base64Url.encode(new Uint8Array(32).fill(7));
 
 describe('telemetry configuration', () => {
   it('accepts only the strict versioned consent schema', () => {
@@ -87,11 +88,7 @@ describe('telemetry configuration', () => {
     {autoAccept: FC.boolean(), bytes: FC.uint8Array({maxLength: 32, minLength: 32})},
     ({autoAccept, bytes}) =>
       Effect.sync(() => {
-        const value = enabledTelemetryConfiguration(
-          DEFAULT_TELEMETRY_ENDPOINT,
-          Encoding.encodeBase64Url(bytes),
-          autoAccept,
-        );
+        const value = enabledTelemetryConfiguration(DEFAULT_TELEMETRY_ENDPOINT, Base64Url.encode(bytes), autoAccept);
         expect(parseTelemetryConfiguration(renderTelemetryConfiguration(value))).toEqual(value);
       }),
     {fastCheck: {numRuns: 50}},

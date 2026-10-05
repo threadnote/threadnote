@@ -3,7 +3,7 @@ import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
 import {afterEach, describe, expect, it} from 'vitest';
 import {Effect, FileSystem} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CODE_GRAPH_EXTRACTOR_GENERATION} from '@threadnote/graph/types';

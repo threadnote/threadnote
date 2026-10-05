@@ -7,9 +7,9 @@ import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from '@threadnote/testing/node-fs';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Effect, Exit, Layer, Tracer} from 'effect';
+import {Effect, Exit, Layer, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
-import {McpSchema, McpServer} from 'effect/unstable/ai';
+import {McpSchema, McpServer} from 'effect/ai';
 import {describe, expect} from 'vitest';
 import {CodeGraphAnalysis, analyzeCodeGraph} from '@threadnote/graph/analysis';
 import {serveCodeGraphAnalysisRead, type CodeGraphAnalysisReadInput} from '@threadnote/graph/isolated/analysis';
@@ -517,7 +517,10 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnsure: () =
   const invoke = (handle: AddedTool['handle'] | undefined, name: string, arguments_: Record<string, unknown>) =>
     Effect.suspend(() => {
       if (handle === undefined) return Effect.die(`${name} was not registered.`);
-      return handle(arguments_).pipe(Effect.provideService(McpSchema.McpServerClient, telemetryMcpClient()));
+      return handle(arguments_).pipe(
+        Effect.provideService(McpSchema.McpRequestContext, telemetryMcpClient()),
+        Effect.flatMap(Schema.decodeUnknownEffect(McpSchema.CallToolResult)),
+      );
     });
 
   return {

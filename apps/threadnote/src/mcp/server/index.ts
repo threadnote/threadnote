@@ -1,4 +1,4 @@
-import {Console, Effect, Schema} from 'effect';
+import {Console, Effect, Logger, Schema} from 'effect';
 import {MCP_PROCESS_LIFECYCLE_PROBE_ENV} from '../../constants.js';
 import {
   DEFAULT_MCP_TOOLSET,
@@ -70,6 +70,8 @@ import {
   runNativeHealthTool,
   runNativeRemoveTool,
 } from './memory.js';
+import {runContextMaintenanceScheduler} from '../../memory/context/maintenance.js';
+import {registerContextMaintenanceTools} from './context/maintenance.js';
 import {registerContextHealthTool} from './context/health.js';
 import {registerContextHealthRepairTools} from './context/health_repair.js';
 import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
@@ -126,7 +128,7 @@ export const mcpServerEffect = withAnonymousTelemetry(
           ? `Personal Cursor Cloud uses one MCP bounded to these Git memory shares: ${memoryScope.shares.map(share => `${share.team} (${share.root})`).join(', ')}. Call recall_context with an absolute callerCwd; optionally pass team to narrow recall. Results are unread pointers, not evidence, so read relevant threadnote:// URIs with read_context. With multiple shares, durable remember_context writes require team; writes are committed and pushed only to that share. Memory tools reject URIs outside the configured share set.`
           : toolset === CURSOR_CLOUD_LOCAL_MCP_TOOLSET
             ? 'Cursor Cloud remote-hybrid mode uses this local server only for checkout-specific code graph evidence, diagnostics, and workload attestation. All historical memory reads and writes belong to the managed threadnote-memory HTTP server. Never fall back to local personal memory or a Git memory share.'
-            : 'Threadnote: cross-session memory, context briefs, code graphs, handoffs. For non-trivial work call `context_brief` with task + absolute `callerCwd`. Read recalled `threadnote://` pointers; verify source. Finish with private `remember_context(kind=handoff)`. Never auto-apply/share or store secrets, credentials, customer data, raw logs. Confirm publishing.';
+            : 'Threadnote offers bounded context, graph, and memory tools. Choose the tool whose description matches the evidence gap; verify returned evidence in source. Writes stay private unless sharing is confirmed. Never auto-apply/share or store secrets, credentials, customer data, or raw logs.';
         const server = new EffectMcpServerAdapter(
           'threadnote-local-adapter',
           '0.2.0',
@@ -143,6 +145,9 @@ export const mcpServerEffect = withAnonymousTelemetry(
           yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
         }
         if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
+          yield* Effect.forkScoped(runContextMaintenanceScheduler(config));
+        }
+        if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
           yield* Effect.forkScoped(monitorSharedRepositories(config));
         }
         if (mcpToolCapabilities(toolset).graphLocal) {
@@ -157,7 +162,14 @@ export const mcpServerEffect = withAnonymousTelemetry(
         return yield* server.run();
       }),
     );
-  }),
+  }).pipe(
+    // MCP stdio reserves stdout for JSON-RPC frames. Route every Effect log in
+    // this process to stderr. server.run() already does this for protocol
+    // handling, but background fibers forked above (share/graph monitors) run
+    // outside that scope, and a single pretty-logger warning on stdout
+    // interleaves with protocol output and fails the client transport.
+    Effect.provideService(Logger.LogToStderr, true),
+  ),
 );
 
 function registerResources(
@@ -295,7 +307,7 @@ function registerTools(
       server,
       config,
       'read_context',
-      'Turn a recalled or listed threadnote:// pointer into evidence.',
+      'Read a recalled threadnote:// or compact memories/ pointer as evidence.',
       memoryScope,
     );
   }
@@ -382,6 +394,7 @@ function registerTools(
 
   if (capabilities.lifecycle) {
     registerContextHealthTool(server, config);
+    if (toolset === 'full') registerContextMaintenanceTools(server, config);
     registerContextHealthRepairTools(server, config);
     registerMaintenanceMetadataTools(server, config);
     registerRecallFeedbackTool(server, config);

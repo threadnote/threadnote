@@ -1,4 +1,4 @@
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import type {Effect} from 'effect';
 import {boolean, optionalString, requiredChoice} from '../../effect/cli/flags.js';
 import {codeGraphCliBounds} from '../../effect/code_graph_cli_flags.js';

@@ -9,9 +9,12 @@ export interface CodeMemoryLinkProcessCaptureOptions {
   readonly environment: Readonly<NodeJS.ProcessEnv>;
   readonly label: string;
   readonly maxOutputBytes: number;
+  readonly stdin?: string | Uint8Array;
   readonly terminationGraceMilliseconds?: number;
   readonly timeoutMilliseconds: number;
 }
+
+export const CODE_MEMORY_LINK_MAX_STDIN_BYTES = 1 * 1_024 * 1_024;
 
 export interface CodeMemoryLinkProcessCaptureResult {
   readonly exitCode: number;
@@ -30,17 +33,32 @@ export async function captureCodeMemoryLinkProcessGroup(
   if (process.platform === 'win32') {
     throw new Error(`${options.label} process-group isolation requires macOS or Linux.`);
   }
+  const stdin = options.stdin === undefined ? undefined : Buffer.from(options.stdin);
+  if (stdin !== undefined && stdin.byteLength > CODE_MEMORY_LINK_MAX_STDIN_BYTES) {
+    throw new Error(`${options.label} stdin exceeded its byte limit.`);
+  }
   const child = spawn(options.command, [...options.arguments], {
     cwd: options.cwd,
     detached: true,
     env: {...options.environment},
     shell: false,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+  });
+  let processError: unknown;
+  const close = new Promise<number | null>(resolvePromise => {
+    child.once('error', cause => {
+      processError = cause;
+    });
+    child.once('close', code => resolvePromise(code));
   });
   const groupId = child.pid;
   if (groupId === undefined || groupId <= 0) {
     child.kill('SIGKILL');
     throw new Error(`${options.label} process has no valid process-group id.`);
+  }
+  if (child.stdout === null || child.stderr === null) {
+    child.kill('SIGKILL');
+    throw new Error(`${options.label} process output pipes were not available.`);
   }
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
@@ -74,10 +92,9 @@ export async function captureCodeMemoryLinkProcessGroup(
   }, options.timeoutMilliseconds);
   let exitCode: number | null;
   try {
-    exitCode = await new Promise<number | null>((resolvePromise, rejectPromise) => {
-      child.once('error', rejectPromise);
-      child.once('exit', code => resolvePromise(code));
-    });
+    if (stdin !== undefined) await writeCodeMemoryLinkProcessStdin(child, stdin, options.label);
+    exitCode = await close;
+    if (processError !== undefined) throw new Error(`${options.label} process failed to start.`, {cause: processError});
   } finally {
     clearTimeout(timeout);
     await terminate();
@@ -93,6 +110,30 @@ export async function captureCodeMemoryLinkProcessGroup(
     throw new Error(`${options.label} failed with exit code ${result.exitCode}.`);
   }
   return result;
+}
+
+async function writeCodeMemoryLinkProcessStdin(child: ChildProcess, stdin: Buffer, label: string): Promise<void> {
+  if (child.stdin === null) throw new Error(`${label} process stdin was not available.`);
+  const input = child.stdin;
+  await new Promise<void>((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const settle = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      input.removeListener('error', onError);
+      if (error === undefined || error === null) resolvePromise();
+      else rejectPromise(new Error(`${label} stdin write failed.`, {cause: error}));
+    };
+    const onError = (error: unknown): void => settle(error);
+    input.once('error', onError);
+    input.write(stdin, (error?: Error | null) => {
+      if (error !== undefined && error !== null) {
+        settle(error);
+        return;
+      }
+      input.end(() => settle());
+    });
+  });
 }
 
 export async function terminateCodeMemoryLinkProcessGroup(

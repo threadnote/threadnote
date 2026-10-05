@@ -46,6 +46,11 @@ export interface BazelSyntax {
 const MAX_BAZEL_CALLS = 8_000;
 const MAX_BAZEL_DECLARATIONS = 4_000;
 const MAX_BAZEL_STRING_LITERALS = 16_000;
+const WHITESPACE = /\s/u;
+const WHITESPACE_OR_COMMA = /[\s,]/u;
+const STRING_PREFIX_CHARACTER = /[rRbBuUfF]/u;
+const IDENTIFIER_START = /[A-Za-z_]/u;
+const IDENTIFIER_PART = /[A-Za-z0-9_]/u;
 
 export function parseBazelSyntax(content: string): BazelSyntax {
   const masked = maskBazelNonCode(content);
@@ -62,7 +67,7 @@ export function parseBazelSyntax(content: string): BazelSyntax {
       index = scanDottedIdentifier(masked, index);
       const callee = masked.slice(start, index);
       let open = index;
-      while (/\s/u.test(masked[open] ?? '')) open += 1;
+      while (WHITESPACE.test(masked[open] ?? '')) open += 1;
       if (masked[open] === '(' && !isDefinitionName(masked, start)) {
         const close = findMatchingDelimiter(masked, open, '(', ')');
         if (close !== undefined) {
@@ -185,7 +190,7 @@ function scanAttributes(content: string, masked: string, start: number, end: num
   const output: BazelAttribute[] = [];
   let cursor = start;
   while (cursor < end) {
-    while (cursor < end && /[\s,]/u.test(masked[cursor] ?? '')) cursor += 1;
+    while (cursor < end && WHITESPACE_OR_COMMA.test(masked[cursor] ?? '')) cursor += 1;
     if (!isIdentifierStart(masked[cursor] ?? '')) {
       cursor = nextTopLevelComma(masked, cursor, end) + 1;
       continue;
@@ -193,7 +198,7 @@ function scanAttributes(content: string, masked: string, start: number, end: num
     const nameStart = cursor;
     cursor = scanIdentifier(masked, cursor);
     const name = masked.slice(nameStart, cursor);
-    while (/\s/u.test(masked[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(masked[cursor] ?? '')) cursor += 1;
     if (masked[cursor] !== '=') {
       cursor = nextTopLevelComma(masked, cursor, end) + 1;
       continue;
@@ -241,9 +246,10 @@ function stringPrefixAt(
 ): Option.Option<{readonly quoteStart: number; readonly raw: boolean}> {
   const character = content[index];
   if (character === '"' || character === "'") return Option.some({quoteStart: index, raw: false});
-  if (!/[rRbBuUfF]/u.test(character ?? '') || !isTokenBoundary(content[index - 1] ?? '')) return Option.none();
+  if (!STRING_PREFIX_CHARACTER.test(character ?? '') || !isTokenBoundary(content[index - 1] ?? ''))
+    return Option.none();
   let cursor = index;
-  while (cursor < end && /[rRbBuUfF]/u.test(content[cursor] ?? '') && cursor - index < 3) cursor += 1;
+  while (cursor < end && STRING_PREFIX_CHARACTER.test(content[cursor] ?? '') && cursor - index < 3) cursor += 1;
   if (content[cursor] !== '"' && content[cursor] !== "'") return Option.none();
   return Option.some({quoteStart: cursor, raw: /r/iu.test(content.slice(index, cursor))});
 }
@@ -254,50 +260,55 @@ function readStringLiteral(
   end: number,
   raw: boolean,
 ): Option.Option<BazelStringLiteral> {
+  const literalEnd = stringLiteralEnd(content, quoteStart, end, raw);
+  if (literalEnd === undefined) return Option.none();
+  const width = content.startsWith(content[quoteStart].repeat(3), quoteStart) ? 3 : 1;
+  const value = content.slice(quoteStart + width, literalEnd - width);
+  return Option.some({
+    end: literalEnd,
+    start: quoteStart,
+    value: raw
+      ? value
+      : value.replace(/\\([\s\S])/gu, (_, escaped: string) =>
+          escaped === 'n' ? '\n' : escaped === 'r' ? '\r' : escaped === 't' ? '\t' : escaped,
+        ),
+  });
+}
+
+function stringLiteralEnd(content: string, quoteStart: number, end: number, raw: boolean): number | undefined {
   const quote = content[quoteStart];
-  const triple = content.slice(quoteStart, quoteStart + 3) === quote.repeat(3);
+  const triple = content.startsWith(quote.repeat(3), quoteStart);
   const width = triple ? 3 : 1;
-  let value = '';
+  const delimiter = quote.repeat(width);
   for (let cursor = quoteStart + width; cursor < end; cursor += 1) {
-    if (triple ? content.slice(cursor, cursor + 3) === quote.repeat(3) : content[cursor] === quote) {
-      return Option.some({end: cursor + width, start: quoteStart, value});
-    }
-    const character = content[cursor];
-    if (!raw && character === '\\' && cursor + 1 < end) {
-      const escaped = content[cursor + 1];
-      value += escaped === 'n' ? '\n' : escaped === 'r' ? '\r' : escaped === 't' ? '\t' : escaped;
-      cursor += 1;
-    } else {
-      value += character;
-    }
+    if (content.startsWith(delimiter, cursor)) return cursor + width;
+    if (!raw && content[cursor] === '\\' && cursor + 1 < end) cursor += 1;
   }
-  return Option.none();
+  return undefined;
 }
 
 function maskBazelNonCode(content: string): string {
-  const output = content.split('');
-  let comment = false;
+  const output: string[] = [];
+  let start = 0;
   for (let index = 0; index < content.length; index += 1) {
-    const character = content[index];
-    if (comment) {
-      if (isLineTerminator(character)) comment = false;
-      else output[index] = ' ';
-      continue;
+    let end: number | undefined;
+    if (content[index] === '#') {
+      end = index + 1;
+      while (end < content.length && !isLineTerminator(content[end])) end += 1;
+    } else {
+      const prefix = stringPrefixAt(content, index, content.length);
+      if (Option.isSome(prefix))
+        end = stringLiteralEnd(content, prefix.value.quoteStart, content.length, prefix.value.raw);
     }
-    if (character === '#') {
-      output[index] = ' ';
-      comment = true;
-      continue;
-    }
-    const prefix = stringPrefixAt(content, index, content.length);
-    if (Option.isNone(prefix)) continue;
-    const literal = readStringLiteral(content, prefix.value.quoteStart, content.length, prefix.value.raw);
-    if (Option.isNone(literal)) continue;
-    for (let cursor = index; cursor < literal.value.end; cursor += 1) {
-      if (!isLineTerminator(content[cursor])) output[cursor] = ' ';
-    }
-    index = literal.value.end - 1;
+    if (end === undefined) continue;
+    output.push(
+      content.slice(start, index),
+      content.slice(index, end).replace(/[^\r\n\u2028\u2029]+/gu, value => ' '.repeat(value.length)),
+    );
+    start = end;
+    index = end - 1;
   }
+  output.push(content.slice(start));
   return output.join('');
 }
 
@@ -349,10 +360,10 @@ function scanDottedIdentifier(source: string, start: number): number {
   let cursor = scanIdentifier(source, start);
   for (;;) {
     const dot = cursor;
-    while (/\s/u.test(source[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(source[cursor] ?? '')) cursor += 1;
     if (source[cursor] !== '.') return dot;
     cursor += 1;
-    while (/\s/u.test(source[cursor] ?? '')) cursor += 1;
+    while (WHITESPACE.test(source[cursor] ?? '')) cursor += 1;
     if (!isIdentifierStart(source[cursor] ?? '')) return dot;
     cursor = scanIdentifier(source, cursor);
   }
@@ -399,11 +410,11 @@ function dirname(path: string): string {
 }
 
 function isIdentifierStart(character: string): boolean {
-  return /[A-Za-z_]/u.test(character);
+  return IDENTIFIER_START.test(character);
 }
 
 function isIdentifierPart(character: string): boolean {
-  return /[A-Za-z0-9_]/u.test(character);
+  return IDENTIFIER_PART.test(character);
 }
 
 function isTokenBoundary(character: string): boolean {

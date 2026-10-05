@@ -1,5 +1,5 @@
 import {Effect, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {codeGraphBlobExtractionReuseClass} from '../blob_reuse.js';
 import {

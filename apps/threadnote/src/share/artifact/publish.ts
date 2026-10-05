@@ -81,6 +81,7 @@ import {
   resourceUriToWorktreeRelative,
   rm,
   setMemoryVisibility,
+  sharedMemoryIdentityContinuityIssue,
   sharedUriFor,
   stripPersonalProvenanceForSharedPublication,
   workfileToResourceUri,
@@ -190,7 +191,24 @@ export const runSharePublish = Effect.fn('share.runSharePublish')(function* (
         message: `Refusing to publish: ${targetUri} already exists with different content. Inspect it via threadnote read and resolve the conflict explicitly.`,
       });
     }
-    yield* assertSharedWorktreeFileReady(worktree, relativePath, currentScrub.cleaned, dryRun);
+    const establishedWorktreeContent = yield* assertSharedWorktreeFileReady(
+      worktree,
+      relativePath,
+      existingTarget,
+      dryRun,
+      undefined,
+      {
+        allowCleanTrackedReplacement: existingTarget === undefined,
+      },
+    );
+    if (existingTarget === undefined && establishedWorktreeContent !== undefined) {
+      const identityIssue = sharedMemoryIdentityContinuityIssue(
+        targetUri,
+        establishedWorktreeContent,
+        currentScrub.cleaned,
+      );
+      if (identityIssue !== undefined) throw ShareOperationError.make({message: identityIssue});
+    }
     yield* ensureSharedDirectoryChain(config, ov, targetUri, dryRun);
     yield* writeMemoryFile(
       config,

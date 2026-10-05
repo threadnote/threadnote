@@ -113,7 +113,9 @@ describe('recall MCP response projection', () => {
 
   it('defaults to a deterministic text-only semantic agent projection', () => {
     const firstHit = hit(1, {
-      rankReasons: [{code: 'exact_term_match', contribution: 0.18, detail: 'Quoted\tvalue\nwith \\ unicode: 🚀'}],
+      rankReasons: [
+        {code: 'exact_term_match', contribution: 0.18, detail: 'Quoted\tvalue\nwith \\ unicode: 🚀\u001b\u2028'},
+      ],
       uri: 'threadnote://user/test/memories/durable/projects/threadnote/a path/🚀.md',
     });
     const response = {
@@ -129,16 +131,19 @@ describe('recall MCP response projection', () => {
     expect(first.responseFormat).toBe('agent');
     expect(first.measurement.structuredBytes).toBe(0);
     expect(first.text).toMatch(/^TN-RECALL\/1\n/);
-    expect(first.text).toContain(JSON.stringify(firstHit.uri));
-    expect(first.text).toContain('result\t1\t');
-    expect(first.text).toContain('connection\t1\t');
-    expect(first.text).toContain('premise\t1\t');
-    expect(first.text).toContain('memoryScope\t');
-    expect(first.text).toContain('confidence\t');
-    expect(first.text).toContain('nextAction\t');
-    expect(first.text).toContain('notice\t');
-    expect(first.text).toContain('warning\t');
-    expect(first.text).toContain('\\tvalue\\nwith');
+    expect(first.text).toContain(firstHit.uri.replace(/\s+/gu, ' '));
+    expect(first.text).toContain('1. Memory, confidence');
+    expect(first.text).toContain('Connection 1:');
+    expect(first.text).toContain('Premise 1:');
+    expect(first.text).toContain('Memory scope:');
+    expect(first.text).toContain('Confidence:');
+    expect(first.text).toContain('Read first with read_context: 1.');
+    expect(first.text).toContain('Notice:');
+    expect(first.text).toContain('Recall index warning:');
+    expect(first.text).toContain('Quoted value with \\ unicode: 🚀');
+    expect(first.text).not.toContain('\u001b');
+    expect(first.text).not.toContain('\u2028');
+    expect(first.text).not.toContain('recall_feedback');
     expect(first.text).not.toContain('Quoted\tvalue\nwith');
   });
 
@@ -169,7 +174,9 @@ describe('recall MCP response projection', () => {
     const dual = projectRecallMcpResponse(response, {budgetTokens: 1_500, responseFormat: 'dual'});
 
     expect(agent.structuredContent.results.length).toBeGreaterThanOrEqual(dual.structuredContent.results.length);
-    expect(agent.measurement.totalBytes).toBeLessThan(dual.measurement.totalBytes);
+    expect(agent.measurement.totalBytes / agent.structuredContent.results.length).toBeLessThan(
+      dual.measurement.totalBytes / dual.structuredContent.results.length,
+    );
     expect(agent.measurement.totalBytes).toBeLessThanOrEqual(1_500 * 3);
     expect(dual.measurement.totalBytes).toBeLessThanOrEqual(1_500 * 3);
   });
@@ -393,9 +400,7 @@ describe('recall MCP response projection', () => {
     expect(first.structuredContent.memoryConnections?.coverage.premiseCount).toBe(
       first.structuredContent.memoryConnections?.premises.length,
     );
-    expect(first.text).toContain(
-      'recovery\t"increase-budgetTokens-if-below-1500-or-narrow-memoryRefs-or-relationTypes"',
-    );
+    expect(first.text).toContain('Recovery: increase budgetTokens if below 1500, or narrow memoryRefs/relationTypes.');
   });
 
   it('counts only projected direct neighbors in seeded one-hop coverage', () => {
@@ -954,11 +959,10 @@ describe('recall MCP response projection', () => {
           expect(expandedUris.slice(0, narrowUris.length)).toEqual(narrowUris);
           expect(expandedUris.length).toBeGreaterThanOrEqual(narrowUris.length);
 
-          for (const row of expanded.text.trimEnd().split('\n')) {
-            const fields = row.split('\t');
-            if (fields[0] === 'result' || fields[0] === 'notice') {
-              expect(() => JSON.parse(fields.at(-1) ?? '')).not.toThrow();
-            }
+          for (const [index, result] of expanded.structuredContent.results.entries()) {
+            const row = expanded.text.split('\n').find(line => line.startsWith(`${index + 1}. `));
+            expect(row).toContain(result.uri);
+            expect(row).not.toMatch(/[\t\n]/u);
           }
         },
       ),
@@ -966,7 +970,7 @@ describe('recall MCP response projection', () => {
     );
   });
 
-  it('renders recovery as a JSON-safe agent row when a budget omits ranked pointers', () => {
+  it('renders readable recovery when a budget omits ranked pointers', () => {
     const projected = projectRecallMcpResponse(
       seededNavigation([
         hit(1, {
@@ -977,6 +981,6 @@ describe('recall MCP response projection', () => {
     );
 
     expect(projected.structuredContent.output.budgetLimited).toBe(true);
-    expect(projected.text).toContain('recovery\t"retry-recall-context-with-budgetTokens-1500"');
+    expect(projected.text).toContain('Recovery: retry recall_context with budgetTokens=1500.');
   });
 });

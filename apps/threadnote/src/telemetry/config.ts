@@ -1,4 +1,5 @@
-import {Crypto, Effect, Encoding, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -145,7 +146,7 @@ export const createEnabledTelemetryConfiguration = Effect.fn('telemetry.createEn
   const crypto = yield* Crypto.Crypto;
   return enabledTelemetryConfiguration(
     endpoint,
-    Encoding.encodeBase64Url(yield* crypto.randomBytes(TELEMETRY_SESSION_SALT_BYTES)),
+    Base64Url.encode(yield* crypto.randomBytes(TELEMETRY_SESSION_SALT_BYTES)),
     autoAccept,
   );
 });
@@ -264,11 +265,11 @@ export function normalizeTelemetryEndpoint(value: string): string {
 }
 
 export function normalizeTelemetrySessionSalt(value: string): string {
-  const decoded = Encoding.decodeBase64Url(value);
+  const decoded = Base64Url.decode(value);
   if (
     !Result.isSuccess(decoded) ||
     decoded.success.byteLength !== TELEMETRY_SESSION_SALT_BYTES ||
-    Encoding.encodeBase64Url(decoded.success) !== value
+    Base64Url.encode(decoded.success) !== value
   ) {
     throw TelemetryConfigurationError.make({
       message: 'Telemetry session salt must be canonical base64url for 32 random bytes.',

@@ -185,13 +185,16 @@ always a strict intersection: adding a field cannot widen the result. Selector t
 bytes, and rejects control characters; otherwise topics remain literal so every valid stored topic stays selectable.
 The MCP adapter is read-only and does not prepare a graph or record a local value event.
 
-The `ContextHealthReportV1` planner reports expired validity, overdue `review_after`, changed/missing/unknown code
-citations, missing or inactive relation targets, exact duplicates, and contradictions or possible duplicates in pending
-candidates. Severity, confidence, and repairability are separate fields. Findings are deterministic and bounded.
+The `ContextHealthReportV1` planner reports expired validity, overdue `review_after`, changed or missing code citations,
+missing or inactive relation targets, exact duplicates, and contradictions or possible duplicates in pending candidates.
+Its additive version-2 maintenance projection separates decisions, automatic work, historical evidence, and coverage.
+Severity, confidence, and repairability are separate fields. Findings are deterministic and bounded. A citation that
+has not been checked because of a batch limit contributes to coverage, rather than becoming another issue.
 
-Health proposes reviewable repairs; it never silently archives, deletes, overwrites, or renews a record. Unknown code
-coverage remains unknown rather than being presented as current. Shared records remain read-only until the user enters
-the existing conflict or publish workflow.
+The health report remains read-only. Automatic maintenance uses a separate persistent worker to make proven safe,
+private structural repairs and record recovery receipts. Changed engineering claims, ambiguous matches, and shared
+canonical changes require review. Unavailable current evidence remains unverified; recovering an original snapshot
+preserves historical provenance without certifying that the memory is correct today.
 
 Reports are bounded. If findings are omitted, the report returns an opaque `nextCursor`; pass it as `--after` (or MCP
 `after`) with the unchanged exact category/kind/topic intersection to retrieve the next deterministic page without
@@ -200,6 +203,36 @@ unavailable semantic evidence leaves health `unknown`: surfaced findings are sti
 establish that the project is clean. Selector runs do not write a value-health snapshot, so a narrow view cannot mark
 unselected findings as resolved. Kind/topic selectors exclude unrelated project-global candidate and guidance evidence;
 category-only selectors may still surface matching project-global evidence.
+
+Foreground health reads reuse background citation receipts only while the memory, repository source, published graph,
+and validation policy still match. Cold or changed evidence is queued for background checks and reports the remaining work as
+deferred coverage. Opening Home or another findings page does not wait for a full-corpus recovery scan; the maintenance
+worker advances that scan independently.
+
+Use the installed `threadnote-health` skill for a scoped decision that automatic maintenance cannot resolve. The agent
+compares the claim with current source and historical evidence, applies an exact authorized repair, or returns a
+concrete choice. Repeated runs with unchanged evidence leave one waiting outcome instead of another failure record.
+
+Automatic maintenance resumes from local checkpoints during normal CLI, MCP, and Manager use. It processes bounded
+batches fairly across projects. Inspect progress or control the same worker with:
+
+```sh
+threadnote context maintain --action status --json
+threadnote context maintain --project <project> --max-records 16 --json
+threadnote context maintain --action pause
+threadnote context maintain --action resume
+threadnote context maintain --action packet --case-id <case-id> --json
+threadnote context maintain --action undo --receipt-id <receipt-id>
+```
+
+Pause is persistent. Undo uses the retained receipt and checks the current memory revision; a conflicting later edit
+requires review. Automatic work never publishes shared knowledge. Manager presents decision cards, evidence coverage,
+grouped waiting causes, and recent changes instead of counting every skipped citation as a failure.
+
+The full local MCP toolset exposes `context_maintenance_status`, `context_maintain`, and
+`context_maintenance_packet`. The status response provides stable case IDs; the packet binds a selected case to its
+memory and evidence revisions for a scoped `threadnote-health` session. Automatic local maintenance also runs when
+the core toolset is selected. Explicitly scoped or remote read-only sessions do not acquire local maintenance authority.
 
 Preview the bounded repair plan separately from the read-only health report, then apply one exact proposal only after
 reviewing its content-bound revision:

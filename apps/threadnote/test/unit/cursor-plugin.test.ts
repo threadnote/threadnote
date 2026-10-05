@@ -171,7 +171,10 @@ describe('Cursor plugin package', () => {
         yield* fs.copy(pluginRoot, cachedRoot, {overwrite: true});
         yield* fs.writeFileString(
           cachedRule,
-          (yield* fs.readFileString(cachedRule)).replace('broad source search', 'broad source search for this task'),
+          (yield* fs.readFileString(cachedRule)).replace(
+            'unfamiliar source relationships',
+            'unfamiliar source relationships for this task',
+          ),
         );
         const sameVersionMismatch = yield* doctor();
         expect(sameVersionMismatch).toMatchObject([{name: 'Cursor plugin', status: 'fail'}]);

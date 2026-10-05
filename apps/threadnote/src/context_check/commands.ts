@@ -136,6 +136,7 @@ const checkRepository = Effect.fn('contextCheck.repository')(function* (
     const graphImpactedMemoryUris = impact.status === 'complete' ? impact.impactedMemoryUris : [];
     const affectedMemoryUris = [...new Set([...directlyAffectedMemoryUris, ...graphImpactedMemoryUris])].sort();
     const healthReport = yield* collectContextHealth(config, project, records, repoRoot, {
+      includeCitationCoverageFindings: true,
       includeFindingCategories: ['candidate-contradiction', 'relation-target-conflicted'],
       includeFindingUris: affectedMemoryUris,
     });

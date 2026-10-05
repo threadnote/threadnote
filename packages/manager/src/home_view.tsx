@@ -11,6 +11,8 @@ interface HomeResponse {
     readonly scanned?: number;
     readonly pending?: number;
     readonly outcomes?: number;
+    readonly decisionMemories?: number;
+    readonly healthCoverage?: string;
   };
   readonly handoffs: readonly {readonly timestamp: string; readonly topic?: string; readonly uri: string}[];
   readonly lanes: readonly ManagerHomeLane[];
@@ -51,11 +53,15 @@ export function ManagerHomePanel({
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError('');
-    void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`)
+    void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
+      signal: controller.signal,
+      timeoutMilliseconds: 8_000,
+    })
       .then(result => {
-        if (!cancelled) setHome(result);
+        if (!cancelled && result.project === project) setHome(result);
       })
       .catch(cause => {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
@@ -65,6 +71,7 @@ export function ManagerHomePanel({
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [project, generation]);
 
@@ -104,13 +111,18 @@ export function ManagerHomePanel({
         </div>
       ) : home ? (
         <>
-          <HomeAttentionFlow input={{...(home.stats ?? {}), findings: healthFindingCount}} onOpen={onOpen} />
+          <HomeAttentionFlow
+            input={{...(home.stats ?? {}), findings: healthFindingCount, decisions: home.stats?.decisionMemories}}
+            onOpen={onOpen}
+          />
           <section className="home-handoffs">
             <div className="home-lane-heading">
               <h3>Resume a handoff</h3>
               <button onClick={() => onOpen('memory')}>Open Library</button>
             </div>
-            {home.handoffs.length === 0 ? (
+            {home.stats?.memories === undefined && home.handoffs.length === 0 ? (
+              <p className="muted">Handoffs are unavailable. Refresh to retry.</p>
+            ) : home.handoffs.length === 0 ? (
               <p className="muted">No active handoffs for {home.project}.</p>
             ) : (
               <ul>

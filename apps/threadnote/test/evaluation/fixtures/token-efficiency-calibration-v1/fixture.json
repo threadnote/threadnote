@@ -1,0 +1,331 @@
+{
+  "id": "token-efficiency-calibration-v1",
+  "version": 1,
+  "schema": {
+    "closedEnums": {
+      "evidenceState": ["sufficient", "partial", "degraded", "no-match"],
+      "contextUtilityKind": ["required-implementation"],
+      "evidenceDisposition": [
+        "suppress-broad-follow-up",
+        "allow-named-expansion",
+        "require-current-verification",
+        "do-not-infer-implementation"
+      ],
+      "memoryState": ["graph-only", "useful", "irrelevant", "stale", "incomplete"],
+      "requiredEvidenceAuthority": ["current-graph"],
+      "resumeKind": ["structured", "legacy", "no-handoff"],
+      "resumeDisposition": ["reuse-bounded-card", "normalize-before-reuse", "request-fresh-context"],
+      "observedOutput": ["not-captured"],
+      "negativeControlPurpose": ["unrelated-public-historical-control"],
+      "retainedAggregateArm": ["files", "threadnote-graph", "threadnote-compact"],
+      "retainedVerifierStatus": ["passed", "task-failed"],
+      "retainedAggregateAvailability": ["available", "unavailable"]
+    },
+    "followUpBounds": {
+      "maximumEdgeLimit": 12,
+      "maximumNodeLimit": 8,
+      "maximumTokenBudget": 800,
+      "minimumEdgeLimit": 1,
+      "minimumNodeLimit": 1,
+      "minimumTokenBudget": 1
+    }
+  },
+  "publicCorpus": {
+    "corpusId": "threadnote-token-efficiency-historical-v1",
+    "corpusPath": "apps/threadnote/test/evaluation/corpora/token-efficiency-historical-v1/corpus.json",
+    "provenancePath": "apps/threadnote/test/evaluation/corpora/token-efficiency-historical-v1/provenance.json"
+  },
+  "contextUtilityLabels": [
+    {
+      "id": "attrs-required-implementation",
+      "kind": "required-implementation",
+      "taskId": "tsk_1c391a7896906b29202da55b",
+      "required": {
+        "path": "src/attr/_make.py",
+        "symbol": "_ClassBuilder.add_replace"
+      },
+      "optionalSupport": [
+        {
+          "path": "src/attr/_make.py",
+          "symbol": "_ClassBuilder._add_method_dunders_safe"
+        }
+      ],
+      "requiredInvariantClass": "callable-metadata-preservation",
+      "distractors": [
+        {
+          "path": "src/attr/_funcs.py",
+          "symbol": "evolve"
+        },
+        {
+          "path": "src/attrs/__init__.py",
+          "symbol": "evolve"
+        }
+      ],
+      "observedOutput": "not-captured"
+    },
+    {
+      "id": "werkzeug-required-implementation",
+      "kind": "required-implementation",
+      "taskId": "tsk_40aa8260ce35eb0588e0d85f",
+      "required": {
+        "path": "src/werkzeug/wrappers/request.py",
+        "symbol": "Request.application"
+      },
+      "optionalSupport": [
+        {
+          "path": "src/werkzeug/wrappers/request.py",
+          "symbol": "Request"
+        }
+      ],
+      "requiredInvariantClass": "static-overload-and-runtime-wrapper-compatibility",
+      "distractors": [
+        {
+          "path": "src/werkzeug/wrappers/request.py",
+          "symbol": "Request.from_values"
+        },
+        {
+          "path": "src/werkzeug/wrappers/request.py",
+          "symbol": "Request.get_data"
+        }
+      ],
+      "observedOutput": "not-captured"
+    }
+  ],
+  "negativeControls": [
+    {
+      "controlId": "ctl_13a87df1c8ff6390c96c7e6f",
+      "taskId": "tsk_ed9ebce266025c8aa067cc03",
+      "purpose": "unrelated-public-historical-control"
+    },
+    {
+      "controlId": "ctl_881bef74dbe43a3269714060",
+      "taskId": "tsk_a7db0fa0dae5f2fca06e5bd8",
+      "purpose": "unrelated-public-historical-control"
+    }
+  ],
+  "evidenceScenarios": [
+    {
+      "id": "sufficient-current-required-implementation",
+      "state": "sufficient",
+      "requiredLabelId": "attrs-required-implementation",
+      "expectedDisposition": "suppress-broad-follow-up",
+      "observedOutput": "not-captured"
+    },
+    {
+      "id": "partial-named-static-contract-gap",
+      "state": "partial",
+      "requiredLabelId": "werkzeug-required-implementation",
+      "expectedDisposition": "allow-named-expansion",
+      "observedOutput": "not-captured"
+    },
+    {
+      "id": "degraded-currentness-uncertain",
+      "state": "degraded",
+      "requiredLabelId": "attrs-required-implementation",
+      "expectedDisposition": "require-current-verification",
+      "observedOutput": "not-captured"
+    },
+    {
+      "id": "no-match-unrelated-control",
+      "state": "no-match",
+      "requiredLabelId": "werkzeug-required-implementation",
+      "expectedDisposition": "do-not-infer-implementation",
+      "observedOutput": "not-captured"
+    }
+  ],
+  "memoryNonInterferenceScenarios": [
+    {
+      "id": "graph-only-required-label",
+      "memoryState": "graph-only",
+      "requiredLabelId": "attrs-required-implementation",
+      "expectedRequiredEvidenceAuthority": "current-graph"
+    },
+    {
+      "id": "useful-memory-does-not-displace-required-label",
+      "memoryState": "useful",
+      "requiredLabelId": "attrs-required-implementation",
+      "expectedRequiredEvidenceAuthority": "current-graph"
+    },
+    {
+      "id": "irrelevant-memory-does-not-displace-required-label",
+      "memoryState": "irrelevant",
+      "requiredLabelId": "werkzeug-required-implementation",
+      "expectedRequiredEvidenceAuthority": "current-graph"
+    },
+    {
+      "id": "stale-memory-does-not-displace-required-label",
+      "memoryState": "stale",
+      "requiredLabelId": "werkzeug-required-implementation",
+      "expectedRequiredEvidenceAuthority": "current-graph"
+    },
+    {
+      "id": "incomplete-memory-does-not-displace-required-label",
+      "memoryState": "incomplete",
+      "requiredLabelId": "attrs-required-implementation",
+      "expectedRequiredEvidenceAuthority": "current-graph"
+    }
+  ],
+  "resumeScenarios": [
+    {
+      "id": "structured-resume-card",
+      "resumeKind": "structured",
+      "expectedDisposition": "reuse-bounded-card"
+    },
+    {
+      "id": "legacy-handoff",
+      "resumeKind": "legacy",
+      "expectedDisposition": "normalize-before-reuse"
+    },
+    {
+      "id": "no-handoff",
+      "resumeKind": "no-handoff",
+      "expectedDisposition": "request-fresh-context"
+    }
+  ],
+  "followUp": {
+    "arguments": {
+      "edgeLimit": 12,
+      "nodeLimit": 8,
+      "budgetTokens": 800
+    },
+    "purpose": "bounded-named-evidence-expansion"
+  },
+  "retainedPilots": [
+    {
+      "pilotId": "production-5.0.7-attrs-three-arm-v1",
+      "name": "attrs-1606-production-5.0.7-three-arm",
+      "availability": "available",
+      "provenance": "privacy-safe-retained-aggregate-v1",
+      "taskId": "tsk_1c391a7896906b29202da55b",
+      "comparativeClaimsEligible": false,
+      "rows": [
+        {
+          "arm": "files",
+          "completed": false,
+          "verifierStatus": "task-failed",
+          "providerTokens": {
+            "cachedInputTokens": 155648,
+            "inputTokens": 192147,
+            "outputTokens": 1806,
+            "reasoningOutputTokens": 235,
+            "totalTokens": 193953
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 36499,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        },
+        {
+          "arm": "threadnote-graph",
+          "completed": false,
+          "verifierStatus": "task-failed",
+          "providerTokens": {
+            "cachedInputTokens": 302336,
+            "inputTokens": 368644,
+            "outputTokens": 2801,
+            "reasoningOutputTokens": 356,
+            "totalTokens": 371445
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 66308,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        },
+        {
+          "arm": "threadnote-compact",
+          "completed": true,
+          "verifierStatus": "passed",
+          "providerTokens": {
+            "cachedInputTokens": 237824,
+            "inputTokens": 286024,
+            "outputTokens": 2238,
+            "reasoningOutputTokens": 396,
+            "totalTokens": 288262
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 48200,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        }
+      ],
+      "unavailableReason": null
+    },
+    {
+      "pilotId": "production-5.0.7-werkzeug-three-arm-v1",
+      "name": "werkzeug-3295-production-5.0.7-three-arm",
+      "availability": "available",
+      "provenance": "privacy-safe-retained-aggregate-v1",
+      "taskId": "tsk_40aa8260ce35eb0588e0d85f",
+      "comparativeClaimsEligible": false,
+      "rows": [
+        {
+          "arm": "files",
+          "completed": true,
+          "verifierStatus": "passed",
+          "providerTokens": {
+            "cachedInputTokens": 163840,
+            "inputTokens": 207692,
+            "outputTokens": 3024,
+            "reasoningOutputTokens": 1374,
+            "totalTokens": 210716
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 43852,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        },
+        {
+          "arm": "threadnote-graph",
+          "completed": true,
+          "verifierStatus": "passed",
+          "providerTokens": {
+            "cachedInputTokens": 125696,
+            "inputTokens": 167154,
+            "outputTokens": 2036,
+            "reasoningOutputTokens": 789,
+            "totalTokens": 169190
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 41458,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        },
+        {
+          "arm": "threadnote-compact",
+          "completed": false,
+          "verifierStatus": "task-failed",
+          "providerTokens": {
+            "cachedInputTokens": 193536,
+            "inputTokens": 221946,
+            "outputTokens": 2341,
+            "reasoningOutputTokens": 908,
+            "totalTokens": 224287
+          },
+          "derivedUsage": {
+            "uncachedInputTokens": 28410,
+            "cacheWriteTokens": null,
+            "newTokens": null,
+            "processedTokens": null,
+            "unavailableReason": "provider-did-not-expose-cache-write-tokens"
+          }
+        }
+      ],
+      "unavailableReason": null
+    }
+  ]
+}

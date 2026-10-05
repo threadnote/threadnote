@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {normalizeSchemaDefinition} from '../schema/normalization.js';
 import {CodeGraphStoreError} from '../../types.js';
 

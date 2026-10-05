@@ -11,7 +11,7 @@ export {
 import {Context, Effect, Layer, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {SystemInfo} from '@threadnote/platform/system';
-import {LanguageModel} from 'effect/unstable/ai';
+import {LanguageModel} from 'effect/ai';
 import {shouldExpandRecall, type RecallConfidenceLevel} from '@threadnote/recall/rank';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {

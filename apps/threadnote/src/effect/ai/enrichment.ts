@@ -1,5 +1,5 @@
 import {Context, Effect, Layer, Schema, pipe} from 'effect';
-import {AiError, LanguageModel} from 'effect/unstable/ai';
+import {AiError, LanguageModel} from 'effect/ai';
 import type {MemoryKind} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {MemoryMetadata} from '@threadnote/memory/document';

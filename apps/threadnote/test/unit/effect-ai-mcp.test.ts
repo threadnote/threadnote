@@ -1,10 +1,10 @@
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, Option, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
-import {McpProtocol, McpSchema} from 'effect/unstable/ai';
-import {RpcServer} from 'effect/unstable/rpc';
+import {McpProtocol, McpSchema} from 'effect/ai';
+import {RpcServer} from 'effect/rpc';
 import {describe, expect, it, vi} from 'vitest';
 import {
   admitMcpProgressToken,
@@ -58,6 +58,29 @@ const repairedInitializeResponse = {
     serverInfo: {name: 'threadnote', version: '4.0.0'},
   },
 };
+
+describe('Effect 4 direct resource error projection', () => {
+  it('strips only the exact internal brand and is idempotent after initialization', () => {
+    fc.assert(
+      fc.property(
+        fc.oneof(fc.integer(), fc.string()),
+        fc.constantFrom(-32_602, -32_603),
+        fc.string(),
+        (id, code, message) => {
+          const transform = makeInitializeInstructionsTransform('Use Threadnote context.');
+          transform(initializeResponse);
+          const response = JSON.stringify({error: {code, data: MCP_RESOURCE_ERROR_DATA, message}, id, jsonrpc: '2.0'});
+          const transformed = transform(response);
+          expect(JSON.parse(String(transformed))).toEqual({error: {code, message}, id, jsonrpc: '2.0'});
+          expect(transform(transformed)).toBe(transformed);
+          const unrelated = JSON.stringify({error: {code, data: {other: true}, message}, id, jsonrpc: '2.0'});
+          expect(transform(unrelated)).toBe(unrelated);
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+});
 
 function encodedResourceNotFoundCause(recovery: unknown, id: number): string {
   return JSON.stringify({
@@ -846,17 +869,14 @@ describe('Effect MCP tool progress', () => {
       expect(installed).not.toBe(original);
       expect(installCallToolProgressBridge(server)).toBe(true);
       expect(server.callTool).toBe(installed);
-      expect(Object.getOwnPropertyDescriptor(server, 'initializedClients')).toMatchObject({
-        configurable: false,
-        writable: false,
-      });
+      expect(server).not.toHaveProperty('initializedClients');
 
       const result = yield* server
         .callTool({arguments: {}, name: 'fixture'})
         .pipe(Effect.provideService(McpSchema.McpServerClient, fixtureMcpServerClient(17)));
 
       expect(result.content).toEqual([{type: 'text', text: 'receiver-preserved'}]);
-      expect(server.initializedClients.size).toBe(0);
+      expect(server).not.toHaveProperty('initializedClients');
     }),
   );
 
@@ -868,6 +888,34 @@ describe('Effect MCP tool progress', () => {
     expect(server.callTool).toBe(original);
   });
 
+  effectIt.effect.prop(
+    'preserves the originating client and opaque token in Effect 4 request context',
+    [Schema.Int, Schema.String],
+    ([clientId, progressToken]) =>
+      Effect.gen(function* () {
+        const server: EffectMcpServer = {
+          ...fakeEffectMcpServer(),
+          callTool: () =>
+            Effect.gen(function* () {
+              const context = yield* Effect.serviceOption(McpSchema.McpRequestContext);
+              expect(Option.isSome(context)).toBe(true);
+              if (Option.isSome(context)) {
+                expect(context.value.clientId).toBe(clientId);
+                expect(context.value.requestMetadata?.progressToken).toBe(progressToken);
+                expect(context.value.protocolVersion).toBe('2025-06-18');
+              }
+              return McpSchema.CallToolResult.make({content: []});
+            }),
+        };
+        expect(installCallToolProgressBridge(server)).toBe(true);
+        yield* server
+          .callTool({_meta: {progressToken}, arguments: {}, name: 'fixture'})
+          .pipe(Effect.provideService(McpSchema.McpServerClient, fixtureMcpServerClient(clientId)));
+        expect(server).not.toHaveProperty('initializedClients');
+      }),
+    {arbitrary: {runs: 50}},
+  );
+
   it('leaves a non-writable Effect service unchanged when the bridge cannot be installed safely', () => {
     const server = fakeEffectMcpServer();
     const original = server.callTool;
@@ -875,15 +923,15 @@ describe('Effect MCP tool progress', () => {
 
     expect(installCallToolProgressBridge(server)).toBe(false);
     expect(server.callTool).toBe(original);
-    expect(server.initializedClients).toEqual(new Set());
+    expect(server).not.toHaveProperty('initializedClients');
   });
 
-  it('restores the exact callTool method when binding the stdio recipient set fails', () => {
+  it('preserves the exact callTool method when binding the request bridge fails', () => {
     const target = fakeEffectMcpServer();
     const original = target.callTool;
     const server = new Proxy(target, {
       defineProperty(object, property, descriptor) {
-        if (property === 'initializedClients') throw TestError.make({message: 'fixture rejects recipient binding'});
+        if (property === 'callTool') throw TestError.make({message: 'fixture rejects request bridge binding'});
         return Reflect.defineProperty(object, property, descriptor);
       },
       set(object, property, value) {
@@ -893,20 +941,7 @@ describe('Effect MCP tool progress', () => {
 
     expect(installCallToolProgressBridge(server)).toBe(false);
     expect(target.callTool).toBe(original);
-    expect(target.initializedClients).toEqual(new Set());
-  });
-
-  it('refuses an already multi-client service without mutating either adapter property', () => {
-    const server = fakeEffectMcpServer();
-    const originalCallTool = server.callTool;
-    const originalInitializedClients = server.initializedClients;
-    originalInitializedClients.add(11);
-    originalInitializedClients.add(22);
-
-    expect(installCallToolProgressBridge(server)).toBe(false);
-    expect(server.callTool).toBe(originalCallTool);
-    expect(server.initializedClients).toBe(originalInitializedClients);
-    expect(server.initializedClients).toEqual(new Set([11, 22]));
+    expect(target).not.toHaveProperty('initializedClients');
   });
 
   effectIt.effect('refuses a second client without leaking its token or mutating the routing set', () =>
@@ -942,9 +977,9 @@ describe('Effect MCP tool progress', () => {
     initializedClients.add(11);
     const queued = [{progressToken: 'client-11-token'}];
 
-    // The Effect 4 queue reads recipients only when it drains. The
-    // stdio registry therefore has to reject a foreign add after enqueue, not
-    // merely check the set before the notification is offered.
+    // Private stdio admission stays with its first client for its entire
+    // lifetime, even after deletion; Effect separately routes each notification
+    // using the request context captured when it was enqueued.
     initializedClients.add(22);
     const deliveries = queued.flatMap(notification =>
       [...initializedClients].map(clientId => ({clientId, notification})),
@@ -1132,7 +1167,6 @@ describe('Effect MCP tool progress', () => {
 
 function fakeEffectMcpServer(): EffectMcpServer {
   const server = {
-    initializedClients: new Set<number>(),
     marker: 'receiver-preserved',
     notifications: {'notifications/progress': () => Effect.void},
     callTool(this: {readonly marker: string}) {

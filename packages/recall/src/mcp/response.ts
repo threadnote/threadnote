@@ -237,46 +237,99 @@ export function renderRecallMcpText(response: RecallMcpStructuredContent, notice
   ].join('\n');
 }
 
-/** A deterministic, text-only recall receipt. Every value is JSON encoded so tabs,
- * newlines, and nested records cannot alter its row grammar. */
+/** A deterministic, text-only recall receipt optimized for direct agent reading.
+ * Common fields use a compact natural-language form; nested diagnostics remain
+ * JSON encoded so control characters cannot alter the line grammar. */
 export function renderRecallMcpAgentText(
   response: RecallMcpStructuredContent,
   notices: readonly string[] = [],
 ): string {
-  const scalar = (value: unknown) => JSON.stringify(value);
-  const lines = ['TN-RECALL/1', 'evidence\t"unread-pointers-not-evidence;read-with-read_context"'];
-  for (const key of ['rankerVersion', 'confidence', 'memoryScope', 'nextAction'] as const) {
-    if (response[key] !== undefined) lines.push(`${key}\t${scalar(response[key])}`);
+  const scalar = (value: unknown) =>
+    (JSON.stringify(value) ?? 'null').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
+  const oneLine = (value: string) => {
+    let output = '';
+    let replacingControl = false;
+    for (const character of value) {
+      const codePoint = character.codePointAt(0) ?? 0;
+      const control =
+        codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) || codePoint === 0x2028 || codePoint === 0x2029;
+      if (!control) output += character;
+      else if (!replacingControl) output += ' ';
+      replacingControl = control;
+    }
+    return output.trim();
+  };
+  const lines = ['TN-RECALL/1', 'Ranked unread pointers; not evidence. Read useful URIs with read_context.'];
+  if (response.confidence !== undefined) {
+    lines.push(
+      `Confidence: ${response.confidence.level} ${roundedConfidence(response.confidence.score)} (${response.confidence.basis.replaceAll('-', ' ')}). ${oneLine(response.confidence.reason)}`,
+    );
   }
-  lines.push(`output\t${scalar(response.output)}`);
+  if (response.memoryScope !== undefined) lines.push(`Memory scope: ${scalar(response.memoryScope)}`);
+  lines.push(
+    `Returned ${response.output.returnedResults}/${response.output.totalResults} pointers${
+      response.output.omittedResults > 0 ? `; ${response.output.omittedResults} omitted by budget` : ''
+    }.`,
+  );
+  if (response.output.explainDetails === 'omitted-response-budget') {
+    lines.push('Ranking details were omitted by the response budget.');
+  }
   for (const [index, result] of response.results.entries()) {
-    lines.push(`result\t${index + 1}\t${scalar(result)}`);
+    const rank = index + 1;
+    const category = result.category === 'memories' ? 'Memory' : result.category === 'resources' ? 'Resource' : 'Skill';
+    lines.push(
+      `${rank}. ${category}, confidence ${result.confidence}, URI: ${oneLine(result.uri)} — ${oneLine(result.reason)}`,
+    );
+    if (result.aliases !== undefined) {
+      lines.push(
+        `   Aliases: ${result.aliases.map(oneLine).join(', ')}${result.omittedAliases ? `; ${result.omittedAliases} omitted` : ''}.`,
+      );
+    }
+    for (const warning of result.warnings ?? []) {
+      lines.push(`   Warning: ${oneLine(warning.message)} ${oneLine(warning.remediation)}`);
+    }
+    if (result.finalScore !== undefined || result.reasons !== undefined || result.signals !== undefined) {
+      lines.push(
+        `   Ranking details: ${scalar({
+          ...(result.finalScore === undefined ? {} : {finalScore: result.finalScore}),
+          ...(result.reasons === undefined ? {} : {reasons: result.reasons}),
+          ...(result.signals === undefined ? {} : {signals: result.signals}),
+          ...(result.rankWarnings === undefined ? {} : {rankWarnings: result.rankWarnings}),
+        })}`,
+      );
+    }
   }
-  if (response.results.length > 0) lines.push('feedback\t"recall_feedback useful|wrong|pin|dismiss|applied"');
+  const nextRanks = response.nextAction.uris.flatMap(uri => {
+    const index = response.results.findIndex(result => result.uri === uri);
+    return index < 0 ? [] : [index + 1];
+  });
+  if (nextRanks.length > 0) lines.push(`Read first with read_context: ${nextRanks.join(', ')}.`);
   if (response.memoryConnections !== undefined) {
-    lines.push(`coverage\t${scalar(response.memoryConnections.coverage)}`);
+    const {coverage} = response.memoryConnections;
+    lines.push(
+      `Relation coverage: ${coverage.resultCount} result(s), ${coverage.connectionCount} connection(s), ${coverage.premiseCount} premise(s)${coverage.truncated ? '; truncated' : ''}.`,
+    );
     for (const [index, connection] of response.memoryConnections.connections.entries()) {
-      lines.push(`connection\t${index + 1}\t${scalar(connection)}`);
+      lines.push(`Connection ${index + 1}: ${scalar(connection)}`);
     }
     for (const [index, premise] of response.memoryConnections.premises.entries()) {
-      lines.push(`premise\t${index + 1}\t${scalar(premise)}`);
+      lines.push(`Premise ${index + 1}: ${scalar(premise)}`);
     }
   }
-  if (response.queryExpansions !== undefined) lines.push(`queryExpansions\t${scalar(response.queryExpansions)}`);
-  for (const warning of response.warnings ?? []) lines.push(`warning\t${scalar(warning)}`);
-  for (const notice of notices) lines.push(`notice\t${scalar(notice)}`);
+  if (response.queryExpansions !== undefined)
+    lines.push(`Query expansions: ${response.queryExpansions.map(oneLine).join(', ')}.`);
+  for (const warning of response.warnings ?? []) lines.push(renderRecallOperationalWarning(warning));
+  for (const notice of notices) lines.push(`Notice: ${oneLine(notice)}`);
   if (response.memoryConnections?.coverage.truncated === true) {
-    lines.push('recovery\t"increase-budgetTokens-if-below-1500-or-narrow-memoryRefs-or-relationTypes"');
+    lines.push('Recovery: increase budgetTokens if below 1500, or narrow memoryRefs/relationTypes.');
   }
   if (response.output.truncated || response.output.budgetLimited) {
     lines.push(
-      `recovery\t${scalar(
-        response.output.budgetLimited
-          ? response.output.retryBudgetTokens === undefined
-            ? 'narrow-recall-inputs-and-retry'
-            : `retry-recall-context-with-budgetTokens-${response.output.retryBudgetTokens}`
-          : 'increase-budgetTokens-or-narrow-recall-inputs',
-      )}`,
+      response.output.budgetLimited
+        ? response.output.retryBudgetTokens === undefined
+          ? 'Recovery: narrow recall inputs and retry.'
+          : `Recovery: retry recall_context with budgetTokens=${response.output.retryBudgetTokens}.`
+        : 'Recovery: increase budgetTokens or narrow recall inputs.',
     );
   }
   return `${lines.join('\n')}\n`;

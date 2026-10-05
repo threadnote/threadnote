@@ -1,5 +1,5 @@
 import {Console, Effect} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {applicationError} from '@threadnote/platform/errors';
 import {argument, boolean, defaultChoice, repeatedString} from './cli/flags.js';

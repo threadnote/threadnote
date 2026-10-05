@@ -1,5 +1,5 @@
 import {Clock, Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphRoutineMaintenanceResult} from './models.js';
 import {pruneRetiredSnapshotRowsPage} from './view_cleanup.js';
 import {

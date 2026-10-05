@@ -1,5 +1,7 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {formatMemoryDocument} from '@threadnote/memory/document';
 import {
   MEMORY_READ_MAXIMUM_CONTENT_BYTES,
   MEMORY_READ_PAGE_BYTES,
@@ -7,30 +9,107 @@ import {
   MemoryReadTooLargeError,
   memoryMarkdownOutline,
   memoryReadMcpStructuredContent,
+  memoryReadMcpText,
   memoryReadContentBytes,
   projectMemoryRead,
   selectMemoryMarkdownSection,
 } from '@threadnote/memory/read/projection';
 
 describe('complete memory read projection', () => {
-  it('defaults to text-channel metadata while explicit dual preserves the body', () => {
+  it('defaults to agent-channel metadata while explicit text and dual preserve canonical content', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 2_000}), text => {
         const read = projectMemoryRead([{text, uri: 'threadnote://test/decision.md'}]);
         const omitted = memoryReadMcpStructuredContent(read);
+        const explicitAgent = memoryReadMcpStructuredContent(read, 'agent');
         const explicitText = memoryReadMcpStructuredContent(read, 'text');
-        expect(omitted).toEqual(explicitText);
+        expect(omitted).toEqual(explicitAgent);
+        expect(omitted).toMatchObject({contentChannel: 'agent'});
+        expect(explicitText).toMatchObject({contentChannel: 'text', uri: read.uri});
         expect(omitted).not.toHaveProperty('content');
+        expect(omitted).not.toHaveProperty('uri');
         expect(memoryReadMcpStructuredContent(read, 'dual')).toBe(read.structuredContent);
       }),
       {numRuns: 50},
     );
   });
 
+  it('replaces raw citation JSON with compact code evidence without changing the memory body', () => {
+    const citation = createMemoryCodeCitation({
+      extractorSet: 'e'.repeat(64),
+      fileContentHash: {algorithm: 'sha256', value: 'f'.repeat(64)},
+      path: 'packages/context/src/projector.ts',
+      repositoryId: 'a'.repeat(64),
+      repositoryIdentityKind: 'remote',
+      sourceCommit: 'b'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${'c'.repeat(40)}`,
+      target: {kind: 'file'},
+      version: 1,
+    });
+    const body = '  # Decision\nPreserve the complete approved body.  \n\n';
+    const formatted = formatMemoryDocument(
+      'MEMORY',
+      {
+        codeCitations: [citation],
+        kind: 'durable',
+        project: 'threadnote',
+        relations: [
+          {type: 'references', uri: 'threadnote://user/test/memories/durable/projects/threadnote/related.md'},
+          {type: 'references', uri: 'threadnote://user/other/memories/durable/projects/threadnote/external.md'},
+        ],
+        schemaVersion: 5,
+        sourceAgentClient: 'test',
+        status: 'active',
+        timestamp: '2026-10-02T00:00:00.000Z',
+        topic: 'compact-read',
+        visibility: 'personal',
+      },
+      body.trim(),
+    );
+    const separator = formatted.indexOf('\n\n');
+    const canonical = `${formatted.slice(0, separator + 2)}${body}`;
+    const read = projectMemoryRead([
+      {
+        text: canonical,
+        uri: 'threadnote://user/test/memories/durable/projects/threadnote/compact-read.md',
+      },
+    ]);
+    const agent = memoryReadMcpText(read);
+
+    expect(agent).toContain('TN-MEMORY/1');
+    expect(agent).toContain(
+      `Code evidence [remote:${citation.repositoryId.slice(0, 12)} @ ${citation.sourceCommit}]: packages/context/src/projector.ts`,
+    );
+    expect(agent).toContain('Relation: references memories/durable/projects/threadnote/related.md');
+    expect(agent).toContain(
+      'Relation: references threadnote://user/other/memories/durable/projects/threadnote/external.md',
+    );
+    expect(agent).toContain('Source: memories/durable/projects/threadnote/compact-read.md');
+    expect(agent.endsWith(body)).toBe(true);
+    expect(agent).not.toContain('code_citation:');
+    expect(agent).not.toContain(citation.repositoryId);
+    expect(memoryReadMcpText(read, 'text')).toBe(canonical);
+    expect(memoryReadContentBytes(agent)).toBeLessThan(memoryReadContentBytes(canonical));
+
+    const mixed = projectMemoryRead([
+      {text: canonical, uri: 'threadnote://user/test/memories/durable/projects/threadnote/compact-read.md'},
+      {text: 'Plain fallback.', uri: 'threadnote://user/test/memories/durable/projects/threadnote/plain.md'},
+    ]);
+    expect(memoryReadMcpStructuredContent(mixed)).toMatchObject({
+      contentChannel: 'agent',
+      sources: ['memories/durable/projects/threadnote/plain.md'],
+    });
+    expect(memoryReadMcpText(mixed)).toContain('Plain fallback.');
+  });
+
   it('moves complete text into one authoritative channel without dropping read metadata', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 2_000}), text => {
         const read = projectMemoryRead([{text, uri: 'threadnote://test/decision.md'}]);
+        expect(memoryReadContentBytes(memoryReadMcpText(read))).toBeLessThanOrEqual(
+          memoryReadContentBytes(read.content),
+        );
         const compact = memoryReadMcpStructuredContent(read, 'text');
         const {content: _content, version: _version, ...metadata} = read.structuredContent;
         expect(compact).toEqual({...metadata, contentChannel: 'text', uri: read.uri, version: 2});
@@ -134,6 +213,11 @@ describe('complete memory read projection', () => {
             const page = read.structuredContent;
             expect(page.contentBytes).toBeLessThanOrEqual(MEMORY_READ_PAGE_BYTES);
             expect(page.content).toBe(read.content);
+            expect(memoryReadMcpText(read)).toBe(read.content);
+            expect(memoryReadMcpStructuredContent(read)).toMatchObject({
+              contentChannel: 'agent',
+              sources: ['threadnote://test/headingless.md'],
+            });
             expect(page.offsetBytes).toBe(offsetBytes);
             expect(page.totalBytes).toBe(memoryReadContentBytes(text));
             expect(page.sourceHash).toMatch(/^[a-f0-9]{64}$/u);

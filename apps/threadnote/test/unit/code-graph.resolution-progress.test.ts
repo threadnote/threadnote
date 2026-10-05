@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Ref} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {afterEach, describe, expect, it} from 'vitest';
 import {CodeGraphStore, type CodeGraphResolutionProgressCallback} from '@threadnote/graph/store';

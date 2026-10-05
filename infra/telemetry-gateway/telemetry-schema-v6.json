@@ -237,7 +237,7 @@
       "unsupported"
     ],
     "contextBriefScope": ["local", "workset"],
-    "contextBriefMode": ["brief", "explain", "impact", "locate", "trace"],
+    "contextBriefMode": ["brief", "explain", "impact", "locate", "resume", "trace"],
     "contextBriefReturnedLane": ["graph", "memory", "mixed", "none"],
     "correlationScope": ["broker", "invocation", "provider-session"],
     "degradationReason": [
@@ -604,6 +604,7 @@
       "cloud.cursor.bootstrap",
       "cloud.cursor.config",
       "cloud.cursor.verify",
+      "codex-resume-hook",
       "complete_cursor_attestation",
       "compact",
       "compact_context",

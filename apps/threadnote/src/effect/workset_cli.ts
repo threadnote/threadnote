@@ -1,5 +1,5 @@
 import {Console, Effect} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import {applicationError, fromSync} from '@threadnote/platform/errors';
 import {
   mutateManagerWorksetDefinition,

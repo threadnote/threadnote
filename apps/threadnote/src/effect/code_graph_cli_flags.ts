@@ -1,5 +1,5 @@
 import {Schema} from 'effect';
-import {Flag} from 'effect/unstable/cli';
+import {Flag} from 'effect/cli';
 import {
   CODE_GRAPH_STATUS_DEFAULT_BUILD_LIMIT,
   CODE_GRAPH_STATUS_DEFAULT_LANGUAGE_PACK_LIMIT,

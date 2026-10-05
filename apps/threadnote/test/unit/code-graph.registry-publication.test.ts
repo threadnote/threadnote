@@ -4,7 +4,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
 

@@ -1,6 +1,6 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';

@@ -5,6 +5,7 @@ import {
   threadnoteHooksAreCurrent,
   withThreadnoteHooks,
 } from '@threadnote/threadnote/hooks';
+import {codexHooksAreCurrent, withCodexHooks} from '@threadnote/threadnote/codex/hooks';
 
 describe('session-start recall queue', () => {
   it('renders only actionable unread pointers and removes ranking diagnostics', () => {
@@ -128,5 +129,53 @@ describe('Claude code-brief hook install', () => {
         ],
       },
     });
+  });
+});
+
+describe('Codex resume hook install', () => {
+  it('adds one bounded UserPromptSubmit command and removes only that exact command', () => {
+    const other = {hooks: [{type: 'command', command: 'other-hook', timeout: 3}], matcher: 'preserve-me'};
+    const input = {
+      custom: true,
+      hooks: {Stop: [{hooks: [{type: 'command', command: 'stop-hook'}]}], UserPromptSubmit: [other]},
+    };
+    const installed = withCodexHooks(input);
+
+    expect(withCodexHooks(installed)).toEqual(installed);
+    expect(codexHooksAreCurrent(installed)).toBe(true);
+    expect(installed).toMatchObject({
+      custom: true,
+      hooks: {
+        Stop: input.hooks.Stop,
+        UserPromptSubmit: [
+          other,
+          {
+            hooks: [
+              {
+                command: 'threadnote codex-resume-hook',
+                statusMessage: 'Loading Threadnote continuation context',
+                timeout: 15,
+                type: 'command',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    expect(withCodexHooks(installed, true)).toEqual(input);
+  });
+
+  it('preserves arbitrary unrelated command order across install and removal', () => {
+    fc.assert(
+      fc.property(fc.array(fc.string({maxLength: 24}), {minLength: 1, maxLength: 30}), suffixes => {
+        const entries = suffixes.map(suffix => ({hooks: [{type: 'command', command: `other-${suffix}`}]}));
+        const input = {hooks: {UserPromptSubmit: entries}};
+        const installed = withCodexHooks(input);
+
+        expect(withCodexHooks(installed)).toEqual(installed);
+        expect(withCodexHooks(installed, true)).toEqual(input);
+      }),
+      {numRuns: 100},
+    );
   });
 });

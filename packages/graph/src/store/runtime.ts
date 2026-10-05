@@ -1,5 +1,5 @@
 import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {type CodeGraphDatabaseSessionOptions} from './shape.js';

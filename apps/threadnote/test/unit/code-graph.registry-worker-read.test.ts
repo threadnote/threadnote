@@ -2,7 +2,7 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer} from 'effect';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {makeGraphShareRegistryReader} from '@threadnote/graph/sharing/registry/reader';

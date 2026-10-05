@@ -48,7 +48,9 @@
     "./process/contracts": "./src/process/contracts.ts",
     "./value-view": "./src/value_view.tsx",
     "./value_view": "./src/value_view.tsx",
-    "./value/contracts": "./src/value/contracts.ts"
+    "./value/contracts": "./src/value/contracts.ts",
+    "./attention/maintenance": "./src/attention/maintenance.ts",
+    "./attention/maintenance-view": "./src/attention/maintenance_view.tsx"
   },
   "dependencies": {
     "@threadnote/integrations": "workspace:*",
@@ -57,7 +59,7 @@
     "@threadnote/platform": "workspace:*",
     "react": "^19.3.0",
     "three": "^0.186.0",
-    "effect": "4.0.0-rc.115",
+    "effect": "4.0.0",
     "@threadnote/recall": "workspace:*",
     "@threadnote/context": "workspace:*",
     "@threadnote/workspace": "workspace:*",
@@ -66,7 +68,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-rc.115",
+    "@effect/vitest": "4.0.0",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.1",
     "vitest": "5.0.1"

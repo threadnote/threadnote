@@ -15,7 +15,8 @@ import {compileSetupSourceVerificationBrief} from '../context_brief/index.js';
 import {retrieveContextBriefGraphEvidence} from '@threadnote/context/graph/evidence';
 import {planContextBrief} from '@threadnote/context/planner';
 import {hasCurrentCursorHooks, hasManagedCursorHooks} from '../cursor/hooks.js';
-import {CLAUDE_SETTINGS_PATH, USER_MANIFEST_NAME} from '../constants.js';
+import {CLAUDE_SETTINGS_PATH, CODEX_HOOKS_PATH, USER_MANIFEST_NAME} from '../constants.js';
+import {hasCurrentCodexHooks, hasManagedCodexHooks} from '../codex/hooks.js';
 import {
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
   type ContextBriefGraphEvidenceV1,
@@ -375,6 +376,7 @@ const setupHookPath = Effect.fn('setup.hookPath')(function* (
   hostRoot?: string,
 ) {
   if (client === 'claude') return yield* expandPath(CLAUDE_SETTINGS_PATH);
+  if (client === 'codex') return yield* expandPath(CODEX_HOOKS_PATH);
   if (client === 'cursor') return yield* expandPath('~/.cursor/hooks.json');
   if (client === 'omp') return (yield* resolveAgentHostPaths('omp', hostRoot))!.hookPath;
   return yield* SetupOperationError.make({message: `${client} has no managed setup hook path.`});
@@ -385,6 +387,7 @@ const managedHooksAreCurrent = Effect.fn('setup.managedHooksAreCurrent')(functio
   hostRoot?: string,
 ) {
   if (client === 'claude') return yield* hasCurrentClaudeHooks();
+  if (client === 'codex') return yield* hasCurrentCodexHooks();
   if (client === 'cursor') return yield* hasCurrentCursorHooks();
   if (client === 'omp') return yield* hasCurrentOmpHooks(hostRoot);
   return false;
@@ -395,6 +398,7 @@ const managedHooksArePresent = Effect.fn('setup.managedHooksArePresent')(functio
   hostRoot?: string,
 ) {
   if (client === 'claude') return yield* hasManagedClaudeHooks();
+  if (client === 'codex') return yield* hasManagedCodexHooks();
   if (client === 'cursor') return yield* hasManagedCursorHooks();
   if (client === 'omp') return yield* hasManagedOmpHooks(hostRoot);
   return false;

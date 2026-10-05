@@ -1,5 +1,5 @@
 import {Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphActivationStage, type CodeGraphActivationProgressCallback} from '../models.js';
 import {LEGACY_BUILDING_REFERENCES_V3_TABLE} from '../schema/contracts.js';
 import {persistedIncrementalFactCountsStatement} from '../incremental/plan.js';

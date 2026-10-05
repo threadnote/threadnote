@@ -1278,9 +1278,21 @@ describe('exact-head development runtime', () => {
         expect(
           result.invocations.some(invocation => invocation.arguments.join(' ') === 'doctor --dry-run --strict'),
         ).toBe(true);
-        expect(result.invocations.some(invocation => invocation.arguments[0] === 'development-install-repair')).toBe(
-          false,
+        const integrationActivationIndex = result.invocations.findIndex(invocation =>
+          invocation.arguments.includes('--activate-integrations'),
         );
+        const doctorIndex = result.invocations.findIndex(
+          invocation => invocation.arguments.join(' ') === 'doctor --dry-run --strict',
+        );
+        expect(integrationActivationIndex).toBeGreaterThan(-1);
+        expect(integrationActivationIndex).toBeLessThan(doctorIndex);
+        expect(
+          result.invocations.some(
+            invocation =>
+              invocation.arguments[0] === 'development-install-repair' &&
+              !invocation.arguments.includes('--activate-integrations'),
+          ),
+        ).toBe(false);
       }),
   );
 
@@ -1369,7 +1381,12 @@ describe('exact-head development runtime', () => {
       expect(result.installed.doctorVerified).toBe(true);
       expect(result.repairObservedInstallationLock).toBe(true);
       expect(result.strictDoctorChecks).toBe(3);
-      expect(result.invocations.filter(invocation => invocation[0] === 'development-install-repair')).toEqual([
+      expect(
+        result.invocations.filter(
+          invocation =>
+            invocation[0] === 'development-install-repair' && !invocation.includes('--activate-integrations'),
+        ),
+      ).toEqual([
         ['development-install-repair', '--expected-version', result.installed.version],
         ['development-install-repair', '--expected-version', result.installed.version],
       ]);
@@ -1532,6 +1549,8 @@ describe('exact-head development runtime', () => {
                 '#!/bin/sh',
                 'if [ "$1" = "doctor" ]; then',
                 "  printf '%s\\n' 'Running Threadnote doctor checks.' 'Summary: 0 failure(s), 0 warning(s)'",
+                'elif [ "$1" = "development-install-repair" ] && [ "$2" = "--activate-integrations" ]; then',
+                '  exit 0',
                 'elif [ "$1" = "--version" ]; then',
                 `  printf '%s\\n' 'threadnote v${version}'`,
                 'else',

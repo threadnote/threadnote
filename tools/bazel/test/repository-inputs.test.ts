@@ -52,6 +52,19 @@ describe('repository input discovery', () => {
     expect(candidates).toContain('cursor-plugin');
   });
 
+  it('ignores zero-argument methods whose names overlap filesystem readers', () => {
+    expect(
+      sourceRepositoryPathCandidates(
+        'example.ts',
+        `
+          const metadata = await handle.stat();
+          const bytes = await handle.readFile();
+          const sink = open();
+        `,
+      ),
+    ).toEqual([]);
+  });
+
   it('accepts only exact roots and their descendants', () => {
     expect(allowedRepositoryPath('docs/troubleshooting.md', ['docs', 'README.md'])).toBe(true);
     expect(allowedRepositoryPath('README.md', ['docs', 'README.md'])).toBe(true);

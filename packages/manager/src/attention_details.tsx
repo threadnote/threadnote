@@ -1,6 +1,7 @@
 import React, {useEffect, useState} from 'react';
 import {Schema} from 'effect';
 import type {CandidateReview} from '@threadnote/memory/candidate';
+import {isSharedMemoryUri} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import type {ManagerContextHealthResponseV1} from './attention/contracts.js';
@@ -42,15 +43,26 @@ export function ReviewDetail(props: {
   }, [props.project, props.reviewId]);
   const candidate = preview?.review.candidates.find(item => item.candidateId === props.candidateId);
   const mutation = preview?.delta.items.find(item => item.candidateId === props.candidateId)?.mutationPreview;
-  const needsSafetyRefresh = mutation?.replacementSafety?.classification === 'review-required';
-  const canCreateMissingTarget = needsSafetyRefresh && missingTarget && operation === 'create' && missingTargetApproved;
+  const reviewedOperation =
+    mutation?.operation === 'create' || mutation?.operation === 'replace' ? mutation.operation : '';
+  const personalCopyRequired =
+    candidate?.targetUri !== undefined &&
+    isSharedMemoryUri(candidate.targetUri) &&
+    (mutation?.operation === 'replace' || mutation?.operation === 'requires_explicit_operation');
+  const needsOperationChoice = mutation?.operation === 'requires_explicit_operation' || personalCopyRequired;
+  const selectedOperation = operation || (personalCopyRequired ? '' : reviewedOperation);
+  const needsSafetyRefresh = !personalCopyRequired && mutation?.replacementSafety?.classification === 'review-required';
+  const canCreateMissingTarget =
+    needsSafetyRefresh && missingTarget && selectedOperation === 'create' && missingTargetApproved;
   const replacementCheckSatisfied =
+    (personalCopyRequired && selectedOperation === 'create') ||
     canCreateMissingTarget ||
     (!needsSafetyRefresh && (!mutation?.replacementSafety?.requiresExplicitApproval || replacementApproved));
   const canApprove =
     mutation &&
     !mutation.truncated &&
-    (mutation.operation !== 'requires_explicit_operation' || operation !== '') &&
+    (!needsOperationChoice || selectedOperation !== '') &&
+    (!personalCopyRequired || selectedOperation === 'create') &&
     replacementCheckSatisfied;
   async function refreshSafety(): Promise<void> {
     if (!preview || busy) return;
@@ -92,9 +104,9 @@ export function ReviewDetail(props: {
         revision: preview.review.revision,
         action,
         approved: action === 'approve',
-        allowDestructiveReplacement: replacementApproved,
+        allowDestructiveReplacement: selectedOperation === 'replace' && replacementApproved,
         allowMissingReplacementCreate: canCreateMissingTarget,
-        ...(operation ? {operation} : {}),
+        ...(selectedOperation ? {operation: selectedOperation} : {}),
       });
       props.onChanged();
       props.onClose();
@@ -106,7 +118,7 @@ export function ReviewDetail(props: {
   }
   return (
     <DetailModal title="Review proposed memory" onClose={props.onClose}>
-      {error ? <p role="alert">{error}</p> : null}
+      {error && !candidate ? <p role="alert">{error}</p> : null}
       {candidate && preview ? (
         <>
           <p>{preview.review.task}</p>
@@ -116,13 +128,26 @@ export function ReviewDetail(props: {
           <MemoryBody content={candidate.applyBodyText ?? candidate.proposedText} />
           <h3>What will change</h3>
           <p>{candidate.reason}</p>
-          <p>Operation: {mutation?.operation.replaceAll('_', ' ') ?? 'Unavailable'}</p>
+          <p>
+            Operation:{' '}
+            {personalCopyRequired
+              ? 'Create a personal copy after your approval'
+              : (mutation?.operation.replaceAll('_', ' ') ?? 'Unavailable')}
+          </p>
           {candidate.targetUri ? (
             <button onClick={() => props.onOpenLibrary(candidate.targetUri)} type="button">
               Inspect existing memory in Library
             </button>
           ) : null}
-          {needsSafetyRefresh && missingTarget ? (
+          {personalCopyRequired ? (
+            <section className="review-safety-state" role="status">
+              <h3>Personal copy of shared memory</h3>
+              <p>
+                The existing memory belongs to a shared team. You can approve this proposal as a personal memory. The
+                shared source will stay unchanged.
+              </p>
+            </section>
+          ) : needsSafetyRefresh && missingTarget ? (
             <section className="review-safety-state">
               <h3>Previous memory no longer exists</h3>
               <p>
@@ -165,7 +190,7 @@ export function ReviewDetail(props: {
           ) : mutation?.replacementSafety?.warning ? (
             <p role="alert">{managerReplacementWarning(mutation.replacementSafety.warning)}</p>
           ) : null}
-          {mutation?.operation === 'requires_explicit_operation' ? (
+          {needsOperationChoice ? (
             <label>
               Choose the intended change
               <select
@@ -177,12 +202,16 @@ export function ReviewDetail(props: {
                 }
               >
                 <option value="">Select an operation</option>
-                <option value="create">Create a separate memory</option>
-                {candidate.targetUri ? <option value="replace">Replace the reviewed existing memory</option> : null}
+                <option value="create">
+                  {personalCopyRequired ? 'Create a personal copy' : 'Create a separate memory'}
+                </option>
+                {candidate.targetUri && !personalCopyRequired ? (
+                  <option value="replace">Replace the reviewed existing memory</option>
+                ) : null}
               </select>
             </label>
           ) : null}
-          {mutation?.replacementSafety?.classification === 'destructive-loss-risk' ? (
+          {!personalCopyRequired && mutation?.replacementSafety?.classification === 'destructive-loss-risk' ? (
             <label>
               <input
                 type="checkbox"
@@ -194,8 +223,11 @@ export function ReviewDetail(props: {
           ) : null}
           {!canApprove && !needsSafetyRefresh ? (
             <p>
-              Review the required operation and replacement warning before approving. You can defer or reject the
-              proposal here.
+              {personalCopyRequired
+                ? mutation?.truncated
+                  ? 'This preview is incomplete and cannot be approved. You can defer or reject the proposal here.'
+                  : 'Choose the personal-copy option before approving. You can defer or reject the proposal here.'
+                : 'Review the required operation and replacement warning before approving. You can defer or reject the proposal here.'}
             </p>
           ) : null}
           {candidate.evidence.length > 0 ? (
@@ -208,13 +240,16 @@ export function ReviewDetail(props: {
               </ul>
             </details>
           ) : null}
+          {error ? <p role="alert">{error}</p> : null}
           <footer>
             <button disabled={busy || !canApprove} onClick={() => void decide('approve')} type="button">
-              {missingTarget && operation === 'create'
-                ? 'Create current memory'
-                : mutation?.operation === 'no_action'
-                  ? 'Confirm no change needed'
-                  : 'Approve and apply'}
+              {personalCopyRequired
+                ? 'Approve and create personal copy'
+                : missingTarget && selectedOperation === 'create'
+                  ? 'Create current memory'
+                  : mutation?.operation === 'no_action'
+                    ? 'Confirm no change needed'
+                    : 'Approve and apply'}
             </button>
             <button disabled={busy} onClick={() => void decide('defer')} type="button">
               Defer

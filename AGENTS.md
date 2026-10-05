@@ -14,6 +14,10 @@ nearest checked-in guidance remain authoritative.
 - Never hand-edit generated `BUILD.bazel` files or `tools/bazel/targets.json`.
   Change source, manifests, or `tools/bazel/target-specs.mjs`, then run
   `bun run bazel:generate`.
+- Before Bazel generation or repository checks, prepare website metadata with
+  `bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json`.
+  This ignored input is required even for non-website changes because generation
+  validates every target's declared data.
 - Run `bun run check:repo` for repository contracts and use
   `bun run bazel -- test <label>` for the narrowest affected target. Use
   `bun run bazel:affected` to inspect the base/head selection before a pull
@@ -40,8 +44,9 @@ nearest checked-in guidance remain authoritative.
 
 ## Use Effect-aware test tooling
 
-When writing Effect code, inspect `@repos/effect/` for examples of idiomatic usage, tests, module structure, and API
-design. Treat it as the source of truth for Effect patterns.
+When writing Effect code, inspect `@repos/effect/` when that reference checkout is available for examples of idiomatic
+usage, tests, module structure, and API design. If it is absent, use the installed `effect` and `@effect/vitest` package
+sources and `@effect/vitest/ai-docs`, together with existing tests in the owning package, as the Effect reference.
 
 Threadnote application and runtime behavior is predominantly Effect code. Tests whose primary program under test is an
 `Effect` must use the Effect Vitest integration from `@effect/vitest` rather than wrapping the program with
@@ -113,6 +118,9 @@ contract or expose a suspected runtime problem.
 Checked-in project skills live in `.cursor/skills/`. Use them for exact-HEAD global install, patch-release preparation,
 focused testing, and dogfood closeout instead of re-deriving this file or `docs/releasing.md`. Product skills shipped to
 users stay in `config/agent-skills/`.
+
+Use `.cursor/skills/release-signoff/SKILL.md` for prerelease manual E2E signoff. It owns low-cost worker orchestration
+and reporting; `docs/prerelease-manual-e2e-dogfood-matrix.md` owns test scenarios and expected results.
 
 ## Never ignore dogfooding issues
 

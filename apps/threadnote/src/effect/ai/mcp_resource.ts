@@ -1,5 +1,5 @@
 import {Effect, Schema} from 'effect';
-import {McpSchema} from 'effect/unstable/ai';
+import {McpSchema} from 'effect/ai';
 import {
   isMemoryRelocationUri,
   MemoryRelocationError,

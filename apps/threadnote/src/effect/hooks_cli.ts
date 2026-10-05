@@ -1,5 +1,5 @@
 import type {Effect} from 'effect';
-import {Argument, Command} from 'effect/unstable/cli';
+import {Argument, Command} from 'effect/cli';
 import type {AgentClient, HookRunnerOptions, HooksInstallOptions} from '../types.js';
 import type {CursorHookEvent} from '../cursor/hooks.js';
 import {boolean, optionalChoice, optionalString} from './cli/flags.js';
@@ -48,3 +48,28 @@ export function makePreCompactHookCommand<E, R>(
     handler,
   ).pipe(Command.withDescription('Store a handoff snapshot before context compaction'), Command.unlisted);
 }
+
+export function makeDiagnosticHookCommand<E, R>(
+  name: string,
+  description: string,
+  handler: (options: {readonly diagnostic?: boolean}) => Effect.Effect<void, E, R>,
+) {
+  return Command.make(
+    name,
+    {diagnostic: boolean('diagnostic', 'Print a privacy-safe delivery status to stderr')},
+    handler,
+  ).pipe(Command.withDescription(description), Command.unlisted);
+}
+
+export const makeCodeBriefHookCommand = <E, R>(
+  handler: (options: {readonly diagnostic?: boolean}) => Effect.Effect<void, E, R>,
+) => makeDiagnosticHookCommand('code-brief-hook', 'Inject current cited memory before a Claude file edit', handler);
+
+export const makeCodexResumeHookCommand = <E, R>(
+  handler: (options: {readonly diagnostic?: boolean}) => Effect.Effect<void, E, R>,
+) =>
+  makeDiagnosticHookCommand(
+    'codex-resume-hook',
+    'Inject one bounded current continuation before a Codex turn',
+    handler,
+  );

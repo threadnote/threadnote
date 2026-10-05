@@ -1,7 +1,7 @@
-import {Effect, Result} from 'effect';
+import {Clock, Effect, Fiber, Result} from 'effect';
 import {managerHomeLanes, type ManagerHomeLane} from '@threadnote/manager/home';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
-import {readActiveProjectMemoryRecords} from '../memory/maintenance/records.js';
+import {readMaintenanceMemoryRecords} from '../memory/maintenance/records.js';
 import {collectContextHealth} from '../memory/context/health_commands.js';
 import {buildLocalValueReport} from '../value_report/commands.js';
 import {managerAttentionProjectRoot} from './attention.js';
@@ -38,9 +38,32 @@ export interface ManagerHomeApiResponse {
   readonly status: 200 | 400;
 }
 
+const homeSources = {
+  records: readMaintenanceMemoryRecords,
+  reviews: listCandidateReviews,
+  value: buildLocalValueReport,
+  root: managerAttentionProjectRoot,
+  health: collectContextHealth,
+};
+
+export type ManagerHomeSources<R = never> = {
+  readonly [K in keyof typeof homeSources]: (
+    ...args: Parameters<(typeof homeSources)[K]>
+  ) => Effect.Effect<Effect.Success<ReturnType<(typeof homeSources)[K]>>, unknown, R>;
+};
+
+const HOME_FOREGROUND_BUDGET_MILLISECONDS = 5_000;
+
 /** A read-only, independently failing landing projection. It never builds a graph or changes memory state. */
-export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(function* (
+export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(function (
   request: ManagerHomeApiRequest,
+) {
+  return collectManagerHomeResponse(request, homeSources);
+});
+
+export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse')(function* <R>(
+  request: ManagerHomeApiRequest,
+  sources: ManagerHomeSources<R>,
 ) {
   if (request.url.pathname !== '/api/home') return undefined;
   if (request.method !== 'GET') return undefined;
@@ -52,14 +75,30 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
     } satisfies ManagerHomeApiResponse;
   }
 
-  const recordsResult = yield* readActiveProjectMemoryRecords(request.config, project).pipe(Effect.result);
-  const reviewsResult = yield* listCandidateReviews(request.config.agentContextHome).pipe(Effect.result);
-  const valueResult = yield* buildLocalValueReport(request.config, {period: 30, project}).pipe(Effect.result);
-  const root = yield* managerAttentionProjectRoot(request.config, project);
-  const healthResult =
-    Result.isSuccess(recordsResult) && root.state === 'available'
-      ? yield* collectContextHealth(request.config, project, recordsResult.success, root.cwd).pipe(Effect.result)
-      : undefined;
+  const deadline = (yield* Clock.currentTimeMillis) + HOME_FOREGROUND_BUDGET_MILLISECONDS;
+  const observe = <A, E, R>(operation: Effect.Effect<A, E, R>) => observeHomeSource(operation, deadline);
+  const corpusFiber = yield* observe(sources.records(request.config)).pipe(Effect.forkChild);
+  const rootFiber = yield* observe(sources.root(request.config, project)).pipe(Effect.forkChild);
+  const healthObservation = Effect.gen(function* () {
+    const corpus = yield* Fiber.join(corpusFiber);
+    const root = yield* Fiber.join(rootFiber);
+    if (Result.isFailure(corpus) || Result.isFailure(root) || root.success.state !== 'available') return undefined;
+    return yield* observe(
+      sources.health(request.config, project, activeProjectRecords(corpus.success, project), root.success.cwd, {
+        relationCorpus: corpus.success,
+      }),
+    );
+  });
+  const [corpusResult, reviewsResult, valueResult, healthResult] = yield* Effect.all(
+    [
+      Fiber.join(corpusFiber),
+      observe(sources.reviews(request.config.agentContextHome)),
+      observe(sources.value(request.config, {period: 30, project})),
+      healthObservation,
+    ],
+    {concurrency: 4},
+  );
+  const recordsResult = Result.map(corpusResult, records => activeProjectRecords(records, project));
   const handoffs = Result.isSuccess(recordsResult)
     ? recordsResult.success
         .filter(record => record.metadata.kind === 'handoff')
@@ -87,6 +126,9 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
     healthResult && Result.isSuccess(healthResult)
       ? {
           findingCount: healthResult.success.findings.length + healthResult.success.omittedFindings,
+          decisionMemories: healthResult.success.maintenance?.affectedMemories,
+          automaticCount: healthResult.success.maintenance?.automaticallyManagedFindings,
+          coverage: healthResult.success.maintenance?.citationCoverage.state,
           status: healthResult.success.status,
         }
       : undefined;
@@ -97,7 +139,12 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
       stats: {
         ...(Result.isSuccess(recordsResult) ? {memories: recordsResult.success.length} : {}),
         ...(healthResult && Result.isSuccess(healthResult)
-          ? {coverage: healthResult.success.semanticCompleteness.state, scanned: healthResult.success.recordsScanned}
+          ? {
+              coverage: healthResult.success.semanticCompleteness.state,
+              scanned: healthResult.success.recordsScanned,
+              decisionMemories: healthResult.success.maintenance?.affectedMemories,
+              healthCoverage: healthResult.success.maintenance?.citationCoverage.state,
+            }
           : {}),
         ...(pendingCount === undefined ? {} : {pending: pendingCount}),
         ...(value
@@ -126,8 +173,23 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
   } satisfies ManagerHomeApiResponse;
 });
 
+function observeHomeSource<A, E, R>(
+  operation: Effect.Effect<A, E, R>,
+  deadline: number,
+): Effect.Effect<Result.Result<A, unknown>, never, R> {
+  return Effect.gen(function* () {
+    const remaining = deadline - (yield* Clock.currentTimeMillis);
+    if (remaining <= 0) return Result.fail('Home foreground budget exhausted.');
+    return yield* operation.pipe(Effect.timeout(remaining), Effect.result);
+  });
+}
+
 function isProject(project: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project);
+}
+
+function activeProjectRecords(records: Effect.Success<ReturnType<typeof homeSources.records>>, project: string) {
+  return records.filter(record => record.metadata.status === 'active' && record.metadata.project === project);
 }
 
 export function managerRecentOutcomeCount(value: {

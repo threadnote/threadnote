@@ -13,6 +13,20 @@ describe('Manager project home', () => {
     expect(lanes.map(lane => lane.status)).toEqual(['attention', 'clear', 'clear']);
   });
 
+  it('counts decision memories independently of diagnostic and incomplete coverage counts', () => {
+    const health = managerHomeLanes({
+      health: {findingCount: 2_013, status: 'unknown', decisionMemories: 3, automaticCount: 4, coverage: 'partial'},
+    }).find(item => item.id === 'health');
+    expect(health).toMatchObject({count: 3, status: 'attention'});
+    expect(health?.detail).toContain('3 memories need your decision');
+    expect(health?.detail).toContain('evidence checks incomplete');
+    expect(
+      managerHomeLanes({
+        health: {findingCount: 2_013, status: 'unknown', decisionMemories: 0, coverage: 'partial'},
+      }).find(item => item.id === 'health'),
+    ).toMatchObject({count: 0, status: 'unavailable'});
+  });
+
   it('is deterministic under equivalent input reconstruction', () => {
     fc.assert(
       fc.property(

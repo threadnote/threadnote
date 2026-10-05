@@ -32,7 +32,19 @@ describe('MCP code graph response format', () => {
     );
     const baseline = (await Bun.file(
       join(process.cwd(), 'apps/threadnote/test/evaluation/baselines/graph-response-single-channel-v1/baseline.json'),
-    ).json()) as {fixtureHash: string; totals: {dualBytes: number; textBytes: number}};
+    ).json()) as {
+      agentEnvelopeComparison: {
+        after: {
+          queries: readonly {agentBytes: number; dualBytes: number; id: string; textBytes: number}[];
+          totals: {agentBytes: number; dualBytes: number; estimatedTokens: number; textBytes: number};
+        };
+        before: {totals: {agentBytes: number}};
+        savings: {agentBytes: number; percent: number};
+      };
+      fixtureHash: string;
+      queries: readonly {dualBytes: number; id: string; textBytes: number}[];
+      totals: {dualBytes: number; textBytes: number};
+    };
     let client: Client | undefined;
     try {
       cpSync(
@@ -85,9 +97,14 @@ describe('MCP code graph response format', () => {
       await client.connect(transport);
       const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'inspect_code_graph');
       expect(JSON.stringify(tool?.inputSchema)).toContain('responseFormat');
+      expect(JSON.stringify(tool?.inputSchema)).toContain('impact agent defaults to 1250');
+      expect(JSON.stringify(tool?.inputSchema)).toContain('Ceiling:');
+      expect(JSON.stringify(tool?.inputSchema)).toContain('agent shows 3 unless set');
 
+      let agentBytes = 0;
       let dualBytes = 0;
       let textBytes = 0;
+      const measurements: {agentBytes: number; dualBytes: number; id: string; textBytes: number}[] = [];
       for (const query of fixture.queries) {
         const args = {
           callerCwd: repository,
@@ -117,20 +134,91 @@ describe('MCP code graph response format', () => {
         const textOnly = firstText(text.content);
         const agentOnly = firstText(agent.content);
         const parsed = JSON.parse(textOnly);
-        expect(parsed).toEqual(dual.structuredContent);
+        const dualProjection = dual.structuredContent as {
+          readonly edges: readonly unknown[];
+          readonly nodes: readonly unknown[];
+          readonly operation: unknown;
+          readonly output: {readonly returnedEdges: number; readonly returnedNodes: number};
+          readonly repository: unknown;
+          readonly snapshot: unknown;
+          readonly trust: unknown;
+        };
+        expect(parsed).toMatchObject({
+          operation: dualProjection.operation,
+          repository: dualProjection.repository,
+          snapshot: dualProjection.snapshot,
+          trust: dualProjection.trust,
+        });
+        expect(parsed.nodes).toEqual(expect.arrayContaining([...dualProjection.nodes]));
+        expect(parsed.edges).toEqual(expect.arrayContaining([...dualProjection.edges]));
+        expect(parsed.output.returnedNodes).toBeGreaterThanOrEqual(dualProjection.output.returnedNodes);
+        expect(parsed.output.returnedEdges).toBeGreaterThanOrEqual(dualProjection.output.returnedEdges);
         expect(parsed.trust).toEqual((dual.structuredContent as {trust: unknown}).trust);
         expect(parsed.snapshot).toEqual((dual.structuredContent as {snapshot: unknown}).snapshot);
         expect(agentOnly.startsWith('TN-GRAPH/1\n')).toBe(true);
-        expect(agentOnly).toContain('coverage\t');
-        dualBytes += measureAgentToolResponse({
+        expect(agentOnly).toContain('Coverage:');
+        expect(agentOnly).not.toContain('\noperation\t');
+        expect(agentOnly).not.toContain('\nrepository\t');
+        expect(agentOnly).not.toContain('\nsnapshot\t');
+        expect(agentOnly).not.toContain('\ntrust\t');
+        expect(agentOnly).not.toContain('\nsourceVersion\t');
+        if (query.operation === 'impact' || query.operation === 'query') {
+          for (const symbol of query.relevantSymbols ?? []) {
+            expect(agentOnly).toContain(symbol);
+          }
+          if (query.operation === 'query' && query.answerable && (query.relevantPaths?.length ?? 0) > 0) {
+            expect(query.relevantPaths?.some(path => agentOnly.includes(path))).toBe(true);
+          }
+          expect(agentGraphHasOnlyVisibleEdgeAliases(agentOnly)).toBe(true);
+          const largerCeiling = await client.callTool({
+            name: 'inspect_code_graph',
+            arguments: {...args, budgetTokens: 1_500},
+          });
+          expect(largerCeiling.isError).not.toBe(true);
+          expect(firstText(largerCeiling.content)).toBe(agentOnly);
+          if (query.operation === 'query' && query.answerable) {
+            const expanded = await client.callTool({
+              name: 'inspect_code_graph',
+              arguments: {...args, budgetTokens: 1_500, nodeLimit: 8},
+            });
+            expect(expanded.isError).not.toBe(true);
+            const expandedText = firstText(expanded.content);
+            expect(agentGraphHasOnlyVisibleEdgeAliases(expandedText)).toBe(true);
+            expect(agentGraphNodeCount(expandedText)).toBeGreaterThan(agentGraphNodeCount(agentOnly));
+          }
+        }
+        const measuredDualBytes = measureAgentToolResponse({
           text: dualText,
           structuredContent: dual.structuredContent,
         }).totalBytes;
-        textBytes += measureAgentToolResponse({text: textOnly}).totalBytes;
+        const measuredTextBytes = measureAgentToolResponse({text: textOnly}).totalBytes;
+        const measuredAgentBytes = measureAgentToolResponse({text: agentOnly}).totalBytes;
+        dualBytes += measuredDualBytes;
+        textBytes += measuredTextBytes;
+        agentBytes += measuredAgentBytes;
+        measurements.push({
+          agentBytes: measuredAgentBytes,
+          dualBytes: measuredDualBytes,
+          id: query.id,
+          textBytes: measuredTextBytes,
+        });
       }
       expect(codeGraphEvaluationFixtureHash(fixture)).toBe(baseline.fixtureHash);
+      const comparison = baseline.agentEnvelopeComparison;
+      expect(measurements).toEqual(comparison.after.queries);
+      expect({agentBytes, dualBytes, estimatedTokens: Math.ceil(agentBytes / 3), textBytes}).toEqual(
+        comparison.after.totals,
+      );
+      expect(measurements.map(({dualBytes, id, textBytes}) => ({dualBytes, id, textBytes}))).toEqual(baseline.queries);
       expect({dualBytes, textBytes}).toEqual(baseline.totals);
       expect(textBytes).toBeLessThan(dualBytes * 0.9);
+      expect(agentBytes).toBeLessThan(textBytes);
+      expect(comparison.before.totals.agentBytes - agentBytes).toBe(comparison.savings.agentBytes);
+      expect(
+        Number(
+          (((comparison.before.totals.agentBytes - agentBytes) / comparison.before.totals.agentBytes) * 100).toFixed(1),
+        ),
+      ).toBe(comparison.savings.percent);
     } finally {
       await client?.close();
       rmSync(root, {recursive: true, force: true});
@@ -240,6 +328,19 @@ function firstText(content: unknown): string {
   }
   if (!('text' in first) || typeof first.text !== 'string') throw new Error('Graph response text was invalid');
   return first.text;
+}
+
+function agentGraphHasOnlyVisibleEdgeAliases(text: string): boolean {
+  const lines = text.trimEnd().split('\n');
+  const aliases = new Set(lines.flatMap(line => line.match(/^(n\d+)\. /u)?.slice(1) ?? []));
+  return lines.flatMap(line => line.match(/^(.+?) → (.+?): /u)?.slice(1) ?? []).every(alias => aliases.has(alias));
+}
+
+function agentGraphNodeCount(text: string): number {
+  return text
+    .trimEnd()
+    .split('\n')
+    .filter(line => /^n\d+\. /u.test(line)).length;
 }
 
 function withoutWorksetCursor(value: unknown): unknown {

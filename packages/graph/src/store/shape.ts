@@ -5,7 +5,7 @@ import type {
   StoredCodeGraphScopeApplicability,
   StoredCodeGraphScopeReceipt,
 } from '../scope/applicability_store_types.js';
-import type * as SqlClient from 'effect/unstable/sql/SqlClient';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphBlobReuseFile} from '../blob_reuse.js';
 import type {CodeGraphCacheFactInput} from '../fact/budget.js';
 import type {CodeGraphWorkspace} from '../languages/types.js';

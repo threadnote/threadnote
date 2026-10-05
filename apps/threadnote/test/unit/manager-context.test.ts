@@ -58,6 +58,7 @@ describe('Manager Context Brief input', () => {
       codeRefs: ['src/service.ts', `cgs_${'a'.repeat(32)}`],
       detail: 'source',
       mode: 'impact',
+      responseFormat: 'agent',
       scope: {callerCwd: '/private/project', kind: 'repository', project: 'threadnote'},
       task: 'Trace Manager context',
     });

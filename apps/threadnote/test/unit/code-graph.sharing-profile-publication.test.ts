@@ -3,7 +3,7 @@ import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {expect, it as effectIt} from '@effect/vitest';
 import {Effect, Layer} from 'effect';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';
 import {graphShareProfileOciArtifact} from '@threadnote/graph/sharing/profile/oci_artifact';
 import {publishGraphShareProfileArtifact} from '@threadnote/graph/sharing/profile/publication';

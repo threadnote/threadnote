@@ -81,7 +81,7 @@ export type ResourceStoreMutation =
     }
   | {
       readonly ignoreMissing?: boolean;
-      readonly options?: {readonly recursive?: boolean};
+      readonly options?: {readonly expectedFingerprint?: string; readonly recursive?: boolean};
       readonly type: 'remove';
       readonly uri: string;
     };
@@ -169,6 +169,12 @@ export interface ResourceStoreShape {
     location: ResourceStoreLocation,
     mutations: readonly ResourceStoreMutation[],
   ) => Effect.Effect<void, ResourceStoreError>;
+  /** Preflight every mutation, then run a read-only check and the batch under one account mutation lock. */
+  readonly mutateChecked: <E, R>(
+    location: ResourceStoreLocation,
+    mutations: readonly ResourceStoreMutation[],
+    check: Effect.Effect<void, E, R>,
+  ) => Effect.Effect<void, E | ResourceStoreError, R>;
   readonly read: (location: ResourceStoreLocation, uri: string) => Effect.Effect<string, ResourceStoreError>;
   readonly readBounded: (
     location: ResourceStoreLocation,
@@ -314,28 +320,85 @@ function createResourceStoreOperations(
       ),
     );
   };
-  const removeResource = (location: ResourceStoreLocation, uri: string, options?: {readonly recursive?: boolean}) =>
+  const verifyFingerprint = (resolved: ResolvedResourcePath, expectedFingerprint: string | undefined) =>
     Effect.gen(function* () {
-      const resolved = yield* resolve(location, uri);
-      yield* withLock(
-        location,
-        resolved.id,
-        Effect.gen(function* () {
-          yield* verifyExistingPath(fs, path, resolved);
-          const canonicalMutationGeneration = yield* provideLockServices(
-            advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
-          );
-          yield* fs
-            .remove(resolved.path, {recursive: options?.recursive === true})
-            .pipe(
-              Effect.andThen(syncDirectory(fs, path.dirname(resolved.path))),
-              Effect.ensuring(
-                invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration),
-              ),
-            );
-        }),
+      if (expectedFingerprint === undefined) return;
+      const actualFingerprint = yield* provideLockServices(sha256Hex(yield* fs.readFile(resolved.path)));
+      if (actualFingerprint !== expectedFingerprint) {
+        return yield* ResourceConflict.make({
+          actualFingerprint,
+          expectedFingerprint,
+          message: `Resource changed before mutation: ${resolved.id.canonicalUri}`,
+          uri: resolved.id.canonicalUri,
+        });
+      }
+    });
+  const removeResourceUnlocked = (
+    location: ResourceStoreLocation,
+    resolved: ResolvedResourcePath,
+    options?: {readonly expectedFingerprint?: string; readonly recursive?: boolean},
+  ) =>
+    Effect.gen(function* () {
+      yield* verifyExistingPath(fs, path, resolved);
+      yield* verifyFingerprint(resolved, options?.expectedFingerprint);
+      const canonicalMutationGeneration = yield* provideLockServices(
+        advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
       );
-    }).pipe(mapIoError('remove', uri));
+      yield* fs
+        .remove(resolved.path, {recursive: options?.recursive === true})
+        .pipe(
+          Effect.andThen(syncDirectory(fs, path.dirname(resolved.path))),
+          Effect.ensuring(
+            invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration),
+          ),
+        );
+    }).pipe(mapIoError('remove', resolved.id.canonicalUri));
+  const removeResource = (
+    location: ResourceStoreLocation,
+    uri: string,
+    options?: {readonly expectedFingerprint?: string; readonly recursive?: boolean},
+  ) =>
+    resolve(location, uri).pipe(
+      Effect.flatMap(resolved => withLock(location, resolved.id, removeResourceUnlocked(location, resolved, options))),
+      mapIoError('remove', uri),
+    );
+  const preflightWrite = (resolved: ResolvedResourcePath, options: ResourceStoreWriteOptions) =>
+    Effect.gen(function* () {
+      const exists = yield* fs.exists(resolved.path);
+      if (options.mode === 'create' && exists) {
+        return yield* ResourceAlreadyExists.make({
+          message: `Resource already exists: ${resolved.id.canonicalUri}`,
+          uri: resolved.id.canonicalUri,
+        });
+      }
+      if (!exists && (options.mode === 'replace' || options.expectedFingerprint !== undefined)) {
+        return yield* ResourceNotFound.make({
+          message: `Resource does not exist for mutation: ${resolved.id.canonicalUri}`,
+          uri: resolved.id.canonicalUri,
+        });
+      }
+      if (exists) {
+        yield* verifyExistingPath(fs, path, resolved, 'File');
+        yield* verifyFingerprint(resolved, options.expectedFingerprint);
+      }
+    }).pipe(mapIoError('write', resolved.id.canonicalUri));
+  const writeResourceUnlocked = (
+    location: ResourceStoreLocation,
+    resolved: ResolvedResourcePath,
+    content: string,
+    options: ResourceStoreWriteOptions,
+  ) =>
+    Effect.gen(function* () {
+      yield* makeSafeDirectoryChain(fs, path, {...resolved, path: path.dirname(resolved.path)});
+      yield* assertCaseCompatible(fs, path.dirname(resolved.path), path.basename(resolved.path), resolved.id);
+      yield* preflightWrite(resolved, options);
+      const canonicalMutationGeneration = yield* provideLockServices(
+        advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
+      );
+      yield* writeAtomically(fs, path, resolved, content, options.mode === 'create').pipe(
+        Effect.ensuring(invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration)),
+      );
+    }).pipe(mapIoError('write', resolved.id.canonicalUri));
   const writeResourceChecked = <E, R>(
     location: ResourceStoreLocation,
     uri: string,
@@ -349,54 +412,7 @@ function createResourceStoreOperations(
       yield* withLock(
         location,
         resolved.id,
-        check.pipe(
-          Effect.andThen(
-            Effect.gen(function* () {
-              yield* makeSafeDirectoryChain(fs, path, {...resolved, path: path.dirname(resolved.path)});
-              yield* assertCaseCompatible(fs, path.dirname(resolved.path), path.basename(resolved.path), resolved.id);
-              const exists = yield* fs.exists(resolved.path);
-              if (options.mode === 'create' && exists) {
-                return yield* ResourceAlreadyExists.make({
-                  message: `Resource already exists: ${resolved.id.canonicalUri}`,
-                  uri: resolved.id.canonicalUri,
-                });
-              }
-              if (options.mode === 'replace' && !exists) {
-                return yield* ResourceNotFound.make({
-                  message: `Resource does not exist: ${resolved.id.canonicalUri}`,
-                  uri: resolved.id.canonicalUri,
-                });
-              }
-              if (exists) {
-                yield* verifyExistingPath(fs, path, resolved, 'File');
-                if (options.expectedFingerprint) {
-                  const actualFingerprint = yield* provideLockServices(sha256Hex(yield* fs.readFile(resolved.path)));
-                  if (actualFingerprint !== options.expectedFingerprint) {
-                    return yield* ResourceConflict.make({
-                      actualFingerprint,
-                      expectedFingerprint: options.expectedFingerprint,
-                      message: `Resource changed before compare-and-replace: ${resolved.id.canonicalUri}`,
-                      uri: resolved.id.canonicalUri,
-                    });
-                  }
-                }
-              } else if (options.expectedFingerprint) {
-                return yield* ResourceNotFound.make({
-                  message: `Resource does not exist for compare-and-replace: ${resolved.id.canonicalUri}`,
-                  uri: resolved.id.canonicalUri,
-                });
-              }
-              const canonicalMutationGeneration = yield* provideLockServices(
-                advanceCanonicalMutationGeneration(fs, path, location.home, location.account),
-              );
-              yield* writeAtomically(fs, path, resolved, content, options.mode === 'create').pipe(
-                Effect.ensuring(
-                  invalidateRecallBestEffort(location, [resolved.id.canonicalUri], canonicalMutationGeneration),
-                ),
-              );
-            }).pipe(mapIoError('write', uri)),
-          ),
-        ),
+        check.pipe(Effect.andThen(writeResourceUnlocked(location, resolved, content, options))),
       );
       return {fingerprint, uri: resolved.id.canonicalUri};
     });
@@ -416,6 +432,49 @@ function createResourceStoreOperations(
       ? remove.pipe(Effect.catchTag('ResourceNotFound', () => Effect.void))
       : remove;
   };
+  const mutateResourceChecked = <E, R>(
+    location: ResourceStoreLocation,
+    mutations: readonly ResourceStoreMutation[],
+    check: Effect.Effect<void, E, R>,
+  ) =>
+    Effect.gen(function* () {
+      if (mutations.length === 0) return yield* check;
+      const prepared = yield* Effect.forEach(mutations, mutation =>
+        resolve(location, mutation.uri).pipe(Effect.map(resolved => ({mutation, resolved}))),
+      );
+      return yield* withLock(
+        location,
+        prepared[0].resolved.id,
+        Effect.gen(function* () {
+          for (const {mutation, resolved} of prepared) {
+            const preflight =
+              mutation.type === 'write'
+                ? preflightWrite(resolved, mutation.options)
+                : verifyExistingPath(fs, path, resolved).pipe(
+                    Effect.andThen(verifyFingerprint(resolved, mutation.options?.expectedFingerprint)),
+                    mapIoError('remove', mutation.uri),
+                  );
+            yield* mutation.type === 'remove' && mutation.ignoreMissing === true
+              ? preflight.pipe(Effect.catchTag('ResourceNotFound', () => Effect.void))
+              : preflight;
+          }
+          yield* check;
+          for (const {mutation, resolved} of prepared) {
+            if (mutation.type === 'write') {
+              yield* writeResourceUnlocked(location, resolved, mutation.content, mutation.options);
+              yield* verifyFingerprint(resolved, yield* provideLockServices(sha256Hex(mutation.content))).pipe(
+                mapIoError('write', mutation.uri),
+              );
+            } else {
+              const remove = removeResourceUnlocked(location, resolved, mutation.options);
+              yield* mutation.ignoreMissing === true
+                ? remove.pipe(Effect.catchTag('ResourceNotFound', () => Effect.void))
+                : remove;
+            }
+          }
+        }),
+      );
+    });
   return {
     fingerprint: content =>
       provideLockServices(sha256Hex(content)).pipe(mapIoError('fingerprint', 'threadnote://local/content')),
@@ -469,6 +528,7 @@ function createResourceStoreOperations(
         : Effect.forEach(mutations, mutation => applyMutation(location, mutation), {
             discard: true,
           }),
+    mutateChecked: (location, mutations, check) => mutateResourceChecked(location, mutations, check),
     read: (location, uri) =>
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);

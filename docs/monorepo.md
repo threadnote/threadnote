@@ -9,10 +9,15 @@ Bazel declarations, and run the repository contracts plus the narrowest affected
 test:
 
 ```bash
+bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun run bazel:generate
 bun run check:repo
 bun run bazel -- test //packages/<owner>:test
 ```
+
+Prepare website metadata before generation or repository checks, including for
+non-website changes. Generation validates every target's declared data, and the
+ignored metadata file is absent in a fresh checkout.
 
 Use `apps/threadnote` for product entrypoints and cross-domain composition,
 `apps/website` for the public site, an existing `packages/*` workspace for a
@@ -55,8 +60,8 @@ The repository has no root `src/` or `test/` tree. Production code belongs to an
    imports and discovers referenced scripts, fixtures, assets, documentation,
    and executable entrypoints automatically. Add an explicit target-spec input
    only for a genuinely dynamic path that cannot be inferred.
-5. Add the manifest to `MODULE.bazel`, run `bun install`, then run
-   `bun run bazel:generate` and `bun run check:repo`.
+5. Add the manifest to `MODULE.bazel`, run `bun install`, prepare website metadata
+   as shown above, then run `bun run bazel:generate` and `bun run check:repo`.
 
 Generated `BUILD.bazel` files and `tools/bazel/targets.json` are reviewable build
 artifacts, not editing surfaces. Resource and infrastructure BUILD files are
@@ -67,6 +72,8 @@ hand-written because those trees have non-TypeScript ownership and native rules.
 Run `bun run check:workspaces` after changing imports or manifests. The check rejects public internal packages, undeclared dependencies, unexported imports, package cycles, and relative imports across workspace boundaries. Production source cannot consume development dependencies. Shared testing helpers are development dependencies only.
 
 Import another package through a declared entrypoint, such as `@threadnote/memory/document`. Keep graph storage schemas in the graph package. Memory core does not depend on recall; recall consumes memory contracts. Context composes memory and graph. The application supplies runtime adapters and owns only cross-domain composition.
+
+Effect 4 uses top-level module paths even for APIs marked `@stability unstable`, including the HTTP, SQL, AI, and test integrations Threadnote depends on. These packages are pinned and their upgrades are verified together; the linter's blanket `unstable-api-usage` warning is intentionally disabled rather than suppressing each required integration.
 
 ## Repository resources
 

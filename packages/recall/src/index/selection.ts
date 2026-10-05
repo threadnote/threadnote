@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {boundedRecallPhysicalCandidateLimit} from './query.js';
 import {recallEligibilityPolicyRestrictsCandidates, type RecallEligibilityPolicy} from '../eligibility.js';
 import {recallEligibilityPredicate} from './eligibility.js';

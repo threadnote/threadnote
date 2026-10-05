@@ -2502,6 +2502,7 @@ p {
 
 /* What's new */
 
+.update-switch,
 .release-hero,
 .release-archive {
   width: min(calc(100% - 48px), var(--content-wide));
@@ -2509,12 +2510,68 @@ p {
   margin-left: auto;
 }
 
+.update-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin-top: 42px;
+}
+
+.update-switch__label {
+  color: var(--muted);
+  font:
+    var(--font-size-min)/1.4 'JetBrains Mono Variable',
+    monospace;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.update-switch__options {
+  display: inline-flex;
+  padding: 4px;
+  background: rgba(16, 21, 29, 0.72);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+
+.update-switch__options a {
+  display: inline-flex;
+  gap: 9px;
+  align-items: center;
+  padding: 9px 15px;
+  color: var(--muted);
+  font:
+    12px/1.4 'JetBrains Mono Variable',
+    monospace;
+  text-transform: uppercase;
+  border-radius: 999px;
+}
+
+.update-switch__options a:hover {
+  color: var(--text);
+}
+
+.update-switch__options a[aria-current='page'] {
+  color: var(--ink);
+  background: var(--teal);
+}
+
+.update-switch__options a span {
+  min-width: 19px;
+  padding: 2px 5px;
+  color: currentcolor;
+  text-align: center;
+  background: rgba(8, 11, 16, 0.13);
+  border-radius: 999px;
+}
+
 .release-hero {
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1.12fr) minmax(360px, 0.88fr);
   min-height: 680px;
-  margin-top: 42px;
+  margin-top: 18px;
   overflow: hidden;
   background:
     radial-gradient(circle at 18% 105%, rgba(103, 232, 199, 0.14), transparent 42%),
@@ -6610,6 +6667,7 @@ p {
   .performance-pipeline,
   .performance-worktrees,
   .performance-methodology,
+  .update-switch,
   .release-hero,
   .release-archive,
   .post-detail,
@@ -6913,8 +6971,27 @@ p {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .release-hero {
+  .update-switch {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
     margin-top: 24px;
+  }
+
+  .update-switch__options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .update-switch__options a {
+    justify-content: center;
+    padding-right: 10px;
+    padding-left: 10px;
+  }
+
+  .release-hero {
+    margin-top: 14px;
   }
 
   .release-hero__intro,

@@ -5,6 +5,8 @@ import {GRAPH_PALETTE} from './graph/model.js';
 export interface HomeAttentionInput {
   readonly coverage?: string;
   readonly findings?: number;
+  readonly decisions?: number;
+  readonly healthCoverage?: string;
   readonly memories?: number;
   readonly outcomes?: number;
   readonly pending?: number;
@@ -45,7 +47,7 @@ const FLOW_COLORS = {
 export function buildHomeAttentionModel(input: HomeAttentionInput): readonly HomeAttentionNode[] {
   const memories = safeCount(input.memories);
   const pending = safeCount(input.pending);
-  const findings = safeCount(input.findings);
+  const findings = safeCount(input.decisions ?? input.findings);
   const outcomes = safeCount(input.outcomes);
   return [
     {
@@ -73,12 +75,26 @@ export function buildHomeAttentionModel(input: HomeAttentionInput): readonly Hom
         findings === undefined
           ? 'Health evidence unavailable'
           : findings === 0
-            ? 'No actionable findings'
+            ? input.healthCoverage === 'partial' || input.healthCoverage === 'unavailable'
+              ? 'No decisions; evidence checks incomplete'
+              : 'No actionable findings'
             : 'Findings to inspect or repair',
       id: 'health',
       kicker: 'Context quality',
-      label: findings === 1 ? 'health finding' : 'health findings',
-      status: countStatus(findings),
+      label:
+        input.decisions === undefined
+          ? findings === 1
+            ? 'health finding'
+            : 'health findings'
+          : findings === 1
+            ? 'memory needs you'
+            : 'memories need you',
+      status:
+        input.decisions !== undefined &&
+        findings === 0 &&
+        (input.healthCoverage === 'partial' || input.healthCoverage === 'unavailable')
+          ? 'unavailable'
+          : countStatus(findings),
       value: formatCount(findings),
     },
     {
@@ -105,7 +121,16 @@ export function HomeAttentionFlow({
   const [webglUnavailable, setWebglUnavailable] = useState(false);
   const nodes = useMemo(
     () => buildHomeAttentionModel(input),
-    [input.coverage, input.findings, input.memories, input.outcomes, input.pending, input.scanned],
+    [
+      input.coverage,
+      input.healthCoverage,
+      input.decisions,
+      input.findings,
+      input.memories,
+      input.outcomes,
+      input.pending,
+      input.scanned,
+    ],
   );
 
   useEffect(() => {

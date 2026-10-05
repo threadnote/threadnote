@@ -1,5 +1,5 @@
 import {Effect, Predicate} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   CODE_GRAPH_CHECKPOINT_IMPORT_FORMAT_VERSION,
   type CodeGraphCheckpointImportBuildInput,

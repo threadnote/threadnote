@@ -13,16 +13,96 @@ import {
   type MatchedEvaluationScheduleEntryV1,
   MATCHED_EVALUATION_ARMS,
 } from './matched-evaluation.js';
+import {
+  parseMatchedEvaluationVerificationReceiptV1,
+  type MatchedEvaluationVerificationReceiptV1,
+} from './matched-verification.js';
 
-export const MATCHED_EVALUATION_OUTCOME_VERSION = 1 as const;
+export const MATCHED_EVALUATION_OUTCOME_VERSION = 5 as const;
 export const MATCHED_EVALUATION_UNAVAILABLE_REASONS = [
   'runtime-not-configured',
   'adapter-missing',
+  'adapter-config-missing',
   'tool-missing',
   'unsupported-platform',
 ] as const;
 
 export type MatchedEvaluationUnavailableReason = (typeof MATCHED_EVALUATION_UNAVAILABLE_REASONS)[number];
+
+export interface MatchedEvaluationProviderTokensV1 {
+  readonly cachedInputTokens: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningOutputTokens: number;
+  readonly totalTokens: number;
+}
+
+export interface MatchedEvaluationTokenAccountingV1 {
+  readonly cacheWriteTokens: number | null;
+  readonly cachedInputTokens: number;
+  readonly newTokens: number | null;
+  readonly outputTokens: number;
+  readonly processedTokens: number | null;
+  readonly rawInputTokens: number;
+  readonly reasoningOutputTokens: number;
+  readonly totalTokens: number;
+  readonly uncachedInputTokens: number;
+}
+
+export interface MatchedEvaluationAttributionV1 {
+  readonly completedItemBytes: {
+    readonly agentMessage: number;
+    readonly commandExecution: number;
+    readonly fileChange: number;
+    readonly mcpToolCall: number;
+    readonly other: number;
+    readonly reasoning: number;
+  };
+  readonly firstSufficientEvidenceMilliseconds: number | null;
+  readonly graphRequests: readonly {
+    readonly budgetTokens: number | null;
+    readonly edgeLimit: number | null;
+    readonly nodeLimit: number | null;
+    readonly operation: string | null;
+  }[];
+  /** Structural evidence-card presence at agent start; not a sufficiency claim. */
+  readonly initialContinuationEvidenceState?: 'background' | 'evidence-bearing';
+  readonly lastTwoModelCallTokens: MatchedEvaluationTokenAccountingV1;
+  readonly modelCallCount: number;
+  readonly modelCalls: readonly MatchedEvaluationTokenAccountingV1[];
+  readonly modelVisibleBytes: {
+    readonly completedItemBytes: number;
+    readonly promptBytes: number;
+    readonly totalBytes: number;
+  };
+  /** Privacy-safe completed work after the first timestamped sufficient-evidence item. */
+  readonly postSufficientEvidence?: {
+    readonly completedItemBytes: number;
+    readonly completedItems: number;
+    readonly commandExecutions: number;
+    readonly declinedCommandExecutions: number;
+    readonly fileChanges: number;
+    readonly mcpToolCalls: number;
+  } | null;
+  readonly repeatedToolCalls: {
+    readonly commandExecution: number;
+    readonly contextBrief: number;
+    readonly fileChange: number;
+    readonly inspectCodeGraph: number;
+    readonly readContext: number;
+    readonly recallContext: number;
+  };
+  readonly tokens: MatchedEvaluationTokenAccountingV1;
+}
+
+export interface MatchedEvaluationContextVerificationV1 {
+  readonly graphReady: true;
+  readonly graphSnapshotHash: string;
+  readonly linkReceiptsHash: string | null;
+  readonly memoryAccess: 'disabled' | 'linked';
+  readonly studyHash: string;
+  readonly taskContextHash: string | null;
+}
 
 export interface MatchedEvaluationMetricsV1 {
   readonly auditability: {
@@ -34,6 +114,7 @@ export interface MatchedEvaluationMetricsV1 {
   };
   readonly correctness: {
     readonly judge: 'blinded-rubric-v1';
+    readonly judgeCompleted: boolean;
     readonly scoreMilli: number;
   };
   readonly drift: {
@@ -44,24 +125,43 @@ export interface MatchedEvaluationMetricsV1 {
     readonly recalledEvidence: number;
     readonly requiredEvidence: number;
   };
+  readonly safety: {
+    readonly authorizationLeaks: number;
+    /** Policy-denied action attempts; distinct from judge-observed harmful actions. */
+    readonly blockedActions: number;
+    readonly harmfulActions: number;
+  };
   readonly sourceSupport: {
     readonly requiredClaims: number;
     readonly supportedClaims: number;
   };
   readonly timing: {
+    readonly agentTaskMilliseconds: number;
+    readonly deterministicVerifierMilliseconds: number;
     readonly endToEndMilliseconds: number;
     readonly firstSufficientEvidenceMilliseconds: number | null;
+    readonly judgeSetupMilliseconds: number;
+    readonly judgeTurnMilliseconds: number;
+    readonly preparationMilliseconds: number;
   };
   readonly usage: {
+    /** Derived, privacy-safe event accounting. Omitted by sealed v5 pilot outcomes. */
+    readonly attribution?: MatchedEvaluationAttributionV1;
     readonly modelVisibleBytes: number;
     readonly modelVisibleTokens: number;
+    /** Provider-reported task-window usage. Required for token-efficiency claims. */
+    readonly providerTokens: MatchedEvaluationProviderTokensV1 | null;
     readonly redundantFileReads: number;
     readonly toolTurns: number;
   };
+  /** Exact ready-graph and linked-memory preflight. Null for non-Threadnote arms. */
+  readonly context: MatchedEvaluationContextVerificationV1 | null;
   readonly validity: {
     readonly failureCount: number;
     readonly valid: boolean;
   };
+  /** Null for generic evaluations without a sealed deterministic verifier. */
+  readonly verification: MatchedEvaluationVerificationReceiptV1 | null;
 }
 
 export interface MatchedEvaluationObservationV1 {
@@ -112,10 +212,15 @@ export interface MatchedEvaluationSummaryV1 {
 export interface MatchedEvaluationArmSummaryV1 {
   readonly arm: MatchedEvaluationArm;
   readonly auditabilityRate: number | null;
+  readonly averageAgentTaskMilliseconds: number | null;
+  readonly averageDeterministicVerifierMilliseconds: number | null;
   readonly averageEndToEndMilliseconds: number | null;
+  readonly averageJudgeSetupMilliseconds: number | null;
+  readonly averageJudgeTurnMilliseconds: number | null;
   readonly averageModelVisibleBytes: number | null;
   readonly averageModelVisibleTokens: number | null;
   readonly averageProviderCostMicros: number | null;
+  readonly averagePreparationMilliseconds: number | null;
   readonly averageRedundantFileReads: number | null;
   readonly averageToolTurns: number | null;
   readonly completed: number;
@@ -126,6 +231,9 @@ export interface MatchedEvaluationArmSummaryV1 {
     readonly wilson95: {readonly high: number; readonly low: number} | null;
   };
   readonly falseCurrentOutcomes: number;
+  readonly blockedActions: number;
+  readonly harmfulActions: number;
+  readonly authorizationLeaks: number;
   readonly invalid: number;
   readonly retrievalRecall: number | null;
   readonly sourceSupportRate: number | null;
@@ -140,7 +248,7 @@ const MAXIMUM_LEDGER_BYTES = 16 * 1_024 * 1_024;
 export function parseMatchedEvaluationObservationV1(value: unknown): MatchedEvaluationObservationV1 {
   const observation = object(value, 'observation');
   exactKeys(observation, ['artifactHash', 'metrics', 'transcriptHash', 'version'], 'observation');
-  if (observation.version !== MATCHED_EVALUATION_OUTCOME_VERSION) invalid('observation version must be 1');
+  if (observation.version !== MATCHED_EVALUATION_OUTCOME_VERSION) invalid('observation version must be 5');
   return {
     artifactHash: matchingString(observation.artifactHash, HASH, 'observation artifact hash'),
     metrics: parseMetrics(observation.metrics),
@@ -156,6 +264,15 @@ export function createMatchedEvaluationCompletedOutcomeV1(input: {
   readonly schedule: MatchedEvaluationScheduleEntryV1;
 }): MatchedEvaluationOutcomeV1 {
   const observation = parseMatchedEvaluationObservationV1(input.observation);
+  if (observation.metrics.verification !== null && observation.metrics.verification.taskId !== input.schedule.taskId) {
+    invalid('verification receipt task differs from the immutable schedule');
+  }
+  if (
+    observation.metrics.verification !== null &&
+    observation.metrics.verification.artifactHash !== observation.artifactHash
+  ) {
+    invalid('verification receipt artifact differs from the observed artifact');
+  }
   return createOutcome({
     artifactHash: observation.artifactHash,
     manifestHash: input.manifest.manifestHash,
@@ -186,7 +303,7 @@ export function createMatchedEvaluationUnavailableOutcomeV1(input: {
     transcriptHash: null,
     unavailable: {
       detailHash: sha256HexSync(
-        `matched-evaluation-unavailable-v1\0${boundedString(input.detail, 1, 2_048, 'unavailable detail')}\n`,
+        `matched-evaluation-unavailable-v2\0${boundedString(input.detail, 1, 2_048, 'unavailable detail')}\n`,
       ),
       reason,
     },
@@ -214,7 +331,7 @@ export function parseMatchedEvaluationOutcomeV1(value: unknown): MatchedEvaluati
     ],
     'outcome',
   );
-  if (outcome.version !== MATCHED_EVALUATION_OUTCOME_VERSION) invalid('outcome version must be 1');
+  if (outcome.version !== MATCHED_EVALUATION_OUTCOME_VERSION) invalid('outcome version must be 5');
   const status = literal(outcome.status, ['completed', 'unavailable'] as const, 'outcome status');
   let unavailable: MatchedEvaluationOutcomeV1['unavailable'] = null;
   if (outcome.unavailable !== null) {
@@ -240,7 +357,7 @@ export function parseMatchedEvaluationOutcomeV1(value: unknown): MatchedEvaluati
   }
   const withoutHash = {
     artifactHash,
-    blindLabel: literal(outcome.blindLabel, ['A', 'B', 'C', 'D'] as const, 'outcome blind label'),
+    blindLabel: literal(outcome.blindLabel, ['A', 'B', 'C', 'D', 'E'] as const, 'outcome blind label'),
     manifestHash: matchingString(outcome.manifestHash, HASH, 'outcome manifest hash'),
     metrics,
     previousOutcomeHash:
@@ -397,7 +514,7 @@ export function summarizeMatchedEvaluationV1(
     manifestHash: manifest.manifestHash,
     proxyDeclarations: {
       auditability: 'Resolvable cited evidence divided by all cited evidence.',
-      correctness: 'Score assigned by the blinded rubric adapter; a score of 1.0 is a pass.',
+      correctness: 'Score assigned by the blinded rubric adapter; deterministic completion is reported separately.',
       drift: 'Count of claims presented as current when the blinded rubric marks their evidence stale or absent.',
       retrieval: 'Required evidence items recalled divided by required evidence items in the sealed rubric.',
       sourceSupport: 'Required claims supported by exact source evidence divided by required claims.',
@@ -435,7 +552,7 @@ function createOutcome(input: {
 }
 
 function matchedEvaluationOutcomeHashV1(input: Omit<MatchedEvaluationOutcomeV1, 'outcomeHash'>): string {
-  return sha256HexSync(`matched-evaluation-outcome-v1\0${JSON.stringify(input)}\n`);
+  return sha256HexSync(`matched-evaluation-outcome-v4\0${JSON.stringify(input)}\n`);
 }
 
 function assertCorpusMatchesManifest(corpus: MatchedEvaluationCorpusV1, manifest: MatchedEvaluationManifestV1): void {
@@ -443,6 +560,7 @@ function assertCorpusMatchesManifest(corpus: MatchedEvaluationCorpusV1, manifest
     invalid('corpus hash differs from the frozen manifest');
   }
   const reproduced = createMatchedEvaluationManifestV1({
+    activeArms: manifest.activeArms,
     arms: manifest.arms,
     corpus,
     model: manifest.model,
@@ -490,10 +608,17 @@ function summarizeArm(
       metrics => metrics.auditability.resolvableCitations,
       metrics => metrics.auditability.citations,
     ),
+    averageAgentTaskMilliseconds: average(valid.map(outcome => outcome.metrics.timing.agentTaskMilliseconds)),
+    averageDeterministicVerifierMilliseconds: average(
+      valid.map(outcome => outcome.metrics.timing.deterministicVerifierMilliseconds),
+    ),
     averageEndToEndMilliseconds: average(valid.map(outcome => outcome.metrics.timing.endToEndMilliseconds)),
+    averageJudgeSetupMilliseconds: average(valid.map(outcome => outcome.metrics.timing.judgeSetupMilliseconds)),
+    averageJudgeTurnMilliseconds: average(valid.map(outcome => outcome.metrics.timing.judgeTurnMilliseconds)),
     averageModelVisibleBytes: average(valid.map(outcome => outcome.metrics.usage.modelVisibleBytes)),
     averageModelVisibleTokens: average(valid.map(outcome => outcome.metrics.usage.modelVisibleTokens)),
     averageProviderCostMicros: average(costs),
+    averagePreparationMilliseconds: average(valid.map(outcome => outcome.metrics.timing.preparationMilliseconds)),
     averageRedundantFileReads: average(valid.map(outcome => outcome.metrics.usage.redundantFileReads)),
     averageToolTurns: average(valid.map(outcome => outcome.metrics.usage.toolTurns)),
     completed: completed.length,
@@ -504,6 +629,9 @@ function summarizeArm(
       wilson95: count === 0 ? null : wilson95(correctnessPasses, count),
     },
     falseCurrentOutcomes: sum(metrics => metrics.drift.falseCurrentOutcomes),
+    blockedActions: sum(metrics => metrics.safety.blockedActions),
+    harmfulActions: sum(metrics => metrics.safety.harmfulActions),
+    authorizationLeaks: sum(metrics => metrics.safety.authorizationLeaks),
     invalid: completed.length - valid.length,
     retrievalRecall: ratio(
       metrics => metrics.retrieval.recalledEvidence,
@@ -524,14 +652,17 @@ function parseMetrics(value: unknown): MatchedEvaluationMetricsV1 {
     [
       'auditability',
       'completion',
+      'context',
       'correctness',
       'drift',
       'providerCostMicros',
       'retrieval',
+      'safety',
       'sourceSupport',
       'timing',
       'usage',
       'validity',
+      'verification',
     ],
     'observation metrics',
   );
@@ -540,25 +671,72 @@ function parseMetrics(value: unknown): MatchedEvaluationMetricsV1 {
   exactKeys(completion, ['completed'], 'completion metrics');
   if (typeof completion.completed !== 'boolean') invalid('completion flag must be boolean');
   const correctness = object(metrics.correctness, 'correctness metrics');
-  exactKeys(correctness, ['judge', 'scoreMilli'], 'correctness metrics');
+  exactKeys(correctness, ['judge', 'judgeCompleted', 'scoreMilli'], 'correctness metrics');
+  if (typeof correctness.judgeCompleted !== 'boolean') invalid('judge completion flag must be boolean');
   const scoreMilli = nonNegativeInteger(correctness.scoreMilli, 'correctness score');
   if (scoreMilli > 1_000) invalid('correctness score must be at most 1000');
   const drift = object(metrics.drift, 'drift metrics');
   exactKeys(drift, ['falseCurrentOutcomes'], 'drift metrics');
   const retrieval = boundedPair(metrics.retrieval, 'requiredEvidence', 'recalledEvidence', 'retrieval');
+  const safety = object(metrics.safety, 'safety metrics');
+  exactKeys(safety, ['authorizationLeaks', 'blockedActions', 'harmfulActions'], 'safety metrics');
   const sourceSupport = boundedPair(metrics.sourceSupport, 'requiredClaims', 'supportedClaims', 'source support');
   const timing = object(metrics.timing, 'timing metrics');
-  exactKeys(timing, ['endToEndMilliseconds', 'firstSufficientEvidenceMilliseconds'], 'timing metrics');
+  exactKeys(
+    timing,
+    [
+      'agentTaskMilliseconds',
+      'deterministicVerifierMilliseconds',
+      'endToEndMilliseconds',
+      'firstSufficientEvidenceMilliseconds',
+      'judgeSetupMilliseconds',
+      'judgeTurnMilliseconds',
+      'preparationMilliseconds',
+    ],
+    'timing metrics',
+  );
+  const agentTaskMilliseconds = nonNegativeInteger(timing.agentTaskMilliseconds, 'agent task time');
+  const deterministicVerifierMilliseconds = nonNegativeInteger(
+    timing.deterministicVerifierMilliseconds,
+    'deterministic verifier time',
+  );
   const endToEndMilliseconds = nonNegativeInteger(timing.endToEndMilliseconds, 'end-to-end time');
+  const judgeSetupMilliseconds = nonNegativeInteger(timing.judgeSetupMilliseconds, 'judge setup time');
+  const judgeTurnMilliseconds = nonNegativeInteger(timing.judgeTurnMilliseconds, 'judge turn time');
+  const preparationMilliseconds = nonNegativeInteger(timing.preparationMilliseconds, 'preparation time');
+  if (
+    endToEndMilliseconds !==
+    preparationMilliseconds +
+      agentTaskMilliseconds +
+      deterministicVerifierMilliseconds +
+      judgeSetupMilliseconds +
+      judgeTurnMilliseconds
+  ) {
+    invalid('end-to-end time must equal the non-overlapping lifecycle phase times');
+  }
   const firstSufficientEvidenceMilliseconds =
     timing.firstSufficientEvidenceMilliseconds === null
       ? null
       : nonNegativeInteger(timing.firstSufficientEvidenceMilliseconds, 'first sufficient evidence time');
-  if (firstSufficientEvidenceMilliseconds !== null && firstSufficientEvidenceMilliseconds > endToEndMilliseconds) {
-    invalid('first sufficient evidence time exceeds end-to-end time');
+  if (
+    firstSufficientEvidenceMilliseconds !== null &&
+    firstSufficientEvidenceMilliseconds > preparationMilliseconds + agentTaskMilliseconds
+  ) {
+    invalid('first sufficient evidence time exceeds the agent task window');
   }
   const usage = object(metrics.usage, 'usage metrics');
-  exactKeys(usage, ['modelVisibleBytes', 'modelVisibleTokens', 'redundantFileReads', 'toolTurns'], 'usage metrics');
+  exactKeys(
+    usage,
+    [
+      ...(usage.attribution === undefined ? [] : ['attribution']),
+      'modelVisibleBytes',
+      'modelVisibleTokens',
+      'providerTokens',
+      'redundantFileReads',
+      'toolTurns',
+    ],
+    'usage metrics',
+  );
   const validity = object(metrics.validity, 'validity metrics');
   exactKeys(validity, ['failureCount', 'valid'], 'validity metrics');
   if (typeof validity.valid !== 'boolean') invalid('validity flag must be boolean');
@@ -566,26 +744,390 @@ function parseMetrics(value: unknown): MatchedEvaluationMetricsV1 {
   if (validity.valid !== (failureCount === 0)) invalid('validity flag and failure count disagree');
   const providerCostMicros =
     metrics.providerCostMicros === null ? null : nonNegativeInteger(metrics.providerCostMicros, 'provider cost micros');
+  const context = parseContextVerification(metrics.context);
+  const verification =
+    metrics.verification === null ? null : parseMatchedEvaluationVerificationReceiptV1(metrics.verification);
+  if (verification !== null && completion.completed !== (verification.status === 'passed')) {
+    invalid('deterministic completion flag and verification receipt disagree');
+  }
+  if (verification === null && deterministicVerifierMilliseconds !== 0) {
+    invalid('deterministic verifier time must be zero when verification is absent');
+  }
+  const modelVisibleBytes = nonNegativeInteger(usage.modelVisibleBytes, 'model-visible bytes');
+  const providerTokens = usage.providerTokens === null ? null : parseProviderTokens(usage.providerTokens);
+  const attribution = usage.attribution === undefined ? undefined : parseAttribution(usage.attribution);
+  if (attribution !== undefined && attribution.modelVisibleBytes.totalBytes !== modelVisibleBytes) {
+    invalid('attribution model-visible bytes differ from usage model-visible bytes');
+  }
+  if (attribution !== undefined && providerTokens !== null) {
+    assertReconciledAttributionTokens(
+      attribution.tokens,
+      {
+        cachedInputTokens: providerTokens.cachedInputTokens,
+        outputTokens: providerTokens.outputTokens,
+        rawInputTokens: providerTokens.inputTokens,
+        reasoningOutputTokens: providerTokens.reasoningOutputTokens,
+        totalTokens: providerTokens.totalTokens,
+      },
+      'provider token usage',
+    );
+  }
   return {
     auditability: {citations: auditability.total, resolvableCitations: auditability.subset},
     completion: {completed: completion.completed},
+    context,
     correctness: {
       judge: literal(correctness.judge, ['blinded-rubric-v1'] as const, 'correctness judge'),
+      judgeCompleted: correctness.judgeCompleted,
       scoreMilli,
     },
     drift: {falseCurrentOutcomes: nonNegativeInteger(drift.falseCurrentOutcomes, 'false-current outcomes')},
     providerCostMicros,
     retrieval: {recalledEvidence: retrieval.subset, requiredEvidence: retrieval.total},
+    safety: {
+      authorizationLeaks: nonNegativeInteger(safety.authorizationLeaks, 'authorization leaks'),
+      blockedActions: nonNegativeInteger(safety.blockedActions, 'blocked actions'),
+      harmfulActions: nonNegativeInteger(safety.harmfulActions, 'harmful actions'),
+    },
     sourceSupport: {requiredClaims: sourceSupport.total, supportedClaims: sourceSupport.subset},
-    timing: {endToEndMilliseconds, firstSufficientEvidenceMilliseconds},
+    timing: {
+      agentTaskMilliseconds,
+      deterministicVerifierMilliseconds,
+      endToEndMilliseconds,
+      firstSufficientEvidenceMilliseconds,
+      judgeSetupMilliseconds,
+      judgeTurnMilliseconds,
+      preparationMilliseconds,
+    },
     usage: {
-      modelVisibleBytes: nonNegativeInteger(usage.modelVisibleBytes, 'model-visible bytes'),
+      ...(attribution === undefined ? {} : {attribution}),
+      modelVisibleBytes,
       modelVisibleTokens: nonNegativeInteger(usage.modelVisibleTokens, 'model-visible tokens'),
+      providerTokens,
       redundantFileReads: nonNegativeInteger(usage.redundantFileReads, 'redundant file reads'),
       toolTurns: nonNegativeInteger(usage.toolTurns, 'tool turns'),
     },
     validity: {failureCount, valid: validity.valid},
+    verification,
   };
+}
+
+function parseAttribution(value: unknown): MatchedEvaluationAttributionV1 {
+  const attribution = object(value, 'usage attribution');
+  const hasPostSufficientEvidence = Object.prototype.hasOwnProperty.call(attribution, 'postSufficientEvidence');
+  const hasInitialContinuationEvidenceState = Object.prototype.hasOwnProperty.call(
+    attribution,
+    'initialContinuationEvidenceState',
+  );
+  exactKeys(
+    attribution,
+    [
+      'completedItemBytes',
+      'firstSufficientEvidenceMilliseconds',
+      'graphRequests',
+      ...(hasInitialContinuationEvidenceState ? ['initialContinuationEvidenceState'] : []),
+      'lastTwoModelCallTokens',
+      'modelCallCount',
+      'modelCalls',
+      'modelVisibleBytes',
+      ...(hasPostSufficientEvidence ? ['postSufficientEvidence'] : []),
+      'repeatedToolCalls',
+      'tokens',
+    ],
+    'usage attribution',
+  );
+  const completedItemBytes = object(attribution.completedItemBytes, 'completed item bytes');
+  exactKeys(
+    completedItemBytes,
+    ['agentMessage', 'commandExecution', 'fileChange', 'mcpToolCall', 'other', 'reasoning'],
+    'completed item bytes',
+  );
+  const repeatedToolCalls = object(attribution.repeatedToolCalls, 'repeated tool calls');
+  exactKeys(
+    repeatedToolCalls,
+    ['commandExecution', 'contextBrief', 'fileChange', 'inspectCodeGraph', 'readContext', 'recallContext'],
+    'repeated tool calls',
+  );
+  const modelCalls = array(attribution.modelCalls, 'attribution model calls').map((call, index) =>
+    parseAttributionTokens(call, `attribution model call ${index}`),
+  );
+  const modelCallCount = nonNegativeInteger(attribution.modelCallCount, 'model call count');
+  if (modelCalls.length !== modelCallCount) invalid('attribution model call count differs from deltas');
+  const lastTwoModelCallTokens = parseAttributionTokens(
+    attribution.lastTwoModelCallTokens,
+    'last two model call tokens',
+  );
+  if (!sameTokenAccounting(lastTwoModelCallTokens, sumTokenAccounting(modelCalls.slice(-2)))) {
+    invalid('last two model call tokens differ from model call deltas');
+  }
+  const tokens = parseAttributionTokens(attribution.tokens, 'attribution tokens');
+  assertReconciledAttributionTokens(tokens, sumTokenAccounting(modelCalls), 'model call deltas');
+  const modelVisibleBytes = object(attribution.modelVisibleBytes, 'attribution model-visible bytes');
+  exactKeys(modelVisibleBytes, ['completedItemBytes', 'promptBytes', 'totalBytes'], 'attribution model-visible bytes');
+  const completedItemByteTotal = Object.values(completedItemBytes).reduce<number>(
+    (total, bytes) => total + nonNegativeInteger(bytes, 'completed item byte count'),
+    0,
+  );
+  const parsedModelVisibleBytes = {
+    completedItemBytes: nonNegativeInteger(modelVisibleBytes.completedItemBytes, 'completed item byte total'),
+    promptBytes: nonNegativeInteger(modelVisibleBytes.promptBytes, 'prompt bytes'),
+    totalBytes: nonNegativeInteger(modelVisibleBytes.totalBytes, 'attribution model-visible byte total'),
+  };
+  if (
+    parsedModelVisibleBytes.completedItemBytes !== completedItemByteTotal ||
+    parsedModelVisibleBytes.totalBytes !== parsedModelVisibleBytes.promptBytes + completedItemByteTotal
+  ) {
+    invalid('attribution model-visible bytes do not reconcile');
+  }
+  const postSufficientEvidence = !hasPostSufficientEvidence
+    ? undefined
+    : attribution.postSufficientEvidence === null
+      ? null
+      : parsePostSufficientEvidence(attribution.postSufficientEvidence);
+  return {
+    completedItemBytes: {
+      agentMessage: nonNegativeInteger(completedItemBytes.agentMessage, 'agent message bytes'),
+      commandExecution: nonNegativeInteger(completedItemBytes.commandExecution, 'command bytes'),
+      fileChange: nonNegativeInteger(completedItemBytes.fileChange, 'file change bytes'),
+      mcpToolCall: nonNegativeInteger(completedItemBytes.mcpToolCall, 'MCP bytes'),
+      other: nonNegativeInteger(completedItemBytes.other, 'other completed item bytes'),
+      reasoning: nonNegativeInteger(completedItemBytes.reasoning, 'reasoning bytes'),
+    },
+    firstSufficientEvidenceMilliseconds:
+      attribution.firstSufficientEvidenceMilliseconds === null
+        ? null
+        : nonNegativeInteger(attribution.firstSufficientEvidenceMilliseconds, 'attribution sufficient evidence time'),
+    graphRequests: array(attribution.graphRequests, 'graph request receipts').map((request, index) =>
+      parseGraphRequestReceipt(request, index),
+    ),
+    ...(hasInitialContinuationEvidenceState
+      ? {
+          initialContinuationEvidenceState: literal(
+            attribution.initialContinuationEvidenceState,
+            ['background', 'evidence-bearing'] as const,
+            'initial continuation evidence state',
+          ),
+        }
+      : {}),
+    lastTwoModelCallTokens,
+    modelCallCount,
+    modelCalls,
+    modelVisibleBytes: parsedModelVisibleBytes,
+    ...(postSufficientEvidence === undefined ? {} : {postSufficientEvidence}),
+    repeatedToolCalls: {
+      commandExecution: nonNegativeInteger(repeatedToolCalls.commandExecution, 'repeated command calls'),
+      contextBrief: nonNegativeInteger(repeatedToolCalls.contextBrief, 'repeated context brief calls'),
+      fileChange: nonNegativeInteger(repeatedToolCalls.fileChange, 'repeated file changes'),
+      inspectCodeGraph: nonNegativeInteger(repeatedToolCalls.inspectCodeGraph, 'repeated graph calls'),
+      readContext: nonNegativeInteger(repeatedToolCalls.readContext, 'repeated context reads'),
+      recallContext: nonNegativeInteger(repeatedToolCalls.recallContext, 'repeated context recalls'),
+    },
+    tokens,
+  };
+}
+
+function parsePostSufficientEvidence(
+  value: unknown,
+): NonNullable<MatchedEvaluationAttributionV1['postSufficientEvidence']> {
+  const observation = object(value, 'post-sufficient evidence attribution');
+  exactKeys(
+    observation,
+    [
+      'completedItemBytes',
+      'completedItems',
+      'commandExecutions',
+      'declinedCommandExecutions',
+      'fileChanges',
+      'mcpToolCalls',
+    ],
+    'post-sufficient evidence attribution',
+  );
+  const commandExecutions = nonNegativeInteger(observation.commandExecutions, 'post-sufficient command executions');
+  const declinedCommandExecutions = nonNegativeInteger(
+    observation.declinedCommandExecutions,
+    'post-sufficient declined command executions',
+  );
+  if (declinedCommandExecutions > commandExecutions) {
+    invalid('post-sufficient declined commands exceed command executions');
+  }
+  return {
+    completedItemBytes: nonNegativeInteger(observation.completedItemBytes, 'post-sufficient completed item bytes'),
+    completedItems: nonNegativeInteger(observation.completedItems, 'post-sufficient completed items'),
+    commandExecutions,
+    declinedCommandExecutions,
+    fileChanges: nonNegativeInteger(observation.fileChanges, 'post-sufficient file changes'),
+    mcpToolCalls: nonNegativeInteger(observation.mcpToolCalls, 'post-sufficient MCP tool calls'),
+  };
+}
+
+function parseGraphRequestReceipt(
+  value: unknown,
+  index: number,
+): MatchedEvaluationAttributionV1['graphRequests'][number] {
+  const receipt = object(value, `graph request receipt ${index}`);
+  exactKeys(receipt, ['budgetTokens', 'edgeLimit', 'nodeLimit', 'operation'], `graph request receipt ${index}`);
+  return {
+    budgetTokens: nullableNonNegativeInteger(receipt.budgetTokens, `graph request ${index} budget`),
+    edgeLimit: nullableNonNegativeInteger(receipt.edgeLimit, `graph request ${index} edge limit`),
+    nodeLimit: nullableNonNegativeInteger(receipt.nodeLimit, `graph request ${index} node limit`),
+    operation:
+      receipt.operation === null ? null : boundedString(receipt.operation, 1, 64, `graph request ${index} operation`),
+  };
+}
+
+function parseAttributionTokens(value: unknown, label: string): MatchedEvaluationTokenAccountingV1 {
+  const tokens = object(value, label);
+  exactKeys(
+    tokens,
+    [
+      'cacheWriteTokens',
+      'cachedInputTokens',
+      'newTokens',
+      'outputTokens',
+      'processedTokens',
+      'rawInputTokens',
+      'reasoningOutputTokens',
+      'totalTokens',
+      'uncachedInputTokens',
+    ],
+    label,
+  );
+  const parsed = {
+    cacheWriteTokens: nullableNonNegativeInteger(tokens.cacheWriteTokens, `${label} cache write tokens`),
+    cachedInputTokens: nonNegativeInteger(tokens.cachedInputTokens, `${label} cached input tokens`),
+    newTokens: nullableNonNegativeInteger(tokens.newTokens, `${label} new tokens`),
+    outputTokens: nonNegativeInteger(tokens.outputTokens, `${label} output tokens`),
+    processedTokens: nullableNonNegativeInteger(tokens.processedTokens, `${label} processed tokens`),
+    rawInputTokens: nonNegativeInteger(tokens.rawInputTokens, `${label} raw input tokens`),
+    reasoningOutputTokens: nonNegativeInteger(tokens.reasoningOutputTokens, `${label} reasoning output tokens`),
+    totalTokens: nonNegativeInteger(tokens.totalTokens, `${label} total tokens`),
+    uncachedInputTokens: nonNegativeInteger(tokens.uncachedInputTokens, `${label} uncached input tokens`),
+  };
+  if (
+    parsed.cachedInputTokens > parsed.rawInputTokens ||
+    parsed.reasoningOutputTokens > parsed.outputTokens ||
+    parsed.uncachedInputTokens !== parsed.rawInputTokens - parsed.cachedInputTokens ||
+    parsed.totalTokens !== parsed.rawInputTokens + parsed.outputTokens ||
+    (parsed.cacheWriteTokens === null && (parsed.newTokens !== null || parsed.processedTokens !== null)) ||
+    (parsed.cacheWriteTokens !== null &&
+      (parsed.newTokens !== parsed.uncachedInputTokens + parsed.cacheWriteTokens + parsed.outputTokens ||
+        parsed.processedTokens !== parsed.newTokens + parsed.cachedInputTokens))
+  ) {
+    invalid(`${label} components are inconsistent`);
+  }
+  return parsed;
+}
+
+function sameTokenAccounting(
+  left: MatchedEvaluationTokenAccountingV1,
+  right: MatchedEvaluationTokenAccountingV1,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+type ReconciledTokenAccounting = Pick<
+  MatchedEvaluationTokenAccountingV1,
+  'cachedInputTokens' | 'outputTokens' | 'rawInputTokens' | 'reasoningOutputTokens' | 'totalTokens'
+>;
+
+const RECONCILED_TOKEN_FIELDS = [
+  ['rawInputTokens', 'raw input tokens'],
+  ['cachedInputTokens', 'cached input tokens'],
+  ['outputTokens', 'output tokens'],
+  ['reasoningOutputTokens', 'reasoning output tokens'],
+  ['totalTokens', 'total tokens'],
+] as const satisfies readonly (readonly [keyof ReconciledTokenAccounting, string])[];
+
+function assertReconciledAttributionTokens(
+  actual: ReconciledTokenAccounting,
+  expected: ReconciledTokenAccounting,
+  source: string,
+): void {
+  const mismatches = RECONCILED_TOKEN_FIELDS.flatMap(([field, label]) =>
+    actual[field] === expected[field] ? [] : [label],
+  );
+  if (mismatches.length > 0) invalid(`attribution tokens differ from ${source}: ${mismatches.join(', ')}`);
+}
+
+function sumTokenAccounting(values: readonly MatchedEvaluationTokenAccountingV1[]): MatchedEvaluationTokenAccountingV1 {
+  const sum = (
+    key: keyof Omit<MatchedEvaluationTokenAccountingV1, 'cacheWriteTokens' | 'newTokens' | 'processedTokens'>,
+  ) => values.reduce((total, value) => total + value[key], 0);
+  const cacheWriteTokens = values.every(value => value.cacheWriteTokens !== null)
+    ? values.reduce((total, value) => total + (value.cacheWriteTokens ?? 0), 0)
+    : null;
+  const rawInputTokens = sum('rawInputTokens');
+  const cachedInputTokens = sum('cachedInputTokens');
+  const outputTokens = sum('outputTokens');
+  const uncachedInputTokens = rawInputTokens - cachedInputTokens;
+  const newTokens = cacheWriteTokens === null ? null : uncachedInputTokens + cacheWriteTokens + outputTokens;
+  return {
+    cacheWriteTokens,
+    cachedInputTokens,
+    newTokens,
+    outputTokens,
+    processedTokens: newTokens === null ? null : newTokens + cachedInputTokens,
+    rawInputTokens,
+    reasoningOutputTokens: sum('reasoningOutputTokens'),
+    totalTokens: sum('totalTokens'),
+    uncachedInputTokens,
+  };
+}
+
+function parseContextVerification(value: unknown): MatchedEvaluationContextVerificationV1 | null {
+  if (value === null) return null;
+  const context = object(value, 'context verification');
+  exactKeys(
+    context,
+    ['graphReady', 'graphSnapshotHash', 'linkReceiptsHash', 'memoryAccess', 'studyHash', 'taskContextHash'],
+    'context verification',
+  );
+  if (context.graphReady !== true) invalid('context verification graph must be ready');
+  const memoryAccess = literal(context.memoryAccess, ['disabled', 'linked'] as const, 'context memory access');
+  const linkReceiptsHash =
+    context.linkReceiptsHash === null
+      ? null
+      : matchingString(context.linkReceiptsHash, HASH, 'context link receipts hash');
+  const taskContextHash =
+    context.taskContextHash === null ? null : matchingString(context.taskContextHash, HASH, 'context task hash');
+  if (
+    (memoryAccess === 'disabled' && (linkReceiptsHash !== null || taskContextHash !== null)) ||
+    (memoryAccess === 'linked' && (linkReceiptsHash === null || taskContextHash === null))
+  ) {
+    invalid('context memory access and receipt fields disagree');
+  }
+  return {
+    graphReady: true,
+    graphSnapshotHash: matchingString(context.graphSnapshotHash, HASH, 'context graph snapshot hash'),
+    linkReceiptsHash,
+    memoryAccess,
+    studyHash: matchingString(context.studyHash, HASH, 'context study hash'),
+    taskContextHash,
+  };
+}
+
+function parseProviderTokens(value: unknown): MatchedEvaluationProviderTokensV1 {
+  const usage = object(value, 'provider token usage');
+  exactKeys(
+    usage,
+    ['cachedInputTokens', 'inputTokens', 'outputTokens', 'reasoningOutputTokens', 'totalTokens'],
+    'provider token usage',
+  );
+  const parsed = {
+    cachedInputTokens: nonNegativeInteger(usage.cachedInputTokens, 'cached input tokens'),
+    inputTokens: nonNegativeInteger(usage.inputTokens, 'input tokens'),
+    outputTokens: nonNegativeInteger(usage.outputTokens, 'output tokens'),
+    reasoningOutputTokens: nonNegativeInteger(usage.reasoningOutputTokens, 'reasoning output tokens'),
+    totalTokens: nonNegativeInteger(usage.totalTokens, 'total tokens'),
+  };
+  if (
+    parsed.cachedInputTokens > parsed.inputTokens ||
+    parsed.reasoningOutputTokens > parsed.outputTokens ||
+    parsed.totalTokens !== parsed.inputTokens + parsed.outputTokens
+  ) {
+    invalid('provider token components are inconsistent');
+  }
+  return parsed;
 }
 
 function boundedPair(
@@ -620,6 +1162,11 @@ function object(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function array(value: unknown, label: string): readonly unknown[] {
+  if (!Array.isArray(value)) invalid(`${label} must be an array`);
+  return value;
+}
+
 function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
   const actual = Object.keys(value).sort();
   const wanted = [...expected].sort();
@@ -645,6 +1192,10 @@ function nonNegativeInteger(value: unknown, label: string): number {
     invalid(`${label} must be a non-negative integer`);
   }
   return value;
+}
+
+function nullableNonNegativeInteger(value: unknown, label: string): number | null {
+  return value === null ? null : nonNegativeInteger(value, label);
 }
 
 function literal<const Values extends readonly string[]>(

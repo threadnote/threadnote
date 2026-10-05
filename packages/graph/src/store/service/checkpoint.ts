@@ -1,6 +1,6 @@
 import {DateTime, Effect, Option} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   bindCheckpointImportBuild,
   readCheckpointImportReceipt,

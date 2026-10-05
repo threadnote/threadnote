@@ -14,7 +14,7 @@ import {
   type CodeMemoryLinkArmPolicy,
 } from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 import {measureAgentToolResponse} from '@threadnote/protocol/agent-response';
-import {parseContextBriefAgentViewText} from '@threadnote/context/projector';
+import {parseContextBriefJsonText} from '@threadnote/context/projector';
 
 describe('Code Memory Link context proxy', () => {
   const temporaryRoots: string[] = [];
@@ -84,7 +84,7 @@ describe('Code Memory Link context proxy', () => {
 
     expect(normalized.text).toBe(normalized.content[0].text);
     expect(normalized.text).not.toContain('stale-runner-channel');
-    expect(parseContextBriefAgentViewText(normalized.text)).toMatchObject({briefVersion: 3, version: 1});
+    expect(parseContextBriefJsonText(normalized.text)).toMatchObject({briefVersion: 3, version: 1});
     expect(
       measureAgentToolResponse({structuredContent: normalized.structuredContent, text: normalized.text}).totalBytes,
     ).toBeLessThanOrEqual(1_250 * 3);

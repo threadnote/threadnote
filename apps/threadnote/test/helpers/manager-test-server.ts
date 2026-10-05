@@ -1,6 +1,6 @@
 import {BunHttpServer} from '@effect/platform-bun';
 import {Effect, Fiber, Scope} from 'effect';
-import {HttpServer} from 'effect/unstable/http';
+import {HttpServer} from 'effect/http';
 import {createManagerServer} from '@threadnote/threadnote/manager/index';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';

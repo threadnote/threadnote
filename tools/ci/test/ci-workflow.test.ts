@@ -20,6 +20,11 @@ interface Job {
 
 interface Workflow {
   readonly jobs?: Readonly<Record<string, Job>>;
+  readonly on?: {
+    readonly pull_request?: {
+      readonly branches?: readonly string[];
+    };
+  };
 }
 
 const workflowPath = '.github/workflows/ci.yml';
@@ -29,6 +34,10 @@ const jobs = workflow.jobs ?? {};
 function step(job: Job | undefined, name: string): Step | undefined {
   return job?.steps?.find(candidate => candidate.name === name);
 }
+
+it('runs affected-target Bazel CI for every maintained pull-request base', () => {
+  expect(workflow.on?.pull_request?.branches).toEqual(['main', 'codex/4.0.0', 'release/5.0.0', 'release/5.1.0']);
+});
 
 it('uses one authoritative Bazel plan and parallel execution matrix', async () => {
   expect(await Bun.file('.github/workflows/bazel.yml').exists()).toBe(false);

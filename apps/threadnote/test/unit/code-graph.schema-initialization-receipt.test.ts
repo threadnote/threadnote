@@ -24,7 +24,7 @@ import {CODE_GRAPH_SCHEMA_INITIALIZATION_RECEIPT_REVISION} from '@threadnote/gra
 import {CODE_GRAPH_WAL_JOURNAL_SIZE_LIMIT_BYTES, configureConnection} from '@threadnote/graph/store/session';
 import {compactCodeGraphStorage, inspectCodeGraphStorage} from '@threadnote/graph/storage';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 
 describe('code graph schema initialization receipt', () => {
   effectIt.effect('sets the WAL retention limit on each writable connection', () =>

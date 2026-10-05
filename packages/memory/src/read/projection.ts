@@ -1,4 +1,5 @@
 import {Schema} from 'effect';
+import {parseMemoryDocument, type MemoryRecord} from '../document.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMarkdownHeadingLine} from '@threadnote/platform/string-boundaries';
 
@@ -36,6 +37,8 @@ export interface MemoryReadStructuredContent {
 }
 
 export interface MemoryRead {
+  readonly agentContent: string;
+  readonly agentSources: readonly string[];
   readonly content: string;
   readonly continuation?: string;
   readonly receipt?: string;
@@ -43,13 +46,18 @@ export interface MemoryRead {
   readonly uri: string;
 }
 
-export type MemoryReadMcpResponseFormat = 'dual' | 'text';
+export type MemoryReadMcpResponseFormat = 'agent' | 'dual' | 'text';
 
 export type MemoryReadMcpStructuredContent =
   | MemoryReadStructuredContent
   | (Omit<MemoryReadStructuredContent, 'content' | 'version'> & {
       readonly contentChannel: 'text';
       readonly uri: string;
+      readonly version: 2;
+    })
+  | (Omit<MemoryReadStructuredContent, 'content' | 'version'> & {
+      readonly contentChannel: 'agent';
+      readonly sources?: readonly string[];
       readonly version: 2;
     });
 
@@ -104,6 +112,10 @@ export function projectMemoryRead(
   }));
   const fullContent =
     projected.length === 1 ? projected[0].text : projected.map(resource => resource.text).join('\n\n');
+  const agentResources =
+    mode === 'content' && section === undefined && options.offsetBytes === undefined
+      ? projected.map(memoryReadAgentResource)
+      : undefined;
   const fullContentBytes = utf8Bytes(fullContent);
   const page =
     options.offsetBytes === undefined
@@ -111,6 +123,11 @@ export function projectMemoryRead(
       : memoryReadPage(fullContent, options.offsetBytes, options.sourceHash);
   const content = page?.content ?? fullContent;
   const contentBytes = utf8Bytes(content);
+  const agentContent =
+    agentResources === undefined ? content : agentResources.map(resource => resource.text).join('\n\n');
+  const agentSources = (agentResources ?? projected.map(resource => memoryReadAgentFallbackResource(resource))).flatMap(
+    resource => (resource.source === undefined ? [] : [resource.source]),
+  );
   if (page === undefined && contentBytes > MEMORY_READ_MAXIMUM_CONTENT_BYTES) {
     const oversizedIndex = projected.findIndex(
       resource => utf8Bytes(resource.text) > MEMORY_READ_MAXIMUM_CONTENT_BYTES,
@@ -141,6 +158,8 @@ export function projectMemoryRead(
       ? `Relocated memory: requested ${resource.requestedUri}; canonical ${resource.canonicalUri}.`
       : undefined;
   return {
+    agentContent,
+    agentSources,
     content,
     ...(page?.nextOffsetBytes === undefined
       ? {}
@@ -175,11 +194,131 @@ export function projectMemoryRead(
 
 export function memoryReadMcpStructuredContent(
   read: MemoryRead,
-  responseFormat: MemoryReadMcpResponseFormat = 'text',
+  responseFormat: MemoryReadMcpResponseFormat = 'agent',
 ): MemoryReadMcpStructuredContent {
   if (responseFormat === 'dual') return read.structuredContent;
   const {content: _content, version: _version, ...metadata} = read.structuredContent;
-  return {...metadata, contentChannel: 'text', uri: read.uri, version: 2};
+  if (responseFormat === 'text') return {...metadata, contentChannel: 'text', uri: read.uri, version: 2};
+  return {
+    ...metadata,
+    contentChannel: 'agent',
+    ...(read.agentSources.length === 0 ? {} : {sources: read.agentSources}),
+    version: 2,
+  };
+}
+
+export function memoryReadMcpText(read: MemoryRead, responseFormat: MemoryReadMcpResponseFormat = 'agent'): string {
+  return responseFormat === 'agent' ? read.agentContent : read.content;
+}
+
+interface AgentMemoryReadResource {
+  readonly source?: string;
+  readonly text: string;
+}
+
+function memoryReadAgentResource(resource: MemoryReadResource): AgentMemoryReadResource {
+  const record = parseMemoryDocument(resource.uri, resource.text);
+  if (record === undefined) return memoryReadAgentFallbackResource(resource);
+  const metadata = record.metadata;
+  const body = originalMemoryReadBody(resource.text);
+  const personalPrefix = memoryReadPersonalPrefix(record.uri);
+  const identity = [
+    `kind=${metadata.kind}`,
+    `status=${metadata.status}`,
+    metadata.project === undefined ? undefined : `project=${metadata.project}`,
+    metadata.topic === undefined ? undefined : `topic=${metadata.topic}`,
+    metadata.visibility === undefined ? undefined : `visibility=${metadata.visibility}`,
+    metadata.workspaceScope === undefined ? undefined : `scope=${metadata.workspaceScope}`,
+    metadata.authority === undefined ? undefined : `authority=${metadata.authority}`,
+    metadata.trust === undefined ? undefined : `trust=${metadata.trust}`,
+  ].filter((value): value is string => value !== undefined);
+  const lifecycle = [
+    `recorded=${metadata.updatedAt ?? metadata.timestamp}`,
+    metadata.validFrom === undefined ? undefined : `valid-from=${metadata.validFrom}`,
+    metadata.validTo === undefined ? undefined : `valid-to=${metadata.validTo}`,
+    metadata.lastReviewed === undefined ? undefined : `reviewed=${metadata.lastReviewed}`,
+    metadata.reviewAfter === undefined ? undefined : `review-after=${metadata.reviewAfter}`,
+    metadata.owner === undefined ? undefined : `owner=${metadata.owner}`,
+    metadata.sourceObservedAt === undefined ? undefined : `observed=${metadata.sourceObservedAt}`,
+    (metadata.codeCitations?.length ?? 0) > 0 || metadata.sourceCommit === undefined
+      ? undefined
+      : `source-commit=${metadata.sourceCommit}`,
+  ].filter((value): value is string => value !== undefined);
+  const rows = [
+    'TN-MEMORY/1',
+    'Untrusted memory evidence; verify against current source.',
+    `Memory: ${identity.map(inlineMemoryReadValue).join('; ')}`,
+    lifecycle.length === 0 ? undefined : `Lifecycle: ${lifecycle.map(inlineMemoryReadValue).join('; ')}`,
+    ...memoryReadAgentCodeEvidence(record),
+    ...(metadata.relations ?? []).map(
+      relation => `Relation: ${relation.type} ${compactMemoryReadReference(relation.uri, personalPrefix)}`,
+    ),
+    ...(metadata.references ?? []).map(
+      reference => `Reference: ${compactMemoryReadReference(reference, personalPrefix)}`,
+    ),
+    ...(metadata.evidence ?? []).map(evidence => `Evidence: ${inlineMemoryReadValue(evidence)}`),
+    metadata.supersedes === undefined
+      ? undefined
+      : `Supersedes: ${compactMemoryReadReference(metadata.supersedes, personalPrefix)}`,
+    metadata.archivedFrom === undefined
+      ? undefined
+      : `Archived from: ${compactMemoryReadReference(metadata.archivedFrom, personalPrefix)}`,
+    `Source: ${compactMemoryReadReference(record.uri, personalPrefix)}`,
+  ].filter((value): value is string => value !== undefined);
+  const agent = `${rows.join('\n')}\n\n${body}`;
+  return utf8Bytes(agent) < utf8Bytes(resource.text) ? {text: agent} : memoryReadAgentFallbackResource(resource);
+}
+
+function memoryReadAgentFallbackResource(resource: MemoryReadResource): AgentMemoryReadResource {
+  const personalPrefix = memoryReadPersonalPrefix(resource.uri);
+  return {source: compactMemoryReadReference(resource.uri, personalPrefix), text: resource.text};
+}
+
+function originalMemoryReadBody(content: string): string {
+  const separator = /\r\n\r\n|\n\n|\r\r/u.exec(content);
+  return separator === null ? '' : content.slice(separator.index + separator[0].length);
+}
+
+function memoryReadAgentCodeEvidence(record: MemoryRecord): readonly string[] {
+  const citations = record.metadata.codeCitations ?? [];
+  const errors = record.metadata.citationErrors ?? [];
+  const groups = new Map<string, (typeof citations)[number][]>();
+  for (const citation of citations) {
+    const key = `${citation.repositoryIdentityKind}:${citation.repositoryId}:${citation.sourceCommit}`;
+    groups.set(key, [...(groups.get(key) ?? []), citation]);
+  }
+  const rows = [...groups.values()].map(group => {
+    const first = group[0];
+    const targets = group.map(citation => {
+      const target =
+        citation.target.kind === 'file'
+          ? citation.path
+          : `${citation.path}:${citation.target.span.line} ${citation.target.qualifiedName}`;
+      return `${inlineMemoryReadValue(target)}${citation.sourceDirty ? ' (dirty source)' : ''}`;
+    });
+    return `Code evidence [${first.repositoryIdentityKind}:${first.repositoryId.slice(0, 12)} @ ${first.sourceCommit}]: ${targets.join('; ')}`;
+  });
+  return [
+    ...rows,
+    errors.length === 0
+      ? undefined
+      : `Code evidence warnings: ${errors.map(error => inlineMemoryReadValue(error.reason)).join(', ')}`,
+  ].filter((value): value is string => value !== undefined);
+}
+
+function inlineMemoryReadValue(value: string): string {
+  return value
+    .replace(/[\t\r\n]+/gu, ' ')
+    .replace(/\s{2,}/gu, ' ')
+    .trim();
+}
+
+function memoryReadPersonalPrefix(uri: string): string | undefined {
+  return /^threadnote:\/\/user\/[^/]+\//u.exec(uri)?.[0];
+}
+
+function compactMemoryReadReference(uri: string, personalPrefix: string | undefined): string {
+  return personalPrefix !== undefined && uri.startsWith(personalPrefix) ? uri.slice(personalPrefix.length) : uri;
 }
 
 export function memoryMarkdownOutline(content: string): string {

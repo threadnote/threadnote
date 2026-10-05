@@ -1,5 +1,5 @@
 import {Effect, FileSystem} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {parseMemoryDocument} from '@threadnote/memory/document';

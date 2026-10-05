@@ -3,6 +3,139 @@
 This directory is the release-quality contract for Threadnote retrieval. It is intentionally independent of a
 developer home, network access, local canonical data, and model-generated relevance scores.
 
+## Matched provider-token experiment v1
+
+The matched evaluator has a claim-oriented local lane for testing whether established Threadnote context reduces
+provider-reported tokens per independently verified task completion. It compares `files`, `threadnote-graph`,
+`threadnote-compact`, and `threadnote-source` on the same blinded, counterbalanced task schedule; `reference-scope`
+remains an optional comparator. Five repetitions (or another multiple of five) expose every arm in every schedule
+position.
+The primary denominator is a verified completion, and every completed attempt's provider tokens stay in the numerator,
+including incorrect, incomplete, invalid, or safety-failing attempts.
+
+This lane models an established workspace, not first-day setup. Before freezing the study, prepare the graph to `ready`,
+create and review the memories, finalize their code links, and retain the exact graph snapshot and link-receipt hashes.
+Each linked-memory Threadnote observation must attest those preregistered hashes. The graph-only arm attests the same
+ready graph snapshot while memory access and receipt fields are disabled. The files-only and reference arms attest no
+Threadnote context, and the runner sends no raw memory fixture text to any adapter. Graph preparation, memory authoring,
+memory review, elapsed setup time, observed reuse, and lifecycle break-even remain separate, hash-bound accounting.
+
+Article-quality input uses independently held-out public Git repositories. Each cluster binds a public HTTPS repository
+URL, exact 40-character revision, repository fixture hash, and task IDs. The study must cover at least its preregistered
+cluster count. A test fixture or a task split from one synthetic repository is useful for evaluator regression only and
+must not be described as external evidence.
+
+Historical external corpora use the `historical-as-issued` task variant for every task and leave `pairId` null. This
+mode deliberately does not claim coverage of the synthetic `exact-name`, `paraphrase`, `absent-answer`,
+`conflicting-records`, or `dirty-worktree` perturbations. Historical and synthetic variants cannot be mixed in one
+corpus; a later study may materialize those conditions explicitly, but must not infer them from issue text alone.
+
+The primary local estimand uses an `identical-as-issued` prompt policy. Preserve each historical task packet exactly as
+the engineer issued it, including manually supplied code, logs, guesses, or architecture notes, and send those exact
+bytes to every arm. Before any outcomes are visible, independent review classifies the extracted manual context as
+`none`, `lacking`, `sufficient`, or `excessive` and binds both the extracted-content hash and assessment hash into the
+study. The report shows every comparison by this context stratum. This prevents an artificially bare files-only prompt
+from manufacturing a Threadnote win. Stratum estimates are descriptive and do not receive their own confidence gate.
+
+This local lane does not establish that developers will change how much context they supply after adopting Threadnote.
+A context-replacement simulation must be a separately preregistered study, and its changed-prompt estimand must be
+reported as such. The behavioral claim requires a randomized developer trial: control developers work normally,
+treatment developers use Threadnote, both may provide any context they choose, and analysis clusters by developer and
+repository while retaining all provider tokens and task failures.
+
+Build and independently review the frozen corpus first. For every task, retain two distinct prepared Threadnote homes
+from the same exact ready graph: a graph-only home with no managed memory documents, and a task-specific linked home
+containing exactly the preregistered reviewed memories and finalized current citations. The preparation command verifies
+the clean public checkouts, exact graph identity in both homes, an empty graph-only Context Brief for the exact task
+prompt, complete linked-memory retrieval for that exact prompt at the preregistered budget, linked-memory currentness and
+stable managed identities, owner-only auth, local runtime artifacts, as-issued
+context/assessment files, and the Threadnote source ancestry before it atomically writes the corpus, per-arm adapter
+configs, manifest, study, runtime, and hash receipt:
+
+```sh
+bun run eval:matched:prepare -- \
+  --corpus /absolute/path/to/reviewed-corpus.json \
+  --plan /absolute/path/to/reviewed-preparation-plan.json \
+  --output /absolute/path/to/.context/token-efficiency-study
+```
+
+Preparation makes no model-provider calls, but it still freezes the provider/model/reasoning settings, Codex app-server
+binary, owner-only auth source, Git and safe-binary hashes, task budget, and optional pricing needed by the later run.
+The exact plan schema is exercised by
+[`matched-token-efficiency-preparation.test.ts`](../unit/matched-token-efficiency-preparation.test.ts). Its top-level
+fields are `version`, `studyId`, `project`, `scheduleSeed`, `repetitions`, `clusters`, `taskContexts`, `bootstrap`,
+`gates`, `lifecycle`, `timeoutMilliseconds`, `threadnote`, and `adapter`. Every task context names the cluster, the two
+prepared homes, the as-issued assessment/content files, and a complete `linkedMemoryIdentities` roster mapping every
+corpus `mem_...` fixture identity to the reviewed memory's actual `tn_...` identity. Repetitions must be a multiple of
+five.
+
+The plan must pin Threadnote 5.0.6. A local build is admissible only when its clean source HEAD contains the recorded
+final 5.0.6 release commit and `threadnote --version` reports `threadnote v5.0.6-local.g<that exact 40-character HEAD>`;
+the version output, source commit, executable bytes, and lock bytes are all retained in the preparation receipt. A
+stable `threadnote v5.0.6` binary without independently verifiable commit provenance is rejected. The bundled preparer
+leaves `reference-scope` explicitly unavailable because the production Codex adapter does not expose a reference
+product; this does not prevent the preregistered files-versus-Threadnote and graph-versus-linked-memory comparisons from
+running.
+
+The preparation command uses `createMatchedEvaluationManifestV1`, `createMatchedTokenEfficiencyTaskContextV1`, and
+`createMatchedTokenEfficiencyStudyV1`. Runtime v3 binds one
+canonical clean checkout to every study cluster by cluster ID and repository identity hash; this lets one local run use
+the complete multi-repository held-out corpus instead of silently executing every task in one repository. Each arm also
+binds a reviewed adapter configuration hash separately from the adapter executable and environment policy.
+
+The production adapter is a standalone compiled executable because the same pinned artifact launches both the Codex
+app-server client and the single-tool context proxy. Build it to an absolute output path, create one immutable adapter
+configuration per arm, and use the executable and configuration SHA-256 values in the manifest:
+
+```sh
+bun run eval:matched:adapter:build -- /absolute/path/to/matched-evaluation-codex-adapter
+/absolute/path/to/matched-evaluation-codex-adapter --hash-prepared-home /absolute/path/to/reviewed-task-home
+```
+
+The adapter configuration pins the Codex app-server and Git executables, their hashes, agent and judge model settings,
+an owner-only Codex authentication file, safe executable paths, task budgets, and—only for Threadnote arms—the
+content-addressed prepared Threadnote home for every task. The runtime file lists the adapter executable and config file
+for each arm plus one `{clusterId, repositoryDirectory, repositoryIdentityHash}` entry for every study cluster. The
+runner stages and re-verifies those files before and after every attempt. It selects the checkout from the task's
+preregistered cluster and rejects missing, duplicate, dirty, or identity-mismatched repositories.
+
+Run the experiment locally with canonical absolute paths:
+
+```sh
+bun run eval:matched:claim -- \
+  --corpus /absolute/path/to/corpus.json \
+  --manifest /absolute/path/to/manifest.json \
+  --runtime /absolute/path/to/runtime.json \
+  --study /absolute/path/to/study.json
+```
+
+The local `.context` artifact directory receives the append-only `outcomes.jsonl`, ordinary matched `summary.json`,
+`token-efficiency-report.json`, `article-evidence.md`, per-run artifacts, and raw transcripts. A comparative claim passes
+only when the complete files and target matrices have provider usage, the cluster-bootstrap 95% lower bound clears the
+preregistered token-reduction threshold, verified completion is non-inferior, and false-current, authorization-leak,
+and harmful-action gates pass. It reports total product effects against files-only and the incremental linked-memory
+effect of `threadnote-compact` against `threadnote-graph`; the latter uses a separately preregistered reduction threshold
+and incremental lifecycle setup cost. Missing usage or an incomplete matrix is inconclusive, never a win.
+Provider usage covers the complete agent task window, including any adapter-internal retries or recovery calls, while
+the blinded judge's own tokens are evaluation overhead and remain outside the product-arm numerator. A pinned adapter
+must keep agent execution isolated from `judgeTask` gold evidence; adapter review is part of study admission.
+The bundled production adapter evaluates completion and correctness with a separately isolated rubric-guided LLM judge.
+That judge never sees the treatment label or agent workspace, but it is still a model-based measurement rather than a
+deterministic test oracle. Article claims must name that limitation; task-specific hidden executable checks should be
+added when the held-out task contract permits them.
+
+With the minimum six tasks and five repetitions, the bundled four-arm runtime performs 120 adapter attempts (240 model
+turns: one agent and one blinded judge per attempt) and records 30 preregistered `reference-scope` slots as unavailable.
+Adding a real reference adapter would raise this to 150 attempts and 300 turns. When pricing is `null`, the evidence
+still reports provider tokens but deliberately makes no monetary-cost claim.
+
+Raw transcripts stay local and must not be stored in Threadnote memory. After every completed experiment—including a
+failed or null result—review `article-evidence.md` and store one replace-in-place durable memory under the stable topic
+`token-efficiency-experiment-evidence`. Preserve the report, manifest, study, and corpus hashes; exact public cluster
+revisions; arm accounting; intervals; gate decision; lifecycle break-even; and limitations. This prevents selective
+publication while leaving the future article traceable to the exact local evidence bundle. The evaluator deliberately
+does not write that memory itself, because mutating Threadnote context during a trial would contaminate the experiment.
+
 The [Threadnote 5 release-readiness fixture](fixtures/threadnote-5-task-loop-v1/README.md) freezes an executable,
 content-free replay contract for solo, two-agent, Git-shared, offline, dirty-worktree, interrupted/resumed,
 upgrade/downgrade, provider-neutral proposal, and health-maintenance scenarios. It independently validates exact source
@@ -60,6 +193,14 @@ correct, graph-ID-grounded answers, including abstention on the no-answer query;
 dual versus 151,708 text-only across those calls. The model pilot uses synthetic evidence and Codex CLI scaffolding,
 so it is not a powered task-quality or provider-cost claim. Explicit dual remains the canonical compatibility path;
 a product-level savings claim still requires a larger paired corpus and supported-client compatibility evidence.
+
+The same baseline also freezes the compact-by-default agent-envelope change against exact parent
+`30475f6899bf8512eef8ebdcf71541ba8f1e04f7`. The five queries fell from 18,643 to
+17,413 serialized agent bytes (1,230 bytes, or 6.6%; 410 conservative `ceil(bytes / 3)` estimated tokens). Clean/current
+responses omit operation, repository/snapshot IDs, invariant trust text, and schema versions; stale, dirty, project,
+refresh, bounded-search, outside-project, and truncation qualifiers remain explicit. Explicit `dual` remains the full
+diagnostic/canonical contract. This envelope fixture is not provider billing or tokens-per-completed-task evidence; one
+query grew because its unchanged budget admitted more useful graph evidence after the metadata shrank.
 
 ## MemoryConnectionsBench v1 (A+B)
 

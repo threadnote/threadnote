@@ -5,7 +5,11 @@ import {describe, expect, it} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {readRecallFeedbackEvents, recordRecallFeedback} from '@threadnote/recall/feedback';
 import {writeValueReportExport} from '@threadnote/threadnote/value_report/commands';
-import {recordContextBriefValueEvent, readLocalValueEvents} from '@threadnote/threadnote/value_report/events';
+import {
+  readLocalValueEvents,
+  recordCodexResumePreloadValueEvent,
+  recordContextBriefValueEvent,
+} from '@threadnote/threadnote/value_report/events';
 import {buildValueReportExportV1} from '@threadnote/threadnote/value_report/export';
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
 import {
@@ -17,6 +21,38 @@ import {
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 describe('local value-report storage controls', () => {
+  effectIt.effect('retains the privacy-safe continuation evidence classification', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-value-resume-'});
+        yield* recordCodexResumePreloadValueEvent(home, {
+          continuationEvidenceState: 'evidence-bearing',
+          durationMilliseconds: 12,
+          estimatedTokens: 120,
+          evidenceState: 'degraded',
+          outcome: 'injected',
+          outputBytes: 480,
+          timestamp: '2026-10-02T00:00:00.000Z',
+        });
+
+        expect(yield* readLocalValueEvents(home)).toEqual([
+          {
+            continuationEvidenceState: 'evidence-bearing',
+            durationMilliseconds: 12,
+            estimatedTokens: 120,
+            evidenceState: 'degraded',
+            kind: 'codex-resume-preload',
+            outcome: 'injected',
+            outputBytes: 480,
+            timestamp: '2026-10-02T00:00:00.000Z',
+            version: 1,
+          },
+        ]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it('selects every export deterministically beyond one deletion batch', () => {
     const exports = Array.from(
       {length: VALUE_REPORT_STORAGE_DELETE_BATCH_SIZE + 1},

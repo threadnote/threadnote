@@ -6,3 +6,6 @@ node_modules/
 out/
 manager/app.js
 tools/bazel/targets.json
+
+# Frozen historical prompt bodies must retain their exact normalized bytes.
+apps/threadnote/test/evaluation/corpora/*/tasks/*/as-issued-context.md

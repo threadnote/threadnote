@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import type * as SqlClient from 'effect/unstable/sql/SqlClient';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {CodeGraphWorksetCatalogError, type CodeGraphWorksetScopeReceiptV1} from './types.js';
 

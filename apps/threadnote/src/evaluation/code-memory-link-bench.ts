@@ -165,6 +165,12 @@ function observationForBrief(
   elapsedMilliseconds: number,
   warmIncremental: CodeMemoryLinkBenchObservationV1['warmIncremental'],
 ): CodeMemoryLinkBenchObservationV1 {
+  if (
+    brief.structuredContent.graph.continuation?.state === 'rerun-required' &&
+    !brief.structuredContent.recommendedFollowUps.some(followUp => followUp.operation === 'inspect-node')
+  ) {
+    throw new Error(`CodeMemoryLinkBench query ${query.id} returned no executable graph recovery.`);
+  }
   const coverage = brief.structuredContent.coverage.memory.codeAnchors;
   if (coverage === undefined) throw new Error(`CodeMemoryLinkBench query ${query.id} did not emit anchor coverage.`);
   const memories = [...brief.structuredContent.activeHandoffs, ...brief.structuredContent.durableDecisions].sort(

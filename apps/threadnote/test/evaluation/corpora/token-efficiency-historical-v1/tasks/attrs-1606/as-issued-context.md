@@ -1,0 +1,1 @@
+I've noticed by accident that the `__str__` and `__doc__` of evolve suddenly were that of methods of internal classes because we assigned it directly to `__replace__` and then ran update dunders on it.

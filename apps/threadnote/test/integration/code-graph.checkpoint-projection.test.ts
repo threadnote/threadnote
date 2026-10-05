@@ -6,7 +6,7 @@ import {join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {codeGraphCheckpointAbiInputV1} from '@threadnote/graph/checkpoint/compatibility';

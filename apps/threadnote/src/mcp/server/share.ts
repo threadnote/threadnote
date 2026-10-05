@@ -12,6 +12,7 @@ import {
   sharedUriFor,
   stripPersonalProvenanceForSharedPublication,
   resourceUriToWorktreeRelative,
+  shareConflictCanTakeShared,
   writeMemoryFile,
   writeSharedWorktreeFile,
 } from '../../share/index.js';
@@ -116,7 +117,9 @@ export function runShareConflictsTool(config: RuntimeConfig, options: ShareConfl
           `status: ${conflict.status}`,
           `reason: ${conflict.reason}`,
           `show: share_conflict_show({"id":${JSON.stringify(conflict.id)}})`,
-          `take shared: share_conflict_resolve({"id":${JSON.stringify(conflict.id)},"take":"shared"})`,
+          ...(shareConflictCanTakeShared(conflict)
+            ? [`take shared: share_conflict_resolve({"id":${JSON.stringify(conflict.id)},"take":"shared"})`]
+            : []),
           `take local: share_conflict_resolve({"id":${JSON.stringify(conflict.id)},"take":"local"})`,
           `merged: share_conflict_resolve({"id":${JSON.stringify(conflict.id)},"mergedContent":"<merged MEMORY markdown>"})`,
         );
@@ -142,7 +145,9 @@ export function runShareConflictShowTool(config: RuntimeConfig, id: string, opti
             detail.diff,
             '',
             'Resolve:',
-            `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"shared"})`,
+            ...(shareConflictCanTakeShared(detail)
+              ? [`share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"shared"})`]
+              : []),
             `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"take":"local"})`,
             `share_conflict_resolve({"id":${JSON.stringify(detail.id)},"mergedContent":"<merged MEMORY markdown>"})`,
           ].join('\n'),
@@ -171,7 +176,12 @@ export function runShareConflictResolveTool(
       if (result.backupPath) {
         lines.push(`Backup: ${result.backupPath}`);
       }
-      lines.push(...result.gitMessages, `Resolved shared memory conflict: ${result.id}`);
+      lines.push(
+        ...result.gitMessages,
+        options.dryRun === true
+          ? `Would resolve shared memory conflict: ${result.id}`
+          : `Resolved shared memory conflict: ${result.id}`,
+      );
       return {content: [{type: 'text' as const, text: lines.join('\n')}]};
     }),
     Effect.catch(error => Effect.succeed(mcpErrorResult(error))),
@@ -292,9 +302,10 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
             yield* assertSharedWorktreeFileReady(
               resolved.config.worktree,
               relativePath,
-              currentScrub.cleaned,
+              existingTarget?.content,
               false,
               sharedPublicationContentEquivalent,
+              {allowCleanTrackedReplacement: existingTarget === undefined},
             );
             yield* ensureSharedDirectoryChain(config, ov, targetUri, false, {quiet: true});
             yield* writeMemoryFile(

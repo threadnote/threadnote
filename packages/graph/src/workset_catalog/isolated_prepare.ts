@@ -1,5 +1,5 @@
 import {Effect, Option, Predicate, Stream, Schema} from 'effect';
-import * as ChildProcess from 'effect/unstable/process/ChildProcess';
+import * as ChildProcess from 'effect/process/ChildProcess';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {developmentStandaloneScript} from '../isolated/builder.js';

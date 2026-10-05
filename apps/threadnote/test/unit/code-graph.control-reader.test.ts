@@ -1,13 +1,13 @@
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
-import * as HttpClientRequest from 'effect/unstable/http/HttpClientRequest';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Console, Effect, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as HttpServer from 'effect/unstable/http/HttpServer';
+import * as HttpServer from 'effect/http/HttpServer';
 import {generateKeyPair, SignJWT} from 'jose';
 import {createAccessTokenVerifier} from '@threadnote/protocol/access-token';
 import {

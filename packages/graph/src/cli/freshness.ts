@@ -25,17 +25,20 @@ export function codeGraphCliReadPlan(
   };
 }
 
-/** A fresh worktree may immediately read shared immutable evidence while its exact graph refreshes off-path. */
+/** A fresh worktree may immediately read same-commit shared evidence without accepting older source as current. */
 export function codeGraphCliUsesBorrowedContinuity(
   policy: CodeGraphCliFreshnessPolicy,
   operation: CodeGraphQueryOptions['operation'],
-  status: Pick<CodeGraphStatus, 'readySnapshot' | 'stale'>,
+  status: Pick<CodeGraphStatus, 'identity' | 'readySnapshot' | 'stale'>,
   borrowedSnapshot: boolean,
+  worktreeClean: boolean,
 ): boolean {
   return (
     policy === 'current' &&
     borrowedSnapshot &&
+    worktreeClean &&
     status.readySnapshot !== undefined &&
+    status.readySnapshot.commit === status.identity.headCommit &&
     status.stale &&
     operation !== 'impact' &&
     operation !== 'path'

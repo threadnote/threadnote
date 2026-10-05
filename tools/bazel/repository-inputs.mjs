@@ -49,7 +49,7 @@ const isProcessCwd = node =>
   node.expression.name.text === 'cwd';
 
 const templateDirectory = node => {
-  if (!ts.isTemplateExpression(node)) return undefined;
+  if (node === undefined || !ts.isTemplateExpression(node)) return undefined;
   const prefix = node.head.text.replaceAll('\\', '/');
   const separator = prefix.lastIndexOf('/');
   return separator < 0 ? undefined : prefix.slice(0, separator);

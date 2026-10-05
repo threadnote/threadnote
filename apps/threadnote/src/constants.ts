@@ -15,11 +15,14 @@ export const LEGACY_CURSOR_INSTRUCTION_PATHS = [
 ] as const;
 
 export const CLAUDE_SETTINGS_PATH = '~/.claude/settings.json';
+export const CODEX_HOOKS_PATH = '~/.codex/hooks.json';
 export const THREADNOTE_HOOK_MARKER = '_threadnote';
 export const THREADNOTE_HOOK_MARKER_VALUE = 'managed';
 export const HOOK_PRE_COMPACT_COMMAND = 'threadnote pre-compact-hook';
 export const HOOK_SESSION_START_COMMAND = 'threadnote session-start-hook';
 export const HOOK_CODE_BRIEF_COMMAND = 'threadnote code-brief-hook';
+export const HOOK_CODEX_RESUME_COMMAND = 'threadnote codex-resume-hook';
+export const THREADNOTE_CODEX_RESUME_PRELOAD_ENV = 'THREADNOTE_CODEX_RESUME_PRELOAD';
 export const HOOK_AUTO_PRECOMPACT_TOPIC = 'auto-precompact';
 export const DEFAULT_SEED_PATTERNS = [
   'AGENTS.md',

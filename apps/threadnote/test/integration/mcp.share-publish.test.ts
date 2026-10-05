@@ -134,11 +134,21 @@ async function makeFakeBin(root: string, options: {readonly mutateSourceOnCommit
     join(bin, 'git'),
     `#! /usr/bin/env node
 const args = process.argv.slice(2);
-if (args.includes('fetch') || args.includes('add') || args.includes('ls-files')) {
+if (args.includes('fetch') || args.includes('add') || args.includes('ls-files') || args.includes('status')) {
+  process.exit(0);
+}
+if (args.includes('rev-parse') && args.includes('--git-path')) {
+  process.stdout.write(${JSON.stringify(
+    Array.from({length: 6}, (_, index) => join(root, `absent-git-operation-${index}`)).join('\n') + '\n',
+  )});
   process.exit(0);
 }
 if (args.includes('rev-list')) {
   process.stdout.write('0\\n');
+  process.exit(0);
+}
+if (args.includes('diff') && args.includes('--cached')) {
+  process.stdout.write(args[args.length - 1] + '\\0');
   process.exit(0);
 }
 if (args.includes('commit')) {

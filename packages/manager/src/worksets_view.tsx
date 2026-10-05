@@ -1,5 +1,6 @@
 import {Schema} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
+import {CONTEXT_BRIEF_MODES} from '@threadnote/context/types';
 import type {ProjectedContextBriefV1, ContextBriefMode} from '@threadnote/context/types';
 import type {CodeGraphWorksetTopologyResultV1} from '@threadnote/graph/cross_repository/runtime';
 import type {CodeGraphCrossRepositoryTraversalResultV1} from '@threadnote/graph/cross_repository/traversal';
@@ -1370,7 +1371,7 @@ function ContextBriefPanel(props: {
           <label>
             Mode
             <select onChange={event => props.onMode(event.target.value as ContextBriefMode)} value={props.mode}>
-              {['brief', 'locate', 'explain', 'trace', 'impact'].map(mode => (
+              {CONTEXT_BRIEF_MODES.map(mode => (
                 <option key={mode}>{mode}</option>
               ))}
             </select>

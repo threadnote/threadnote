@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {compareCodeUnits} from '../ordering.js';
 import {retireReadySnapshotsIfUnused} from '../store/cleanup_core.js';
 import {CODE_GRAPH_SNAPSHOT_ID, validCanonicalTimestamp} from '../store/reconciliation/core.js';

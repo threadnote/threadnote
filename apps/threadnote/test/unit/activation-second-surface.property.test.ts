@@ -9,7 +9,7 @@ import {
 } from '@threadnote/threadnote/activation/second/surface';
 
 const hash = fc.string({unit: fc.constantFrom(...'0123456789abcdef'), minLength: 64, maxLength: 64});
-const identity = fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/u);
+const identity = fc.stringMatching(/^[a-z][a-z0-9-]{0,20}$/u).map(value => `team-${value}`);
 
 describe('activation second-surface proof properties', () => {
   it('is deterministic and sensitive to every bound identity fingerprint', () => {
@@ -60,8 +60,13 @@ describe('activation second-surface proof properties', () => {
           for (const stale of staleFields) expect(planSecondSurfaceReadV1(context, stale).status).toBe('rejected');
         },
       ),
-      {numRuns: 100},
+      {numRuns: 100, examples: [[{...fixedValues(), teamId: 'team-con'}]]},
     );
+  });
+
+  it.each(['con', 'prn', 'aux', 'nul', 'com1', 'lpt9'])('rejects the non-portable team identity %s', teamId => {
+    const [context, recall, read] = proofFixture({...fixedValues(), teamId});
+    expect(completeSecondSurfaceProofV1(context, recall, read)).toEqual({code: 'input-invalid', status: 'rejected'});
   });
 
   it('never advances to read for incomplete, truncated, absent, or ambiguous target recall', () => {

@@ -167,6 +167,39 @@ describe('context brief isolated graph reads', () => {
     }),
   );
 
+  effectIt.effect('pins the parent local ready snapshot and clean overlay in the worker', () =>
+    Effect.gen(function* () {
+      const seen: {input?: Uint8Array} = {};
+      const service = yield* isolatedService(
+        () => Effect.die('Local ready reads must stay off the MCP thread.'),
+        queryResult('query'),
+        seen,
+      );
+
+      yield* service.inspect({
+        cwd: '/workspace/repository',
+        edgeLimit: 40,
+        nodeLimit: 20,
+        operation: 'query',
+        query: 'native union',
+        refresh: false,
+        requestMaintenance: false,
+        statusObservation: {identity, overlay: {dirty: false}, readySnapshotId: SNAPSHOT_ID},
+        strictFreshness: false,
+        threadnoteHome: '/threadnote-home',
+      });
+
+      const request = decodeImpactQueryRequest(new TextDecoder().decode(seen.input));
+      expect(request).toMatchObject({
+        operation: 'query',
+        overlay: {dirty: false},
+        query: 'native union',
+        readySnapshotId: SNAPSHOT_ID,
+        strictFreshness: false,
+      });
+    }),
+  );
+
   effectIt.effect('keeps in-scope impact seeds and reports no outside-scope drift', () =>
     Effect.gen(function* () {
       const seen: {input?: Uint8Array} = {};

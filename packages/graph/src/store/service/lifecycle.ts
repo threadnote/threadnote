@@ -1,6 +1,6 @@
 import {DateTime, Effect, Option, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
-import * as SqlError from 'effect/unstable/sql/SqlError';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as SqlError from 'effect/sql/SqlError';
 import {CODE_GRAPH_CACHE_TRANSACTION_LIMITS, codeGraphTextFieldsCapacityBytes} from '../../cache_capacity.js';
 import {saturatingCapacityAdd} from '../../disk/capacity.js';
 import {ensureBoundedCodeGraphFact} from '../../fact/budget.js';

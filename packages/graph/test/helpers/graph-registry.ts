@@ -1,5 +1,5 @@
 import {Effect, FileSystem, Path} from 'effect';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256Digest} from '@threadnote/graph/sharing/digest';

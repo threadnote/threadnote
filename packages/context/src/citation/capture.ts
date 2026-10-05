@@ -4,6 +4,7 @@ import {
   createCodeGraphSourceSpanCanonicalizer,
 } from '@threadnote/graph/citation/primitives';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
+import {retainCodeGraphCitationEvidence} from '@threadnote/graph/citation/capsule';
 import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {codeGraphScopeAdmitsPath} from '@threadnote/graph/scope/applicability';
@@ -15,8 +16,10 @@ import {
   type ResolvedCodeGraphQualifiedRefTargetV1,
 } from '@threadnote/graph/workset/query_v2';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
+  assertMemoryCodeCitation,
   createMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
   MEMORY_CODE_CITATION_VERSION,
@@ -181,8 +184,18 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     return yield* MemoryCodeCitationCaptureError.of('Code citation callerCwd must be absolute.');
   }
 
+  const invalidQualifiedRef = refs.find(ref => ref.startsWith('cgr_') && !QUALIFIED_SYMBOL_REF.test(ref));
+  if (invalidQualifiedRef !== undefined) {
+    return yield* MemoryCodeCitationCaptureError.of(`Invalid qualified code graph reference: ${invalidQualifiedRef}.`);
+  }
+  const qualifiedRefs = refs.filter(ref => QUALIFIED_SYMBOL_REF.test(ref));
+  // Local groups already fence the caller before and after capture. Qualified
+  // references can target another checkout, so they need a separate caller fence.
+  const fenceCallerSeparately =
+    qualifiedRefs.length > 0 &&
+    (input.expectedCallerIdentity !== undefined || input.expectedProjectScope !== undefined);
   const query = yield* CodeGraphQueryService;
-  if (input.expectedCallerIdentity || input.expectedProjectScope) {
+  if (fenceCallerSeparately) {
     const callerBefore = yield* query
       .status(config.agentContextHome, input.callerCwd, {
         project,
@@ -195,11 +208,6 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     if (input.expectedProjectScope) yield* requireExpectedProjectScope(callerBefore, input.expectedProjectScope);
   }
 
-  const invalidQualifiedRef = refs.find(ref => ref.startsWith('cgr_') && !QUALIFIED_SYMBOL_REF.test(ref));
-  if (invalidQualifiedRef !== undefined) {
-    return yield* MemoryCodeCitationCaptureError.of(`Invalid qualified code graph reference: ${invalidQualifiedRef}.`);
-  }
-  const qualifiedRefs = refs.filter(ref => QUALIFIED_SYMBOL_REF.test(ref));
   const qualifiedTargets = yield* resolveCodeGraphQualifiedRefTargets(
     config,
     qualifiedRefs,
@@ -231,7 +239,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
       ),
     {concurrency: 4},
   );
-  if (input.expectedCallerIdentity || input.expectedProjectScope) {
+  if (fenceCallerSeparately) {
     const callerAfter = yield* query
       .status(config.agentContextHome, input.callerCwd, {
         project,
@@ -369,7 +377,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
             const file = fileByPath.get(target.target.path);
             return file === undefined
               ? []
-              : [{expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: false}];
+              : [{expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true}];
           }),
           ...symbolTargets.flatMap(target => {
             const symbol = symbolById.get(target.target.nodeId);
@@ -483,6 +491,44 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         (result): result is NonNullable<(typeof results)[number]> => result !== undefined,
       );
 
+      // Complete preservation before releasing the snapshot lease or returning
+      // anchors: dirty source has no clean-Git recovery after worktree removal.
+      const retainedTargets: typeof capturedTargets = [];
+      for (const captured of capturedTargets) {
+        const {citation} = captured;
+        const bytes = sourceBytes.get(
+          codeGraphCitationSourceKey({
+            expectedContentHash: citation.fileContentHash.value,
+            repositoryPath: citation.path,
+          }),
+        );
+        const retained =
+          bytes !== undefined &&
+          (yield* retainCodeGraphCitationEvidence({
+            bytes,
+            checkoutId: before.identity.checkoutId,
+            objectFormat: before.identity.objectFormat,
+            referenceId: sha256HexSync(citation.id),
+            source: {
+              extractorSet: citation.extractorSet,
+              fileContentHash: citation.fileContentHash.value,
+              path: citation.path,
+              repositoryId: citation.repositoryId,
+              sourceCommit: citation.sourceCommit,
+              sourceDirty: citation.sourceDirty,
+              sourceSnapshotId: citation.sourceSnapshotId,
+            },
+            threadnoteHome: config.agentContextHome,
+          }));
+        retainedTargets.push({
+          ...captured,
+          citation: assertMemoryCodeCitation({
+            ...citation,
+            evidenceRetention: retained ? 'capsule-retained' : 'unavailable',
+          }),
+        });
+      }
+
       const after = yield* query
         .status(config.agentContextHome, cwd, {
           project,
@@ -498,7 +544,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
       }
       if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(after, expectedCallerIdentity);
       if (expectedProjectScope) yield* requireExpectedProjectScope(after, expectedProjectScope);
-      return capturedTargets;
+      return retainedTargets;
     }),
   );
 });

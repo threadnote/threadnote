@@ -5,6 +5,7 @@ import type {
   ManagerContextHealthResponseV1,
   ManagerReviewInboxResponseV1,
 } from '@threadnote/manager/attention/contracts';
+import {ContextMaintenanceView} from './attention/maintenance_view.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 
@@ -170,6 +171,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [generation, setGeneration] = useState(0);
   const requestEpoch = useRef(0);
+  const requestController = useRef<AbortController | undefined>(undefined);
   const [report, setReport] = useState<ManagerContextHealthResponseV1>();
   const [nextCursor, setNextCursor] = useState<string>();
   const [error, setError] = useState('');
@@ -194,12 +196,21 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    requestController.current = controller;
     setLoading(true);
     setLoadingMore(false);
     setError('');
-    void api<ManagerContextHealthResponseV1>(`/api/context-health?project=${encodeURIComponent(props.project)}`)
+    void api<ManagerContextHealthResponseV1>(
+      `/api/context-health?project=${encodeURIComponent(props.project)}`,
+      undefined,
+      {
+        signal: controller.signal,
+        timeoutMilliseconds: 8_000,
+      },
+    )
       .then(result => {
-        if (!cancelled) {
+        if (!cancelled && result.project === props.project) {
           setReport(result);
           setNextCursor(result.nextCursor);
         }
@@ -212,6 +223,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [props.project, props.refreshGeneration, generation]);
 
@@ -223,7 +235,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       refreshedCitationRepairJobId.current = undefined;
       setCitationRepairJobStarting(false);
     }
-    if (!props.project) {
+    if (!props.project || report === undefined || report?.maintenance !== undefined) {
       setCitationRepairJob(undefined);
       setCitationRepairJobError('');
       return;
@@ -273,7 +285,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [props.project, citationRepairJobGeneration]);
+  }, [props.project, citationRepairJobGeneration, report !== undefined, report?.maintenance !== undefined]);
 
   function loadMore(): void {
     if (!nextCursor || loadingMore) return;
@@ -282,9 +294,11 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     setError('');
     void api<ManagerContextHealthResponseV1>(
       `/api/context-health?project=${encodeURIComponent(props.project)}&after=${encodeURIComponent(nextCursor)}`,
+      undefined,
+      {signal: requestController.current?.signal, timeoutMilliseconds: 8_000},
     )
       .then(next => {
-        if (epoch !== requestEpoch.current) return;
+        if (epoch !== requestEpoch.current || next.project !== props.project) return;
         setReport(current =>
           current === undefined
             ? next
@@ -337,6 +351,25 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         setCitationRepairJobStarting(false);
       }
     }
+  }
+
+  if (report?.maintenance !== undefined && report.project === props.project) {
+    return (
+      <ContextMaintenanceView
+        key={props.project}
+        project={props.project}
+        projects={props.projects}
+        report={report}
+        onProjectChange={props.onProjectChange}
+        onOpenLibrary={props.onOpenLibrary}
+        onChanged={() => setGeneration(value => value + 1)}
+        nextCursor={nextCursor}
+        loadingMore={loadingMore}
+        onLoadMore={loadMore}
+        reportError={error}
+        onRefresh={() => setGeneration(value => value + 1)}
+      />
+    );
   }
 
   return (
@@ -444,7 +477,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                           {code.line === undefined ? '' : `:${code.line}`}
                         </span>
                       </header>
-                      {code.excerpt ? <pre>{code.excerpt}</pre> : <p>Current source excerpt is unavailable.</p>}
+                      {code.excerpt ? <pre>{code.excerpt}</pre> : <p>Review this finding to check source evidence.</p>}
                     </section>
                   ))}
                   <div className="health-issues">

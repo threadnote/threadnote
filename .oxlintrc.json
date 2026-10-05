@@ -132,7 +132,8 @@
     "effecttsgo/prefer-schema-over-json": "off",
     "effecttsgo/process-env": "off",
     "effecttsgo/schema-sync": "off",
-    "effecttsgo/strict-boolean-expressions": "off"
+    "effecttsgo/strict-boolean-expressions": "off",
+    "effecttsgo/unstable-api-usage": "off"
   },
   "overrides": [
     {

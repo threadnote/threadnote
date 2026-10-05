@@ -1,5 +1,5 @@
 import {Option} from 'effect';
-import {Argument, Flag} from 'effect/unstable/cli';
+import {Argument, Flag} from 'effect/cli';
 import {decodeCliStringFlagValue, registerCliBooleanFlag, registerCliValueFlag} from './invocation.js';
 
 export const describeFlag = <A>(flag: Flag.Flag<A>, description: string): Flag.Flag<A> =>

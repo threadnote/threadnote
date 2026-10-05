@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {Encoding} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import {
   anonymousAgentSessionId,
   deriveConsentedAgentSessionPseudonym,
@@ -36,7 +36,7 @@ describe('anonymous telemetry agent sessions', () => {
         };
         const consentGeneration = telemetryConsentGeneration({
           endpoint: ENDPOINT,
-          sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(7)),
+          sessionSalt: Base64Url.encode(new Uint8Array(32).fill(7)),
         });
         const child = withAgentSessionEnvironment(inherited, {consentGeneration, id: sessionId}, 'mcp-server');
         const changedBytes = Uint8Array.from(bytes);
@@ -115,7 +115,7 @@ describe('anonymous telemetry agent sessions', () => {
       randomBytes,
     });
     const withConsent = resolveAgentSession({
-      configuration: {endpoint: ENDPOINT, sessionSalt: Encoding.encodeBase64Url(consentSalt)},
+      configuration: {endpoint: ENDPOINT, sessionSalt: Base64Url.encode(consentSalt)},
       environment,
       randomBytes,
     });
@@ -123,7 +123,7 @@ describe('anonymous telemetry agent sessions', () => {
     expect(withoutConsent).toEqual({correlationScope: 'broker', id: anonymousAgentSessionId(randomBytes)});
     expect(withConsent.correlationScope).toBe('provider-session');
     expect(withConsent.consentGeneration).toBe(
-      telemetryConsentGeneration({endpoint: ENDPOINT, sessionSalt: Encoding.encodeBase64Url(consentSalt)}),
+      telemetryConsentGeneration({endpoint: ENDPOINT, sessionSalt: Base64Url.encode(consentSalt)}),
     );
     expect(withConsent.id).toBe('tns_fa8c00ba7723ca763211e426daac5a7a');
     expect(withConsent.id).not.toContain('host-session-token');
@@ -149,7 +149,7 @@ describe('anonymous telemetry agent sessions', () => {
     ).toEqual(expected);
     expect(
       resolveAgentSession({
-        configuration: {endpoint: ENDPOINT, sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32))},
+        configuration: {endpoint: ENDPOINT, sessionSalt: Base64Url.encode(new Uint8Array(32))},
         environment: {
           [TELEMETRY_PROVIDER_ENVIRONMENT_VARIABLE]: 'unknown-provider',
           [TELEMETRY_PROVIDER_SESSION_TOKEN_ENVIRONMENT_VARIABLE]: 'provider-token',
@@ -162,8 +162,8 @@ describe('anonymous telemetry agent sessions', () => {
   it('trusts inherited aliases only for declared children in the current consent generation', () => {
     const randomBytes = new Uint8Array(16).fill(9);
     const inheritedId = anonymousAgentSessionId(new Uint8Array(16).fill(3));
-    const first = {endpoint: ENDPOINT, sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(1))};
-    const second = {endpoint: ENDPOINT, sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(2))};
+    const first = {endpoint: ENDPOINT, sessionSalt: Base64Url.encode(new Uint8Array(32).fill(1))};
+    const second = {endpoint: ENDPOINT, sessionSalt: Base64Url.encode(new Uint8Array(32).fill(2))};
     const firstGeneration = telemetryConsentGeneration(first);
     const intendedEnvironment = withAgentSessionEnvironment(
       {},
@@ -227,7 +227,7 @@ describe('anonymous telemetry agent sessions', () => {
   it('scrubs every provider and consent marker from generic external commands', () => {
     const consentGeneration = telemetryConsentGeneration({
       endpoint: ENDPOINT,
-      sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(4)),
+      sessionSalt: Base64Url.encode(new Uint8Array(32).fill(4)),
     });
     const environment = {
       PATH: '/usr/bin',
@@ -270,7 +270,7 @@ describe('anonymous telemetry agent sessions', () => {
   it('preserves only a valid current alias when a Threadnote child is selected explicitly', () => {
     const consentGeneration = telemetryConsentGeneration({
       endpoint: ENDPOINT,
-      sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(5)),
+      sessionSalt: Base64Url.encode(new Uint8Array(32).fill(5)),
     });
     expect(isTelemetryConsentGeneration(consentGeneration)).toBe(true);
     const id = anonymousAgentSessionId(new Uint8Array(16).fill(6));

@@ -1,6 +1,6 @@
 import {Database} from 'bun:sqlite';
 import {Effect, FileSystem, Option} from 'effect';
-import type * as SqlClient from 'effect/unstable/sql/SqlClient';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../../disk/capacity.js';
 import {
   codeGraphMaterializationSpoolPath,

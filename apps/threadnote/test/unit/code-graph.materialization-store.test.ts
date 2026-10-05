@@ -3,7 +3,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {DateTime, Deferred, Effect, Fiber, FileSystem, Option, Ref} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
 import {TestClock} from 'effect/testing';
 import {codeGraphBlobReuseCacheKey} from '@threadnote/graph/blob_reuse';
@@ -3863,45 +3863,44 @@ describe('code graph full-build materialization store', () => {
     expect(rankedTermPlan.every(row => !/terms_symbol/i.test(row.detail))).toBe(true);
   });
 
-  it('prefers an implementation symbol over test and documentation copies of the same product name', async () => {
-    const fixture = await materializationFixture();
-    const registration = {
-      ...symbol('registration', 'recall_context', ['typescript:name:recall_context']),
-      path: 'apps/threadnote/src/mcp/server/index.ts',
-    };
-    const testLocal = {
-      ...symbol('test-local', 'recall_context', ['typescript:name:recall_context']),
-      path: 'apps/threadnote/test/integration/mcp.native-tools.test.ts',
-    };
-    const heading = {
-      ...symbol('agent-heading', 'recall_context', ['typescript:name:recall_context']),
-      path: 'AGENTS.md',
-    };
+  effectIt.effect('prefers an implementation symbol over test and documentation copies of the same product name', () =>
+    Effect.gen(function* () {
+      const fixture = yield* Effect.promise(materializationFixture);
+      const registration = {
+        ...symbol('registration', 'recall_context', ['typescript:name:recall_context']),
+        path: 'apps/threadnote/src/mcp/server/index.ts',
+      };
+      const testLocal = {
+        ...symbol('test-local', 'recall_context', ['typescript:name:recall_context']),
+        path: 'apps/threadnote/test/integration/mcp.native-tools.test.ts',
+      };
+      const heading = {
+        ...symbol('agent-heading', 'recall_context', ['typescript:name:recall_context']),
+        path: 'AGENTS.md',
+      };
 
-    const search = await runEffect(
-      Effect.gen(function* () {
-        const store = yield* CodeGraphStore;
-        return yield* store.withSession(
-          fixture.databasePath,
-          Effect.gen(function* () {
-            yield* store.prepareActivation(fixture.databasePath, [fixture.file]);
-            yield* store.stageActivationFacts(fixture.databasePath, [heading, testLocal, registration], []);
-            const snapshot = readySnapshot(fixture.identity, 3, 0);
-            yield* store.activateStaged(fixture.databasePath, fixture.identity, snapshot);
-            return yield* store.searchSymbols(fixture.databasePath, snapshot.id, 'recall_context', 10);
-          }),
-        );
-      }),
-    );
+      const store = yield* CodeGraphStore;
+      const search = yield* store.withSession(
+        fixture.databasePath,
+        Effect.gen(function* () {
+          yield* store.prepareActivation(fixture.databasePath, [fixture.file]);
+          yield* store.stageActivationFacts(fixture.databasePath, [heading, testLocal, registration], []);
+          const snapshot = readySnapshot(fixture.identity, 3, 0);
+          yield* store.activateStaged(fixture.databasePath, fixture.identity, snapshot);
+          return yield* store.searchSymbols(fixture.databasePath, snapshot.id, 'recall_context', 10);
+        }),
+      );
 
-    expect(search.map(node => node.path)).toEqual([
-      'apps/threadnote/src/mcp/server/index.ts',
-      'apps/threadnote/test/integration/mcp.native-tools.test.ts',
-      'AGENTS.md',
-    ]);
-    expect(search[0]?.score).toBeGreaterThan(search[1].score);
-    expect(search[1]?.score).toBeGreaterThan(search[2].score);
-  });
+      expect(search.map(node => node.path)).toEqual([
+        'apps/threadnote/src/mcp/server/index.ts',
+        'apps/threadnote/test/integration/mcp.native-tools.test.ts',
+        'AGENTS.md',
+      ]);
+      expect(search[0]?.score).toBe(1);
+      expect(search[0]?.score).toBeGreaterThan(search[1].score);
+      expect(search[1]?.score).toBeGreaterThan(search[2].score);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
 
   it('keeps test symbols undemoted when the query asks for a test path', async () => {
     const fixture = await materializationFixture();

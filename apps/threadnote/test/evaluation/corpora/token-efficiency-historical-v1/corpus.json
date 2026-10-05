@@ -1,0 +1,288 @@
+{
+  "corpusId": "threadnote-token-efficiency-historical-v1",
+  "tasks": [
+    {
+      "category": "unfamiliar-call-path",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_ea8893107ff4194e0c011008",
+          "repository": "python-hyper/h11",
+          "source": {
+            "path": "h11/_readers.py",
+            "startLine": 150,
+            "endLine": 188
+          },
+          "status": "active",
+          "text": "ChunkedReader incrementally validates hexadecimal chunk-size lines, emits Data slices with chunk boundary markers, and separately discards each chunk’s trailing CRLF. A zero-size chunk switches the reader into trailer parsing, where trailer lines become EndOfMessage headers; chunk extensions are intentionally discarded."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_8cf58dfad7db5a6a3143112a",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Request-target validation is a separate event-construction concern and must not be changed to solve chunk framing."
+        }
+      ],
+      "pairId": null,
+      "prompt": "Robust handling of whitespace-malformed chunk encoding headers.\n\nPrompted by https://github.com/encode/httpx/discussions/1735\n\nWhen a server uses chunked encoding, but erroneously includes whitespace between the `<chunk size marker>` and the `<crlf>`, a `RemoteProtocolError` is raised...\n\n```pycon\n>>> import h11\n>>> state = h11.Connection(our_role=h11.CLIENT)\n>>> state.send(h11.Request(method=b'GET', target='b/', headers=[(b'Host', 'example.com')]))\nb'GET b/ HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n'\n>>> state.send(h11.EndOfMessage())\nb''\n>>> state.receive_data(b'HTTP/1.1 200 OK\\r\\n')\n>>> state.receive_data(b'Transfer-Encoding: chunked\\r\\n')\n>>> state.receive_data(b'\\r\\n')\n>>> state.receive_data(b'123  \\r\\n')\n>>> state.receive_data(b'x' * 123)\n>>> state.receive_data(b'\\r\\n0\\r\\n\\r\\n')\n>>> state.next_event()\nResponse(status_code=200, headers=<Headers([(b'transfer-encoding', b'chunked')])>, http_version=b'1.1', reason=b'OK')\n>>> state.next_event()\nTraceback (most recent call last):\n  File \"<stdin>\", line 1, in <module>\n  File \"venv/lib/python3.8/site-packages/h11/_connection.py\", line 443, in next_event\n    exc._reraise_as_remote_protocol_error()\n  File \"venv/lib/python3.8/site-packages/h11/_util.py\", line 76, in _reraise_as_remote_protocol_error\n    raise self\n  File \"venv/lib/python3.8/site-packages/h11/_connection.py\", line 425, in next_event\n    event = self._extract_next_receive_event()\n  File \"/venv/lib/python3.8/site-packages/h11/_connection.py\", line 367, in _extract_next_receive_event\n    event = self._reader(self._receive_buffer)\n  File \"venv/lib/python3.8/site-packages/h11/_readers.py\", line 157, in __call__\n    matches = validate(\n  File \"venv/lib/python3.8/site-packages/h11/_util.py\", line 88, in validate\n    raise LocalProtocolError(msg)\nh11._util.RemoteProtocolError: illegal chunk header: bytearray(b'123  \\r\\n')\n```\n\nNo doubt this is technically correct, but we *probably* want to be robust to this kind of malformed input, given that we've seen it occur as a user-issue in `httpx`.",
+      "repositoryFixtureHash": "db7c68bd7fe3710829db1f6b27943c909ca357a95741c3b1d544a21fb8d09d82",
+      "rubric": {
+        "completion": "The repository accepts optional whitespace after a chunk size or chunk extension before CRLF, preserves ordinary chunk framing, and retains strict rejection of non-whitespace malformed chunk headers.",
+        "criteria": [
+          "The public issue reproduction no longer raises RemoteProtocolError.",
+          "A complete whitespace-terminated chunk decodes to the expected data and EndOfMessage.",
+          "Chunk-size hexadecimal validation and unrelated protocol behavior remain intact."
+        ],
+        "requiredEvidenceIds": ["ev_b5fdcaf74f4da8630f0d2b21"]
+      },
+      "sourceGold": [
+        {
+          "claim": "Chunk-size and chunk-extension framing is centralized in the chunk_header ABNF consumed by the incremental reader.",
+          "endLine": 129,
+          "evidenceId": "ev_b5fdcaf74f4da8630f0d2b21",
+          "path": "h11/_abnf.py",
+          "repository": "python-hyper/h11",
+          "startLine": 112
+        }
+      ],
+      "taskId": "tsk_47e3cb3faf2da9c58a8faa14",
+      "variant": "historical-as-issued"
+    },
+    {
+      "category": "cross-repository-transfer",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_fb3a4e78901f4bf97281cf2a",
+          "repository": "python-hyper/hpack",
+          "source": {
+            "path": "src/hpack/hpack.py",
+            "startLine": 214,
+            "endLine": 252
+          },
+          "status": "active",
+          "text": "Encoder.encode accepts dictionaries or iterable two-/three-tuples and feeds each header through the dynamic/static-table lookup and literal encoding pipeline. It logs list(headers) before processing, so one-shot generators may be consumed by observability. Dictionary inputs are converted to an ordering-aware iterable so HTTP/2 pseudo-headers can be placed first."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_13a87df1c8ff6390c96c7e6f",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Decoder table eviction is downstream of encoding and is not the cause of the generator disappearing before iteration."
+        }
+      ],
+      "pairId": null,
+      "prompt": "Debug output: encoding generator object 😅\n\nRunning a simple client using `h2` with log level DEBUG:\n\n```\nDEBUG:hpack.hpack:Adding (b'foo', b'bar') to the header table\nDEBUG:hpack.hpack:Encoding 2 with 7 bits\nDEBUG:hpack.hpack:Encoding 3 with 7 bits\nDEBUG:hpack.hpack:Encoded header block to b'\\x83\\x87A\\x8a\\xa0\\xe4\\x1d\\x13\\x9d\\t\\xb8 \\xbe\\xefD\\x8ba\\x96$/s\\x10\\xac\\x0ccX_@\\x82\\x94\\xe7\\x83\\x8cv\\x7f'\nDEBUG:hpack.hpack:HPACK encoding <generator object _check_path_header.<locals>.inner at 0x7fda203e94a0>\n```\nThe last debug line looks odd.\nI'm guessing that data is [probably] sent correctly on the line.\nIn that case it's only the `hpack` debug that's funky.\n\nCode in question is here: https://github.com/python-hyper/hyper-h2/blob/13005074d14c7d32f8eaf1683b854446a09d09d3/h2/utilities.py#L490-L513 ",
+      "repositoryFixtureHash": "b5df5e2d915dd2a765e5a4cbd8d35ca73ad0b394a2a18ed7900490c82dfe02e7",
+      "rubric": {
+        "completion": "The encoder preserves all headers supplied through a one-shot generator while retaining useful bounded debug logging and normal dictionary and sequence behavior.",
+        "criteria": [
+          "Encoding a generator produces a block that decodes to every generated header.",
+          "Debug logging does not consume or duplicate a one-shot iterable.",
+          "Existing dictionary ordering and HPACK table behavior remain intact."
+        ],
+        "requiredEvidenceIds": ["ev_86fe33b68815894fb97260ca"]
+      },
+      "sourceGold": [
+        {
+          "claim": "Encoder.encode accepts general iterables, logs the input, normalizes dictionaries, and then iterates headers into the encoding pipeline.",
+          "endLine": 252,
+          "evidenceId": "ev_86fe33b68815894fb97260ca",
+          "path": "src/hpack/hpack.py",
+          "repository": "python-hyper/hpack",
+          "startLine": 214
+        }
+      ],
+      "taskId": "tsk_ed9ebce266025c8aa067cc03",
+      "variant": "historical-as-issued"
+    },
+    {
+      "category": "hidden-architectural-constraint",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_d22ff02a19563f798adb0da4",
+          "repository": "python-attrs/attrs",
+          "source": {
+            "path": "src/attr/_make.py",
+            "startLine": 1110,
+            "endLine": 1112
+          },
+          "status": "active",
+          "text": "The class builder installs a generated __replace__ method by attaching the shared evolve function through _add_method_dunders. The shared operation reconstructs an attrs instance from initialization fields while applying requested changes."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_8e2bf26930f05da1fc7fede2",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Attribute alias handling inside evolve must remain unchanged; the regression concerns shared callable metadata during method installation."
+        }
+      ],
+      "pairId": null,
+      "prompt": "Stop evolve dunders from being modified\n\nI've noticed by accident that the `__str__` and `__doc__` of evolve suddenly were that of methods of internal classes because we assigned it directly to `__replace__` and then ran update dunders on it.",
+      "repositoryFixtureHash": "1fb4775d41a062e575c8d311a8dd37de8b9284eea109d519e798471a89c424f3",
+      "rubric": {
+        "completion": "Generated __replace__ methods continue to delegate to attrs.evolve semantics without mutating attrs.evolve identity, documentation, or string representation.",
+        "criteria": [
+          "Creating attrs classes does not modify attrs.evolve.__doc__, __name__, __qualname__, or repr.",
+          "An instance __replace__ remains callable and applies field changes correctly.",
+          "Existing replace customization and evolve behavior remain compatible."
+        ],
+        "requiredEvidenceIds": ["ev_ac829b4264bfcee7ee27f2ca"]
+      },
+      "sourceGold": [
+        {
+          "claim": "The class builder installs __replace__ by passing the shared evolve function through a helper that updates method dunders.",
+          "endLine": 1112,
+          "evidenceId": "ev_ac829b4264bfcee7ee27f2ca",
+          "path": "src/attr/_make.py",
+          "repository": "python-attrs/attrs",
+          "startLine": 1110
+        }
+      ],
+      "taskId": "tsk_1c391a7896906b29202da55b",
+      "variant": "historical-as-issued"
+    },
+    {
+      "category": "same-repository-onboarding",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_4967c78cf20184c7b5046b19",
+          "repository": "pallets/click",
+          "source": {
+            "path": "src/click/core.py",
+            "startLine": 3075,
+            "endLine": 3114
+          },
+          "status": "active",
+          "text": "Click builds option help metadata by resolving option-level show_default first and otherwise inheriting ctx.show_default. Defaults are fetched with resilient parsing and formatted by type, including lists or tuples, enums, function-valued defaults, boolean flags, and empty strings, before being appended to the help record."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_881bef74dbe43a3269714060",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Parameter conversion is bypassed during help default lookup; changing SemverType.convert would not fix the comparison performed by help rendering."
+        }
+      ],
+      "pairId": null,
+      "prompt": "semver.Version as default causing an error\n\nAny instance of `semver.Version` set as `default` in an option will lead to an error when Click tries to show it in the help text.\nThe problem seems to be that `Version` allows comparison to strings, and Click, when building the help text, tries to check the default value against an empty string `\"\"`, which cannot be parsed by `semver.Version`:\n\n```\n  File \".venv/lib/python3.12/site-packages/click/core.py\", line 3091, in get_help_extra\n    elif default_value == \"\":\n         ^^^^^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.12/site-packages/semver/version.py\", line 52, in wrapper\n    return operator(self, other)\n           ^^^^^^^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.12/site-packages/semver/version.py\", line 467, in __eq__\n    return self.compare(other) == 0\n           ^^^^^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.12/site-packages/semver/version.py\", line 394, in compare\n    other = cls.parse(other)\n            ^^^^^^^^^^^^^^^^\n  File \".venv/lib/python3.12/site-packages/semver/version.py\", line 644, in parse\n    raise ValueError(f\"{version} is not valid SemVer string\")\nValueError:  is not valid SemVer string\n```\n\nThis can be replicated with the following code by trying to print the help text:\n\n<details>\n\n```python\nimport click\nfrom semver import Version\n\n\nclass SemverType(click.ParamType):\n    name = \"semver\"\n\n    def convert(self, value: str | Version, param: click.Parameter | None, ctx: click.Context | None) -> Version:\n        if isinstance(value, Version):\n            return value\n\n        try:\n            return Version.parse(value)\n        except ValueError as e:\n            raise self.fail(str(e), param, ctx) from e\n\n\n@click.command()\n@click.option(\n    \"--version\",\n    type=SemverType(),\n    default=Version(1, 0, 0),\n    show_default=True,\n)\ndef cli(version: Version | None) -> None:\n    print(version)\n\n\nif __name__ == \"__main__\":\n    cli()\n```\n\n</details>\n\nBy quickly inspecting the code, I'd say this could be fixed by checking whether `default_value` is actually a string before comparing it to `\"\"`. \n\nEnvironment:\n\n- Python version: 3.12\n- Click version: 8.3.1\n- semver version: 3.0.4\n",
+      "repositoryFixtureHash": "90bbd433be0b3400c4a5bad22fc935939050af63bec1ab0aa1a30a9e3e008f5c",
+      "rubric": {
+        "completion": "Help rendering displays a non-string default whose equality rejects string operands without raising, while preserving the special empty-string display and other default formatting.",
+        "criteria": [
+          "A semver.Version default with show_default=True renders help successfully.",
+          "The empty string remains displayed using Click's existing quoted-empty representation.",
+          "Boolean, enum, sequence, and dynamic defaults retain their established formatting."
+        ],
+        "requiredEvidenceIds": ["ev_6cdeb3c6353e468d6fc619b7"]
+      },
+      "sourceGold": [
+        {
+          "claim": "Option help resolves show_default under resilient parsing and formats defaults through type-specific branches before comparing the residual value with an empty string.",
+          "endLine": 3114,
+          "evidenceId": "ev_6cdeb3c6353e468d6fc619b7",
+          "path": "src/click/core.py",
+          "repository": "pallets/click",
+          "startLine": 3075
+        }
+      ],
+      "taskId": "tsk_a7db0fa0dae5f2fca06e5bd8",
+      "variant": "historical-as-issued"
+    },
+    {
+      "category": "stale-citation-refactor",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_283c5e477ca393cc1f178c36",
+          "repository": "pallets/werkzeug",
+          "source": {
+            "path": "src/werkzeug/wrappers/request.py",
+            "startLine": 176,
+            "endLine": 208
+          },
+          "status": "active",
+          "text": "Request.application returns a wrapped WSGI callable whose runtime shape expects environ and start-response in the final two positions. It constructs the request from the penultimate argument, invokes the decorated function with preceding arguments plus the request, closes the request, converts HTTPException to a response, and calls that response with the original WSGI arguments."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_239e1fd1a1be9f006d1269a6",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Request.from_values constructs test requests and is unrelated to the decorator's callable overload contract."
+        }
+      ],
+      "pairId": null,
+      "prompt": "`Request.application` doesn't type check when decorating a method\n\n`Request.application` supports decorating a function or a method. However, it's type annotation only accounts for a function. Needs to have overloads to support both.",
+      "repositoryFixtureHash": "b8024c914c6cc0d9acdc166d6b65b858b572e78a3f7f8a565cf660ba116733af",
+      "rubric": {
+        "completion": "Request.application has sound static typing for both standalone decorated functions and decorated instance methods without regressing its existing WSGI runtime behavior.",
+        "criteria": [
+          "Strict static checking accepts a standalone Request.application callable.",
+          "Strict static checking accepts an instance method whose self precedes Request.",
+          "The wrapper still handles WSGI environ/start_response and HTTPException responses correctly."
+        ],
+        "requiredEvidenceIds": ["ev_b61860b573487b0a14906667"]
+      },
+      "sourceGold": [
+        {
+          "claim": "Request.application already supports functions and bound methods at runtime by reserving the final WSGI arguments, but its annotation describes only a single-argument function.",
+          "endLine": 211,
+          "evidenceId": "ev_b61860b573487b0a14906667",
+          "path": "src/werkzeug/wrappers/request.py",
+          "repository": "pallets/werkzeug",
+          "startLine": 175
+        }
+      ],
+      "taskId": "tsk_40aa8260ce35eb0588e0d85f",
+      "variant": "historical-as-issued"
+    },
+    {
+      "category": "unfamiliar-call-path",
+      "memoryFixtures": [
+        {
+          "memoryId": "mem_5aeb8931f8ca6b3da4da9bfd",
+          "repository": "pypa/packaging",
+          "source": {
+            "path": "src/packaging/markers.py",
+            "startLine": 186,
+            "endLine": 211
+          },
+          "status": "active",
+          "text": "Packaging serializes marker trees recursively: a top-level list joins children without outer parentheses, while nested lists are parenthesized. A single-item list containing another list is unwrapped to avoid redundant parentheses; tuples serialize marker atoms and join with spaces. Marker.__str__ delegates to this formatter, so output reflects logical grouping rather than raw input text."
+        }
+      ],
+      "negativeControls": [
+        {
+          "controlId": "ctl_7cd1485943288a80bace88e7",
+          "reason": "Plausible nearby code that does not satisfy the historical task.",
+          "text": "Extra-name normalization changes marker values, not boolean grouping, and must not be used to mask a precedence error."
+        }
+      ],
+      "pairId": null,
+      "prompt": "`str(Marker(...))` drops parentheses of a nested group and changes evaluation\n\n`str(Marker(...))` can drop the parentheses around a parenthesized sub-group when it is nested inside a larger `and`/`or` expression. The string then reparses with different precedence and can evaluate to the opposite result.\n\nMRE (packaging 26.2):\n\n```python\nfrom packaging.markers import Marker\n\nm = Marker('python_version < \"3.10\" and ((sys_platform == \"linux\" or sys_platform == \"darwin\"))')\nenv = {\"python_version\": \"3.12\", \"sys_platform\": \"darwin\"}\n\nprint(str(m))\n# python_version < \"3.10\" and sys_platform == \"linux\" or sys_platform == \"darwin\"\nprint(m.evaluate(env))               # False\nprint(Marker(str(m)).evaluate(env))  # True\n```\n\nThe original means `A and (B or C)`. The serialized string drops the inner parentheses and reparses as `(A and B) or C`, which flips the result. Expected: `str(Marker(x))` reparses to a marker that evaluates the same as `x` in every environment.",
+      "repositoryFixtureHash": "e042361da3d9f38d6fabedd4339c37d381aecd63d9c1fa5d0d9cefdce40dfc2f",
+      "rubric": {
+        "completion": "Serializing and reparsing nested marker groups preserves logical precedence and evaluation across environments without adding unnecessary outer parentheses.",
+        "criteria": [
+          "The public nested and/or reproduction evaluates identically before and after str round-trip.",
+          "Nested list groups retain required parentheses while top-level output remains canonical.",
+          "Existing marker equality, hash, and simple serialization behavior remain intact."
+        ],
+        "requiredEvidenceIds": ["ev_5b64ed14fa1fca23bf03dd58"]
+      },
+      "sourceGold": [
+        {
+          "claim": "Marker serialization recursively joins top-level lists, parenthesizes nested lists, and specially unwraps single-item nested list structures.",
+          "endLine": 211,
+          "evidenceId": "ev_5b64ed14fa1fca23bf03dd58",
+          "path": "src/packaging/markers.py",
+          "repository": "pypa/packaging",
+          "startLine": 186
+        }
+      ],
+      "taskId": "tsk_f88853b19227dfc208075dc9",
+      "variant": "historical-as-issued"
+    }
+  ],
+  "version": 1
+}

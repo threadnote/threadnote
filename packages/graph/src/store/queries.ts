@@ -1,7 +1,7 @@
 import {Clock, Effect, Option} from 'effect';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {codeGraphScopeAuthorityInstalled} from './scope/schema.js';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphBlobReuseFile} from '../blob_reuse.js';
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {decodeStoredCodeGraphFact, storedCodeGraphFactRawBytesSql} from '../fact/storage.js';
@@ -32,7 +32,14 @@ import {
 import {type EdgeRow, type FileBlobRow, type SnapshotRow, type SymbolRow} from './internal_models.js';
 import {edgeFromRow, snapshotFromRow, symbolFromRow} from './rows.js';
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './build/core.js';
-import {boundedPageLimit, chunk, normalizedTerms, sqlTextOption, uniqueBy} from './utilities.js';
+import {
+  boundedPageLimit,
+  chunk,
+  codeGraphIdentitySelectors,
+  normalizedTerms,
+  sqlTextOption,
+  uniqueBy,
+} from './utilities.js';
 import {
   codeGraphAdjacencyQueryStatement,
   codeGraphDirectEdgeQueryStatement,
@@ -1326,6 +1333,7 @@ const selectSearchSymbols = Effect.fn('codeGraph.selectSearchSymbols')(function*
 
 interface SearchSymbolRow extends SymbolRow {
   readonly exact_rank: number;
+  readonly rankingScore?: number;
   readonly score: number;
 }
 
@@ -1439,7 +1447,7 @@ function searchSymbolRowComparator(
     codeGraphSymbolSearchScoreMultiplier(right.path, right.kind, right.name, queryTerms) -
       codeGraphSymbolSearchScoreMultiplier(left.path, left.kind, left.name, queryTerms) ||
     right.exact_rank - left.exact_rank ||
-    right.score - left.score ||
+    (right.rankingScore ?? right.score) - (left.rankingScore ?? left.score) ||
     right.exported - left.exported ||
     searchSymbolKindOrder(left.kind) - searchSymbolKindOrder(right.kind) ||
     compareCodeUnits(left.name, right.name) ||
@@ -1481,12 +1489,16 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
   });
   const exactPath = normalizeExactSearchPath(query);
   const exactStatement = codeGraphExactSymbolQueryStatement(snapshotId, baseSnapshotId, exactPath ?? query, safeLimit);
-  const exactRows = yield* sql.unsafe<SearchSymbolRow>(exactStatement.text, exactStatement.parameters);
+  const exactRows = [...(yield* sql.unsafe<SearchSymbolRow>(exactStatement.text, exactStatement.parameters))];
   if (
     exactPath !== undefined &&
     exactRows.some(row => normalizeExactSearchPath(row.path)?.toLocaleLowerCase() === exactPath.toLocaleLowerCase())
   ) {
     return [...exactRows].sort(compareRows).slice(0, safeLimit).map(rankedNode);
+  }
+  for (const selector of codeGraphIdentitySelectors(query)) {
+    const statement = codeGraphExactSymbolQueryStatement(snapshotId, baseSnapshotId, selector, safeLimit);
+    exactRows.push(...(yield* sql.unsafe<SearchSymbolRow>(statement.text, statement.parameters)));
   }
   const candidateLimit = Math.min(2_000, Math.max(100, safeLimit * 20));
   const termStatement =
@@ -1507,13 +1519,31 @@ const selectSearchSymbolsWithSql = Effect.fn('codeGraph.selectSearchSymbolsWithS
     baseSnapshotId,
     termCandidates.map(candidate => candidate.symbol_id),
   )).map(row => ({...row, score: termScores.get(row.id) ?? 0}));
+  const exactEvidence = new Map<string, Pick<SearchSymbolRow, 'exact_rank' | 'score'>>();
+  for (const row of exactRows) {
+    const current = exactEvidence.get(row.id);
+    exactEvidence.set(row.id, {
+      exact_rank: Math.max(current?.exact_rank ?? 0, row.exact_rank),
+      score: Math.max(current?.score ?? 0, row.score),
+    });
+  }
   const byId = new Map<string, SearchSymbolRow>();
   for (const row of [...termRows.map(row => ({...row, exact_rank: 0})), ...exactRows]) {
     const current = byId.get(row.id);
     if (!current || compareRows(row, current) < 0) byId.set(row.id, row);
   }
-  const ranked = [...byId.values()].sort(compareRows);
-  const exactIds = new Set(exactRows.map(row => row.id));
+  const ranked = [...byId.values()]
+    .map(row => {
+      const exact = exactEvidence.get(row.id);
+      return {
+        ...row,
+        exact_rank: exact?.exact_rank ?? 0,
+        rankingScore: termScores.get(row.id) ?? exact?.score ?? row.score,
+        score: exact?.score ?? termScores.get(row.id) ?? row.score,
+      };
+    })
+    .sort(compareRows);
+  const exactIds = new Set(exactEvidence.keys());
   // Admit exact identities before the bounded page is truncated, then retain
   // the established path and side-effect-owner ordering within that page.
   const reservedExact = ranked.filter(row => exactIds.has(row.id)).slice(0, safeLimit);

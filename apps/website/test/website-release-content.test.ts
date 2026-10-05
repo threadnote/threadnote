@@ -123,6 +123,7 @@ Make the bottleneck observable.
     const release = loadLatestMajorWebsiteReleases(root)[0];
     const releasePost = {
       ...release,
+      publishedAt: '2027-01-01T00:00:00Z',
       author: 'Threadnote' as const,
       kind: 'release' as const,
       title: `Threadnote ${release.version.replace(/^v/, '')}`,
@@ -183,12 +184,13 @@ Make the bottleneck observable.
     expect(renderWebsitePostsSitemap(renderedSitemap, [article, releasePost])).toBe(renderedSitemap);
     expect(renderedIndex).toContain('data-threadnote-index');
     expect(renderedIndex).toContain('<h1>Threadnote articles and releases</h1>');
+    expect(renderedIndex).toContain('<h2><a href="https://threadnote.io/whats-new/?view=articles">Articles</a></h2>');
+    expect(renderedIndex).toContain(
+      '<h2><a href="https://threadnote.io/whats-new/?view=releases">Release notes</a></h2>',
+    );
     const orderedPosts = orderWebsitePostsDescending([releasePost, article]);
-    const latestPost = orderedPosts[0];
-    const latestSocialImage =
-      latestPost.kind === 'article'
-        ? websiteSocialImageForArticle(latestPost)
-        : websiteSocialImageForRelease(latestPost);
+    expect(orderedPosts[0].kind).toBe('release');
+    const latestSocialImage = websiteSocialImageForArticle(article);
     expect(renderedIndex).toContain(`<meta property="og:image" content="${latestSocialImage.url}" />`);
     expect(renderedIndex).toContain(`<meta property="og:image:type" content="${latestSocialImage.type}" />`);
     expect(renderedIndex).toContain(`<meta property="og:image:width" content="${latestSocialImage.width}" />`);
@@ -198,7 +200,9 @@ Make the bottleneck observable.
     expect(renderedIndex).toContain(`<meta name="twitter:image:alt" content="${latestSocialImage.alt}" />`);
     expect(renderedIndex).toContain(`"image":"${latestSocialImage.url}"`);
     expect(renderedIndex).not.toContain('whats-new-og.png');
-    const orderedTitles = orderedPosts.map(post => post.title);
-    expect(renderedIndex.indexOf(orderedTitles[0])).toBeLessThan(renderedIndex.indexOf(orderedTitles[1]));
+    const crawlerIndex = renderedIndex.slice(renderedIndex.indexOf('<main class="crawler-post crawler-post--index">'));
+    expect(crawlerIndex.indexOf('>Articles</a>')).toBeLessThan(crawlerIndex.indexOf(article.title));
+    expect(crawlerIndex.indexOf(article.title)).toBeLessThan(crawlerIndex.indexOf('>Release notes</a>'));
+    expect(crawlerIndex.indexOf('>Release notes</a>')).toBeLessThan(crawlerIndex.indexOf(releasePost.title));
   });
 });

@@ -9,10 +9,15 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {
   recallIndexMaintenanceShouldRetry,
   RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT,
+  runDevelopmentInstallIntegrationActivation,
   runDevelopmentInstallRepair,
   runRepair,
   verifyRecallIndexMaintenanceReadiness,
 } from '@threadnote/threadnote/lifecycle';
+import {
+  installAgentIntegration,
+  isExactLegacyCopilotInstructionFrontmatter,
+} from '@threadnote/threadnote/agent_integration/index';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
@@ -128,8 +133,10 @@ const fixture = Effect.gen(function* () {
     pointer,
     provide,
     provideWithRuntime,
+    releaseRoot,
     registry,
     registryContent,
+    user,
   };
 });
 
@@ -225,6 +232,34 @@ describe('development installer repair isolation', () => {
             completedRetries >= 0 &&
             completedRetries < RECALL_INDEX_MAINTENANCE_GENERATION_RETRY_LIMIT,
         );
+      }),
+    {fastCheck: {numRuns: 100}},
+  );
+
+  fcEffectProp(
+    effectIt,
+    'recognizes only the exact markerless legacy Copilot instructions',
+    {
+      extraKey: FC.array(FC.constantFrom(...'abcdefghijklmnopqrstuvwxyz'), {maxLength: 16, minLength: 1}).map(chars =>
+        chars.join(''),
+      ),
+      lineEnding: FC.constantFrom('\n', '\r\n'),
+      trailingNewlines: FC.integer({max: 3, min: 1}),
+    },
+    ({extraKey, lineEnding, trailingNewlines}) =>
+      Effect.sync(() => {
+        const legacyLines = [
+          '---',
+          'name: Threadnote',
+          'description: Shared local context and handoffs through Threadnote',
+          'applyTo: "**"',
+          '---',
+        ];
+        const exact = `${legacyLines.join(lineEnding)}${lineEnding.repeat(trailingNewlines)}`;
+        const customized = [...legacyLines.slice(0, -1), `${extraKey}: keep-me`, '---'].join(lineEnding);
+
+        expect(isExactLegacyCopilotInstructionFrontmatter(exact)).toBe(true);
+        expect(isExactLegacyCopilotInstructionFrontmatter(customized)).toBe(false);
       }),
     {fastCheck: {numRuns: 100}},
   );
@@ -342,6 +377,102 @@ describe('development installer repair isolation', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('activates and verifies registered agent integration artifacts', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.fs.remove(f.instruction, {force: true});
+        yield* f.fs.remove(f.registry, {force: true});
+        yield* writeAgentIntegrationPayload(f.fs, f.path, f.releaseRoot);
+        yield* f.provide(
+          installAgentIntegration(f.config, 'copilot', {
+            dryRun: false,
+            name: 'threadnote',
+            toolset: 'core',
+          }),
+        );
+        const skill = f.path.join(f.user, '.copilot', 'skills', 'threadnote-context', 'SKILL.md');
+        const expectedInstruction = yield* f.fs.readFileString(f.instruction);
+        const expectedSkill = yield* f.fs.readFileString(skill);
+        yield* f.fs.writeFileString(
+          f.instruction,
+          [
+            '---',
+            'name: Threadnote',
+            'description: Shared local context and handoffs through Threadnote',
+            'applyTo: "**"',
+            '---',
+            '',
+          ].join('\n'),
+        );
+        yield* f.fs.writeFileString(skill, expectedSkill.replace('Current context skill.', 'Stale context skill.'));
+        const registry = JSON.parse(yield* f.fs.readFileString(f.registry)) as {surfaces?: Record<string, unknown>};
+        registry.surfaces = {
+          'historical-agent': {
+            adapterVersion: 1,
+            agentId: 'historical-agent',
+            artifactDescriptors: [],
+            artifacts: {},
+            installedVersion: version,
+            mcp: {
+              createdContainer: false,
+              createdFile: false,
+              hash: 'a'.repeat(64),
+              name: 'threadnote',
+              path: f.path.join(f.user, '.historical-agent', 'mcp.json'),
+              toolset: 'core',
+            },
+            root: f.path.join(f.user, '.historical-agent'),
+            skillRoot: f.path.join(f.user, '.historical-agent', 'skills'),
+            status: 'current',
+            strategy: {codec: 'json', container: 'mcpServers', kind: 'json'},
+            surfaceId: 'historical-agent',
+          },
+        };
+        yield* f.fs.writeFileString(f.registry, JSON.stringify(registry));
+
+        yield* f.provide(runDevelopmentInstallIntegrationActivation(f.config, version));
+
+        expect(yield* f.fs.readFileString(f.instruction)).toBe(expectedInstruction);
+        expect(yield* f.fs.readFileString(skill)).toBe(expectedSkill);
+        expect(yield* f.fs.readFileString(f.path.join(f.installRoot, 'active-release.json'))).toBe(f.pointer);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('preserves customized markerless Copilot instructions', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.fs.remove(f.instruction, {force: true});
+        yield* f.fs.remove(f.registry, {force: true});
+        yield* writeAgentIntegrationPayload(f.fs, f.path, f.releaseRoot);
+        yield* f.provide(
+          installAgentIntegration(f.config, 'copilot', {
+            dryRun: false,
+            name: 'threadnote',
+            toolset: 'core',
+          }),
+        );
+        const customizedInstruction = [
+          '---',
+          'name: Threadnote',
+          'description: Shared local context and handoffs through Threadnote',
+          'applyTo: "**"',
+          'custom: keep-me',
+          '---',
+          '',
+        ].join('\n');
+        yield* f.fs.writeFileString(f.instruction, customizedInstruction);
+
+        const error = yield* f.provide(runDevelopmentInstallIntegrationActivation(f.config, version)).pipe(Effect.flip);
+
+        expect(error).toMatchObject({message: expect.stringContaining('is not managed by Threadnote')});
+        expect(yield* f.fs.readFileString(f.instruction)).toBe(customizedInstruction);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('still fails when required graph maintenance cannot inspect its derived root', () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -379,4 +510,30 @@ function handoffDocument(body: string): string {
     '',
     body,
   ].join('\n');
+}
+
+function writeAgentIntegrationPayload(fs: FileSystem.FileSystem, path: Path.Path, releaseRoot: string) {
+  return Effect.gen(function* () {
+    const configRoot = path.join(releaseRoot, 'config');
+    yield* fs.makeDirectory(path.join(configRoot, 'agent-skills'), {recursive: true});
+    yield* fs.writeFileString(path.join(configRoot, 'agent-instructions.md'), 'Current agent instructions.\n');
+    for (const skill of ['threadnote-context', 'threadnote-code-graph', 'threadnote-memory'] as const) {
+      const skillRoot = path.join(configRoot, 'agent-skills', skill);
+      yield* fs.makeDirectory(skillRoot, {recursive: true});
+      yield* fs.writeFileString(
+        path.join(skillRoot, 'SKILL.md'),
+        [
+          '---',
+          `name: ${skill}`,
+          `description: Current ${skill} fixture.`,
+          '---',
+          '',
+          '<!-- BEGIN THREADNOTE USER INSTRUCTIONS -->',
+          skill === 'threadnote-context' ? 'Current context skill.' : `Current ${skill} skill.`,
+          '<!-- END THREADNOTE USER INSTRUCTIONS -->',
+          '',
+        ].join('\n'),
+      );
+    }
+  });
 }

@@ -5,7 +5,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Cause, Effect, Exit, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 
 describe('Effect 4 Bun SQLite transaction compatibility', () => {

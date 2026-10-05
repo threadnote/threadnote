@@ -7,7 +7,7 @@ import {Database} from 'bun:sqlite';
 import {describe, expect, it} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as FC from 'fast-check';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {CodeGraphStore, type CodeGraphStoreShape} from '@threadnote/graph/store';
 import {persistedIncrementalSurfaceMatches} from '@threadnote/graph/store/incremental/surface';
 import type {

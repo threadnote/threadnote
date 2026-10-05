@@ -37,6 +37,13 @@ const recallQualityEntries = [
   'scripts/evaluate-context-brief-citations-runtime.ts',
   'scripts/evaluate-code-memory-link-bench.ts',
   'scripts/evaluate-recall-v2.ts',
+  'scripts/run-matched-evaluation.ts',
+  'scripts/matched-evaluation-codex-adapter.ts',
+  'scripts/matched-evaluation-context-proxy.ts',
+  'scripts/matched-continuation-runtime-integrity.ts',
+  'scripts/prepare-matched-continuation-study.ts',
+  'scripts/finalize-matched-continuation-study.ts',
+  'scripts/prepare-matched-token-efficiency-study.ts',
 ];
 const windowsSmokeEntries = [
   'apps/threadnote/test/unit/windows-support.test.ts',
@@ -135,6 +142,7 @@ const packageTestClosureEntries = {
   ],
 };
 const packageRuntimeTestEntries = {
+  'packages/context': ['apps/threadnote/src/standalone.ts'],
   'packages/graph': ['apps/threadnote/src/standalone.ts'],
   'packages/manager': ['apps/threadnote/src/standalone.ts'],
   'packages/memory': ['apps/threadnote/src/standalone.ts'],

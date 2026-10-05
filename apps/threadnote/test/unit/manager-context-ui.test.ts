@@ -144,6 +144,12 @@ afterEach(async () => {
 });
 
 describe('Manager Context workspace', () => {
+  it('offers resume in the Context Brief mode selector', async () => {
+    await renderContext();
+
+    expect([...selectWithLabel('Mode').options].map(option => option.value)).toContain('resume');
+  });
+
   it('surfaces the local value workspace beside Context Brief and Recall', async () => {
     await renderContext();
     await clickButton('Value');
@@ -789,6 +795,7 @@ function projectedBrief(
           uri: MEMORY_URI,
         },
       ],
+      evidenceState: 'partial',
       graph: {
         cards: [
           {
@@ -829,10 +836,55 @@ function projectedBrief(
         truncated: true,
       },
       recommendedFollowUps: [
-        {id: 'follow-read', operation: 'read-memory', rank: 0, uri: MEMORY_URI},
-        {id: 'follow-inspect', operation: 'inspect-node', rank: 1, ref: graphRef},
-        {id: 'follow-workset', operation: 'prepare-workset', rank: 2, workset: 'platform'},
-        {id: 'follow-graph-status', operation: 'graph-status', rank: 3, scope: recoveryScope},
+        {
+          arguments: {uri: MEMORY_URI},
+          id: 'follow-read',
+          operation: 'read-memory',
+          rank: 0,
+          tool: 'read_context',
+          uri: MEMORY_URI,
+        },
+        {
+          arguments: {
+            budgetTokens: 800,
+            callerCwd: '/private/threadnote',
+            edgeLimit: 12,
+            nodeId: graphRef,
+            nodeLimit: 8,
+            operation: 'node',
+          },
+          id: 'follow-inspect',
+          operation: 'inspect-node',
+          rank: 1,
+          ref: graphRef,
+          tool: 'inspect_code_graph',
+        },
+        {
+          arguments:
+            recoveryScope === 'repository'
+              ? {
+                  budgetTokens: 800,
+                  callerCwd: '/private/threadnote',
+                  edgeLimit: 12,
+                  nodeLimit: 8,
+                  operation: 'query',
+                  query: 'code graph readiness',
+                }
+              : {
+                  budgetTokens: 800,
+                  edgeLimit: 12,
+                  nodeLimit: 8,
+                  operation: 'query',
+                  query: 'code graph readiness',
+                  workset: 'platform',
+                },
+          id: 'follow-graph-status',
+          operation: 'graph-status',
+          rank: 2,
+          scope: recoveryScope,
+          tool: 'inspect_code_graph',
+          ...(recoveryScope === 'workset' ? {workset: 'platform'} : {}),
+        },
       ],
       scope: {
         freshness: staleAnchorRecovery ? 'stale' : 'fresh',

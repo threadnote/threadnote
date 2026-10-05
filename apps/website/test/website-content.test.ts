@@ -49,12 +49,13 @@ import {
   siteCanonicalUrlForPathname,
   sitePageForPathname,
   whatsNewArticlePath,
+  whatsNewIndexViewForSearch,
   whatsNewPostForPathname,
   whatsNewReleasePath,
   type SitePage,
 } from '../src/lib/routes.js';
 import {renderDocsArticleHtml, renderDocsSitemap} from '../tools/site-doc-pages.js';
-import {orderWebsiteUpdatesDescending} from '../src/content/websiteArticles.js';
+import {filterWebsiteUpdatesByKind, orderWebsiteUpdatesDescending} from '../src/content/websiteArticles.js';
 import type {BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
 import {proTips} from '../src/content/proTips.js';
 import {EXTERNAL_REPOSITORY_REQUIRED_MEASUREMENTS} from '@threadnote/evidence/external-evidence';
@@ -904,6 +905,35 @@ The body remains ordinary **Markdown**.
     );
   });
 
+  it('filters update views without reordering or mutating the timeline', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            id: fc.uuid(),
+            kind: fc.constantFrom<'article' | 'release'>('article', 'release'),
+          }),
+          {maxLength: 80},
+        ),
+        fc.constantFrom<'article' | 'release'>('article', 'release'),
+        (updates, kind) => {
+          const before = structuredClone(updates);
+          const selected = filterWebsiteUpdatesByKind(updates, kind);
+
+          expect(updates).toEqual(before);
+          expect(selected.length).toBe(updates.reduce((count, update) => count + Number(update.kind === kind), 0));
+          const positions = selected.map(update => updates.indexOf(update));
+          expect(
+            positions.every((position, index) => position >= 0 && (index === 0 || position > positions[index - 1])),
+          ).toBe(true);
+          expect(filterWebsiteUpdatesByKind(selected, kind)).toEqual(selected);
+          expect(selected.every(update => update.kind === kind)).toBe(true);
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
   it('covers the complete 5.0 documentation map with unique article anchors', () => {
     const articles = docsSections.flatMap(section => section.articles);
     const articleIds = articles.map(article => article.id);
@@ -1659,6 +1689,10 @@ The body remains ordinary **Markdown**.
       kind: 'release',
       version: 'v4.3.8',
     });
+    expect(whatsNewIndexViewForSearch('')).toBe('articles');
+    expect(whatsNewIndexViewForSearch('?view=articles')).toBe('articles');
+    expect(whatsNewIndexViewForSearch('?view=releases')).toBe('releases');
+    expect(whatsNewIndexViewForSearch('?view=unknown')).toBe('articles');
     expect(sitePageForPathname('/threadnote/docs/nested/extra/', '/threadnote/')).toBeUndefined();
     expect(sitePageForPathname('/other/docs/', '/threadnote/')).toBeUndefined();
     expect(siteCanonicalUrlForPathname('/performance/', '/')).toBe('https://threadnote.io/performance/');
@@ -2564,7 +2598,9 @@ Measure the system before changing its implementation language.
       .find(article => article.id === 'cursor-marketplace-plugin');
 
     expect(content).toContain('threadnote install-hooks claude --dry-run');
-    expect(content).not.toContain('threadnote install-hooks codex --dry-run');
+    expect(content).toContain('threadnote install-hooks codex --dry-run');
+    expect(content).toContain('UserPromptSubmit');
+    expect(content).toContain('THREADNOTE_CODEX_RESUME_PRELOAD=off');
     expect(content).toContain('threadnote share publish');
     expect(content).toContain('--preview');
     expect(content).toContain('selected vector generation');

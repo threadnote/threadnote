@@ -13,7 +13,7 @@ interface PackageManifest {
 
 const ROOT_URL = new URL('..', import.meta.url);
 const EXPECTED_BUN_VERSION = '1.4.2';
-const EXPECTED_EFFECT_VERSION = '4.0.0-rc.115';
+const EXPECTED_EFFECT_VERSION = '4.0.0';
 const EXPECTED_NODE_LLAMA_CPP_VERSION = '3.21.1';
 const EXPECTED_TYPESCRIPT_COMPILER_VERSION = 'npm:typescript@5.9.3';
 const EXPECTED_WEB_TREE_SITTER_VERSION = '0.27.0';
@@ -205,6 +205,7 @@ const checkSelfContained = Effect.gen(function* () {
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-context', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-code-graph', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-memory', 'SKILL.md'),
+      path.join(root, 'dist', 'config', 'agent-skills', 'threadnote-health', 'SKILL.md'),
       path.join(root, 'dist', 'config', 'agent-profiles', 'cursor-cloud-personal', 'agent-instructions.md'),
       path.join(
         root,

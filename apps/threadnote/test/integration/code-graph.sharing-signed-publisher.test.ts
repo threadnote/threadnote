@@ -1,8 +1,8 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
-import * as HttpClientRequest from 'effect/unstable/http/HttpClientRequest';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import {exportJWK, generateKeyPair, SignJWT} from 'jose';
 import {graphRegistryFixture} from '@threadnote/graph/test/helpers/graph-registry';
 import {provideTestLayer} from '../helpers/effect-layer.js';

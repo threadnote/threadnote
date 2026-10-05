@@ -1631,8 +1631,13 @@ function projectSeedPatterns(value: unknown): readonly string[] {
 
 function contextBriefMode(value: unknown): ContextBrief.ContextBriefMode {
   if (value === undefined || value === 'brief') return 'brief';
-  if (value === 'locate' || value === 'explain' || value === 'trace' || value === 'impact') return value;
-  throw ManagerWorksetApiError.of('invalid-input', 'mode must be brief, locate, explain, trace, or impact.', 400);
+  if (value === 'locate' || value === 'explain' || value === 'trace' || value === 'impact' || value === 'resume')
+    return value;
+  throw ManagerWorksetApiError.of(
+    'invalid-input',
+    'mode must be brief, locate, explain, trace, impact, or resume.',
+    400,
+  );
 }
 function validateExpectedRevision(value: string): void {
   if (!SHA256.test(value)) throw ManagerWorksetApiError.of('invalid-input', 'expectedRevision is invalid.', 400);

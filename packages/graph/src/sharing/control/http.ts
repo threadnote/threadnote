@@ -1,7 +1,7 @@
 import {Clock, Effect, Redacted, Schema, Stream} from 'effect';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
-import * as HttpClientRequest from 'effect/unstable/http/HttpClientRequest';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import {makeGraphControlCredentialLoader, type GraphControlClientScope} from './credentials.js';
 import {GRAPH_SHARE_CONTROL_MAX_BODY_BYTES} from './protocol.js';
 import {SHA256_DIGEST} from '../digest.js';

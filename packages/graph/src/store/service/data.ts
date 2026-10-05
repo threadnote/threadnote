@@ -6,7 +6,7 @@ import {
 } from '../scope/applicability.js';
 import {DateTime, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDirectPersistentCapacityBoundary} from '../../disk/capacity.js';
 import {configureConnection, useDatabase, useReadOnlyDatabase} from '../session.js';
 import {CodeGraphStoreError} from '../../types.js';

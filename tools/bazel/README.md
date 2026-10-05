@@ -3,6 +3,7 @@
 The normal contributor entrypoints are:
 
 ```sh
+bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun run bazel:generate
 bun run bazel:check
 bun run bazel:affected
@@ -12,6 +13,10 @@ bun run bazel -- test //packages/graph:test
 These commands download the pinned tools when needed. Contributors and agents do
 not install Bazel, Bun toolchains, or bazel-diff globally. Generated BUILD files
 and `targets.json` must be regenerated rather than edited directly.
+
+Prepare website metadata before generation or declaration checks, even for
+non-website changes: the inventory includes the website build's declared input.
+The metadata file is ignored by Git and absent in a fresh checkout.
 
 Run the focused gate without installing Bazel globally:
 
@@ -123,9 +128,9 @@ each `bun_test` and `bun_action` retains its exact, generated `srcs` closure. Th
 export globs grant visibility only; they are not broad target dependencies.
 
 ```sh
+bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun tools/bazel/generate.mjs
 bun tools/bazel/generate.mjs --check
-bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun tools/bazel/run.ts test //apps/website:test //apps/website:typecheck
 bun tools/bazel/run.ts build //apps/website:build
 ```

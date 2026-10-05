@@ -1,6 +1,6 @@
 import {Clock, DateTime, Effect, Predicate} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
-import * as SqlError from 'effect/unstable/sql/SqlError';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as SqlError from 'effect/sql/SqlError';
 import {
   CODE_GRAPH_REMOVED_VIEW_CLEANUP_CLAIM_LEASE_MILLISECONDS,
   CODE_GRAPH_REMOVED_VIEW_CLEANUP_PAGE_ROWS,

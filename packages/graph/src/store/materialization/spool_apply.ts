@@ -1,5 +1,5 @@
 import {DateTime, Effect} from 'effect';
-import type * as SqlClient from 'effect/unstable/sql/SqlClient';
+import type * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphMaterializationApplyPages} from '../../materialization/spool.js';
 import {CODE_GRAPH_MATERIALIZATION_SPOOL_APPLY_SURFACES} from '../../materialization/spool/apply_surfaces.js';
 import {assertPersistentBuildOwner, assertPersistentMaterializationComplete} from '../build/core.js';

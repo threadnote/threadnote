@@ -453,8 +453,13 @@ body.is-resizing-sidebar * {
   border-top: 1px solid var(--line-soft);
   display: flex;
   gap: 10px;
+  flex-shrink: 0;
   margin-top: auto;
   padding: 16px 7px 4px;
+}
+
+.sidebar-product-note > div {
+  min-width: 0;
 }
 
 .sidebar-product-note strong {
@@ -465,6 +470,7 @@ body.is-resizing-sidebar * {
   color: var(--muted);
   font-size: 10px;
   margin: 3px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .status-pulse {
@@ -1122,6 +1128,11 @@ body.is-resizing-sidebar * {
   margin: 5px 0 0;
 }
 
+.health-record > header .attention-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .health-memory-preview {
   color: var(--text);
   line-height: 1.55;
@@ -1132,6 +1143,313 @@ body.is-resizing-sidebar * {
 .health-record-actions {
   display: flex;
   gap: 8px;
+}
+
+.context-health {
+  --health-info: #a6bfff;
+}
+
+.context-health p {
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.context-health button {
+  font-size: 12px;
+  justify-self: start;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.context-health [data-tone='warning'] {
+  --health-tone: var(--warn);
+}
+
+.context-health [data-tone='success'] {
+  --health-tone: var(--ok);
+}
+
+.context-health [data-tone='info'] {
+  --health-tone: var(--health-info);
+}
+
+.context-health [data-tone='neutral'] {
+  --health-tone: var(--muted);
+}
+
+.context-health .health-overview-status,
+.context-health .health-status-badge {
+  background: color-mix(in srgb, var(--health-tone) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--health-tone) 26%, transparent);
+  border-radius: 999px;
+  color: var(--health-tone);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 7px;
+  padding: 4px 9px;
+  text-transform: capitalize;
+  width: fit-content;
+}
+
+.context-health .health-overview-status::before,
+.context-health .health-status-badge::before {
+  align-self: center;
+  background: currentColor;
+  border-radius: 50%;
+  content: '';
+  height: 5px;
+  width: 5px;
+}
+
+.context-health .attention-header .health-overview-status {
+  color: var(--health-tone);
+  text-transform: none;
+}
+
+.context-health [role='alert'] {
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 34%, transparent);
+  border-radius: 9px;
+  color: var(--danger);
+  padding: 12px;
+}
+
+.context-health .attention-metrics {
+  background: transparent;
+  border: 0;
+  gap: 12px;
+  padding: 0;
+}
+
+.context-health .attention-metrics > div {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--health-tone) 7%, var(--panel)), var(--panel));
+  border: 1px solid color-mix(in srgb, var(--health-tone) 22%, var(--line));
+  border-radius: var(--radius);
+  gap: 8px;
+  padding: 16px;
+}
+
+.context-health .attention-metrics span {
+  font-size: 11px;
+}
+
+.context-health .attention-metrics strong {
+  color: var(--health-tone);
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+
+.health-maintenance-heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.health-maintenance-heading strong {
+  margin: 0;
+}
+
+.context-health .health-primary-action {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+  font-weight: 650;
+}
+
+.context-health .health-primary-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 85%, white);
+}
+
+.context-health .health-primary-action:disabled {
+  background: var(--accent-soft);
+  border-color: var(--line-soft);
+  color: var(--muted);
+}
+
+.context-health .health-quiet-action {
+  background: transparent;
+  border-color: var(--line-soft);
+  color: var(--muted);
+}
+
+.context-health .health-quiet-action:hover {
+  background: var(--panel-alt);
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.context-health .health-record-actions,
+.context-health .attention-bulk-repair-actions {
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.context-health .attention-bulk-repair-actions > button {
+  flex: 0 1 auto;
+}
+
+.context-health .attention-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.context-health .maintenance-failure-diagnostic code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.context-health .attention-card h3,
+.context-health .attention-card h4 {
+  margin: 0;
+}
+
+.context-health .attention-card > header {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.context-health .attention-card > header > div {
+  min-width: 0;
+}
+
+.context-health .attention-list > h3 {
+  font-size: 16px;
+  margin: 10px 0 2px;
+}
+
+.context-health .health-decision-card {
+  background: linear-gradient(135deg, color-mix(in srgb, var(--warn) 5%, var(--panel)), var(--panel));
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+  border-left: 3px solid var(--warn);
+  padding: 20px;
+}
+
+.context-health .health-decision-card .attention-count {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 24%, transparent);
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.context-health .health-finding {
+  background: color-mix(in srgb, var(--warn) 4%, var(--code-bg));
+  border: 1px solid color-mix(in srgb, var(--warn) 18%, var(--line-soft));
+  border-radius: 9px;
+  gap: 8px;
+  padding: 14px;
+}
+
+.context-health .health-finding h4 {
+  color: var(--warn);
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.context-health .health-finding p,
+.context-health .health-record > p,
+.context-health .health-recovery-card p,
+.context-health .health-history-list > p {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.context-health .health-coverage-card {
+  border-color: color-mix(in srgb, var(--health-info) 20%, var(--line));
+}
+
+.health-scan-progress {
+  background: color-mix(in srgb, var(--accent) 5%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  border-radius: var(--radius);
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.health-scan-progress > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.health-scan-progress p {
+  margin: 0;
+}
+
+.health-scan-progress p > strong {
+  color: var(--accent);
+  font-size: 23px;
+  letter-spacing: -0.03em;
+}
+
+.health-scan-progress small {
+  color: var(--muted);
+}
+
+.context-health .health-evidence-metrics > div {
+  padding: 12px;
+}
+
+.context-health .health-scan-progress progress {
+  accent-color: var(--accent);
+  height: 9px;
+}
+
+.context-health .health-scan-progress progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
+.context-health progress {
+  accent-color: var(--health-info);
+  height: 6px;
+  max-width: none;
+  width: 100%;
+}
+
+.context-health progress::-webkit-progress-bar {
+  background: var(--panel-raised);
+  border-radius: 999px;
+}
+
+.context-health progress::-webkit-progress-value {
+  background: var(--health-info);
+  border-radius: 999px;
+}
+
+.context-health .health-recovery-card {
+  border-left: 3px solid var(--health-info);
+  gap: 8px;
+}
+
+.context-health .health-recovery-card h4 {
+  color: var(--health-info);
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.context-health details {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.context-health summary {
+  cursor: pointer;
+  padding: 3px 0;
+}
+
+.context-health .health-history-card {
+  background: transparent;
+  border-color: var(--line-soft);
 }
 
 .health-code-preview {
@@ -5011,6 +5329,13 @@ dd {
   .pane-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .manager-connection-alert {
+    align-self: stretch;
+    flex-basis: auto;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .primary-nav {

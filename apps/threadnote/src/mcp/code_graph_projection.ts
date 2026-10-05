@@ -6,12 +6,19 @@ import {
 import {renderCodeGraphResult} from '@threadnote/graph/query';
 import type {CodeGraphProjectCoverage, CodeGraphQueryResult} from '@threadnote/graph/types';
 import type {CodeGraphRefreshContinuity} from '@threadnote/graph/watcher';
+import {
+  graphAgentNumber,
+  graphAgentRecord,
+  graphAgentString,
+  renderCodeGraphAgentProvenance,
+} from './code_graph_agent_provenance.js';
 
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
 /** Fixed receipt floor for every public graph channel (dual, text, agent). */
 export const MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS = 800;
 const MCP_CODE_GRAPH_MAXIMUM_ESTIMATED_TOKENS = 1_500;
+const MCP_CODE_GRAPH_AGENT_IMPACT_DEFAULT_ESTIMATED_TOKENS = 1_250;
 
 export type CodeGraphMcpResponseFormat = 'dual' | 'text' | 'agent';
 
@@ -339,6 +346,117 @@ function defaultCodeGraphMcpResponse(result: CodeGraphQueryResult, refresh?: Cod
   );
 }
 
+function impactAgentProjectionOrder(result: CodeGraphQueryResult): CodeGraphQueryResult {
+  if (result.operation !== 'impact') return result;
+  const nodeIds = new Set(result.nodes.map(node => node.id));
+  const edges = result.edges
+    .map((edge, index) => ({edge, index}))
+    .sort(
+      (left, right) =>
+        Number(edgeIsConnected(right.edge, nodeIds)) - Number(edgeIsConnected(left.edge, nodeIds)) ||
+        impactRelationPriority(left.edge.relation) - impactRelationPriority(right.edge.relation) ||
+        left.index - right.index,
+    )
+    .map(({edge}) => edge);
+  const nodesById = new Map(result.nodes.map(node => [node.id, node]));
+  const seen = new Set<string>();
+  const nodes: CodeGraphQueryResult['nodes'][number][] = [];
+  const append = (id: string | undefined) => {
+    if (id === undefined || seen.has(id)) return;
+    const node = nodesById.get(id);
+    if (node === undefined) return;
+    seen.add(id);
+    nodes.push(node);
+  };
+  for (const edge of edges) {
+    append(edge.sourceId);
+    append(edge.targetId);
+  }
+  for (const node of result.nodes) append(node.id);
+  return {...result, edges, nodes};
+}
+
+function impactRelationPriority(relation: string): number {
+  if (['calls', 'constructs', 'extends', 'implements', 'overrides'].includes(relation)) return 0;
+  if (relation === 'depends_on') return 1;
+  if (relation === 'imports') return 2;
+  if (relation === 'reexports') return 3;
+  if (relation === 'contains') return 4;
+  return 5;
+}
+
+function edgeIsConnected(edge: CodeGraphQueryResult['edges'][number], nodeIds: ReadonlySet<string>): boolean {
+  return (
+    edge.sourceId !== undefined &&
+    edge.targetId !== undefined &&
+    nodeIds.has(edge.sourceId) &&
+    nodeIds.has(edge.targetId)
+  );
+}
+
+function impactAgentCoreResponse(
+  result: CodeGraphQueryResult,
+  maximumBytes: number,
+  refresh?: CodeGraphRefreshContinuity,
+) {
+  const ordered = impactAgentProjectionOrder(result);
+  const nodeIds = new Set(ordered.nodes.map(node => node.id));
+  const firstPriority = ordered.edges[0] === undefined ? undefined : impactRelationPriority(ordered.edges[0].relation);
+  const primaryEdgeCount =
+    firstPriority === undefined
+      ? 0
+      : ordered.edges.findIndex(
+          edge => !edgeIsConnected(edge, nodeIds) || impactRelationPriority(edge.relation) !== firstPriority,
+        );
+  const maximumPrimaryEdges = primaryEdgeCount === -1 ? ordered.edges.length : primaryEdgeCount;
+  for (let edgeCount = maximumPrimaryEdges; edgeCount >= 0; edgeCount -= 1) {
+    const endpointIds = new Set<string>();
+    for (const edge of ordered.edges.slice(0, edgeCount)) {
+      if (edge.sourceId !== undefined && nodeIds.has(edge.sourceId)) endpointIds.add(edge.sourceId);
+      if (edge.targetId !== undefined && nodeIds.has(edge.targetId)) endpointIds.add(edge.targetId);
+    }
+    const nodeCount = edgeCount === 0 ? Math.min(2, ordered.nodes.length) : endpointIds.size;
+    const candidate = responseForPrefix(
+      ordered,
+      nodeCount,
+      edgeCount,
+      Math.min(5, ordered.warnings.length),
+      true,
+      refresh,
+    );
+    if (measureFormattedCodeGraphMcpResponse(candidate, 'agent').totalBytes <= maximumBytes) return candidate;
+  }
+  return fixedCodeGraphMcpReceipt(ordered, refresh);
+}
+
+function queryAgentCoreResponse(
+  result: CodeGraphQueryResult,
+  maximumBytes: number,
+  refresh?: CodeGraphRefreshContinuity,
+  requestedNodeLimit?: number,
+) {
+  const maximumCoreNodes = Math.min(requestedNodeLimit ?? 3, result.nodes.length);
+  for (let nodeCount = maximumCoreNodes; nodeCount >= 0; nodeCount -= 1) {
+    const selectedNodeIds = new Set(result.nodes.slice(0, nodeCount).map(node => node.id));
+    const connectedEdges = result.edges.filter(edge => edgeIsConnected(edge, selectedNodeIds));
+    const connectedEdgeSet = new Set(connectedEdges);
+    const ordered = {
+      ...result,
+      edges: [...connectedEdges, ...result.edges.filter(edge => !connectedEdgeSet.has(edge))],
+    };
+    const candidate = responseForPrefix(
+      ordered,
+      nodeCount,
+      connectedEdges.length,
+      Math.min(5, result.warnings.length),
+      false,
+      refresh,
+    );
+    if (measureFormattedCodeGraphMcpResponse(candidate, 'agent').totalBytes <= maximumBytes) return candidate;
+  }
+  return fixedCodeGraphMcpReceipt(result, refresh);
+}
+
 /**
  * Last-resort receipt for a valid public budget. It intentionally contains no
  * optional metadata bodies: their bounded omission counts retain recovery
@@ -423,18 +541,30 @@ export function codeGraphMcpResponse(
   maximumEstimatedTokens?: number,
   refresh?: CodeGraphRefreshContinuity,
   responseFormat: CodeGraphMcpResponseFormat = 'dual',
+  options?: {readonly queryNodeLimit?: number},
 ) {
-  if (maximumEstimatedTokens === undefined) return defaultCodeGraphMcpResponse(result, refresh);
+  const effectiveMaximumEstimatedTokens =
+    maximumEstimatedTokens ??
+    (responseFormat === 'agent' && result.operation === 'impact'
+      ? MCP_CODE_GRAPH_AGENT_IMPACT_DEFAULT_ESTIMATED_TOKENS
+      : undefined);
+  if (effectiveMaximumEstimatedTokens === undefined) return defaultCodeGraphMcpResponse(result, refresh);
   if (
-    !Number.isSafeInteger(maximumEstimatedTokens) ||
-    maximumEstimatedTokens < MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS ||
-    maximumEstimatedTokens > MCP_CODE_GRAPH_MAXIMUM_ESTIMATED_TOKENS
+    !Number.isSafeInteger(effectiveMaximumEstimatedTokens) ||
+    effectiveMaximumEstimatedTokens < MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS ||
+    effectiveMaximumEstimatedTokens > MCP_CODE_GRAPH_MAXIMUM_ESTIMATED_TOKENS
   ) {
     throw new Error(
       `Code graph response token budget must be an integer from ${MCP_CODE_GRAPH_MINIMUM_ESTIMATED_TOKENS} to ${MCP_CODE_GRAPH_MAXIMUM_ESTIMATED_TOKENS}.`,
     );
   }
-  const maximumBytes = maximumEstimatedTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN;
+  const maximumBytes = effectiveMaximumEstimatedTokens * AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN;
+  if (responseFormat === 'agent' && result.operation === 'impact') {
+    return impactAgentCoreResponse(result, maximumBytes, refresh);
+  }
+  if (responseFormat === 'agent' && result.operation === 'query') {
+    return queryAgentCoreResponse(result, maximumBytes, refresh, options?.queryNodeLimit);
+  }
   const minimum = responseForPrefix(result, 0, 0, 0, true, refresh);
   const minimumBytes = measureFormattedCodeGraphMcpResponse(minimum, responseFormat).totalBytes;
   if (minimumBytes <= maximumBytes) {
@@ -484,8 +614,8 @@ function measureFormattedCodeGraphMcpResponse<T>(
   });
 }
 
-/** A deterministic, text-only receipt for local graph inspection. Every cell
- * is JSON encoded, so delimiters and Unicode remain grammar-safe. */
+/** A deterministic, text-only receipt for direct agent reading. The structured
+ * dual channel remains available to machine consumers. */
 export function renderCodeGraphAgentResponse(value: unknown): string {
   const result = value as {
     readonly edges?: readonly Record<string, unknown>[];
@@ -496,37 +626,86 @@ export function renderCodeGraphAgentResponse(value: unknown): string {
   };
   const nodes = result.nodes ?? [];
   const aliases = new Map(nodes.map((node, index) => [String(node.id), `n${index + 1}`]));
-  const scalar = (item: unknown) => JSON.stringify(item);
-  const lines = ['TN-GRAPH/1'];
-  for (const key of [
-    'operation',
-    'repository',
-    'snapshot',
-    'freshness',
-    'trust',
-    'sourceVersion',
-    'projectCoverage',
-    'outsideProjectGraph',
-    'outsideScopeChangedPaths',
-    'scope',
-    'searchCoverage',
-    'source',
-    'refresh',
-  ]) {
-    if (result[key] !== undefined) lines.push(`${key}\t${scalar(result[key])}`);
+  const scalar = (item: unknown) =>
+    (JSON.stringify(item) ?? 'null').replaceAll('\u2028', '\\u2028').replaceAll('\u2029', '\\u2029');
+  const oneLine = (item: unknown) => {
+    let output = '';
+    let replacingControl = false;
+    for (const character of String(item ?? '')) {
+      const codePoint = character.codePointAt(0) ?? 0;
+      const control =
+        codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f) || codePoint === 0x2028 || codePoint === 0x2029;
+      if (!control) output += character;
+      else if (!replacingControl) output += ' ';
+      replacingControl = control;
+    }
+    return output.trim();
+  };
+  const provenance = renderCodeGraphAgentProvenance(result).trimEnd();
+  const lines = ['TN-GRAPH/1', ...(provenance.length === 0 ? [] : provenance.split('\n'))];
+  if (result.outsideProjectGraph !== undefined)
+    lines.push(`Outside project graph: ${scalar(result.outsideProjectGraph)}`);
+  if (result.outsideScopeChangedPaths !== undefined)
+    lines.push(`Outside-scope changed paths: ${scalar(result.outsideScopeChangedPaths)}`);
+  if (result.scope !== undefined) lines.push(`Scope: ${scalar(result.scope)}`);
+  if (result.searchCoverage !== undefined) lines.push(`Search coverage: ${scalar(result.searchCoverage)}`);
+  const source = graphAgentRecord(result.source);
+  if (source !== undefined) {
+    const kind = graphAgentString(source.kind);
+    const deltaCount = graphAgentNumber(source.deltaCount);
+    if (kind !== undefined || deltaCount !== undefined)
+      lines.push(`Source: ${kind ?? 'graph'}${deltaCount === undefined ? '' : `, ${deltaCount} delta(s)`}.`);
   }
-  lines.push(`coverage\t${scalar(result.output ?? {})}`);
+  const output = graphAgentRecord(result.output);
+  const returnedNodes = graphAgentNumber(output?.returnedNodes) ?? nodes.length;
+  const totalNodes = graphAgentNumber(output?.totalNodes) ?? returnedNodes;
+  const returnedEdges = graphAgentNumber(output?.returnedEdges) ?? result.edges?.length ?? 0;
+  const totalEdges = graphAgentNumber(output?.totalEdges) ?? returnedEdges;
+  lines.push(
+    `Coverage: ${returnedNodes}/${totalNodes} symbols, ${returnedEdges}/${totalEdges} relationships${output?.truncated === true ? '; truncated' : ''}${output?.metadataTruncated === true ? '; metadata truncated' : ''}.`,
+  );
   for (const node of nodes) {
-    const {id, ...rest} = node;
-    lines.push(`node\t${aliases.get(String(id))}\t${scalar(id)}\t${scalar(rest)}`);
+    const id = graphAgentString(node.id) ?? '';
+    const alias = aliases.get(id) ?? `n${lines.length}`;
+    const kind = graphAgentString(node.kind) ?? 'symbol';
+    const name = graphAgentString(node.name) ?? graphAgentString(node.qualifiedName) ?? id;
+    const path = graphAgentString(node.path);
+    const span = graphAgentRecord(node.span);
+    const line = graphAgentNumber(span?.line);
+    const location = path === undefined ? '' : ` — ${oneLine(path)}${line === undefined ? '' : `:${line}`}`;
+    lines.push(`${alias}. ${node.exported === true ? 'exported ' : ''}${kind} ${oneLine(name)}${location} — ${id}`);
+    const signature = graphAgentString(node.signature);
+    if (signature !== undefined) lines.push(`   Signature: ${oneLine(signature)}`);
+    const qualifiedName = graphAgentString(node.qualifiedName);
+    if (qualifiedName !== undefined && qualifiedName !== name) lines.push(`   Qualified: ${oneLine(qualifiedName)}`);
   }
   for (const edge of result.edges ?? []) {
     const {id: _id, sourceId, targetId, ...rest} = edge;
-    const source = sourceId === undefined ? null : (aliases.get(String(sourceId)) ?? sourceId);
-    const target = targetId === undefined ? null : (aliases.get(String(targetId)) ?? targetId);
-    lines.push(`edge\t${scalar(source)}\t${scalar(target)}\t${scalar(rest)}`);
+    const source =
+      sourceId === undefined
+        ? (graphAgentString(rest.sourceName) ?? 'unknown')
+        : (aliases.get(String(sourceId)) ?? graphAgentString(rest.sourceName) ?? sourceId);
+    const target =
+      targetId === undefined
+        ? (graphAgentString(rest.targetName) ?? 'unknown')
+        : (aliases.get(String(targetId)) ?? graphAgentString(rest.targetName) ?? targetId);
+    const relation = graphAgentString(rest.relation) ?? 'related to';
+    const evidencePath = graphAgentString(rest.evidencePath);
+    const evidenceSpan = graphAgentRecord(rest.evidenceSpan);
+    const evidenceLine = graphAgentNumber(evidenceSpan?.line);
+    const evidence =
+      evidencePath === undefined
+        ? ''
+        : ` — ${oneLine(evidencePath)}${evidenceLine === undefined ? '' : `:${evidenceLine}`}`;
+    const confidence = graphAgentNumber(rest.confidence);
+    const relationshipEvidence = [graphAgentString(rest.provenance), confidence === undefined ? undefined : confidence]
+      .filter(item => item !== undefined)
+      .join(' ');
+    lines.push(
+      `${oneLine(source)} → ${oneLine(target)}: ${oneLine(relation)}${relationshipEvidence ? ` (${relationshipEvidence})` : ''}${evidence}`,
+    );
   }
-  for (const warning of result.warnings ?? []) lines.push(`warning\t${scalar(warning)}`);
-  if (result.output?.truncated === true) lines.push('recovery\t"refine-query-or-follow-a-stable-cgs-handle"');
+  for (const warning of result.warnings ?? []) lines.push(`Warning: ${oneLine(warning)}`);
+  if (result.output?.truncated === true) lines.push('Recovery: refine the query or follow a stable cgs_ handle.');
   return `${lines.join('\n')}\n`;
 }

@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {REMOVED_VIEWS_TABLE_SQL} from '../removed/view_schema_contracts.js';
 import {inspectBoundedSchemaMetadataValue} from './metadata.js';
 import {configureConnection} from '../session.js';

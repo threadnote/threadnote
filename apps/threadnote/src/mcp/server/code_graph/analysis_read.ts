@@ -6,6 +6,7 @@ import {
   copyAnonymousTelemetryMetadata,
   attachAnonymousTelemetryReportedOutcome,
 } from '../../../telemetry/diagnostic.js';
+import {renderCodeGraphAgentProvenance} from '../../code_graph_agent_provenance.js';
 
 export function codeGraphAnalysisReadMetadata(
   policy: CodeGraphCliFreshnessPolicy,
@@ -40,10 +41,27 @@ export function codeGraphAnalysisReadStateResponse(
   metadata: CodeGraphAnalysisReadMetadata,
   responseFormat: 'agent' | 'dual' | undefined,
 ): CallToolResult {
+  const structured =
+    typeof response.structuredContent === 'object' && response.structuredContent !== null
+      ? (response.structuredContent as Readonly<Record<string, unknown>>)
+      : undefined;
+  const result =
+    typeof structured?.result === 'object' && structured.result !== null
+      ? (structured.result as Readonly<Record<string, unknown>>)
+      : undefined;
+  const agentProvenance = renderCodeGraphAgentProvenance({
+    ...metadata,
+    ...(result?.projectCoverage === undefined ? {} : {projectCoverage: result.projectCoverage}),
+  });
   const formatted = {
     ...response,
     content: response.content.map(item =>
-      item.type === 'text' ? {...item, text: `Read: ${JSON.stringify(metadata)}\n${item.text}`} : item,
+      item.type === 'text'
+        ? {
+            ...item,
+            text: `${agentProvenance}${item.text}`,
+          }
+        : item,
     ),
     structuredContent: {...response.structuredContent, ...metadata},
   };

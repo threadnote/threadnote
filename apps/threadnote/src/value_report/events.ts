@@ -28,6 +28,30 @@ export interface ContextBriefValueEventV1 {
   readonly version: typeof VALUE_EVENT_VERSION;
 }
 
+export type CodexResumePreloadOutcome =
+  | 'already-preloaded'
+  | 'disabled'
+  | 'ineligible-evidence'
+  | 'injected'
+  | 'invalid-input'
+  | 'lookup-unavailable'
+  | 'manual-context'
+  | 'over-limit';
+
+export type CodexResumeContinuationEvidenceState = 'background' | 'evidence-bearing';
+
+export interface CodexResumePreloadValueEventV1 {
+  readonly continuationEvidenceState?: CodexResumeContinuationEvidenceState;
+  readonly durationMilliseconds: number;
+  readonly estimatedTokens: number;
+  readonly evidenceState?: 'degraded' | 'no-match' | 'partial' | 'sufficient';
+  readonly kind: 'codex-resume-preload';
+  readonly outcome: CodexResumePreloadOutcome;
+  readonly outputBytes: number;
+  readonly timestamp: string;
+  readonly version: typeof VALUE_EVENT_VERSION;
+}
+
 export interface HealthValueEventV1 {
   readonly activeFindings: number;
   readonly kind: 'health';
@@ -66,6 +90,7 @@ export interface ActivationValueEventV1 {
 
 export type LocalValueEventV1 =
   | ActivationValueEventV1
+  | CodexResumePreloadValueEventV1
   | ContextBriefValueEventV1
   | HealthValueEventV1
   | SetupCompletionValueEventV1
@@ -88,6 +113,20 @@ export const recordContextBriefValueEvent = Effect.fn('valueReport.recordContext
   event: Omit<ContextBriefValueEventV1, 'kind' | 'version'>,
 ) {
   yield* appendValueEvent(agentContextHome, {kind: 'context-brief', version: VALUE_EVENT_VERSION, ...event});
+});
+
+export const recordCodexResumePreloadValueEvent = Effect.fn('valueReport.recordCodexResumePreload')(function* (
+  agentContextHome: string,
+  event: Omit<CodexResumePreloadValueEventV1, 'kind' | 'version'>,
+) {
+  yield* appendValueEvent(agentContextHome, {
+    ...event,
+    durationMilliseconds: boundedDuration(event.durationMilliseconds),
+    estimatedTokens: boundedCount(event.estimatedTokens),
+    kind: 'codex-resume-preload',
+    outputBytes: boundedCount(event.outputBytes),
+    version: VALUE_EVENT_VERSION,
+  });
 });
 
 export const recordHealthValueSnapshot = Effect.fn('valueReport.recordHealthSnapshot')(function* (
@@ -404,6 +443,33 @@ function parseValueEvent(line: string): LocalValueEventV1 | undefined {
     validCount(value.durationMilliseconds)
   ) {
     return value as unknown as ActivationValueEventV1;
+  }
+  if (
+    value.kind === 'codex-resume-preload' &&
+    value.project === undefined &&
+    [
+      'already-preloaded',
+      'disabled',
+      'ineligible-evidence',
+      'injected',
+      'invalid-input',
+      'lookup-unavailable',
+      'manual-context',
+      'over-limit',
+    ].includes(String(value.outcome)) &&
+    (value.continuationEvidenceState === undefined ||
+      value.continuationEvidenceState === 'background' ||
+      value.continuationEvidenceState === 'evidence-bearing') &&
+    (value.evidenceState === undefined ||
+      value.evidenceState === 'degraded' ||
+      value.evidenceState === 'no-match' ||
+      value.evidenceState === 'partial' ||
+      value.evidenceState === 'sufficient') &&
+    validCount(value.durationMilliseconds) &&
+    validCount(value.estimatedTokens) &&
+    validCount(value.outputBytes)
+  ) {
+    return value as unknown as CodexResumePreloadValueEventV1;
   }
   if (
     value.kind === 'context-brief' &&

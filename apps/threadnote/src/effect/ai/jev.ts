@@ -1,7 +1,7 @@
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {Console, Context, Effect, Layer, Redacted, Schema} from 'effect';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
-import * as HttpClientRequest from 'effect/unstable/http/HttpClientRequest';
+import * as HttpClient from 'effect/http/HttpClient';
+import * as HttpClientRequest from 'effect/http/HttpClientRequest';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RecallSelectionCandidate, RecallSelectionInput} from '@threadnote/recall/selection';
 

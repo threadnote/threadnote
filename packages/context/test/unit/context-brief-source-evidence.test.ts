@@ -10,7 +10,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {compileContextBriefWith} from '../../src/compiler.js';
 import {planContextBrief} from '../../src/planner.js';
-import {parseContextBriefAgentViewText} from '../../src/projector.js';
+import {projectContextBriefAgentView} from '../../src/projector.js';
 import {parseContextBriefRequestV1, type ContextBriefGraphEvidenceV1} from '../../src/types.js';
 import {
   CONTEXT_BRIEF_SOURCE_MAXIMUM_FILES,
@@ -60,7 +60,7 @@ describe('Context Brief source evidence', () => {
           startLine: 1,
         }),
       ]);
-      const agent = parseContextBriefAgentViewText(source.text);
+      const agent = projectContextBriefAgentView(source.structuredContent, true);
       expect(agent.graph?.sources).toEqual(source.structuredContent.graph.sources);
       expect(agent.answer).toContain('already read');
     }),

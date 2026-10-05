@@ -110,7 +110,7 @@ function createTarStreamParser(
         readonly mode: number;
         readonly padding: number;
         readonly path: string | undefined;
-        readonly scope?: Scope.Scope;
+        readonly scope?: Scope.Closeable;
         remaining: number;
       }
     | undefined;

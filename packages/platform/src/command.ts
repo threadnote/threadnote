@@ -1,6 +1,6 @@
 import {Context, Effect, Layer, Schema, Sink, Stdio, Stream} from 'effect';
-import * as ChildProcess from 'effect/unstable/process/ChildProcess';
-import {ChildProcessSpawner} from 'effect/unstable/process/ChildProcessSpawner';
+import * as ChildProcess from 'effect/process/ChildProcess';
+import {ChildProcessSpawner} from 'effect/process/ChildProcessSpawner';
 import {redactSensitiveText} from '@threadnote/platform/scrubber';
 import {ChildEnvironmentPolicy, type ChildEnvironmentPolicyShape} from './child-environment-policy.js';
 import {SystemInfo, type SystemInfoShape} from './system.js';

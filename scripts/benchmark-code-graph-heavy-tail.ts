@@ -656,8 +656,8 @@ function heavyTailSharedRatchetMetadata(metadata: BenchmarkArtifactV1['metadata'
 }
 
 /**
- * Final release admission for the heavy-tail performance ratchet. Hosted Actions captures deliberately cannot
- * satisfy this contract: release performance evidence must be replayable from three fresh runs on one local runner.
+ * Validates optional heavy-tail performance evidence, not release readiness. Hosted Actions captures deliberately
+ * cannot satisfy this contract: governed performance evidence needs three fresh runs on one local runner.
  */
 export function assertHeavyTailReleaseRatchet(
   artifacts: readonly CodeGraphHeavyTailBenchmarkArtifact[],

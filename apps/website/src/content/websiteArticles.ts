@@ -61,6 +61,15 @@ export interface WebsiteUpdateOrderRef {
   readonly stableId: string;
 }
 
+export type WebsiteUpdateKind = 'article' | 'release';
+
+export function filterWebsiteUpdatesByKind<T extends Readonly<{kind: WebsiteUpdateKind}>>(
+  updates: readonly T[],
+  kind: WebsiteUpdateKind,
+): readonly T[] {
+  return updates.filter(update => update.kind === kind);
+}
+
 export function orderWebsiteUpdatesDescending<T extends WebsiteUpdateOrderRef>(updates: readonly T[]): readonly T[] {
   return [...updates].sort(
     (left, right) =>

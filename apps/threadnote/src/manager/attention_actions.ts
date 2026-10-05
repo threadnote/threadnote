@@ -17,6 +17,14 @@ import {
   applyContextHealthRepair,
   previewContextHealthRepairs,
 } from '../memory/context/health_repair_commands.js';
+import {
+  readContextMaintenanceStatus,
+  readContextMaintenancePacket,
+  runContextMaintenance,
+  setContextMaintenancePaused,
+  undoContextMaintenance,
+} from '../memory/context/maintenance.js';
+import {SystemInfo} from '@threadnote/platform/system';
 import {readActiveProjectMemoryRecords} from '../memory/maintenance/records.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
@@ -56,6 +64,61 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   readonly url: URL;
 }) {
   const route = request.url.pathname;
+  if (route === '/api/attention/context-maintenance') {
+    if (request.method === 'GET') {
+      const project = request.url.searchParams.get('project') ?? undefined;
+      if (project !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project))
+        return invalid('Select a valid project.');
+      const caseId = request.url.searchParams.get('caseId');
+      if (caseId !== null && request.url.searchParams.get('view') !== 'status') {
+        if (project !== undefined) yield* readContextMaintenanceStatus(request.config, project, {caseId});
+        const startLine = request.url.searchParams.get('startLine');
+        const maximumLines = request.url.searchParams.get('maximumLines');
+        if (
+          (startLine !== null && !/^[1-9][0-9]*$/u.test(startLine)) ||
+          (maximumLines !== null && !/^(?:[1-9]|1[0-9]|2[0-4])$/u.test(maximumLines))
+        )
+          return invalid('Choose a positive source line and 1 to 24 excerpt lines.');
+        return {
+          status: 200,
+          body: yield* readContextMaintenancePacket(request.config, caseId, {
+            citationId: request.url.searchParams.get('citationId') ?? undefined,
+            memoryUri: request.url.searchParams.get('memoryUri') ?? undefined,
+            ...(startLine === null ? {} : {startLine: Number(startLine)}),
+            ...(maximumLines === null ? {} : {maximumLines: Number(maximumLines)}),
+          }),
+        };
+      }
+      const limitText = request.url.searchParams.get('limit');
+      if (limitText !== null && !/^(?:[1-9][0-9]?|100)$/u.test(limitText))
+        return invalid('Choose a page limit from 1 to 100.');
+      const status = yield* readContextMaintenanceStatus(request.config, project, {
+        ...(limitText === null ? {} : {limit: Number(limitText)}),
+        caseCursor: request.url.searchParams.get('caseCursor') ?? undefined,
+        receiptCursor: request.url.searchParams.get('receiptCursor') ?? undefined,
+        caseId: caseId ?? undefined,
+        receiptId: request.url.searchParams.get('receiptId') ?? undefined,
+      });
+      return {status: 200, body: status};
+    }
+    if (request.method !== 'POST') return undefined;
+    const body = yield* request.body;
+    if (body.action === 'pause' || body.action === 'resume')
+      return {status: 200, body: yield* setContextMaintenancePaused(request.config, body.action === 'pause')};
+    if (body.action === 'undo' && typeof body.receiptId === 'string') {
+      const result = yield* undoContextMaintenance(request.config, body.receiptId);
+      return {status: result.status === 'conflict' ? 409 : 200, body: result};
+    }
+    if (body.action === 'run-now')
+      return {
+        status: 200,
+        body: yield* runContextMaintenance(request.config, {
+          cwd: (yield* SystemInfo).currentDirectory(),
+          project: typeof body.project === 'string' ? body.project : undefined,
+        }),
+      };
+    return invalid('Choose run-now, pause, resume, or undo with an exact receipt.');
+  }
   if (route === '/api/context-health/citations/jobs' && request.method === 'GET') {
     const project = request.url.searchParams.get('project') ?? '';
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project)) return invalid('Select a valid project.');

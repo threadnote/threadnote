@@ -1,4 +1,4 @@
-import {Cause, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
+import {Cause, Clock, Console, DateTime, Effect, Option, Result, Schema} from 'effect';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
 import {MAX_RECALL_SELECTION_CANDIDATES, type RecallSelectionCandidate} from '@threadnote/recall/selection';
 import {uriSegment} from '@threadnote/workspace/manifest';
@@ -14,6 +14,7 @@ import {rerankWithSelectedLocalModel} from '@threadnote/inference/models/inferen
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
+import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {loadRecallFeedback} from './feedback.js';
 import {
   currentRecallCorpusGeneration,
@@ -108,6 +109,7 @@ const WORKSPACE_CANDIDATE_RESERVE_MULTIPLIER = 2;
 const CROSS_SCOPE_CANDIDATE_RESERVE_MAXIMUM = 4;
 const CROSS_SCOPE_CANDIDATE_SELECTION_MAXIMUM = 16;
 export const MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS = 15_000;
+export const MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS = 60_000;
 
 export interface RecallCrossScopeLaneBudgets {
   readonly admissionLimit: number;
@@ -540,6 +542,8 @@ export type BoundedRecallSemanticRetrieval<A> =
   | {readonly cause: Cause.Cause<unknown>; readonly status: 'failed'}
   | {readonly status: 'timed-out'};
 
+export type GatedRecallSemanticRetrieval<A> = BoundedRecallSemanticRetrieval<A> | {readonly status: 'cooldown'};
+
 export interface McpRecallSemanticScoresResult {
   readonly result: RecallSemanticScoresResult;
   readonly status: 'available' | 'failed' | 'timed-out' | 'unavailable';
@@ -582,6 +586,29 @@ export function boundedRecallSemanticRetrieval<A, E, R>(
   );
 }
 
+export function createMcpRecallSemanticRetrievalGate() {
+  const retryAfterByRuntime = new WeakMap<object, {readonly deadline: bigint}>();
+  const cooldownNanos = BigInt(MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS) * 1_000_000n;
+  return <A, E, R>(
+    runtime: object,
+    retrieval: Effect.Effect<A, E, R>,
+  ): Effect.Effect<GatedRecallSemanticRetrieval<A>, never, R> =>
+    Effect.gen(function* () {
+      const now = yield* Clock.monotonicTimeNanos;
+      const previousCooldown = retryAfterByRuntime.get(runtime);
+      if (previousCooldown && previousCooldown.deadline > now) return {status: 'cooldown'} as const;
+      const result = yield* boundedRecallSemanticRetrieval(retrieval);
+      if (result.status === 'timed-out') {
+        retryAfterByRuntime.set(runtime, {deadline: (yield* Clock.monotonicTimeNanos) + cooldownNanos});
+      } else if (retryAfterByRuntime.get(runtime) === previousCooldown) {
+        retryAfterByRuntime.delete(runtime);
+      }
+      return result;
+    });
+}
+
+const mcpRecallSemanticRetrievalGate = createMcpRecallSemanticRetrievalGate();
+
 /**
  * MCP recall uses only the already-active lexical/vector generations. It never
  * builds, repairs, or retries derived storage while a client request is open.
@@ -594,9 +621,17 @@ export const loadMcpRecallSemanticScoresResult = Effect.fn('recall.loadMcpSemant
   allowedUriScopes?: readonly string[],
 ) {
   const semanticLimit = recallIndexPreselectionLimit(limit);
-  const attempt = yield* boundedRecallSemanticRetrieval(
+  const runtime = yield* LocalModelRuntime;
+  const attempt = yield* mcpRecallSemanticRetrievalGate(
+    runtime,
     loadReadOnlySemanticScoresAttempt(config, query, semanticLimit, eligibility, allowedUriScopes),
   );
+  if (attempt.status === 'cooldown') {
+    return {
+      result: emptyRecallSemanticScoresResult(Option.some(semanticRecallCooldownWarning())),
+      status: 'unavailable',
+    } satisfies McpRecallSemanticScoresResult;
+  }
   if (attempt.status === 'timed-out') {
     return {
       result: emptyRecallSemanticScoresResult(Option.some(semanticRecallTimeoutWarning())),
@@ -841,6 +876,14 @@ function semanticRecallTimeoutWarning(): string {
   return (
     `Local AI recall warning: semantic retrieval timed out after ${MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS}ms; ` +
     'deterministic lexical recall continued. Run threadnote doctor --dry-run if this repeats.'
+  );
+}
+
+function semanticRecallCooldownWarning(): string {
+  return (
+    'Local AI recall warning: semantic retrieval was skipped after a recent timeout; ' +
+    `deterministic lexical recall continued. Retry after ${MCP_RECALL_SEMANTIC_TIMEOUT_COOLDOWN_MILLISECONDS / 1_000}s ` +
+    'or run threadnote doctor --dry-run if this repeats.'
   );
 }
 

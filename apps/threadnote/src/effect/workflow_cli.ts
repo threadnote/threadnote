@@ -1,5 +1,5 @@
 import {Schema, type Effect} from 'effect';
-import {Command, Flag} from 'effect/unstable/cli';
+import {Command, Flag} from 'effect/cli';
 import {withDefaultActionSubcommand} from './cli/help.js';
 import {
   argument,
@@ -18,6 +18,7 @@ import {CONTEXT_BRIEF_CWD_OPTION, type runContextBrief} from '../context_brief/c
 import type {runCompact} from '../memory/commands.js';
 import type {runRecallFeedback} from '../recall/feedback_commands.js';
 import type {runContextHealth} from '../memory/context/health_commands.js';
+import type {runContextMaintainCommand} from '../memory/context/maintenance.js';
 import {CONTEXT_HEALTH_FINDING_CATEGORIES, CONTEXT_HEALTH_MEMORY_KINDS} from '../memory/context/health_selector.js';
 import type {runContextHealthAggregate, runContextHealthSchedule} from '../memory/context/health_aggregate_commands.js';
 import type {
@@ -37,6 +38,7 @@ import {
   CONTEXT_BRIEF_DETAILS,
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
   CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
+  CONTEXT_BRIEF_MODES,
 } from '@threadnote/context/types';
 
 export function makeCompactCommand<E, R>(
@@ -88,7 +90,7 @@ export function makeContextBriefCommand<E, R>(
               ),
             ),
           ),
-          `Maximum estimated tokens for the combined structured and text response (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS})`,
+          `Maximum estimated tokens for the agent text (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS}); --json exposes the same selected evidence with structured audit metadata`,
         ),
       ),
       codeRefs: repeatedString(
@@ -107,7 +109,7 @@ export function makeContextBriefCommand<E, R>(
         'compact',
       ),
       json: boolean('json', 'Print the structured Context Brief projection'),
-      mode: defaultChoice('mode', ['brief', 'locate', 'explain', 'trace', 'impact'], 'Evidence-planning mode', 'brief'),
+      mode: defaultChoice('mode', CONTEXT_BRIEF_MODES, 'Evidence-planning mode', 'brief'),
       project: optionalString('project', 'Optional memory project scope, at most 256 UTF-8 bytes'),
       surface: optionalString('surface', 'Agent catalog surface selector used for compatible procedure admission'),
       task: requiredString('task', 'Engineering task or question, 1-4096 UTF-8 bytes without control characters'),
@@ -394,4 +396,49 @@ export function makeProcedurePublishCommand<E, R>(
     },
     handler,
   ).pipe(Command.withDescription('Preview by default; publish verified procedure bytes only after explicit approval'));
+}
+
+export function makeContextMaintainCommand<E, R>(
+  handler: (options: Parameters<typeof runContextMaintainCommand>[1]) => Effect.Effect<void, E, R>,
+) {
+  return Command.make(
+    'maintain',
+    {
+      action: defaultChoice(
+        'action',
+        ['run', 'status', 'pause', 'resume', 'undo', 'packet', 'retire-anchor'],
+        'Local maintenance action',
+        'run',
+      ),
+      json: boolean('json', 'Emit local maintenance progress and decisions as JSON'),
+      maxRecords: optional(
+        integerFlag('max-records').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 100}))),
+        ),
+      ),
+      project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
+      receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
+      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet or status selector'),
+      caseCursor: optionalString('case-cursor', 'Generation-bound next retained case page'),
+      receiptCursor: optionalString('receipt-cursor', 'Generation-bound next retained receipt page'),
+      citationId: optionalString('citation-id', 'Exact scoped citation evidence selector'),
+      memoryUri: optionalString('memory-uri', 'Exact scoped case subject evidence selector'),
+      startLine: optional(
+        integerFlag('start-line').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 1000000}))),
+        ),
+      ),
+      maximumLines: optional(
+        integerFlag('maximum-lines').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 24}))),
+        ),
+      ),
+      evidenceRevision: optionalString('evidence-revision', 'Exact reviewed anchor evidence revision'),
+      expectedContentHash: optionalString('expected-content-hash', 'Exact reviewed subject hash for anchor retirement'),
+      limit: optional(
+        integerFlag('limit').pipe(Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 100})))),
+      ),
+    },
+    handler,
+  ).pipe(Command.withDescription('Run bounded local structural maintenance or inspect/pause/undo it'));
 }

@@ -3,7 +3,7 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
 import {Effect} from 'effect';
 import * as FC from 'fast-check';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 import type {RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {postingLexicalScore} from '@threadnote/recall/index/lexical';

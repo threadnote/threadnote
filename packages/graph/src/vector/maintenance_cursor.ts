@@ -1,4 +1,5 @@
-import {Encoding, Result} from 'effect';
+import {Result} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const VECTOR_DATABASE_LIMIT = 64;
@@ -95,7 +96,7 @@ export function encodeOrdinaryVectorPhaseCursor(cursor: OrdinaryVectorPhaseCurso
       state.admissionWrapped ? 1 : 0,
       state.afterGeneration,
     ]);
-  const payload = Encoding.encodeBase64Url(
+  const payload = Base64Url.encode(
     JSON.stringify({
       v: 1,
       d: cursor.digest,
@@ -115,8 +116,8 @@ export function parseOrdinaryVectorPhaseCursor(cursorToken: string | undefined):
   if (match === null) return undefined;
   const [, seal, payload] = match;
   if (sha256HexSync(`code-graph-ordinary-vector-cursor-v1\n${payload}`) !== seal) return undefined;
-  const decoded = Encoding.decodeBase64UrlString(payload);
-  if (!Result.isSuccess(decoded) || Encoding.encodeBase64Url(decoded.success) !== payload) return undefined;
+  const decoded = Base64Url.decodeString(payload);
+  if (!Result.isSuccess(decoded) || Base64Url.encode(decoded.success) !== payload) return undefined;
   let raw: unknown;
   try {
     raw = JSON.parse(decoded.success);

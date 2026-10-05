@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import {Argument, Command} from 'effect/unstable/cli';
+import {Argument, Command} from 'effect/cli';
 import {getAgentAdapter} from '../agent_integration/adapters.js';
 import {runSetup, SetupOperationError} from '../setup/index.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';

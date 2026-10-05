@@ -1,5 +1,5 @@
 import {Effect, Path, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphLayout} from '../layout.js';
 import {useReadOnlyDatabase} from '../store/session.js';
 import {CODE_GRAPH_SNAPSHOT_ID} from '../store/reconciliation/core.js';

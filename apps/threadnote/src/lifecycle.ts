@@ -566,6 +566,34 @@ export const repairRegisteredMcpClients = Effect.fn('lifecycle.repairRegisteredM
   }
 });
 
+export const runDevelopmentInstallIntegrationActivation = Effect.fn(
+  'lifecycle.developmentInstallIntegrationActivation',
+)(function* (config: RuntimeConfig, expectedVersion: string) {
+  const requireExpectedActive = Effect.gen(function* () {
+    if ((yield* activeInstalledVersion()) !== expectedVersion) {
+      return yield* LifecycleOperationError.make({
+        message: 'The active release changed during development integration activation.',
+      });
+    }
+  });
+  yield* requireExpectedActive;
+  const inferredMcpClients = yield* inferConfiguredMcpClients(config);
+  yield* migrateLegacyAgentIntegrations(config, inferredMcpClients, false);
+  yield* repairAgentIntegrations(config, false);
+  yield* repairRegisteredAgentAdapters(config, false);
+  const incomplete = (yield* agentAdapterDoctorChecks(config, inferredMcpClients, {
+    includeRetainedUnsupported: false,
+  })).filter(check => check.status !== 'ok');
+  if (incomplete.length > 0) {
+    return yield* LifecycleOperationError.make({
+      message: `Development agent integration activation remains incomplete: ${incomplete
+        .map(check => check.name)
+        .join(', ')}.`,
+    });
+  }
+  yield* requireExpectedActive;
+});
+
 /**
  * Repairs version-derived state while the development installer owns the
  * installation lock. Unlike ordinary repair, this never activates or prunes a
@@ -592,6 +620,16 @@ export const runDevelopmentInstallRepair = Effect.fn('lifecycle.developmentInsta
   });
   yield* requireExpectedActive;
 });
+
+export function runDevelopmentInstallMaintenance(
+  config: RuntimeConfig,
+  expectedVersion: string,
+  activateIntegrations: boolean,
+) {
+  return activateIntegrations
+    ? runDevelopmentInstallIntegrationActivation(config, expectedVersion)
+    : runDevelopmentInstallRepair(config, expectedVersion);
+}
 
 const maintainRecallIndexes = Effect.fn('lifecycle.maintainRecallIndexes')(function* (
   config: RuntimeConfig,

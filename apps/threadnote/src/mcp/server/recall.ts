@@ -45,6 +45,7 @@ import {
   MemoryReadProjectionError,
   MemoryReadTooLargeError,
   memoryReadMcpStructuredContent,
+  memoryReadMcpText,
   projectMemoryRead,
   type MemoryReadResource,
 } from '@threadnote/memory/read/projection';
@@ -116,6 +117,8 @@ import {
   type RecallProgressTiming,
   type RuntimeConfig,
   argumentError,
+  compactPersonalMemoryReferences,
+  compactPersonalMemoryStructuredReferences as compactStructuredReferences,
   mcpErrorResult,
   normalizeOptionalMetadata,
   optionalResourceUri,
@@ -1256,12 +1259,8 @@ function runRecallTool(
       }
     }
     const {semanticSection, exactTail} = recallSections;
-    if (semanticSection) {
-      sections.push(semanticSection);
-    }
-    if (exactTail) {
-      sections.push(exactTail);
-    }
+    if (semanticSection) sections.push(semanticSection);
+    if (exactTail) sections.push(exactTail);
     const referencedContext = yield* referencedContextSection(config, semanticSection ?? '', params.allowedUriScopes);
     if (referencedContext) {
       sections.push(referencedContext);
@@ -1304,9 +1303,12 @@ function runRecallTool(
           ? error
           : McpServerOperationError.make({message: 'Recall response projection failed.', cause: error}),
     });
+    const text = compactPersonalMemoryReferences(projected.text, config.user);
     return {
-      content: [{type: 'text' as const, text: projected.text}],
-      ...(projected.responseFormat === 'dual' ? {structuredContent: projected.structuredContent} : {}),
+      content: [{type: 'text' as const, text}],
+      ...(projected.responseFormat === 'dual'
+        ? {structuredContent: compactStructuredReferences(projected.structuredContent, config.user)}
+        : {}),
     };
   });
 }
@@ -1351,7 +1353,6 @@ const referencedContextSection = Effect.fn('mcpServer.referencedContext')(functi
   const existingRecords = yield* readMemoryRecordsByUri(config, candidates);
   return formatReferencedContextPointers(existingReferencedUris(candidates, existingRecords), MAX_REFERENCED_CONTEXT);
 });
-
 export function registerReadTool(
   server: EffectMcpServerAdapter,
   config: RuntimeConfig,
@@ -1363,15 +1364,15 @@ export function registerReadTool(
     name,
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
-      description: `${description} Read up to ${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes. Default text avoids duplicating the body; dual repeats it in structuredContent. Oversize: mode=outline or section, or page with offsetBytes=0.`,
+      description: `${description} Max ${MEMORY_READ_MAXIMUM_CONTENT_BYTES} bytes. Default agent; text=canonical; dual=structured. Oversize: mode=outline or section, or offsetBytes=0.`,
       inputSchema: {
         mode: McpInput.literals(['content', 'outline']),
         offsetBytes: McpInput.integer('UTF-8 byte offset for an explicit bounded page; start at 0', {minimum: 0}),
-        responseFormat: McpInput.literals(['dual', 'text'], 'Default text; dual repeats body in structuredContent.'),
+        responseFormat: McpInput.literals(['agent', 'dual', 'text'], 'Default agent; text=canonical; dual=structured.'),
         section: McpInput.string(),
         sourceHash: McpInput.string('SHA-256 from the first page; required when offsetBytes > 0'),
-        uri: McpInput.string(),
-        uris: McpInput.stringOrStrings(),
+        uri: McpInput.string('Memory pointer'),
+        uris: McpInput.stringOrStrings('Memory pointers'),
       },
     },
     ({mode, offsetBytes, responseFormat, section, sourceHash, uri, uris}) => {
@@ -1379,6 +1380,7 @@ export function registerReadTool(
         uris ?? uri,
         name,
         'threadnote://user/you/memories/.abstract.md',
+        {personalMemoryUser: config.user},
       );
       if (!requestedUrisResult.ok) return requestedUrisResult.error;
       const requestedUris = requestedUrisResult.value;
@@ -1491,7 +1493,7 @@ export function registerReadTool(
             },
           },
           content: [
-            {type: 'text' as const, text: read.content},
+            {type: 'text' as const, text: memoryReadMcpText(read, responseFormat)},
             ...(read.continuation === undefined ? [] : [{type: 'text' as const, text: read.continuation}]),
             ...(read.receipt === undefined ? [] : [{type: 'text' as const, text: read.receipt}]),
             ...missingRecoveries.map(text => ({type: 'text' as const, text})),

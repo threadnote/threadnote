@@ -3,6 +3,7 @@ import {Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {retrieveContextBriefCodeLinkedMemoryEvidence} from '@threadnote/threadnote/context_brief/memory_evidence';
 import {planContextBrief} from '@threadnote/context/planner';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -148,19 +149,22 @@ describe('Context Brief deferred code-anchor recovery', () => {
                 }),
             });
             const receipts: DeferredCodeAnchorRouteFinalizationReceiptV1[] = [];
+            const query = yield* CodeGraphQueryService;
+            const liveQuery = CodeGraphQueryService.of({
+              ...query,
+              status: (...args) => query.status(...args).pipe(TestClock.withLive),
+            });
             const firstRetrieve = retrieveContextBriefCodeLinkedMemoryEvidence(config, plan.codeAnchors, {
               onFinalizationReceipt: receipt => {
                 receipts.push(receipt);
               },
-            }).pipe(Effect.provideService(ResourceStore, contendedStore));
-            // The interrupt case must keep TestClock so the 750ms route-pass
-            // deadline can fire against the never-completing first read.
-            // The ordinary path uses live time: lock retries and capture
-            // spacing otherwise sleep on the frozen test clock and hang the
-            // 60s Vitest budget under CI contention.
-            const firstFiber = yield* (
-              interruptFirstAdmission ? firstRetrieve : firstRetrieve.pipe(TestClock.withLive)
-            ).pipe(Effect.forkScoped);
+            }).pipe(
+              Effect.provideService(ResourceStore, contendedStore),
+              Effect.provideService(CodeGraphQueryService, liveQuery),
+            );
+            // Real repository observations need live Git/lease timing; route
+            // deadlines stay deterministic regardless of runner load.
+            const firstFiber = yield* firstRetrieve.pipe(Effect.forkScoped);
             if (interruptFirstAdmission) {
               yield* Deferred.await(entered);
               yield* TestClock.adjust('750 millis');

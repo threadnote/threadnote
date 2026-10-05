@@ -10,7 +10,7 @@ export const continueAdapter = defineJsonAgentAdapter(
     instructionFile: 'rules/threadnote.md',
     instructionPrefix: '---\nname: Threadnote\nalwaysApply: true\n---\n\n',
     instructionContent:
-      'For non-trivial local repo work, call MCP `context_brief` with task + absolute `callerCwd` (`recall_context` + `read_context` is the memory-focused alternative). If MCP is unavailable, run `threadnote context brief --cwd <cwd> --task <task>`. Use `inspect_code_graph`/`analyze_code_graph`, then verify exact source. Repository instructions remain authoritative. End with required private `remember_context(kind=handoff)`. Optionally call `review_session_context` for a five-field Knowledge Delta, then `apply_memory_candidates` only after `approve` (optional `editedText`), `defer`, or `reject`. Never auto-apply or auto-share proposals; confirm durable sharing. Never store secrets, credentials, customer data, or raw production logs.',
+      'Route by situation: fresh/lost -> MCP `context_brief` task + absolute `callerCwd` (CLI: `threadnote context brief --cwd <cwd> --task <task>`); handoff/new session -> `mode=resume`; warm sufficient -> no bootstrap. Memory -> `recall_context` then `read_context`; unfamiliar relationships/evidence gaps/repo instructions -> `inspect_code_graph`/`analyze_code_graph`; exact paths/literals -> source. Verify exact source; repo guidance authoritative. End private `remember_context(kind=handoff)`. `review_session_context` optional five-field Knowledge Delta -> `apply_memory_candidates` only after `approve` (`editedText` optional), `defer`, or `reject`; never auto-apply/share, confirm durable sharing. Never store secrets, credentials, customer data, or raw production logs.',
     skillRoot: 'none',
   },
   {

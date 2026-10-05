@@ -58,6 +58,44 @@ describe('Code Memory Link evaluation boundaries', () => {
     expect(await codeMemoryLinkProcessGroupMembers(groupId)).toEqual([]);
   });
 
+  it('writes bounded string and byte stdin without changing process-group cleanup', async () => {
+    if (process.platform === 'win32') return;
+    const capture = (stdin: string | Uint8Array, label: string) =>
+      captureCodeMemoryLinkProcessGroup({
+        arguments: ['-e', "process.stdin.on('data', chunk => process.stdout.write(chunk));"],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {PATH: process.env.PATH ?? '/usr/bin:/bin'},
+        label,
+        maxOutputBytes: 4_096,
+        stdin,
+        timeoutMilliseconds: 5_000,
+      });
+
+    const [stringResult, bytesResult] = await Promise.all([
+      capture('bounded string stdin', 'string stdin fixture'),
+      capture(new TextEncoder().encode('bounded byte stdin'), 'byte stdin fixture'),
+    ]);
+    expect(stringResult.stdout).toBe('bounded string stdin');
+    expect(bytesResult.stdout).toBe('bounded byte stdin');
+  });
+
+  it('rejects stdin larger than the explicit boundary before spawning', async () => {
+    if (process.platform === 'win32') return;
+    await expect(
+      captureCodeMemoryLinkProcessGroup({
+        arguments: ['-e', 'process.stdin.resume()'],
+        command: process.execPath,
+        cwd: process.cwd(),
+        environment: {PATH: process.env.PATH ?? '/usr/bin:/bin'},
+        label: 'oversized stdin fixture',
+        maxOutputBytes: 4_096,
+        stdin: 'x'.repeat(1 * 1_024 * 1_024 + 1),
+        timeoutMilliseconds: 5_000,
+      }),
+    ).rejects.toThrow('stdin exceeded its byte limit');
+  });
+
   it('freezes one hash-bound tree used by both judge input verification and public inventory', async () => {
     const root = await temporaryRoot(roots);
     const source = join(root, 'source');

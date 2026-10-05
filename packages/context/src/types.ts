@@ -22,7 +22,10 @@ export const CONTEXT_BRIEF_DEFAULT_PUBLIC_CODE_RELATIONS = 1 as const;
 export const CONTEXT_BRIEF_DEFAULT_ESTIMATED_TOKENS = 1_250 as const;
 export const CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS = 800 as const;
 export const CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS = 1_500 as const;
-export const CONTEXT_BRIEF_MODES = ['brief', 'locate', 'explain', 'trace', 'impact'] as const;
+export const CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS = 800 as const;
+export const CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT = 8 as const;
+export const CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT = 12 as const;
+export const CONTEXT_BRIEF_MODES = ['brief', 'locate', 'explain', 'trace', 'impact', 'resume'] as const;
 export const CONTEXT_BRIEF_DETAILS = ['compact', 'source'] as const;
 
 export type ContextBriefMode = (typeof CONTEXT_BRIEF_MODES)[number];
@@ -33,6 +36,8 @@ export function isContextBriefMode(value: string): value is ContextBriefMode {
   return CONTEXT_BRIEF_MODES.some(mode => mode === value);
 }
 export type ContextBriefFreshness = 'fresh' | 'stale' | 'unknown';
+/** Coverage of retained evidence, never a claim that an eventual answer or patch is correct. */
+export type ContextBriefEvidenceState = 'sufficient' | 'partial' | 'degraded' | 'no-match';
 export type ContextBriefPreciseEvidenceStatus = 'exact' | 'relocated' | 'changed' | 'deleted' | 'unknown';
 export type ContextBriefResponseVersion =
   typeof CONTEXT_BRIEF_LEGACY_VERSION | typeof CONTEXT_BRIEF_VERSION | typeof CONTEXT_BRIEF_PROCEDURE_VERSION;
@@ -75,6 +80,15 @@ export interface ContextBriefCitationValidationReceiptV2 {
   readonly observedNodeId?: string;
   readonly observedPath?: string;
   readonly observedSpan?: CodeGraphSpan;
+  readonly provenance?: 'current-verified' | 'historical-verified' | 'unverified';
+  /** Route absence may recover; a failed closing fence must remain deferred. */
+  readonly repositoryRouteUnavailable?: true;
+  /** Private local recovery route; original citation provenance stays immutable. */
+  readonly recovery?: {
+    readonly callerCwd: string;
+    readonly repositoryId: string;
+    readonly aliasProof?: import('@threadnote/graph/citation/recovery').CodeGraphRepositoryAliasProofV1;
+  };
   readonly reason: ContextBriefCitationValidationReasonV2;
   readonly repositoryId?: string;
   readonly snapshotCommit?: string;
@@ -264,6 +278,7 @@ export interface ContextBriefGraphEvidenceV1 {
 
 export interface ContextBriefMemoryCandidateV1 {
   readonly actionCard?: ContextBriefMemoryActionCardV1;
+  readonly continuationCard?: ContextBriefContinuationCardV1;
   readonly authority?: MemoryAuthority;
   /** Private compiler input; the public projection emits only compact validation receipts. */
   readonly codeCitations: readonly MemoryCodeCitationV1[];
@@ -284,6 +299,12 @@ export interface ContextBriefMemoryCandidateV1 {
   readonly uri: string;
 }
 
+/** Canonical memory identity and explicit anchors supplied to citation validation by Context Health. */
+export interface ContextHealthCitationSubjectV1 {
+  readonly codeCitations: readonly MemoryCodeCitationV1[];
+  readonly uri: string;
+}
+
 /** Explicit, bounded author-supplied guidance; never executable instructions. */
 export interface ContextBriefMemoryActionCardV1 {
   readonly appliesTo: string;
@@ -292,10 +313,30 @@ export interface ContextBriefMemoryActionCardV1 {
   readonly verify?: string;
 }
 
+/** Bounded current-workflow state for a handoff, distinct from a reusable action card. */
+export interface ContextBriefContinuationCardV1 {
+  readonly anchors?: string;
+  readonly attempted?: string;
+  readonly avoidRepeat?: string;
+  readonly blockers?: string;
+  readonly decisions?: string;
+  readonly graphQuery?: string;
+  readonly graphQuestion?: string;
+  readonly observations?: string;
+  readonly invariants?: string;
+  readonly nextStep?: string;
+  readonly rationale?: string;
+  readonly risks?: string;
+  readonly task?: string;
+  readonly unresolved?: string;
+  readonly verification?: string;
+}
+
 export interface ContextBriefMemoryEvidenceV1 extends Omit<
   ContextBriefMemoryCandidateV1,
   'citationErrorCount' | 'codeCitations' | 'codeLinkMatches' | 'lexicallySelected'
 > {
+  readonly continuationCard?: ContextBriefContinuationCardV1;
   readonly citationErrorCount?: number;
   /** Detailed citation receipts were omitted to protect an actionable relationship bundle. */
   readonly citationDetailsOmitted?: true;
@@ -370,34 +411,69 @@ export interface ContextBriefContextIssueV1 {
 
 export type ContextBriefFollowUpV1 =
   | {
+      readonly arguments: {
+        readonly budgetTokens: typeof CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS;
+        readonly callerCwd: string;
+        readonly edgeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT;
+        readonly nodeId: string;
+        readonly nodeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT;
+        readonly operation: 'node';
+      };
       readonly id: string;
       readonly operation: 'inspect-node';
       readonly rank: number;
       readonly ref: string;
+      readonly tool: 'inspect_code_graph';
     }
   | {
+      readonly arguments: {readonly uri: string};
       readonly id: string;
       readonly operation: 'read-memory';
       readonly rank: number;
+      readonly tool: 'read_context';
       readonly uri: string;
     }
   | {
+      readonly arguments: {
+        readonly budgetTokens: typeof CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS;
+        readonly cursor: string;
+        readonly edgeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT;
+        readonly nodeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT;
+        readonly operation: 'query';
+        readonly workset: string;
+      };
       readonly cursor: string;
       readonly id: string;
       readonly operation: 'continue-workset';
       readonly rank: number;
-    }
-  | {
-      readonly id: string;
-      readonly operation: 'prepare-workset';
-      readonly rank: number;
+      readonly tool: 'inspect_code_graph';
       readonly workset: string;
     }
   | {
+      readonly arguments:
+        | {
+            readonly budgetTokens: typeof CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS;
+            readonly callerCwd: string;
+            readonly edgeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT;
+            readonly nodeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT;
+            readonly operation: 'query';
+            readonly query: string;
+          }
+        | {
+            readonly budgetTokens: typeof CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS;
+            readonly edgeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT;
+            readonly nodeLimit: typeof CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT;
+            readonly operation: 'query';
+            readonly query: string;
+            readonly workset: string;
+          };
       readonly id: string;
       readonly operation: 'graph-status';
       readonly rank: number;
       readonly scope: 'repository' | 'workset';
+      readonly tool: 'inspect_code_graph';
+      /** Legacy label companion; required when the executable retry targets a Workset. */
+      readonly workset?: string;
     };
 
 export interface ContextBriefLogicalResultV1 {
@@ -457,6 +533,7 @@ export interface ContextBriefV1 {
     };
   };
   readonly durableDecisions: readonly ContextBriefMemoryEvidenceV1[];
+  readonly evidenceState: ContextBriefEvidenceState;
   readonly recommendedFollowUps: readonly ContextBriefFollowUpV1[];
   readonly graph: {
     readonly cards: readonly ContextBriefGraphCardV1[];
@@ -515,6 +592,7 @@ export interface ContextBriefAgentViewV1 {
     readonly gaps?: readonly string[];
   };
   readonly durableDecisions?: readonly ContextBriefAgentViewMemoryV1[];
+  readonly evidenceState: ContextBriefEvidenceState;
   readonly graph?: {
     readonly cards?: readonly {
       readonly kind: string;
@@ -558,6 +636,7 @@ export interface ContextBriefAgentViewV1 {
 
 export interface ContextBriefAgentViewMemoryV1 {
   readonly actionCard?: ContextBriefMemoryActionCardV1;
+  readonly continuationCard?: ContextBriefContinuationCardV1;
   readonly authority?: MemoryAuthority;
   readonly citationActions?: readonly {
     readonly count: number;
@@ -753,7 +832,14 @@ function parseScope(value: unknown): ContextBriefScopeV1 {
 }
 
 function contextBriefMode(value: unknown): ContextBriefMode {
-  if (value === 'brief' || value === 'locate' || value === 'explain' || value === 'trace' || value === 'impact') {
+  if (
+    value === 'brief' ||
+    value === 'locate' ||
+    value === 'explain' ||
+    value === 'trace' ||
+    value === 'impact' ||
+    value === 'resume'
+  ) {
     return value;
   }
   throw invalid(`mode must be one of ${CONTEXT_BRIEF_MODES.join(', ')}.`);

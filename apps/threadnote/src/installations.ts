@@ -106,9 +106,7 @@ export const activateStandaloneRelease = Effect.fn('installations.activateReleas
   yield* faultInjection.afterStep?.('active-previous-backed-up') ?? Effect.void;
   yield* fs
     .rename(temporaryPath, activePath)
-    .pipe(
-      Effect.catch(error => recoverActiveReleasePromotion(fs, path, root).pipe(Effect.andThen(Effect.fail(error)))),
-    );
+    .pipe(Effect.tapError(() => recoverActiveReleasePromotion(fs, path, root)));
   yield* syncDirectoryBestEffort(fs, root);
   yield* faultInjection.afterStep?.('active-promoted') ?? Effect.void;
   yield* fs.remove(backupPath, {force: true});
@@ -156,11 +154,7 @@ export const promoteStandaloneReleaseDirectory = Effect.fn('installations.promot
   yield* faultInjection.afterStep?.('release-previous-backed-up') ?? Effect.void;
   yield* fs
     .rename(resolvedStagedRoot, resolvedReleaseRoot)
-    .pipe(
-      Effect.catch(error =>
-        recoverStandaloneReleasePromotion(fs, path, resolvedReleaseRoot).pipe(Effect.andThen(Effect.fail(error))),
-      ),
-    );
+    .pipe(Effect.tapError(() => recoverStandaloneReleasePromotion(fs, path, resolvedReleaseRoot)));
   yield* syncDirectoryBestEffort(fs, versionsRoot);
   yield* faultInjection.afterStep?.('release-promoted') ?? Effect.void;
   yield* fs.remove(backupRoot, {force: true, recursive: true});

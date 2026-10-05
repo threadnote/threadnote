@@ -9,6 +9,18 @@ import {
   type CodeGraphSymbolSemanticLocatorV1,
 } from '@threadnote/graph/citation/primitives';
 import {codeGraphCitationSourceKey, readCodeGraphCitationSources} from '@threadnote/graph/citation/source';
+import {
+  resolveCodeGraphCitationRepositoryRoutes,
+  makeCodeGraphCitationRepositoryRouteObservation,
+  revalidateCodeGraphCitationRecoveryRoute,
+  type CodeGraphCitationRecoveryRouteV1,
+} from '@threadnote/graph/citation/recovery';
+import {
+  readRetainedCodeGraphCitationEvidence,
+  retainCodeGraphCitationEvidence,
+  type CodeGraphCitationEvidenceSourceV1,
+} from '@threadnote/graph/citation/capsule';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {worktreeOverlayState} from '@threadnote/graph/inventory';
 import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
@@ -47,14 +59,760 @@ import type {
   ContextBriefMemoryCandidateV1,
   ContextBriefMemoryCitationValidationV2,
   ContextBriefScopeV1,
+  ContextHealthCitationSubjectV1,
 } from './types.js';
 
 export const CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS = 96 as const;
 export const CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES = 32 as const;
+export type {ContextHealthCitationSourceExcerptV1} from './citation/evidence_excerpt.js';
+import {
+  citationSourceExcerpt,
+  historicalCitationBytesMatch,
+  historicalSnapshotCitationMatches,
+  type ContextHealthCitationSourceExcerptV1,
+} from './citation/evidence_excerpt.js';
+
 const RELOCATION_MATCH_LIMIT = 2;
 const VALIDATION_CONCURRENCY = 4;
 const VALIDATION_CACHE_LIMIT = 512;
 const validationReceiptCache = new Map<string, ContextBriefCitationValidationReceiptV2>();
+
+/** Bounded read overlay for a verified namespace change in this exact caller checkout. */
+export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.validateMemoryCitations')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  candidates: readonly ContextBriefMemoryCandidateV1[],
+  fence?: ContextBriefCitationValidationFenceV2,
+) {
+  const direct = yield* validateBoundedMemoryCitations(config, scope, candidates, fence);
+  if (scope.kind !== 'repository' || fence?.kind === 'workset') return direct;
+  const eligible = direct.flatMap(validation => {
+    const receipts = validation.receipts.filter(
+      receipt =>
+        receipt.status === 'unknown' &&
+        (receipt.reason === 'repository-unavailable' ||
+          (receipt.reason === 'graph-stale' && receipt.repositoryRouteUnavailable === true)),
+    );
+    return receipts.length === 0 ? [] : [{...validation, receipts}];
+  });
+  if (eligible.length === 0) return direct;
+  const eligibleByUri = new Map(
+    eligible.map(validation => [validation.uri, new Set(validation.receipts.map(receipt => receipt.citationId))]),
+  );
+  const selected = candidates.flatMap(candidate => {
+    const ids = eligibleByUri.get(candidate.uri);
+    return ids === undefined
+      ? []
+      : [{...candidate, codeCitations: candidate.codeCitations.filter(citation => ids.has(citation.id))}];
+  });
+  const recovered = yield* recoverContextHealthCitationEvidence(config, scope, selected, eligible, 'brief', fence);
+  const byUri = new Map(
+    recovered.map(validation => [
+      validation.uri,
+      new Map(validation.receipts.map(receipt => [receipt.citationId, receipt])),
+    ]),
+  );
+  return direct.map(validation => ({
+    ...validation,
+    receipts: validation.receipts.map(receipt => byUri.get(validation.uri)?.get(receipt.citationId) ?? receipt),
+  }));
+});
+
+export interface ContextHealthCitationCheckpointV1 {
+  readonly after?: {readonly uri: string; readonly citationId: string};
+  readonly complete: boolean;
+}
+
+export interface ContextHealthCitationBatchOptionsV1 {
+  readonly after?: ContextHealthCitationCheckpointV1['after'];
+  readonly batchSize?: number;
+}
+
+/** A stable identity cursor survives deletions; new entries before it belong to the next scan generation. */
+export function planContextHealthCitationBatch(
+  candidates: readonly ContextHealthCitationSubjectV1[],
+  options: ContextHealthCitationBatchOptionsV1 = {},
+): {
+  readonly candidates: readonly ContextHealthCitationSubjectV1[];
+  readonly checkpoint: ContextHealthCitationCheckpointV1;
+  readonly eligible: number;
+  readonly checked: number;
+} {
+  const requested = options.batchSize ?? CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS;
+  if (!Number.isSafeInteger(requested) || requested < 1)
+    throw new Error('Citation batch size must be a positive integer.');
+  const maximum = Math.min(requested, CONTEXT_BRIEF_MAXIMUM_CITATION_VALIDATIONS);
+  const key = (identity: {readonly uri: string; readonly citationId: string}) =>
+    `${identity.uri}\0${identity.citationId}`;
+  const tasks = candidates
+    .flatMap(candidate =>
+      candidate.codeCitations.map(citation => ({
+        candidate,
+        citation,
+        identity: {uri: candidate.uri, citationId: citation.id},
+      })),
+    )
+    .sort((left, right) =>
+      key(left.identity) < key(right.identity) ? -1 : key(left.identity) > key(right.identity) ? 1 : 0,
+    );
+  const remaining =
+    options.after === undefined ? tasks : tasks.filter(task => key(task.identity) > key(options.after!));
+  const selected: typeof tasks = [];
+  const repositories = new Set<string>();
+  for (const task of remaining) {
+    if (
+      selected.length === maximum ||
+      (!repositories.has(task.citation.repositoryId) && repositories.size === CONTEXT_BRIEF_MAXIMUM_CITED_REPOSITORIES)
+    )
+      break;
+    repositories.add(task.citation.repositoryId);
+    selected.push(task);
+  }
+  const grouped = new Map<string, ContextHealthCitationSubjectV1>();
+  for (const task of selected) {
+    const existing = grouped.get(task.candidate.uri);
+    grouped.set(task.candidate.uri, {
+      ...task.candidate,
+      codeCitations: [...(existing?.codeCitations ?? []), task.citation],
+    });
+  }
+  const after = selected.at(-1)?.identity ?? options.after;
+  return {
+    candidates: [...grouped.values()],
+    checkpoint: {...(after === undefined ? {} : {after}), complete: selected.length === remaining.length},
+    checked: selected.length,
+    eligible: tasks.length,
+  };
+}
+
+export const validateContextHealthCitationBatch = Effect.fn('contextHealth.validateCitationBatch')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  candidates: readonly ContextHealthCitationSubjectV1[],
+  options: ContextHealthCitationBatchOptionsV1 = {},
+) {
+  const batch = planContextHealthCitationBatch(candidates, options);
+  const direct = yield* validateBoundedMemoryCitations(
+    config,
+    scope,
+    batch.candidates,
+    undefined,
+    config.agentContextHome,
+  );
+  const validations = yield* recoverContextHealthCitationEvidence(config, scope, batch.candidates, direct);
+  return {...batch, validations};
+});
+
+const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCitationEvidence')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  candidates: readonly ContextHealthCitationSubjectV1[],
+  direct: readonly ContextBriefMemoryCitationValidationV2[],
+  policy: 'health' | 'brief' = 'health',
+  fence?: ContextBriefCitationValidationFenceV2,
+) {
+  const query = yield* CodeGraphQueryService;
+  const byUri = new Map(candidates.map(candidate => [candidate.uri, candidate]));
+  const resolve = yield* makeCodeGraphCitationRepositoryRouteObservation({
+    threadnoteHome: config.agentContextHome,
+    ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
+  });
+  const routesBySource = new Map<string, Effect.Success<ReturnType<typeof resolveCodeGraphCitationRepositoryRoutes>>>();
+  const statuses = new Map<string, CodeGraphStatus | undefined>();
+  const routeReceipts = new Map<string, ReadonlyMap<string, ContextBriefCitationValidationReceiptV2>>();
+  const validations = yield* Effect.forEach(
+    direct,
+    validation =>
+      Effect.gen(function* () {
+        const candidate = byUri.get(validation.uri)!;
+        const citations = new Map(candidate.codeCitations.map(citation => [citation.id, citation]));
+        const receipts: ContextBriefCitationValidationReceiptV2[] = [];
+        for (const original of validation.receipts) {
+          if (original.status !== 'unknown' || !['repository-unavailable', 'graph-stale'].includes(original.reason)) {
+            const current = {
+              ...original,
+              provenance:
+                original.status === 'exact' || original.status === 'relocated'
+                  ? ('current-verified' as const)
+                  : ('unverified' as const),
+            };
+            receipts.push(current);
+            continue;
+          }
+          const citation = citations.get(original.citationId)!;
+          const sourceKey = `${citation.repositoryId}\0${citation.sourceCommit}`;
+          let resolution = routesBySource.get(sourceKey);
+          if (resolution === undefined) {
+            resolution = yield* resolve({
+              callerOnly: policy === 'brief',
+              repositoryId: citation.repositoryId,
+              sourceCommit: citation.sourceCommit,
+            }).pipe(
+              Effect.orElseSucceed(() => ({
+                ambiguous: false,
+                complete: false,
+                checkoutIds: [],
+                generation: 'unavailable',
+                routes: [],
+              })),
+            );
+            routesBySource.set(sourceKey, resolution);
+          }
+          if (resolution.ambiguous) {
+            receipts.push({...original, provenance: 'unverified', reason: 'repository-ambiguous'});
+            continue;
+          }
+          let recovered: ContextBriefCitationValidationReceiptV2 | undefined;
+          for (const route of resolution.routes) {
+            if (policy === 'brief' && route.aliasProof === undefined) continue;
+            recovered = yield* Effect.gen(function* () {
+              if (!statuses.has(route.identity.repoRoot))
+                statuses.set(
+                  route.identity.repoRoot,
+                  yield* query
+                    .status(config.agentContextHome, route.identity.repoRoot, {
+                      manifestPath: config.manifestPath,
+                      ...(scope.project === undefined ? {} : {project: scope.project}),
+                      observeWorktree: true,
+                      requestMaintenance: false,
+                    })
+                    .pipe(Effect.orElseSucceed(() => undefined)),
+                );
+              const status = statuses.get(route.identity.repoRoot);
+              if (
+                status !== undefined &&
+                (status.identity.repositoryId !== route.identity.repositoryId ||
+                  status.identity.worktreeId !== route.identity.worktreeId ||
+                  status.databasePath !== route.databasePath)
+              )
+                return undefined;
+              if (
+                policy === 'brief' &&
+                fence?.kind === 'repository' &&
+                (status?.identity.repositoryId !== fence.repositoryId || status?.readySnapshot?.id !== fence.snapshotId)
+              )
+                return undefined;
+              const recovery = {
+                callerCwd: route.identity.repoRoot,
+                repositoryId: route.identity.repositoryId,
+                ...(route.aliasProof === undefined ? {} : {aliasProof: route.aliasProof}),
+              };
+              if (
+                status !== undefined &&
+                status.readySnapshot !== undefined &&
+                !status.stale &&
+                status.freshness === 'current' &&
+                (original.reason !== 'graph-stale' || original.repositoryRouteUnavailable === true)
+              ) {
+                const routeKey = `${route.identity.repoRoot}\0${citation.repositoryId}\0${status.readySnapshot.id}`;
+                let checkedById = routeReceipts.get(routeKey);
+                if (checkedById === undefined) {
+                  const repositoryTasks = candidates.flatMap(value =>
+                    value.codeCitations
+                      .filter(anchor => anchor.repositoryId === citation.repositoryId)
+                      .map((anchor, index) => ({citation: anchor, index, uri: value.uri})),
+                  );
+                  const checked = yield* validateRepositoryTasks(
+                    {
+                      databasePath: status.databasePath,
+                      finalFence: Effect.all(
+                        [
+                          statusRepositoryFinalFence(config, {cwd: route.identity.repoRoot, status}),
+                          revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
+                        ],
+                        {concurrency: 2},
+                      ).pipe(Effect.map(results => results.every(Boolean))),
+                      objectFormat: status.identity.objectFormat,
+                      repositoryId: status.identity.repositoryId,
+                      ...(policy === 'health'
+                        ? {retention: {checkoutId: status.identity.checkoutId, threadnoteHome: config.agentContextHome}}
+                        : {}),
+                      snapshot: status.readySnapshot,
+                      sourceRoot: status.identity.repoRoot,
+                      worktreeId: status.identity.worktreeId,
+                    },
+                    repositoryTasks,
+                    original.observedAt,
+                  );
+                  checkedById = new Map(checked.map(value => [value.receipt.citationId, value.receipt]));
+                  routeReceipts.set(routeKey, checkedById);
+                }
+                const checked = checkedById.get(citation.id)!;
+                if (checked.status !== 'unknown') {
+                  const current = {
+                    ...checked,
+                    provenance:
+                      checked.status === 'exact' || checked.status === 'relocated'
+                        ? ('current-verified' as const)
+                        : ('unverified' as const),
+                    recovery,
+                  };
+                  return current;
+                }
+              }
+              if (policy === 'brief') return undefined;
+              const historical = yield* recoverHistoricalCitationEvidence(config, route, citation, original);
+              return historical === undefined ? undefined : {...historical, recovery};
+            }).pipe(Effect.orElseSucceed(() => undefined));
+            if (recovered !== undefined) break;
+          }
+          const retained =
+            policy === 'health' && recovered === undefined
+              ? yield* recoverCapsuleCitationEvidence(config, resolution.checkoutIds, citation, original)
+              : undefined;
+          receipts.push(recovered ?? retained ?? {...original, provenance: 'unverified'});
+        }
+        return {...validation, receipts};
+      }),
+    {concurrency: 1},
+  );
+  return validations;
+});
+
+function citationEvidenceSource(citation: MemoryCodeCitationV1): CodeGraphCitationEvidenceSourceV1 {
+  return {
+    extractorSet: citation.extractorSet,
+    fileContentHash: citation.fileContentHash.value,
+    path: citation.path,
+    repositoryId: citation.repositoryId,
+    sourceCommit: citation.sourceCommit,
+    sourceDirty: citation.sourceDirty,
+    sourceSnapshotId: citation.sourceSnapshotId,
+  };
+}
+
+const retainCitationEvidenceUnderLease = Effect.fn('contextHealth.retainCitationEvidenceUnderLease')(function* (
+  repository: RepositoryValidationInput & {readonly retention: NonNullable<RepositoryValidationInput['retention']>},
+  tasks: readonly CitationTask[],
+) {
+  const captures = new Map<string, CitationTask[]>();
+  for (const task of tasks) {
+    const key = `${task.citation.sourceCommit}\0${task.citation.sourceDirty}`;
+    captures.set(key, [...(captures.get(key) ?? []), task]);
+  }
+  const retainedSources = yield* Effect.forEach(
+    captures.values(),
+    capturedTasks =>
+      Effect.gen(function* () {
+        const sources = capturedTasks.map(task => ({
+          expectedContentHash: task.citation.fileContentHash.value,
+          repositoryPath: task.citation.path,
+          requireBytes: true,
+        }));
+        const bytes = yield* readCodeGraphCitationSources({
+          allowCommitFallback: !capturedTasks[0].citation.sourceDirty,
+          objectFormat: repository.objectFormat,
+          repositoryRoot: repository.sourceRoot,
+          sourceCommit: capturedTasks[0].citation.sourceCommit,
+          sources,
+        });
+        return capturedTasks.flatMap((task, index) => {
+          const retained = bytes.get(codeGraphCitationSourceKey(sources[index]));
+          return retained === undefined ? [] : [{bytes: retained, task}];
+        });
+      }).pipe(Effect.orElseSucceed(() => [])),
+    {concurrency: 2},
+  );
+  for (const {bytes, task} of retainedSources.flat()) {
+    yield* retainCodeGraphCitationEvidence({
+      bytes,
+      checkoutId: repository.retention.checkoutId,
+      objectFormat: repository.objectFormat,
+      referenceId: sha256HexSync(`${task.uri}\0${task.citation.id}`),
+      source: citationEvidenceSource(task.citation),
+      threadnoteHome: repository.retention.threadnoteHome,
+    });
+  }
+});
+
+const recoverCapsuleCitationEvidence = Effect.fn('contextHealth.recoverCapsuleCitationEvidence')(function* (
+  config: RuntimeConfig,
+  checkoutIds: readonly string[],
+  citation: MemoryCodeCitationV1,
+  original: ContextBriefCitationValidationReceiptV2,
+) {
+  for (const checkoutId of checkoutIds) {
+    const retained = yield* readRetainedCodeGraphCitationEvidence(
+      config.agentContextHome,
+      checkoutId,
+      citationEvidenceSource(citation),
+    );
+    if (retained === undefined) continue;
+    if (!(yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))) continue;
+    return {
+      ...original,
+      provenance: 'historical-verified' as const,
+      snapshotCommit: citation.sourceCommit,
+      snapshotId: citation.sourceSnapshotId,
+    };
+  }
+  return undefined;
+});
+
+const readHistoricalGitCitationBytes = Effect.fn('contextHealth.readHistoricalGitCitationBytes')(function* (
+  config: RuntimeConfig,
+  route: CodeGraphCitationRecoveryRouteV1,
+  citation: MemoryCodeCitationV1,
+) {
+  if (citation.sourceDirty || !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route)))
+    return undefined;
+  const request = {
+    expectedContentHash: citation.fileContentHash.value,
+    repositoryPath: citation.path,
+    requireBytes: true,
+  };
+  const sources = yield* readCodeGraphCitationSources({
+    commitOnly: true,
+    objectFormat: route.identity.objectFormat,
+    repositoryRoot: route.identity.repoRoot,
+    retainedBytesLimit: 4 * 1_048_576,
+    sourceCommit: citation.sourceCommit,
+    sources: [request],
+  });
+  const bytes = sources.get(codeGraphCitationSourceKey(request));
+  if (bytes === undefined || !(yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)))
+    return undefined;
+  if (!(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))) return undefined;
+  return bytes;
+});
+
+/** Exact local evidence for one canonical citation; excerpts are data, never instructions. */
+export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCitationEvidence')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  citation: MemoryCodeCitationV1,
+  options: {readonly maximumBytes?: number; readonly maximumLines?: number; readonly startLine?: number} = {},
+) {
+  const attemptedSteps: string[] = ['verified-repository-routes'];
+  const resolution = yield* resolveCodeGraphCitationRepositoryRoutes({
+    ...(scope.kind === 'repository' ? {callerCwd: scope.callerCwd} : {}),
+    repositoryId: citation.repositoryId,
+    sourceCommit: citation.sourceCommit,
+    threadnoteHome: config.agentContextHome,
+  });
+  const excerpts: ContextHealthCitationSourceExcerptV1[] = [];
+  const query = yield* CodeGraphQueryService;
+  const store = yield* CodeGraphStore;
+  if (!resolution.ambiguous)
+    for (const route of resolution.routes) {
+      attemptedSteps.push('current-source');
+      const current = yield* Effect.gen(function* () {
+        const status = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
+          manifestPath: config.manifestPath,
+          ...(scope.project === undefined ? {} : {project: scope.project}),
+          observeWorktree: true,
+          requestMaintenance: false,
+        });
+        if (
+          status.stale ||
+          status.freshness !== 'current' ||
+          status.readySnapshot === undefined ||
+          status.databasePath !== route.databasePath ||
+          status.identity.repositoryId !== route.identity.repositoryId
+        )
+          return undefined;
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const snapshot = status.readySnapshot!;
+            yield* Effect.acquireRelease(store.acquireSnapshotLease(status.databasePath, snapshot.id, 60_000), token =>
+              store.releaseSnapshotLease(status.databasePath, token).pipe(Effect.ignore),
+            );
+            const [checked] = yield* validateRepositoryTasks(
+              {
+                databasePath: status.databasePath,
+                finalFence: revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
+                objectFormat: status.identity.objectFormat,
+                repositoryId: status.identity.repositoryId,
+                snapshot,
+                sourceRoot: route.identity.repoRoot,
+                worktreeId: status.identity.worktreeId,
+              },
+              [{citation, index: 0, uri: ''}],
+              DateTime.formatIso(yield* DateTime.now),
+            );
+            const observedPath = checked.receipt.observedPath ?? citation.path;
+            const evidence = yield* store.effectiveSnapshotCitationEvidence(status.databasePath, snapshot.id, {
+              paths: [observedPath],
+            });
+            const file = evidence.filesByPaths.find(value => value.path === observedPath)?.file;
+            if (file === undefined) return undefined;
+            const request = {expectedContentHash: file.contentHash, repositoryPath: file.path, requireBytes: true};
+            const sources = yield* readCodeGraphCitationSources({
+              allowCommitFallback: false,
+              objectFormat: status.identity.objectFormat,
+              repositoryRoot: route.identity.repoRoot,
+              retainedBytesLimit: 4 * 1_048_576,
+              sourceCommit: snapshot.commit,
+              sources: [request],
+            });
+            const bytes = sources.get(codeGraphCitationSourceKey(request));
+            if (
+              bytes === undefined ||
+              !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
+            )
+              return undefined;
+            const after = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
+              manifestPath: config.manifestPath,
+              ...(scope.project === undefined ? {} : {project: scope.project}),
+              observeWorktree: true,
+              requestMaintenance: false,
+            });
+            if (!sameExactSnapshot(status, after)) return undefined;
+            return citationSourceExcerpt(
+              bytes,
+              {
+                extractorSet: snapshot.extractorSet,
+                fileContentHash: file.contentHash,
+                path: file.path,
+                repositoryId: status.identity.repositoryId,
+                sourceCommit: snapshot.commit,
+                sourceDirty: snapshot.dirty,
+                sourceSnapshotId: snapshot.id,
+              },
+              'current-verified',
+              checked.receipt.status === 'exact' || checked.receipt.status === 'relocated',
+              {
+                ...options,
+                startLine:
+                  options.startLine ??
+                  checked.receipt.observedSpan?.line ??
+                  (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+              },
+            );
+          }),
+        );
+      }).pipe(Effect.orElseSucceed(() => undefined));
+      if (current !== undefined) {
+        excerpts.push(current);
+        break;
+      }
+    }
+  attemptedSteps.push('retained-capsule');
+  let historical: Uint8Array | undefined;
+  for (const checkoutId of resolution.checkoutIds) {
+    const retained = yield* readRetainedCodeGraphCitationEvidence(
+      config.agentContextHome,
+      checkoutId,
+      citationEvidenceSource(citation),
+    );
+    if (
+      retained !== undefined &&
+      (yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))
+    ) {
+      historical = retained.bytes;
+      break;
+    }
+  }
+  if (historical === undefined && !resolution.ambiguous)
+    for (const route of resolution.routes) {
+      attemptedSteps.push('exact-snapshot');
+      historical = yield* Effect.gen(function* () {
+        const snapshot = yield* store.readySnapshotById(route.databasePath, citation.sourceSnapshotId);
+        if (
+          snapshot === undefined ||
+          snapshot.repositoryId !== citation.repositoryId ||
+          snapshot.commit !== citation.sourceCommit ||
+          snapshot.dirty !== citation.sourceDirty ||
+          snapshot.extractorSet !== citation.extractorSet
+        )
+          return undefined;
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>
+              store.releaseSnapshotLease(route.databasePath, token).pipe(Effect.ignore),
+            );
+            const evidence = yield* store.effectiveSnapshotCitationEvidence(route.databasePath, snapshot.id, {
+              paths: [citation.path],
+              symbolIds: citation.target.kind === 'symbol' ? [citation.target.nodeId] : [],
+            });
+            if (!historicalSnapshotCitationMatches(citation, evidence)) return undefined;
+            const request = {
+              expectedContentHash: citation.fileContentHash.value,
+              repositoryPath: citation.path,
+              requireBytes: true,
+            };
+            const sources = yield* readCodeGraphCitationSources({
+              allowCommitFallback: !snapshot.dirty,
+              commitOnly: !snapshot.dirty,
+              objectFormat: route.identity.objectFormat,
+              repositoryRoot: route.identity.repoRoot,
+              sourceCommit: snapshot.commit,
+              sources: [request],
+              retainedBytesLimit: 4 * 1_048_576,
+            });
+            const bytes = sources.get(codeGraphCitationSourceKey(request));
+            return bytes !== undefined &&
+              (yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)) &&
+              (yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
+              ? bytes
+              : undefined;
+          }),
+        );
+      }).pipe(Effect.orElseSucceed(() => undefined));
+      if (historical === undefined) {
+        attemptedSteps.push('exact-clean-git');
+        historical = yield* readHistoricalGitCitationBytes(config, route, citation).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+      }
+      if (historical !== undefined) break;
+    }
+  if (historical !== undefined) {
+    const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
+      ...options,
+      startLine: options.startLine ?? (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+    });
+    if (excerpt !== undefined) excerpts.push(excerpt);
+  }
+  return {
+    attemptedSteps: [...new Set(attemptedSteps)],
+    citationId: citation.id,
+    coverage:
+      excerpts.length > 0
+        ? ('available' as const)
+        : resolution.ambiguous
+          ? ('ambiguous' as const)
+          : ('unavailable' as const),
+    excerpts,
+    generation: resolution.generation,
+    routesComplete: resolution.complete,
+  };
+});
+
+const recoverHistoricalCitationEvidence = Effect.fn('contextHealth.recoverHistoricalCitationEvidence')(function* (
+  config: RuntimeConfig,
+  route: CodeGraphCitationRecoveryRouteV1,
+  citation: MemoryCodeCitationV1,
+  original: ContextBriefCitationValidationReceiptV2,
+) {
+  const store = yield* CodeGraphStore;
+  const exact = yield* store
+    .readySnapshotById(route.databasePath, citation.sourceSnapshotId)
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const snapshot =
+    exact ??
+    (citation.sourceDirty
+      ? undefined
+      : yield* store
+          .readySnapshotForCommit(
+            route.databasePath,
+            citation.repositoryId,
+            citation.sourceCommit,
+            citation.extractorSet,
+          )
+          .pipe(Effect.orElseSucceed(() => undefined)));
+  if (
+    snapshot === undefined ||
+    snapshot.repositoryId !== citation.repositoryId ||
+    snapshot.commit !== citation.sourceCommit ||
+    snapshot.dirty !== citation.sourceDirty ||
+    snapshot.extractorSet !== citation.extractorSet
+  ) {
+    const bytes = yield* readHistoricalGitCitationBytes(config, route, citation);
+    if (bytes === undefined) return undefined;
+    yield* retainCodeGraphCitationEvidence({
+      bytes,
+      checkoutId: route.identity.checkoutId,
+      objectFormat: route.identity.objectFormat,
+      referenceId: sha256HexSync(citation.id),
+      source: citationEvidenceSource(citation),
+      threadnoteHome: config.agentContextHome,
+    });
+    if (!(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))) return undefined;
+    return {
+      ...original,
+      coverage: 'incomplete' as const,
+      provenance: 'historical-verified' as const,
+      snapshotCommit: citation.sourceCommit,
+      snapshotId: citation.sourceSnapshotId,
+    };
+  }
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>
+        store.releaseSnapshotLease(route.databasePath, token).pipe(Effect.ignore),
+      );
+      const bytes = yield* readCodeGraphCitationSources({
+        allowCommitFallback: !snapshot.dirty,
+        objectFormat: route.identity.objectFormat,
+        repositoryRoot: route.identity.repoRoot,
+        sourceCommit: snapshot.commit,
+        sources: [
+          {expectedContentHash: citation.fileContentHash.value, repositoryPath: citation.path, requireBytes: true},
+        ],
+      });
+      if (
+        !bytes.has(
+          codeGraphCitationSourceKey({
+            expectedContentHash: citation.fileContentHash.value,
+            repositoryPath: citation.path,
+          }),
+        )
+      )
+        return undefined;
+      const [checked] = yield* validateRepositoryTasks(
+        {
+          databasePath: route.databasePath,
+          finalFence: revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
+          objectFormat: route.identity.objectFormat,
+          repositoryId: snapshot.repositoryId,
+          snapshot,
+          sourceRoot: route.identity.repoRoot,
+          worktreeId: snapshot.worktreeId,
+        },
+        [{citation, index: 0, uri: ''}],
+        original.observedAt,
+      );
+      if (checked.receipt.status !== 'exact' && checked.receipt.status !== 'relocated') return undefined;
+      yield* retainCodeGraphCitationEvidence({
+        bytes: bytes.get(
+          codeGraphCitationSourceKey({
+            expectedContentHash: citation.fileContentHash.value,
+            repositoryPath: citation.path,
+          }),
+        )!,
+        checkoutId: route.identity.checkoutId,
+        objectFormat: route.identity.objectFormat,
+        referenceId: sha256HexSync(citation.id),
+        source: citationEvidenceSource(citation),
+        threadnoteHome: config.agentContextHome,
+      });
+      return {
+        ...checked.receipt,
+        coverage: 'incomplete' as const,
+        provenance: 'historical-verified' as const,
+        reason: original.reason,
+        status: 'unknown' as const,
+      };
+    }),
+  );
+});
+
+/** Ordinary health admits one batch; explicit diagnostic/worker traversal can drain bounded batches. */
+export const validateContextHealthMemoryCitations = Effect.fn('contextHealth.validateMemoryCitations')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  candidates: readonly ContextHealthCitationSubjectV1[],
+  options: {readonly fullScan?: boolean} = {},
+) {
+  if (!options.fullScan) return (yield* validateContextHealthCitationBatch(config, scope, candidates)).validations;
+  const byUri = new Map<string, ContextBriefMemoryCitationValidationV2>();
+  let after: ContextHealthCitationCheckpointV1['after'];
+  while (true) {
+    const batch = yield* validateContextHealthCitationBatch(config, scope, candidates, {after});
+    for (const validation of batch.validations) {
+      const previous = byUri.get(validation.uri);
+      byUri.set(validation.uri, {
+        uri: validation.uri,
+        receipts: [...(previous?.receipts ?? []), ...validation.receipts],
+        cacheHits: (previous?.cacheHits ?? 0) + (validation.cacheHits ?? 0),
+      });
+    }
+    if (batch.checkpoint.complete) break;
+    after = batch.checkpoint.after;
+  }
+  return [...byUri.values()];
+});
 
 interface CitationTask {
   readonly citation: MemoryCodeCitationV1;
@@ -67,6 +825,7 @@ interface RepositoryValidationInput {
   readonly finalFence: Effect.Effect<boolean, unknown, RepositoryValidationFenceRequirements>;
   readonly objectFormat: RepositoryIdentity['objectFormat'];
   readonly repositoryId: string;
+  readonly retention?: {readonly checkoutId: string; readonly threadnoteHome: string};
   readonly snapshot: CodeGraphSnapshot;
   readonly sourceRoot: string;
   readonly worktreeId: string;
@@ -111,11 +870,12 @@ interface ValidatedCitation {
 }
 
 /** Validate selected-memory citations against exact-current, already-ready graph snapshots. */
-export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.validateMemoryCitations')(function* (
+const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMemoryCitations')(function* (
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
-  candidates: readonly ContextBriefMemoryCandidateV1[],
+  candidates: readonly ContextHealthCitationSubjectV1[],
   fence?: ContextBriefCitationValidationFenceV2,
+  retentionHome?: string,
 ) {
   const allTasks = candidates.flatMap(candidate =>
     candidate.codeCitations.map((citation, index) => ({citation, index, uri: candidate.uri})),
@@ -184,6 +944,9 @@ export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.valid
             finalFence: statusRepositoryFinalFence(config, repository),
             objectFormat: status.identity.objectFormat,
             repositoryId,
+            ...(retentionHome === undefined
+              ? {}
+              : {retention: {checkoutId: status.identity.checkoutId, threadnoteHome: retentionHome}}),
             snapshot: status.readySnapshot,
             sourceRoot: status.identity.repoRoot,
             worktreeId: status.identity.worktreeId,
@@ -211,7 +974,8 @@ export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.valid
         const repositoryId = target.published.repositoryId;
         const tasks = eligibleByRepository.get(repositoryId);
         if (tasks === undefined) return Effect.succeedNone;
-        if (!tasks.every(task => task.citation.target.kind === 'file')) return statusAndValidate.pipe(Effect.option);
+        if (retentionHome !== undefined || !tasks.every(task => task.citation.target.kind === 'file'))
+          return statusAndValidate.pipe(Effect.option);
         return validatePublishedRepositoryTasks(config, target.cwd, target.published, tasks, observedAt).pipe(
           Effect.orElseSucceed(() => undefined),
           Effect.flatMap(results =>
@@ -237,7 +1001,16 @@ export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.valid
   }
   for (const [repositoryId, tasks] of eligibleByRepository) {
     if (matchedRepositoryIds.has(repositoryId)) continue;
-    validated.push(...tasks.map(task => [task, unknown(task.citation, resolution.unavailableReason), false] as const));
+    validated.push(
+      ...tasks.map(
+        task =>
+          [
+            task,
+            {...unknown(task.citation, resolution.unavailableReason), repositoryRouteUnavailable: true as const},
+            false,
+          ] as const,
+      ),
+    );
   }
 
   const receiptsByUri = new Map<string, ContextBriefCitationValidationReceiptV2[]>();
@@ -474,6 +1247,7 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
             : yield* fs.realPath(repository.sourceRoot).pipe(
                 Effect.flatMap(repositoryRoot =>
                   readCodeGraphCitationSources({
+                    allowCommitFallback: !snapshot.dirty,
                     objectFormat: repository.objectFormat,
                     repositoryRoot,
                     sourceCommit: snapshot.commit,
@@ -546,6 +1320,20 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
         for (const [index, task] of uncachedTasks.entries()) computed.set(task, receipts[index]);
       }
 
+      const results = tasks.map((task, index) => {
+        const cachedReceipt = cached[index];
+        return cachedReceipt === undefined
+          ? {cacheHit: false, receipt: computed.get(task)!}
+          : {cacheHit: true, receipt: {...cachedReceipt, observedAt}};
+      }) satisfies readonly ValidatedCitation[];
+      if (repository.retention !== undefined) {
+        yield* retainCitationEvidenceUnderLease(
+          {...repository, retention: repository.retention},
+          tasks.filter(
+            (_, index) => results[index].receipt.status === 'exact' || results[index].receipt.status === 'relocated',
+          ),
+        ).pipe(Effect.ignore);
+      }
       const fenceCurrent = yield* repository.finalFence.pipe(Effect.orElseSucceed(() => false));
       if (!fenceCurrent) {
         return tasks.map(task => ({
@@ -554,13 +1342,10 @@ const validateRepositoryTasks = Effect.fn('contextBrief.validateRepositoryCitati
         })) satisfies readonly ValidatedCitation[];
       }
 
-      return tasks.map((task, index) => {
-        const cachedReceipt = cached[index];
-        if (cachedReceipt !== undefined) return {cacheHit: true, receipt: {...cachedReceipt, observedAt}};
-        const computedReceipt = computed.get(task)!;
-        if (computedReceipt.reason !== 'validation-error') validationCacheSet(cacheKeys[index], computedReceipt);
-        return {cacheHit: false, receipt: computedReceipt};
-      }) satisfies readonly ValidatedCitation[];
+      for (const [index, result] of results.entries())
+        if (!result.cacheHit && result.receipt.reason !== 'validation-error')
+          validationCacheSet(cacheKeys[index], result.receipt);
+      return results;
     }),
   );
 });

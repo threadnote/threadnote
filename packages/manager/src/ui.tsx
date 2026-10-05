@@ -243,6 +243,7 @@ function App(): React.ReactElement {
   const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
+  const [libraryError, setLibraryError] = useState('');
 
   useEffect(() => {
     void refreshAll();
@@ -469,11 +470,28 @@ function App(): React.ReactElement {
           }
         },
       },
-      {label: 'Runtime', run: async () => setState(await api<StateResponse>('/api/state'))},
+      {
+        label: 'Runtime',
+        run: async () => {
+          try {
+            setState(await api<StateResponse>('/api/state'));
+            dispatchAvailability('runtime-ready');
+          } catch (cause) {
+            dispatchAvailability('runtime-lost');
+            throw cause;
+          }
+        },
+      },
       {
         label: 'Memory library',
         run: async () => {
-          nextTree = await api<TreeResponse>('/api/tree');
+          try {
+            nextTree = await api<TreeResponse>('/api/tree');
+            setLibraryError('');
+          } catch (cause) {
+            setLibraryError(errorMessage(cause));
+            throw cause;
+          }
         },
       },
       {
@@ -481,9 +499,6 @@ function App(): React.ReactElement {
         run: async () => setShares((await api<{shares: readonly ShareSummary[]}>('/api/shares')).shares),
       },
     ]);
-    dispatchAvailability(
-      failures.some(failure => /^(Runtime|Memory library):/u.test(failure)) ? 'runtime-lost' : 'runtime-ready',
-    );
     if (nextTree) {
       setTree(nextTree.tree);
       setResourceTree(nextTree.resourcesTree);
@@ -693,6 +708,7 @@ function App(): React.ReactElement {
 
   async function refreshTreeOnly(): Promise<void> {
     const next = await api<TreeResponse>('/api/tree');
+    setLibraryError('');
     setTree(next.tree);
     setResourceTree(next.resourcesTree);
   }
@@ -1341,6 +1357,11 @@ function App(): React.ReactElement {
                 : 'Connecting to Manager. Memory contents and write actions are unavailable.'}
             </div>
           ) : null}
+          {libraryError ? (
+            <div className="manager-connection-alert" role="alert">
+              Memory library unavailable: {libraryError}. Refresh to retry.
+            </div>
+          ) : null}
         </header>
 
         {panel === 'graph' ? (
@@ -1412,7 +1433,7 @@ function App(): React.ReactElement {
 
         {panel === 'context' ? (
           <section className="panel context-panel is-active">
-            <ContextPanel projectOptions={projectOptions} />
+            <ContextPanel projectOptions={projectOptions} refreshGeneration={attentionRefreshGeneration} />
           </section>
         ) : null}
 

@@ -1,7 +1,7 @@
 import {Effect, Layer} from 'effect';
-import * as HttpRouter from 'effect/unstable/http/HttpRouter';
-import * as HttpServerResponse from 'effect/unstable/http/HttpServerResponse';
-import {McpSchema} from 'effect/unstable/ai';
+import * as HttpRouter from 'effect/http/HttpRouter';
+import * as HttpServerResponse from 'effect/http/HttpServerResponse';
+import {McpSchema} from 'effect/ai';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {

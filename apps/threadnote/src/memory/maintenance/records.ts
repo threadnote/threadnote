@@ -9,10 +9,16 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {memoryHeaderValue, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  memoryHeaderValue,
+  parseMemoryDocument,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {localUserMemoriesRoot} from '../migrations.js';
 
 const MAINTENANCE_READ_CONCURRENCY = 16;
+const PERSONAL_PROJECT_READ_CONCURRENCY = 4;
 const PERSONAL_PROJECT_FILE_LIMIT = 10_000;
 const PERSONAL_PROJECT_FILE_BYTE_LIMIT = 8 * 1_024 * 1_024;
 const PERSONAL_PROJECT_TOTAL_BYTE_LIMIT = 128 * 1_024 * 1_024;
@@ -47,24 +53,15 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* localUserMemoriesRoot(config);
-  const records: MemoryRecord[] = [];
   const directorySnapshots: Array<{readonly directory: string; readonly entries: readonly string[] | undefined}> = [];
   const selectedEntries: Array<{
     readonly location: PersonalProjectLocation;
     readonly name: string;
     readonly relative: string;
   }> = [];
-  const admittedEntries: Array<{
-    readonly location: PersonalProjectLocation;
-    readonly name: string;
-    readonly relative: string;
-    readonly size: number;
-  }> = [];
-  const selectedFiles: Array<{readonly contentHash: string; readonly relative: string}> = [];
   let canonicalRoot: string | undefined;
   let filesRead = 0;
   let inspectedBytes = 0;
-  let bytesRead = 0;
   for (const location of personalProjectLocations(uriSegment(project))) {
     const directory = path.join(root, ...location.relativeDirectory);
     const before = yield* canonicalDirectoryEntries(fs, directory);
@@ -84,50 +81,57 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
   if (selectedEntries.length > 0) {
     canonicalRoot = yield* fs.realPath(root);
   }
-  for (const selected of selectedEntries) {
-    const inspected = yield* inspectContainedStableRegularFile(fs, path, canonicalRoot!, selected.relative);
-    const nextInspectedBytes = admitPersonalProjectBytes(inspectedBytes, inspected.size);
+  const admittedEntries = yield* Effect.forEach(
+    selectedEntries,
+    selected =>
+      inspectContainedStableRegularFile(fs, path, canonicalRoot!, selected.relative).pipe(
+        Effect.map(inspected => ({...selected, size: inspected.size})),
+      ),
+    {concurrency: PERSONAL_PROJECT_READ_CONCURRENCY},
+  );
+  for (const selected of admittedEntries) {
+    const nextInspectedBytes = admitPersonalProjectBytes(inspectedBytes, selected.size);
     if (Result.isFailure(nextInspectedBytes)) return yield* personalProjectReadError(nextInspectedBytes.failure);
     inspectedBytes = nextInspectedBytes.success;
-    admittedEntries.push({...selected, size: inspected.size});
   }
-  for (const selected of admittedEntries) {
-    const bytes = yield* readBoundedContainedStableRegularFile(
-      fs,
-      path,
-      canonicalRoot!,
-      selected.relative,
-      PERSONAL_PROJECT_FILE_BYTE_LIMIT,
-    );
-    if (bytes.byteLength !== selected.size) {
-      return yield* personalProjectReadError('Personal project memory content changed during the snapshot read.');
-    }
-    selectedFiles.push({contentHash: sha256HexSync(bytes), relative: selected.relative});
-    bytesRead += bytes.byteLength;
-    if (bytesRead > PERSONAL_PROJECT_TOTAL_BYTE_LIMIT) {
-      return yield* personalProjectReadError('Personal project memory byte limit exceeded.');
-    }
-    const content = yield* Effect.try({
-      try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
-      catch: cause => personalProjectReadError('Personal project memory is not valid UTF-8.', cause),
-    });
-    const uri = `threadnote://user/${uriSegment(config.user)}/memories/${selected.relative}`;
-    const record = parseMemoryDocument(uri, content);
-    if (
-      record === undefined ||
-      record.metadata.kind !== selected.location.kind ||
-      record.metadata.project !== project ||
-      record.metadata.status !== selected.location.status ||
-      !selected.location.headerTitles.includes(record.headerTitle) ||
-      !hasPersonalVisibility(record.content) ||
-      !hasCanonicalPersonalFilename(record, selected.name, selected.location.topicBoundFilename)
-    ) {
-      return yield* personalProjectReadError(
-        `Personal project memory path and metadata do not agree: ${selected.relative}`,
-      );
-    }
-    records.push(record);
-  }
+  const selectedFiles = yield* Effect.forEach(
+    admittedEntries,
+    selected =>
+      Effect.gen(function* () {
+        const bytes = yield* readBoundedContainedStableRegularFile(
+          fs,
+          path,
+          canonicalRoot!,
+          selected.relative,
+          PERSONAL_PROJECT_FILE_BYTE_LIMIT,
+        );
+        if (bytes.byteLength !== selected.size) {
+          return yield* personalProjectReadError('Personal project memory content changed during the snapshot read.');
+        }
+        const contentHash = sha256HexSync(bytes);
+        const content = yield* Effect.try({
+          try: () => new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(bytes),
+          catch: cause => personalProjectReadError('Personal project memory is not valid UTF-8.', cause),
+        });
+        const uri = `threadnote://user/${uriSegment(config.user)}/memories/${selected.relative}`;
+        const record = parseMemoryDocument(uri, content);
+        if (
+          record === undefined ||
+          record.metadata.kind !== selected.location.kind ||
+          record.metadata.project !== project ||
+          record.metadata.status !== selected.location.status ||
+          !selected.location.headerTitles.includes(record.headerTitle) ||
+          !hasPersonalVisibility(record.content) ||
+          !hasCanonicalPersonalFilename(record, selected.name, selected.location.topicBoundFilename)
+        ) {
+          return yield* personalProjectReadError(
+            `Personal project memory path and metadata do not agree: ${selected.relative}`,
+          );
+        }
+        return {contentHash, record, relative: selected.relative};
+      }),
+    {concurrency: PERSONAL_PROJECT_READ_CONCURRENCY},
+  );
   for (const snapshot of directorySnapshots) {
     const after = yield* canonicalDirectoryEntries(fs, snapshot.directory);
     if (
@@ -140,33 +144,44 @@ export const readPersonalProjectMemoryRecords = Effect.fn('memory.readPersonalPr
   if (selectedFiles.length > 0 && canonicalRoot === undefined) {
     return yield* personalProjectReadError('Personal project memory root could not be observed.');
   }
-  for (const selected of selectedFiles) {
-    const observed = yield* readBoundedContainedStableRegularFile(
-      fs,
-      path,
-      canonicalRoot!,
-      selected.relative,
-      PERSONAL_PROJECT_FILE_BYTE_LIMIT,
-    );
-    if (sha256HexSync(observed) !== selected.contentHash) {
-      return yield* personalProjectReadError('Personal project memory content changed during the snapshot read.');
-    }
-  }
-  return records.sort((left, right) => left.uri.localeCompare(right.uri));
+  yield* Effect.forEach(
+    selectedFiles,
+    selected =>
+      Effect.gen(function* () {
+        const observed = yield* readBoundedContainedStableRegularFile(
+          fs,
+          path,
+          canonicalRoot!,
+          selected.relative,
+          PERSONAL_PROJECT_FILE_BYTE_LIMIT,
+        );
+        if (sha256HexSync(observed) !== selected.contentHash) {
+          return yield* personalProjectReadError('Personal project memory content changed during the snapshot read.');
+        }
+      }),
+    {concurrency: PERSONAL_PROJECT_READ_CONCURRENCY, discard: true},
+  );
+  return selectedFiles.map(selected => selected.record).sort((left, right) => left.uri.localeCompare(right.uri));
 });
 
 /** Read every canonical memory document for maintenance evidence, including inactive relation targets. */
 export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRecords')(function* (
   config: RuntimeConfig,
-  options: {readonly personalOnly?: boolean} = {},
+  options: {readonly personalOnly?: boolean; readonly requireReadable?: boolean} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* localUserMemoriesRoot(config);
   const files = yield* scanFilesWithinBoundary(fs, root, root, {
     includeDirectory: directory => {
-      if (options.personalOnly !== true) return true;
       const relative = path.relative(root, directory);
+      if (
+        isAgentArtifactUri(
+          `threadnote://user/${uriSegment(config.user)}/memories/${relative.split(path.sep).join('/')}`,
+        )
+      )
+        return false;
+      if (options.personalOnly !== true) return true;
       return relative.split(path.sep)[0] !== 'shared';
     },
     includeFile: (_filePath, name) => name.endsWith('.md') && !name.startsWith('.'),
@@ -178,7 +193,16 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
       Effect.gen(function* () {
         const content = yield* fs.readFileString(file.path);
         const relative = path.relative(root, file.path).split(path.sep).join('/');
-        return parseMemoryDocument(`threadnote://user/${uriSegment(config.user)}/memories/${relative}`, content);
+        const record = parseMemoryDocument(
+          `threadnote://user/${uriSegment(config.user)}/memories/${relative}`,
+          content,
+        );
+        if (record === undefined && options.requireReadable === true && !relative.startsWith('shared/')) {
+          return yield* personalProjectReadError(
+            'Maintenance corpus contains an unreadable memory; absence cannot be inferred.',
+          );
+        }
+        return record;
       }),
     {concurrency: MAINTENANCE_READ_CONCURRENCY},
   );

@@ -1,16 +1,42 @@
 {
   "version": 1,
-  "sourceCommit": "dd73e2d7aee74b1ff4147f2094a7161ef8d57a0c",
+  "sourceCommit": "30475f6899bf8512eef8ebdcf71541ba8f1e04f7",
   "fixtureHash": "c4c45a6bcc25517df1fdae711f19f4989e13fde6b4763d596d547c6757230e7d",
   "measurement": "combined serialized text plus structuredContent UTF-8 bytes",
   "queries": [
-    {"id": "definition-exclusive-lock", "dualBytes": 19902, "textBytes": 15833},
+    {"id": "definition-exclusive-lock", "dualBytes": 2378, "textBytes": 2225},
     {"id": "path-app-to-lock", "dualBytes": 3392, "textBytes": 2713},
     {"id": "impact-lock", "dualBytes": 18419, "textBytes": 14203},
-    {"id": "documentation-recovery", "dualBytes": 24158, "textBytes": 19979},
+    {"id": "documentation-recovery", "dualBytes": 2395, "textBytes": 2225},
     {"id": "missing-payment-service", "dualBytes": 815, "textBytes": 676}
   ],
-  "totals": {"dualBytes": 66686, "textBytes": 53404},
+  "totals": {"dualBytes": 27399, "textBytes": 22042},
+  "agentEnvelopeComparison": {
+    "comparisonBaseCommit": "30475f6899bf8512eef8ebdcf71541ba8f1e04f7",
+    "measurement": "serialized model-facing MCP text UTF-8 bytes; dual also includes structuredContent",
+    "before": {
+      "queries": [
+        {"id": "definition-exclusive-lock", "agentBytes": 2067},
+        {"id": "path-app-to-lock", "agentBytes": 2383},
+        {"id": "impact-lock", "agentBytes": 11208},
+        {"id": "documentation-recovery", "agentBytes": 2390},
+        {"id": "missing-payment-service", "agentBytes": 595}
+      ],
+      "totals": {"agentBytes": 18643, "estimatedTokens": 6215}
+    },
+    "after": {
+      "queries": [
+        {"id": "definition-exclusive-lock", "agentBytes": 932, "dualBytes": 2378, "textBytes": 2225},
+        {"id": "path-app-to-lock", "agentBytes": 855, "dualBytes": 3392, "textBytes": 2713},
+        {"id": "impact-lock", "agentBytes": 1408, "dualBytes": 18419, "textBytes": 14203},
+        {"id": "documentation-recovery", "agentBytes": 869, "dualBytes": 2395, "textBytes": 2225},
+        {"id": "missing-payment-service", "agentBytes": 104, "dualBytes": 815, "textBytes": 676}
+      ],
+      "totals": {"agentBytes": 4168, "dualBytes": 27399, "estimatedTokens": 1390, "textBytes": 22042}
+    },
+    "savings": {"agentBytes": 14475, "estimatedTokens": 4825, "percent": 77.6},
+    "caveat": "The five deterministic synthetic queries measure response-envelope bytes, not provider-billed tokens or verified task completion. Impact uses a complete connected behavioral core. Query returns the top three ranked nodes and relationships between them unless nodeLimit explicitly requests a larger result. Both operations treat the token budget as a ceiling rather than refilling it. Agent mode renders the same selected graph as concise readable lines; dual and text retain structured compatibility."
+  },
   "modelPilot": {
     "model": "gpt-5.6-luna",
     "harness": "codex exec --json --ephemeral --ignore-user-config --skip-git-repo-check -s read-only",

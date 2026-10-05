@@ -1,5 +1,5 @@
 import type {Effect} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import type {runProcedurePublish, runProcedureStatus, runProcedureVerify} from '../procedure/commands.js';
 import {makeProcedurePublishCommand, makeProcedureStatusCommand, makeProcedureVerifyCommand} from './workflow_cli.js';
 

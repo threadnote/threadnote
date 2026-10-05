@@ -1160,9 +1160,7 @@ describe('bounded code graph maintenance', () => {
         `graph-v${CODE_GRAPH_SCHEMA_VERSION}.sqlite`,
       );
       const store = yield* CodeGraphStore;
-      const snapshot = legacyReadySnapshot(identity, 'a');
-      yield* store.activate(databasePath, identity, snapshot, [], [], []);
-      yield* store.promote(databasePath, identity, snapshot.id);
+      yield* store.initialize(databasePath);
       yield* Effect.sync(() => downgradeToReleasedRevision6(databasePath));
 
       const otherCheckoutId = 'b'.repeat(64);

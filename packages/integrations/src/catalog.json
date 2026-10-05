@@ -20,15 +20,14 @@
           "status": "managed"
         },
         "hooks": {
-          "status": "unsupported",
-          "reason": "No suitable lifecycle API is installed."
+          "status": "managed"
         }
       },
-      "officialDocs": ["https://developers.openai.com/codex/mcp"],
-      "lastVerified": "2026-09-19",
+      "officialDocs": ["https://developers.openai.com/codex/mcp", "https://learn.chatgpt.com/docs/hooks"],
+      "lastVerified": "2026-10-01",
       "caveats": [],
       "setup": ["Preview threadnote setup codex; add --apply to complete setup, then restart the host."],
-      "verification": "Threadnote 5 setup and MCP lifecycle verified with an exact-HEAD global install on macOS; focused fixtures cover managed files.",
+      "verification": "Threadnote 5 setup, MCP lifecycle, and managed UserPromptSubmit resume hook are covered by focused fixtures; run threadnote doctor after restarting the host.",
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"

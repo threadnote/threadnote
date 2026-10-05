@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Exit, Fiber, FileSystem, Path, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {

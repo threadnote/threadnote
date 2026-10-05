@@ -188,7 +188,7 @@ describe('generated Bazel test contracts', () => {
   });
 
   it('keeps application runtime closure out of ordinary package tests', () => {
-    for (const packageName of ['graph', 'manager', 'memory', 'platform']) {
+    for (const packageName of ['context', 'graph', 'manager', 'memory', 'platform']) {
       const ordinary = target(`//packages/${packageName}:test`);
       const runtime = target(`//packages/${packageName}:test_runtime`);
       expect(ordinary.inputs).not.toContain('apps/threadnote/src/standalone.ts');

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "taskId": "tsk_a7db0fa0dae5f2fca06e5bd8",
+  "reviewTiming": "before-provider-outcomes",
+  "sourceSlice": "entire GitHub body, title excluded",
+  "sufficiency": "excessive",
+  "rationale": "The issue includes a complete reproducer, traceback, exact failing source comparison, and a proposed guard, leaving little discovery work.",
+  "outcomeVisible": false,
+  "solutionVisible": false,
+  "independentBlindReviewConfirmed": true
+}

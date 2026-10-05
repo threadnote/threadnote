@@ -288,6 +288,14 @@ class McpBroker {
       if (this.#child !== active) continue;
       this.#cancelIdleChildTimer();
       const envelope = parseJsonRpcEnvelope(line);
+      if (envelope === undefined) {
+        // The stdio transport is JSON-RPC NDJSON. Never forward child stdout
+        // that is not a JSON-RPC envelope (for example a pretty-logger line
+        // that escaped to stdout): clients fail the transport on the first
+        // non-JSON line. The child already records the underlying condition
+        // in its production logs and telemetry.
+        continue;
+      }
       let outgoingLine = line;
       let completedRequest: string | undefined;
       if (isJsonRpcId(envelope?.id)) {

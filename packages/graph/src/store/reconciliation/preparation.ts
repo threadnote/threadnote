@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {REMOVED_VIEW_CLEANUP_EPOCH_SEQUENCE_KEY} from '../removed/view_schema_contracts.js';
 import {removedViewCleanupRecordedRevision, removedViewCleanupSchemaState} from '../removed/view_schema_inspection.js';
 import {codeGraphPersistentExtensionSchemaCompatible, inspectPersistentExtensionTables} from '../schema/inspection.js';

@@ -679,7 +679,7 @@ esac
         status: 'current',
       });
       await expect(readFile(join(userHome, '.cursor', 'rules', 'threadnote.mdc'), 'utf8')).resolves.toContain(
-        'Use the installed Threadnote skills',
+        'Route non-trivial work by situation',
       );
       await expect(
         readFile(join(userHome, '.cursor', 'skills', 'threadnote-memory', 'SKILL.md'), 'utf8'),

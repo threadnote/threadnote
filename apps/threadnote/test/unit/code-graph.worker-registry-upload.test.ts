@@ -2,7 +2,7 @@ import {TestCommandExecutorLayer} from '../helpers/system-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
-import * as FetchHttpClient from 'effect/unstable/http/FetchHttpClient';
+import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Clock, Effect, FileSystem, Layer, Ref} from 'effect';
 import * as FC from 'fast-check';

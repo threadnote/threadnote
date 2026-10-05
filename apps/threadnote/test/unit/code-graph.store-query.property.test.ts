@@ -26,6 +26,7 @@ import {
   CODE_GRAPH_FILE_BLOB_AUTHORITY_TRIGGER_SQL,
 } from '@threadnote/graph/store/cache/authority';
 import {neighborQuery, pathQuery} from '@threadnote/graph/query';
+import {codeGraphIdentitySelectors} from '@threadnote/graph/store/utilities';
 import type {CodeGraphEdge, CodeGraphProvenance} from '@threadnote/graph/types';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 
@@ -259,6 +260,43 @@ describe('code graph indexed query properties', () => {
       if (pathClass === 'implementation') expect(multiplier).toBe(1);
     },
     {fastCheck: {numRuns: 200}},
+  );
+
+  fcProp(
+    it,
+    'preserves embedded code identities without treating repository paths as identity selectors',
+    {
+      identity: FC.constantFrom('Node.search', 'parse_html_dict', 'resolveTaskGraph'),
+      prefix: FC.array(FC.constantFrom('find', 'queue', 'regex', 'transition'), {maxLength: 6}),
+      suffix: FC.array(FC.constantFrom('child', 'count', 'static', 'target'), {maxLength: 6}),
+    },
+    ({identity, prefix, suffix}) => {
+      const selectors = codeGraphIdentitySelectors(
+        [...prefix, 'src/router/node.ts', `${identity}()`, ...suffix].join(' '),
+      );
+      expect(selectors).toContain(identity);
+      expect(selectors).not.toContain('src/router/node.ts');
+      expect(selectors.filter(selector => selector === identity)).toHaveLength(1);
+    },
+    {fastCheck: {numRuns: 64}},
+  );
+
+  fcProp(
+    it,
+    'preserves identity-bearing leaves from dotted qualified selectors',
+    {
+      leaf: FC.constantFrom('parse_html_dict', 'get_value', 'resolveTaskGraph'),
+      namespace: FC.array(FC.stringMatching(/^[a-z][a-z0-9]{1,12}$/), {minLength: 1, maxLength: 4}),
+    },
+    ({leaf, namespace}) => {
+      const qualified = [...namespace, leaf].join('.');
+      const selectors = codeGraphIdentitySelectors(`src/fields.py trace ${qualified} callers`);
+
+      expect(selectors).toContain(qualified);
+      expect(selectors).toContain(leaf);
+      expect(selectors).not.toContain('src/fields.py');
+    },
+    {fastCheck: {numRuns: 64}},
   );
 
   fcProp(
@@ -948,6 +986,60 @@ describe('code graph indexed query properties', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  it.effect('reserves a qualified symbol identity embedded in a natural-language query', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const store = yield* CodeGraphStore;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-qualified-query-'});
+        const databasePath = path.join(root, 'graph-v3.sqlite');
+        yield* store.initialize(databasePath);
+        yield* Effect.sync(() => insertRankingFixture(databasePath));
+
+        const results = yield* store.searchSymbols(
+          databasePath,
+          currentSnapshotId,
+          'Which Node.search queue transition advances the regex child?',
+          3,
+        );
+
+        expect(results[0]).toMatchObject({
+          id: 'method-node-search',
+          qualifiedName: 'Node.search',
+          score: 0.99,
+        });
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  it.effect('reserves a snake-case symbol identity embedded in a verbose natural-language query', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const store = yield* CodeGraphStore;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-snake-query-'});
+        const databasePath = path.join(root, 'graph-v3.sqlite');
+        yield* store.initialize(databasePath);
+        yield* Effect.sync(() => insertRankingFixture(databasePath));
+
+        const results = yield* store.searchSymbols(
+          databasePath,
+          currentSnapshotId,
+          'rest_framework/fields.py trace html.parse_html_dict callers and absence/empty-dictionary semantics',
+          3,
+        );
+
+        expect(results[0]).toMatchObject({
+          id: 'function-parse-html-dict',
+          name: 'parse_html_dict',
+          score: 1,
+        });
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it.effect('resolves an exact repository path without broad lexical candidate expansion', () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1326,6 +1418,30 @@ function insertRankingFixture(databasePath: string): void {
         'src/ProgressManager.java',
         'java',
         'java',
+        spanJson,
+      );
+      insert.run(
+        currentSnapshotId,
+        'method-node-search',
+        'hash-method-node-search',
+        'method',
+        'search',
+        'Node.search',
+        'src/router/node.ts',
+        'typescript',
+        'typescript',
+        spanJson,
+      );
+      insert.run(
+        currentSnapshotId,
+        'function-parse-html-dict',
+        'hash-function-parse-html-dict',
+        'function',
+        'parse_html_dict',
+        'parse_html_dict',
+        'rest_framework/utils/html.py',
+        'python',
+        'python',
         spanJson,
       );
       for (const [id, path] of [

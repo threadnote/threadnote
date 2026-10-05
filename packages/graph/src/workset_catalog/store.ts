@@ -1,5 +1,5 @@
 import {Clock, Crypto, DateTime, Effect, FileSystem, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';

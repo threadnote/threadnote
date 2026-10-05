@@ -1,6 +1,6 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, Layer} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   CODE_GRAPH_VECTOR_GENERATIONS_TABLE_SQL,
   CODE_GRAPH_VECTOR_POINTERS_TABLE_SQL,

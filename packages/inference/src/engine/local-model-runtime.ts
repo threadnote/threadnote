@@ -1,6 +1,6 @@
 import {Context, Effect, Exit, Layer, Path, Scope, Semaphore} from 'effect';
-import * as AiError from 'effect/unstable/ai/AiError';
-import * as EmbeddingModel from 'effect/unstable/ai/EmbeddingModel';
+import * as AiError from 'effect/ai/AiError';
+import * as EmbeddingModel from 'effect/ai/EmbeddingModel';
 import type {LocalModelManifest} from '../models/catalog.js';
 import {LlamaCppEngine, type LlamaCppDiagnostics} from './llama-cpp-engine.js';
 import {llamaEmbeddingModelLayer} from './embedding.js';

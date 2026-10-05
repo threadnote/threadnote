@@ -55,11 +55,15 @@ export function registerStoreTool(
   description: string,
   memoryScope?: CursorCloudMemoryScope,
 ): void {
+  const handoffDescription =
+    name === 'remember_context'
+      ? ' Handoff: task; decisions/invariants; verification; blockers/risks; next_step. CodeRefs enable compact resume. Skip Knowledge Delta review.'
+      : '';
   server.registerTool(
     name,
     {
       annotations: {readOnlyHint: false, destructiveHint: true},
-      description: `${description} Never store secrets, credentials, customer data, or raw logs.`,
+      description: `${description}${handoffDescription} Never store secrets, credentials, customer data, or raw logs.`,
       inputSchema: {
         callerCwd: McpInput.string('Absolute cwd'),
         codeRefs: McpInput.stringOrStrings(
@@ -357,13 +361,19 @@ export function registerStoreTool(
                 enrichedMetadata.keywords?.length ?? 0,
               )
             : relationReceiptResult;
-        return deferredCodeAnchor
+        const citationReceiptResult = deferredCodeAnchor
           ? withDeferredCodeAnchorWriteReceipt(keywordReceiptResult, deferredCodeAnchor)
           : withClearedCodeCitationReceipt(
               keywordReceiptResult,
               replaceTarget?.metadata.codeCitations?.length,
               codeCitations.length,
             );
+        return withHandoffResumeReceipt(citationReceiptResult, {
+          capturedCodeCitationCount: codeCitations.length,
+          kind: memoryKind,
+          pendingCodeRefCount: deferredCodeAnchor?.codeRefs.length ?? 0,
+          status: metadata.status,
+        });
       }).pipe(Effect.flatMap(withStaleVersionNotice));
     },
   );
@@ -434,6 +444,38 @@ function withClearedCodeCitationReceipt(
     structuredContent: {
       ...(result.structuredContent ?? {}),
       clearedCodeCitations: previousCount,
+    },
+  };
+}
+
+function withHandoffResumeReceipt(
+  result: CallToolResult,
+  memory: {
+    readonly capturedCodeCitationCount: number;
+    readonly kind: MemoryMetadata['kind'];
+    readonly pendingCodeRefCount: number;
+    readonly status: MemoryMetadata['status'];
+  },
+): CallToolResult {
+  if (
+    result.isError === true ||
+    memory.kind !== 'handoff' ||
+    memory.status !== 'active' ||
+    memory.capturedCodeCitationCount > 0
+  ) {
+    return result;
+  }
+  const pending = memory.pendingCodeRefCount > 0;
+  const reason = pending ? 'pending-code-refs' : 'missing-code-refs';
+  const note = pending
+    ? 'CodeRefs pending: compact exact-current resume remains unavailable until citations finalize.'
+    : 'No codeRefs: compact exact-current resume is unavailable for this handoff.';
+  return {
+    ...result,
+    content: [...result.content, {type: 'text', text: note}],
+    structuredContent: {
+      ...(result.structuredContent ?? {}),
+      exactCurrentResume: {eligible: false, reason},
     },
   };
 }

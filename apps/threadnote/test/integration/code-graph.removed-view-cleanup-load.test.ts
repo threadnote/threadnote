@@ -5,7 +5,7 @@ import {existsSync, statSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Clock, Effect, FileSystem, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {

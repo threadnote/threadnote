@@ -120,6 +120,29 @@ describe('Code Memory Link Codex app-server transport', () => {
       reasoningEffort: 'medium',
     });
 
+    const autoReviewedTrace = await runCodeMemoryLinkAppServerTurn({
+      appServer: {argumentsBeforeSubcommand: [fake], executable: process.execPath},
+      cwd: repositoryRoot,
+      environment: {
+        HOME: repositoryRoot,
+        PATH: process.env.PATH ?? '/usr/bin:/bin',
+        THREADNOTE_TEST_AUTO_APPROVAL_REVIEW: '1',
+      },
+      expected: {model: 'gpt-5.6-luna', modelProvider: 'openai', reasoningEffort: 'medium'},
+      outputSchema: {
+        additionalProperties: false,
+        properties: {status: {const: 'done', type: 'string'}},
+        required: ['status'],
+        type: 'object',
+      },
+      prompt: 'Complete the public fixture task.',
+      proxyServerName: 'context_brief_gate',
+      taskBudget: {steps: 2, tokens: 150},
+      timeoutMilliseconds: 10_000,
+    });
+    expect(autoReviewedTrace.approvals).toEqual([]);
+    expect(autoReviewedTrace.events.map(event => event.method)).toContain('item/autoApprovalReview/completed');
+
     const artifactId = `art_${'1'.repeat(16)}`;
     const rubricInput = {
       fixtureHash: '1'.repeat(64),
@@ -806,7 +829,7 @@ describe('Code Memory Link Codex app-server transport', () => {
         ],
         expected,
       ),
-    ).toThrow('read-only allowlist');
+    ).toThrow('git diff revisions and options are outside the reviewed grammar');
   });
 
   it('accepts lossy one-server inventory while preserving topology and routing checks', () => {

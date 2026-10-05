@@ -1,6 +1,6 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
-import * as SqlError from 'effect/unstable/sql/SqlError';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as SqlError from 'effect/sql/SqlError';
 import {compareCodeUnits} from '../../ordering.js';
 import {
   PERSISTENT_EXTENSION_TABLES,

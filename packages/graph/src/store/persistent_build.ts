@@ -1,6 +1,6 @@
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY} from '../index_scope.js';
 import {Clock, DateTime, Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {saturatingCapacityAdd} from '../disk/capacity.js';
 import {compareCodeUnits} from '../ordering.js';
 import {

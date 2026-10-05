@@ -603,11 +603,7 @@ const attemptReusableCleanCandidate = Effect.fn('codeGraph.attemptReusableCleanC
           Effect.onInterrupt(() =>
             settleInterruptedCodeGraphBuild(input.store, input.layout.databasePath, building.id),
           ),
-          Effect.catch(cause =>
-            input.store
-              .markFailed(input.layout.databasePath, building.id, messageOf(cause))
-              .pipe(Effect.andThen(Effect.fail(cause))),
-          ),
+          Effect.tapError(cause => input.store.markFailed(input.layout.databasePath, building.id, messageOf(cause))),
         );
         return Option.some<ReusableCleanSnapshotAttempt>({mode: 'complete', summary});
       }),

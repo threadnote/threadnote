@@ -5,7 +5,6 @@ import {
   Crypto,
   DateTime,
   Effect,
-  Encoding,
   Exit,
   FileSystem,
   Layer,
@@ -16,8 +15,9 @@ import {
   Schema,
   Scope,
 } from 'effect';
-import * as HttpServer from 'effect/unstable/http/HttpServer';
-import * as HttpServerResponse from 'effect/unstable/http/HttpServerResponse';
+import * as Base64Url from 'effect/encoding/Base64Url';
+import * as HttpServer from 'effect/http/HttpServer';
+import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
@@ -26,6 +26,7 @@ import {
   runEffectAiConsolidation,
   runNativeAiConsolidation,
 } from '../effect/ai/consolidator.js';
+import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -123,7 +124,6 @@ import {runCodeGraphPurge, runCodeGraphRepair} from '../code_graph/commands.js';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
 import {
   compactCodeGraphStorageIsolated,
-  runCodeGraphAutomaticCompactionScheduler,
   type CodeGraphAutomaticCompactionStatus,
 } from '@threadnote/graph/automatic/compaction';
 import {inspectAllCodeGraphsLocal} from '@threadnote/graph/diagnostics';
@@ -333,7 +333,7 @@ const STATIC_FILES: Readonly<
       readonly contentType: string;
       readonly directory?: 'assets/brand' | 'manager';
       readonly path: string;
-      readonly sourceDirectory?: 'manager' | 'packages/manager/static';
+      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static';
     }
   >
 > = {
@@ -348,7 +348,7 @@ const STATIC_FILES: Readonly<
     path: 'app.css',
     sourceDirectory: 'packages/manager/static',
   },
-  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js'},
+  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
   '/threadnote-logo.svg': {
     contentType: 'image/svg+xml; charset=utf-8',
     directory: 'assets/brand',
@@ -373,7 +373,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             targets: lifecycleTargets,
             threadnoteHome: config.agentContextHome,
           }).pipe(Effect.catch(() => Effect.void));
-          const token = Encoding.encodeBase64Url(yield* crypto.randomBytes(24));
+          const token = Base64Url.encode(yield* crypto.randomBytes(24));
           const automaticCompactionStatus = yield* Ref.make<CodeGraphAutomaticCompactionStatus>({state: 'idle'});
           const worksetScope = yield* Scope.Scope;
           const server = yield* HttpServer.HttpServer;
@@ -381,11 +381,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
           yield* server.serve(
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope}),
           );
-          yield* Effect.forkScoped(
-            runCodeGraphAutomaticCompactionScheduler(config.agentContextHome, status =>
-              Ref.set(automaticCompactionStatus, status),
-            ),
-          );
+          yield* startManagerContextSchedulers(config, automaticCompactionStatus);
           const actualPort =
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port

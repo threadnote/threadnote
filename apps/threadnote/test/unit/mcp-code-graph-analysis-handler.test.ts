@@ -4,10 +4,11 @@ import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {BunFileSystem} from '@effect/platform-bun';
 import * as BunPath from '@effect/platform-bun/BunPath';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, FileSystem, Fiber, Layer, Option} from 'effect';
+import fc from 'fast-check';
+import {Deferred, Effect, FileSystem, Fiber, Layer, Option, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
-import {McpSchema, McpServer} from 'effect/unstable/ai';
-import {describe, expect} from 'vitest';
+import {McpSchema, McpServer} from 'effect/ai';
+import {describe, expect, it} from 'vitest';
 import {CodeGraphAnalysis, analyzeCodeGraph} from '@threadnote/graph/analysis';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {succeedUndefined} from '@threadnote/platform/optional';
@@ -27,13 +28,36 @@ import {
   type CodeGraphWatchOptions,
 } from '@threadnote/graph/watcher';
 import {EffectMcpServerAdapter, type EffectMcpServer} from '@threadnote/threadnote/effect/ai/mcp';
-import {registerCodeGraphTool} from '@threadnote/threadnote/mcp/server/code_graph';
+import {codeGraphMcpRequestDefaults, registerCodeGraphTool} from '@threadnote/threadnote/mcp/server/code_graph';
 import type {CommandResult} from '@threadnote/platform/command';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {analysisSnapshot, pagedAnalysisStore} from '@threadnote/graph/test/helpers/code-graph-analysis';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 describe('registered analyze_code_graph snapshot resolution', () => {
+  it('keeps explicit graph limits and budgets while compacting only omitted local query values', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('explain', 'impact', 'neighbors', 'node', 'path', 'query', 'topology'),
+        fc.option(fc.constant('prepared-workset'), {nil: undefined}),
+        fc.option(fc.integer({min: 1, max: 1_500}), {nil: undefined}),
+        fc.option(fc.integer({min: 1, max: 200}), {nil: undefined}),
+        fc.option(fc.integer({min: 1, max: 500}), {nil: undefined}),
+        (operation, workset, budgetTokens, nodeLimit, edgeLimit) => {
+          const defaults = codeGraphMcpRequestDefaults(operation, {budgetTokens, edgeLimit, nodeLimit, workset});
+          const localQuery = operation === 'query' && workset === undefined;
+
+          expect(defaults).toEqual({
+            budgetTokens: localQuery ? (budgetTokens ?? 800) : budgetTokens,
+            edgeLimit: localQuery ? (edgeLimit ?? 12) : (edgeLimit ?? 40),
+            nodeLimit: localQuery ? (nodeLimit ?? 8) : (nodeLimit ?? 20),
+          });
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
   effectIt.effect('propagates the explicit project selector to graph status', () => {
     const ready = codeGraphStatus({ready: true, stale: false});
     const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
@@ -119,6 +143,35 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(harness.observation.statusOptions).toHaveLength(0);
     }).pipe(provideTestLayer(harness.layer));
   });
+
+  effectIt.effect(
+    'uses compact defaults only for local graph queries and preserves explicit and non-query limits',
+    () => {
+      const ready = codeGraphStatus({ready: true, stale: false});
+      const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
+
+      return Effect.gen(function* () {
+        for (const request of [
+          {operation: 'query' as const, query: 'value'},
+          {edgeLimit: 17, nodeLimit: 9, operation: 'query' as const, query: 'value'},
+          {nodeId: `cgs_${'a'.repeat(32)}`, operation: 'neighbors' as const},
+        ]) {
+          const result = yield* harness.invokeInspect({
+            callerCwd: ready.identity.repoRoot,
+            responseFormat: 'dual',
+            ...request,
+          });
+          expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        }
+
+        expect(harness.observation.isolatedRequests).toEqual([
+          expect.objectContaining({edgeLimit: 12, nodeLimit: 8, operation: 'query'}),
+          expect.objectContaining({edgeLimit: 17, nodeLimit: 9, operation: 'query'}),
+          expect.objectContaining({edgeLimit: 40, nodeLimit: 20, operation: 'neighbors'}),
+        ]);
+      }).pipe(provideTestLayer(harness.layer));
+    },
+  );
 
   effectIt.effect(
     'directs explicit configured-project topology requests to scoped analysis or a prepared workset',
@@ -561,6 +614,10 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(result.content).toEqual([
         expect.objectContaining({type: 'text', text: expect.stringContaining('Graph analysis:')}),
       ]);
+      const text = (result.content[0] as {readonly text: string}).text;
+      expect(text).not.toContain('Read:');
+      expect(text).not.toContain(ready.identity.repositoryId);
+      expect(text).not.toContain(ready.readySnapshot!.id);
       expect(harness.observation.ensureOptions).toEqual([]);
       expect(harness.observation.refreshOptions).toEqual([]);
       expect(harness.observation.watcherStatusCalls).toBe(0);
@@ -571,21 +628,83 @@ describe('registered analyze_code_graph snapshot resolution', () => {
     }).pipe(provideTestLayer(harness.layer));
   });
 
-  effectIt.effect('keeps canonical analysis structured content behind explicit dual format', () => {
-    const ready = codeGraphStatus({ready: true, stale: false});
+  effectIt.effect(
+    'retains stale analysis provenance without repeating opaque repository or snapshot identities',
+    () => {
+      const stale = codeGraphStatus({ready: true, stale: true});
+      const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [stale]});
+
+      return Effect.gen(function* () {
+        const result = yield* harness.invoke({
+          callerCwd: stale.identity.repoRoot,
+          freshness: 'ready',
+          operation: 'stats',
+        });
+        const text = (result.content[0] as {readonly text: string}).text;
+
+        expect(text).toContain(`Evidence: freshness stale, commit ${stale.readySnapshot!.commit.slice(0, 12)}.`);
+        expect(text).not.toContain('Read:');
+        expect(text).not.toContain(stale.identity.repositoryId);
+        expect(text).not.toContain(stale.readySnapshot!.id);
+      }).pipe(provideTestLayer(harness.layer));
+    },
+  );
+
+  effectIt.effect('retains actionable partial project scope in the default analysis projection', () => {
+    const base = codeGraphStatus({ready: true, stale: false});
+    const ready: CodeGraphStatus = {
+      ...base,
+      projectCoverage: {
+        completeness: 'partial',
+        configuredRoots: ['root-a', 'root-b', 'root-c'],
+        dependencyComponents: 2,
+        kind: 'project',
+        negativeProof: 'selected-graph-only',
+        observedWorktreeCommit: base.identity.headCommit,
+        project: 'threadnote-app',
+        reusedEquivalentSnapshot: false,
+        rootComponents: 1,
+      },
+    };
     const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
 
     return Effect.gen(function* () {
       const result = yield* harness.invoke({
         callerCwd: ready.identity.repoRoot,
         operation: 'stats',
-        responseFormat: 'dual',
+        project: 'threadnote-app',
       });
+      const text = (result.content[0] as {readonly text: string}).text;
 
-      expect(result.isError, JSON.stringify(result)).not.toBe(true);
-      expect(result.structuredContent).toMatchObject({operation: 'stats', type: 'code-graph-analysis'});
+      expect(text).toContain(
+        'Project scope: threadnote-app, project, partial, negative proof selected-graph-only, roots root-a, root-b, 1 root(s) omitted.',
+      );
     }).pipe(provideTestLayer(harness.layer));
   });
+
+  effectIt.effect(
+    'keeps canonical analysis structured content behind explicit dual format without duplicating metadata in text',
+    () => {
+      const ready = codeGraphStatus({ready: true, stale: false});
+      const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
+
+      return Effect.gen(function* () {
+        const result = yield* harness.invoke({
+          callerCwd: ready.identity.repoRoot,
+          operation: 'stats',
+          responseFormat: 'dual',
+        });
+
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({operation: 'stats', type: 'code-graph-analysis'});
+        const text = (result.content[0] as {readonly text: string}).text;
+        expect(text).toContain('Graph analysis:');
+        expect(text).not.toContain('Read:');
+        expect(text).not.toContain(ready.identity.repositoryId);
+        expect(text).not.toContain(ready.readySnapshot!.id);
+      }).pipe(provideTestLayer(harness.layer));
+    },
+  );
 
   for (const freshness of ['ready', 'allow-stale'] as const) {
     effectIt.effect(`analyzes the selected stale snapshot with ${freshness} and starts no watcher`, () => {
@@ -964,13 +1083,19 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
       Effect.suspend(() => {
         const handle = analyzeHandle;
         if (handle === undefined) return Effect.die('analyze_code_graph was not registered.');
-        return handle(arguments_).pipe(Effect.provideService(McpSchema.McpServerClient, mcpServerClient()));
+        return handle(arguments_).pipe(
+          Effect.provideService(McpSchema.McpRequestContext, mcpServerClient()),
+          Effect.flatMap(Schema.decodeUnknownEffect(McpSchema.CallToolResult)),
+        );
       }),
     invokeInspect: (arguments_: Record<string, unknown>) =>
       Effect.suspend(() => {
         const handle = inspectHandle;
         if (handle === undefined) return Effect.die('inspect_code_graph was not registered.');
-        return handle(arguments_).pipe(Effect.provideService(McpSchema.McpServerClient, mcpServerClient()));
+        return handle(arguments_).pipe(
+          Effect.provideService(McpSchema.McpRequestContext, mcpServerClient()),
+          Effect.flatMap(Schema.decodeUnknownEffect(McpSchema.CallToolResult)),
+        );
       }),
     layer,
     observation: {

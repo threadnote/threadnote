@@ -63,6 +63,7 @@ const CLI_TOP_LEVEL_OPERATIONS = [
   'auto-update-worker',
   'cloud',
   'compact',
+  'codex-resume-hook',
   'context',
   'doctor',
   'enrich-memories',

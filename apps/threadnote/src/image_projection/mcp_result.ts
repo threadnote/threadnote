@@ -1,4 +1,4 @@
-import {Encoding} from 'effect';
+import {Base64} from 'effect/encoding';
 import {
   memoryReadBoundedWarnings,
   type MemoryReadMode,
@@ -119,7 +119,7 @@ export function buildImageProjectedReadResult(options: {
     content: [
       {text: caption, type: 'text'},
       ...options.pages.map(page => ({
-        data: Encoding.encodeBase64(page.png),
+        data: Base64.encode(page.png),
         mimeType: 'image/png' as const,
         type: 'image' as const,
       })),

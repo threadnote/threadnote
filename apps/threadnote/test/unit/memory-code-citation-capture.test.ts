@@ -175,7 +175,7 @@ describe('memory code citation capture and validation', () => {
       function statusFor() {
         statusCalls += 1;
         const expectedStatus = fixture.status;
-        if (statusCalls !== 3) return expectedStatus;
+        if (statusCalls !== 2) return expectedStatus;
         const repositoryId = 'b'.repeat(64);
         return {
           ...expectedStatus,
@@ -205,7 +205,7 @@ describe('memory code citation capture and validation', () => {
       expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
       expect(String(failure)).toContain('Repository graph or worktree changed while code citations were captured');
       expect(fixture.evidenceCalls()).toBe(1);
-      expect(statusCalls).toBe(3);
+      expect(statusCalls).toBe(2);
     }).pipe(provideTestLayer(StandaloneBrokerLayer)),
   );
 
@@ -262,9 +262,17 @@ describe('memory code citation capture and validation', () => {
         registerCodeGraphQualifiedRef(home, {nodeId: SYMBOL_ID, repositoryId: REPOSITORY_ID}),
       );
       let siblingCurrent = false;
+      let swapCallerAfterCapture = false;
+      let callerFences = 0;
       const fixture = citationFixture(sibling, {
         statusFor: (cwd, observeWorktree) => {
-          if (cwd === caller) return callerStatus(caller);
+          if (cwd === caller) {
+            const status = callerStatus(caller);
+            if (observeWorktree === true) callerFences += 1;
+            return swapCallerAfterCapture && callerFences === 2
+              ? {...status, identity: {...status.identity, worktreeId: 'swapped-caller'}}
+              : status;
+          }
           return observeWorktree === false || siblingCurrent
             ? fixture.status
             : {...fixture.status, freshness: 'stale', stale: true};
@@ -291,9 +299,24 @@ describe('memory code citation capture and validation', () => {
       siblingCurrent = true;
       const citations = yield* captureMemoryCodeCitations(config, {
         callerCwd: caller,
+        expectedCallerIdentity: callerStatus(caller).identity,
+        expectedProjectScope: {kind: 'full'},
         refs: [qualified.ref],
       }).pipe(provideTestLayer(fixture.layer));
       expect(citations).toMatchObject([{path: 'src/value.ts', target: {kind: 'symbol', nodeId: SYMBOL_ID}}]);
+
+      swapCallerAfterCapture = true;
+      callerFences = 0;
+      const evidenceBeforeSwap = fixture.evidenceCalls();
+      const swapped = yield* captureMemoryCodeCitations(config, {
+        callerCwd: caller,
+        expectedCallerIdentity: callerStatus(caller).identity,
+        expectedProjectScope: {kind: 'full'},
+        refs: [qualified.ref],
+      }).pipe(provideTestLayer(fixture.layer), Effect.flip);
+      expect(String(swapped)).toContain('caller repository identity changed during capture');
+      expect(fixture.evidenceCalls()).toBe(evidenceBeforeSwap + 1);
+      expect(callerFences).toBe(2);
     }).pipe(provideTestLayer(StandaloneBrokerLayer)),
   );
 

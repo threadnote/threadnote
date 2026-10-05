@@ -3,7 +3,8 @@ import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promise
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Encoding, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import {afterEach, describe, expect, it} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -146,7 +147,7 @@ describe('doctor report resilience', () => {
             consentVersion: 5,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
-            sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(9)),
+            sessionSalt: Base64Url.encode(new Uint8Array(32).fill(9)),
             version: 1,
           })}\n`,
         );
@@ -164,7 +165,7 @@ describe('doctor report resilience', () => {
             consentVersion: 5,
             enabled: true,
             endpoint: DEFAULT_TELEMETRY_ENDPOINT,
-            sessionSalt: Encoding.encodeBase64Url(new Uint8Array(32).fill(9)),
+            sessionSalt: Base64Url.encode(new Uint8Array(32).fill(9)),
             version: 1,
           })}\n`,
         );

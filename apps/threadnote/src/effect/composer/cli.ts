@@ -1,6 +1,6 @@
 import {makeGitWorktreeLock} from '../git_worktree_lock.js';
 import {Console, Effect, Schema} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import {applicationError, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
 import {boolean, optionalString} from '../cli/flags.js';
 import {SystemInfo} from '@threadnote/platform/system';

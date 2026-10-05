@@ -392,11 +392,7 @@ export const attemptSparseReusableOverlay = Effect.fn('codeGraph.attemptSparseRe
           Effect.onInterrupt(() =>
             settleInterruptedCodeGraphBuild(input.store, input.layout.databasePath, building.id),
           ),
-          Effect.catch(cause =>
-            input.store
-              .markFailed(input.layout.databasePath, building.id, messageOf(cause))
-              .pipe(Effect.andThen(Effect.fail(cause))),
-          ),
+          Effect.tapError(cause => input.store.markFailed(input.layout.databasePath, building.id, messageOf(cause))),
         ),
       );
     }),

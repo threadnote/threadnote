@@ -377,7 +377,7 @@ describe('built self-contained distribution', () => {
       runCli(['read', 'threadnote://user/e2e-user/memories/durable/projects/threadnote/missing.md']),
     ).rejects.toThrow();
     const entriesBeforeDryRun = parseProductionLog(await readFile(logPath, 'utf8'));
-    expect(entriesBeforeDryRun.slice(entriesAfterRecall.length)).toEqual([
+    expect(entriesBeforeDryRun.slice(entriesAfterRecall.length).filter(entry => entry.operation === 'read')).toEqual([
       expect.objectContaining({event: 'invocation.started', operation: 'read'}),
       expect.objectContaining({
         errorType: expect.any(String),
@@ -388,12 +388,16 @@ describe('built self-contained distribution', () => {
     ]);
 
     await runCli(['seed', '--dry-run']);
-    expect(parseProductionLog(await readFile(logPath, 'utf8'))).toHaveLength(entriesBeforeDryRun.length);
+    expect(parseProductionLog(await readFile(logPath, 'utf8')).filter(entry => entry.operation === 'seed')).toEqual(
+      entriesBeforeDryRun.filter(entry => entry.operation === 'seed'),
+    );
 
     const concurrentProcessCount = 8;
     await Promise.all(Array.from({length: concurrentProcessCount}, () => runCli(['logs'])));
     const entriesAfterConcurrentWrites = parseProductionLog(await readFile(logPath, 'utf8'));
-    const newEntries = entriesAfterConcurrentWrites.slice(entriesBeforeDryRun.length);
+    const newEntries = entriesAfterConcurrentWrites
+      .slice(entriesBeforeDryRun.length)
+      .filter(entry => entry.operation === 'logs');
     expect(newEntries).toHaveLength(concurrentProcessCount * 2);
     expect(new Set(newEntries.map(entry => entry.invocationId)).size).toBe(concurrentProcessCount);
     expect(newEntries.every(entry => entry.operation === 'logs')).toBe(true);
@@ -401,7 +405,11 @@ describe('built self-contained distribution', () => {
   });
 
   it('previews an issue with production logs without requiring or invoking gh', async () => {
-    const logPath = join(home, 'logs', 'threadnote.log');
+    const previewHome = join(temporaryRoot, 'report-preview-home');
+    const logPath = join(previewHome, 'logs', 'threadnote.log');
+    await mkdir(dirname(logPath), {recursive: true});
+    await copyFile(join(home, 'layout.json'), join(previewHome, 'layout.json'));
+    await runCli(['--log-level', 'info', 'logs'], {}, previewHome);
     const logBeforePreview = await readFile(logPath, 'utf8');
     const output = await runCli(
       [
@@ -415,6 +423,7 @@ describe('built self-contained distribution', () => {
         '--include-logs',
       ],
       {PATH: ''},
+      previewHome,
     );
 
     expect(output).toContain('GitHub issue preview: threadnote/threadnote');
@@ -810,7 +819,7 @@ describe('built self-contained distribution', () => {
     };
     expect(Object.keys(registry.hosts ?? {})).toEqual(['cursor']);
     await expect(readFile(join(userHome, '.cursor', 'rules', 'threadnote.mdc'), 'utf8')).resolves.toContain(
-      'Use the installed Threadnote skills',
+      'Route non-trivial work by situation',
     );
     await expect(
       readFile(join(userHome, '.cursor', 'skills', 'threadnote-context', 'SKILL.md'), 'utf8'),
@@ -1259,8 +1268,12 @@ async function activeVectorRevision(): Promise<string> {
   }
 }
 
-async function runCli(args: readonly string[], environment: NodeJS.ProcessEnv = {}): Promise<string> {
-  const result = await runCliOutput(args, environment);
+async function runCli(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv = {},
+  targetHome = home,
+): Promise<string> {
+  const result = await runCliOutput(args, environment, targetHome);
   return `${result.stdout}${result.stderr}`;
 }
 
@@ -1273,9 +1286,10 @@ async function runCliJson<T>(args: readonly string[], environment: NodeJS.Proces
 async function runCliOutput(
   args: readonly string[],
   environment: NodeJS.ProcessEnv = {},
+  targetHome = home,
 ): Promise<{readonly stderr: string; readonly stdout: string}> {
   try {
-    const result = await execute(cli, ['--home', home, ...args], {
+    const result = await execute(cli, ['--home', targetHome, ...args], {
       cwd: root,
       env: {
         ...process.env,
@@ -1301,7 +1315,7 @@ async function runCliOutput(
       cause,
       message: [
         `Packaged Threadnote command exited with ${String(failure.code ?? 'an unknown status')}:`,
-        `${cli} --home ${home} ${args.join(' ')}`,
+        `${cli} --home ${targetHome} ${args.join(' ')}`,
         `stdout:\n${boundedFailureOutput(failure.stdout)}`,
         `stderr:\n${boundedFailureOutput(failure.stderr)}`,
       ].join('\n'),

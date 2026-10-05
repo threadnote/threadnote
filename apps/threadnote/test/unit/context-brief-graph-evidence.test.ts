@@ -15,7 +15,7 @@ import {
   fromRepositoryQuery,
   mergeContextBriefAnchoredRepositoryGraphResults,
   planContextBrief,
-  parseContextBriefAgentViewText,
+  parseContextBriefJsonText,
   projectContextBrief,
   retrieveContextBriefGraphEvidence,
 } from '@threadnote/threadnote/context_brief/index';
@@ -68,7 +68,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
       1_500,
     );
     expect(projected.structuredContent.scope.projectCoverage).toEqual(projectCoverage);
-    expect(parseContextBriefAgentViewText(projected.text).scope.projectCoverage).toEqual(projectCoverage);
+    expect(parseContextBriefJsonText(projected.text).scope.projectCoverage).toEqual(projectCoverage);
   });
   effectIt.effect('borrows compatible shared graph evidence before reporting a fresh-worktree gap', () =>
     Effect.gen(function* () {
@@ -281,7 +281,7 @@ describe('Context Brief exact-anchor graph evidence', () => {
       expect(evidence.cards.every(card => card.symbol.kind === 'module')).toBe(true);
       expect(evidence.contracts).toEqual([]);
       expect(recovery).toMatchObject({operation: 'inspect-node', ref: stableId(1)});
-      expect(parseContextBriefAgentViewText(projected.text).recommendedFollowUps?.[0]).toEqual(recovery);
+      expect(parseContextBriefJsonText(projected.text).recommendedFollowUps?.[0]).toEqual(recovery);
       expect(projected.measurement.totalBytes).toBeLessThanOrEqual(1_500 * 3);
     }),
   );
@@ -527,6 +527,38 @@ describe('Context Brief exact-anchor graph evidence', () => {
       }),
       {numRuns: 50},
     );
+  });
+
+  it('uses resume code anchors as semantic-free path seeds and ranks the cited module first', () => {
+    const plan = planContextBrief({
+      budgetTokens: 1_500,
+      codeRefs: [PATH_ANCHOR],
+      mode: 'resume',
+      scope: {callerCwd: '/workspace/effect', kind: 'repository'},
+      task: 'Continue the implementation from the current handoff.',
+    });
+    expect(contextBriefAnchoredRepositoryGraphRequests(plan.graph)[0]).toMatchObject({
+      operation: 'impact',
+      phase: 'path-resolution',
+      query: PATH_ANCHOR,
+      seedQueries: [PATH_ANCHOR],
+    });
+
+    const anchorId = stableId(1);
+    const evidence = fromRepositoryQuery(
+      mergeContextBriefAnchoredRepositoryGraphResults(plan.graph, [
+        queryResult({
+          edges: [],
+          nodes: [
+            sourceNode(stableId(2), 'resume', 'apps/runtime/commands.ts', 'variable'),
+            sourceNode(anchorId, PATH_ANCHOR, PATH_ANCHOR, 'module'),
+          ],
+          operation: 'query',
+        }),
+      ]),
+    );
+
+    expect(evidence.cards[0]).toMatchObject({ref: anchorId, symbol: {kind: 'module', path: PATH_ANCHOR}});
   });
 
   it.each(['trace', 'impact'] as const)(

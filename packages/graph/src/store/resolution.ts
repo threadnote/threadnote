@@ -1,5 +1,5 @@
 import {Clock, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
 import {
   type CodeGraphDirectPersistentCapacityProtector,

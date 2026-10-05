@@ -1,24 +1,18 @@
-import {
-  makeCompactCommand,
-  makeContextBriefCommand,
-  makeContextHealthCommand,
-  makeContextHealthRepairCommand,
-  makeContextCheckCommand,
-  makeRecallFeedbackCommand,
-  makeValueCommand,
-} from './workflow_cli.js';
-import {makeCursorHookCommand, makeInstallHooksCommand, makePreCompactHookCommand} from './hooks_cli.js';
+import {makeContextRuntimeCommand} from './context_cli.js';
+import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
+import * as hooksCli from './hooks_cli.js';
 import {agentsCommandMetadata, makeAgentsCommand} from './agents_cli.js';
 import {makeSetupCommand, setupCommandMetadata} from './setup_cli.js';
 import {guidanceCommandMetadata, makeGuidanceCommand} from './guidance_cli.js';
+import {makeDevelopmentInstallRepairCommand} from './development_install_cli.js';
 import {runCursorHook} from '../cursor/hook_runner.js';
 import {Console, Effect, Schema} from 'effect';
-import {Argument, CliError, Command, Flag} from 'effect/unstable/cli';
+import {Argument, CliError, Command, Flag} from 'effect/cli';
 import {THREADNOTE_MCP_NAME} from '../constants.js';
 import {makeComposerAttachFlags} from './composer/attach_flags.js';
 import {runHooksInstall, runPreCompactHook, runSessionStartHook} from '../hooks.js';
 import {
-  runDevelopmentInstallRepair,
+  runDevelopmentInstallMaintenance,
   runDoctor,
   runInstall,
   runRepair,
@@ -61,12 +55,7 @@ import {
 } from '../memory/index.js';
 import {runRecallFeedback} from '../recall/feedback_commands.js';
 import {makeCloseoutCommand} from './closeout_cli.js';
-import {makeContextMetadataCommand} from './maintenance_metadata_cli.js';
-import {runContextHealthAggregate, runContextHealthSchedule} from '../memory/context/health_aggregate_commands.js';
-import {runContextHealth} from '../memory/context/health_commands.js';
-import {runContextHealthRepairApply, runContextHealthRepairPreview} from '../memory/context/health_repair_commands.js';
-import {runMaintenanceMetadataApply, runMaintenanceMetadataPreview} from '../memory/maintenance/metadata_commands.js';
-import {runContextCheck} from '../context_check/commands.js';
+import {wakeContextMaintenance} from '../memory/context/maintenance.js';
 import {runProcedurePublish, runProcedureStatus, runProcedureVerify} from '../procedure/commands.js';
 import {runMcpInstall} from '../mcp/index.js';
 import {runObsidianInboxScan} from '../obsidian/inbox.js';
@@ -160,8 +149,8 @@ import {
   CODE_GRAPH_WORKSET_EVIDENCE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/graph/workset/evidence';
 import {runProcessDiagnostics} from '../process/diagnostics.js';
-import {runContextBrief} from '../context_brief/commands.js';
 import {runCodeBriefEditHook} from '../context_brief/edit_hook.js';
+import {runCodexResumeHook} from '../codex/resume_hook.js';
 import {runImageProjectionCommand} from '../image_projection/commands.js';
 import {runTelemetryDisable, runTelemetryEnable, runTelemetryStatus} from '../telemetry/commands.js';
 import * as valueReportCommands from '../value_report/commands.js';
@@ -227,6 +216,12 @@ const withRuntimeEffect = <E, R>(
       Effect.flatMap(effect),
     ),
   );
+const withMutationRuntimeEffect = <E, R>(effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>) =>
+  withRuntimeEffect(config =>
+    effect(config).pipe(Effect.tap(() => wakeContextMaintenance(config).pipe(Effect.ignore))),
+  );
+export type CliRuntimeRunner = typeof withRuntimeEffect;
+export type CliMutationRuntimeRunner = typeof withMutationRuntimeEffect;
 const withManifestManagementRuntimeEffect = <E, R>(effect: (config: RuntimeConfig) => Effect.Effect<void, E, R>) =>
   withRuntimeEffect(config => ensureUserManifestRuntimeConfig(config).pipe(Effect.flatMap(effect)));
 const manage = Command.make(
@@ -384,13 +379,11 @@ const postUpdate = Command.make(
   options => withRuntimeEffect(config => runPostUpdate(config, options)),
 ).pipe(Command.withDescription('Run packaged post-update action prompts'), Command.unlisted);
 
-const developmentInstallRepair = Command.make(
-  'development-install-repair',
-  {
-    expectedVersion: requiredString('expected-version', 'Exact active development release version'),
-  },
-  options => withRuntimeEffect(config => runDevelopmentInstallRepair(config, options.expectedVersion)),
-).pipe(Command.withDescription('Repair state inside an exact-HEAD development activation'), Command.unlisted);
+const developmentInstallRepair = makeDevelopmentInstallRepairCommand(options =>
+  withRuntimeEffect(config =>
+    runDevelopmentInstallMaintenance(config, options.expectedVersion, options.activateIntegrations),
+  ),
+);
 
 const repair = Command.make(
   'repair',
@@ -686,7 +679,7 @@ const graphIndex = Command.make(
     ),
     project: graphBounds.project,
   },
-  options => withRuntimeEffect(config => runCodeGraphIndex(config, options)),
+  options => withMutationRuntimeEffect(config => runCodeGraphIndex(config, options)),
 ).pipe(Command.withDescription('Build and atomically activate a current native code graph snapshot'));
 
 const withScopedRuntime = withManifestManagementRuntimeEffect as <E, R>(
@@ -1241,14 +1234,14 @@ const mcpInstall = Command.make(
   ({agent, ...options}) => withRuntimeEffect(config => runMcpInstall(config, agent, options)),
 ).pipe(Command.withDescription('Install the Threadnote MCP config, instructions, and skills for one supported agent'));
 
-const installHooks = makeInstallHooksCommand((agent, options) =>
+const installHooks = hooksCli.makeInstallHooksCommand((agent, options) =>
   withRuntimeEffect(config => runHooksInstall(config, agent, options)),
 );
-const cursorHook = makeCursorHookCommand((event, options) =>
+const cursorHook = hooksCli.makeCursorHookCommand((event, options) =>
   withRuntimeEffect(config => runCursorHook(config, event, options)),
 );
 
-const preCompactHook = makePreCompactHookCommand(options =>
+const preCompactHook = hooksCli.makePreCompactHookCommand(options =>
   withRuntimeEffect(config => runPreCompactHook(config, options)),
 );
 
@@ -1258,11 +1251,12 @@ const sessionStartHook = Command.make(
   options => withRuntimeEffect(config => runSessionStartHook(config, options)),
 ).pipe(Command.withDescription('Print current repo handoff context at session start'), Command.unlisted);
 
-const codeBriefHook = Command.make(
-  'code-brief-hook',
-  {diagnostic: boolean('diagnostic', 'Print a privacy-safe delivery status to stderr')},
-  options => withRuntimeEffect(config => runCodeBriefEditHook(config, options)),
-).pipe(Command.withDescription('Inject current cited memory before a Claude file edit'), Command.unlisted);
+const codeBriefHook = hooksCli.makeCodeBriefHookCommand(options =>
+  withRuntimeEffect(config => runCodeBriefEditHook(config, options)),
+);
+const codexResumeHook = hooksCli.makeCodexResumeHookCommand(options =>
+  withRuntimeEffect(config => runCodexResumeHook(config, options)),
+);
 const remember = Command.make(
   'remember',
   {
@@ -1314,7 +1308,7 @@ const remember = Command.make(
     topic: optionalString('topic', 'Stable topic name for an active project/topic memory'),
   },
   ({keyword, ...rest}) =>
-    withRuntimeEffect(config =>
+    withMutationRuntimeEffect(config =>
       runRemember(config, {...rest, ...(keyword.length > 0 ? {keywords: [...keyword]} : {})}),
     ),
 ).pipe(Command.withDescription('Store a durable engineering memory in the native Threadnote store'));
@@ -1327,7 +1321,7 @@ const migrateMemories = Command.make(
     limit: optionalString('limit', 'Maximum number of memories to migrate'),
     sourceAccount: repeatedString('source-account', 'Source canonical account; repeat for multiple accounts'),
   },
-  options => withRuntimeEffect(config => runMigrateMemories(config, options)),
+  options => withMutationRuntimeEffect(config => runMigrateMemories(config, options)),
 ).pipe(Command.withDescription('Migrate legacy session-only memories into durable memory files'));
 
 const migrateHome = Command.make(
@@ -1354,7 +1348,7 @@ const migrateLifecycle = Command.make(
     dryRun: boolean('dry-run', 'Print migration actions without changing memories'),
     limit: optionalString('limit', 'Maximum number of legacy handoffs to migrate'),
   },
-  options => withRuntimeEffect(config => runMigrateLifecycle(config, options)),
+  options => withMutationRuntimeEffect(config => runMigrateLifecycle(config, options)),
 ).pipe(Command.withDescription('Move clear legacy handoff memories into lifecycle-aware archive paths'));
 
 const migrateProjectNamesFlags = {
@@ -1364,11 +1358,11 @@ const migrateProjectNamesFlags = {
 };
 
 const migrateProjectNames = Command.make('migrate-projects', migrateProjectNamesFlags, options =>
-  withRuntimeEffect(config => runMigrateProjectNames(config, options)),
+  withMutationRuntimeEffect(config => runMigrateProjectNames(config, options)),
 ).pipe(Command.withDescription('Move memories from clone-folder project names to the git remote repo name'));
 
 const migrateProjectNamesCompatibility = Command.make('migrate-project-names', migrateProjectNamesFlags, options =>
-  withRuntimeEffect(config => runMigrateProjectNames(config, options)),
+  withMutationRuntimeEffect(config => runMigrateProjectNames(config, options)),
 ).pipe(Command.withDescription('Compatibility name for migrate-projects'), Command.unlisted);
 
 const enrichMemories = Command.make(
@@ -1418,7 +1412,7 @@ const recall = Command.make(
     uri: optionalString('uri', 'Restrict search to a threadnote:// URI'),
     workset: optionalString('workset', 'Recall across a named seed-manifest workset'),
   },
-  options => withRuntimeEffect(config => runRecall(config, options)),
+  options => withMutationRuntimeEffect(config => runRecall(config, options)),
 ).pipe(Command.withDescription('Search shared Threadnote context'));
 
 const recallFeedback = makeRecallFeedbackCommand(options =>
@@ -1427,25 +1421,7 @@ const recallFeedback = makeRecallFeedbackCommand(options =>
 
 const workset = makeWorksetCommand(withScopedRuntime);
 const project = makeProjectCommand(withScopedRuntime);
-const contextBrief = makeContextBriefCommand(options => withRuntimeEffect(config => runContextBrief(config, options)));
-const contextHealth = makeContextHealthCommand(
-  options => withRuntimeEffect(config => runContextHealth(config, options)),
-  options => withRuntimeEffect(config => runContextHealthAggregate(config, options)),
-  options => runContextHealthSchedule(options),
-);
-const contextHealthRepair = makeContextHealthRepairCommand(
-  options => withRuntimeEffect(config => runContextHealthRepairPreview(config, options)),
-  options => withRuntimeEffect(config => runContextHealthRepairApply(config, options)),
-);
-const contextMetadata = makeContextMetadataCommand(
-  options => withRuntimeEffect(config => runMaintenanceMetadataPreview(config, options)),
-  options => withRuntimeEffect(config => runMaintenanceMetadataApply(config, options)),
-);
-const contextCheck = makeContextCheckCommand(options => withRuntimeEffect(config => runContextCheck(config, options)));
-const context = Command.make('context').pipe(
-  Command.withDescription('Compile task-oriented agent context'),
-  Command.withSubcommands([contextBrief, contextHealth, contextHealthRepair, contextMetadata, contextCheck]),
-);
+const context = makeContextRuntimeCommand(withRuntimeEffect, withMutationRuntimeEffect);
 const value = makeValueCommand(
   options => withRuntimeEffect(config => valueReportCommands.runValueReport(config, options)),
   options => withRuntimeEffect(config => valueReportCommands.runValueReportExport(config, options)),
@@ -1528,7 +1504,7 @@ const handoff = Command.make(
     timestamped: boolean('timestamped', 'Store a historical timestamped handoff'),
     topic: optionalString('topic', 'Stable topic name'),
   },
-  options => withRuntimeEffect(config => runHandoff(config, {...options, references: options.reference})),
+  options => withMutationRuntimeEffect(config => runHandoff(config, {...options, references: options.reference})),
 ).pipe(Command.withDescription('Capture current repo state as a durable cross-agent handoff memory'));
 
 const archive = Command.make(
@@ -1540,7 +1516,7 @@ const archive = Command.make(
     topic: optionalString('topic', 'Override inferred topic'),
     uri: argument('uri', 'threadnote:// memory URI to archive'),
   },
-  ({uri, ...options}) => withRuntimeEffect(config => runArchive(config, uri, options)),
+  ({uri, ...options}) => withMutationRuntimeEffect(config => runArchive(config, uri, options)),
 ).pipe(Command.withDescription('Move a memory into the archived lifecycle tree'));
 
 const forget = Command.make(
@@ -1549,7 +1525,7 @@ const forget = Command.make(
     dryRun: boolean('dry-run', 'Print the native delete without running it'),
     uri: argument('uri', 'threadnote:// URI to remove'),
   },
-  ({uri, ...options}) => withRuntimeEffect(config => runForget(config, uri, options)),
+  ({uri, ...options}) => withMutationRuntimeEffect(config => runForget(config, uri, options)),
 ).pipe(Command.withDescription('Remove a threadnote:// URI from local Threadnote context'));
 
 const finalizeCodeRefs = Command.make(
@@ -1558,7 +1534,7 @@ const finalizeCodeRefs = Command.make(
     limit: optionalString('limit', 'Maximum pending memories to inspect; defaults to 25, maximum 100'),
     uris: repeatedString('uri', 'Pending personal memory URI to finalize; repeat for multiple'),
   },
-  options => withRuntimeEffect(config => runFinalizeCodeRefs(config, options)),
+  options => withMutationRuntimeEffect(config => runFinalizeCodeRefs(config, options)),
 ).pipe(Command.withDescription('Finalize private pending memory code citations from exact-current ready graphs'));
 
 const cursorCloudIdentityFlags = makeCursorCloudIdentityFlags(defaultString, optionalString);
@@ -1676,7 +1652,7 @@ const shareSync = Command.make(
     push: negatedBoolean('push', 'Skip the push step'),
     team: optionalString('team', 'Team name; omit to sync all teams'),
   },
-  options => withRuntimeEffect(config => runShareSync(config, options)),
+  options => withMutationRuntimeEffect(config => runShareSync(config, options)),
 ).pipe(Command.withDescription('Pull, reindex, and push shared memories repos'));
 
 const shareConflicts = Command.make(
@@ -1863,7 +1839,7 @@ const importPack = Command.make(
     path: requiredString('path', 'Input .ovpack path'),
     targetUri: optionalString('target-uri', 'Target parent threadnote:// URI; defaults to the current user'),
   },
-  options => withRuntimeEffect(config => runImportPack(config, options)),
+  options => withMutationRuntimeEffect(config => runImportPack(config, options)),
 ).pipe(Command.withDescription('Import an .ovpack archive into local Threadnote context'));
 
 interface TopLevelCommandMetadata {
@@ -1941,6 +1917,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('cursor-hook', cursorHook),
   registerTopLevelCommand('session-start-hook', sessionStartHook),
   registerTopLevelCommand('code-brief-hook', codeBriefHook),
+  registerTopLevelCommand('codex-resume-hook', codexResumeHook),
   registerTopLevelCommand('remember', remember),
   registerTopLevelCommand('finalize-code-refs', finalizeCodeRefs),
   registerTopLevelCommand('migrate', migrateHome, {productionLog: {mode: 'requires-apply'}}),

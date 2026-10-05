@@ -1,5 +1,5 @@
 import {Crypto, Effect, FileSystem, Option, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {

@@ -1,5 +1,5 @@
 import {Clock, DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {SystemInfo} from '@threadnote/platform/system';
 import {classifyCodeGraphBuildOwner} from '../build/owner.js';
 import {MAXIMUM_CANONICAL_DATE_MILLISECONDS} from './removed/view_schema_contracts.js';

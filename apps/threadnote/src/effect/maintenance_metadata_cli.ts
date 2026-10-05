@@ -1,5 +1,5 @@
 import {type Effect} from 'effect';
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import type {
   runMaintenanceMetadataApply,
   runMaintenanceMetadataPreview,

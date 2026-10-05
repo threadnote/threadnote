@@ -405,9 +405,7 @@ export const writePrivateDeferredCodeAnchorFile = Effect.fn('memoryCodeAnchor.wr
     yield* fs.remove(temporary, {force: true}).pipe(Effect.ignore);
     return yield* deferredCodeAnchorError(`Deferred code-anchor ${label} parent changed before write.`);
   }
-  yield* fs
-    .rename(temporary, target)
-    .pipe(Effect.catch(error => fs.remove(temporary, {force: true}).pipe(Effect.andThen(Effect.fail(error)))));
+  yield* fs.rename(temporary, target).pipe(Effect.tapError(() => fs.remove(temporary, {force: true})));
   if (Option.isSome(yield* fs.readLink(target).pipe(Effect.option))) {
     return yield* deferredCodeAnchorError(`Deferred code-anchor ${label} must not be a symbolic link.`);
   }

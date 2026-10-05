@@ -1,5 +1,5 @@
 import {Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
-import * as HttpClient from 'effect/unstable/http/HttpClient';
+import * as HttpClient from 'effect/http/HttpClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';

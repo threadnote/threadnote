@@ -1,5 +1,5 @@
 import {Clock, Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {saturatingCapacityAdd, saturatingCapacityMultiply} from '../disk/capacity.js';
 import {assertPersistentBuildOwner, type CodeGraphWriterGate} from './build/core.js';
 import {

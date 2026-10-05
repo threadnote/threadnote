@@ -2,7 +2,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {expect, it} from '@effect/vitest';
 import {Effect, Exit, Fiber, Layer, Schema} from 'effect';
-import * as EmbeddingModel from 'effect/unstable/ai/EmbeddingModel';
+import * as EmbeddingModel from 'effect/ai/EmbeddingModel';
 import {describe} from 'vitest';
 import {llamaEmbeddingModelLayer} from '@threadnote/inference/engine/embedding';
 import {InferenceInterrupted} from '@threadnote/inference/engine/errors';

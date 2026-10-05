@@ -7,6 +7,10 @@ description: Prepare a Threadnote stable or beta release (version bump, curated 
 
 Authority: `docs/releasing.md`. This skill is the mechanical path only.
 
+Local heavy-tail attestation is optional and is not a publication gate for stable or beta releases. Do not wait for
+workstation capacity or three local samples before tagging. Required CI, functional dogfood, signing, and immutable
+publication gates remain unchanged.
+
 ## Execution agent
 
 Delegate patch-release preparation and post-merge publication to one `gpt-5.6-terra` agent with `low` reasoning effort. Keep `docs/releasing.md` authoritative: the agent must satisfy every applicable gate and stop on a failed or missing prerequisite rather than treating this delegation as permission to bypass it.

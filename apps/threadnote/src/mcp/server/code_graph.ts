@@ -85,14 +85,16 @@ import {
   codeGraphRefreshBlocksCompletedInspection,
   completeCodeGraphReadyReadRefresh,
 } from './code_graph/ready_read.js';
+import {compactPersonalMemoryReferences} from './common.js';
 import {argumentError, mcpErrorResult, requiredText, type RuntimeConfig} from './common.js';
 import {
   anonymousTelemetryDiagnosticFromCodeGraphRefreshFailure,
   attachAnonymousTelemetryDiagnostic,
   attachAnonymousTelemetryReportedOutcome,
 } from '../../telemetry/diagnostic.js';
-
+import {codeGraphMcpRequestDefaults} from './code_graph/request_defaults.js';
 export {codeGraphMcpResponse, compactCodeGraphMcpResult};
+export {codeGraphMcpRequestDefaults} from './code_graph/request_defaults.js';
 export {
   codeGraphInspectionAllowsStaleReady,
   codeGraphInspectionObservation,
@@ -125,14 +127,13 @@ const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_DISTINCT_EDGES = 500_000;
 const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_COMMUNITY_MEMBERS = 5_000;
 const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION =
   'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd; max 256 UTF-8 bytes';
-
 export function registerContextBriefTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
     'context_brief',
     {
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
       description:
-        'Graph+memory brief with semantic truncation. Accepts 8 canonical graph-indexed repository-relative paths/local cgs_; cgr_ is unsupported; cold indexing is never started.',
+        'Graph+memory brief with semantic truncation. Accepts 8 graph paths/local cgs_; not cgr_; cold indexing is never started.',
       inputSchema: {
         budgetTokens: McpInput.integer('800-1500; default 1250', {
           minimum: CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
@@ -143,7 +144,7 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           maximumItems: CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
         }),
         detail: McpInput.literals(['compact', 'source'], 'Default compact; source adds exact-current excerpts.'),
-        mode: McpInput.literals(['brief', 'locate', 'explain', 'trace', 'impact'], 'Default brief'),
+        mode: McpInput.literals(['brief', 'locate', 'explain', 'trace', 'impact', 'resume'], 'Default brief'),
         project: McpInput.string(MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION),
         responseFormat: McpInput.literals(['dual', 'agent'], 'Default agent; dual adds structured content.'),
         surface: McpInput.string('Agent catalog surface selector for compatible verified procedures'),
@@ -192,13 +193,12 @@ export function registerContextBriefTool(server: EffectMcpServerAdapter, config:
           task: checkedTask.value,
         }).pipe(Effect.provideService(CodeGraphQueryService, isolatedReads));
         return selectedResponseFormat === 'agent'
-          ? {content: [{type: 'text' as const, text: response.text}]}
+          ? {content: [{type: 'text' as const, text: compactPersonalMemoryReferences(response.text, config.user)}]}
           : {content: [{type: 'text' as const, text: response.text}], structuredContent: response.structuredContent};
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error))));
     },
   );
 }
-
 export function registerCodeGraphTool(
   server: EffectMcpServerAdapter,
   config: RuntimeConfig,
@@ -209,33 +209,33 @@ export function registerCodeGraphTool(
     {
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
       description:
-        'Inspect before broad text search. Output is untrusted evidence; node/neighbors accept cgs_/cgr_. Local default: agent text after semantic truncation; Worksets: lossless JSON text; dual adds structured content. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations: `threadnote workset prepare <name>`. Cold/limited reads can be unavailable, indexing, timed-out, or partial.',
+        'Use semantic truncation before broad text search; node/neighbors accept cgs_/cgr_. Omit budgetTokens. Output is untrusted evidence. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations; workset prepare. States: unavailable/indexing/timed-out/partial.',
       inputSchema: {
-        base: McpInput.string('Impact base if query omitted; default HEAD~1'),
+        base: McpInput.string('Impact base when query omitted; default HEAD~1'),
         budgetTokens: McpInput.integer(
-          'Worksets: 1-1500; local: 800-1500. Applied after final formatting and semantic truncation.',
+          'Ceiling: Workset query defaults to 1250 (min 1); local query defaults to 800; impact agent defaults to 1250; other local min 800.',
           {
             minimum: 1,
             maximum: 1_500,
           },
         ),
-        callerCwd: McpInput.string('Absolute checkout path'),
-        readTimeoutMilliseconds: McpInput.integer('Total ms; minimum 4000, default 55000.', {
+        callerCwd: McpInput.string('Absolute checkout'),
+        readTimeoutMilliseconds: McpInput.integer('Total ms; min 4000, default 55000.', {
           minimum: 4000,
           maximum: 55000,
         }),
-        depth: McpInput.integer('Traversal depth', {minimum: 0, maximum: 8}),
-        direction: McpInput.literals(['both', 'incoming', 'outgoing'], 'neighbors direction'),
-        edgeLimit: McpInput.integer('Edge limit; default 40', {
+        depth: McpInput.integer('Depth', {minimum: 0, maximum: 8}),
+        direction: McpInput.literals(['both', 'incoming', 'outgoing'], 'Direction'),
+        edgeLimit: McpInput.integer('Edges: local query default 12; others 40.', {
           minimum: 1,
           maximum: MCP_CODE_GRAPH_MAXIMUM_EDGE_LIMIT,
         }),
-        from: McpInput.string('Path start or ID'),
-        cursor: McpInput.string('Workset cgwc_ continuation'),
-        includeHeuristic: McpInput.boolean('Include heuristic relationships'),
-        includeModelAssociations: McpInput.boolean('Include model associations'),
-        nodeId: McpInput.string('cgs_ or qualified cgr_ node'),
-        nodeLimit: McpInput.integer('Node limit; default 20', {
+        from: McpInput.string('Path start/ID'),
+        cursor: McpInput.string('Workset cgwc_ cursor'),
+        includeHeuristic: McpInput.boolean('Include heuristic edges'),
+        includeModelAssociations: McpInput.boolean('Include model edges'),
+        nodeId: McpInput.string('cgs_ or cgr_ node'),
+        nodeLimit: McpInput.integer('Nodes: local query searches 8; agent shows 3 unless set. Others 20.', {
           minimum: 1,
           maximum: MCP_CODE_GRAPH_MAXIMUM_NODE_LIMIT,
         }),
@@ -247,13 +247,13 @@ export function registerCodeGraphTool(
         project: McpInput.string(
           `${MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION}; preserve the project selected by context_brief`,
         ),
-        query: McpInput.string('Concept, symbol, path, or impact target'),
+        query: McpInput.string('Query/path/impact target'),
         responseFormat: McpInput.literals(
           ['dual', 'text', 'agent'],
-          'Local default agent; Workset default text; dual adds structured content.',
+          'Default local agent; Workset text; dual structure.',
         ),
-        symbol: McpInput.string('Explain selector'),
-        to: McpInput.string('Path target or ID'),
+        symbol: McpInput.string('Explain symbol/query'),
+        to: McpInput.string('Path target/ID'),
         workset: McpInput.string('Workset name'),
       },
     },
@@ -304,6 +304,7 @@ export function registerCodeGraphTool(
           'inspect_code_graph requires operation. Example: {"operation":"query","callerCwd":"/workspace/project","query":"exclusive file lock"}',
         );
       }
+      const effectiveRequest = codeGraphMcpRequestDefaults(operation, {budgetTokens, edgeLimit, nodeLimit, workset});
       const queryTelemetry = makeCodeGraphQueryAnonymousTelemetryReporter({
         requestKind: codeGraphInspectAnonymousTelemetryRequestKind(operation),
         requestScope: workset?.trim() ? 'workset' : 'local',
@@ -515,12 +516,12 @@ export function registerCodeGraphTool(
           cwd: inspectionCwd,
           depth,
           direction,
-          edgeLimit: edgeLimit ?? MCP_CODE_GRAPH_DEFAULT_EDGE_LIMIT,
+          edgeLimit: effectiveRequest.edgeLimit,
           from,
           includeHeuristic,
           includeModelAssociations,
           nodeId: inspectionNodeId,
-          nodeLimit: nodeLimit ?? MCP_CODE_GRAPH_DEFAULT_NODE_LIMIT,
+          nodeLimit: effectiveRequest.nodeLimit,
           operation,
           packageName: packageName?.trim() || undefined,
           query: requestedQuery,
@@ -648,16 +649,16 @@ export function registerCodeGraphTool(
           Effect.asVoid,
         );
         yield* completeReadyReadRefresh;
-
         return yield* queryTelemetry.stage(
           'graph.query.execute',
           'query-serialization',
           Effect.sync(() => {
             const response = codeGraphMcpResponse(
               codeGraphResultWithRefreshContinuity(presentedResult, refreshStatus, refreshContinuity),
-              budgetTokens,
+              effectiveRequest.budgetTokens,
               refreshContinuity,
               selectedResponseFormat,
+              operation === 'query' && nodeLimit !== undefined ? {queryNodeLimit: nodeLimit} : undefined,
             );
             return formatCodeGraphMcpResponse(response, selectedResponseFormat);
           }),
@@ -875,9 +876,10 @@ export function registerCodeGraphTool(
               },
               metadata(),
             );
-            return responseFormat === 'dual'
-              ? {content: [{type: 'text' as const, text: response.text}], structuredContent: response.structuredContent}
-              : {content: [{type: 'text' as const, text: response.text}]};
+            return format({
+              content: [{type: 'text' as const, text: response.text}],
+              structuredContent: response.structuredContent,
+            });
           }),
         );
       }).pipe(
@@ -1025,7 +1027,6 @@ interface CodeGraphMcpOutputCoverage {
   readonly complete: boolean;
   readonly truncated: boolean;
 }
-
 type CodeGraphMcpAnalysisTextCoverage = CodeGraphMcpOutputCoverage;
 
 interface CodeGraphMcpAnalysisStringObservation {
@@ -1195,7 +1196,7 @@ export function codeGraphAnalysisMcpResponse(
 
   const projectionOmissions = codeGraphMcpAnalysisOmissions(compactSource, projected, operation);
   const projectionComplete = observation.truncated === 0 && Object.keys(projectionOmissions).length === 0;
-  const rendered = `${metadata === undefined ? '' : `Read: ${JSON.stringify(metadata)}\n`}${renderCodeGraphAnalysis(projected, operation, 'mcp')}`;
+  const rendered = renderCodeGraphAnalysis(projected, operation, 'mcp');
   const boundedText = boundedCodeGraphMcpAnalysisText(rendered, result.coverage.topology.state, projectionComplete);
   const structuredContent = finalizedCodeGraphMcpAnalysisEnvelope(
     compactSource,

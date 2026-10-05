@@ -40,6 +40,23 @@ const BETA30_STAGING_EVIDENCE =
   'apps/threadnote/test/evaluation/baselines/code-graph-v1/beta30-staging-development.json';
 
 describe('code graph release evidence', () => {
+  it('keeps local heavy-tail attestation outside stable and beta publication gates', () => {
+    const guide = readFileSync('docs/releasing.md', 'utf8');
+    const publishing = guide
+      .split('## Publishing\n')[1]
+      ?.split('\n## Optional local heavy-tail performance evidence')[0];
+    expect(publishing).toBeDefined();
+    expect(publishing).toMatch(
+      /Local heavy-tail attestation is optional and is not a publication gate for\s+stable or beta releases/u,
+    );
+    expect(publishing).not.toContain('bench:code-graph:heavy-tail:ratchet');
+    expect(publishing).not.toContain('Final release readiness additionally requires');
+    expect(publishing).toContain('Run the Stage 3 code-graph dogfood gate');
+    expect(publishing).toContain('Confirm immutable releases are enabled');
+    const publisher = readFileSync('.github/workflows/publish.yml', 'utf8');
+    expect(publisher).not.toContain('bench:code-graph:heavy-tail');
+    expect(publisher).not.toContain('assertHeavyTailReleaseRatchet');
+  });
   it('keeps the production-shaped release target immutable while classifying hosted heavy-tail runs as correctness-only', () => {
     expect(PRODUCTION_LARGE_CODE_GRAPH_PROFILE).toMatchObject({
       targetRepositoryFiles: 73_000,

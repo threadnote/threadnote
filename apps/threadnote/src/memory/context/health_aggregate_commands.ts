@@ -195,13 +195,6 @@ const collectTeamSource = Effect.fn('memory.contextHealth.aggregateTeam')(functi
   }
   if (Result.isFailure(readResult)) return unknownTeam(team, 'snapshot-unreadable', headRevision);
   const {active, all, evidenceRevision} = readResult.success;
-  if (
-    active.some(
-      record => (record.metadata.codeCitations?.length ?? 0) > 0 || (record.metadata.citationErrors?.length ?? 0) > 0,
-    )
-  ) {
-    return unknownTeam(team, 'citation-evidence-unavailable', evidenceRevision);
-  }
   const now = yield* DateTime.nowAsDate;
   const report = buildContextHealthReport({
     citationValidations: [],
@@ -211,7 +204,11 @@ const collectTeamSource = Effect.fn('memory.contextHealth.aggregateTeam')(functi
     records: active,
     relationEvidence: relationEvidenceWithinSnapshot(active, all),
   });
-  return {evidenceRevision, report, scope: 'team', state: 'complete', team} satisfies ContextHealthAggregateSourceV1;
+  return active.some(
+    record => (record.metadata.codeCitations?.length ?? 0) > 0 || (record.metadata.citationErrors?.length ?? 0) > 0,
+  )
+    ? {...unknownTeam(team, 'citation-evidence-unavailable', evidenceRevision), report}
+    : ({evidenceRevision, report, scope: 'team', state: 'complete', team} satisfies ContextHealthAggregateSourceV1);
 });
 
 const readTeamRecords = Effect.fn('memory.contextHealth.readTeamRecords')(function* (

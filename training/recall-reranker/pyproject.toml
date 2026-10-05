@@ -5,7 +5,7 @@ description = "Non-shipping training and evaluation harness for Threadnote's rec
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-  "accelerate==1.14.0",
+  "accelerate==1.15.0",
   "datasets==5.0.1",
   "huggingface-hub==0.36.2",
   "sentence-transformers==5.6.1",

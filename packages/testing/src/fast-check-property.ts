@@ -1,6 +1,6 @@
 import type {Vitest} from '@effect/vitest';
 import {Schema, type Effect, type Scope} from 'effect';
-import * as Arbitrary from 'effect/unstable/arbitrary/Arbitrary';
+import * as Arbitrary from 'effect/Arbitrary';
 import * as FC from 'fast-check';
 
 type Inputs = ReadonlyArray<FC.Arbitrary<unknown>> | Readonly<Record<string, FC.Arbitrary<unknown>>>;
@@ -45,7 +45,7 @@ export function fcProp<const A extends Inputs, R>(
   );
 }
 
-/** Preserve custom Fast-check generators while RC115 owns Effect execution and per-case scopes. */
+/** Preserve custom Fast-check generators while @effect/vitest owns Effect execution and per-case scopes. */
 export function fcEffectProp<const A extends Inputs, R, E, Result>(
   it: Vitest.MethodsNonLive<R>,
   name: string,

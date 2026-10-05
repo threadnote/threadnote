@@ -1,4 +1,5 @@
-import {Encoding, Result} from 'effect';
+import {Result} from 'effect';
+import {Base64Url} from 'effect/encoding';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {EnabledTelemetryConfiguration} from './config.js';
 import {Layer} from 'effect';
@@ -123,11 +124,11 @@ export function resolveAgentSession(options: {
     id: anonymousAgentSessionId(options.randomBytes),
   });
   if (options.configuration === undefined) return random();
-  const salt = Encoding.decodeBase64Url(options.configuration.sessionSalt);
+  const salt = Base64Url.decode(options.configuration.sessionSalt);
   if (
     !Result.isSuccess(salt) ||
     salt.success.byteLength !== CONSENT_SALT_BYTES ||
-    Encoding.encodeBase64Url(salt.success) !== options.configuration.sessionSalt
+    Base64Url.encode(salt.success) !== options.configuration.sessionSalt
   ) {
     return random();
   }

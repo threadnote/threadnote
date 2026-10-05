@@ -1,11 +1,11 @@
 import * as BunStdio from '@effect/platform-bun/BunStdio';
 import {Cause, Context, Effect, Layer, Logger, Option, Schema, Sink, Stdio} from 'effect';
-import {McpProtocol, McpSchema, McpServer} from 'effect/unstable/ai';
-import * as HttpRouter from 'effect/unstable/http/HttpRouter';
-import * as HttpEffect from 'effect/unstable/http/HttpEffect';
-import * as HttpServerRequest from 'effect/unstable/http/HttpServerRequest';
-import * as HttpServerResponse from 'effect/unstable/http/HttpServerResponse';
-import {RpcMessage, RpcSerialization, RpcServer} from 'effect/unstable/rpc';
+import {McpProtocol, McpSchema, McpServer} from 'effect/ai';
+import * as HttpRouter from 'effect/http/HttpRouter';
+import * as HttpEffect from 'effect/http/HttpEffect';
+import * as HttpServerRequest from 'effect/http/HttpServerRequest';
+import * as HttpServerResponse from 'effect/http/HttpServerResponse';
+import {RpcMessage, RpcSerialization, RpcServer} from 'effect/rpc';
 import {applicationError, fromPromise} from '@threadnote/platform/errors';
 import type {ApplicationServices} from '../runtime.js';
 import {omitProductionLogPhaseRecorder, withProductionLogging} from '../production_log.js';
@@ -22,6 +22,7 @@ import {omitAnonymousTelemetryRecorder, withAnonymousTelemetry} from '../telemet
 // routinely dropping the completion record that explains a returned error.
 const MCP_PRODUCTION_LOG_WRITE_TIMEOUT_MILLISECONDS = 500;
 const EFFECT_RPC_CAUSE_MARKER = new TextEncoder().encode('"_tag":"Cause"');
+const MCP_RESOURCE_ERROR_BRAND_MARKER = new TextEncoder().encode('"threadnote.io/resource-read-error"');
 const MCP_RESOURCE_ERROR_BRAND_KEY = 'threadnote.io/resource-read-error';
 const MCP_RESOURCE_MEMORY_RECOVERY_KEY = 'threadnote.io/memory-read-recovery';
 export const MCP_RESOURCE_ERROR_DATA = Object.freeze({[MCP_RESOURCE_ERROR_BRAND_KEY]: 1});
@@ -34,7 +35,7 @@ const MCP_PROGRESS_PHASE_MAX_CHARACTERS = 64;
 const MCP_PROGRESS_INTERVAL_MAX_MILLISECONDS = 300_000;
 const MCP_PROGRESS_ENCODER = new TextEncoder();
 const MCP_PROGRESS_DECODER = new TextDecoder();
-const MCP_PROGRESS_BRIDGED_SERVERS = new WeakSet<object>();
+const MCP_PROGRESS_BRIDGED_SERVERS = new WeakMap<object, StdioSingleClientSet>();
 const MCP_PROTOCOLS = [
   McpProtocol.v2025_11_25,
   McpProtocol.v2025_06_18,
@@ -324,26 +325,23 @@ export class EffectMcpServerRegistry {
             }),
             handle: payload =>
               Effect.flatMap(CurrentMcpProgressRequestAssociation, association =>
-                Effect.flatMap(McpSchema.McpServerClient, client =>
+                Effect.flatMap(McpSchema.McpRequestContext, client =>
                   Effect.flatMap(CurrentMcpToolProgress, inheritedProgress => {
-                    // RC.112's live protocol handlers dispatch through the
+                    // Effect's live protocol handlers dispatch through the
                     // internal tool core instead of public server.callTool.
                     // Rehydrate Threadnote progress at this surviving Effect
                     // context boundary; HTTP has no transport association and
                     // therefore keeps the inherited disabled implementation.
+                    const stdioClients = MCP_PROGRESS_BRIDGED_SERVERS.get(server);
                     const progress =
-                      association === undefined
+                      association === undefined || stdioClients === undefined
                         ? inheritedProgress
                         : makeMcpToolProgress(
-                            admitMcpProgressToken(
-                              association.progressToken,
-                              client.clientId,
-                              server.initializedClients,
-                            ),
+                            admitMcpProgressToken(association.progressToken, client.clientId, stdioClients),
                             notification =>
                               mcpProgressNotificationForCurrentRequest(notification).pipe(
                                 Effect.flatMap(outgoingNotification =>
-                                  mcpProgressCanRouteToClient(server.initializedClients, client.clientId)
+                                  mcpProgressCanRouteToClient(stdioClients, client.clientId)
                                     ? server.notifications['notifications/progress'](outgoingNotification)
                                     : Effect.void,
                                 ),
@@ -513,7 +511,7 @@ function repairMcpHttpResponse(
   if (response.status !== 200 || response.body._tag !== 'Uint8Array' || response.body.contentLength === 0) {
     return response;
   }
-  if (instructions === undefined && !couldContainEffectRpcCause(response.body.body)) return response;
+  if (instructions === undefined && !couldContainMcpResourceError(response.body.body)) return response;
   const repaired = repairMcpJsonRpcEnvelope(new TextDecoder().decode(response.body.body), instructions);
   return repaired === undefined
     ? response
@@ -778,7 +776,7 @@ export function mcpStdioSerialization(
           for (const frame of frames.decode(data)) {
             if (Array.isArray(frame)) {
               if (
-                selectedProtocol?.transport.acceptsJsonRpcBatches !== true ||
+                selectedProtocol?.runtime.transport.jsonRpc.acceptsBatches !== true ||
                 frame.length === 0 ||
                 frame.some(mcpStdioInitializeMessage)
               ) {
@@ -867,25 +865,17 @@ function mcpInvalidBatchExit(response: unknown): response is {
 export type EffectMcpServer = Context.Service.Shape<typeof McpServer.McpServer>;
 
 export function installCallToolProgressBridge(server: EffectMcpServer): boolean {
-  // Effect 4.0.0-rc.112's live protocol handlers bypass public callTool, so
+  // Effect's live protocol handlers bypass public callTool, so
   // registrationLayer rehydrates their progress from the transport context.
   // Keep this wrapper for direct callTool consumers and, more importantly,
-  // install the lifetime-single-client recipient guard used by both paths.
+  // install the private lifetime-single-client admission guard used by both paths.
   if (MCP_PROGRESS_BRIDGED_SERVERS.has(server)) return true;
   const callToolDescriptor = Object.getOwnPropertyDescriptor(server, 'callTool');
-  const clientsDescriptor = Object.getOwnPropertyDescriptor(server, 'initializedClients');
-  if (
-    Object.isFrozen(server) ||
-    !isWritableDataProperty(callToolDescriptor) ||
-    !isWritableDataProperty(clientsDescriptor) ||
-    clientsDescriptor.configurable !== true ||
-    server.initializedClients.size > 1
-  ) {
+  if (Object.isFrozen(server) || !isWritableDataProperty(callToolDescriptor)) {
     return false;
   }
   const originalCallToolMethod = server.callTool;
-  const originalInitializedClients = server.initializedClients;
-  const stdioInitializedClients = new StdioSingleClientSet(originalInitializedClients);
+  const stdioInitializedClients = new StdioSingleClientSet();
   const wrappedCallTool: EffectMcpServer['callTool'] = request =>
     Effect.gen(function* () {
       // McpServerClient middleware rejects non-initialize requests before
@@ -898,33 +888,32 @@ export function installCallToolProgressBridge(server: EffectMcpServer): boolean 
       const progressToken = admitMcpProgressToken(
         request._meta?.progressToken,
         client.clientId,
-        server.initializedClients,
+        stdioInitializedClients,
       );
       const progress = makeMcpToolProgress(progressToken, notification =>
         mcpProgressNotificationForCurrentRequest(notification).pipe(
           Effect.flatMap(outgoingNotification =>
-            mcpProgressCanRouteToClient(server.initializedClients, client.clientId)
+            mcpProgressCanRouteToClient(stdioInitializedClients, client.clientId)
               ? server.notifications['notifications/progress'](outgoingNotification)
               : Effect.void,
           ),
         ),
       );
-      return yield* originalCallToolMethod
-        .call(server, request)
-        .pipe(Effect.provideService(CurrentMcpToolProgress, progress));
+      return yield* originalCallToolMethod.call(server, request).pipe(
+        Effect.provideService(CurrentMcpToolProgress, progress),
+        Effect.provideService(McpSchema.McpRequestContext, {
+          clientCapabilities: client.clientCapabilities,
+          clientId: client.clientId,
+          clientInfo: client.clientInfo,
+          protocolVersion: client.protocolVersion,
+          requestMetadata: request._meta,
+        }),
+      );
     });
   try {
-    // Effect 4.0.0-rc.112's canonical notification queue broadcasts at drain time. This
-    // adapter is permanently backed by layerStdio, so replace its recipient
-    // registry with a non-replaceable lifetime-single-client set before any
-    // request can enqueue progress. A late foreign add is ignored even if the
-    // first client disconnected, closing the enqueue-to-drain token leak.
-    Object.defineProperty(server, 'initializedClients', {
-      configurable: false,
-      enumerable: clientsDescriptor.enumerable,
-      value: stdioInitializedClients,
-      writable: false,
-    });
+    // Effect 4 routes progress using McpRequestContext rather than exposing an
+    // initialized-client registry. Keep stdio admission private; notifications
+    // retain the originating context through delivery instead of broadcasting.
     Object.defineProperty(server, 'callTool', {
       configurable: callToolDescriptor.configurable,
       enumerable: callToolDescriptor.enumerable,
@@ -934,20 +923,14 @@ export function installCallToolProgressBridge(server: EffectMcpServer): boolean 
     if (server.callTool !== wrappedCallTool) throw new Error('Effect MCP callTool bridge was not installed.');
   } catch {
     try {
-      Object.defineProperty(server, 'callTool', {
-        configurable: callToolDescriptor.configurable,
-        enumerable: callToolDescriptor.enumerable,
-        value: originalCallToolMethod,
-        writable: true,
-      });
+      Object.defineProperty(server, 'callTool', callToolDescriptor);
     } catch {
-      // The stdio recipient invariant is installed before the handler wrapper,
-      // so even a hostile setter that prevents restoration cannot turn this
-      // failure into a cross-client notification path.
+      // A hostile setter may prevent restoration. No admission state is
+      // published on failure, and Effect still routes notifications by origin.
     }
     return false;
   }
-  MCP_PROGRESS_BRIDGED_SERVERS.add(server);
+  MCP_PROGRESS_BRIDGED_SERVERS.set(server, stdioInitializedClients);
   return true;
 }
 
@@ -981,10 +964,8 @@ function isWritableDataProperty(descriptor: PropertyDescriptor | undefined): des
 }
 
 function mcpProgressCanRouteToClient(initializedClients: ReadonlySet<number>, clientId: number): boolean {
-  // Effect 4.0.0-rc.112's canonical outgoing notification queue broadcasts to the
-  // complete initialized-client set. Threadnote's adapter is stdio-only, but
-  // fail closed if the service is ever reused with another client so an opaque
-  // request token cannot cross client boundaries.
+  // Threadnote's compatibility adapter is stdio-only. Keep admission bound to
+  // one lifetime client, in addition to Effect's request-local delivery routing.
   for (const initializedClientId of initializedClients) {
     if (initializedClientId !== clientId) return false;
   }
@@ -1252,7 +1233,7 @@ export function makeInitializeInstructionsTransform(
 ): (input: string | Uint8Array) => string | Uint8Array {
   let initialized = false;
   return input => {
-    if (initialized && !couldContainEffectRpcCause(input)) return input;
+    if (initialized && !couldContainMcpResourceError(input)) return input;
     const text = typeof input === 'string' ? input : new TextDecoder().decode(input);
     const parsed = parseMcpJsonRpcEnvelope(text);
     if (!parsed) {
@@ -1369,22 +1350,24 @@ function mcpInitializeResponse(parsed: Record<string, unknown>): parsed is Recor
   return result !== undefined && 'protocolVersion' in result && 'serverInfo' in result;
 }
 
-function couldContainEffectRpcCause(input: string | Uint8Array): boolean {
-  if (typeof input === 'string') return input.includes('"_tag":"Cause"');
-  outer: for (let index = 0; index <= input.length - EFFECT_RPC_CAUSE_MARKER.length; index += 1) {
-    for (let offset = 0; offset < EFFECT_RPC_CAUSE_MARKER.length; offset += 1) {
-      if (input[index + offset] !== EFFECT_RPC_CAUSE_MARKER[offset]) continue outer;
+function couldContainMcpResourceError(input: string | Uint8Array): boolean {
+  return [EFFECT_RPC_CAUSE_MARKER, MCP_RESOURCE_ERROR_BRAND_MARKER].some(marker => containsMcpMarker(input, marker));
+}
+
+function containsMcpMarker(input: string | Uint8Array, marker: Uint8Array): boolean {
+  if (typeof input === 'string') return input.includes(new TextDecoder().decode(marker));
+  outer: for (let index = 0; index <= input.length - marker.length; index += 1) {
+    for (let offset = 0; offset < marker.length; offset += 1) {
+      if (input[index + offset] !== marker[offset]) continue outer;
     }
     return true;
   }
   return false;
 }
 
-// Effect 4.0.0-rc.112 preserves the typed MCP code on its outer Cause envelope,
-// but clients still require a plain JSON-RPC error object. Repair only the exact
-// single-Fail envelopes and branded protocol errors Threadnote emits. Keep the
-// beta-era code-0 case bounded for compatible stored/test envelopes; unrelated
-// results, defects, and Cause values pass through byte-for-byte.
+// Effect 4 projects typed errors directly; prior releases used Cause envelopes.
+// Repair only exact branded errors Threadnote emits in either representation.
+// Unrelated results, defects, and errors pass through byte-for-byte.
 function unwrapEffectRpcMcpError(parsed: Record<string, unknown>): Record<string, unknown> {
   const error = parsed.error;
   if (
@@ -1394,13 +1377,18 @@ function unwrapEffectRpcMcpError(parsed: Record<string, unknown>): Record<string
     'result' in parsed ||
     typeof error !== 'object' ||
     error === null ||
-    !('_tag' in error) ||
-    error._tag !== 'Cause' ||
     !('code' in error) ||
     typeof error.code !== 'number'
   ) {
     return parsed;
   }
+  if (!('_tag' in error) && 'message' in error && typeof error.message === 'string' && typeof error.code === 'number') {
+    const typed = {...error, code: error.code, message: error.message};
+    if (isRecognizedMcpError(typed) && hasMcpResourceErrorBrand(typed)) {
+      return projectMcpResourceError(parsed, typed);
+    }
+  }
+  if (!('_tag' in error) || error._tag !== 'Cause') return parsed;
   if (!('data' in error) || !Array.isArray(error.data)) return parsed;
   if (error.data.length !== 1) return parsed;
   const failure = error.data[0];
@@ -1427,6 +1415,13 @@ function unwrapEffectRpcMcpError(parsed: Record<string, unknown>): Record<string
     return parsed;
   }
   if (error.code !== 0 && error.code !== typed.code) return parsed;
+  return projectMcpResourceError(parsed, typed);
+}
+
+function projectMcpResourceError(
+  parsed: Record<string, unknown>,
+  typed: {readonly code: number; readonly message: string} & Record<PropertyKey, unknown>,
+): Record<string, unknown> {
   const memoryRecovery = mcpResourceMemoryRecovery(typed);
   return {
     ...parsed,

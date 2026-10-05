@@ -10,6 +10,7 @@ import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {loadLatestMajorWebsiteReleases, type WebsiteRelease} from './site-release-notes.js';
 import {renderWebsiteReleaseSocialImagePng} from './site-release-social-image.js';
 import {
+  filterWebsiteUpdatesByKind,
   orderWebsiteUpdatesDescending,
   websiteArticleSocialImageHeight,
   websiteArticleSocialImageWidth,
@@ -381,29 +382,35 @@ export function orderWebsitePostsDescending(posts: readonly WebsitePost[]): read
 }
 
 function crawlerIndexFallback(posts: readonly WebsitePost[]): string {
-  return [
-    '<main class="crawler-post crawler-post--index">',
-    "<header><p>What's new</p><h1>Threadnote articles and releases</h1>",
-    '<p>Engineering stories and stable release posts, ordered by publication time.</p></header>',
+  const renderPostList = (kind: 'article' | 'release', heading: string, view: 'articles' | 'releases') => [
+    `<section><h2><a href="${new URL(`whats-new/?view=${view}`, publicOrigin).href}">${heading}</a></h2>`,
     '<ol>',
-    ...posts.map(post => {
+    ...filterWebsiteUpdatesByKind(posts, kind).map(post => {
       const details = postDetails(post);
       return [
         '<li><article>',
         `<p>${details.kindLabel} · ${escapeHtml(post.publishedAt)} · By ${escapeHtml(details.author)}</p>`,
-        `<h2><a href="${escapeHtml(details.canonicalUrl)}">${escapeHtml(post.title)}</a></h2>`,
+        `<h3><a href="${escapeHtml(details.canonicalUrl)}">${escapeHtml(post.title)}</a></h3>`,
         `<p>${escapeHtml(post.summary)}</p>`,
         '</article></li>',
       ].join('');
     }),
-    '</ol>',
+    '</ol></section>',
+  ];
+
+  return [
+    '<main class="crawler-post crawler-post--index">',
+    "<header><p>What's new</p><h1>Threadnote articles and releases</h1>",
+    '<p>Engineering stories and stable release posts, kept in separate views.</p></header>',
+    ...renderPostList('article', 'Articles', 'articles'),
+    ...renderPostList('release', 'Release notes', 'releases'),
     '</main>',
   ].join('');
 }
 
 export function renderWhatsNewIndexHtml(template: string, posts: readonly WebsitePost[]): string {
   const orderedPosts = orderWebsitePostsDescending(posts);
-  const latestPost = orderedPosts[0];
+  const latestPost = filterWebsiteUpdatesByKind(orderedPosts, 'article')[0] ?? orderedPosts[0];
   if (!latestPost) throw ScriptError.make({message: "What's New index requires at least one post"});
   const latestSocialImage = postDetails(latestPost).socialImage;
   if (!template.includes('<div id="root"></div>'))

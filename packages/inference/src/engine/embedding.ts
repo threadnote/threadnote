@@ -1,6 +1,6 @@
 import {Effect, Layer} from 'effect';
-import * as AiError from 'effect/unstable/ai/AiError';
-import * as EmbeddingModel from 'effect/unstable/ai/EmbeddingModel';
+import * as AiError from 'effect/ai/AiError';
+import * as EmbeddingModel from 'effect/ai/EmbeddingModel';
 import {LlamaCppEngine} from './llama-cpp-engine.js';
 
 export interface LlamaEmbeddingLayerOptions {

@@ -1,4 +1,4 @@
-import {Command} from 'effect/unstable/cli';
+import {Command} from 'effect/cli';
 import {runJevStatusCommand} from './ai/jev.js';
 import {boolean} from './cli/flags.js';
 

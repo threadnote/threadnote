@@ -4,7 +4,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Clock, Effect} from 'effect';
 import * as FC from 'fast-check';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect, vi} from 'vitest';
 import {releaseSnapshotLease} from '@threadnote/graph/store/leases';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';

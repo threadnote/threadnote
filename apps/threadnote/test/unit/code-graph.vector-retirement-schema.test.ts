@@ -6,7 +6,7 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {
   type CodeGraphVectorRetirementCapacityProtector,
   CODE_GRAPH_VECTOR_RETIREMENT_PAGE_FIXED_ROWS,

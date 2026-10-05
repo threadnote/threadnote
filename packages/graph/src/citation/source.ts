@@ -23,6 +23,7 @@ export interface CodeGraphCitationSourceRequest {
 
 interface CommitBlobObservation extends CodeGraphCitationSourceRequest {
   readonly blobId: string;
+  readonly requiresByteVerification: boolean;
   readonly size: number;
 }
 
@@ -50,6 +51,8 @@ export function codeGraphCitationSourceKey(
 export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSources')(function* (input: {
   /** Refuse snapshot blobs when the caller requires bytes from the current worktree. */
   readonly allowCommitFallback?: boolean;
+  /** Historical recovery must prove that the exact commit contains the bytes. */
+  readonly commitOnly?: boolean;
   readonly objectFormat: RepositoryIdentity['objectFormat'];
   /** @internal Narrower bound used by focused admission tests. */
   readonly retainedBytesLimit?: number;
@@ -65,6 +68,17 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   }
   const retainedBytesLimit = Math.min(CODE_GRAPH_CITATION_SOURCE_MAXIMUM_TOTAL_BYTES, requestedRetainedBytesLimit);
   const sources = deduplicateSources(input.sources);
+  if (
+    !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(input.sourceCommit) ||
+    sources.some(
+      source =>
+        !source.repositoryPath ||
+        source.repositoryPath.startsWith('/') ||
+        /[\0\r\n\\]/.test(source.repositoryPath) ||
+        source.repositoryPath.split('/').some(segment => !segment || segment === '.' || segment === '..'),
+    )
+  )
+    return yield* CodeGraphCitationSourceError.make({message: 'Citation source identity or path is invalid.'});
   if (sources.length > CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILES) {
     return yield* CodeGraphCitationSourceError.make({
       message: `Citation source request exceeds the ${CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILES}-file bound.`,
@@ -72,7 +86,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   }
 
   const metadata = yield* Effect.forEach(
-    sources,
+    input.commitOnly === true ? [] : sources,
     source =>
       inspectContainedStableRegularFile(fs, path, input.repositoryRoot, source.repositoryPath).pipe(
         Effect.option,
@@ -83,7 +97,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   let reservedBytes = 0;
   const reservedBytesByKey = new Map<string, number>();
   const worktreePlans: Array<{readonly size: number; readonly source: CodeGraphCitationSourceRequest}> = [];
-  const commitFallback: CodeGraphCitationSourceRequest[] = [];
+  const commitFallback: CodeGraphCitationSourceRequest[] = input.commitOnly === true ? [...sources] : [];
   for (const {inspected, source} of metadata) {
     if (Option.isNone(inspected)) {
       commitFallback.push(source);
@@ -178,7 +192,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
   const blobsToRead: CommitBlobObservation[] = [];
   for (const observation of observations) {
     const key = codeGraphCitationSourceKey(observation);
-    if (!observation.requireBytes) {
+    if (!observation.requireBytes && !observation.requiresByteVerification) {
       resolved.set(key, EMPTY_SOURCE_BYTES);
       continue;
     }
@@ -215,7 +229,7 @@ export const readCodeGraphCitationSources = Effect.fn('codeGraph.readCitationSou
       const observation = batch[index];
       const bytes = blobs[index];
       if (codeGraphFileContentHashMatchesBytes(observation.expectedContentHash, input.objectFormat, bytes)) {
-        resolved.set(codeGraphCitationSourceKey(observation), bytes);
+        resolved.set(codeGraphCitationSourceKey(observation), observation.requireBytes ? bytes : EMPTY_SOURCE_BYTES);
       }
     }
   }
@@ -259,15 +273,15 @@ function parseBatchCheck(
     const match = /^([0-9a-f]+) blob (\d+)$/u.exec(lines[index]);
     if (!match) continue;
     const size = Number(match[2]);
-    if (
-      !Number.isSafeInteger(size) ||
-      size < 0 ||
-      size > CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILE_BYTES ||
-      codeGraphCommittedContentHash(objectFormat, match[1]) !== source.expectedContentHash
-    ) {
+    if (!Number.isSafeInteger(size) || size < 0 || size > CODE_GRAPH_CITATION_SOURCE_MAXIMUM_FILE_BYTES) {
       continue;
     }
-    observations.push({...source, blobId: match[1], size});
+    observations.push({
+      ...source,
+      blobId: match[1],
+      requiresByteVerification: codeGraphCommittedContentHash(objectFormat, match[1]) !== source.expectedContentHash,
+      size,
+    });
   }
   return observations;
 }

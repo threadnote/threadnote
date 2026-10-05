@@ -1,6 +1,6 @@
 import {DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
-import * as SqlError from 'effect/unstable/sql/SqlError';
+import * as SqlClient from 'effect/sql/SqlClient';
+import * as SqlError from 'effect/sql/SqlError';
 import {
   REMOVED_VIEW_CLEANUP_ADMISSION_CURSOR_KEY,
   REMOVED_VIEW_CLEANUP_DUE_INDEX_SQL,

@@ -1,5 +1,5 @@
 import {Console, Effect} from 'effect';
-import {Argument, Command} from 'effect/unstable/cli';
+import {Argument, Command} from 'effect/cli';
 import {getAgentAdapter} from '../agent_integration/adapters.js';
 import {
   GuidanceError,

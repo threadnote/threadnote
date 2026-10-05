@@ -1,7 +1,11 @@
 import {Clock, Console, DateTime, Effect, FileSystem, Result} from 'effect';
 
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {memoryIdentityLockKey} from '@threadnote/memory/identity-alias';
 import {SystemInfo} from '@threadnote/platform/system';
+import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
+import {uriSegment} from '@threadnote/workspace/manifest';
 
 import type {ShareRuntime, ShareSyncOptions, ShareTeamConfig} from '../types.js';
 
@@ -18,6 +22,7 @@ import {
   conflictId,
   formatShareConflictNextSteps,
   isShareableMemoryChange,
+  listShareConflicts,
   normalizePendingChange,
   teamsForShareQuery,
 } from './conflicts.js';
@@ -31,7 +36,9 @@ import {
   SHARED_BACKGROUND_FETCH_INTERVAL_MILLISECONDS,
   SHARE_FETCH_RECEIPT_VERSION,
   SHARE_FETCH_WARNING_MAXIMUM_LENGTH,
+  SHAREABLE_MEMORY_KIND_DIRS,
   ShareOperationError,
+  assertSafeShareRelativePath,
   autoShareState,
   countManagedMemoryFieldsTrailers,
   ensureSharedDirectoryChain,
@@ -41,6 +48,7 @@ import {
   mkdir,
   pathDirname,
   pathJoin,
+  prepareSharedInboundContentEffect,
   readMemoryContent,
   readSharedInboundFileContent,
   readTeamsFile,
@@ -52,6 +60,7 @@ import {
   sharedMemoryIdentityContinuityIssue,
   shareTeamAccess,
   sharedMemoryContentsEquivalent,
+  verifySharedMemoryContentUnchanged,
   verifySharedMemoryIdentityContinuity,
   workfileToResourceUri,
   writeFile,
@@ -500,7 +509,8 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
         yield* Console.warn(
           `share sync: ${result.failed.length} file(s) could not be ingested on this run; they are persisted and will be retried on the next sync or agent recall/read.`,
         );
-        yield* Console.warn(formatShareConflictNextSteps(team.name, result.failed));
+        const conflicts = yield* listShareConflicts(config, {team: team.name});
+        yield* Console.warn(formatShareConflictNextSteps(team.name, conflicts));
       }
     }
   }
@@ -656,10 +666,11 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
         const uri = yield* workfileToResourceUri(config, team, normalizedChange.path);
         changeLabel = uri;
         const fs = yield* FileSystem.FileSystem;
+        const identityLockPlan = yield* sharedIdentityLockPlan(config, ov, uri, normalizedChange);
         return yield* withMemoryUriLocks(
           fs,
           config.agentContextHome,
-          [uri],
+          [uri, ...identityLockPlan.lockKeys],
           Effect.gen(function* () {
             if (normalizedChange.status === 'removed') {
               const currentContent = yield* readExistingMemoryContent(config, ov, uri);
@@ -682,9 +693,30 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
             // the URI before the corresponding upstream commit landed in this clone.
             const content = yield* readSharedInboundFileContent(uri, normalizedChange.path);
             const currentContent = yield* readExistingMemoryContent(config, ov, uri);
+            let restoredIdentity = false;
             if (currentContent !== undefined) {
               const identityIssue = sharedMemoryIdentityContinuityIssue(uri, currentContent, content);
-              if (identityIssue !== undefined) return yield* ShareOperationError.make({message: identityIssue});
+              if (identityIssue !== undefined) {
+                if (
+                  identityLockPlan.currentContent === undefined ||
+                  identityLockPlan.incomingContent === undefined ||
+                  !sharedMemoryContentsEquivalent(currentContent, identityLockPlan.currentContent) ||
+                  !sharedMemoryContentsEquivalent(content, identityLockPlan.incomingContent)
+                ) {
+                  return yield* ShareOperationError.make({
+                    message: `Refusing shared update for ${uri}: memory identity changed while acquiring update locks.`,
+                  });
+                }
+                restoredIdentity = yield* isHistoricalSharedIdentityRestoration(
+                  team.worktree,
+                  normalizedChange,
+                  uri,
+                  currentContent,
+                  content,
+                );
+                if (!restoredIdentity) return yield* ShareOperationError.make({message: identityIssue});
+                yield* assertRestoredSharedMemoryIdentityAvailable(config, team, uri, content);
+              }
               if (
                 sharedMemoryContentsEquivalent(currentContent, content) &&
                 countManagedMemoryFieldsTrailers(currentContent) <= 1
@@ -699,16 +731,11 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
             }
             yield* ensureSharedDirectoryChain(config, ov, uri, false, options);
             const writeMode: 'create' | 'replace' = currentContent !== undefined ? 'replace' : 'create';
-            yield* writeMemoryFileChecked(
-              config,
-              ov,
-              uri,
-              content,
-              writeMode,
-              false,
-              verifySharedMemoryIdentityContinuity(config, uri, content),
-              options,
-            );
+            const writeCheck =
+              restoredIdentity && currentContent !== undefined
+                ? verifySharedMemoryContentUnchanged(config, uri, currentContent)
+                : verifySharedMemoryIdentityContinuity(config, uri, content);
+            yield* writeMemoryFileChecked(config, ov, uri, content, writeMode, false, writeCheck, options);
           }),
         );
       }),
@@ -724,6 +751,156 @@ const applyChangesToCanonicalStore = Effect.fn('share.applyChangesToCanonicalSto
   }
   return {failed};
 });
+
+const sharedIdentityLockPlan = Effect.fn('share.identityLockPlan')(function* (
+  config: ShareRuntime,
+  ov: string,
+  uri: string,
+  change: ChangedFile,
+) {
+  if (change.status === 'removed' || !(yield* isRegularFileNoSymlink(change.path))) {
+    return {currentContent: undefined, incomingContent: undefined, lockKeys: [] as string[]};
+  }
+  const incomingContent = yield* readSharedInboundFileContent(uri, change.path);
+  const currentContent = yield* readExistingMemoryContent(config, ov, uri);
+  const currentMemoryId =
+    currentContent === undefined ? undefined : parseMemoryDocument(uri, currentContent)?.metadata.memoryId;
+  const incomingMemoryId = parseMemoryDocument(uri, incomingContent)?.metadata.memoryId;
+  return {
+    currentContent,
+    incomingContent,
+    lockKeys: [memoryIdentityLockKey(currentMemoryId), memoryIdentityLockKey(incomingMemoryId)].filter(
+      (key): key is string => key !== undefined,
+    ),
+  };
+});
+
+const MAX_SHARED_IDENTITY_HISTORY_COMMITS = 64;
+
+const isHistoricalSharedIdentityRestoration = Effect.fn('share.isHistoricalIdentityRestoration')(function* (
+  worktree: string,
+  change: ChangedFile,
+  uri: string,
+  currentContent: string,
+  incomingContent: string,
+) {
+  const previousContent =
+    change.previousContent ??
+    (change.previousRevision
+      ? yield* gitFileContent(worktree, change.previousRevision, change.relativePath)
+      : undefined);
+  if (previousContent === undefined || !sharedMemoryContentsEquivalent(currentContent, previousContent)) return false;
+  const currentMemoryId = parseMemoryDocument(uri, currentContent)?.metadata.memoryId;
+  const incomingMemoryId = parseMemoryDocument(uri, incomingContent)?.metadata.memoryId;
+  if (currentMemoryId === undefined || incomingMemoryId === undefined || currentMemoryId === incomingMemoryId) {
+    return false;
+  }
+  const headRawContent = yield* gitFileContent(worktree, 'HEAD', change.relativePath);
+  if (headRawContent === undefined) return false;
+  const headContent = yield* prepareSharedInboundContentEffect(uri, headRawContent);
+  if (!sharedMemoryContentsEquivalent(incomingContent, headContent)) return false;
+  const history = yield* runCommand(
+    'git',
+    [
+      '-C',
+      worktree,
+      'log',
+      `--max-count=${MAX_SHARED_IDENTITY_HISTORY_COMMITS}`,
+      '--format=%H',
+      '--follow',
+      '--',
+      change.relativePath,
+    ],
+    {allowFailure: true},
+  );
+  if (history.exitCode !== 0) return false;
+  const historyMemoryIds = yield* Effect.forEach(
+    history.stdout.split('\n').filter(Boolean),
+    Effect.fn('share.callback')(function* (revision) {
+      const historyContent = yield* gitFileContent(worktree, revision, change.relativePath);
+      return historyContent === undefined ? undefined : parseMemoryDocument(uri, historyContent)?.metadata.memoryId;
+    }),
+  );
+  return isRestoredSharedMemoryIdentityHistory(historyMemoryIds, currentMemoryId, incomingMemoryId);
+});
+
+const assertRestoredSharedMemoryIdentityAvailable = Effect.fn('share.assertRestoredIdentityAvailable')(function* (
+  config: ShareRuntime,
+  team: ShareTeamConfig,
+  uri: string,
+  incomingContent: string,
+) {
+  const memoryId = parseMemoryDocument(uri, incomingContent)?.metadata.memoryId;
+  if (memoryId === undefined) {
+    return yield* ShareOperationError.make({
+      message: `Refusing shared identity restoration for ${uri}: incoming content has no stable memory_id.`,
+    });
+  }
+  const scope = `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(team.name)}/durable/projects`;
+  const candidates = yield* loadRecallMemoryIdentities(config, {
+    allowedUriScopes: [scope],
+    memoryIds: [memoryId],
+    validateNow: true,
+  });
+  if (
+    candidates.some(
+      candidate => candidate.memoryId === memoryId && (candidate.identityConflict === true || candidate.uri !== uri),
+    )
+  ) {
+    return yield* ShareOperationError.make({
+      message: `Refusing shared identity restoration for ${uri}: stable memory_id ${memoryId} is already owned or ambiguous in team ${team.name}.`,
+    });
+  }
+
+  const head = yield* gitOutput(team.worktree, ['rev-parse', 'HEAD'], false);
+  const listing =
+    head === undefined
+      ? undefined
+      : yield* gitOutput(
+          team.worktree,
+          ['ls-tree', '-r', '--name-only', '-z', head, '--', ...SHAREABLE_MEMORY_KIND_DIRS],
+          false,
+        );
+  if (head === undefined || listing === undefined) {
+    return yield* ShareOperationError.make({
+      message: `Cannot verify stable memory_id ownership in shared team ${team.name}. Inspect the shared worktree and retry.`,
+    });
+  }
+  for (const candidate of listing.split('\0').filter(Boolean)) {
+    const relativePath = assertSafeShareRelativePath(candidate);
+    if (!relativePath.endsWith('.md')) continue;
+    const rawContent = yield* gitFileContent(team.worktree, head, relativePath);
+    if (rawContent === undefined) {
+      return yield* ShareOperationError.make({
+        message: `Cannot verify stable memory_id ownership for shared file ${relativePath}. Inspect the shared worktree and retry.`,
+      });
+    }
+    const candidatePath = yield* pathJoin(team.worktree, ...relativePath.split('/'));
+    const candidateUri = yield* workfileToResourceUri(config, team, candidatePath);
+    const record = parseMemoryDocument(candidateUri, rawContent);
+    if (record?.metadata.status === 'active' && record.metadata.memoryId === memoryId && candidateUri !== uri) {
+      return yield* ShareOperationError.make({
+        message: `Refusing shared identity restoration for ${uri}: stable memory_id ${memoryId} is already owned by ${candidateUri} in team ${team.name}.`,
+      });
+    }
+  }
+});
+
+export function isRestoredSharedMemoryIdentityHistory(
+  historyMemoryIds: readonly (string | undefined)[],
+  currentMemoryId: string,
+  incomingMemoryId: string,
+): boolean {
+  const distinctIdentities: string[] = [];
+  for (const memoryId of historyMemoryIds) {
+    if (memoryId !== undefined && distinctIdentities.at(-1) !== memoryId) distinctIdentities.push(memoryId);
+  }
+  return (
+    distinctIdentities[0] === incomingMemoryId &&
+    distinctIdentities[1] === currentMemoryId &&
+    distinctIdentities[2] === incomingMemoryId
+  );
+}
 
 const readExistingMemoryContent = Effect.fn('share.readExistingMemoryContent')(function* (
   config: ShareRuntime,

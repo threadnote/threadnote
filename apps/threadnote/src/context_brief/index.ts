@@ -30,9 +30,11 @@ import {planContextBrief} from '@threadnote/context/planner';
 import {projectContextBrief} from '@threadnote/context/projector';
 import type {
   ContextBriefGraphEvidenceV1,
+  ContextBriefLogicalResultV1,
   ContextBriefMemoryRetrievalV1,
   ContextBriefPlanV1,
   ContextBriefRequestV1,
+  ContextBriefResponseFormat,
   ProjectedContextBriefV1,
 } from '@threadnote/context/types';
 
@@ -56,6 +58,11 @@ export interface ContextBriefRuntimeCompilerSources<
 interface ContextBriefCompilerOptions {
   readonly codeLinkedMemoryOnly?: boolean;
   readonly includeProcedureEvidence?: boolean;
+  readonly projection?: (
+    logical: ContextBriefLogicalResultV1,
+    maximumEstimatedTokens: number,
+    responseFormat: ContextBriefResponseFormat,
+  ) => ProjectedContextBriefV1;
 }
 
 /**
@@ -238,7 +245,9 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
                   }),
                 ),
           projection: (logical, maximumEstimatedTokens, responseFormat) =>
-            Effect.sync(() => projectContextBrief(logical, maximumEstimatedTokens, responseFormat)),
+            Effect.sync(() =>
+              (options.projection ?? projectContextBrief)(logical, maximumEstimatedTokens, responseFormat),
+            ),
         },
         requestedRepositories,
       ),
@@ -281,6 +290,15 @@ export const compileContextBrief = Effect.fn('contextBrief.compile')(function* (
   input: ContextBriefRequestV1 | unknown,
 ) {
   return yield* compileContextBriefRuntime(config, input);
+});
+
+/** Compile through the normal runtime evidence boundaries with one reviewed private projection. */
+export const compileContextBriefRuntimeProjection = Effect.fn('contextBrief.compileRuntimeProjection')(function* (
+  config: RuntimeConfig,
+  input: ContextBriefRequestV1 | unknown,
+  projection: NonNullable<ContextBriefCompilerOptions['projection']>,
+) {
+  return yield* compileContextBriefRuntime(config, input, {projection});
 });
 
 /** Compile the final source-verification brief used only by setup. */

@@ -1,6 +1,7 @@
 import {Console, Effect, FileSystem} from 'effect';
 import {isFileLockTimeout} from '@threadnote/platform/file/lock';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
+import {memoryIdentityWriteLockKeys} from '../memory/relations.js';
 import {observeSharedRepositoryHomeLock, withSharedRepositoryLock} from './share/lock.js';
 import {
   installSharedAgentArtifacts as installSharedAgentArtifactsEffect,
@@ -201,7 +202,12 @@ function withShareConflictMutationLocks<A, E, R>(
     Effect.gen(function* () {
       const conflict = yield* showShareConflictEffect(config, reference, options);
       const fs = yield* FileSystem.FileSystem;
-      return yield* withMemoryUriLocks(fs, config.agentContextHome, [conflict.uri], mutation);
+      return yield* withMemoryUriLocks(
+        fs,
+        config.agentContextHome,
+        [conflict.uri, ...memoryIdentityWriteLockKeys(conflict.establishedMemoryId, [])],
+        mutation,
+      );
     }),
   );
 }

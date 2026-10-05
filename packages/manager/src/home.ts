@@ -11,7 +11,13 @@ export interface ManagerHomeLane {
 }
 
 export interface ManagerHomeLaneInput {
-  readonly health?: {readonly findingCount: number; readonly status: 'clean' | 'findings' | 'unknown'};
+  readonly health?: {
+    readonly findingCount: number;
+    readonly status: 'clean' | 'findings' | 'unknown';
+    readonly decisionMemories?: number;
+    readonly automaticCount?: number;
+    readonly coverage?: 'complete' | 'partial' | 'unavailable';
+  };
   readonly reviews?: {readonly pendingCount: number};
   readonly value?: {readonly applied: number; readonly reviewed: number; readonly useful: number};
 }
@@ -24,6 +30,8 @@ export function managerHomeLanes(input: ManagerHomeLaneInput): readonly ManagerH
   const reviews = input.reviews;
   const health = input.health;
   const value = input.value;
+  const decisions = health?.decisionMemories ?? health?.findingCount;
+  const modernHealth = health?.decisionMemories !== undefined;
   return [
     {
       action: 'reviews',
@@ -40,16 +48,22 @@ export function managerHomeLanes(input: ManagerHomeLaneInput): readonly ManagerH
     },
     {
       action: 'context-health',
-      ...(health === undefined ? {} : {count: health.findingCount}),
-      detail:
-        health === undefined || health.status === 'unknown'
+      ...(health === undefined ? {} : {count: decisions}),
+      detail: modernHealth
+        ? `${decisions === 0 ? 'No decisions need you' : `${decisions} ${decisions === 1 ? 'memory needs' : 'memories need'} your decision`}; ${health?.coverage === 'complete' ? 'required evidence checks complete' : 'evidence checks incomplete'}. ${health?.automaticCount ?? 0} checks handled automatically.`
+        : health === undefined || health.status === 'unknown'
           ? 'Health coverage is unavailable or incomplete.'
           : health.status === 'clean'
             ? 'Current project records have no actionable findings.'
             : `${health.findingCount} context ${health.findingCount === 1 ? 'finding' : 'findings'} need review.`,
       id: 'health',
-      status:
-        health === undefined || health.status === 'unknown'
+      status: modernHealth
+        ? (decisions ?? 0) > 0
+          ? 'attention'
+          : health?.coverage === 'complete'
+            ? 'clear'
+            : 'unavailable'
+        : health === undefined || health.status === 'unknown'
           ? 'unavailable'
           : health.status === 'findings'
             ? 'attention'

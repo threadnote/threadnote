@@ -1,5 +1,5 @@
 import {Effect} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {type CodeGraphDatabaseHealth} from './models.js';
 import {codeGraphPersistentExtensionSchemaCompatible} from './schema/inspection.js';
 import {type CodeGraphSnapshot} from '../types.js';

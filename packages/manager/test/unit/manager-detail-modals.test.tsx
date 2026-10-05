@@ -77,6 +77,7 @@ it('opens full candidate text and submits the exact preview revision only after 
     revision: 7,
     approved: true,
     action: 'approve',
+    operation: 'create',
   });
 });
 it('refreshes legacy replacement safety in Manager without exposing an internal tool name', async () => {
@@ -146,6 +147,90 @@ it('refreshes legacy replacement safety in Manager without exposing an internal 
   expect(
     [...document.querySelectorAll('button')].find(item => item.textContent === 'Approve and apply')?.disabled,
   ).toBe(false);
+});
+it('submits the reviewed replace operation when approving a safe replacement', async () => {
+  const candidate = {
+    candidateId: 'candidate-replace',
+    proposedText: 'Updated decision',
+    kind: 'durable',
+    topic: 'topic',
+    evidence: [],
+    reason: 'Replace the previous decision',
+    state: 'pending',
+    targetUri: 'threadnote://memory/tn_existing',
+  };
+  fetchMock
+    .mockResolvedValueOnce(
+      response({
+        review: {task: 'Task', revision: 4, candidates: [candidate]},
+        delta: {
+          items: [
+            {
+              candidateId: candidate.candidateId,
+              mutationPreview: {
+                operation: 'replace',
+                replaceUri: candidate.targetUri,
+                replacementSafety: {classification: 'preserving', requiresExplicitApproval: false},
+                truncated: false,
+              },
+            },
+          ],
+        },
+      }),
+    )
+    .mockResolvedValueOnce(response({message: 'Applied'}));
+
+  await render(<ReviewDetail {...base} reviewId="review-replace" candidateId={candidate.candidateId} />);
+  await click('Approve and apply');
+
+  expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body)).toMatchObject({
+    action: 'approve',
+    operation: 'replace',
+  });
+});
+it('submits the operation selected for an ambiguous candidate', async () => {
+  const candidate = {
+    candidateId: 'candidate-manual',
+    proposedText: 'Reviewed decision',
+    kind: 'durable',
+    topic: 'topic',
+    evidence: [],
+    reason: 'Choose whether to replace or create',
+    state: 'pending',
+    targetUri: 'threadnote://memory/tn_existing',
+  };
+  fetchMock
+    .mockResolvedValueOnce(
+      response({
+        review: {task: 'Task', revision: 5, candidates: [candidate]},
+        delta: {
+          items: [
+            {
+              candidateId: candidate.candidateId,
+              mutationPreview: {operation: 'requires_explicit_operation', truncated: false},
+            },
+          ],
+        },
+      }),
+    )
+    .mockResolvedValueOnce(response({message: 'Applied'}));
+
+  await render(<ReviewDetail {...base} reviewId="review-manual" candidateId={candidate.candidateId} />);
+  expect(
+    [...document.querySelectorAll('button')].find(item => item.textContent === 'Approve and apply')?.disabled,
+  ).toBe(true);
+  const select = document.querySelector<HTMLSelectElement>('select');
+  await act(async () => {
+    if (!select) return;
+    select.value = 'replace';
+    select.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  await click('Approve and apply');
+
+  expect(JSON.parse(fetchMock.mock.calls[1]?.[1]?.body)).toMatchObject({
+    action: 'approve',
+    operation: 'replace',
+  });
 });
 it('lets the user create a reviewed replacement when its original target disappeared', async () => {
   const candidate = {

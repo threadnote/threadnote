@@ -4,6 +4,9 @@ import {
   CONTEXT_BRIEF_CITATION_RELOCATION_HINT_MAXIMUM_BYTES,
   CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION,
   CONTEXT_BRIEF_DEFAULT_ESTIMATED_TOKENS,
+  CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+  CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+  CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
   CONTEXT_BRIEF_LEGACY_VERSION,
   CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
   CONTEXT_BRIEF_DEFAULT_PUBLIC_CODE_RELATIONS,
@@ -28,7 +31,11 @@ import {
   type ContextBriefRequestV1,
 } from './types.js';
 import type {VerifiedProcedureEvidence} from './procedure/selection.js';
-import {classifyMemoryFreshness, reconcileContextBriefMemoryFreshness} from '@threadnote/context/memory-evidence';
+import {
+  classifyMemoryFreshness,
+  contextBriefResumeTaskAlignmentScore,
+  reconcileContextBriefMemoryFreshness,
+} from '@threadnote/context/memory-evidence';
 
 const MAXIMUM_ISSUES = 24;
 const MAXIMUM_FOLLOW_UPS = 24;
@@ -145,7 +152,11 @@ export function assembleContextBriefLogicalResult(input: {
   }) satisfies readonly ContextBriefMemoryEvidenceV1[];
   const validatedCodeLinkedMemories = memories.filter(memory => memory.selectionBasis === 'code-citation').length;
   const durableDecisions = stableMemories(memories.filter(memory => memory.kind === 'durable'));
-  const handoffs = stableMemories(memories.filter(memory => memory.kind === 'handoff'));
+  const handoffs = prioritizeHandoffs(
+    memories.filter(memory => memory.kind === 'handoff'),
+    input.plan.mode,
+    input.plan.task,
+  );
   const issues = contextIssues(memories);
   const procedureGaps = stableUnique(input.verifiedProcedureGaps ?? []);
   const generalGaps = stableUnique([
@@ -155,6 +166,10 @@ export function assembleContextBriefLogicalResult(input: {
     ...(input.graph.cards.length === 0 ? ['no-graph-evidence'] : []),
     ...(memories.length === 0 ? ['no-relevant-active-memory'] : []),
     ...(memories.some(memory => memory.freshness === 'unknown') ? ['memory-freshness-unknown'] : []),
+    ...(input.plan.mode === 'resume' &&
+    !handoffs.some(memory => memory.freshness === 'fresh' && memory.continuationCard !== undefined)
+      ? ['resume-continuation-card-unavailable']
+      : []),
     ...(memories.some(memory => (memory.citationErrorCount ?? 0) > 0) ? ['memory-code-citations-invalid'] : []),
     ...(memories.some(memory => memory.preciseStatus === 'relocated') ? ['memory-code-links-relocated'] : []),
     ...(input.memory.codeAnchorCoverage !== undefined &&
@@ -244,6 +259,26 @@ export function contextBriefGraphWarningGaps(warnings: readonly string[]): reado
 function stableMemories(memories: readonly ContextBriefMemoryEvidenceV1[]): readonly ContextBriefMemoryEvidenceV1[] {
   return [...memories]
     .sort((left, right) => left.rank - right.rank || compareText(left.uri, right.uri))
+    .map((memory, rank) => ({...memory, rank}));
+}
+
+function prioritizeHandoffs(
+  memories: readonly ContextBriefMemoryEvidenceV1[],
+  mode: ContextBriefPlanV1['mode'],
+  task: string,
+): readonly ContextBriefMemoryEvidenceV1[] {
+  const priority = (memory: ContextBriefMemoryEvidenceV1): number =>
+    mode === 'resume' && memory.freshness === 'fresh' && memory.continuationCard !== undefined ? 0 : 1;
+  return [...memories]
+    .sort(
+      (left, right) =>
+        priority(left) - priority(right) ||
+        (mode === 'resume'
+          ? contextBriefResumeTaskAlignmentScore(task, right) - contextBriefResumeTaskAlignmentScore(task, left)
+          : 0) ||
+        left.rank - right.rank ||
+        compareText(left.uri, right.uri),
+    )
     .map((memory, rank) => ({...memory, rank}));
 }
 
@@ -341,21 +376,60 @@ function exactFollowUps(
     graph.coverage.readyRepositories === 0 ||
     graph.gaps.includes('graph-repository-read-failed') ||
     staleRepositoryAnchors;
-  if (graphStatusRequired) {
+  if (
+    graphStatusRequired &&
+    (plan.scope.kind === 'workset' || new TextEncoder().encode(plan.scope.callerCwd).byteLength <= 128)
+  ) {
     followUps.push({
+      arguments:
+        plan.scope.kind === 'repository'
+          ? {
+              budgetTokens: CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+              callerCwd: plan.scope.callerCwd,
+              edgeLimit: CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+              nodeLimit: CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
+              operation: 'query',
+              query: 'code graph readiness',
+            }
+          : {
+              budgetTokens: CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+              edgeLimit: CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+              nodeLimit: CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
+              operation: 'query',
+              query: 'code graph readiness',
+              workset: plan.scope.name,
+            },
       id: followUpId('graph-status', plan.scope.kind),
       operation: 'graph-status',
       rank: followUps.length,
       scope: plan.scope.kind,
+      tool: 'inspect_code_graph',
+      ...(plan.scope.kind === 'workset' ? {workset: plan.scope.name} : {}),
     });
   }
-  for (const card of [...graph.cards].sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))) {
-    followUps.push({
-      id: followUpId('inspect-node', card.ref),
-      operation: 'inspect-node',
-      rank: followUps.length,
-      ref: card.ref,
-    });
+  const firstCardHasCurrentSource = graph.sourceExcerpts?.some(
+    source => source.freshness === 'fresh' && source.coveredGraphRefs.includes(graph.cards[0]?.ref ?? ''),
+  );
+  if (plan.scope.kind === 'repository' && new TextEncoder().encode(plan.scope.callerCwd).byteLength <= 128) {
+    for (const card of firstCardHasCurrentSource
+      ? []
+      : [...graph.cards].sort((left, right) => left.rank - right.rank || compareText(left.id, right.id))) {
+      followUps.push({
+        arguments: {
+          budgetTokens: CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+          callerCwd: plan.scope.callerCwd,
+          edgeLimit: CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+          nodeId: card.ref,
+          nodeLimit: CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
+          operation: 'node',
+        },
+        id: followUpId('inspect-node', card.ref),
+        operation: 'inspect-node',
+        rank: followUps.length,
+        ref: card.ref,
+        tool: 'inspect_code_graph',
+      });
+    }
   }
   const graphCardRefs = new Set(graph.cards.map(card => card.ref));
   const relocatedNodeIds = stableUnique(
@@ -365,36 +439,52 @@ function exactFollowUps(
       ),
     ),
   );
-  for (const observedNodeId of relocatedNodeIds) {
-    if (graphCardRefs.has(observedNodeId)) continue;
-    followUps.push({
-      id: followUpId('inspect-node', observedNodeId),
-      operation: 'inspect-node',
-      rank: followUps.length,
-      ref: observedNodeId,
-    });
+  if (plan.scope.kind === 'repository' && new TextEncoder().encode(plan.scope.callerCwd).byteLength <= 128) {
+    for (const observedNodeId of relocatedNodeIds) {
+      if (graphCardRefs.has(observedNodeId)) continue;
+      followUps.push({
+        arguments: {
+          budgetTokens: CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+          callerCwd: plan.scope.callerCwd,
+          edgeLimit: CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+          nodeId: observedNodeId,
+          nodeLimit: CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
+          operation: 'node',
+        },
+        id: followUpId('inspect-node', observedNodeId),
+        operation: 'inspect-node',
+        rank: followUps.length,
+        ref: observedNodeId,
+        tool: 'inspect_code_graph',
+      });
+    }
   }
   for (const memory of stableMemories(memories)) {
+    if (plan.mode === 'resume' && memory.continuationCard !== undefined) continue;
     followUps.push({
+      arguments: {uri: memory.uri},
       id: followUpId('read-memory', memory.uri),
       operation: 'read-memory',
       rank: followUps.length,
+      tool: 'read_context',
       uri: memory.uri,
     });
   }
-  if (graph.continuation !== undefined) {
+  if (graph.continuation !== undefined && plan.scope.kind === 'workset') {
     followUps.push({
+      arguments: {
+        budgetTokens: CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
+        cursor: graph.continuation.cursor,
+        edgeLimit: CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
+        nodeLimit: CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
+        operation: 'query',
+        workset: plan.scope.name,
+      },
       cursor: graph.continuation.cursor,
       id: followUpId('continue-workset', graph.continuation.cursor),
       operation: 'continue-workset',
       rank: followUps.length,
-    });
-  }
-  if (!graph.coverage.complete && plan.scope.kind === 'workset') {
-    followUps.push({
-      id: followUpId('prepare-workset', plan.scope.name),
-      operation: 'prepare-workset',
-      rank: followUps.length,
+      tool: 'inspect_code_graph',
       workset: plan.scope.name,
     });
   }

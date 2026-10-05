@@ -22,6 +22,18 @@ const readySnapshot: CodeGraphSnapshot = {
   worktreeId: 'worktree',
 };
 
+const currentIdentity = {
+  caseMode: 'sensitive' as const,
+  checkoutId: 'checkout',
+  displayName: 'fixture',
+  gitCommonDirectory: '/workspace/repository/.git',
+  headCommit: readySnapshot.commit,
+  objectFormat: 'sha1' as const,
+  repoRoot: '/workspace/repository',
+  repositoryId: readySnapshot.repositoryId,
+  worktreeId: 'current-worktree',
+};
+
 describe('code graph CLI freshness properties', () => {
   it('keeps path and impact strict-current while ordinary semantic reads default to ready', () => {
     expect(defaultCodeGraphCliFreshness('path')).toBe('current');
@@ -86,21 +98,41 @@ describe('code graph CLI freshness properties', () => {
         fc.constantFrom('query', 'node', 'neighbors', 'explain', 'path', 'impact'),
         fc.boolean(),
         fc.boolean(),
-        (operation, borrowedSnapshot, stale) => {
+        fc.boolean(),
+        fc.boolean(),
+        (operation, borrowedSnapshot, stale, sameCommit, worktreeClean) => {
+          const identity = sameCommit ? currentIdentity : {...currentIdentity, headCommit: 'b'.repeat(40)};
           const continuity = codeGraphCliUsesBorrowedContinuity(
             'current',
             operation,
-            {readySnapshot, stale},
+            {identity, readySnapshot, stale},
             borrowedSnapshot,
+            worktreeClean,
           );
-          expect(continuity).toBe(borrowedSnapshot && stale && operation !== 'path' && operation !== 'impact');
+          expect(continuity).toBe(
+            borrowedSnapshot && worktreeClean && sameCommit && stale && operation !== 'path' && operation !== 'impact',
+          );
         },
       ),
       {numRuns: 100},
     );
-    expect(codeGraphCliUsesBorrowedContinuity('ready', 'query', {readySnapshot, stale: true}, true)).toBe(false);
-    expect(codeGraphCliUsesBorrowedContinuity('current', 'query', {readySnapshot: undefined, stale: true}, true)).toBe(
-      false,
-    );
+    expect(
+      codeGraphCliUsesBorrowedContinuity(
+        'ready',
+        'query',
+        {identity: currentIdentity, readySnapshot, stale: true},
+        true,
+        true,
+      ),
+    ).toBe(false);
+    expect(
+      codeGraphCliUsesBorrowedContinuity(
+        'current',
+        'query',
+        {identity: currentIdentity, readySnapshot: undefined, stale: true},
+        true,
+        true,
+      ),
+    ).toBe(false);
   });
 });

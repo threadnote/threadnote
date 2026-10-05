@@ -36,6 +36,8 @@
     "./checkpoint/schema": "./src/checkpoint/schema.ts",
     "./checkpoint/terminal_text": "./src/checkpoint/terminal_text.ts",
     "./citation/primitives": "./src/citation/primitives.ts",
+    "./citation/capsule": "./src/citation/capsule.ts",
+    "./citation/recovery": "./src/citation/recovery.ts",
     "./citation/source": "./src/citation/source.ts",
     "./cli/freshness": "./src/cli/freshness.ts",
     "./cli/progress": "./src/cli/progress.ts",
@@ -442,13 +444,13 @@
     "./worktree_reconciliation": "./src/worktree_reconciliation.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0-rc.115",
-    "@effect/sql-sqlite-bun": "4.0.0-rc.115",
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-sqlite-bun": "4.0.0",
     "@threadnote/inference": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/protocol": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.0-rc.115",
+    "effect": "4.0.0",
     "fflate": "0.8.3",
     "jose": "6.2.12",
     "js-yaml": "^5.4.2",
@@ -457,7 +459,7 @@
     "web-tree-sitter": "0.27.0"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0-rc.115",
+    "@effect/vitest": "4.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.1",

@@ -4,12 +4,23 @@ import type {
 } from '@threadnote/context/types';
 import {buildCompactPlan} from '@threadnote/memory/hygiene';
 import type {CandidateComparison} from '@threadnote/memory/candidate';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
 import {
   analyzeContextHealthSemantics,
   type ContextHealthSemanticCompletenessV1,
   type ContextHealthSemanticContradictionV1,
 } from './health_semantic.js';
+import {
+  classifyContextHealthFindingV2,
+  contextHealthCaseIdV2,
+  contextHealthFindingCaseIdentityV2,
+  type ContextHealthCaseIdentityV2,
+  contextHealthCitationCoverageV2,
+  summarizeContextHealthMaintenanceV2,
+  type ContextHealthCitationCoverageV2,
+  type ContextHealthFindingClassificationV2,
+  type ContextHealthMaintenanceSummaryV2,
+} from './health_maintenance.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const CONTEXT_HEALTH_REPORT_VERSION = 1 as const;
@@ -53,6 +64,9 @@ export interface ContextHealthRepairDescriptorV1 {
 }
 
 export interface ContextHealthFindingV1 {
+  readonly caseId?: string;
+  readonly caseIdentity?: ContextHealthCaseIdentityV2;
+  readonly classification?: ContextHealthFindingClassificationV2;
   readonly category: ContextHealthFindingCategoryV1;
   readonly confidence: ContextHealthConfidenceV1;
   readonly id: string;
@@ -87,6 +101,8 @@ export interface ContextHealthReportInputV1 {
   readonly candidateEvidence?: readonly ContextHealthCandidateEvidenceV1[];
   readonly guidanceEvidence?: readonly ContextHealthGuidanceEvidenceV1[];
   readonly citationValidations?: readonly ContextBriefMemoryCitationValidationV2[];
+  readonly citationCoverage?: ContextHealthCitationCoverageV2;
+  readonly includeCitationCoverageFindings?: boolean;
   readonly duplicateCorpus?: readonly MemoryRecord[];
   readonly includeFindingCategories?: readonly ContextHealthFindingCategoryV1[];
   /** How category and URI filters combine when both are present. Defaults to the legacy `any` behavior. */
@@ -100,6 +116,7 @@ export interface ContextHealthReportInputV1 {
 }
 
 export interface ContextHealthReportV1 {
+  readonly maintenance?: ContextHealthMaintenanceSummaryV2;
   readonly findings: readonly ContextHealthFindingV1[];
   readonly limit: number;
   readonly omittedFindings: number;
@@ -130,20 +147,29 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
     [
       ...validityFindings(records, input.now),
       ...reviewFindings(records, input.now),
-      ...citationFindings(input.citationValidations ?? [], recordUris),
+      ...citationFindings(input.citationValidations ?? [], recordUris, input.includeCitationCoverageFindings ?? false),
       ...relationFindings(input.relationEvidence ?? [], records),
       ...duplicateFindings(duplicateCorpus, input.project, input.now),
       ...candidateFindings(input.candidateEvidence ?? [], input.project),
       ...guidanceFindings(input.guidanceEvidence ?? []),
       ...semanticFindings(semanticAnalysis.contradictions),
     ].sort(compareFindings),
-  ).filter(finding => {
-    const categoryMatches = includeFindingCategories?.has(finding.category);
-    const uriMatches =
-      includeFindingUris === undefined ? undefined : findingMatchesSelectedUris(finding, includeFindingUris);
-    if (categoryMatches === undefined) return uriMatches ?? true;
-    if (uriMatches === undefined) return categoryMatches;
-    return input.includeFindingCombination === 'all' ? categoryMatches && uriMatches : categoryMatches || uriMatches;
+  )
+    .map(finding => projectFinding(finding, input.project, input.records))
+    .filter(finding => {
+      const categoryMatches = includeFindingCategories?.has(finding.category);
+      const uriMatches =
+        includeFindingUris === undefined ? undefined : findingMatchesSelectedUris(finding, includeFindingUris);
+      if (categoryMatches === undefined) return uriMatches ?? true;
+      if (uriMatches === undefined) return categoryMatches;
+      return input.includeFindingCombination === 'all' ? categoryMatches && uriMatches : categoryMatches || uriMatches;
+    });
+  const citationCoverage =
+    input.citationCoverage ?? contextHealthCitationCoverageV2({records, validations: input.citationValidations ?? []});
+  const maintenance = summarizeContextHealthMaintenanceV2({
+    findings,
+    citationCoverage,
+    semanticCoverage: semanticAnalysis.completeness,
   });
   const limit = findingLimit(input.limit);
   const cursorDigest = contextHealthCursorDigest(records, findings);
@@ -154,6 +180,7 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
   const filtered = includeFindingUris !== undefined || includeFindingCategories !== undefined;
   return {
     findings: selectedFindings,
+    maintenance,
     limit,
     ...(remainingFindings === 0
       ? {}
@@ -164,7 +191,9 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
     ...(input.after === undefined && remainingFindings === 0 ? {} : {remainingFindings}),
     semanticCompleteness: semanticAnalysis.completeness,
     status:
-      semanticAnalysis.completeness.state !== 'complete' || (filtered && findings.length === 0)
+      semanticAnalysis.completeness.state !== 'complete' ||
+      citationCoverage.state !== 'complete' ||
+      (filtered && findings.length === 0)
         ? 'unknown'
         : findings.length > 0
           ? 'findings'
@@ -290,15 +319,19 @@ function reviewFindings(records: readonly MemoryRecord[], now: Date): readonly C
 function citationFindings(
   validations: readonly ContextBriefMemoryCitationValidationV2[],
   recordUris: ReadonlySet<string>,
+  includeCoverageFindings: boolean,
 ): readonly ContextHealthFindingV1[] {
   return validations
     .filter(validation => recordUris.has(validation.uri))
-    .flatMap(validation => validation.receipts.flatMap(receipt => citationFinding(validation.uri, receipt)));
+    .flatMap(validation =>
+      validation.receipts.flatMap(receipt => citationFinding(validation.uri, receipt, includeCoverageFindings)),
+    );
 }
 
 function citationFinding(
   uri: string,
   receipt: ContextBriefCitationValidationReceiptV2,
+  includeCoverageFindings: boolean,
 ): readonly ContextHealthFindingV1[] {
   const citationUri = `${uri}#${receipt.citationId}`;
   if (receipt.status === 'changed') {
@@ -328,6 +361,12 @@ function citationFinding(
     ];
   }
   if (receipt.status === 'unknown') {
+    if (!includeCoverageFindings && receipt.provenance === 'historical-verified') return [];
+    if (
+      !includeCoverageFindings &&
+      ['citation-limit', 'graph-incomplete', 'graph-stale', 'validation-error'].includes(receipt.reason)
+    )
+      return [];
     return [
       finding('citation-unknown', [uri], `citation ${receipt.citationId} could not be validated: ${receipt.reason}`, {
         confidence: 'low',
@@ -351,23 +390,33 @@ function relationFindings(
   return evidence
     .filter(
       item =>
+        !isAgentArtifactUri(item.targetUri) &&
         item.status !== 'active' &&
         relationsBySource.get(item.sourceUri)?.some(relation => relation.uri === item.targetUri) === true,
     )
     .map(item => {
+      const historical =
+        item.status === 'inactive' &&
+        relationsBySource
+          .get(item.sourceUri)
+          ?.filter(relation => relation.uri === item.targetUri)
+          .every(relation => relation.type !== 'depends_on') === true;
       const category = `relation-target-${item.status}` as Extract<
         ContextHealthFindingCategoryV1,
         `relation-target-${string}`
       >;
-      return finding(category, [item.sourceUri, item.targetUri], `relation target is ${item.status}`, {
-        confidence: item.status === 'conflicted' ? 'medium' : 'high',
-        kind: 'repair-relation',
-        repairability: item.status === 'conflicted' ? 'manual-review' : 'reviewable',
-        severity: 'high',
-        subjectUri: item.sourceUri,
-        summary: `Review the relation target ${item.targetUri}.`,
-        targetUri: item.targetUri,
-      });
+      return {
+        ...finding(category, [item.sourceUri, item.targetUri], `relation target is ${item.status}`, {
+          confidence: item.status === 'conflicted' ? 'medium' : 'high',
+          kind: 'repair-relation',
+          repairability: item.status === 'conflicted' ? 'manual-review' : 'reviewable',
+          severity: 'high',
+          subjectUri: item.sourceUri,
+          summary: `Review the relation target ${item.targetUri}.`,
+          targetUri: item.targetUri,
+        }),
+        ...(historical ? {classification: 'historical' as const} : {}),
+      };
     });
 }
 
@@ -406,14 +455,18 @@ function candidateFindings(
     .map(item => {
       const category = item.comparison === 'contradiction' ? 'candidate-contradiction' : 'candidate-possible-duplicate';
       const uris = item.targetUri === undefined ? [] : [item.targetUri];
-      return finding(category, uris, `candidate ${item.candidateId} is ${item.comparison.replace('_', ' ')}`, {
-        confidence: 'medium',
-        kind: 'review-candidate',
-        repairability: 'manual-review',
-        severity: 'medium',
-        summary: `Review candidate ${item.candidateId} before applying it.`,
-        ...(item.targetUri === undefined ? {} : {targetUri: item.targetUri}),
-      });
+      return {
+        ...finding(category, uris, `candidate ${item.candidateId} is ${item.comparison.replace('_', ' ')}`, {
+          confidence: 'medium',
+          kind: 'review-candidate',
+          repairability: 'manual-review',
+          severity: 'medium',
+          summary: `Review candidate ${item.candidateId} before applying it.`,
+          ...(item.targetUri === undefined ? {} : {targetUri: item.targetUri}),
+        }),
+        caseIdentity: {project, memoryId: 'candidate', family: 'candidate', slot: item.candidateId},
+        caseId: contextHealthCaseIdV2({project, memoryId: 'candidate', family: 'candidate', slot: item.candidateId}),
+      };
     });
 }
 
@@ -443,6 +496,25 @@ function finding(
     severity: repair.severity,
     summary,
     uris: canonicalUris,
+  };
+}
+
+function projectFinding(
+  finding: ContextHealthFindingV1,
+  project: string,
+  records: readonly MemoryRecord[],
+): ContextHealthFindingV1 {
+  const subjectUri = finding.repair.subjectUri ?? finding.uris[0];
+  const subject = records.find(record => record.uri === subjectUri);
+  const caseIdentity = contextHealthFindingCaseIdentityV2({project, finding, records});
+  return {
+    ...finding,
+    caseIdentity,
+    caseId: finding.caseId ?? contextHealthCaseIdV2(caseIdentity),
+    classification: classifyContextHealthFindingV2(
+      finding,
+      subject?.metadata.visibility !== 'shared' && subject?.metadata.visibility !== 'external',
+    ),
   };
 }
 

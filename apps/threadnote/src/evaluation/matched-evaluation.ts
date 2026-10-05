@@ -1,10 +1,17 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const MATCHED_EVALUATION_VERSION = 1 as const;
-export const MATCHED_EVALUATION_ADAPTER_PROTOCOL = 'matched-evaluation-adapter-v1' as const;
-export const MATCHED_EVALUATION_SCHEDULE_ALGORITHM = 'sha256-counterbalanced-v1' as const;
-export const MATCHED_EVALUATION_ARMS = ['files', 'threadnote-compact', 'threadnote-source', 'reference-scope'] as const;
-export const MATCHED_EVALUATION_BLIND_LABELS = ['A', 'B', 'C', 'D'] as const;
+export const MATCHED_EVALUATION_ADAPTER_PROTOCOL = 'matched-evaluation-adapter-v5' as const;
+export const MATCHED_EVALUATION_SCHEDULE_ALGORITHM = 'sha256-counterbalanced-v3' as const;
+export const MATCHED_EVALUATION_LEGACY_SCHEDULE_ALGORITHM = 'sha256-counterbalanced-v2' as const;
+export const MATCHED_EVALUATION_ARMS = [
+  'files',
+  'threadnote-graph',
+  'threadnote-compact',
+  'threadnote-source',
+  'reference-scope',
+] as const;
+export const MATCHED_EVALUATION_BLIND_LABELS = ['A', 'B', 'C', 'D', 'E'] as const;
 export const MATCHED_EVALUATION_TASK_CATEGORIES = [
   'unfamiliar-call-path',
   'hidden-architectural-constraint',
@@ -18,8 +25,9 @@ export const MATCHED_EVALUATION_TASK_VARIANTS = [
   'absent-answer',
   'conflicting-records',
   'dirty-worktree',
+  'historical-as-issued',
 ] as const;
-export const MATCHED_EVALUATION_MINIMUM_REPETITIONS = 4 as const;
+export const MATCHED_EVALUATION_MINIMUM_REPETITIONS = 5 as const;
 
 export type MatchedEvaluationArm = (typeof MATCHED_EVALUATION_ARMS)[number];
 export type MatchedEvaluationBlindLabel = (typeof MATCHED_EVALUATION_BLIND_LABELS)[number];
@@ -80,6 +88,7 @@ export interface MatchedEvaluationCorpusV1 {
 
 export interface MatchedEvaluationArmDefinitionV1 {
   readonly adapterArtifactHash: string;
+  readonly adapterConfigurationHash: string;
   readonly adapterProtocol: typeof MATCHED_EVALUATION_ADAPTER_PROTOCOL;
   readonly arm: MatchedEvaluationArm;
   readonly environmentPolicyHash: string;
@@ -107,7 +116,7 @@ export interface MatchedEvaluationManifestTaskV1 {
 
 export interface MatchedEvaluationScheduleEntryV1 {
   readonly blindLabel: MatchedEvaluationBlindLabel;
-  readonly position: 1 | 2 | 3 | 4;
+  readonly position: 1 | 2 | 3 | 4 | 5;
   readonly repetition: number;
   readonly runNonce: string;
   readonly runOrder: number;
@@ -115,6 +124,8 @@ export interface MatchedEvaluationScheduleEntryV1 {
 }
 
 export interface MatchedEvaluationManifestV1 {
+  /** Canonical selected subset. Omitted by legacy manifests, which means all five arms. */
+  readonly activeArms?: readonly MatchedEvaluationArm[];
   readonly arms: readonly MatchedEvaluationArmDefinitionV1[];
   readonly blindAssignment: Readonly<Record<MatchedEvaluationBlindLabel, MatchedEvaluationArm>>;
   readonly corpusHash: string;
@@ -132,7 +143,8 @@ export interface MatchedEvaluationManifestV1 {
     readonly revision: string;
   };
   readonly schedule: readonly MatchedEvaluationScheduleEntryV1[];
-  readonly scheduleAlgorithm: typeof MATCHED_EVALUATION_SCHEDULE_ALGORITHM;
+  readonly scheduleAlgorithm:
+    typeof MATCHED_EVALUATION_SCHEDULE_ALGORITHM | typeof MATCHED_EVALUATION_LEGACY_SCHEDULE_ALGORITHM;
   readonly scheduleSeed: string;
   readonly tasks: readonly MatchedEvaluationManifestTaskV1[];
   readonly version: typeof MATCHED_EVALUATION_VERSION;
@@ -157,12 +169,16 @@ export function matchedEvaluationReferenceEnvironmentPolicyHashV1(): string {
   return digest('matched-evaluation-environment-policy-v1', matchedEvaluationReferenceEnvironmentPolicyV1());
 }
 
+export function matchedEvaluationPromptHashV1(prompt: string): string {
+  return digest('matched-evaluation-prompt-v1', prompt);
+}
+
 export function parseMatchedEvaluationCorpusV1(value: unknown): MatchedEvaluationCorpusV1 {
   const corpus = object(value, 'corpus');
   exactKeys(corpus, ['corpusId', 'tasks', 'version'], 'corpus');
   if (corpus.version !== MATCHED_EVALUATION_VERSION) invalid('corpus version must be 1');
   const tasks = array(corpus.tasks, 'corpus tasks').map((task, index) => parseCorpusTask(task, index));
-  if (tasks.length < 6 || tasks.length > 64) invalid('corpus must contain between 6 and 64 tasks');
+  if (tasks.length < 5 || tasks.length > 64) invalid('corpus must contain between 5 and 64 tasks');
   unique(
     tasks.map(task => task.taskId),
     'corpus task ids',
@@ -170,10 +186,7 @@ export function parseMatchedEvaluationCorpusV1(value: unknown): MatchedEvaluatio
   for (const category of MATCHED_EVALUATION_TASK_CATEGORIES) {
     if (!tasks.some(task => task.category === category)) invalid(`corpus does not cover ${category}`);
   }
-  for (const variant of MATCHED_EVALUATION_TASK_VARIANTS) {
-    if (!tasks.some(task => task.variant === variant)) invalid(`corpus does not cover ${variant}`);
-  }
-  assertExactParaphrasePairs(tasks);
+  assertVariantDesign(tasks);
   return {
     corpusId: matchingString(corpus.corpusId, CORPUS_ID, 'corpus id'),
     tasks: [...tasks].sort((left, right) => left.taskId.localeCompare(right.taskId)),
@@ -186,6 +199,7 @@ export function matchedEvaluationCorpusHashV1(value: MatchedEvaluationCorpusV1 |
 }
 
 export function createMatchedEvaluationManifestV1(input: {
+  readonly activeArms?: readonly MatchedEvaluationArm[];
   readonly arms: readonly MatchedEvaluationArmDefinitionV1[];
   readonly corpus: MatchedEvaluationCorpusV1 | unknown;
   readonly model: MatchedEvaluationManifestV1['model'];
@@ -198,9 +212,11 @@ export function createMatchedEvaluationManifestV1(input: {
   const repetitions = repetitionsValue(input.repetitions);
   const scheduleSeed = matchingString(input.scheduleSeed, HASH, 'schedule seed');
   const tasks = corpus.tasks.map(projectManifestTask);
+  const activeArms = canonicalActiveArms(input.activeArms);
   const blindAssignment = deriveMatchedEvaluationBlindAssignmentV1(scheduleSeed);
-  const schedule = deriveMatchedEvaluationScheduleV1({blindAssignment, repetitions, scheduleSeed, tasks});
+  const schedule = deriveMatchedEvaluationScheduleV1({activeArms, blindAssignment, repetitions, scheduleSeed, tasks});
   const withoutHash = {
+    activeArms,
     arms,
     blindAssignment,
     corpusHash: matchedEvaluationCorpusHashV1(corpus),
@@ -221,6 +237,7 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
   exactKeys(
     manifest,
     [
+      ...(manifest.activeArms === undefined ? [] : ['activeArms']),
       'arms',
       'blindAssignment',
       'corpusHash',
@@ -237,14 +254,27 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
     'manifest',
   );
   if (manifest.version !== MATCHED_EVALUATION_VERSION) invalid('manifest version must be 1');
-  if (manifest.scheduleAlgorithm !== MATCHED_EVALUATION_SCHEDULE_ALGORITHM) {
+  if (
+    manifest.scheduleAlgorithm !== MATCHED_EVALUATION_SCHEDULE_ALGORITHM &&
+    manifest.scheduleAlgorithm !== MATCHED_EVALUATION_LEGACY_SCHEDULE_ALGORITHM
+  ) {
     invalid('manifest schedule algorithm is unsupported');
   }
   const arms = parseArmDefinitions(array(manifest.arms, 'manifest arms'));
+  const activeArms = manifest.activeArms === undefined ? undefined : canonicalActiveArms(manifest.activeArms);
+  if (manifest.scheduleAlgorithm === MATCHED_EVALUATION_SCHEDULE_ALGORITHM && activeArms === undefined) {
+    invalid('v3 schedule must declare active arms');
+  }
+  if (
+    manifest.scheduleAlgorithm === MATCHED_EVALUATION_LEGACY_SCHEDULE_ALGORITHM &&
+    manifest.activeArms !== undefined
+  ) {
+    invalid('legacy schedule algorithm cannot declare active arms');
+  }
   const repetitions = repetitionsValue(manifest.repetitions);
   const scheduleSeed = matchingString(manifest.scheduleSeed, HASH, 'manifest schedule seed');
   const tasks = array(manifest.tasks, 'manifest tasks').map((task, index) => parseManifestTask(task, index));
-  if (tasks.length < 6 || tasks.length > 64) invalid('manifest must contain between 6 and 64 tasks');
+  if (tasks.length < 5 || tasks.length > 64) invalid('manifest must contain between 5 and 64 tasks');
   canonicalUnique(
     tasks.map(task => task.taskId),
     'manifest task ids',
@@ -257,11 +287,18 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
   const schedule = array(manifest.schedule, 'manifest schedule').map((entry, index) =>
     parseScheduleEntry(entry, index),
   );
-  const expectedSchedule = deriveMatchedEvaluationScheduleV1({blindAssignment, repetitions, scheduleSeed, tasks});
+  const expectedSchedule = deriveMatchedEvaluationScheduleV1({
+    activeArms,
+    blindAssignment,
+    repetitions,
+    scheduleSeed,
+    tasks,
+  });
   if (JSON.stringify(schedule) !== JSON.stringify(expectedSchedule)) {
     invalid('schedule does not match the content-addressed counterbalanced derivation');
   }
   const withoutHash = {
+    ...(activeArms === undefined ? {} : {activeArms}),
     arms,
     blindAssignment,
     corpusHash: matchingString(manifest.corpusHash, HASH, 'manifest corpus hash'),
@@ -269,7 +306,7 @@ export function parseMatchedEvaluationManifestV1(value: unknown): MatchedEvaluat
     repetitions,
     repository: parseRepository(manifest.repository),
     schedule,
-    scheduleAlgorithm: MATCHED_EVALUATION_SCHEDULE_ALGORITHM,
+    scheduleAlgorithm: manifest.scheduleAlgorithm,
     scheduleSeed,
     tasks,
     version: MATCHED_EVALUATION_VERSION,
@@ -295,10 +332,12 @@ export function deriveMatchedEvaluationBlindAssignmentV1(
     B: shuffled[1],
     C: shuffled[2],
     D: shuffled[3],
+    E: shuffled[4],
   };
 }
 
 export function deriveMatchedEvaluationScheduleV1(input: {
+  readonly activeArms?: readonly MatchedEvaluationArm[];
   readonly blindAssignment: Readonly<Record<MatchedEvaluationBlindLabel, MatchedEvaluationArm>>;
   readonly repetitions: number;
   readonly scheduleSeed: string;
@@ -306,6 +345,10 @@ export function deriveMatchedEvaluationScheduleV1(input: {
 }): readonly MatchedEvaluationScheduleEntryV1[] {
   const scheduleSeed = matchingString(input.scheduleSeed, HASH, 'schedule seed');
   const repetitions = repetitionsValue(input.repetitions);
+  const activeArms = canonicalActiveArms(input.activeArms);
+  if (repetitions % activeArms.length !== 0) {
+    invalid(`repetitions must be divisible by selected arm count (${activeArms.length})`);
+  }
   const tasks = [...input.tasks].sort((left, right) => left.taskId.localeCompare(right.taskId));
   canonicalUnique(
     tasks.map(task => matchingString(task.taskId, TASK_ID, 'schedule task id')),
@@ -319,9 +362,9 @@ export function deriveMatchedEvaluationScheduleV1(input: {
   for (let repetition = 0; repetition < repetitions; repetition += 1) {
     const taskOrder = hashOrder(tasks, task => `${scheduleSeed}\0task-order\0${repetition}\0${task.taskId}`);
     for (const task of taskOrder) {
-      const base = hashOrder(MATCHED_EVALUATION_ARMS, arm => `${scheduleSeed}\0arm-order\0${task.taskId}\0${arm}`);
-      const offset = digestInteger(`${scheduleSeed}\0rotation\0${task.taskId}`) % MATCHED_EVALUATION_ARMS.length;
-      const rotation = (offset + repetition) % MATCHED_EVALUATION_ARMS.length;
+      const base = hashOrder(activeArms, arm => `${scheduleSeed}\0arm-order\0${task.taskId}\0${arm}`);
+      const offset = digestInteger(`${scheduleSeed}\0rotation\0${task.taskId}`) % activeArms.length;
+      const rotation = (offset + repetition) % activeArms.length;
       const order = [...base.slice(rotation), ...base.slice(0, rotation)];
       for (let position = 0; position < order.length; position += 1) {
         const arm = order[position];
@@ -330,7 +373,7 @@ export function deriveMatchedEvaluationScheduleV1(input: {
         const runOrder = entries.length;
         entries.push({
           blindLabel,
-          position: (position + 1) as 1 | 2 | 3 | 4,
+          position: (position + 1) as 1 | 2 | 3 | 4 | 5,
           repetition,
           runNonce: `run_${digest('matched-evaluation-run-v1', {
             manifestSeed: scheduleSeed,
@@ -361,7 +404,7 @@ function projectManifestTask(task: MatchedEvaluationCorpusTaskV1): MatchedEvalua
     memoryFixtureHash: digest('matched-evaluation-memory-fixtures-v1', task.memoryFixtures),
     negativeControlHash: digest('matched-evaluation-negative-controls-v1', task.negativeControls),
     pairId: task.pairId,
-    promptHash: digest('matched-evaluation-prompt-v1', task.prompt),
+    promptHash: matchedEvaluationPromptHashV1(task.prompt),
     repositoryFixtureHash: task.repositoryFixtureHash,
     rubricHash: digest('matched-evaluation-rubric-v1', task.rubric),
     sourceGoldHash: digest('matched-evaluation-source-gold-v1', task.sourceGold),
@@ -542,12 +585,12 @@ function parseManifestTask(value: unknown, index: number): MatchedEvaluationMani
 }
 
 function parseArmDefinitions(value: readonly unknown[]): readonly MatchedEvaluationArmDefinitionV1[] {
-  if (value.length !== MATCHED_EVALUATION_ARMS.length) invalid('manifest must define all four arms');
+  if (value.length !== MATCHED_EVALUATION_ARMS.length) invalid('manifest must define every arm');
   const parsed = value.map((entry, index) => {
     const arm = object(entry, `arm definition ${index}`);
     exactKeys(
       arm,
-      ['adapterArtifactHash', 'adapterProtocol', 'arm', 'environmentPolicyHash', 'tool'],
+      ['adapterArtifactHash', 'adapterConfigurationHash', 'adapterProtocol', 'arm', 'environmentPolicyHash', 'tool'],
       `arm definition ${index}`,
     );
     const id = literal(arm.arm, MATCHED_EVALUATION_ARMS, `arm definition ${index} id`);
@@ -555,6 +598,11 @@ function parseArmDefinitions(value: readonly unknown[]): readonly MatchedEvaluat
     exactKeys(tool, ['artifactHash', 'lockIdentityHash', 'name', 'version'], `arm definition ${index} tool`);
     const definition: MatchedEvaluationArmDefinitionV1 = {
       adapterArtifactHash: matchingString(arm.adapterArtifactHash, HASH, `arm definition ${index} adapter hash`),
+      adapterConfigurationHash: matchingString(
+        arm.adapterConfigurationHash,
+        HASH,
+        `arm definition ${index} adapter configuration hash`,
+      ),
       adapterProtocol: literal(
         arm.adapterProtocol,
         [MATCHED_EVALUATION_ADAPTER_PROTOCOL] as const,
@@ -625,6 +673,7 @@ function parseBlindAssignment(value: unknown): Readonly<Record<MatchedEvaluation
     B: literal(assignment.B, MATCHED_EVALUATION_ARMS, 'blind assignment B'),
     C: literal(assignment.C, MATCHED_EVALUATION_ARMS, 'blind assignment C'),
     D: literal(assignment.D, MATCHED_EVALUATION_ARMS, 'blind assignment D'),
+    E: literal(assignment.E, MATCHED_EVALUATION_ARMS, 'blind assignment E'),
   };
   unique(Object.values(parsed), 'blind assignment arms');
   return parsed;
@@ -637,14 +686,14 @@ function parseScheduleEntry(value: unknown, index: number): MatchedEvaluationSch
     ['blindLabel', 'position', 'repetition', 'runNonce', 'runOrder', 'taskId'],
     `schedule entry ${index}`,
   );
-  if (entry.position !== 1 && entry.position !== 2 && entry.position !== 3 && entry.position !== 4) {
+  if (![1, 2, 3, 4, 5].includes(entry.position as number)) {
     invalid(`schedule entry ${index} position is invalid`);
   }
   const runOrder = nonNegativeInteger(entry.runOrder, `schedule entry ${index} order`);
   if (runOrder !== index) invalid(`schedule entry ${index} is not in canonical run order`);
   return {
     blindLabel: literal(entry.blindLabel, MATCHED_EVALUATION_BLIND_LABELS, `schedule entry ${index} label`),
-    position: entry.position,
+    position: entry.position as 1 | 2 | 3 | 4 | 5,
     repetition: nonNegativeInteger(entry.repetition, `schedule entry ${index} repetition`),
     runNonce: matchingString(entry.runNonce, RUN_NONCE, `schedule entry ${index} nonce`),
     runOrder,
@@ -674,7 +723,19 @@ function parseRepository(value: unknown): MatchedEvaluationManifestV1['repositor
   };
 }
 
-function assertExactParaphrasePairs(tasks: readonly MatchedEvaluationCorpusTaskV1[]): void {
+function assertVariantDesign(tasks: readonly MatchedEvaluationCorpusTaskV1[]): void {
+  const historical = tasks.filter(task => task.variant === 'historical-as-issued');
+  if (historical.length > 0) {
+    if (historical.length !== tasks.length) invalid('historical-as-issued tasks cannot mix with synthetic variants');
+    if (historical.some(task => task.pairId !== null))
+      invalid('historical-as-issued tasks cannot declare synthetic pairs');
+    return;
+  }
+  for (const variant of MATCHED_EVALUATION_TASK_VARIANTS) {
+    if (variant !== 'historical-as-issued' && !tasks.some(task => task.variant === variant)) {
+      invalid(`corpus does not cover ${variant}`);
+    }
+  }
   const exact = tasks.filter(task => task.variant === 'exact-name');
   const paraphrases = tasks.filter(task => task.variant === 'paraphrase');
   if (exact.length === 0 || paraphrases.length === 0) invalid('corpus requires exact-name and paraphrase pairs');
@@ -693,10 +754,23 @@ function assertExactParaphrasePairs(tasks: readonly MatchedEvaluationCorpusTaskV
 
 function repetitionsValue(value: unknown): number {
   const repetitions = positiveInteger(value, 'manifest repetitions');
-  if (repetitions < MATCHED_EVALUATION_MINIMUM_REPETITIONS || repetitions > 40 || repetitions % 4 !== 0) {
-    invalid('manifest repetitions must be between 4 and 40 and divisible by four');
+  if (repetitions < MATCHED_EVALUATION_MINIMUM_REPETITIONS || repetitions > 40) {
+    invalid('manifest repetitions must be between 5 and 40');
   }
   return repetitions;
+}
+
+function canonicalActiveArms(value: unknown): readonly MatchedEvaluationArm[] {
+  const arms =
+    value === undefined
+      ? [...MATCHED_EVALUATION_ARMS]
+      : array(value, 'active arms').map((arm, index) => literal(arm, MATCHED_EVALUATION_ARMS, `active arm ${index}`));
+  if (arms.length === 0 || arms.length > MATCHED_EVALUATION_ARMS.length)
+    invalid('active arms must select at least one arm');
+  unique(arms, 'active arms');
+  return [...arms].sort(
+    (left, right) => MATCHED_EVALUATION_ARMS.indexOf(left) - MATCHED_EVALUATION_ARMS.indexOf(right),
+  );
 }
 
 function hashOrder<T>(values: readonly T[], key: (value: T) => string): T[] {

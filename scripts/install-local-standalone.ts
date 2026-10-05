@@ -748,6 +748,11 @@ const verifyActivatedDevelopmentRelease = Effect.fn('developmentInstall.verifyAc
   } as const;
   const runDoctorStrict = () =>
     runCommandEffect(executable, ['doctor', '--dry-run', '--strict'], {...commandOptions, allowFailure: true});
+  yield* runCommandEffect(
+    executable,
+    ['development-install-repair', '--activate-integrations', '--expected-version', expectedVersion],
+    commandOptions,
+  );
   const repair = () =>
     runCommandEffect(executable, ['development-install-repair', '--expected-version', expectedVersion], commandOptions);
   const initial = yield* runDoctorStrict();

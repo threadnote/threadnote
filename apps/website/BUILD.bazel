@@ -134,6 +134,7 @@ bun_test(
         "//apps/website:test/helpers/test-error.ts",
         "//apps/website:test/website-content.test.ts",
         "//apps/website:test/website-site-meta.test.ts",
+        "//apps/website:test/whats-new-page.test.ts",
         "//apps/website:tools/effect/errors.ts",
         "//apps/website:tools/site-articles.ts",
         "//apps/website:tools/site-doc-pages.ts",
@@ -199,6 +200,7 @@ bun_test(
         "tools/bazel/project-vitest.config.ts",
         "apps/website/test/website-content.test.ts",
         "apps/website/test/website-site-meta.test.ts",
+        "apps/website/test/whats-new-page.test.ts",
     ],
 )
 
@@ -310,6 +312,10 @@ bun_workspace_test(
         "//:.github/release-notes/v5.0.7-beta.1.md",
         "//:.github/release-notes/v5.0.7-beta.2.md",
         "//:.github/release-notes/v5.0.7.md",
+        "//:.github/release-notes/v5.1.0-beta.1.md",
+        "//:.github/release-notes/v5.1.0-beta.2.md",
+        "//:.github/release-notes/v5.1.0-beta.3.md",
+        "//:.github/release-notes/v5.1.0.md",
         "//:.github/workflows/ci.yml",
         "//:.github/workflows/pages.yml",
         "//:README.md",

@@ -147,18 +147,24 @@ function emitTurn(responseId: number | undefined, params: Record<string, unknown
       },
     },
   };
-  const events = [
+  const events: Record<string, unknown>[] = [
     turnSettings(params),
     {
       method: 'turn/started',
       params: {threadId, turn: {error: null, id: turnId, items: [], status: 'inProgress'}},
     },
     {method: 'item/started', params: {item: command, threadId, turnId}},
-    approvalRequest(deniedCommand ? 899 : 900, command),
   ];
+  if (process.env.THREADNOTE_TEST_AUTO_APPROVAL_REVIEW === '1' && !deniedCommand) {
+    events.push(...autoApprovalReview(command));
+  } else events.push(approvalRequest(deniedCommand ? 899 : 900, command));
   writeMessages(
     process.env.THREADNOTE_TEST_APPROVAL_BEFORE_RESPONSE === '1' ? [...events, response] : [response, ...events],
   );
+  if (process.env.THREADNOTE_TEST_AUTO_APPROVAL_REVIEW === '1' && !deniedCommand) {
+    emitApprovedTurn(params, false);
+    pendingTurnParams = undefined;
+  }
 }
 
 function reviewedCommand(params: Record<string, unknown>): Record<string, unknown> {
@@ -242,9 +248,44 @@ function emitDeclinedCommandAndRecovery(params: Record<string, unknown>): void {
   writeMessages([{method: 'item/started', params: {item: command, threadId, turnId}}, approvalRequest(900, command)]);
 }
 
-function emitApprovedTurn(params: Record<string, unknown>): void {
+function autoApprovalReview(command: Record<string, unknown>): readonly Record<string, unknown>[] {
+  const action = {command: command.command, cwd: command.cwd, source: 'unifiedExec', type: 'command'};
+  const common = {
+    action,
+    reviewId: 'review_auto_approved_command',
+    startedAtMs: 1,
+    targetItemId: command.id,
+    threadId,
+    turnId,
+  };
+  return [
+    {
+      method: 'item/autoApprovalReview/started',
+      params: {
+        ...common,
+        review: {rationale: null, riskLevel: null, status: 'inProgress', userAuthorization: null},
+      },
+    },
+    {
+      method: 'item/autoApprovalReview/completed',
+      params: {
+        ...common,
+        completedAtMs: 2,
+        decisionSource: 'agent',
+        review: {
+          rationale: 'read-only fixture command',
+          riskLevel: 'low',
+          status: 'approved',
+          userAuthorization: 'low',
+        },
+      },
+    },
+  ];
+}
+
+function emitApprovedTurn(params: Record<string, unknown>, manualApproval = true): void {
   const completedActionViolation = process.env.THREADNOTE_TEST_COMPLETED_ACTION_VIOLATION === '1';
-  notify('serverRequest/resolved', {requestId: 900, threadId});
+  if (manualApproval) notify('serverRequest/resolved', {requestId: 900, threadId});
   notify('item/completed', {
     item: {
       command: completedActionViolation ? 'rm -f src/service.ts' : 'cat src/service.ts',

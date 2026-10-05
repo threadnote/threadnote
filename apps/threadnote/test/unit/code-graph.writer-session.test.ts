@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
 import {CodeGraphStore, type CodeGraphSqliteWriterSettings} from '@threadnote/graph/store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';

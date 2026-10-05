@@ -1,7 +1,8 @@
 import {Schema} from 'effect';
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- This reviewed adapter validates app-server actions before execution. */
 import {createHash} from 'node:crypto';
-import {isAbsolute, resolve, sep} from 'node:path';
+import {realpathSync} from 'node:fs';
+import {isAbsolute, relative, resolve, sep} from 'node:path';
 import {codeMemoryLinkAppServerOpaqueIdDigest} from '@threadnote/threadnote/evaluation/code-memory-link-agent-protocol';
 
 export interface CodeMemoryLinkAppServerApprovalReceiptV1 {
@@ -9,6 +10,12 @@ export interface CodeMemoryLinkAppServerApprovalReceiptV1 {
   readonly itemType: 'commandExecution' | 'fileChange';
   readonly requestDigest: string;
 }
+
+export interface CodeMemoryLinkCommandPolicyV1 {
+  readonly approvedCommandTokens: readonly (readonly string[])[];
+}
+
+const EMPTY_COMMAND_POLICY: CodeMemoryLinkCommandPolicyV1 = {approvedCommandTokens: []};
 
 interface ApprovalScope {
   readonly repositoryRoot: string;
@@ -45,14 +52,17 @@ export class CodeMemoryLinkActionDeniedError extends Schema.TaggedError<CodeMemo
   }
 }
 
-export function approveCodeMemoryLinkAppServerRequest(input: {
-  readonly method: string;
-  readonly params: unknown;
-  readonly scope: ApprovalScope;
-  readonly startedItem: unknown;
-}): CodeMemoryLinkAppServerApprovalReceiptV1 {
+export function approveCodeMemoryLinkAppServerRequest(
+  input: {
+    readonly method: string;
+    readonly params: unknown;
+    readonly scope: ApprovalScope;
+    readonly startedItem: unknown;
+  },
+  commandPolicy: CodeMemoryLinkCommandPolicyV1 = EMPTY_COMMAND_POLICY,
+): CodeMemoryLinkAppServerApprovalReceiptV1 {
   if (input.method === 'item/commandExecution/requestApproval') {
-    return approveCommand(input.params, input.startedItem, input.scope);
+    return approveCommand(input.params, input.startedItem, input.scope, commandPolicy);
   }
   if (input.method === 'item/fileChange/requestApproval') {
     return approveFileChange(input.params, input.startedItem, input.scope);
@@ -63,10 +73,11 @@ export function approveCodeMemoryLinkAppServerRequest(input: {
 export function assertCodeMemoryLinkPublicAction(
   itemInput: unknown,
   repositoryRoot: string,
+  commandPolicy: CodeMemoryLinkCommandPolicyV1 = EMPTY_COMMAND_POLICY,
 ): 'commandExecution' | 'fileChange' | null {
   const item = object(itemInput, 'app-server action item');
   if (item.type === 'commandExecution') {
-    assertReadCommand(item, repositoryRoot);
+    assertReadCommand(item, repositoryRoot, commandPolicy);
     return 'commandExecution';
   }
   if (item.type === 'fileChange') {
@@ -80,12 +91,14 @@ function approveCommand(
   paramsInput: unknown,
   startedItemInput: unknown,
   scope: ApprovalScope,
+  commandPolicy: CodeMemoryLinkCommandPolicyV1,
 ): CodeMemoryLinkAppServerApprovalReceiptV1 {
   const params = object(paramsInput, 'command approval params');
   exactKeys(
     params,
     [
       'approvalId',
+      'additionalPermissions',
       'availableDecisions',
       'command',
       'commandActions',
@@ -106,11 +119,12 @@ function approveCommand(
   assertApprovalScope(params, scope);
   if (
     params.approvalId != null ||
+    params.additionalPermissions != null ||
     (params.environmentId != null && params.environmentId !== 'local') ||
     params.networkApprovalContext != null ||
     params.proposedNetworkPolicyAmendments != null
   ) {
-    throw new Error('Code Memory Link rejects compound, remote, and network command approvals.');
+    throw new Error('Code Memory Link rejects compound, remote, network, and additional permissions.');
   }
   assertTemporaryCommandApproval(params);
   const item = object(startedItemInput, 'started command item');
@@ -124,7 +138,7 @@ function approveCommand(
   }
   denyUnsupportedAction(() => {
     assertProposedExecpolicyAmendment(params.proposedExecpolicyAmendment);
-    assertReadCommand(item, scope.repositoryRoot);
+    assertReadCommand(item, scope.repositoryRoot, commandPolicy);
   });
   return receipt('commandExecution', String(params.itemId), params);
 }
@@ -188,12 +202,26 @@ function assertApprovalScope(params: Record<string, unknown>, scope: ApprovalSco
   }
 }
 
-function assertReadCommand(item: Record<string, unknown>, repositoryRoot: string): void {
+function assertReadCommand(
+  item: Record<string, unknown>,
+  repositoryRoot: string,
+  commandPolicy: CodeMemoryLinkCommandPolicyV1,
+): void {
   const cwd = containedPath(text(item.cwd, 'command cwd'), repositoryRoot);
   const command = text(item.command, 'command');
   const commands = reviewableCommands(item, repositoryRoot, cwd);
-  for (const command of commands) assertSingleReadCommand(command, repositoryRoot, cwd);
-  if (tokenize(command)[0] !== '/bin/zsh') {
+  if (
+    commands.length !== 1 &&
+    commands.some(candidate =>
+      commandPolicy.approvedCommandTokens.some(approved =>
+        equalTokens(tokenizeCodeMemoryLinkCommandV1(candidate), approved),
+      ),
+    )
+  ) {
+    throw new Error('Code Memory Link task-scoped commands must run as one exact standalone command.');
+  }
+  for (const command of commands) assertSingleReadCommand(command, repositoryRoot, cwd, commandPolicy);
+  if (tokenizeCodeMemoryLinkCommandV1(command)[0] !== '/bin/zsh') {
     if (!Array.isArray(item.commandActions) || item.commandActions.length === 0) {
       throw new Error('Code Memory Link command lacks a reviewable read-only action projection.');
     }
@@ -201,8 +229,14 @@ function assertReadCommand(item: Record<string, unknown>, repositoryRoot: string
   }
 }
 
-function assertSingleReadCommand(command: string, repositoryRoot: string, cwd: string): void {
-  const tokens = tokenize(command);
+function assertSingleReadCommand(
+  command: string,
+  repositoryRoot: string,
+  cwd: string,
+  commandPolicy: CodeMemoryLinkCommandPolicyV1,
+): void {
+  const tokens = tokenizeCodeMemoryLinkCommandV1(command);
+  if (commandPolicy.approvedCommandTokens.some(approved => equalTokens(tokens, approved))) return;
   const executable = tokens[0];
   if (!executable || executable.includes('/') || executable.includes('\\')) {
     throw new Error('Code Memory Link commands require one bare reviewed executable name.');
@@ -210,19 +244,34 @@ function assertSingleReadCommand(command: string, repositoryRoot: string, cwd: s
   if (executable === 'pwd') {
     if (tokens.length !== 1) throw new Error('pwd does not accept arguments in the evaluation policy.');
   } else if (executable === 'ls') assertLs(tokens.slice(1), repositoryRoot, cwd);
+  else if (executable === 'find') assertFind(tokens.slice(1), repositoryRoot, cwd);
+  else if (executable === 'git') assertGit(tokens.slice(1), repositoryRoot, cwd);
+  else if (executable === 'grep') assertGrep(tokens.slice(1), repositoryRoot, cwd);
   else if (executable === 'rg') assertRipgrep(tokens.slice(1), repositoryRoot, cwd);
   else if (executable === 'sed') assertSed(tokens.slice(1), repositoryRoot, cwd);
   else if (executable === 'od') assertOd(tokens.slice(1), repositoryRoot, cwd);
   else if (SIMPLE_READ_EXECUTABLES.has(executable)) {
     assertSimpleRead(executable, tokens.slice(1), repositoryRoot, cwd);
   } else {
-    throw new Error('Code Memory Link command executable is outside the reviewed read-only allowlist.');
+    throw new Error(
+      `Code Memory Link command executable ${safeExecutableLabel(executable)} is outside the reviewed read-only allowlist.`,
+    );
   }
+}
+
+function equalTokens(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((token, index) => token === right[index]);
+}
+
+function safeExecutableLabel(executable: string): string {
+  return /^[A-Za-z0-9._+-]{1,128}$/u.test(executable)
+    ? JSON.stringify(executable)
+    : `with SHA-256 ${createHash('sha256').update(executable).digest('hex')}`;
 }
 
 function reviewableCommands(item: Record<string, unknown>, repositoryRoot: string, cwd: string): readonly string[] {
   const command = text(item.command, 'command');
-  const shellTokens = tokenize(command);
+  const shellTokens = tokenizeCodeMemoryLinkCommandV1(command);
   if (shellTokens[0] === '/bin/zsh') {
     if (shellTokens.length !== 3 || (shellTokens[1] !== '-c' && shellTokens[1] !== '-lc')) {
       throw new Error('Code Memory Link shell command uses an unsupported invocation shape.');
@@ -273,8 +322,11 @@ function splitReadCommandChain(command: string): readonly string[] {
     }
     if (quote === 'double') {
       if (character === '"') quote = null;
-      else if (character === '$' || character === '`' || character === '\\') {
+      else if (character === '$' || character === '`') {
         throw new Error('Command chain contains expansion inside double quotes.');
+      } else if (character === '\\') {
+        if (index + 1 >= command.length) throw new Error('Command chain ends with an escape.');
+        index += 1;
       }
       continue;
     }
@@ -379,6 +431,120 @@ function assertLs(args: readonly string[], root: string, cwd: string): void {
   for (const path of paths.length === 0 ? ['.'] : paths) containedPath(path, root, cwd);
 }
 
+function assertGit(args: readonly string[], root: string, cwd: string): void {
+  const [subcommand, ...subcommandArgs] = args;
+  if (subcommand === 'diff') {
+    const flags = new Set([
+      '--cached',
+      '--check',
+      '--color=never',
+      '--name-only',
+      '--name-status',
+      '--no-ext-diff',
+      '--no-renames',
+      '--stat',
+    ]);
+    let optionsEnded = false;
+    for (const value of subcommandArgs) {
+      if (!optionsEnded && value === '--') {
+        optionsEnded = true;
+        continue;
+      }
+      if (!optionsEnded && flags.has(value)) continue;
+      if (!optionsEnded) throw new Error('git diff revisions and options are outside the reviewed grammar.');
+      containedPath(value, root, cwd);
+    }
+    return;
+  }
+  if (subcommand === 'status') {
+    const flags = new Set([
+      '-b',
+      '-s',
+      '--branch',
+      '--porcelain',
+      '--porcelain=v1',
+      '--short',
+      '--untracked-files=all',
+      '--untracked-files=no',
+      '--untracked-files=normal',
+    ]);
+    if (subcommandArgs.some(value => !flags.has(value))) {
+      throw new Error('git status option is outside the reviewed grammar.');
+    }
+    return;
+  }
+  if (subcommand === 'rev-parse') {
+    if (
+      subcommandArgs.length !== 1 ||
+      !['--is-inside-work-tree', '--show-prefix', '--show-toplevel'].includes(subcommandArgs[0])
+    ) {
+      throw new Error('git rev-parse is limited to one reviewed repository-location query.');
+    }
+    return;
+  }
+  if (subcommand === 'ls-files') {
+    const flags = new Set([
+      '--cached',
+      '--deleted',
+      '--exclude-standard',
+      '--full-name',
+      '--ignored',
+      '--modified',
+      '--others',
+      '--stage',
+      '--unmerged',
+    ]);
+    let optionsEnded = false;
+    for (const value of subcommandArgs) {
+      if (!optionsEnded && value === '--') {
+        optionsEnded = true;
+        continue;
+      }
+      if (!optionsEnded && flags.has(value)) continue;
+      if (!optionsEnded && value.startsWith('-')) {
+        throw new Error('git ls-files option is outside the reviewed grammar.');
+      }
+      containedPath(value, root, cwd);
+    }
+    return;
+  }
+  throw new Error('git subcommand is outside the reviewed read-only grammar.');
+}
+
+function assertFind(args: readonly string[], root: string, cwd: string): void {
+  const paths: string[] = [];
+  let index = 0;
+  while (index < args.length && !args[index].startsWith('-')) {
+    paths.push(args[index]);
+    index += 1;
+  }
+  if (paths.length === 0) throw new Error('find requires an explicit repository path.');
+  for (const path of paths) containedPath(path, root, cwd);
+  while (index < args.length) {
+    const predicate = args[index];
+    index += 1;
+    if (predicate === '-maxdepth' || predicate === '-mindepth') {
+      positiveCount(args[index], `find ${predicate}`);
+      index += 1;
+      continue;
+    }
+    if (predicate === '-type') {
+      if (!['d', 'f', 'l'].includes(args[index] ?? '')) {
+        throw new Error('find -type is outside the reviewed grammar.');
+      }
+      index += 1;
+      continue;
+    }
+    if (predicate === '-name' || predicate === '-iname' || predicate === '-path' || predicate === '-ipath') {
+      safeGlob(boundedLiteral(args[index], `find ${predicate}`));
+      index += 1;
+      continue;
+    }
+    if (predicate === '-a' || predicate === '-o' || predicate === '-print') continue;
+    throw new Error('find predicate is outside the reviewed read-only grammar.');
+  }
+}
+
 function assertSed(args: readonly string[], root: string, cwd: string): void {
   if (args.length < 2 || args[0] !== '-n' || !/^[0-9]+(?:,[0-9]+)?p$/u.test(args[1])) {
     throw new Error('sed is limited to one numeric print range.');
@@ -443,6 +609,78 @@ function assertRipgrep(args: readonly string[], root: string, cwd: string): void
   for (const path of paths.length === 0 ? ['.'] : paths) containedPath(path, root, cwd);
 }
 
+/**
+ * Keep the reviewed grammar deliberately smaller than grep's full CLI: no
+ * recursive traversal, pattern files, binary modes, or filesystem-selection
+ * globs. Existing operands are canonicalized because grep follows explicitly
+ * named symlinks even without recursive flags.
+ */
+function assertGrep(args: readonly string[], root: string, cwd: string): void {
+  let explicitPatterns = 0;
+  const positionals: string[] = [];
+  const flags = new Set([
+    '-E',
+    '-F',
+    '-H',
+    '-L',
+    '-c',
+    '-h',
+    '-i',
+    '-l',
+    '-n',
+    '-s',
+    '-v',
+    '-w',
+    '-x',
+    '--count',
+    '--extended-regexp',
+    '--files-with-matches',
+    '--files-without-match',
+    '--fixed-strings',
+    '--ignore-case',
+    '--invert-match',
+    '--line-number',
+    '--line-regexp',
+    '--no-filename',
+    '--no-messages',
+    '--with-filename',
+    '--word-regexp',
+  ]);
+  const countOptions = new Set([
+    '-A',
+    '-B',
+    '-C',
+    '-m',
+    '--after-context',
+    '--before-context',
+    '--context',
+    '--max-count',
+  ]);
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === '--') {
+      positionals.push(...args.slice(index + 1));
+      break;
+    }
+    if (flags.has(value) || /^-[EFHLchilnsvwx]+$/u.test(value)) continue;
+    if (countOptions.has(value)) {
+      positiveCount(args[++index], `grep ${value}`);
+      continue;
+    }
+    if (value === '-e' || value === '--regexp') {
+      boundedLiteral(args[++index], `grep ${value}`);
+      explicitPatterns += 1;
+      continue;
+    }
+    if (value.startsWith('-')) throw new Error('grep option is outside the reviewed grammar.');
+    positionals.push(value);
+  }
+  const implicitPatternCount = explicitPatterns === 0 ? 1 : 0;
+  if (positionals.length < implicitPatternCount) throw new Error('grep requires an explicit bounded search pattern.');
+  const paths = positionals.slice(implicitPatternCount);
+  for (const path of paths.length === 0 ? ['.'] : paths) containedExistingPath(path, root, cwd);
+}
+
 function assertFileChanges(item: Record<string, unknown>, repositoryRoot: string): void {
   if (!Array.isArray(item.changes) || item.changes.length === 0) {
     throw new Error('Code Memory Link file change has no paths.');
@@ -454,14 +692,24 @@ function assertFileChanges(item: Record<string, unknown>, repositoryRoot: string
       throw new Error('Code Memory Link file-change diff is missing or oversized.');
     }
     const kind = object(change.kind, 'file change kind');
-    if (kind.update !== undefined) {
+    if (kind.type !== undefined) {
+      exactKeys(kind, kind.type === 'update' ? ['move_path', 'type'] : ['type'], 'file change kind', false);
+      if (!['add', 'delete', 'update'].includes(String(kind.type))) {
+        throw new Error('Code Memory Link file-change kind is invalid.');
+      }
+      if (kind.type === 'update' && kind.move_path != null) {
+        containedPath(text(kind.move_path, 'file move path'), repositoryRoot);
+      }
+    } else if (kind.update !== undefined) {
       const update = object(kind.update, 'file update');
       if (update.movePath != null) containedPath(text(update.movePath, 'file move path'), repositoryRoot);
+    } else {
+      throw new Error('Code Memory Link file-change kind is invalid.');
     }
   }
 }
 
-function tokenize(command: string): readonly string[] {
+export function tokenizeCodeMemoryLinkCommandV1(command: string): readonly string[] {
   if (command.length > 16_384 || /[\0\r\n]/u.test(command)) throw new Error('Command is not bounded single-line text.');
   const tokens: string[] = [];
   let token = '';
@@ -478,10 +726,17 @@ function tokenize(command: string): readonly string[] {
     if (quote === 'double') {
       if (character === '"') quote = null;
       else {
-        if (character === '$' || character === '`' || character === '\\') {
+        if (character === '$' || character === '`') {
           throw new Error('Command contains expansion inside double quotes.');
         }
-        token += character;
+        if (character === '\\') {
+          const next = command[index + 1];
+          if (next === undefined) throw new Error('Command ends with an escape inside double quotes.');
+          if (next === '"' || next === '\\') {
+            token += next;
+            index += 1;
+          } else token += character;
+        } else token += character;
       }
       active = true;
       continue;
@@ -515,7 +770,7 @@ function tokenize(command: string): readonly string[] {
 function containedPath(value: string, rootInput: string, cwdInput = rootInput): string {
   if (value.includes('\0') || value.includes('\\')) throw new Error('Repository path is invalid.');
   const segments = value.split('/');
-  if (segments.some(segment => segment === '..' || FORBIDDEN_PATH_SEGMENTS.has(segment))) {
+  if (segments.some(segment => segment === '..')) {
     throw new Error('Repository path contains a forbidden parent or control segment.');
   }
   const root = resolve(rootInput);
@@ -524,7 +779,40 @@ function containedPath(value: string, rootInput: string, cwdInput = rootInput): 
   if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) {
     throw new Error('App-server action referenced a path outside the public task repository.');
   }
+  const repositoryRelativeSegments = candidate === root ? [] : relative(root, candidate).split(sep);
+  if (repositoryRelativeSegments.some(segment => FORBIDDEN_PATH_SEGMENTS.has(segment))) {
+    throw new Error('Repository path contains a forbidden parent or control segment.');
+  }
   return candidate;
+}
+
+/**
+ * grep follows an explicitly named symlink even without recursive flags. Resolve
+ * existing operands so the reviewed read cannot escape through a repository
+ * symlink; nonexistent operands remain harmless grep errors.
+ */
+function containedExistingPath(value: string, rootInput: string, cwdInput = rootInput): string {
+  const candidate = containedPath(value, rootInput, cwdInput);
+  try {
+    const canonicalRoot = realpathSync(resolve(rootInput));
+    const canonicalCandidate = realpathSync(candidate);
+    if (canonicalCandidate !== canonicalRoot && !canonicalCandidate.startsWith(`${canonicalRoot}${sep}`)) {
+      throw new Error('App-server action referenced a symlink target outside the public task repository.');
+    }
+  } catch (cause) {
+    if (isMissingPath(cause)) return candidate;
+    throw cause;
+  }
+  return candidate;
+}
+
+function isMissingPath(cause: unknown): boolean {
+  return (
+    typeof cause === 'object' &&
+    cause !== null &&
+    'code' in cause &&
+    (cause.code === 'ENOENT' || cause.code === 'ENOTDIR')
+  );
 }
 
 function safeGlob(value: string): void {

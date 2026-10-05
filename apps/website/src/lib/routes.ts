@@ -64,6 +64,12 @@ export function docsArticleIdForPathname(pathname: string, basePath: string): st
 export type WhatsNewPostRoute =
   Readonly<{kind: 'article'; slug: string}> | Readonly<{kind: 'release'; version: string}>;
 
+export type WhatsNewIndexView = 'articles' | 'releases';
+
+export function whatsNewIndexViewForSearch(search: string): WhatsNewIndexView {
+  return new URLSearchParams(search).get('view') === 'releases' ? 'releases' : 'articles';
+}
+
 export function whatsNewPostForPathname(pathname: string, basePath: string): WhatsNewPostRoute | undefined {
   const relativePath = siteRelativePathname(pathname, basePath);
   const match = relativePath?.match(/^whats-new\/(articles|releases)\/([^/]+)$/);

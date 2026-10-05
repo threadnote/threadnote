@@ -5,7 +5,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {symlinkSync} from 'node:fs';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -48,13 +48,30 @@ const mutations = [
 ] as const;
 type Mutation = (typeof mutations)[number] | 'none' | 'legacy-service';
 
-const scenario = (mutation: Mutation, suffix = 0) =>
+const scenario = (mutation: Mutation, suffix = 0, overlapObservations = false) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const store = yield* CodeGraphStore;
     const packs = yield* CodeGraphLanguagePackRegistry;
     const command = yield* CommandExecutor;
+    const admissionStarted = yield* Deferred.make<void>();
+    const overlayStarted = yield* Deferred.make<void>();
+    const observedCommand = CommandExecutor.of({
+      ...command,
+      execute: (executable, args, options) =>
+        Effect.gen(function* () {
+          if (overlapObservations && args.includes('--git-path') && args.includes('info/exclude')) {
+            yield* Deferred.succeed(admissionStarted, undefined);
+            yield* Deferred.await(overlayStarted);
+          }
+          if (overlapObservations && args.includes('--porcelain=v1')) {
+            yield* Deferred.succeed(overlayStarted, undefined);
+            yield* Deferred.await(admissionStarted);
+          }
+          return yield* command.execute(executable, args, options);
+        }),
+    });
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-local-fence-'});
     const home = path.join(root, 'home');
     const [repository] = yield* prepareContextBriefCitationScaleRepositories(
@@ -177,6 +194,7 @@ const scenario = (mutation: Mutation, suffix = 0) =>
     const unexpected = () => Effect.die(new Error('Citation validation must not index or maintain graphs.'));
     const dependencies = Layer.mergeAll(
       platformLayer,
+      Layer.succeed(CommandExecutor, observedCommand),
       Layer.succeed(CodeGraphStore, observedStore),
       Layer.succeed(CodeGraphLanguagePackRegistry, packs),
       Layer.succeed(CodeGraphIndexer, CodeGraphIndexer.of({ensureCommit: unexpected, index: unexpected})),
@@ -231,8 +249,9 @@ const scenario = (mutation: Mutation, suffix = 0) =>
     }).pipe(provideTestLayer(CodeGraphQueryService.layer.pipe(Layer.provideMerge(dependencies))));
     const receipts = validations.flatMap(value => value.receipts);
     expect(receipts).toHaveLength(1);
-    expect(receipts[0].status).toBe(mutation === 'none' || mutation === 'legacy-service' ? 'exact' : 'unknown');
-    if (mutation === 'none' || mutation === 'legacy-service') expect(receipts[0].coverage).toBe('current-complete');
+    const exact = mutation === 'none' || mutation === 'legacy-service';
+    expect(receipts[0].status).toBe(exact ? 'exact' : 'unknown');
+    if (exact) expect(receipts[0].coverage).toBe('current-complete');
     expect(expectedCalls).toBe(mutation === 'legacy-service' ? 0 : 1);
     expect(ordinaryFinalCalls).toBe(mutation === 'legacy-service' ? 1 : 0);
     expect(sessions).toBe(1);
@@ -240,6 +259,9 @@ const scenario = (mutation: Mutation, suffix = 0) =>
   }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive);
 
 describe('Context Brief local citation closing observation', () => {
+  effectIt.effect('overlaps initial admission and worktree reads without skipping the closing fence', () =>
+    scenario('none', 0, true),
+  );
   effectIt.effect('reobserves a locally discovered identity after evidence within its lease and session', () =>
     scenario('none'),
   );
@@ -249,6 +271,13 @@ describe('Context Brief local citation closing observation', () => {
   for (const mutation of mutations) {
     effectIt.effect(`rejects a between-observation ${mutation} change`, () => scenario(mutation));
   }
+  fcEffectProp(
+    effectIt,
+    'preserves fail-closed mutation outcomes when initial observations overlap',
+    {mutation: fc.constantFrom(...mutations), suffix: fc.nat(100_000)},
+    ({mutation, suffix}) => scenario(mutation, suffix, true),
+    {fastCheck: {numRuns: 8}},
+  );
   fcEffectProp(
     effectIt,
     'rejects independently changed remote identities',

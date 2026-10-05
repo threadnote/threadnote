@@ -1,8 +1,8 @@
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {Effect, FileSystem, Layer, Option, Path, Ref, Schema} from 'effect';
-import * as HttpServer from 'effect/unstable/http/HttpServer';
-import * as HttpServerRequest from 'effect/unstable/http/HttpServerRequest';
-import * as HttpServerResponse from 'effect/unstable/http/HttpServerResponse';
+import * as HttpServer from 'effect/http/HttpServer';
+import * as HttpServerRequest from 'effect/http/HttpServerRequest';
+import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {readJsonFile, writePrivateJsonFile} from '../atomic.js';
 import {putCasBytes, readVerifiedCasBlob, verifyCasBlob} from '../cas.js';
 import {

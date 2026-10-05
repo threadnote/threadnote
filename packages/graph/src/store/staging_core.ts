@@ -1,5 +1,5 @@
 import {Clock, DateTime, Effect, Option} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {codeGraphUtf8ByteLength, saturatingCapacityAdd} from '../disk/capacity.js';
 import {isCodeGraphReferenceWithinCandidateBudget} from '../fact/budget.js';
 import {

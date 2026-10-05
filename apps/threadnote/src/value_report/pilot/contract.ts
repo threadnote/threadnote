@@ -112,7 +112,7 @@ export const PilotReportSchema = Schema.Struct({
       crossActorFullLoopActors: Schema.NullOr(Schema.Literals(PILOT_COUNTS)),
       retainedFromPriorWeek: Schema.NullOr(Schema.Literals(PILOT_COUNTS)),
     }),
-  ).check(Schema.isLengthBetween(4, 4)),
+  ).check(Schema.isMinLength(4), Schema.isMaxLength(4)),
   fourWeekCrossActorRetention: Schema.Struct({
     state: Schema.Literals(['observed', 'missing', 'pending']),
     actors: Schema.Literals(PILOT_COUNTS),

@@ -1,5 +1,5 @@
 import {Cause, Effect, Option, Predicate, Ref, Result, Schema} from 'effect';
-import * as SqlClient from 'effect/unstable/sql/SqlClient';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from '../store/build/core.js';
 import {classifyCodeGraphStoreFailure} from '../store/failure.js';
