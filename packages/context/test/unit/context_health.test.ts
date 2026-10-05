@@ -44,6 +44,35 @@ function record(uri: string, body: string, metadata: Partial<MemoryMetadata> = {
 }
 
 describe('buildContextHealthReport', () => {
+  it('excludes reserved artifact targets without hiding ordinary missing-memory evidence', () => {
+    fc.assert(
+      fc.property(fc.boolean(), fc.constantFrom('missing', 'inactive', 'conflicted'), (shared, status) => {
+        const prefix = `threadnote://user/tester/memories/${shared ? 'shared/default/' : ''}`;
+        const artifact = `${prefix}agent-artifacts/skills/review/SKILL.md`;
+        const ordinary = `${prefix}durable/projects/threadnote/agent-artifacts/missing.md`;
+        const source = record(`${prefix}durable/projects/threadnote/source.md`, 'Artifact references.', {
+          relations: [
+            {type: 'depends_on', uri: artifact},
+            {type: 'depends_on', uri: ordinary},
+          ],
+        });
+        const report = buildContextHealthReport({
+          now,
+          project: 'threadnote',
+          records: [source],
+          relationEvidence: [artifact, ordinary].map(targetUri => ({sourceUri: source.uri, targetUri, status})),
+        });
+        const findings = report.findings.filter(item => item.category.startsWith('relation-target-'));
+        expect(findings).toHaveLength(1);
+        expect(findings[0]?.repair.targetUri).toBe(ordinary);
+        expect(
+          (report.maintenance?.actionableFindings ?? 0) + (report.maintenance?.automaticallyManagedFindings ?? 0),
+        ).toBe(1);
+      }),
+      {numRuns: 24, seed: 74653},
+    );
+  });
+
   it('reports the 2,001-citation admission tail as coverage rather than content damage', () => {
     const records = Array.from({length: 2_001}, (_, index) =>
       record(`threadnote://memory/tn_${index}`, `unique claim ${index}`, {kind: 'handoff'}),

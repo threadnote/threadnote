@@ -3,6 +3,7 @@ import {
   selectFairMaintenanceWork,
   maintenanceCheckpointCurrent,
   duplicateArchiveSafe,
+  artifactOnlySharedRelationProposal,
   reconcileRepositoryRecoveryCases,
   mergeMaintenanceCaseLineage,
   upsertCase,
@@ -36,6 +37,7 @@ import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutati
 import {
   assertMemoryDocumentSchemaWritable,
   canonicalMemoryDocumentContent,
+  isAgentArtifactUri,
   isSharedMemoryUri,
   parseMemoryDocument,
   type MemoryRecord,
@@ -331,7 +333,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       const corpus = snapshot.success.records;
       const logicalHashes = snapshot.success.canonicalContentHashes;
-      state = {...state, cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes)};
+      state = {...state, cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes, snapshot.success.complete)};
       const active = corpus
         .filter(record => record.metadata.status === 'active')
         .map(record =>
@@ -581,6 +583,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           });
           const removal = changes.map(change => change.relation);
           for (const relation of record.metadata.relations ?? []) {
+            if (isAgentArtifactUri(relation.uri)) continue;
             const target = resolveRelationTarget(relationCorpus, relation.uri);
             if (target.state === 'active') continue;
             const policy = resolveMaintenanceRelationPolicy(
@@ -624,6 +627,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           }
           if (isSharedMemoryUri(record.uri)) {
             for (const relation of record.metadata.relations ?? []) {
+              if (isAgentArtifactUri(relation.uri)) continue;
               const target = resolveRelationTarget(corpus, relation.uri);
               if (target.state !== 'missing') continue;
               const item = upsertCase(
@@ -1929,6 +1933,7 @@ export function migrateMaintenanceCases(
   cases: readonly ContextMaintenanceCaseV2[],
   records: readonly MemoryRecord[] = [],
   hashes?: ReadonlyMap<string, string>,
+  inventoryComplete = false,
 ): readonly ContextMaintenanceCaseV2[] {
   const identities = new Map<string, ContextMaintenanceCaseV2>();
   for (const item of cases) {
@@ -1965,6 +1970,9 @@ export function migrateMaintenanceCases(
           : item.slot === item.family && item.family !== 'citation'
             ? 'record'
             : item.slot;
+    // Remove non-memory findings before a current checkpoint can skip record work.
+    if (item.family === 'relation' && isAgentArtifactUri(slot)) continue;
+    if (inventoryComplete && unchangedSubject && artifactOnlySharedRelationProposal(item, subject, records)) continue;
     const canonicalSlot =
       item.family === 'relation' ? (resolveRelationTarget(records, slot).record?.metadata.memoryId ?? slot) : slot;
     const next = {

@@ -15,6 +15,25 @@ import type {ContextMaintenanceCaseV2} from './maintenance.js';
 
 const MAX_EVENTS = 8;
 
+export function artifactOnlySharedRelationProposal(
+  item: ContextMaintenanceCaseV2,
+  subject: MemoryRecord,
+  records: readonly MemoryRecord[],
+): boolean {
+  return (
+    item.family === 'shared-owner-proposal' &&
+    item.reason === 'shared-canonical-relations-require-owner-review' &&
+    item.slot === 'relations' &&
+    isSharedMemoryUri(subject.uri) &&
+    subject.metadata.relations?.some(relation => isAgentArtifactUri(relation.uri)) === true &&
+    subject.metadata.relations.every(relation => {
+      if (isAgentArtifactUri(relation.uri)) return true;
+      const state = resolveRelationTarget(records, relation.uri).state;
+      return state === 'active' || state === 'inactive';
+    })
+  );
+}
+
 export function duplicateArchiveSafe(subject: MemoryRecord, survivor: MemoryRecord | undefined): boolean {
   if (
     survivor === undefined ||
