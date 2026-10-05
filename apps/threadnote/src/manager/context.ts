@@ -332,6 +332,7 @@ export function managerContextBriefInput(body: Record<string, unknown>): {
   readonly codeRefs: readonly string[];
   readonly detail?: ContextBriefDetail;
   readonly mode: ContextBriefMode;
+  readonly responseFormat?: 'agent' | 'dual';
   readonly scope:
     | {readonly callerCwd: string; readonly kind: 'repository'; readonly project?: string}
     | {readonly kind: 'workset'; readonly name: string; readonly project?: string};
@@ -366,6 +367,7 @@ export function managerContextBriefInput(body: Record<string, unknown>): {
     ...(body.codeRefs === undefined ? {} : {codeRefs: body.codeRefs}),
     ...(body.detail === undefined ? {} : {detail: body.detail}),
     mode,
+    responseFormat: 'agent',
     scope:
       workset === undefined
         ? {callerCwd: callerCwd!, kind: 'repository', ...(project === undefined ? {} : {project})}

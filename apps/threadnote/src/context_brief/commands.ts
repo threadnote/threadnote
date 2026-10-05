@@ -33,6 +33,7 @@ export const runContextBrief = Effect.fn('contextBrief.command.compile')(functio
     codeRefs: options.codeRefs ?? [],
     ...(options.detail === undefined ? {} : {detail: options.detail}),
     ...(options.mode === undefined ? {} : {mode: options.mode}),
+    responseFormat: 'agent',
     scope: workset
       ? {kind: 'workset', name: workset, ...(options.project?.trim() ? {project: options.project.trim()} : {})}
       : {callerCwd: cwd, kind: 'repository', ...(options.project?.trim() ? {project: options.project.trim()} : {})},

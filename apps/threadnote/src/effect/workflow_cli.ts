@@ -90,7 +90,7 @@ export function makeContextBriefCommand<E, R>(
               ),
             ),
           ),
-          `Maximum estimated tokens for the combined structured and text response (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS})`,
+          `Maximum estimated tokens for the agent text (${CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}-${CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS}); --json exposes the same selected evidence with structured audit metadata`,
         ),
       ),
       codeRefs: repeatedString(
