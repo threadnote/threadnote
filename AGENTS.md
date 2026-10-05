@@ -44,8 +44,9 @@ nearest checked-in guidance remain authoritative.
 
 ## Use Effect-aware test tooling
 
-When writing Effect code, inspect `@repos/effect/` for examples of idiomatic usage, tests, module structure, and API
-design. Treat it as the source of truth for Effect patterns.
+When writing Effect code, inspect `@repos/effect/` when that reference checkout is available for examples of idiomatic
+usage, tests, module structure, and API design. If it is absent, use the installed `effect` and `@effect/vitest` package
+sources and `@effect/vitest/ai-docs`, together with existing tests in the owning package, as the Effect reference.
 
 Threadnote application and runtime behavior is predominantly Effect code. Tests whose primary program under test is an
 `Effect` must use the Effect Vitest integration from `@effect/vitest` rather than wrapping the program with
