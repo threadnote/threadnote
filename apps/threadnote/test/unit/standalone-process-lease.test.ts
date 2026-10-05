@@ -36,13 +36,19 @@ const fixture = Effect.gen(function* () {
   return {fs, path, root, system, leasePath: path.join(root, 'leases', '4.0.0', `${system.processId}.json`)};
 });
 
-const awaitLease = (fs: FileSystem.FileSystem, file: string) =>
+const observeLeasePublication = (fs: FileSystem.FileSystem, file: string) =>
   Effect.gen(function* () {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      if (yield* fs.exists(file)) return;
-      yield* Effect.yieldNow;
-    }
-    expect(yield* fs.exists(file)).toBe(true);
+    const published = yield* Deferred.make<void>();
+    return {
+      published,
+      fs: FileSystem.FileSystem.of({
+        ...fs,
+        link: (from, to) =>
+          fs
+            .link(from, to)
+            .pipe(Effect.tap(() => (to === file ? Deferred.succeed(published, undefined) : Effect.void))),
+      }),
+    };
   });
 
 describe('standalone lease reconciliation', () => {
@@ -223,10 +229,11 @@ describe('standalone lease reconciliation', () => {
   effectIt.effect('retries a transient lease read failure without surrendering ownership', () =>
     Effect.gen(function* () {
       const {fs, system, leasePath} = yield* fixture;
+      const publication = yield* observeLeasePublication(fs, leasePath);
       const failed = yield* Deferred.make<void>();
       let fail = true;
       const flaky = FileSystem.FileSystem.of({
-        ...fs,
+        ...publication.fs,
         readFileString: (file, encoding) => {
           if (file !== leasePath || !fail) return fs.readFileString(file, encoding);
           fail = false;
@@ -239,7 +246,7 @@ describe('standalone lease reconciliation', () => {
           yield* Deferred.await(failed);
           yield* fs.remove(leasePath);
           yield* TestClock.adjust(30_000);
-          yield* awaitLease(fs, leasePath);
+          yield* Deferred.await(publication.published);
         }),
       ).pipe(Effect.provideService(SystemInfo, system), Effect.provideService(FileSystem.FileSystem, flaky));
     }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer)),
@@ -317,12 +324,26 @@ describe('standalone lease reconciliation', () => {
   effectIt.effect('restores the immutable idle lease and protects its release from pruning', () =>
     Effect.gen(function* () {
       const {fs, path, root, system, leasePath} = yield* fixture;
+      const requested = yield* Deferred.make<void>();
+      const allowPublication = yield* Deferred.make<void>();
+      const gated = FileSystem.FileSystem.of({
+        ...fs,
+        link: (from, to) =>
+          Deferred.succeed(requested, undefined).pipe(
+            Effect.andThen(Deferred.await(allowPublication)),
+            Effect.andThen(fs.link(from, to)),
+          ),
+      });
+      const publication = yield* observeLeasePublication(gated, leasePath);
       yield* withStandaloneProcessLease(
         Effect.gen(function* () {
           const original = yield* fs.readFileString(leasePath);
           yield* fs.remove(path.dirname(leasePath), {recursive: true});
           yield* TestClock.adjust(30_000);
-          yield* awaitLease(fs, leasePath);
+          yield* Deferred.await(requested);
+          expect(yield* fs.exists(leasePath)).toBe(false);
+          yield* Deferred.succeed(allowPublication, undefined);
+          yield* Deferred.await(publication.published);
           expect(yield* fs.readFileString(leasePath)).toBe(original);
           yield* pruneStandaloneReleases(path.join(root, 'versions', '4.0.2'), false).pipe(
             Effect.provideService(SystemInfo, {
@@ -332,7 +353,7 @@ describe('standalone lease reconciliation', () => {
           );
           expect(yield* fs.exists(path.join(root, 'versions', '4.0.0'))).toBe(true);
         }),
-      ).pipe(Effect.provideService(SystemInfo, system));
+      ).pipe(Effect.provideService(SystemInfo, system), Effect.provideService(FileSystem.FileSystem, publication.fs));
       expect(yield* fs.exists(leasePath)).toBe(false);
     }).pipe(provideTestLayer(TestSystemInfoLayer), provideTestLayer(BunServices.layer)),
   );
@@ -340,10 +361,11 @@ describe('standalone lease reconciliation', () => {
   effectIt.effect('retries after a transient heartbeat failure', () =>
     Effect.gen(function* () {
       const {fs, system, leasePath} = yield* fixture;
+      const publication = yield* observeLeasePublication(fs, leasePath);
       let attempts = 0;
       const refreshed = yield* Deferred.make<void>();
       const flaky = FileSystem.FileSystem.of({
-        ...fs,
+        ...publication.fs,
         utimes: (file, atime, mtime) => {
           attempts += 1;
           return fs
@@ -358,7 +380,7 @@ describe('standalone lease reconciliation', () => {
           expect(attempts).toBe(1);
           yield* fs.remove(leasePath);
           yield* TestClock.adjust(30_000);
-          yield* awaitLease(fs, leasePath);
+          yield* Deferred.await(publication.published);
           expect(yield* fs.exists(leasePath)).toBe(true);
         }),
       ).pipe(Effect.provideService(SystemInfo, system), Effect.provideService(FileSystem.FileSystem, flaky));
