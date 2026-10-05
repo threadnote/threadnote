@@ -266,24 +266,22 @@ export class CodeGraphQueryService extends Context.Service<
               {identity, projectScope, manifestPath: options?.manifestPath},
             );
           }
-          const runtimeCurrent = readySnapshot
-            ? yield* codeGraphSnapshotRuntimeCurrent(
+          const runtimeRead = readySnapshot
+            ? codeGraphSnapshotRuntimeCurrent(
                 store,
                 layout.databasePath,
                 readySnapshot,
                 languagePacks,
                 options?.observeWorktree === false ? undefined : {layout, identity},
               )
-            : false;
+            : Effect.succeed(false);
           const telemetryPhase = options?.telemetryPhase ?? 'graph.query.status';
-          const overlay =
+          const overlayRead =
             options?.observeWorktree === false
-              ? yield* skipCodeGraphQueryTelemetryStage(
-                  options.telemetry,
-                  telemetryPhase,
-                  'query-worktree-observation',
-                ).pipe(Effect.as(undefined))
-              : yield* withCodeGraphQueryTelemetryStage(
+              ? skipCodeGraphQueryTelemetryStage(options.telemetry, telemetryPhase, 'query-worktree-observation').pipe(
+                  Effect.as(undefined),
+                )
+              : withCodeGraphQueryTelemetryStage(
                   options?.telemetry,
                   telemetryPhase,
                   'query-worktree-observation',
@@ -292,6 +290,7 @@ export class CodeGraphQueryService extends Context.Service<
                     : worktreeOverlayState(identity),
                   options?.telemetryWorktreeDisposition,
                 );
+          const [runtimeCurrent, overlay] = yield* Effect.all([runtimeRead, overlayRead], {concurrency: 2});
           const stale =
             !readySnapshot ||
             !runtimeCurrent ||
