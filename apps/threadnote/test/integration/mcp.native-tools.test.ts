@@ -4880,7 +4880,7 @@ describe('Threadnote MCP toolsets', () => {
       const input = {kind: 'handoff', project: 'threadnote', topic: 'uri-validation'};
       await callText(client, 'remember_context', {...input, text: 'Original synthetic memory.'});
       const original = await readFile(memoryPath, 'utf8');
-      const files = await readdir(join(fixture.home, 'data'), {recursive: true});
+      const files = (await readdir(join(fixture.home, 'data'), {recursive: true})).sort();
 
       for (const replaceUri of [
         compact,
@@ -4891,7 +4891,7 @@ describe('Threadnote MCP toolsets', () => {
           callErrorText(client, 'remember_context', {...input, replaceUri, text: 'Rejected synthetic replacement.'}),
         ).resolves.toContain('optional "replaceUri" must be a threadnote:// URI');
         await expect(readFile(memoryPath, 'utf8')).resolves.toBe(original);
-        await expect(readdir(join(fixture.home, 'data'), {recursive: true})).resolves.toEqual(files);
+        expect((await readdir(join(fixture.home, 'data'), {recursive: true})).sort()).toEqual(files);
       }
 
       await callText(client, 'remember_context', {...input, replaceUri: uri, text: 'Accepted synthetic replacement.'});
