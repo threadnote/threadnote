@@ -5,6 +5,7 @@ import type {
   CandidateReviewState,
 } from '@threadnote/memory/candidate';
 import type {ContextHealthReportV1} from '@threadnote/context/health';
+import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import type {MemoryKind} from '@threadnote/memory/types';
 
 export type ManagerRepositoryEvidenceUnavailableReasonV1 =
@@ -182,7 +183,11 @@ export interface ManagerContextMaintenanceStatusV2 {
   readonly omittedReceipts?: number;
   readonly page?: {readonly generation: string; readonly caseNextCursor?: string; readonly receiptNextCursor?: string};
   readonly lastProgressAt?: string;
-  readonly error?: {readonly reason: string; readonly at: string};
+  readonly error?: {
+    readonly reason: string;
+    readonly at: string;
+    readonly diagnostic?: ContextMaintenanceSnapshotDiagnosticV1;
+  };
 }
 
 export interface ManagerContextMaintenancePacketV2 {

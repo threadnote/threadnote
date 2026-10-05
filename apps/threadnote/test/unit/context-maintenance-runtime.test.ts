@@ -1,6 +1,6 @@
 import {BunFileSystem, BunPath} from '@effect/platform-bun';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Result} from 'effect';
+import {Clock, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
@@ -22,6 +22,7 @@ import {
   maintenanceAnchorChunksComplete,
   planMaintenanceWorkerBatches,
   maintenanceWorkerRecordValidations,
+  renderContextMaintenanceStatus,
 } from '@threadnote/threadnote/memory/context/maintenance';
 import {
   canonicalMemoryDocumentContent,
@@ -44,6 +45,7 @@ import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
   maintenanceSemanticWindowCount,
   selectMaintenanceSemanticPairBatch,
@@ -3119,6 +3121,71 @@ describe('persistent context maintenance', () => {
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
+  fcEffectProp(
+    effectIt,
+    'reserved artifact bundles are not memories and maintenance preserves their bytes and incoming links',
+    {body: fc.string({maxLength: 96})},
+    ({body}) =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const root = fixture.path.join(fixture.home, 'data', 'local', 'user', 'tester', 'memories');
+        const relatives = [
+          'agent-artifacts/skills/claude/review-pr/SKILL.md',
+          'agent-artifacts/skills/claude/review-pr/references/guide.md',
+          'agent-artifacts/commands/review.md',
+          'agent-artifacts/packs/team/README.md',
+          'agent-artifacts/procedures/check/PROCEDURE.md',
+          'shared/default/agent-artifacts/skills/review/SKILL.md',
+        ];
+        const artifacts = relatives.map((relative, index) => ({
+          file: fixture.path.join(root, relative),
+          uri: `threadnote://user/tester/memories/${relative}`,
+          // A reserved artifact remains tooling even if its text resembles a memory header.
+          content: index === 3 ? record('artifact').content : `---\nname: synthetic-tool\n---\n${body}`,
+        }));
+        for (const artifact of artifacts) {
+          yield* fixture.fs.makeDirectory(fixture.path.dirname(artifact.file), {recursive: true});
+          yield* fixture.fs.writeFileString(artifact.file, artifact.content);
+        }
+        const relations = artifacts.map(artifact => ({type: 'depends_on' as const, uri: artifact.uri}));
+        const source = record('source', {
+          relations: [...relations, {type: 'depends_on', uri: URI.replace('source.md', 'missing.md')}],
+        });
+        yield* fixture.fs.writeFileString(fixture.source, source.content);
+        const inventory = yield* prepareContextMaintenanceInventory(fixture.config, undefined, 100);
+        expect(inventory.complete).toBe(true);
+        expect(inventory.records.map(record => record.uri)).toEqual([URI]);
+        expect(
+          (yield* readMaintenanceMemoryRecords(fixture.config, {requireReadable: true})).map(record => record.uri),
+        ).toEqual([URI]);
+        const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(result.error).toBeUndefined();
+        expect(result.receipts).toHaveLength(1);
+        expect(parseMemoryDocument(URI, yield* fixture.fs.readFileString(fixture.source))!.metadata.relations).toEqual(
+          relations,
+        );
+        for (const artifact of artifacts)
+          expect(yield* fixture.fs.readFileString(artifact.file)).toBe(artifact.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 8, seed: 80511}},
+  );
+
+  for (const relative of ['durable/projects/threadnote/SKILL.md', 'durable/projects/threadnote/agent-artifacts/bad.md'])
+    effectIt.effect(`an artifact-like name outside the reserved namespace still fails closed (${relative})`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        yield* fixture.fs.writeFileString(fixture.source, record('source').content);
+        const file = fixture.path.join(fixture.home, 'data', 'local', 'user', 'tester', 'memories', relative);
+        yield* fixture.fs.makeDirectory(fixture.path.dirname(file), {recursive: true});
+        const content = '---\nname: synthetic-tool\n---\nNot a memory.';
+        yield* fixture.fs.writeFileString(file, content);
+        const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(result.error?.diagnostic?.category).toBe('invalid-header');
+        expect(result.receipts).toHaveLength(0);
+        expect(yield* fixture.fs.readFileString(file)).toBe(content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+
   effectIt.effect('preserves unreadable corpus records and never turns them into target absence', () =>
     Effect.gen(function* () {
       const fixture = yield* makeFixture();
@@ -3126,10 +3193,76 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.writeFileString(fixture.source, source.content);
       yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'missing.md'), 'Malformed but present.');
       const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
-      expect(result).toMatchObject({state: 'failed', error: {reason: 'memory-snapshot-unreadable'}});
+      expect(result).toMatchObject({
+        state: 'failed',
+        error: {
+          reason: 'memory-snapshot-unreadable',
+          diagnostic: {
+            version: 1,
+            category: 'invalid-header',
+            stage: 'record-read',
+            memoryUri: URI.replace('source.md', 'missing.md'),
+            retryable: false,
+          },
+        },
+      });
+      expect(JSON.stringify(result.error)).not.toContain('Malformed but present.');
+      expect(renderContextMaintenanceStatus(result)).toContain('missing.md');
+      expect(renderContextMaintenanceStatus(result)).toContain('backup');
+      expect((yield* readContextMaintenanceStatus(fixture.config)).error).toEqual(result.error);
+      expect(result.receipts).toHaveLength(0);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      const target = record('missing');
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'missing.md'), target.content);
+      const recovered = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(recovered.error).toBeUndefined();
+      expect(recovered.receipts).toHaveLength(0);
       expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
+
+  for (const persistent of [false, true])
+    effectIt.effect(`retries a confirmed file race once and preserves authority (persistent=${persistent})`, () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const source = record('source');
+        yield* fixture.fs.writeFileString(fixture.source, source.content);
+        let opens = 0;
+        const wrapped = FileSystem.FileSystem.of({
+          ...fixture.fs,
+          open: (file, options) => {
+            if (file === fixture.source && (++opens === 1 || persistent))
+              return Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'NotFound',
+                  module: 'FileSystem',
+                  method: 'open',
+                  description: 'Synthetic private error details must not be copied.',
+                  pathOrDescriptor: '/synthetic/private/path',
+                }),
+              );
+            return fixture.fs.open(file, options);
+          },
+        });
+        const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home}).pipe(
+          Effect.provideService(FileSystem.FileSystem, wrapped),
+        );
+        if (persistent) {
+          expect(opens).toBe(2);
+          expect(result).toMatchObject({
+            state: 'failed',
+            error: {diagnostic: {category: 'record-changed', retryable: true, memoryUri: URI}},
+          });
+          expect(JSON.stringify(result.error)).not.toContain('Synthetic private');
+          expect(JSON.stringify(result.error)).not.toContain('/synthetic/private/path');
+        } else {
+          expect(opens).toBeGreaterThanOrEqual(2);
+          expect(result.state).not.toBe('failed');
+          expect(result.error).toBeUndefined();
+        }
+        expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
 
   effectIt.effect('ignores ancillary shared documents while preserving their existence and personal authority', () =>
     Effect.gen(function* () {

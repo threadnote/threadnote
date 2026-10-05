@@ -382,6 +382,23 @@ export function isSharedMemoryUri(uri: string): boolean {
   return /^threadnote:\/\/user\/[^/]+\/memories\/shared\/[^/]+\//.test(canonicalResourceInput(uri));
 }
 
+export function isAgentArtifactPath(segments: readonly string[]): boolean {
+  return (
+    segments[0] === 'agent-artifacts' ||
+    (segments[0] === 'shared' && Boolean(segments[1]) && segments[2] === 'agent-artifacts')
+  );
+}
+
+/** Reserved personal and team bundle storage contains tooling, not memory records. */
+export function isAgentArtifactUri(uri: string): boolean {
+  try {
+    const {namespace, segments} = parseResourceId(uri);
+    return namespace === 'user' && segments[1] === 'memories' && isAgentArtifactPath(segments.slice(2));
+  } catch {
+    return false;
+  }
+}
+
 function canonicalResourceInput(uri: string): string {
   try {
     return parseResourceId(uri).canonicalUri;

@@ -160,5 +160,13 @@ export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV
       .slice(0, 12)
       .map(group => `${group.project}: ${group.reason} (${group.affectedMemories} memories)`),
     ...(status.error === undefined ? [] : [`Maintenance error: ${status.error.reason}`]),
+    ...(status.error?.diagnostic === undefined
+      ? []
+      : [
+          status.error.diagnostic.summary,
+          `Stage: ${status.error.diagnostic.stage}`,
+          ...(status.error.diagnostic.memoryUri === undefined ? [] : [`Memory: ${status.error.diagnostic.memoryUri}`]),
+          status.error.diagnostic.recovery,
+        ]),
   ].join('\n');
 }

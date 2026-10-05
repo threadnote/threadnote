@@ -1300,6 +1300,11 @@ body.is-resizing-sidebar * {
   min-width: 0;
 }
 
+.context-health .maintenance-failure-diagnostic code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .context-health .attention-card h3,
 .context-health .attention-card h4 {
   margin: 0;

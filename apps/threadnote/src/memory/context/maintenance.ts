@@ -47,6 +47,7 @@ import {
   contextHealthCitationCaseSlotV2,
   migrateContextHealthCitationCaseSlotV2,
   type ContextHealthCaseDispositionV2,
+  type ContextMaintenanceSnapshotDiagnosticV1,
 } from '@threadnote/context/health_maintenance';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
@@ -228,7 +229,11 @@ export interface ContextMaintenanceStatusV2 {
   readonly omittedReceipts?: number;
   readonly page?: {readonly generation: string; readonly caseNextCursor?: string; readonly receiptNextCursor?: string};
   readonly lastProgressAt?: string;
-  readonly error?: {readonly reason: string; readonly at: string};
+  readonly error?: {
+    readonly reason: string;
+    readonly at: string;
+    readonly diagnostic?: ContextMaintenanceSnapshotDiagnosticV1;
+  };
 }
 
 export interface MaintenanceState extends ContextMaintenanceStatusV2 {
@@ -300,16 +305,26 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       let state = yield* readState(config);
       if (state.paused) return publicStatus(state);
       const started = yield* Clock.currentTimeMillis;
-      const snapshot = yield* prepareContextMaintenanceInventory(
+      let snapshot = yield* prepareContextMaintenanceInventory(
         config,
         options.project,
         Math.min(256, maxRecords * 16),
       ).pipe(Effect.result);
+      if (Result.isFailure(snapshot) && snapshot.failure.diagnostic.retryable)
+        snapshot = yield* prepareContextMaintenanceInventory(
+          config,
+          options.project,
+          Math.min(256, maxRecords * 16),
+        ).pipe(Effect.result);
       if (Result.isFailure(snapshot)) {
         state = {
           ...state,
           state: 'failed',
-          error: {at: DateTime.formatIso(DateTime.makeUnsafe(started)), reason: 'memory-snapshot-unreadable'},
+          error: {
+            at: DateTime.formatIso(DateTime.makeUnsafe(started)),
+            reason: 'memory-snapshot-unreadable',
+            diagnostic: snapshot.failure.diagnostic,
+          },
         };
         yield* writeState(config, state);
         return publicStatus(state);

@@ -9,7 +9,12 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {memoryHeaderValue, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  memoryHeaderValue,
+  parseMemoryDocument,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {localUserMemoriesRoot} from '../migrations.js';
 
 const MAINTENANCE_READ_CONCURRENCY = 16;
@@ -169,8 +174,14 @@ export const readMaintenanceMemoryRecords = Effect.fn('memory.readMaintenanceRec
   const root = yield* localUserMemoriesRoot(config);
   const files = yield* scanFilesWithinBoundary(fs, root, root, {
     includeDirectory: directory => {
-      if (options.personalOnly !== true) return true;
       const relative = path.relative(root, directory);
+      if (
+        isAgentArtifactUri(
+          `threadnote://user/${uriSegment(config.user)}/memories/${relative.split(path.sep).join('/')}`,
+        )
+      )
+        return false;
+      if (options.personalOnly !== true) return true;
       return relative.split(path.sep)[0] !== 'shared';
     },
     includeFile: (_filePath, name) => name.endsWith('.md') && !name.startsWith('.'),

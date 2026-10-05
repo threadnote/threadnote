@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, Result} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Option, Path, PlatformError, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
@@ -103,6 +103,134 @@ const settle = (f: Effect.Success<ReturnType<typeof fixture>>, budget: number, n
   });
 
 describe('maintenance inventory authority and fairness', () => {
+  for (const relative of ['agent-artifacts/skills/claude/review-pr', 'shared/default/agent-artifacts/packs/team'])
+    for (const failure of ['permission', 'catalog'] as const)
+      effectIt.effect(`drops resumed tooling pages before enumeration (${relative}, ${failure})`, () =>
+        Effect.gen(function* () {
+          const f = yield* fixture([0]);
+          const root = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories');
+          const directory = f.path.join(root, relative);
+          const artifact = f.path.join(directory, 'SKILL.md');
+          yield* f.fs.makeDirectory(directory, {recursive: true});
+          const text = '---\nname: synthetic-tool\n---\nPreserve this bundle.';
+          yield* f.fs.writeFileString(artifact, text);
+          yield* f.prepare(100);
+          const cache = f.path.join(f.home, 'context-maintenance', 'inventory', `${sha256HexSync('selected')}.json`);
+          const prior = JSON.parse(yield* f.fs.readFileString(cache));
+          yield* f.fs.writeFileString(
+            cache,
+            JSON.stringify({...prior, complete: false, queue: [{directory, offset: 0}]}),
+          );
+          let reads = 0;
+          const wrapped = FileSystem.FileSystem.of({
+            ...f.fs,
+            readDirectory: file => {
+              if (file !== directory) return f.fs.readDirectory(file);
+              reads++;
+              return failure === 'catalog'
+                ? Effect.succeed(Array.from({length: 10_001}, (_, i) => `member-${i}.md`))
+                : Effect.fail(
+                    PlatformError.systemError({
+                      _tag: 'PermissionDenied',
+                      module: 'FileSystem',
+                      method: 'readDirectory',
+                      pathOrDescriptor: directory,
+                    }),
+                  );
+            },
+          });
+          const inventory = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped));
+          expect(inventory.complete).toBe(true);
+          expect(inventory.records.map(record => record.uri)).toEqual([uri(0)]);
+          expect(reads).toBe(0);
+          expect(yield* f.fs.readFileString(artifact)).toBe(text);
+        }).pipe(TestClock.withLive, provide),
+      );
+
+  effectIt.effect('reports inventory-cache access when cache directory creation fails', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([0]);
+      const directory = f.path.join(f.home, 'context-maintenance', 'inventory');
+      const wrapped = FileSystem.FileSystem.of({
+        ...f.fs,
+        makeDirectory: (file, options) =>
+          file === directory
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'PermissionDenied',
+                  module: 'FileSystem',
+                  method: 'makeDirectory',
+                  pathOrDescriptor: directory,
+                }),
+              )
+            : f.fs.makeDirectory(file, options),
+      });
+      const result = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped), Effect.result);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result))
+        expect(result.failure.diagnostic).toMatchObject({category: 'permission-denied', stage: 'inventory-cache'});
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('reports a bounded permission diagnostic without raw platform details', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([0]);
+      const wrapped = FileSystem.FileSystem.of({
+        ...f.fs,
+        open: (file, options) =>
+          file === f.recordPath(0)
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'PermissionDenied',
+                  module: 'FileSystem',
+                  method: 'open',
+                  description: 'Synthetic secret content.',
+                  pathOrDescriptor: '/synthetic/private/path',
+                }),
+              )
+            : f.fs.open(file, options),
+      });
+      const result = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped), Effect.result);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure).toMatchObject({
+          diagnostic: {category: 'permission-denied', stage: 'record-read', memoryUri: uri(0), retryable: false},
+        });
+        expect(JSON.stringify(result.failure)).not.toContain('Synthetic secret');
+        expect(JSON.stringify(result.failure)).not.toContain('/synthetic/private/path');
+      }
+      expect(yield* f.fs.readFileString(f.recordPath(0))).toBe(content(0));
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'unreadable present records remain unchanged and failures retain only safe diagnostics',
+    {invalidUtf8: fc.boolean(), body: fc.string({minLength: 1, maxLength: 96})},
+    ({invalidUtf8, body}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture([0, 1]);
+        yield* settle(f, 8);
+        const raw = invalidUtf8
+          ? new Uint8Array([0xff, ...new TextEncoder().encode(body)])
+          : new TextEncoder().encode(`Malformed synthetic header.\n${body}`);
+        yield* f.fs.writeFile(f.recordPath(0), raw);
+        const result = yield* f.prepare(100).pipe(Effect.result);
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result))
+          expect(result.failure).toMatchObject({
+            diagnostic: {
+              category: invalidUtf8 ? 'invalid-utf8' : 'invalid-header',
+              memoryUri: uri(0),
+              retryable: false,
+            },
+          });
+        expect(Array.from(yield* f.fs.readFile(f.recordPath(0)))).toEqual(Array.from(raw));
+        expect(yield* f.fs.readFileString(f.recordPath(1))).toBe(content(1));
+      }).pipe(TestClock.withLive, provide),
+    {fastCheck: {numRuns: 16, seed: 80510}},
+  );
+
   effectIt.effect('resumes bounded discovery across native unrelated writes and selects the tail', () =>
     Effect.gen(function* () {
       const f = yield* fixture(Array.from({length: 30}, (_, i) => i));
@@ -113,6 +241,32 @@ describe('maintenance inventory authority and fairness', () => {
       expect(result.result.hashes.has(uri(29))).toBe(true);
       expect(result.result.incompleteReason).toBeUndefined();
       expect(result.result.reconciliation?.canonicalBytes).toBeGreaterThan(0);
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('reports authority failure without reading or exposing the external target', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([0]);
+      let externalRead = false;
+      const wrapped = FileSystem.FileSystem.of({
+        ...f.fs,
+        realPath: file =>
+          file === f.recordPath(0) ? Effect.succeed('/synthetic/external/private.md') : f.fs.realPath(file),
+        open: (file, options) => {
+          if (file === '/synthetic/external/private.md') externalRead = true;
+          return f.fs.open(file, options);
+        },
+      });
+      const result = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped), Effect.result);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) {
+        expect(result.failure).toMatchObject({
+          diagnostic: {category: 'authority-boundary', stage: 'authority-check', memoryUri: uri(0), retryable: false},
+        });
+        expect(JSON.stringify(result.failure)).not.toContain('/synthetic/external');
+      }
+      expect(externalRead).toBe(false);
+      expect(yield* f.fs.readFileString(f.recordPath(0))).toBe(content(0));
     }).pipe(TestClock.withLive, provide),
   );
 
@@ -331,7 +485,12 @@ describe('maintenance inventory authority and fairness', () => {
         content(0, 'selected', 'x'.repeat(contextMaintenanceInventoryAuthorityLimits.recordBytes)),
         {mode: 'replace'},
       );
-      expect(Result.isFailure(yield* f.prepare(100).pipe(Effect.result))).toBe(true);
+      const oversized = yield* f.prepare(100).pipe(Effect.result);
+      expect(Result.isFailure(oversized)).toBe(true);
+      if (Result.isFailure(oversized))
+        expect(oversized.failure).toMatchObject({
+          diagnostic: {category: 'record-size-limit', memoryUri: uri(0), retryable: false},
+        });
     }).pipe(TestClock.withLive, provide),
   );
 

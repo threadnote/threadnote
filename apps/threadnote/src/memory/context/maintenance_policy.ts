@@ -1,5 +1,10 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {isSharedMemoryUri, type MemoryRecord, type MemoryRelation} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  isSharedMemoryUri,
+  type MemoryRecord,
+  type MemoryRelation,
+} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   contextHealthCaseIdV2,
@@ -233,6 +238,7 @@ export function resolveMaintenanceRelationPolicy(
   corpus: readonly MemoryRecord[],
   complete = true,
 ): MaintenanceRelationPolicy {
+  if (isAgentArtifactUri(relation.uri)) return {state: 'unknown'};
   const target = resolveRelationTarget(corpus, relation.uri);
   if (target.state === 'conflicted') return {state: 'ambiguous'};
   if (target.state === 'active') return {state: 'active', target: target.record};

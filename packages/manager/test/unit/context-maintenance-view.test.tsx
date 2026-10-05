@@ -107,6 +107,42 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it('shows the affected memory, safe cause and concrete recovery when inventory stops', async () => {
+    const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/broken.md';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...status(),
+              state: 'failed',
+              error: {
+                reason: 'memory-snapshot-unreadable',
+                at: '2026-10-05T07:00:00Z',
+                diagnostic: {
+                  version: 1,
+                  category: 'invalid-header',
+                  stage: 'record-read',
+                  memoryUri,
+                  retryable: false,
+                  summary: 'Private memory header is not a valid Threadnote document.',
+                  recovery:
+                    'Preserve a backup, restore a valid header from a known-good copy, then run maintenance again.',
+                },
+              },
+            }),
+          ),
+      ),
+    );
+    await render(<ContextMaintenanceView project="threadnote" report={report()} {...props} />);
+    expect(document.body.textContent).toContain('Private memory header is not a valid Threadnote document.');
+    expect(document.body.textContent).toContain(memoryUri);
+    expect(document.body.textContent).toContain('Preserve a backup');
+    expect(document.body.textContent).not.toContain('inspect the diagnostic');
+    expect(document.body.textContent).toContain('Stopped');
+  });
+
   it('loads retained case and receipt pages and opens exact evidence and old undo', async () => {
     const item = {
       caseId: 'old-case',

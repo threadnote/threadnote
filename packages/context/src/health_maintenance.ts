@@ -7,6 +7,26 @@ import {memoryCodeCitationAnchorId, type MemoryCodeCitationV1} from '@threadnote
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export type ContextHealthFindingClassificationV2 = 'actionable' | 'automatically-managed' | 'coverage' | 'historical';
+
+export interface ContextMaintenanceSnapshotDiagnosticV1 {
+  readonly version: 1;
+  readonly category:
+    | 'invalid-header'
+    | 'invalid-utf8'
+    | 'permission-denied'
+    | 'record-size-limit'
+    | 'cache-size-limit'
+    | 'authority-boundary'
+    | 'record-not-regular'
+    | 'record-changed'
+    | 'io-error';
+  readonly stage: 'discovery' | 'record-read' | 'authority-check' | 'inventory-cache';
+  readonly memoryUri?: string;
+  readonly summary: string;
+  readonly recovery: string;
+  readonly retryable: boolean;
+}
+
 export type ContextHealthCaseDispositionV2 =
   | 'queued'
   | 'repairing'

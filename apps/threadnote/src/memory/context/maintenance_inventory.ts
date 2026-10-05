@@ -1,6 +1,8 @@
 import {Clock, Crypto, Effect, Equal, FileSystem, Option, Path} from 'effect';
 import {
   canonicalMemoryDocumentContent,
+  isAgentArtifactUri,
+  isAgentArtifactPath,
   parseMemoryDocument,
   type MemoryMetadata,
   type MemoryRecord,
@@ -11,7 +13,8 @@ import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
-import {localUserMemoriesRoot, MemoryOperationError} from '../migrations.js';
+import {localUserMemoriesRoot} from '../migrations.js';
+import {maintenanceSnapshotFailure, withMaintenanceSnapshotDiagnostic} from './maintenance_snapshot.js';
 
 interface InventoryEntry {
   readonly uri: string;
@@ -151,12 +154,18 @@ function inProject(path: Path.Path, root: string, candidate: string, project: st
     segments[projectAt + 1] === project
   );
 }
-const checkAuthority = (fs: FileSystem.FileSystem, path: Path.Path, canonicalRoot: string, candidate: string) =>
+const checkAuthority = (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  canonicalRoot: string,
+  candidate: string,
+  memoryUri?: string,
+) =>
   Effect.gen(function* () {
     const canonical = yield* fs.realPath(candidate);
     if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${path.sep}`))
-      return yield* MemoryOperationError.make({message: 'Maintenance inventory target left its authority boundary.'});
-  });
+      return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', memoryUri);
+  }).pipe(withMaintenanceSnapshotDiagnostic('authority-check', memoryUri));
 
 const persistInventory = Effect.fn('contextMaintenance.persistInventory')(function* (
   fs: FileSystem.FileSystem,
@@ -166,8 +175,10 @@ const persistInventory = Effect.fn('contextMaintenance.persistInventory')(functi
 ) {
   const encoded = new TextEncoder().encode(JSON.stringify(inventory));
   if (encoded.length > contextMaintenanceInventoryAuthorityLimits.canonicalBytes)
-    return yield* MemoryOperationError.make({message: 'Maintenance inventory exceeds its cache boundary.'});
-  yield* fs.makeDirectory(path.dirname(file), {recursive: true});
+    return yield* maintenanceSnapshotFailure('cache-size-limit', 'inventory-cache');
+  yield* fs
+    .makeDirectory(path.dirname(file), {recursive: true})
+    .pipe(withMaintenanceSnapshotDiagnostic('inventory-cache'));
   const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
@@ -178,6 +189,7 @@ const persistInventory = Effect.fn('contextMaintenance.persistInventory')(functi
   ).pipe(
     Effect.andThen(fs.rename(temporary, file)),
     Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)),
+    withMaintenanceSnapshotDiagnostic('inventory-cache'),
   );
 });
 
@@ -192,26 +204,25 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
   project: string | undefined,
   expectedInfo?: FileSystem.File.Info,
 ) {
-  yield* checkAuthority(fs, path, canonicalRoot, candidate);
+  yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const before = expectedInfo ?? (yield* fs.stat(candidate));
-      if (before.type !== 'File' || Number(before.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
-        return yield* MemoryOperationError.make({message: 'Maintenance inventory record exceeds its read boundary.'});
+      if (before.type !== 'File') return yield* maintenanceSnapshotFailure('record-not-regular', 'record-read', uri);
+      if (Number(before.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
+        return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
       const handle = yield* fs.open(candidate, {flag: 'r'});
       const opened = yield* handle.stat;
-      yield* checkAuthority(fs, path, canonicalRoot, candidate);
+      yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
       if (
         opened.type !== 'File' ||
         opened.dev !== before.dev ||
         !Equal.equals(opened.ino, before.ino) ||
         signature(opened) !== signature(before)
       )
-        return yield* MemoryOperationError.make({
-          message: 'Maintenance inventory record changed before its bounded read.',
-        });
+        return yield* maintenanceSnapshotFailure('record-changed', 'record-read', uri);
       if (Number(opened.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
-        return yield* MemoryOperationError.make({message: 'Maintenance inventory record exceeds its read boundary.'});
+        return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
       const chunks: Uint8Array[] = [];
       let bytes = 0;
       for (;;) {
@@ -219,16 +230,13 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
         if (Option.isNone(chunk)) break;
         bytes += chunk.value.length;
         if (bytes > contextMaintenanceInventoryAuthorityLimits.recordBytes)
-          return yield* MemoryOperationError.make({message: 'Maintenance inventory record exceeds its read boundary.'});
-        if (bytes > Number(opened.size))
-          return yield* MemoryOperationError.make({
-            message: 'Maintenance inventory record changed during its bounded read.',
-          });
+          return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
+        if (bytes > Number(opened.size)) return yield* maintenanceSnapshotFailure('record-changed', 'record-read', uri);
         chunks.push(chunk.value);
       }
       const after = yield* handle.stat;
       const current = yield* fs.stat(candidate);
-      yield* checkAuthority(fs, path, canonicalRoot, candidate);
+      yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
       if (
         signature(after) !== signature(opened) ||
         bytes !== Number(after.size) ||
@@ -236,9 +244,7 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
         !Equal.equals(current.ino, opened.ino) ||
         signature(current) !== signature(after)
       )
-        return yield* MemoryOperationError.make({
-          message: 'Maintenance inventory record changed during its bounded read.',
-        });
+        return yield* maintenanceSnapshotFailure('record-changed', 'record-read', uri);
       const raw = new Uint8Array(bytes);
       let offset = 0;
       for (const chunk of chunks) {
@@ -247,12 +253,12 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
       }
       const content = yield* Effect.try({
         try: () => new TextDecoder('utf-8', {fatal: true}).decode(raw),
-        catch: () => MemoryOperationError.make({message: 'Unreadable private memory inventory record.'}),
+        catch: () => maintenanceSnapshotFailure('invalid-utf8', 'record-read', uri),
       });
       const record = parseMemoryDocument(uri, content);
       const relative = path.relative(root, candidate).split(path.sep).join('/');
       if (record === undefined && !relative.startsWith('shared/'))
-        return yield* MemoryOperationError.make({message: 'Unreadable private memory inventory record.'});
+        return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
       const entry: InventoryEntry | undefined =
         record !== undefined && (project === undefined || (record.metadata.project ?? 'unscoped') === project)
           ? {
@@ -268,7 +274,7 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
           : undefined;
       return {entry, bytes};
     }),
-  );
+  ).pipe(withMaintenanceSnapshotDiagnostic('record-read', uri));
 });
 
 const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(function* (
@@ -306,12 +312,12 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
       });
       const rootInfo = yield* statIfPresent(fs, root);
       if (Option.isSome(rootInfo) && rootInfo.value.type !== 'Directory')
-        return yield* MemoryOperationError.make({message: 'Maintenance inventory root is not a directory.'});
+        return yield* maintenanceSnapshotFailure('record-not-regular', 'discovery');
       if (Option.isSome(rootInfo)) {
         const canonicalRoot = yield* fs.realPath(root);
         const canonicalHome = yield* fs.realPath(config.agentContextHome);
         if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
-          return yield* MemoryOperationError.make({message: 'Maintenance inventory root left its authority boundary.'});
+          return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check');
         const directories = [root];
         while (directories.length > 0) {
           const directory = directories.shift()!;
@@ -333,18 +339,20 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
               Effect.gen(function* () {
                 const candidate = path.join(directory, name);
                 if (!inProject(path, root, candidate, project)) return item();
-                const info = yield* statIfPresent(fs, candidate);
+                const relative = path.relative(root, candidate).split(path.sep).join('/');
+                const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
+                const info = yield* statIfPresent(fs, candidate).pipe(
+                  withMaintenanceSnapshotDiagnostic('discovery', uri),
+                );
                 if (Option.isNone(info)) return item(undefined, undefined, 'inventory-terminal-membership-race');
-                yield* checkAuthority(fs, path, canonicalRoot, candidate);
+                yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
+                if (isAgentArtifactUri(uri)) return item();
                 if (info.value.type === 'Directory') return item(candidate);
                 if (name.endsWith('.md')) {
-                  if (
-                    info.value.type !== 'File' ||
-                    Number(info.value.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes
-                  )
-                    return yield* MemoryOperationError.make({
-                      message: 'Maintenance inventory record exceeds its read boundary.',
-                    });
+                  if (info.value.type !== 'File')
+                    return yield* maintenanceSnapshotFailure('record-not-regular', 'record-read', uri);
+                  if (Number(info.value.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
+                    return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
                   if (
                     canonicalBytes + Number(info.value.size) >
                     contextMaintenanceInventoryAuthorityLimits.canonicalBytes
@@ -353,8 +361,6 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
                   // Reserve bytes before the first read yield; concurrent handles cannot
                   // jointly exceed the terminal bound. readEntry proves the reserved identity/size.
                   canonicalBytes += Number(info.value.size);
-                  const relative = path.relative(root, candidate).split(path.sep).join('/');
-                  const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
                   const read = yield* readEntry(fs, path, root, canonicalRoot, candidate, uri, project, info.value);
                   return item(undefined, read.entry);
                 }
@@ -416,16 +422,22 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
   const generation = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   const cacheStat = yield* fs.stat(file).pipe(Effect.option);
   if (cacheStat._tag === 'Some' && Number(cacheStat.value.size) > 32 * 1024 * 1024)
-    return yield* MemoryOperationError.make({message: 'Maintenance inventory exceeds its cache boundary.'});
+    return yield* maintenanceSnapshotFailure('cache-size-limit', 'inventory-cache');
   const prior = yield* fs.readFileString(file).pipe(
     Effect.flatMap(raw => Effect.try(() => decodeInventory(raw, root, config.user))),
     Effect.orElseSucceed(() => undefined),
   );
   // Account writes invalidate authority, never the fair discovery cursor. The terminal
   // snapshot reconciles every selected byte and deletion under the native mutation lock.
-  let entries: Record<string, InventoryEntry> = {...prior?.entries};
+  let entries: Record<string, InventoryEntry> = Object.fromEntries(
+    Object.entries(prior?.entries ?? {}).filter(([uri]) => !isAgentArtifactUri(uri)),
+  );
   const queue: DirectoryPage[] =
-    prior === undefined ? [{directory: root, offset: 0}] : prior.complete ? [] : [...prior.queue];
+    prior === undefined
+      ? [{directory: root, offset: 0}]
+      : prior.complete
+        ? []
+        : prior.queue.filter(page => !isAgentArtifactPath(path.relative(root, page.directory).split(path.sep)));
   let incompleteReason: InventoryIncompleteReason | undefined = 'inventory-discovery-incomplete';
   let admitted = 0;
   while (queue.length > 0 && admitted < budget) {
@@ -433,11 +445,11 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     const directoryInfo = yield* statIfPresent(fs, page.directory);
     if (Option.isNone(directoryInfo)) continue;
     if (directoryInfo.value.type !== 'Directory')
-      return yield* MemoryOperationError.make({message: 'Maintenance inventory directory changed during discovery.'});
+      return yield* maintenanceSnapshotFailure('record-changed', 'discovery');
     const canonicalRoot = yield* fs.realPath(root);
     const canonicalHome = yield* fs.realPath(config.agentContextHome);
     if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
-      return yield* MemoryOperationError.make({message: 'Maintenance inventory root left its authority boundary.'});
+      return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check');
     yield* checkAuthority(fs, path, canonicalRoot, page.directory);
     const names =
       page.names ??
@@ -458,16 +470,20 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
       if (name.startsWith('.')) continue;
       admitted++;
       const candidate = path.join(page.directory, name);
-      const info = yield* statIfPresent(fs, candidate);
-      if (info._tag === 'None') continue;
       const relative = path.relative(root, candidate).split(path.sep).join('/');
+      const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
+      const info = yield* statIfPresent(fs, candidate).pipe(withMaintenanceSnapshotDiagnostic('discovery', uri));
+      if (info._tag === 'None') continue;
       if (!inProject(path, root, candidate, project)) continue;
+      if (isAgentArtifactUri(uri)) {
+        yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
+        continue;
+      }
       if (info.value.type === 'Directory') {
-        yield* checkAuthority(fs, path, canonicalRoot, candidate);
+        yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
         queue.push({directory: candidate, offset: 0});
       } else if (info.value.type === 'File' && name.endsWith('.md')) {
-        yield* checkAuthority(fs, path, canonicalRoot, candidate);
-        const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
+        yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
         if (entries[uri]?.signature === signature(info.value) && entries[uri]?.canonicalContentHash !== undefined)
           continue;
         const read = yield* readEntry(fs, path, root, canonicalRoot, candidate, uri, project, info.value);
@@ -546,7 +562,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
         }) satisfies MemoryRecord,
     ),
   };
-});
+}, withMaintenanceSnapshotDiagnostic('discovery'));
 export function pruneAbsentMaintenanceCheckpoints<T>(
   checkpoints: Record<string, T>,
   activeKeys: ReadonlySet<string>,

@@ -410,9 +410,30 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       ) : null}
       {notice ? <p role="status">{notice}</p> : null}
       {status?.error ? (
-        <p role="alert">
-          Maintenance stopped: {status.error.reason}. Progress is preserved; inspect the diagnostic before resuming.
-        </p>
+        <section
+          role="alert"
+          aria-label="Maintenance failure diagnostic"
+          className="attention-card maintenance-failure-diagnostic"
+        >
+          <p>Maintenance stopped: {status.error.reason}. Progress is preserved.</p>
+          {status.error.diagnostic ? (
+            <>
+              <p>{status.error.diagnostic.summary}</p>
+              <p>Stage: {status.error.diagnostic.stage.replaceAll('-', ' ')}</p>
+              {status.error.diagnostic.memoryUri ? (
+                <p>
+                  <code>{status.error.diagnostic.memoryUri}</code>
+                </p>
+              ) : null}
+              <p>{status.error.diagnostic.recovery}</p>
+            </>
+          ) : (
+            <p>
+              Run maintenance again to collect current failure details. Update Threadnote if this version keeps
+              reporting only a reason.
+            </p>
+          )}
+        </section>
       ) : null}
       <section aria-label="Evidence coverage" className="attention-card health-coverage-card">
         <header>
