@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1120" viewBox="0 0 720 1120" role="img" aria-labelledby="title description">
+  <title id="title">Lifecycle tokens across five paired tasks</title>
+  <desc id="description">Files-only versus Threadnote, including the shared first session. Click: 560,404 versus 209,818. Pluggy: 621,988 versus 319,182. Chi: 526,224 versus 201,392. Gin: 657,529 versus 390,933. Echo: 649,521 versus 174,715. Files-only Pluggy failed verification; all other attempts passed. All bars use the same zero-based scale from 0 to 700,000 tokens.</desc>
+  <rect width="720" height="1120" rx="20" fill="#081318"/>
+  <g font-family="Arial, Helvetica, sans-serif" fill="#edf6f3">
+    <text x="36" y="53" font-size="32" font-weight="700">Same task. Fewer tokens.</text>
+    <text x="36" y="95" font-size="26" fill="#b0c3c4">Lifecycle tokens per assigned workflow</text>
+    <rect x="36" y="123" width="22" height="22" rx="4" fill="#a5b6c5"/>
+    <text x="70" y="144" font-size="27">Files-only</text>
+    <rect x="290" y="123" width="22" height="22" rx="4" fill="#67e8c7"/>
+    <text x="324" y="144" font-size="27">Threadnote</text>
+    <text x="36" y="193" font-size="30" font-weight="700">Click</text>
+    <rect x="36" y="211" width="416.30" height="30" rx="4" fill="#a5b6c5" data-tokens="560404"/>
+    <text x="464.30" y="236" font-size="28" fill="#a5b6c5">560,404</text>
+    <rect x="36" y="257" width="155.86" height="30" rx="4" fill="#67e8c7" data-tokens="209818"/>
+    <text x="203.86" y="282" font-size="28" fill="#67e8c7">209,818</text>
+    <text x="36" y="348" font-size="30" font-weight="700">Pluggy</text>
+    <rect x="36" y="366" width="462.05" height="30" rx="4" fill="#a5b6c5" data-tokens="621988"/>
+    <text x="510.05" y="391" font-size="28" fill="#a5b6c5">621,988*</text>
+    <rect x="36" y="412" width="237.11" height="30" rx="4" fill="#67e8c7" data-tokens="319182"/>
+    <text x="285.11" y="437" font-size="28" fill="#67e8c7">319,182</text>
+    <text x="36" y="503" font-size="30" font-weight="700">Chi</text>
+    <rect x="36" y="521" width="390.91" height="30" rx="4" fill="#a5b6c5" data-tokens="526224"/>
+    <text x="438.91" y="546" font-size="28" fill="#a5b6c5">526,224</text>
+    <rect x="36" y="567" width="149.61" height="30" rx="4" fill="#67e8c7" data-tokens="201392"/>
+    <text x="197.61" y="592" font-size="28" fill="#67e8c7">201,392</text>
+    <text x="36" y="658" font-size="30" font-weight="700">Gin</text>
+    <rect x="36" y="676" width="488.45" height="30" rx="4" fill="#a5b6c5" data-tokens="657529"/>
+    <text x="536.45" y="701" font-size="28" fill="#a5b6c5">657,529</text>
+    <rect x="36" y="722" width="290.41" height="30" rx="4" fill="#67e8c7" data-tokens="390933"/>
+    <text x="338.41" y="747" font-size="28" fill="#67e8c7">390,933</text>
+    <text x="36" y="813" font-size="30" font-weight="700">Echo</text>
+    <rect x="36" y="831" width="482.50" height="30" rx="4" fill="#a5b6c5" data-tokens="649521"/>
+    <text x="530.50" y="856" font-size="28" fill="#a5b6c5">649,521</text>
+    <rect x="36" y="877" width="129.79" height="30" rx="4" fill="#67e8c7" data-tokens="174715"/>
+    <text x="177.79" y="902" font-size="28" fill="#67e8c7">174,715</text>
+    <line x1="36" y1="952" x2="556" y2="952" stroke="#80989c"/>
+    <text x="36" y="988" font-size="26" fill="#b0c3c4">0</text>
+    <text x="556" y="988" text-anchor="end" font-size="26" fill="#b0c3c4">700,000 tokens</text>
+    <text x="36" y="1040" font-size="27" fill="#b0c3c4">* Failed verification; its tokens still count.</text>
+    <text x="36" y="1083" font-size="25" fill="#b0c3c4">5 tasks · 1 model · Threadnote 5.1.0-beta.2</text>
+  </g>
+</svg>

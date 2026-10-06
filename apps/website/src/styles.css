@@ -508,7 +508,7 @@ p {
 .hero h1 {
   max-width: 760px;
   margin-bottom: 28px;
-  font-size: clamp(52px, 6.2vw, 92px);
+  font-size: clamp(44px, 4.5vw, 66px);
   font-weight: 620;
   line-height: 0.96;
 }
@@ -530,6 +530,84 @@ p {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.hero-study {
+  max-width: 560px;
+  margin-bottom: 30px;
+  padding: 22px 24px;
+  background: linear-gradient(120deg, rgba(103, 232, 199, 0.08), rgba(122, 162, 255, 0.035));
+  border: 1px solid rgba(103, 232, 199, 0.24);
+  border-radius: var(--radius);
+}
+
+.hero-study__eyebrow {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.hero-study__metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  margin: 18px 0;
+}
+
+.hero-study__metrics > div {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 5px;
+}
+
+.hero-study__metrics > div + div {
+  padding-left: 20px;
+  border-left: 1px solid var(--line);
+}
+
+.hero-study__metrics dt {
+  color: var(--text);
+  font-size: 17px;
+}
+
+.hero-study__metrics dd {
+  margin: 0;
+  color: var(--teal);
+  font-size: clamp(36px, 4.2vw, 60px);
+  font-weight: 620;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-study__metrics dd span {
+  margin-left: 2px;
+  font-size: 0.6em;
+}
+
+.hero-study__scope {
+  margin: 0 0 12px;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.hero-study__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--teal);
+  font-size: 14px;
+  font-weight: 550;
+}
+
+.hero-study__link:hover {
+  text-decoration: underline;
+  text-underline-offset: 4px;
+}
+
+.hero-study__link svg {
+  width: 17px;
+  height: 17px;
 }
 
 .hero__install {
@@ -6628,6 +6706,18 @@ p {
 
   .hero__lede {
     font-size: 17px;
+  }
+
+  .hero-study {
+    padding: 18px;
+  }
+
+  .hero-study__metrics {
+    gap: 14px;
+  }
+
+  .hero-study__metrics > div + div {
+    padding-left: 14px;
   }
 
   .hero__actions {

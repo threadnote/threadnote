@@ -22,6 +22,7 @@ import {
 } from '@threadnote/context/health';
 import {readActiveProjectMemoryRecords, readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {isAgentArtifactUri} from '@threadnote/memory/document';
 import {MemoryOperationError} from '../migrations.js';
 import {guidanceHealthEvidence} from '../../guidance/index.js';
 import {
@@ -180,47 +181,49 @@ const relationStatusEvidence = Effect.fn('memory.contextHealth.relationEvidence'
   }));
   const allowedScopes = [`threadnote://user/${uriSegment(config.user)}/memories`];
   return records.flatMap(record =>
-    (record.metadata.relations ?? []).map(relation => {
-      const memoryId = memoryIdFromIdentityAlias(relation.uri);
-      const resolution =
-        memoryId === undefined
-          ? undefined
-          : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
-      const directMatches =
-        memoryId === undefined
-          ? corpus.filter(
-              candidate =>
-                candidate.uri === relation.uri ||
-                (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
-            )
-          : undefined;
-      const target =
-        resolution?.state === 'resolved'
-          ? corpus.find(candidate => candidate.uri === resolution.uri)
-          : memoryId === undefined
-            ? directMatches?.length === 1
-              ? directMatches[0]
-              : undefined
+    (record.metadata.relations ?? [])
+      .filter(relation => !isAgentArtifactUri(relation.uri))
+      .map(relation => {
+        const memoryId = memoryIdFromIdentityAlias(relation.uri);
+        const resolution =
+          memoryId === undefined
+            ? undefined
+            : classifyMemoryIdentityCandidates(identityCandidates, memoryId, allowedScopes);
+        const directMatches =
+          memoryId === undefined
+            ? corpus.filter(
+                candidate =>
+                  candidate.uri === relation.uri ||
+                  (candidate.metadata.status !== 'active' && candidate.metadata.archivedFrom === relation.uri),
+              )
             : undefined;
-      const inactiveIdentityMatches =
-        memoryId === undefined
-          ? []
-          : corpus.filter(
-              candidate => candidate.metadata.memoryId === memoryId && candidate.metadata.status !== 'active',
-            );
-      return {
-        sourceUri: record.uri,
-        status:
-          resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
-            ? 'conflicted'
-            : target?.metadata.status === 'active'
-              ? 'active'
-              : target !== undefined || inactiveIdentityMatches.length > 0
-                ? 'inactive'
-                : 'missing',
-        targetUri: relation.uri,
-      } satisfies ContextHealthRelationEvidenceV1;
-    }),
+        const target =
+          resolution?.state === 'resolved'
+            ? corpus.find(candidate => candidate.uri === resolution.uri)
+            : memoryId === undefined
+              ? directMatches?.length === 1
+                ? directMatches[0]
+                : undefined
+              : undefined;
+        const inactiveIdentityMatches =
+          memoryId === undefined
+            ? []
+            : corpus.filter(
+                candidate => candidate.metadata.memoryId === memoryId && candidate.metadata.status !== 'active',
+              );
+        return {
+          sourceUri: record.uri,
+          status:
+            resolution?.state === 'ambiguous' || (directMatches !== undefined && directMatches.length > 1)
+              ? 'conflicted'
+              : target?.metadata.status === 'active'
+                ? 'active'
+                : target !== undefined || inactiveIdentityMatches.length > 0
+                  ? 'inactive'
+                  : 'missing',
+          targetUri: relation.uri,
+        } satisfies ContextHealthRelationEvidenceV1;
+      }),
   );
 });
 

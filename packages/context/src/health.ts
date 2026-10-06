@@ -4,7 +4,7 @@ import type {
 } from '@threadnote/context/types';
 import {buildCompactPlan} from '@threadnote/memory/hygiene';
 import type {CandidateComparison} from '@threadnote/memory/candidate';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
 import {
   analyzeContextHealthSemantics,
   type ContextHealthSemanticCompletenessV1,
@@ -390,6 +390,7 @@ function relationFindings(
   return evidence
     .filter(
       item =>
+        !isAgentArtifactUri(item.targetUri) &&
         item.status !== 'active' &&
         relationsBySource.get(item.sourceUri)?.some(relation => relation.uri === item.targetUri) === true,
     )

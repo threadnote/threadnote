@@ -685,24 +685,66 @@ The body remains ordinary **Markdown**.
     expect(source).not.toMatch(/\b(?:TODO|TBD)\b|publication placeholder|\{\{[^}]+}}|<insert\b/i);
   });
 
-  it('publishes Threadnote 5.0.0 as the latest workflow-oriented article', async () => {
+  it('publishes the GraphMem continuation study as the latest evidence article', async () => {
     const articles = await loadWebsiteArticles(root);
     const latest = articles[0];
     const landingSource = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
 
     expect(latest).toMatchObject({
-      publishedAt: '2026-09-18T08:00:00Z',
-      slug: 'threadnote-5-context-lifecycle',
-      title: 'Threadnote 5.0.0 — Context that keeps up with the work',
+      publishedAt: '2026-10-03T12:30:00Z',
+      slug: 'graphmem-agent-continuation-study',
+      title: 'How much do coding agents spend rediscovering a codebase?',
     });
-    expect(latest?.summary).toContain('trustworthy context lifecycle');
-    expect(latest?.body).toContain('## Begin a task with a Context Brief');
-    expect(latest?.body).toContain('## End with a Knowledge Delta, not a transcript');
-    expect(latest?.body).toContain('## Keep context healthy as the code changes');
-    expect(latest?.body).toContain('## Measure whether the loop helps');
-    expect(latest?.body).toContain('graph scope');
-    expect(latest?.body).not.toContain('SetupReceiptV1');
-    expect(latest?.body).not.toMatch(/Codex, Claude(?: Code)?, Cursor, (?:and )?Copilot/i);
+    expect(latest?.summary).toContain('65.62% fewer lifecycle tokens per verified completion');
+    expect(latest?.body).toContain('## Same checkpoint, different starting context');
+    expect(latest?.body).toContain('## Count finished work, including the cost of failure');
+    expect(latest?.body).toContain('## Fewer tokens in every task pair');
+    expect(latest?.body).toContain('## Time to completion: about 2m34s versus 4m45s');
+    expect(latest?.body).toContain('## Result quality: did the patches actually work?');
+    expect(latest?.body).toContain('## What this study does not settle');
+    expect(latest?.body).toContain('57.02%');
+    expect(latest?.body).toContain('5.1.0-beta.2');
+    expect(latest?.body).toContain('baseline had **no handoff**');
+    expect(latest?.body).toContain('not a claim of equivalent dollar savings');
+    expect(latest?.body).toContain('do not claim an established completion-rate advantage');
+    expect(latest?.body).toContain('50.80% to 81.56%');
+    expect(latest?.body).toContain('25.25% to 73.38%');
+    expect(latest?.body).toContain('32.68% reduction in total measured time');
+    expect(latest?.body).toContain('not time to a working fix');
+    expect(latest?.body).toContain('738/1,000 for Threadnote versus 404/1,000 for files-only');
+    expect(latest?.body).toContain('minimum judge-score');
+    expect(latest?.body).toContain('threshold to zero');
+    expect(latest?.body).toContain('separate uncertainty analysis');
+    expect(latest?.body.replace(/\s+/g, ' ')).toContain(
+      "The judge's own completion verdict was also stricter: 2/5 for Threadnote and 1/5 for files-only",
+    );
+    for (const seconds of [179.619, 122.845, 230.997, 161.289, 204.802, 156.835, 286.463, 216.087, 239.619, 111.454]) {
+      expect(latest?.body).toContain(seconds.toFixed(3));
+    }
+    for (const [repository, filesVerified, filesScore, threadnoteScore] of [
+      ['Click', 'Pass', '400', '650'],
+      ['Pluggy', 'Fail', '0', '720'],
+      ['Chi', 'Pass', '550', '320'],
+      ['Gin', 'Pass', '720', '1,000'],
+      ['Echo', 'Pass', '350', '1,000'],
+    ]) {
+      expect(latest?.body).toMatch(
+        new RegExp(
+          `\\| ${repository} +\\| ${filesVerified} +\\| Pass +\\| +${filesScore} +\\| +${threadnoteScore} +\\|`,
+        ),
+      );
+    }
+    expect(latest?.body).toContain('2b9ede3e031790f9798517504027870dacbc0f74');
+    expect(latest?.body).not.toMatch(/github\.com\/threadnote\/threadnote\/(?:blob|tree)\/(?:main|codex\/)/);
+    const chart = await readFile(join(root, 'apps', 'website', 'public', 'graphmem-continuation-tokens.svg'), 'utf8');
+    expect(latest?.body).toContain('](/graphmem-continuation-tokens.svg)');
+    expect(chart).toContain('aria-labelledby="title description"');
+    expect(chart).toContain('zero-based scale from 0 to 700,000 tokens');
+    for (const tokens of [560404, 209818, 621988, 319182, 526224, 201392, 657529, 390933, 649521, 174715]) {
+      expect(chart).toContain(`data-tokens="${tokens}"`);
+      expect(latest?.body).toContain(tokens.toLocaleString('en-US'));
+    }
+    expect(latest?.body).not.toMatch(/\b(?:TODO|TBD)\b|publication placeholder|\{\{[^}]+}}|<insert\b/i);
     expect(landingSource).toContain("import articles from 'virtual:threadnote-articles'");
     expect(landingSource).toContain("import latestRelease from 'virtual:threadnote-latest-release'");
     expect(landingSource).toContain('whatsNewArticleHref(latestArticle.slug)');
@@ -713,6 +755,28 @@ The body remains ordinary **Markdown**.
     expect(landingSource).toContain('Latest · What&apos;s new');
     expect(landingSource).toContain('Read what&apos;s new');
     expect(landingSource).not.toContain('Read the 5.0 story');
+  });
+
+  it('leads with scoped token and time savings linked to the continuation study', async () => {
+    const source = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
+    const hero = source.match(/<section className="hero section-grid">([\s\S]*?)<\/section>/)?.[1];
+    const study = hero?.match(/<div className="hero-study"[\s\S]*?<\/dl>[\s\S]*?<\/div>/)?.[0];
+
+    expect(hero).toContain('Less rediscovery.');
+    expect(hero).toContain('More finished work.');
+    expect(study).toContain('65.6');
+    expect(study).toContain('fewer tokens');
+    expect(study).toContain('46.1');
+    expect(study).toContain('less time');
+    expect(study).toContain('Measured in our 5.1 beta study');
+    expect(study?.replace(/\s+/g, ' ')).toContain(
+      'Per verified completion. Five tasks, one model, versus files-only with no handoff.',
+    );
+    expect(study).toContain('href={whatsNewArticleHref(continuationStudySlug)}');
+    expect(source).toContain("const continuationStudySlug = 'graphmem-agent-continuation-study'");
+    expect(source).toContain('latestArticle.slug !== continuationStudySlug');
+    expect(hero?.indexOf('className="hero-study"')).toBeLessThan(hero?.indexOf('className="hero__actions"') ?? -1);
+    expect(study).not.toMatch(/less cost|cheaper|faster|guaranteed/i);
   });
 
   it('keeps the solo-first lifecycle coherent across the homepage and onboarding docs', async () => {
@@ -1314,7 +1378,7 @@ The body remains ordinary **Markdown**.
     const docs = JSON.stringify(docsSections);
     const tips = JSON.stringify(proTips);
 
-    expect(landingSource).toContain('source-verifiable context lifecycle');
+    expect(landingSource).toContain('sources they can check and decisions you can review');
     expect(landingSource).toContain('Knowledge Delta');
     expect(landingSource).toContain('No Threadnote cloud account required');
     expect(landingSource).toContain('home-update-banners');

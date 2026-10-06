@@ -16,6 +16,7 @@ import {
 } from '../lib/site';
 
 const ThreadScene = lazy(() => import('../visuals/ThreadScene'));
+const continuationStudySlug = 'graphmem-agent-continuation-study';
 
 const features: Array<{
   icon: IconName;
@@ -167,16 +168,36 @@ export default function LandingPage() {
             Threadnote 5.0 · local and Git-backed
           </div>
           <h1>
-            Start with the right context.
-            <span>Leave it better for the next agent.</span>
+            Less rediscovery.
+            <span>More finished work.</span>
           </h1>
           <p className="hero__lede">
-            Threadnote is a source-verifiable context lifecycle that helps coding agents understand why your code is the
-            way it is. A coding-agent environment is the editor, CLI, or other{' '}
-            <a href={siteHref('agents/')}>supported catalog integration</a> where an agent works; Threadnote calls it a
-            surface. Connect one, then work normally: its installed guidance starts with a cited Context Brief and ends
-            meaningful work with a Knowledge Delta you can review.
+            New session. Same codebase. Skip the repeat investigation. Threadnote carries useful context between coding
+            agents, with sources they can check and decisions you can review.
           </p>
+          <div className="hero-study" role="group" aria-label="Measured continuation study results">
+            <span className="hero-study__eyebrow">Measured in our 5.1 beta study</span>
+            <dl className="hero-study__metrics">
+              <div>
+                <dt>fewer tokens</dt>
+                <dd>
+                  65.6<span>%</span>
+                </dd>
+              </div>
+              <div>
+                <dt>less time</dt>
+                <dd>
+                  46.1<span>%</span>
+                </dd>
+              </div>
+            </dl>
+            <p className="hero-study__scope">
+              Per verified completion. Five tasks, one model, versus files-only with no handoff.
+            </p>
+            <a className="hero-study__link" href={whatsNewArticleHref(continuationStudySlug)}>
+              Read the study <Icon name="arrow" aria-hidden="true" />
+            </a>
+          </div>
           <div className="hero__actions">
             <a className="button" href={docsArticleHref('installation')}>
               Install Threadnote
@@ -213,7 +234,7 @@ export default function LandingPage() {
             <span>Current evidence</span>
           </div>
         </div>
-        {latestArticle ? (
+        {latestArticle && latestArticle.slug !== continuationStudySlug ? (
           <a className="home-update-banner home-update-banner--hero" href={whatsNewArticleHref(latestArticle.slug)}>
             <span className="home-update-banner__label">Latest · What&apos;s new</span>
             <div>
@@ -352,6 +373,12 @@ export default function LandingPage() {
         <header className="section-heading">
           <span className="eyebrow">One solo-first workflow</span>
           <h2>Start informed. Finish with context the next engineer can trust.</h2>
+          <p>
+            A coding-agent environment is the editor, CLI, or other{' '}
+            <a href={siteHref('agents/')}>supported catalog integration</a> where an agent works; Threadnote calls it a
+            surface. Connect one, then work normally: its installed guidance starts with a cited Context Brief and ends
+            meaningful work with a Knowledge Delta you can review.
+          </p>
         </header>
         <ol className="workflow-list">
           {workflow.map(item => (
