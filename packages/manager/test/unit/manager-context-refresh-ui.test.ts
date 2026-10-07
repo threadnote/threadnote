@@ -85,7 +85,7 @@ it.each(['Repository', 'Workset'])('clears a removed %s selection before compili
     select.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const compileButton = () =>
-    [...document.querySelectorAll('button')].find(button => button.textContent === 'Compile Context Brief');
+    [...document.querySelectorAll('button')].find(button => button.textContent === 'Build brief');
   expect(compileButton()?.disabled).toBe(false);
 
   projects = ['replacement'];

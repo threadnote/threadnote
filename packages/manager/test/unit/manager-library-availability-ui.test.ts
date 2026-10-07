@@ -78,9 +78,7 @@ it('keeps navigation available while the library is pending or failed and recove
   const library = navigation().find(button => button.querySelector('strong')?.textContent === 'Library');
   expect(library).toBeDefined();
   await act(async () => library?.click());
-  const save = [...container.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Save');
-  expect(save).toBeDefined();
-  await act(async () => save?.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')?.click());
   expect(container.textContent).not.toContain('Memory library unavailable');
 
   await fc.assert(

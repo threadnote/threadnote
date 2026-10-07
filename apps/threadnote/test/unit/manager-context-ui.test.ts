@@ -170,10 +170,10 @@ describe('Manager Context workspace', () => {
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
     await changeSelect(selectWithLabel('Evidence detail'), 'source');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Trace the Context Brief Manager contract');
+    await changeTextArea(textareaWithLabel('Task'), 'Trace the Context Brief Manager contract');
     await changeTextArea(textareaWithLabel('Code anchors'), 'apps/threadnote/src/manager/context.ts\n' + GRAPH_REF);
 
-    await clickButton('Compile Context Brief');
+    await clickButton('Build brief');
     await waitForText('Context Brief evidence is projected here');
 
     expect(requests[0]).toEqual({
@@ -218,7 +218,7 @@ describe('Manager Context workspace', () => {
   it('keeps every entered anchor visible and disables compilation above the server bound', async () => {
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Bound the selected anchors');
+    await changeTextArea(textareaWithLabel('Task'), 'Bound the selected anchors');
     const refs = Array.from({length: CONTEXT_BRIEF_MAXIMUM_CODE_REFS + 1}, (_, index) => `src/${index}.ts`);
     await changeTextArea(textareaWithLabel('Code anchors'), refs.join('\n'));
 
@@ -227,15 +227,15 @@ describe('Manager Context workspace', () => {
     expect(document.body.textContent).toContain(
       `codeRefs may contain at most ${CONTEXT_BRIEF_MAXIMUM_CODE_REFS} entries`,
     );
-    expect(findButton('Compile Context Brief')?.disabled).toBe(true);
+    expect(findButton('Build brief')?.disabled).toBe(true);
   });
 
   it('indexes an explicitly selected repository graph and recompiles without losing the Context form or result', async () => {
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Recover this Context Brief graph');
+    await changeTextArea(textareaWithLabel('Task'), 'Recover this Context Brief graph');
     await changeTextArea(textareaWithLabel('Code anchors'), 'apps/threadnote/src/manager/context.ts');
-    await clickButton('Compile Context Brief');
+    await clickButton('Build brief');
     await waitForText('Context Brief evidence is projected here');
 
     expect(document.body.textContent).toContain('stale');
@@ -249,7 +249,7 @@ describe('Manager Context workspace', () => {
       {body: {action: 'index-cwd', cwd: '/private/threadnote'}, path: '/api/graphs/action'},
     ]);
     expect(selectWithLabel('Repository').value).toBe('/private/threadnote');
-    expect(textareaWithLabel('Engineering task').value).toBe('Recover this Context Brief graph');
+    expect(textareaWithLabel('Task').value).toBe('Recover this Context Brief graph');
     expect(textareaWithLabel('Code anchors').value).toBe('apps/threadnote/src/manager/context.ts');
     expect(document.body.textContent).toContain('Context Brief recompiled with the refreshed graph.');
     expect(document.body.textContent).toContain('Context Brief evidence is projected here');
@@ -258,8 +258,8 @@ describe('Manager Context workspace', () => {
   it('does not index a different workspace after the displayed brief inputs change', async () => {
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Recover only the displayed scope');
-    await clickButton('Compile Context Brief');
+    await changeTextArea(textareaWithLabel('Task'), 'Recover only the displayed scope');
+    await clickButton('Build brief');
     await waitForText('Context Brief evidence is projected here');
     await changeSelect(selectWithLabel('Repository'), '/private/other-repository');
 
@@ -274,8 +274,8 @@ describe('Manager Context workspace', () => {
     await renderContext();
     await clickButton('Workset');
     await changeSelect(selectWithLabel('Prepared Workset'), 'platform');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Recover the prepared Workset graph');
-    await clickButton('Compile Context Brief');
+    await changeTextArea(textareaWithLabel('Task'), 'Recover the prepared Workset graph');
+    await clickButton('Build brief');
     await waitForText('Context Brief evidence is projected here');
 
     await clickButton('Prepare Workset and rerun');
@@ -320,14 +320,14 @@ describe('Manager Context workspace', () => {
     );
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
-    await changeTextArea(textareaWithLabel('Engineering task'), 'Cancel this bounded compile');
-    await clickButton('Compile Context Brief');
+    await changeTextArea(textareaWithLabel('Task'), 'Cancel this bounded compile');
+    await clickButton('Build brief');
     expect(document.querySelector('.context-compose')?.getAttribute('aria-busy')).toBe('true');
 
     await clickButton('Cancel');
 
     expect(document.querySelector('.context-compose')?.getAttribute('aria-busy')).toBe('false');
-    expect(findButton('Compile Context Brief')?.disabled).toBe(false);
+    expect(findButton('Build brief')?.disabled).toBe(false);
     expect(document.body.textContent).not.toContain('Compiling bounded graph and memory evidence');
   });
 
@@ -410,7 +410,7 @@ describe('Manager Context workspace', () => {
 
   it('pages ranked structured recall rows and reads the selected canonical source', async () => {
     await renderContext();
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'Manager Context Brief decision');
     await clickButton('Recall context');
     await waitForText('9 ranked pointers');
@@ -453,7 +453,7 @@ describe('Manager Context workspace', () => {
   it('lazily lists direct connections, opens neighbors, and saves only through the structured relation editor', async () => {
     await renderContext();
     await changeSelect(selectWithLabel('Repository'), '/private/threadnote');
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'connected memory');
     await clickButton('Recall context');
     await waitForText('9 ranked pointers');
@@ -521,7 +521,7 @@ describe('Manager Context workspace', () => {
       {preconnect: originalFetch.preconnect},
     );
     await renderContext();
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'relation refresh race');
     await clickButton('Recall context');
     await waitForText('9 ranked pointers');
@@ -567,7 +567,7 @@ describe('Manager Context workspace', () => {
       {preconnect: originalFetch.preconnect},
     );
     await renderContext();
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'cancel connection lookup');
     await clickButton('Recall context');
     await waitForText('9 ranked pointers');
@@ -585,7 +585,7 @@ describe('Manager Context workspace', () => {
 
   it('invalidates the stable recall snapshot when any search criterion changes', async () => {
     await renderContext();
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'first criteria');
     await clickButton('Recall context');
     await waitForText('9 ranked pointers');
@@ -619,7 +619,7 @@ describe('Manager Context workspace', () => {
       {preconnect: originalFetch.preconnect},
     );
     await renderContext();
-    await clickButton('Recall & read');
+    await clickButton('Recall');
     await changeInput(inputWithLabel('Recall query'), 'error state');
     await clickButton('Recall context');
     await waitForText('Threadnote could not complete this context operation.');

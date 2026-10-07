@@ -1,8 +1,12 @@
+import {PageActions} from './workspace.js';
+import {Check, Circle, Cpu, GitBranch, Monitor, Plug, RefreshCw, ShieldCheck} from 'lucide-react';
+import {DetailModal} from './detail_modal.js';
 import React, {useEffect, useState} from 'react';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 import {
   orderManagerProcessesByAttention,
+  managerProcessIsActive,
   type ManageableManagerProcess,
   type ManagerProcessDiagnostics,
 } from '@threadnote/manager/process/contracts';
@@ -14,6 +18,7 @@ export function ProcessesPanel(): React.ReactElement {
   const [diagnostics, setDiagnostics] = useState<ManagerProcessDiagnostics>();
   const [loadError, setLoadError] = useState('');
   const [operationError, setOperationError] = useState('');
+  const [inspected, setInspected] = useState<ManageableManagerProcess>();
   const [terminating, setTerminating] = useState<string>();
   const displayedProcesses =
     diagnostics === undefined ? undefined : orderManagerProcessesForPresentation(diagnostics.processes);
@@ -69,27 +74,76 @@ export function ProcessesPanel(): React.ReactElement {
     }
   };
 
-  return (
-    <div className="process-workspace">
-      <header className="workspace-header process-header">
-        <div>
-          <p className="eyebrow">Runtime inventory</p>
-          <h2>Threadnote processes</h2>
+  const row = (process: ManageableManagerProcess) => {
+    const active = managerProcessIsActive(process);
+    const current = process.terminationBlockedReason === 'current-manager';
+    const unverified = process.terminationBlockedReason === 'identity-unverified';
+    const Icon = active
+      ? GitBranch
+      : process.role === 'manager'
+        ? Monitor
+        : process.role === 'mcp' || process.role === 'mcp-broker'
+          ? Plug
+          : Cpu;
+    return (
+      <article className="workspace-row process-row" key={`${process.processId}:${process.startedAt}`} role="listitem">
+        <Icon aria-hidden="true" />
+        <div className="row-copy">
+          <strong>
+            {active && process.currentOperation
+              ? operationLabel(process.currentOperation)
+              : processRoleLabel(process.role)}
+          </strong>
           <p>
-            Active operations appear first, followed by other registered processes and identity-verified legacy
-            runtimes. Arguments, environment variables, and private registration data are never exposed.
+            {current
+              ? 'This session · Verified runtime'
+              : `${processRoleLabel(process.role)}${process.activityRole ? ` · ${processRoleLabel(process.activityRole)} activity` : ''} · Started ${formatDuration(process.ageMilliseconds)} ago`}
           </p>
         </div>
+        <span className={`workspace-status ${current ? '' : unverified ? 'warn' : 'neutral'}`}>
+          {current ? <Check aria-hidden="true" /> : <Circle aria-hidden="true" />}
+          {current
+            ? 'Current'
+            : unverified
+              ? 'Unverified'
+              : active
+                ? 'Running'
+                : process.role === 'legacy'
+                  ? 'Legacy'
+                  : 'Idle'}
+        </span>
         <button
-          aria-label="Refresh process list"
-          onClick={() => void load()}
-          title="Refresh process list"
-          type="button"
+          aria-label={`Inspect ${processRoleLabel(process.role)} process ${process.processId}`}
+          onClick={() => setInspected(process)}
         >
+          {active ? 'Inspect' : 'Details'}
+        </button>
+        {process.terminable ? (
+          <button
+            aria-label={`Terminate ${processRoleLabel(process.role)} process ${process.processId}`}
+            className="danger"
+            disabled={terminating !== undefined}
+            onClick={() => void terminate(process)}
+            title={terminationTitle(process)}
+          >
+            {terminating === process.processRef ? 'Stopping…' : 'Stop…'}
+          </button>
+        ) : null}
+      </article>
+    );
+  };
+  return (
+    <div className="process-workspace">
+      <PageActions>
+        <button aria-label="Refresh process list" onClick={() => void load()}>
+          <RefreshCw aria-hidden="true" />
           Refresh
         </button>
-      </header>
-
+      </PageActions>
+      <div className="workspace-note">
+        <ShieldCheck aria-hidden="true" />
+        Only registered Threadnote processes and identity-verified legacy runtimes appear here.
+      </div>
       {loadError ? <p className="process-notice is-error">{loadError}</p> : null}
       {operationError ? (
         <p aria-live="polite" className="process-notice is-error">
@@ -99,57 +153,71 @@ export function ProcessesPanel(): React.ReactElement {
       {diagnostics?.truncated ? (
         <p className="process-notice">The bounded inventory is truncated. Refresh after other processes exit.</p>
       ) : null}
-
-      <div aria-label="Threadnote process inventory" className="process-list" role="list">
+      <div className="workspace-stack" aria-label="Threadnote process inventory" role="list">
         {diagnostics === undefined ? (
-          <p className="process-empty">Loading registered processes…</p>
-        ) : displayedProcesses?.length === 0 ? (
-          <p className="process-empty">No registered Threadnote processes are visible.</p>
+          <p className="workspace-empty">Loading registered processes…</p>
         ) : (
-          displayedProcesses?.map(process => (
-            <article className="process-card" key={`${process.processId}:${process.startedAt}`} role="listitem">
-              <div className="process-card-main">
-                <div className="process-card-title">
-                  <strong>{processRoleLabel(process.role)}</strong>
-                  {process.activityRole ? <em>{processRoleLabel(process.activityRole)} activity</em> : null}
-                  <span>PID {process.processId}</span>
-                </div>
-                <p>{process.currentOperation ? operationLabel(process.currentOperation) : 'Idle'}</p>
-                <dl>
-                  <div>
-                    <dt>Parent</dt>
-                    <dd>{parentLabel(process)}</dd>
-                  </div>
-                  <div>
-                    <dt>Running</dt>
-                    <dd>{formatDuration(process.ageMilliseconds)}</dd>
-                  </div>
-                  <div>
-                    <dt>Memory</dt>
-                    <dd>{process.rssBytes === undefined ? 'Unavailable' : formatBytes(process.rssBytes)}</dd>
-                  </div>
-                  <div>
-                    <dt>Version</dt>
-                    <dd>{process.releaseVersion ? `v${process.releaseVersion}` : 'Current runtime'}</dd>
-                  </div>
-                </dl>
-              </div>
-              <button
-                aria-label={`Terminate ${processRoleLabel(process.role)} process ${process.processId}`}
-                className="icon-button danger process-terminate"
-                disabled={!process.terminable || terminating !== undefined}
-                onClick={() => void terminate(process)}
-                title={terminationTitle(process)}
-                type="button"
-              >
-                <svg aria-hidden="true" viewBox="0 0 20 20">
-                  <rect height="9" rx="1" width="9" x="5.5" y="5.5" />
-                </svg>
-              </button>
-            </article>
-          ))
+          <>
+            <section className="workspace-card">
+              <header>
+                <h3>Active operations</h3>
+              </header>
+              {displayedProcesses?.some(managerProcessIsActive) ? (
+                displayedProcesses.filter(managerProcessIsActive).map(row)
+              ) : (
+                <p className="workspace-empty">No active background operations.</p>
+              )}
+            </section>
+            <section className="workspace-card">
+              <header>
+                <h3>Other runtimes</h3>
+              </header>
+              {displayedProcesses?.some(process => !managerProcessIsActive(process)) ? (
+                displayedProcesses.filter(process => !managerProcessIsActive(process)).map(row)
+              ) : (
+                <p className="workspace-empty">No other runtimes are registered.</p>
+              )}
+            </section>
+          </>
         )}
       </div>
+      {inspected ? (
+        <DetailModal title={processRoleLabel(inspected.role)} onClose={() => setInspected(undefined)}>
+          <p className="workspace-note">
+            <ShieldCheck />
+            {inspected.terminationBlockedReason === 'identity-unverified'
+              ? 'The process identity could not be verified. Stop it from its owning application.'
+              : 'Verified Threadnote runtime. Private arguments and environment variables stay hidden.'}
+          </p>
+          <dl className="process-detail-grid">
+            <div>
+              <dt>Process</dt>
+              <dd>PID {inspected.processId}</dd>
+            </div>
+            <div>
+              <dt>Parent</dt>
+              <dd>{parentLabel(inspected)}</dd>
+            </div>
+            <div>
+              <dt>Operation</dt>
+              <dd>{inspected.currentOperation ? operationLabel(inspected.currentOperation) : 'Idle'}</dd>
+            </div>
+            <div>
+              <dt>Running</dt>
+              <dd>{formatDuration(inspected.ageMilliseconds)}</dd>
+            </div>
+            <div>
+              <dt>Memory</dt>
+              <dd>{inspected.rssBytes === undefined ? 'Unavailable' : formatBytes(inspected.rssBytes)}</dd>
+            </div>
+            <div>
+              <dt>Version</dt>
+              <dd>{inspected.releaseVersion ? `v${inspected.releaseVersion}` : 'Current runtime'}</dd>
+            </div>
+          </dl>
+          {!inspected.terminable ? <p className="muted">{terminationTitle(inspected)}</p> : null}
+        </DetailModal>
+      ) : null}
     </div>
   );
 }

@@ -1,15 +1,50 @@
+import {SharingPanel} from './sharing_view.js';
+import {RuntimeHealthPanel} from './runtime_health_view.js';
+import '@mdxeditor/editor/style.css';
+import {
+  ArrowLeft,
+  Brain,
+  Check,
+  ChevronRight,
+  Files,
+  HardDrive,
+  Info,
+  ListChecks,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings2,
+  Download,
+  Users,
+} from 'lucide-react';
+import {DetailModal} from './detail_modal.js';
+import {LibraryArticle} from './library_article.js';
 import React, {useEffect, useMemo, useReducer, useRef, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import {ContextPanel} from './context/view.js';
-import {ManagerAutocompleteInput, ManagerDialogProvider, useManagerDialogs} from '@threadnote/manager/dialog';
+import {ManagerDialogProvider, useManagerDialogs} from '@threadnote/manager/dialog';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
+import {ManagerNavigation} from './navigation.js';
+import {ActionMenu} from './action_menu.js';
+import {libraryItemActions} from './library_actions.js';
+import {MemoryEditor} from './memory_editor.js';
+import {WorkspaceUtilities} from './workspace_utilities.js';
+import {
+  descendantMemoryUris,
+  libraryScopeTree,
+  libraryItemTitle,
+  reconcileMemorySelection,
+  toggleMemorySelection,
+  type LibraryScope,
+} from './library_model.js';
 import {LibraryExplorer} from './library_explorer.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
-import {DropdownSelect, MarkdownViewer, Metadata, TargetFields} from '@threadnote/manager/ui/controls';
+import {DropdownSelect, Metadata, TargetFields} from '@threadnote/manager/ui/controls';
 import {
   initialManagerAvailability,
   managerActionsAreAvailable,
@@ -41,12 +76,10 @@ import {
 } from '@threadnote/manager/graph';
 import {
   GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-  SharesPanel,
   actionProgressLabel,
   api,
   clampSidebarWidth,
   bulkActionLabel,
-  canPublishMemoryFromManager,
   canPublishSelectedMemoriesFromManager,
   countFiles,
   errorMessage,
@@ -71,11 +104,7 @@ import {
   managerProjectOptions,
   markdownBodyForPreview,
   panelDescription,
-  panelIcon,
-  panelNavDescription,
-  pruneSelectedMemoryUris,
   resourceUrisFromText,
-  selectableMemoryUris,
   tabTitle,
   uniqueSelectorValues,
 } from '@threadnote/manager/ui/support';
@@ -209,24 +238,20 @@ function App(): React.ReactElement {
   const [memoryViewMode, setMemoryViewMode] = useState<MemoryViewMode>('edit');
   const [openSelect, setOpenSelect] = useState<SelectId | undefined>();
   const [filter, setFilter] = useState('');
+  const [libraryScope, setLibraryScope] = useState<LibraryScope>('local');
+  const [savingMemory, setSavingMemory] = useState(false);
+  const [libraryActionBusy, setLibraryActionBusy] = useState(false);
+  const [bulkCount, setBulkCount] = useState(0);
+  const [showLibraryDetails, setShowLibraryDetails] = useState(false);
+  const [creatingMemory, setCreatingMemory] = useState(false);
+  const [editorRevision, setEditorRevision] = useState(0);
+  const scopedTree = useMemo(() => libraryScopeTree(tree, libraryScope), [tree, libraryScope]);
   const [showSystem, setShowSystem] = useState(false);
   const [navTreeTab, setNavTreeTab] = useState<NavTreeTab>('memories');
   const [toast, setToast] = useState('');
   const [output, setOutput] = useState('');
-  const [recallQuery, setRecallQuery] = useState('');
-  const [recallProject, setRecallProject] = useState('');
-  const [readUri, setReadUri] = useState('');
-  const [compactProject, setCompactProject] = useState('');
   const [workspaceProject, setWorkspaceProject] = useState('');
-  const [compactTopic, setCompactTopic] = useState('');
-  const [packPath, setPackPath] = useState('');
-  const [selectedShare, setSelectedShare] = useState('');
-  const [shareTeam, setShareTeam] = useState('');
-  const [shareRemote, setShareRemote] = useState('');
-  const [renameShareTo, setRenameShareTo] = useState('');
-  const [shareNewUrl, setShareNewUrl] = useState('');
-  const [preserveShare, setPreserveShare] = useState(true);
-  const [keepShareFiles, setKeepShareFiles] = useState(false);
+
   const [target, setTarget] = useState<TargetForm>({
     kind: 'durable',
     project: '',
@@ -240,7 +265,7 @@ function App(): React.ReactElement {
   const [draftingConsolidation, setDraftingConsolidation] = useState(false);
   const [applyingConsolidation, setApplyingConsolidation] = useState(false);
   const [consolidationSourceUris, setConsolidationSourceUris] = useState<readonly string[]>([]);
-  const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | undefined>();
+  const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | 'unpublish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [libraryError, setLibraryError] = useState('');
@@ -352,8 +377,16 @@ function App(): React.ReactElement {
   }, [panel]);
 
   useEffect(() => {
-    setSelectedUris(current => pruneSelectedMemoryUris(current, tree, {filter, showSystem}));
-  }, [filter, showSystem, tree]);
+    const warn = (event: BeforeUnloadEvent) => {
+      if (draftRef.current || (creatingMemory && content.trim())) event.preventDefault();
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [creatingMemory, content]);
+
+  useEffect(() => {
+    setSelectedUris(current => reconcileMemorySelection(current, scopedTree));
+  }, [scopedTree]);
 
   useEffect(() => {
     if (!selectedUri) {
@@ -424,15 +457,11 @@ function App(): React.ReactElement {
     [resourceTree, selectedUri, tree],
   );
   const visibleSelectedUris = useMemo(
-    () =>
-      navTreeTab === 'memories'
-        ? pruneSelectedMemoryUris(selectedUris, tree, {filter, showSystem})
-        : EMPTY_SELECTED_URIS,
-    [filter, navTreeTab, selectedUris, showSystem, tree],
+    () => (navTreeTab === 'memories' ? reconcileMemorySelection(selectedUris, scopedTree) : EMPTY_SELECTED_URIS),
+    [navTreeTab, selectedUris, scopedTree],
   );
   const selectedList = useMemo(() => [...visibleSelectedUris], [visibleSelectedUris]);
   const canBulkPublish = useMemo(() => canPublishSelectedMemoriesFromManager(tree, selectedList), [tree, selectedList]);
-  const outputUris = useMemo(() => resourceUrisFromText(output), [output]);
   const projectOptions = useMemo(
     () =>
       uniqueSelectorValues([
@@ -616,7 +645,9 @@ function App(): React.ReactElement {
   }
 
   function showMemory(next: MemoryResponse): void {
+    setCreatingMemory(false);
     setMemory(next);
+    setEditorRevision(value => value + 1);
     setLoadedUri(next.node.uri);
     const reconciled = reconcileManagerDraft(draftRef.current, {content: next.content, uri: next.node.uri});
     setContent(reconciled.content);
@@ -638,30 +669,9 @@ function App(): React.ReactElement {
     setLoadedUri(uri);
     setContent(result.content || result.output);
     setOutput(result.output || result.content);
-    setReadUri(uri);
     setMemoryViewMode(isMarkdownUri(uri) ? 'preview' : 'edit');
     setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
     return uri;
-  }
-
-  async function readContext(uri: string): Promise<void> {
-    const trimmed = uri.trim();
-    if (!trimmed) {
-      toastMessage('Provide a Threadnote URI');
-      return;
-    }
-    try {
-      const result = await api<ReadResponse>('/api/read', {uri: trimmed});
-      setOutput(result.output || result.content);
-      setReadUri(trimmed);
-      if (result.localMemory) {
-        setSelectedUri(result.localMemory.node.uri);
-        showMemory(result.localMemory);
-      }
-      toastMessage('Read complete');
-    } catch (err) {
-      toastMessage(errorMessage(err));
-    }
   }
 
   function toastMessage(message: string): void {
@@ -670,18 +680,28 @@ function App(): React.ReactElement {
   }
 
   async function runAction(label: string, action: () => Promise<{readonly output?: string}>): Promise<void> {
+    if (libraryActionBusy) return;
+    setLibraryActionBusy(true);
     try {
       const result = await action();
       if (result.output) {
         setOutput(result.output);
       }
       toastMessage(label);
-      await refreshTreeOnly();
+      const nextTree = await refreshTreeOnly();
       if (selectedUri) {
-        await reloadSelected(selectedUri);
+        if (findNodeInTrees([nextTree.tree, nextTree.resourcesTree], selectedUri)) await reloadSelected(selectedUri);
+        else {
+          if (draftRef.current?.uri === selectedUri) draftRef.current = undefined;
+          setSelectedUri(undefined);
+          setMemory(undefined);
+          setContent('');
+        }
       }
     } catch (err) {
       toastMessage(errorMessage(err));
+    } finally {
+      setLibraryActionBusy(false);
     }
   }
 
@@ -689,9 +709,9 @@ function App(): React.ReactElement {
     label: string,
     busyLabel: string,
     action: () => Promise<{readonly output?: string}>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (doctorAction) {
-      return;
+      return false;
     }
     setDoctorAction(busyLabel);
     try {
@@ -699,18 +719,21 @@ function App(): React.ReactElement {
       setDoctorOutput(result.output ?? '');
       toastMessage(label);
       await loadDoctorChecks();
+      return true;
     } catch (err) {
       toastMessage(errorMessage(err));
+      return false;
     } finally {
       setDoctorAction(undefined);
     }
   }
 
-  async function refreshTreeOnly(): Promise<void> {
+  async function refreshTreeOnly(): Promise<TreeResponse> {
     const next = await api<TreeResponse>('/api/tree');
     setLibraryError('');
     setTree(next.tree);
     setResourceTree(next.resourcesTree);
+    return next;
   }
 
   async function reloadSelected(uri: string): Promise<void> {
@@ -722,6 +745,8 @@ function App(): React.ReactElement {
   }
 
   async function saveCurrent(): Promise<void> {
+    if (savingMemory) return;
+    setSavingMemory(true);
     await runAction('Saved memory', () =>
       api<{readonly output?: string}>('/api/memory/save', {
         kind: target.kind,
@@ -736,44 +761,72 @@ function App(): React.ReactElement {
         return result;
       }),
     );
+    setSavingMemory(false);
   }
 
   async function newMemory(): Promise<void> {
+    if (!(await confirmDiscardDraft())) return;
+    draftRef.current = undefined;
+    setPendingCanonical(undefined);
+    setPanel('memory');
+    setCreatingMemory(true);
+    setNavTreeTab('memories');
+    setLibraryScope('local');
+    setSelectedUris(new Set());
+    setEditorRevision(value => value + 1);
     setSelectedUri(undefined);
     setMemory(undefined);
     setContent('');
     setMemoryViewMode('edit');
-    setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
-    toastMessage('New memory draft');
+    setTarget({kind: 'durable', project: workspaceProject, status: 'active', team: '', topic: ''});
+    toastMessage('New local memory · written by you');
   }
 
   async function saveNew(): Promise<void> {
-    await runAction('Stored memory', () =>
-      api('/api/memory/save', {
+    if (savingMemory || !content.trim() || !target.topic.trim()) return;
+    setSavingMemory(true);
+    try {
+      const result = await api<{readonly output?: string}>('/api/memory/save', {
         kind: target.kind,
         project: target.project,
         status: target.status,
         text: content,
         topic: target.topic,
-      }),
-    );
+        sourceAgentClient: 'user',
+      });
+      draftRef.current = undefined;
+      setOutput(result.output ?? '');
+      await refreshTreeOnly();
+      const uri = resourceUrisFromText(result.output ?? '').find(value => value.endsWith('.md'));
+      if (uri) setSelectedUri(uri);
+      else {
+        setContent('');
+        setTarget(current => ({...current, topic: ''}));
+        setEditorRevision(value => value + 1);
+      }
+      toastMessage('Saved local memory');
+    } catch (cause) {
+      toastMessage(errorMessage(cause));
+    } finally {
+      setSavingMemory(false);
+    }
   }
 
-  async function archiveCurrent(): Promise<void> {
-    if (!selectedUri) return;
+  async function archiveCurrent(uri = selectedUri): Promise<void> {
+    if (!uri) return;
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Archive memory',
-      detail: selectedUri,
+      detail: uri,
       message: 'The memory stays available in the archive and can be restored later.',
       title: 'Archive this memory?',
     });
     if (!confirmed) return;
-    await runAction('Archived memory', () => api('/api/memory/archive', {confirm: true, uri: selectedUri}));
+    await runAction('Archived memory', () => api('/api/memory/archive', {confirm: true, uri}));
   }
 
-  async function forgetCurrent(): Promise<void> {
-    if (!selectedUri) return;
-    const forgottenUri = selectedUri;
+  async function forgetCurrent(uri = selectedUri): Promise<void> {
+    if (!uri) return;
+    const forgottenUri = uri;
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Forget memory',
       detail: forgottenUri,
@@ -782,66 +835,77 @@ function App(): React.ReactElement {
       tone: 'danger',
     });
     if (!confirmed) return;
+    setLibraryActionBusy(true);
     try {
       await api('/api/memory/forget', {confirm: true, uri: forgottenUri});
       if (draftRef.current?.uri === forgottenUri) draftRef.current = undefined;
       setPendingCanonical(current => (current?.node.uri === forgottenUri ? undefined : current));
-      setSelectedUri(undefined);
-      setMemory(undefined);
-      setContent('');
-      setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
+      if (selectedUri === forgottenUri) {
+        setSelectedUri(undefined);
+        setMemory(undefined);
+        setContent('');
+        setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
+      }
       await refreshTreeOnly();
       toastMessage('Forgot memory');
     } catch (cause) {
       toastMessage(errorMessage(cause));
+    } finally {
+      setLibraryActionBusy(false);
     }
   }
 
-  async function removeFolderCurrent(): Promise<void> {
-    if (!selectedNode?.isDir) {
+  async function removeFolderCurrent(node = selectedNode): Promise<void> {
+    if (!node?.isDir) {
       return;
     }
-    if (!selectedNode.relativePath) {
+    if (!node.relativePath) {
       toastMessage('The root memories folder cannot be removed');
       return;
     }
-    if (selectedNode.isShared) {
+    if (node.isShared) {
       toastMessage('Use Sharing to remove shared folders');
       return;
     }
-    const fileCount = countFiles(selectedNode);
+    const fileCount = countFiles(node);
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Remove folder',
-      detail: selectedNode.uri,
+      detail: [node.uri, ...descendantMemoryUris(node)].join('\n'),
       message: `This permanently removes ${fileCount} memory file${fileCount === 1 ? '' : 's'} from local context.`,
-      title: 'Remove this folder?',
+      title: 'Remove folder and forget its memories?',
       tone: 'danger',
     });
     if (!confirmed) return;
+    setLibraryActionBusy(true);
     try {
       const result = await api<{readonly output?: string}>('/api/folder/remove', {
         confirm: true,
-        uri: selectedNode.uri,
+        uri: node.uri,
       });
       if (result.output) {
         setOutput(result.output);
       }
-      setSelectedUri(undefined);
-      setSelectedUris(new Set());
-      setMemory(undefined);
-      setContent('');
+      if (selectedUri === node.uri || selectedUri?.startsWith(node.uri + '/')) {
+        draftRef.current = undefined;
+        setPendingCanonical(undefined);
+        setSelectedUri(undefined);
+        setMemory(undefined);
+        setContent('');
+      }
       await refreshTreeOnly();
       toastMessage('Removed folder');
     } catch (err) {
       toastMessage(errorMessage(err));
+    } finally {
+      setLibraryActionBusy(false);
     }
   }
 
-  async function publishCurrent(): Promise<void> {
-    if (!selectedUri) return;
+  async function publishCurrent(uri = selectedUri): Promise<void> {
+    if (!uri) return;
     const values = await dialogs.prompt({
       confirmLabel: 'Publish memory',
-      detail: selectedUri,
+      detail: uri,
       fields: [
         {
           id: 'team',
@@ -855,24 +919,20 @@ function App(): React.ReactElement {
       title: 'Publish memory',
     });
     if (!values) return;
-    await runAction('Published memory', () =>
-      api('/api/memory/publish', {confirm: true, team: values.team, uri: selectedUri}),
-    );
+    await runAction('Published memory', () => api('/api/memory/publish', {confirm: true, team: values.team, uri}));
   }
 
-  async function unpublishCurrent(): Promise<void> {
-    if (!selectedUri) return;
+  async function unpublishCurrent(uri = selectedUri, team = target.team): Promise<void> {
+    if (!uri) return;
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Unpublish memory',
-      detail: selectedUri,
+      detail: uri,
       message: 'Remove this memory from its shared repository projection.',
       title: 'Unpublish this memory?',
       tone: 'danger',
     });
     if (!confirmed) return;
-    await runAction('Unpublished memory', () =>
-      api('/api/memory/unpublish', {confirm: true, team: target.team, uri: selectedUri}),
-    );
+    await runAction('Unpublished memory', () => api('/api/memory/unpublish', {confirm: true, team, uri}));
   }
 
   async function moveCurrent(): Promise<void> {
@@ -915,9 +975,12 @@ function App(): React.ReactElement {
     );
   }
 
-  async function bulk(action: 'archive' | 'forget' | 'publish'): Promise<void> {
-    if (bulkAction || selectedList.length === 0) return;
-    const title = `${bulkActionLabel(action)} ${selectedList.length} selected ${selectedList.length === 1 ? 'memory' : 'memories'}?`;
+  async function bulk(
+    action: 'archive' | 'forget' | 'publish' | 'unpublish',
+    uris: readonly string[] = selectedList,
+  ): Promise<void> {
+    if (bulkAction || uris.length === 0) return;
+    const title = `${bulkActionLabel(action)} ${uris.length} selected ${uris.length === 1 ? 'memory' : 'memories'}?`;
     const values = await dialogs.prompt({
       confirmLabel: bulkActionLabel(action),
       fields:
@@ -927,28 +990,39 @@ function App(): React.ReactElement {
       message:
         action === 'forget'
           ? 'This permanently removes every selected memory from local context.'
-          : 'Only the currently selected memories will be changed.',
+          : action === 'unpublish'
+            ? 'Remove every selected memory from its shared repository projection.'
+            : 'Only the currently selected memories will be changed.',
+      detail: uris.join('\n'),
       title,
-      tone: action === 'forget' ? 'danger' : 'default',
+      tone: action === 'forget' || action === 'unpublish' ? 'danger' : 'default',
     });
     if (!values) return;
-    const team = action === 'publish' ? values.team : undefined;
+    const team =
+      action === 'publish'
+        ? values.team
+        : action === 'unpublish' && libraryScope !== 'local'
+          ? libraryScope.slice(5)
+          : undefined;
     const currentSelectedUri = selectedUri;
+    setBulkCount(uris.length);
     setBulkAction(action);
     try {
       const result = await api<{readonly results: readonly BulkItemResult[]}>('/api/bulk', {
         action,
         confirm: true,
         team,
-        uris: selectedList,
+        uris,
       });
       setOutput(formatBulkResults(action, result.results));
       const failedUris = result.results.filter(item => !item.ok).map(item => item.uri);
       setSelectedUris(new Set(failedUris));
-      if (currentSelectedUri && selectedList.includes(currentSelectedUri)) {
+      if (currentSelectedUri && uris.includes(currentSelectedUri)) {
         if (failedUris.includes(currentSelectedUri)) {
           await reloadSelected(currentSelectedUri);
         } else {
+          if (draftRef.current?.uri === currentSelectedUri) draftRef.current = undefined;
+          setPendingCanonical(undefined);
           setSelectedUri(undefined);
           setMemory(undefined);
           setContent('');
@@ -964,12 +1038,6 @@ function App(): React.ReactElement {
     } finally {
       setBulkAction(undefined);
     }
-  }
-
-  async function loadShares(): Promise<void> {
-    const next = await api<{shares: readonly ShareSummary[]}>('/api/shares');
-    setShares(next.shares);
-    toastMessage('Shares refreshed');
   }
 
   async function loadDoctorChecks(showToast = false): Promise<void> {
@@ -1082,29 +1150,6 @@ function App(): React.ReactElement {
     }
   }
 
-  async function removeSelectedShare(): Promise<void> {
-    if (!selectedShare) return;
-    const confirmed = await dialogs.confirm({
-      confirmLabel: 'Remove share',
-      detail: selectedShare,
-      message: keepShareFiles
-        ? 'Disconnect this shared repository and keep its local files.'
-        : 'Disconnect this shared repository and remove its managed local files.',
-      title: 'Remove this share?',
-      tone: 'danger',
-    });
-    if (!confirmed) return;
-    await runAction('Removed share', () =>
-      api('/api/shares/remove', {
-        confirm: true,
-        keepFiles: keepShareFiles,
-        preserveLocal: preserveShare,
-        team: selectedShare,
-      }),
-    );
-    await loadShares();
-  }
-
   async function repairThreadnote(): Promise<void> {
     const confirmed = await dialogs.confirm({
       confirmLabel: 'Run repair',
@@ -1115,52 +1160,75 @@ function App(): React.ReactElement {
     await runDoctorAction('Repair complete', 'Running repair', () => api('/api/doctor/repair', {confirm: true}));
   }
 
-  async function applyCompactPlan(): Promise<void> {
-    const confirmed = await dialogs.confirm({
-      confirmLabel: 'Apply compact plan',
-      message: 'Apply the current memory compaction plan and write its changes.',
-      title: 'Compact memories?',
+  async function confirmDiscardDraft(): Promise<boolean> {
+    if (!draftRef.current && (!creatingMemory || !content.trim())) return true;
+    return dialogs.confirm({
+      title: 'Discard unsaved changes?',
+      message: 'Save your memory before leaving to keep these changes.',
+      confirmLabel: 'Discard changes',
+      tone: 'danger',
     });
-    if (!confirmed) return;
-    await runAction('Compact applied', () =>
-      api('/api/compact', {
-        apply: true,
-        confirm: true,
-        project: compactProject,
-        topic: compactTopic,
-      }),
-    );
   }
 
-  async function importPack(): Promise<void> {
-    const confirmed = await dialogs.confirm({
-      confirmLabel: 'Import pack',
-      detail: packPath || 'No path entered',
-      message: 'Import memories and resources from this pack into local Threadnote storage.',
-      title: 'Import this pack?',
-    });
-    if (!confirmed) return;
-    await runAction('Import complete', () => api('/api/import-pack', {confirm: true, path: packPath}));
-  }
-
-  async function seedThreadnote(skills: boolean): Promise<void> {
-    const confirmed = await dialogs.confirm({
-      confirmLabel: skills ? 'Seed skills' : 'Seed resources',
-      message: skills
-        ? 'Write the configured Threadnote skills into their managed destinations.'
-        : 'Write the configured Threadnote resources into local storage.',
-      title: skills ? 'Run seed-skills?' : 'Run seed?',
-    });
-    if (!confirmed) return;
-    await runAction(skills ? 'Seed skills complete' : 'Seed complete', () =>
-      api('/api/seed', {confirm: true, ...(skills ? {skills: true} : {})}),
-    );
-  }
-
-  function selectTreeUri(uri: string): void {
+  async function selectTreeUri(uri: string): Promise<void> {
+    if (uri !== selectedUri && !(await confirmDiscardDraft())) return;
+    if (uri !== selectedUri) draftRef.current = undefined;
+    setCreatingMemory(false);
+    setShowLibraryDetails(false);
     setSelectedUri(uri);
     setPanel('memory');
+    setNavTreeTab(isResourceUri(uri) ? 'resources' : 'memories');
+    const node = findNodeInTrees([tree], uri);
+    if (!isResourceUri(uri)) setLibraryScope(node?.sharedTeam ? `team:${node.sharedTeam}` : 'local');
   }
+
+  async function switchLibrary(tab: NavTreeTab, scope = libraryScope): Promise<void> {
+    if (!(await confirmDiscardDraft())) return;
+    draftRef.current = undefined;
+    setPendingCanonical(undefined);
+    setShowLibraryDetails(false);
+    setCreatingMemory(false);
+    setSelectedUri(undefined);
+    setContent('');
+    setNavTreeTab(tab);
+    setLibraryScope(scope);
+    setSelectedUris(new Set());
+  }
+
+  async function removeResource(node: TreeNode): Promise<void> {
+    if (node.isDir || !isResourceUri(node.uri)) return;
+    if (
+      !(await dialogs.confirm({
+        title: 'Remove indexed copy?',
+        confirmLabel: 'Remove indexed copy',
+        message:
+          'Remove this resource from Threadnote. The original source file stays untouched; a later source sync may import it again.',
+        detail: node.uri,
+        tone: 'danger',
+      }))
+    )
+      return;
+    await runAction('Removed indexed resource', () => api('/api/memory/forget', {confirm: true, uri: node.uri}));
+    if (selectedUri === node.uri) {
+      setSelectedUri(undefined);
+      setContent('');
+    }
+  }
+
+  const itemActions = (node: TreeNode) =>
+    libraryItemActions(node, {
+      tree,
+      scope: libraryScope,
+      open: selectTreeUri,
+      select: node => setSelectedUris(current => toggleMemorySelection(current, node, true)),
+      removeResource,
+      removeFolder: removeFolderCurrent,
+      bulk,
+      unpublish: unpublishCurrent,
+      publish: publishCurrent,
+      archive: archiveCurrent,
+      forget: forgetCurrent,
+    });
 
   function updateSidebarWidth(width: number): void {
     const next = clampSidebarWidth(width);
@@ -1221,135 +1289,192 @@ function App(): React.ReactElement {
   const selectedIsMarkdown = Boolean(selectedNode && isMarkdownNode(selectedNode));
   const markdownPreview = markdownBodyForPreview(content);
   const canMutate = Boolean(selectedUri && selectedIsReadable && !selectedIsDir && !selectedIsResource);
-  const canRemoveFolder = Boolean(
-    selectedNode?.isDir && selectedNode.relativePath && !selectedNode.isShared && !selectedIsResource,
-  );
   const consolidationBusy = draftingConsolidation || applyingConsolidation;
   const canDraftConsolidation = selectedList.length > 0 || !selectedIsResource;
   const doctorBusy = doctorAction !== undefined;
   const selectedHasPendingCanonical = pendingCanonical !== undefined && pendingCanonical.node.uri === selectedUri;
   const controlsBlocked =
     bulkAction !== undefined ||
+    savingMemory ||
+    libraryActionBusy ||
     selectedHasPendingCanonical ||
     !managerActionsAreAvailable(availability) ||
     Boolean(selectedUri && !selectedIsDir && !selectedIsReadable);
   const busyOverlayMessage = bulkAction
-    ? `${actionProgressLabel(bulkAction)} ${selectedList.length} selected ${selectedList.length === 1 ? 'memory' : 'memories'}...`
+    ? `${actionProgressLabel(bulkAction)} ${bulkCount} selected ${bulkCount === 1 ? 'memory' : 'memories'}...`
     : '';
-  const doctorBusyMessage = doctorAction ? `${doctorAction}...` : '';
   const metadataFieldsDisabled = Boolean(
     memory || selectedIsDir || selectedIsResource || (selectedUri && !selectedIsReadable),
   );
   const appStyle: React.CSSProperties & {'--sidebar-width': string} = {'--sidebar-width': `${sidebarWidth}px`};
   const updateIndicator = state ? managerUpdateIndicator(state) : undefined;
 
+  const authoringMemory =
+    creatingMemory ||
+    (memoryViewMode === 'edit' && !!selectedUri && !selectedIsDir && !selectedIsResource && !selectedNode?.isSystem);
+  const libraryDetails = (
+    <aside className="inspector">
+      <h3>{selectedIsResource ? 'Source details' : memory ? 'Memory details' : 'Properties'}</h3>
+      {selectedUri && !selectedIsReadable && !selectedIsDir ? (
+        <p className="muted">Metadata unavailable until the selected record loads.</p>
+      ) : (
+        <>
+          {!metadataFieldsDisabled && creatingMemory ? (
+            <TargetFields
+              disabled={metadataFieldsDisabled}
+              hideTopic
+              onChange={setTarget}
+              openSelect={openSelect}
+              projectOptions={projectOptions}
+              setOpenSelect={setOpenSelect}
+              target={target}
+            />
+          ) : null}
+          {!selectedUri && creatingMemory ? (
+            <p className="muted">Written by you · saved locally. Publish separately to share with a team.</p>
+          ) : selectedIsResource ? (
+            <p className="muted">Indexed source content. This view does not edit the original file.</p>
+          ) : null}
+          <Metadata metadata={memory?.record?.metadata} node={memory?.node ?? selectedNode} />
+        </>
+      )}
+      {!selectedIsResource && !creatingMemory ? (
+        <details className="consolidation-details">
+          <summary>Consolidate memories</summary>
+          <div className="field-row select-row">
+            <DropdownSelect
+              id="agent"
+              label="Agent"
+              onChange={value => void (isAgentClient(value) && setAgent(value))}
+              openSelect={openSelect}
+              options={(state?.agents ?? []).map(item => ({
+                disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
+                label: `${item.label}${item.available ? '' : ' unavailable'}`,
+                value: item.id,
+              }))}
+              setOpenSelect={setOpenSelect}
+              value={agent}
+            />
+            <button
+              disabled={consolidationBusy || controlsBlocked || !canDraftConsolidation}
+              onClick={() => void draftConsolidation()}
+            >
+              {draftingConsolidation ? 'Drafting...' : 'Draft'}
+            </button>
+          </div>
+          <textarea
+            aria-busy={consolidationBusy}
+            placeholder={draftingConsolidation ? 'Generating draft...' : 'Draft preview'}
+            readOnly={consolidationBusy || controlsBlocked}
+            value={draft}
+            onChange={event => setDraft(event.target.value)}
+            spellCheck={false}
+          />
+          <button
+            disabled={consolidationBusy || controlsBlocked || !jobId || !draft}
+            onClick={() => void applyConsolidation()}
+          >
+            {applyingConsolidation ? 'Applying...' : 'Apply draft'}
+          </button>
+        </details>
+      ) : null}
+    </aside>
+  );
+
   return (
     <div className="app" style={appStyle}>
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-title">
-            <img alt="" className="brand-logo" src="/threadnote-logo.svg" />
-            <div>
-              <h1>Threadnote</h1>
-              <p>{state ? `${state.config.user} · ${state.config.account}` : 'Loading manager'}</p>
-            </div>
-          </div>
-        </div>
-        <p className="sidebar-label">Workspace</p>
-        <nav className="primary-nav" aria-label="Manager sections">
-          {(
-            [
-              'home',
-              'reviews',
-              'context-health',
-              'graph',
-              'context',
-              'worksets',
-              'memory',
-              'shares',
-              'processes',
-              'doctor',
-              'tools',
-            ] as const
-          ).map(name => (
-            <button
-              aria-current={panel === name ? 'page' : undefined}
-              className={panel === name ? 'is-active' : undefined}
-              disabled={controlsBlocked}
-              key={name}
-              onClick={() => setPanel(name)}
-              type="button"
-            >
-              <span aria-hidden="true" className="nav-icon">
-                {panelIcon(name)}
-              </span>
-              <span>
-                <strong>{tabTitle(name)}</strong>
-                <small>{panelNavDescription(name)}</small>
-              </span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="sidebar-product-note">
-          <span className="status-pulse" />
-          <div>
-            <strong>Local runtime</strong>
-            <p>{state ? `v${state.version} · private by default` : 'Connecting…'}</p>
-          </div>
-        </div>
-        {updateIndicator ? (
-          <div className="sidebar-update">
-            <span>{updateIndicator.label}</span>
-            <strong>{updateIndicator.detail}</strong>
-          </div>
-        ) : null}
-      </aside>
-      <div
-        aria-label="Resize navigation panel"
-        aria-orientation="vertical"
-        aria-valuemax={SIDEBAR_WIDTH_MAX}
-        aria-valuemin={SIDEBAR_WIDTH_MIN}
-        aria-valuenow={sidebarWidth}
-        className="sidebar-resizer"
-        onKeyDown={resizeSidebarWithKeyboard}
-        onPointerDown={startSidebarResize}
-        role="separator"
-        tabIndex={0}
-        title="Drag to resize navigation"
+      <ManagerNavigation
+        panel={panel}
+        disabled={controlsBlocked}
+        connected={!!state}
+        onSelect={setPanel}
+        width={sidebarWidth}
+        onResizeKeyDown={resizeSidebarWithKeyboard}
+        onResizePointerDown={startSidebarResize}
+        updateIndicator={updateIndicator}
       />
 
       <main className="main">
-        <header className="topbar">
-          <div className="page-title">
-            <span>{tabTitle(panel)}</span>
-            <small>{panelDescription(panel)}</small>
-          </div>
-          {panel === 'memory' && selectedList.length > 0 ? (
-            <div className="selection-bar">
-              <span>{selectedList.length} selected</span>
-              <button disabled={controlsBlocked} onClick={() => void bulk('archive')}>
-                {bulkAction === 'archive' ? 'Archiving...' : 'Archive'}
-              </button>
-              <button disabled={controlsBlocked || !canBulkPublish} onClick={() => void bulk('publish')}>
-                {bulkAction === 'publish' ? 'Publishing...' : 'Publish'}
-              </button>
-              <button className="danger" disabled={controlsBlocked} onClick={() => void bulk('forget')}>
-                {bulkAction === 'forget' ? 'Forgetting...' : 'Forget'}
-              </button>
-            </div>
-          ) : (
+        <div className="workspace-bar">
+          <nav className="workspace-breadcrumb" aria-label="Breadcrumb">
+            <span>Manager</span>
+            <ChevronRight aria-hidden="true" />
+            <span aria-current="page">{tabTitle(panel)}</span>
+          </nav>
+          <div className="workspace-bar-actions">
+            {['home', 'memory', 'reviews', 'context-health'].includes(panel) ? (
+              <select
+                aria-label={panel === 'memory' ? 'Default project for new memories' : 'Workspace project'}
+                title={panel === 'memory' ? 'Default project for new memories' : 'Workspace project'}
+                value={workspaceProject}
+                onChange={event => setWorkspaceProject(event.target.value)}
+              >
+                {projectOptions.length === 0 ? <option value="">Select project</option> : null}
+                {projectOptions.map(project => (
+                  <option key={project} value={project}>
+                    {project}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="muted">Local workspace</span>
+            )}
             <button
               aria-label="Refresh manager"
-              className="topbar-refresh"
-              disabled={bulkAction !== undefined}
+              className="quiet-icon"
+              disabled={bulkAction !== undefined || savingMemory || libraryActionBusy}
               onClick={() => void refreshAll()}
               title="Refresh manager"
               type="button"
             >
-              ↻
+              <RefreshCw aria-hidden="true" />
             </button>
-          )}
+          </div>
+        </div>
+        <header className="topbar">
+          <div className="page-title">
+            <span>
+              {panel === 'memory' && authoringMemory
+                ? creatingMemory
+                  ? 'New memory'
+                  : 'Edit memory'
+                : tabTitle(panel)}
+            </span>
+            <small>
+              {panel === 'memory' && authoringMemory ? 'Write knowledge in your own words.' : panelDescription(panel)}
+            </small>
+          </div>
+          <div className="action-row" id="manager-page-actions">
+            {panel === 'memory' && authoringMemory ? (
+              <button
+                className="primary"
+                disabled={controlsBlocked || (creatingMemory && (!content.trim() || !target.topic.trim()))}
+                onClick={() => void (creatingMemory ? saveNew() : saveCurrent())}
+              >
+                <Check aria-hidden="true" />
+                {savingMemory ? 'Saving…' : creatingMemory ? 'Save memory' : 'Save'}
+              </button>
+            ) : panel === 'home' || panel === 'memory' ? (
+              <button className="primary" disabled={controlsBlocked} onClick={() => void newMemory()}>
+                <Plus aria-hidden="true" />
+                New memory
+              </button>
+            ) : null}
+            {panel === 'doctor' ? (
+              <button disabled={doctorBusy} onClick={() => void loadDoctor()}>
+                <RefreshCw aria-hidden="true" />
+                {doctorBusy ? 'Running…' : 'Run diagnostics'}
+              </button>
+            ) : null}
+            {panel !== 'memory' ? (
+              <WorkspaceUtilities
+                panel={panel}
+                project={workspaceProject}
+                projects={projectOptions}
+                onChanged={refreshAll}
+              />
+            ) : null}
+          </div>
           {availability.runtime !== 'connected' ? (
             <div className="manager-connection-alert" role="alert">
               {availability.runtime === 'disconnected'
@@ -1364,513 +1489,476 @@ function App(): React.ReactElement {
           ) : null}
         </header>
 
-        {panel === 'graph' ? (
-          <section className="panel graph-panel is-active">
-            <GraphWorkspace
-              administration={graphDiagnostics}
-              administrationBusy={
-                graphAdministrationBusy ??
-                (graphCatalog?.maintenance
-                  ? graphMaintenanceStatusLabel(graphCatalog.maintenance)
-                  : graphCatalog?.lifecyclePending
-                    ? 'Reconciling indexed views'
-                    : undefined)
-              }
-              administrationOutput={graphAdministrationOutput}
-              catalog={graphCatalog}
-              catalogError={graphCatalogError}
-              loadAnalysis={loadManagerGraphAnalysis}
-              loadCatalogPage={loadManagerGraphCatalogPage}
-              loadGraph={loadManagerGraph}
-              loadNodeDetail={loadManagerGraphNodeDetail}
-              loadQuery={loadManagerGraphQuery}
-              loadViewsPage={loadManagerGraphViewsPage}
-              onAdministrationAction={action => void runGraphAdministration(action)}
-              onDiagnostics={options => void refreshGraphDiagnostics(options)}
-              onRefresh={() => void refreshGraphCatalog(true)}
-            />
-          </section>
-        ) : null}
-
-        {panel === 'home' ? (
-          <ManagerHomePanel
-            onOpen={target => setPanel(target)}
-            onOpenMemory={uri => {
-              setPanel('memory');
-              setSelectedUri(uri);
-            }}
-            onProjectChange={setWorkspaceProject}
-            project={workspaceProject}
-            projects={projectOptions}
-          />
-        ) : null}
-
-        {panel === 'reviews' ? (
-          <ReviewsPanel
-            onOpenLibrary={uri => {
-              setPanel('memory');
-              if (uri) setSelectedUri(uri);
-            }}
-            onProjectChange={setWorkspaceProject}
-            project={workspaceProject}
-            projects={projectOptions}
-            refreshGeneration={attentionRefreshGeneration}
-          />
-        ) : null}
-
-        {panel === 'context-health' ? (
-          <ContextHealthPanel
-            onOpenLibrary={uri => {
-              setPanel('memory');
-              if (uri) setSelectedUri(uri);
-            }}
-            onProjectChange={setWorkspaceProject}
-            project={workspaceProject}
-            projects={projectOptions}
-            refreshGeneration={attentionRefreshGeneration}
-          />
-        ) : null}
-
-        {panel === 'context' ? (
-          <section className="panel context-panel is-active">
-            <ContextPanel projectOptions={projectOptions} refreshGeneration={attentionRefreshGeneration} />
-          </section>
-        ) : null}
-
-        {panel === 'worksets' ? (
-          <section className="panel is-active">
-            <WorksetsPanel />
-          </section>
-        ) : null}
-
-        {panel === 'processes' ? (
-          <section className="panel is-active">
-            <ProcessesPanel />
-          </section>
-        ) : null}
-
-        {panel === 'memory' ? (
-          <section className="panel library-panel is-active">
-            <div className="library-workspace">
-              {selectedUri && !selectedIsReadable ? (
-                <div className="library-record-status" role="status">
-                  {availability.selection === 'failed' ? 'Could not load record. Refresh to retry.' : 'Loading memory…'}
-                </div>
-              ) : null}
-              <LibraryExplorer
-                busy={bulkAction !== undefined}
-                controlsBlocked={controlsBlocked}
-                filter={filter}
-                navTreeTab={navTreeTab}
-                onFilter={setFilter}
-                onRefresh={() => void refreshAll()}
-                onSelect={selectTreeUri}
-                onShowSystem={setShowSystem}
-                onTab={setNavTreeTab}
-                onToggleSelection={(node, checked) =>
-                  setSelectedUris(current => {
-                    const next = new Set(current);
-                    for (const uri of selectableMemoryUris(node, {filter, showSystem})) {
-                      if (checked) next.add(uri);
-                      else next.delete(uri);
-                    }
-                    return next;
-                  })
+        <div className="manager-content">
+          {panel === 'graph' ? (
+            <section className="panel graph-panel is-active">
+              <GraphWorkspace
+                administration={graphDiagnostics}
+                administrationBusy={
+                  graphAdministrationBusy ??
+                  (graphCatalog?.maintenance
+                    ? graphMaintenanceStatusLabel(graphCatalog.maintenance)
+                    : graphCatalog?.lifecyclePending
+                      ? 'Reconciling indexed views'
+                      : undefined)
                 }
-                resourceTree={resourceTree}
-                selectedUri={selectedUri}
-                selectedUris={selectedUris}
-                showSystem={showSystem}
-                tree={tree}
+                administrationOutput={graphAdministrationOutput}
+                catalog={graphCatalog}
+                catalogError={graphCatalogError}
+                loadAnalysis={loadManagerGraphAnalysis}
+                loadCatalogPage={loadManagerGraphCatalogPage}
+                loadGraph={loadManagerGraph}
+                loadNodeDetail={loadManagerGraphNodeDetail}
+                loadQuery={loadManagerGraphQuery}
+                loadViewsPage={loadManagerGraphViewsPage}
+                onAdministrationAction={action => void runGraphAdministration(action)}
+                onDiagnostics={options => void refreshGraphDiagnostics(options)}
+                onRefresh={() => void refreshGraphCatalog(true)}
               />
-              <div className="content-grid">
-                <section className="editor-pane">
-                  <div className="pane-head">
-                    <div>
-                      <h2>{selectedNode?.name ?? 'New memory'}</h2>
-                      <p className="uri-line">{selectedUri ?? 'No URI until saved'}</p>
-                    </div>
-                    <div className="action-row">
-                      <div className="segmented-control" aria-label="Memory view mode">
+            </section>
+          ) : null}
+
+          {panel === 'home' ? (
+            <ManagerHomePanel
+              showProjectSelector={false}
+              onNewMemory={() => void newMemory()}
+              onOpen={target => setPanel(target)}
+              onOpenMemory={uri => {
+                void selectTreeUri(uri);
+              }}
+              onProjectChange={setWorkspaceProject}
+              project={workspaceProject}
+              projects={projectOptions}
+            />
+          ) : null}
+
+          {panel === 'reviews' ? (
+            <ReviewsPanel
+              onOpenLibrary={uri => {
+                if (uri) void selectTreeUri(uri);
+                else setPanel('memory');
+              }}
+              onProjectChange={setWorkspaceProject}
+              project={workspaceProject}
+              projects={projectOptions}
+              refreshGeneration={attentionRefreshGeneration}
+            />
+          ) : null}
+
+          {panel === 'context-health' ? (
+            <ContextHealthPanel
+              onOpenLibrary={uri => {
+                if (uri) void selectTreeUri(uri);
+                else setPanel('memory');
+              }}
+              onProjectChange={setWorkspaceProject}
+              project={workspaceProject}
+              projects={projectOptions}
+              refreshGeneration={attentionRefreshGeneration}
+            />
+          ) : null}
+
+          {panel === 'context' ? (
+            <section className="panel context-panel is-active">
+              <ContextPanel projectOptions={projectOptions} refreshGeneration={attentionRefreshGeneration} />
+            </section>
+          ) : null}
+
+          {panel === 'worksets' ? (
+            <section className="panel is-active">
+              <WorksetsPanel />
+            </section>
+          ) : null}
+
+          {panel === 'processes' ? (
+            <section className="panel is-active">
+              <ProcessesPanel />
+            </section>
+          ) : null}
+
+          {panel === 'memory' ? (
+            <section className={`panel library-panel is-active${authoringMemory ? ' is-authoring' : ''}`}>
+              {!authoringMemory ? (
+                <>
+                  <div className="library-tabs">
+                    <div className="segmented-control" aria-label="Library content">
+                      {(['memories', 'resources'] as const).map(tab => (
                         <button
-                          className={memoryViewMode === 'preview' ? 'is-active' : undefined}
-                          disabled={!selectedIsMarkdown || selectedIsDir || controlsBlocked}
-                          onClick={() => setMemoryViewMode('preview')}
+                          key={tab}
+                          aria-pressed={navTreeTab === tab}
+                          className={navTreeTab === tab ? 'is-active' : undefined}
+                          disabled={controlsBlocked}
+                          onClick={() => {
+                            void switchLibrary(tab);
+                          }}
                         >
-                          Preview
+                          {tab === 'memories' ? <Brain aria-hidden="true" /> : <Files aria-hidden="true" />}
+                          {tab === 'memories' ? 'Memories' : 'Resources'}
                         </button>
-                        <button
-                          className={memoryViewMode === 'edit' ? 'is-active' : undefined}
-                          disabled={selectedIsDir || selectedIsResource || controlsBlocked}
-                          onClick={() => setMemoryViewMode('edit')}
-                        >
-                          Edit
-                        </button>
-                      </div>
-                      <button disabled={controlsBlocked} onClick={() => void newMemory()}>
-                        New
-                      </button>
-                      <button
-                        disabled={selectedIsDir || selectedIsResource || controlsBlocked}
-                        onClick={() => void (memory ? saveCurrent() : saveNew())}
-                      >
-                        Save
-                      </button>
-                      <button disabled={!canMutate || controlsBlocked} onClick={() => void archiveCurrent()}>
-                        Archive
-                      </button>
-                      <button
-                        disabled={
-                          !canMutate ||
-                          selectedNode?.isShared === true ||
-                          !canPublishMemoryFromManager(selectedUri, memory?.record?.metadata) ||
-                          controlsBlocked
-                        }
-                        onClick={() => void publishCurrent()}
-                      >
-                        Publish
-                      </button>
-                      <button
-                        disabled={!canMutate || selectedNode?.isShared !== true || controlsBlocked}
-                        onClick={() => void unpublishCurrent()}
-                      >
-                        Unpublish
-                      </button>
-                      <button disabled={!canMutate || controlsBlocked} onClick={() => void moveCurrent()}>
-                        Move
-                      </button>
-                      <button
-                        className="danger"
-                        disabled={!canRemoveFolder || controlsBlocked}
-                        onClick={() => void removeFolderCurrent()}
-                        title={selectedNode?.isShared ? 'Use Sharing to remove shared folders' : undefined}
-                      >
-                        Remove Folder
-                      </button>
-                      <button
-                        className="danger"
-                        disabled={!canMutate || controlsBlocked}
-                        onClick={() => void forgetCurrent()}
-                      >
-                        Forget
-                      </button>
+                      ))}
                     </div>
                   </div>
-                  {pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
-                    <div className="manager-draft-reconcile" role="alert">
-                      <p>The record changed while Manager was disconnected. Your unsaved draft is preserved.</p>
-                      <details>
-                        <summary>Review the reloaded record</summary>
-                        <pre>{pendingCanonical.content}</pre>
-                      </details>
-                      <div className="action-row">
-                        <button
-                          onClick={() => {
-                            draftRef.current = {...draftRef.current!, base: pendingCanonical.content};
-                            setPendingCanonical(undefined);
-                          }}
-                        >
-                          Keep my draft
-                        </button>
-                        <button
-                          onClick={() => {
-                            draftRef.current = undefined;
-                            showMemory(pendingCanonical);
-                          }}
-                        >
-                          Load reloaded record
-                        </button>
+                  <div className="library-toolbar">
+                    {navTreeTab === 'memories' ? (
+                      <div className="library-scope">
+                        <div className="segmented-control" aria-label="Memory scope">
+                          <button
+                            className={libraryScope === 'local' ? 'is-active' : undefined}
+                            disabled={controlsBlocked}
+                            aria-pressed={libraryScope === 'local'}
+                            onClick={() => {
+                              void switchLibrary('memories', 'local');
+                            }}
+                          >
+                            <HardDrive aria-hidden="true" />
+                            Local
+                          </button>
+                          <button
+                            className={libraryScope !== 'local' ? 'is-active' : undefined}
+                            disabled={controlsBlocked || shares.length === 0}
+                            aria-pressed={libraryScope !== 'local'}
+                            onClick={() => {
+                              void switchLibrary('memories', `team:${shares[0]?.name ?? ''}`);
+                            }}
+                          >
+                            <Users aria-hidden="true" />
+                            Team
+                          </button>
+                        </div>
+                        {libraryScope !== 'local' ? (
+                          <select
+                            aria-label="Shared team"
+                            value={libraryScope.slice(5)}
+                            disabled={controlsBlocked}
+                            onChange={event => {
+                              void switchLibrary('memories', `team:${event.target.value}`);
+                            }}
+                          >
+                            {shares.map(share => (
+                              <option key={share.name} value={share.name}>
+                                {share.name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
                       </div>
+                    ) : (
+                      <span className="muted">Indexed source material · read-only</span>
+                    )}
+                    <label className="library-search">
+                      <Search aria-hidden="true" />
+                      <input
+                        type="search"
+                        aria-label="Filter Library"
+                        placeholder={navTreeTab === 'memories' ? 'Filter memories' : 'Filter resources'}
+                        value={filter}
+                        disabled={controlsBlocked}
+                        onChange={event => setFilter(event.target.value)}
+                      />
+                    </label>
+                    <WorkspaceUtilities
+                      panel="memory"
+                      project={workspaceProject}
+                      projects={projectOptions}
+                      onChanged={refreshAll}
+                      extraActions={[
+                        {
+                          label: showSystem ? 'Hide system files' : 'Show system files',
+                          icon: <Settings2 />,
+                          onSelect: () => setShowSystem(value => !value),
+                        },
+                        {
+                          label: 'Consolidate memories…',
+                          icon: <ListChecks />,
+                          disabled: navTreeTab !== 'memories',
+                          onSelect: () => setShowLibraryDetails(true),
+                        },
+                      ]}
+                    />
+                  </div>
+                  {selectedList.length > 0 ? (
+                    <div className="selection-bar" aria-live="polite">
+                      <span>
+                        <strong>{selectedList.length}</strong> memories selected · includes hidden descendants
+                      </span>
+                      {libraryScope !== 'local' ? (
+                        <button disabled={controlsBlocked} onClick={() => void bulk('unpublish')}>
+                          <Download />
+                          Unpublish…
+                        </button>
+                      ) : (
+                        <>
+                          <button disabled={controlsBlocked} onClick={() => void bulk('archive')}>
+                            Archive
+                          </button>
+                          <button disabled={controlsBlocked || !canBulkPublish} onClick={() => void bulk('publish')}>
+                            Publish…
+                          </button>
+                          <button
+                            className="danger"
+                            disabled={controlsBlocked || libraryScope !== 'local'}
+                            onClick={() => void bulk('forget')}
+                          >
+                            Forget…
+                          </button>
+                        </>
+                      )}
+                      <button disabled={controlsBlocked} onClick={() => setSelectedUris(new Set())}>
+                        Clear
+                      </button>
                     </div>
                   ) : null}
-                  {selectedUri && !selectedIsDir && !selectedIsReadable ? (
-                    <div className="manager-record-unavailable" role="status">
-                      Record unavailable until it loads.
-                    </div>
-                  ) : memoryViewMode === 'preview' && selectedIsMarkdown && !selectedIsDir ? (
-                    <MarkdownViewer markdown={markdownPreview} />
-                  ) : (
-                    <textarea
-                      disabled={selectedIsDir || selectedIsResource || controlsBlocked}
-                      onChange={event => {
-                        const next = event.target.value;
-                        if (selectedUri && memory)
-                          draftRef.current = {base: memory.content, text: next, uri: selectedUri};
-                        setContent(next);
-                      }}
-                      placeholder={
-                        selectedIsDir ? 'Folder selected' : selectedIsResource ? 'Resource content' : 'Memory content'
-                      }
-                      spellCheck={false}
-                      value={content}
-                    />
-                  )}
-                </section>
-
-                <aside className="inspector">
-                  <h3>Metadata</h3>
-                  {selectedUri && !selectedIsReadable && !selectedIsDir ? (
-                    <p className="muted">Metadata unavailable until the selected record loads.</p>
-                  ) : (
-                    <>
-                      <TargetFields
-                        disabled={metadataFieldsDisabled}
-                        onChange={setTarget}
-                        openSelect={openSelect}
-                        projectOptions={projectOptions}
-                        setOpenSelect={setOpenSelect}
-                        target={target}
-                      />
-                      {metadataFieldsDisabled ? (
-                        <p className="muted">Metadata is read-only for existing entries.</p>
-                      ) : null}
-                      <Metadata metadata={memory?.record?.metadata} node={memory?.node ?? selectedNode} />
-                    </>
-                  )}
-                  <h3>Consolidate</h3>
-                  <div className="field-row select-row">
-                    <DropdownSelect
-                      id="agent"
-                      label="Agent"
-                      onChange={value => void (isAgentClient(value) && setAgent(value))}
-                      openSelect={openSelect}
-                      options={(state?.agents ?? []).map(item => ({
-                        disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
-                        label: `${item.label}${item.available ? '' : ' unavailable'}`,
-                        value: item.id,
-                      }))}
-                      setOpenSelect={setOpenSelect}
-                      value={agent}
-                    />
-                    <button
-                      disabled={consolidationBusy || controlsBlocked || !canDraftConsolidation}
-                      onClick={() => void draftConsolidation()}
-                    >
-                      {draftingConsolidation ? 'Drafting...' : 'Draft'}
-                    </button>
-                  </div>
-                  <textarea
-                    aria-busy={consolidationBusy}
-                    placeholder={draftingConsolidation ? 'Generating draft...' : 'Draft preview'}
-                    readOnly={consolidationBusy || controlsBlocked}
-                    value={draft}
-                    onChange={event => setDraft(event.target.value)}
-                    spellCheck={false}
-                  />
+                </>
+              ) : (
+                <div className="library-editor-navigation">
                   <button
-                    disabled={consolidationBusy || controlsBlocked || !jobId || !draft}
-                    onClick={() => void applyConsolidation()}
+                    className="quiet-button"
+                    onClick={() => {
+                      if (memory) setMemoryViewMode('preview');
+                      else void switchLibrary('memories');
+                    }}
                   >
-                    {applyingConsolidation ? 'Applying...' : 'Apply draft'}
+                    <ArrowLeft aria-hidden="true" />
+                    Back to Library
                   </button>
-                </aside>
-              </div>
-            </div>
-          </section>
-        ) : null}
-
-        {panel === 'shares' ? (
-          <SharesPanel
-            createShare={() =>
-              void runAction('Created share', () =>
-                api('/api/shares/init', {confirm: true, remoteUrl: shareRemote, team: shareTeam}),
-              ).then(loadShares)
-            }
-            keepShareFiles={keepShareFiles}
-            loadShares={() => void loadShares()}
-            preserveShare={preserveShare}
-            removeShare={() => void removeSelectedShare()}
-            renameShare={() =>
-              void runAction('Renamed share', () =>
-                api('/api/shares/rename', {confirm: true, team: selectedShare, to: renameShareTo}),
-              ).then(loadShares)
-            }
-            renameShareTo={renameShareTo}
-            selectedShare={selectedShare}
-            setKeepShareFiles={setKeepShareFiles}
-            setPreserveShare={setPreserveShare}
-            setRenameShareTo={setRenameShareTo}
-            setSelectedShare={setSelectedShare}
-            setShareNewUrl={setShareNewUrl}
-            setShareRemote={setShareRemote}
-            setShareTeam={setShareTeam}
-            shareNewUrl={shareNewUrl}
-            shareRemote={shareRemote}
-            shares={shares}
-            shareTeam={shareTeam}
-            setShareUrl={() =>
-              void runAction('Updated share URL', () =>
-                api('/api/shares/set-url', {confirm: true, remoteUrl: shareNewUrl, team: selectedShare}),
-              ).then(loadShares)
-            }
-            syncShare={() =>
-              void runAction('Synced share', () => api('/api/shares/sync', {team: selectedShare})).then(loadShares)
-            }
-          />
-        ) : null}
-
-        {panel === 'doctor' ? (
-          <section aria-busy={doctorBusy} className="panel is-active health-panel">
-            <div className="pane-head">
-              <h2>Health and Doctor</h2>
-              <div className="action-row">
-                <button disabled={doctorBusy} onClick={() => void loadDoctor()}>
-                  {doctorAction === 'Running doctor' ? 'Running...' : 'Run Doctor'}
-                </button>
-                <button
-                  disabled={doctorBusy}
-                  onClick={() =>
-                    void runDoctorAction('Runtime ready', 'Checking runtime', () => api('/api/doctor/start', {}))
-                  }
-                >
-                  Verify Runtime
-                </button>
-                <button
-                  disabled={doctorBusy}
-                  onClick={() =>
-                    void runDoctorAction('Repair dry run complete', 'Running repair dry run', () =>
-                      api('/api/doctor/repair-dry-run', {}),
-                    )
-                  }
-                >
-                  Repair Dry Run
-                </button>
-                <button disabled={doctorBusy} onClick={() => void repairThreadnote()}>
-                  Repair
-                </button>
-              </div>
-            </div>
-            {doctorBusyMessage ? (
-              <div aria-live="polite" className="loading-row" role="status">
-                <span className="spinner" aria-hidden="true" />
-                <span>{doctorBusyMessage}</span>
-              </div>
-            ) : null}
-            {doctorOutput ? <pre className="output doctor-output">{doctorOutput}</pre> : null}
-            <div className="checks">
-              {doctor.map(check => (
-                <div className="check-item" key={check.name}>
-                  <span className={`badge ${check.status}`}>{check.status.toUpperCase()}</span>
-                  <strong>{check.name}</strong>
-                  <p>{check.detail}</p>
+                  <span>
+                    <Pencil aria-hidden="true" />
+                    Written by you
+                  </span>
                 </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-
-        {panel === 'tools' ? (
-          <section className="panel is-active">
-            <div className="split">
-              <section>
-                <h2>Recall</h2>
-                <div className="field-row">
-                  <input
-                    value={recallQuery}
-                    onChange={event => setRecallQuery(event.target.value)}
-                    placeholder="Search memories and seeded resources"
-                  />
-                  <ManagerAutocompleteInput
-                    allowCreate={false}
-                    onChange={setRecallProject}
-                    options={projectOptions}
-                    value={recallProject}
-                    placeholder="project scope (blank = all)"
-                  />
-                  <button
-                    onClick={() =>
-                      void runAction('Recall complete', () =>
-                        api<{readonly output: string}>('/api/recall', {
-                          query: recallQuery,
-                          ...(recallProject.trim() ? {project: recallProject.trim()} : {}),
-                        }),
-                      )
-                    }
-                  >
-                    Search
-                  </button>
-                </div>
-                <h3>Read URI</h3>
-                <div className="field-row">
-                  <input
-                    value={readUri}
-                    onChange={event => setReadUri(event.target.value)}
-                    placeholder="threadnote://..."
-                  />
-                  <button disabled={!readUri.trim()} onClick={() => void readContext(readUri)}>
-                    Read
-                  </button>
-                </div>
-                {outputUris.length > 0 ? (
-                  <div className="uri-list">
-                    <h3>URIs in Output</h3>
-                    {outputUris.map(uri => (
-                      <button className="uri-button" key={uri} onClick={() => void readContext(uri)} title={uri}>
-                        {uri}
-                      </button>
-                    ))}
+              )}
+              <div className="library-workspace">
+                {selectedUri && !selectedIsDir && !selectedIsReadable ? (
+                  <div className="library-record-status" role="status">
+                    {availability.selection === 'failed'
+                      ? 'Could not load record. Refresh to retry.'
+                      : 'Loading memory…'}
                   </div>
                 ) : null}
-                <pre className="output">{output}</pre>
-              </section>
-              <aside className="form-pane">
-                <section className="form-section">
-                  <h3>Hygiene</h3>
-                  <ManagerAutocompleteInput
-                    allowCreate={false}
-                    onChange={setCompactProject}
-                    options={projectOptions}
-                    value={compactProject}
-                    placeholder="project"
+                {!authoringMemory ? (
+                  <LibraryExplorer
+                    scopeLabel={libraryScope === 'local' ? 'Local' : libraryScope.slice(5)}
+                    busy={bulkAction !== undefined}
+                    controlsBlocked={controlsBlocked}
+                    filter={filter}
+                    navTreeTab={navTreeTab}
+                    onFilter={setFilter}
+                    onRefresh={() => void refreshAll()}
+                    onSelect={uri => void selectTreeUri(uri)}
+                    actions={itemActions}
+                    onShowSystem={setShowSystem}
+                    onTab={setNavTreeTab}
+                    onToggleSelection={(node, checked) =>
+                      setSelectedUris(current => toggleMemorySelection(current, node, checked))
+                    }
+                    resourceTree={resourceTree}
+                    selectedUri={selectedUri}
+                    selectedUris={selectedUris}
+                    showSystem={showSystem}
+                    tree={scopedTree}
                   />
-                  <input
-                    value={compactTopic}
-                    onChange={event => setCompactTopic(event.target.value)}
-                    placeholder="topic"
-                  />
-                  <div className="button-row">
-                    <button
-                      onClick={() =>
-                        void runAction('Compact dry run complete', () =>
-                          api<{readonly output: string}>('/api/compact', {
-                            project: compactProject,
-                            topic: compactTopic,
-                          }),
-                        )
-                      }
+                ) : null}
+                <div className="content-grid">
+                  <section className="editor-pane">
+                    <div className="pane-head reader-head">
+                      <span className="reader-location">
+                        {authoringMemory
+                          ? creatingMemory
+                            ? 'New memory · Unsaved'
+                            : selectedNode
+                              ? libraryItemTitle(selectedNode)
+                              : 'Memory draft'
+                          : selectedNode
+                            ? selectedNode.relativePath.split('/').slice(0, -1).filter(Boolean).slice(-1).join(' / ') ||
+                              'Library'
+                            : 'Library'}
+                      </span>
+                      <div className="action-row">
+                        {selectedUri && !selectedIsDir && !selectedIsResource ? (
+                          <button
+                            disabled={selectedNode?.isSystem || controlsBlocked}
+                            onClick={() => setMemoryViewMode(memoryViewMode === 'preview' ? 'edit' : 'preview')}
+                          >
+                            {authoringMemory ? <Files aria-hidden="true" /> : <Pencil aria-hidden="true" />}
+                            {authoringMemory ? 'Preview' : 'Edit'}
+                          </button>
+                        ) : null}
+                        {selectedNode ? (
+                          <button
+                            className="quiet-icon"
+                            aria-label="Memory details"
+                            disabled={!selectedIsReadable && !selectedIsDir}
+                            onClick={() => setShowLibraryDetails(true)}
+                          >
+                            <Info aria-hidden="true" />
+                          </button>
+                        ) : null}
+                        {selectedNode && !selectedNode.isSystem ? (
+                          <ActionMenu
+                            label={`Actions for ${selectedNode.name}`}
+                            disabled={controlsBlocked}
+                            actions={[
+                              ...itemActions(selectedNode),
+                              ...(!selectedNode.isDir && !selectedIsResource
+                                ? [{label: 'Move…', disabled: !canMutate, onSelect: () => void moveCurrent()}]
+                                : []),
+                            ]}
+                          />
+                        ) : null}
+                      </div>
+                    </div>
+                    {pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
+                      <div className="manager-draft-reconcile" role="alert">
+                        <p>The record changed while Manager was disconnected. Your unsaved draft is preserved.</p>
+                        <details>
+                          <summary>Review the reloaded record</summary>
+                          <pre>{pendingCanonical.content}</pre>
+                        </details>
+                        <div className="action-row">
+                          <button
+                            onClick={() => {
+                              draftRef.current = {...draftRef.current!, base: pendingCanonical.content};
+                              setPendingCanonical(undefined);
+                            }}
+                          >
+                            Keep my draft
+                          </button>
+                          <button
+                            onClick={() => {
+                              draftRef.current = undefined;
+                              showMemory(pendingCanonical);
+                            }}
+                          >
+                            Load reloaded record
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedUri && !selectedIsDir && !selectedIsReadable ? (
+                      <div className="manager-record-unavailable" role="status">
+                        Record unavailable until it loads.
+                      </div>
+                    ) : !selectedUri && !creatingMemory ? (
+                      <div className="library-empty">
+                        <h3>
+                          {navTreeTab === 'resources'
+                            ? 'Browse your source material'
+                            : libraryScope === 'local'
+                              ? 'Your private memory library'
+                              : 'Shared team knowledge'}
+                        </h3>
+                        <p>
+                          {navTreeTab === 'resources'
+                            ? 'Choose a resource in the explorer to inspect its indexed content.'
+                            : 'Choose a memory to read, or capture something new.'}
+                        </p>
+                        {navTreeTab === 'memories' ? (
+                          <button onClick={() => void newMemory()}>New memory</button>
+                        ) : null}
+                      </div>
+                    ) : memoryViewMode === 'preview' && selectedIsMarkdown && !selectedIsDir ? (
+                      <LibraryArticle
+                        node={selectedNode!}
+                        metadata={memory?.record?.metadata}
+                        markdown={markdownPreview}
+                        resource={selectedIsResource}
+                      />
+                    ) : selectedIsDir ? (
+                      <div className="library-empty">
+                        <h3>{selectedNode?.name}</h3>
+                        <p>
+                          {selectedNode ? countFiles(selectedNode) : 0} files in this folder. Select its checkbox to
+                          include all descendant memories.
+                        </p>
+                      </div>
+                    ) : selectedIsResource ? (
+                      <pre className="resource-content">{content}</pre>
+                    ) : (
+                      <>
+                        {!memory ? (
+                          <label className="memory-title-field">
+                            Title
+                            <input
+                              aria-label="Memory title"
+                              placeholder="Give this memory a name"
+                              value={target.topic}
+                              disabled={controlsBlocked}
+                              onChange={event => setTarget(current => ({...current, topic: event.target.value}))}
+                            />
+                          </label>
+                        ) : null}
+                        <MemoryEditor
+                          key={`${selectedUri ?? 'new'}:${editorRevision}`}
+                          content={content}
+                          disabled={controlsBlocked}
+                          onChange={next => {
+                            if (selectedUri && memory)
+                              draftRef.current = {base: memory.content, text: next, uri: selectedUri};
+                            setContent(next);
+                          }}
+                        />
+                      </>
+                    )}
+                  </section>
+
+                  {creatingMemory ? libraryDetails : null}
+                  {showLibraryDetails ? (
+                    <DetailModal
+                      title={selectedIsResource ? 'Source details' : 'Memory details'}
+                      onClose={() => setShowLibraryDetails(false)}
                     >
-                      Dry Run
-                    </button>
-                    <button onClick={() => void applyCompactPlan()}>Apply</button>
-                  </div>
-                </section>
-                <section className="form-section">
-                  <h3>Import / Export</h3>
-                  <input
-                    value={packPath}
-                    onChange={event => setPackPath(event.target.value)}
-                    placeholder=".ovpack path"
-                  />
-                  <div className="button-row">
-                    <button
-                      onClick={() => void runAction('Export complete', () => api('/api/export-pack', {path: packPath}))}
-                    >
-                      Export
-                    </button>
-                    <button onClick={() => void importPack()}>Import</button>
-                  </div>
-                </section>
-                <section className="form-section">
-                  <h3>Seed</h3>
-                  <div className="button-row">
-                    <button onClick={() => void seedThreadnote(false)}>Seed</button>
-                    <button onClick={() => void seedThreadnote(true)}>Seed Skills</button>
-                  </div>
-                </section>
-              </aside>
-            </div>
-          </section>
-        ) : null}
+                      {libraryDetails}
+                      <p className="uri-line">{selectedUri}</p>
+                    </DetailModal>
+                  ) : null}
+                </div>
+              </div>
+              {output ? (
+                <details className="library-result">
+                  <summary>Last operation</summary>
+                  <pre className="output">{output}</pre>
+                </details>
+              ) : null}
+            </section>
+          ) : null}
+
+          {panel === 'shares' ? (
+            <SharingPanel
+              shares={shares}
+              onChanged={refreshAll}
+              onBrowse={team => {
+                void switchLibrary('memories', `team:${team}`).then(() => setPanel('memory'));
+              }}
+            />
+          ) : null}
+
+          {panel === 'doctor' ? (
+            <RuntimeHealthPanel
+              checks={doctor}
+              busy={doctorAction}
+              output={doctorOutput}
+              onVerify={() =>
+                void runDoctorAction('Runtime ready', 'Checking runtime', () => api('/api/doctor/start', {}))
+              }
+              onPreviewRepair={() =>
+                runDoctorAction('Repair preview complete', 'Preparing repair preview', () =>
+                  api('/api/doctor/repair-dry-run', {}),
+                )
+              }
+              onRepair={() => void repairThreadnote()}
+              onRefresh={() => void refreshAll()}
+              version={state?.version}
+              latestVersion={state?.latestVersion}
+              updateAvailable={state?.updateAvailable}
+              policy={state?.autoUpdate.effectivePolicy}
+              updateNotice={updateIndicator ? `${updateIndicator.label} · ${updateIndicator.detail}` : undefined}
+            />
+          ) : null}
+        </div>
+        <footer className="workspace-footer">
+          <span>Threadnote Manager · Local workspace</span>
+          <span>{state ? `v${state.version}` : 'Connecting…'}</span>
+        </footer>
       </main>
       {busyOverlayMessage ? (
         <div aria-live="polite" className="busy-overlay" role="status">

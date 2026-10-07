@@ -51,10 +51,17 @@ export function orderManagerProcessesByAttention<T extends ManageableManagerProc
 
 function attentionRank(process: ManageableManagerProcess): number {
   if (process.role === 'legacy') return 2;
-  if (process.activityRole !== undefined || (process.currentOperation !== undefined && !isBaselineOperation(process))) {
+  if (managerProcessIsActive(process)) {
     return 0;
   }
   return 1;
+}
+
+export function managerProcessIsActive(process: ManageableManagerProcess): boolean {
+  return (
+    process.role !== 'legacy' &&
+    (process.activityRole !== undefined || (process.currentOperation !== undefined && !isBaselineOperation(process)))
+  );
 }
 
 function isBaselineOperation(process: ManageableManagerProcess): boolean {

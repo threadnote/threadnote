@@ -1,3 +1,5 @@
+import {ArrowLeft, FolderGit2, Plus} from 'lucide-react';
+import {PageActions} from './workspace.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
@@ -33,6 +35,7 @@ export interface ManifestProjectsPanelProps {
 
 export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.ReactElement {
   const dialogs = useManagerDialogs();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedName, setSelectedName] = useState('');
   const [selectedProject, setSelectedProject] = useState<ManagerManifestProject>();
   const [draft, setDraft] = useState<ProjectDraft>();
@@ -266,173 +269,225 @@ export function ManifestProjectsPanel(props: ManifestProjectsPanelProps): React.
   const projectsReadOnly = props.catalog?.projectsReadOnly ?? true;
 
   return (
-    <div
-      aria-labelledby="manifest-management-tab-projects"
-      className="worksets-workspace projects-workspace"
-      id="manifest-management-panel-projects"
-      role="tabpanel"
-    >
-      <aside
-        aria-hidden={draft ? true : undefined}
-        aria-label="Manifest projects"
-        className="worksets-catalog"
-        inert={draft ? true : undefined}
-      >
-        <div className="worksets-section-head">
-          <div>
-            <p className="eyebrow">Seed manifest</p>
-            <h2>Projects</h2>
-          </div>
-          <button
-            aria-label="Create project"
-            disabled={!props.catalog || projectsReadOnly}
-            onClick={openCreate}
-            title="Create project"
-            type="button"
-          >
-            +
-          </button>
-        </div>
-        <ProjectEditabilityBoundary catalog={props.catalog} />
-        {props.catalogError ? <p className="worksets-error">{props.catalogError}</p> : null}
-        <div className="worksets-definition-list projects-list">
-          {props.catalog?.projects.map(project => (
-            <button
-              aria-current={selectedName.toLowerCase() === project.name.toLowerCase() ? 'true' : undefined}
-              className={selectedName.toLowerCase() === project.name.toLowerCase() ? 'is-selected' : undefined}
-              key={project.name}
-              onClick={() => setSelectedName(project.name)}
-              type="button"
-            >
-              <strong>{project.name}</strong>
-              <span>{managerManifestProjectLocation(project)}</span>
-              <span>
-                {project.worksetCount} {project.worksetCount === 1 ? 'Workset' : 'Worksets'}
-              </span>
-            </button>
-          ))}
-          {props.catalog && props.catalog.projects.length === 0 ? <p>No manifest projects yet.</p> : null}
-        </div>
-        <button className="quiet-button" onClick={() => void props.onRefreshCatalog()} type="button">
-          Refresh projects
+    <>
+      <PageActions>
+        <button
+          className="primary"
+          aria-label="Create project"
+          disabled={!!draft || !props.catalog || projectsReadOnly}
+          onClick={openCreate}
+        >
+          <Plus />
+          Add project
         </button>
-      </aside>
-
-      <section aria-hidden={draft ? true : undefined} className="worksets-main" inert={draft ? true : undefined}>
-        {notice ? (
-          <p className="worksets-notice" role="status">
-            {notice}
-          </p>
-        ) : null}
-        {selectedSummary ? (
-          <>
-            <header className="worksets-header">
-              <div>
-                <p className="eyebrow">Manifest repository</p>
-                <h2>{selectedSummary.name}</h2>
-                <p>{managerManifestProjectLocation(selectedSummary)}</p>
-              </div>
-              <div className="button-row">
-                <button disabled={projectsReadOnly || !selectedProject || busy} onClick={openEdit} type="button">
-                  Edit project
-                </button>
-                <button disabled={!selectedProject || busy} onClick={() => void previewScope()} type="button">
-                  {scopePreviewLoading ? 'Previewing graph scope…' : 'Preview graph scope'}
-                </button>
-                <button
-                  className="danger"
-                  disabled={projectsReadOnly || busy}
-                  onClick={() => void deleteProject(selectedSummary)}
-                  type="button"
-                >
-                  Delete project
-                </button>
-              </div>
-            </header>
-            {detailError ? (
-              <p className="worksets-error" role="alert">
-                {detailError}
-              </p>
-            ) : null}
-            <section aria-label="Project manifest configuration" className="worksets-card project-detail-card">
-              <div className="worksets-metrics">
-                <Metric label="Worksets" value={String(selectedSummary.worksetCount)} />
-                <Metric label="Branch" value={branchLabel(selectedSummary)} />
-                <Metric label="Folder" value={selectedSummary.folder} />
-                <Metric label="Seed patterns" value={String(selectedProject?.seed.length ?? 0)} />
-              </div>
-              {loading ? <p className="worksets-muted">Loading authoritative project fields…</p> : null}
-              {selectedProject ? (
-                <dl className="project-manifest-fields">
-                  <div>
-                    <dt>Configured path</dt>
-                    <dd>{selectedProject.path}</dd>
-                  </div>
-                  <div>
-                    <dt>Resource URI</dt>
-                    <dd>{selectedProject.uri}</dd>
-                  </div>
-                  <div>
-                    <dt>Seed patterns</dt>
-                    <dd>{selectedProject.seed.length > 0 ? selectedProject.seed.join(', ') : 'No seed patterns'}</dd>
-                  </div>
-                  <div>
-                    <dt>Graph scope</dt>
-                    <dd>
-                      {selectedProject.graph === undefined
-                        ? 'Full repository (no optional scope configured)'
-                        : `${selectedProject.graph.roots.join(', ')} · dependency closure`}
-                    </dd>
-                  </div>
-                </dl>
-              ) : null}
-              {scopePreviewLoading ? (
-                <p className="worksets-muted" role="status">
-                  Previewing graph scope…
-                </p>
-              ) : null}
-              {scopePreviewError ? (
-                <p className="worksets-error" role="alert">
-                  Couldn&apos;t preview graph scope: {scopePreviewError} Review the project path and graph roots, then
-                  try again.
-                </p>
-              ) : null}
-              {scopePreview ? <ProjectScopePreview preview={scopePreview} /> : null}
-            </section>
-          </>
-        ) : (
-          <div className="worksets-empty">
-            <h2>Add your first manifest project</h2>
-            <p>
-              A Workset needs at least one project. Add a repository path, resource URI, and optional seed patterns.
+      </PageActions>
+      {!detailsOpen && !draft ? (
+        <div className="workspace-stack projects-overview">
+          {notice ? (
+            <p className="workspace-note" role="status">
+              {notice}
             </p>
-            <button disabled={!props.catalog || projectsReadOnly} onClick={openCreate} type="button">
-              Add first project
-            </button>
-            {props.catalog?.definitions.length ? (
-              <button className="quiet-button" onClick={props.onSwitchToWorksets} type="button">
-                View unresolved Worksets
-              </button>
-            ) : null}
-          </div>
-        )}
-      </section>
-
-      {draft && props.catalog ? (
-        <ProjectEditor
-          busy={busy}
-          draft={draft}
-          notice={notice}
-          renameAllowed={!props.catalog.readOnly || (selectedSummary?.worksetCount ?? 0) === 0}
-          onCancel={() => {
-            setDraft(undefined);
-            setNotice('');
-          }}
-          onChange={setDraft}
-          onSave={() => void saveProject()}
-        />
+          ) : null}
+          <ProjectEditabilityBoundary catalog={props.catalog} />
+          {props.catalogError ? <p role="alert">{props.catalogError}</p> : null}
+          {props.catalog?.projects.map(project => (
+            <section className="workspace-card" key={project.name}>
+              <div className="workspace-row">
+                <FolderGit2 />
+                <div className="row-copy">
+                  <strong>{project.name}</strong>
+                  <p>{managerManifestProjectLocation(project)}</p>
+                </div>
+                <span className="workspace-status neutral">{project.worksetCount} worksets</span>
+                <button
+                  onClick={() => {
+                    setSelectedName(project.name);
+                    setDetailsOpen(true);
+                  }}
+                >
+                  Project settings
+                </button>
+              </div>
+            </section>
+          ))}
+          {props.catalog?.projects.length === 0 ? (
+            <section className="workspace-card">
+              <div className="workspace-pad">
+                <h3>Add your first project</h3>
+                <p>Connect a repository to index source material and use it in a workset.</p>
+                <button disabled={projectsReadOnly} onClick={openCreate}>
+                  Add first project
+                </button>
+              </div>
+            </section>
+          ) : null}
+        </div>
       ) : null}
-    </div>
+      {detailsOpen && !draft ? (
+        <button className="back-to-library" onClick={() => setDetailsOpen(false)}>
+          <ArrowLeft />
+          All projects
+        </button>
+      ) : null}
+      <div
+        hidden={!detailsOpen && !draft}
+        aria-labelledby="manifest-management-tab-projects"
+        className="worksets-workspace projects-workspace"
+        id="manifest-management-panel-projects"
+        role="tabpanel"
+      >
+        <aside
+          aria-hidden={draft ? true : undefined}
+          aria-label="Manifest projects"
+          className="worksets-catalog"
+          inert={draft ? true : undefined}
+        >
+          <div className="worksets-section-head">
+            <div>
+              <h3>Projects</h3>
+            </div>
+          </div>
+          <ProjectEditabilityBoundary catalog={props.catalog} />
+          {props.catalogError ? <p className="worksets-error">{props.catalogError}</p> : null}
+          <div className="worksets-definition-list projects-list">
+            {props.catalog?.projects.map(project => (
+              <button
+                aria-current={selectedName.toLowerCase() === project.name.toLowerCase() ? 'true' : undefined}
+                className={selectedName.toLowerCase() === project.name.toLowerCase() ? 'is-selected' : undefined}
+                key={project.name}
+                onClick={() => setSelectedName(project.name)}
+                type="button"
+              >
+                <strong>{project.name}</strong>
+                <span>{managerManifestProjectLocation(project)}</span>
+                <span>
+                  {project.worksetCount} {project.worksetCount === 1 ? 'Workset' : 'Worksets'}
+                </span>
+              </button>
+            ))}
+            {props.catalog && props.catalog.projects.length === 0 ? <p>No manifest projects yet.</p> : null}
+          </div>
+          <button className="quiet-button" onClick={() => void props.onRefreshCatalog()} type="button">
+            Refresh projects
+          </button>
+        </aside>
+
+        <section aria-hidden={draft ? true : undefined} className="worksets-main" inert={draft ? true : undefined}>
+          {notice ? (
+            <p className="worksets-notice" role="status">
+              {notice}
+            </p>
+          ) : null}
+          {selectedSummary ? (
+            <>
+              <header className="worksets-header">
+                <div>
+                  <p className="eyebrow">Manifest repository</p>
+                  <h2>{selectedSummary.name}</h2>
+                  <p>{managerManifestProjectLocation(selectedSummary)}</p>
+                </div>
+                <div className="button-row">
+                  <button disabled={projectsReadOnly || !selectedProject || busy} onClick={openEdit} type="button">
+                    Edit project
+                  </button>
+                  <button disabled={!selectedProject || busy} onClick={() => void previewScope()} type="button">
+                    {scopePreviewLoading ? 'Previewing graph scope…' : 'Preview graph scope'}
+                  </button>
+                  <button
+                    className="danger"
+                    disabled={projectsReadOnly || busy}
+                    onClick={() => void deleteProject(selectedSummary)}
+                    type="button"
+                  >
+                    Delete project
+                  </button>
+                </div>
+              </header>
+              {detailError ? (
+                <p className="worksets-error" role="alert">
+                  {detailError}
+                </p>
+              ) : null}
+              <section aria-label="Project manifest configuration" className="worksets-card project-detail-card">
+                <div className="worksets-metrics">
+                  <Metric label="Worksets" value={String(selectedSummary.worksetCount)} />
+                  <Metric label="Branch" value={branchLabel(selectedSummary)} />
+                  <Metric label="Folder" value={selectedSummary.folder} />
+                  <Metric label="Seed patterns" value={String(selectedProject?.seed.length ?? 0)} />
+                </div>
+                {loading ? <p className="worksets-muted">Loading authoritative project fields…</p> : null}
+                {selectedProject ? (
+                  <dl className="project-manifest-fields">
+                    <div>
+                      <dt>Configured path</dt>
+                      <dd>{selectedProject.path}</dd>
+                    </div>
+                    <div>
+                      <dt>Resource URI</dt>
+                      <dd>{selectedProject.uri}</dd>
+                    </div>
+                    <div>
+                      <dt>Seed patterns</dt>
+                      <dd>{selectedProject.seed.length > 0 ? selectedProject.seed.join(', ') : 'No seed patterns'}</dd>
+                    </div>
+                    <div>
+                      <dt>Graph scope</dt>
+                      <dd>
+                        {selectedProject.graph === undefined
+                          ? 'Full repository (no optional scope configured)'
+                          : `${selectedProject.graph.roots.join(', ')} · dependency closure`}
+                      </dd>
+                    </div>
+                  </dl>
+                ) : null}
+                {scopePreviewLoading ? (
+                  <p className="worksets-muted" role="status">
+                    Previewing graph scope…
+                  </p>
+                ) : null}
+                {scopePreviewError ? (
+                  <p className="worksets-error" role="alert">
+                    Couldn&apos;t preview graph scope: {scopePreviewError} Review the project path and graph roots, then
+                    try again.
+                  </p>
+                ) : null}
+                {scopePreview ? <ProjectScopePreview preview={scopePreview} /> : null}
+              </section>
+            </>
+          ) : (
+            <div className="worksets-empty">
+              <h2>Add your first manifest project</h2>
+              <p>
+                A Workset needs at least one project. Add a repository path, resource URI, and optional seed patterns.
+              </p>
+              <button disabled={!props.catalog || projectsReadOnly} onClick={openCreate} type="button">
+                Add first project
+              </button>
+              {props.catalog?.definitions.length ? (
+                <button className="quiet-button" onClick={props.onSwitchToWorksets} type="button">
+                  View unresolved Worksets
+                </button>
+              ) : null}
+            </div>
+          )}
+        </section>
+
+        {draft && props.catalog ? (
+          <ProjectEditor
+            busy={busy}
+            draft={draft}
+            notice={notice}
+            renameAllowed={!props.catalog.readOnly || (selectedSummary?.worksetCount ?? 0) === 0}
+            onCancel={() => {
+              setDraft(undefined);
+              setNotice('');
+            }}
+            onChange={setDraft}
+            onSave={() => void saveProject()}
+          />
+        ) : null}
+      </div>
+    </>
   );
 }
 
@@ -486,14 +541,14 @@ function ProjectScopePreview(props: {readonly preview: CodeGraphProjectScopePrev
   );
 }
 
-function ProjectEditabilityBoundary(props: {readonly catalog?: ManagerWorksetCatalog}): React.ReactElement {
+function ProjectEditabilityBoundary(props: {readonly catalog?: ManagerWorksetCatalog}): React.ReactElement | null {
   const catalog = props.catalog;
   const text = catalog?.projectsReadOnly
     ? catalog.projectEditability.reason === 'manifest-symlink'
       ? 'This manifest is a symbolic link, so projects are read-only in Manager.'
       : 'Project YAML uses aliases, anchors, or shapes that Manager will preserve but cannot edit safely.'
     : 'Projects are edited atomically in the authoritative seed manifest.';
-  return <p className="worksets-boundary">{text}</p>;
+  return catalog?.projectsReadOnly ? <p className="worksets-boundary">{text}</p> : null;
 }
 
 function ProjectEditor(props: {

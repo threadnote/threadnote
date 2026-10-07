@@ -20,7 +20,7 @@ import {managerProjectPathIsForeign} from './project/roots.js';
 
 type ManagerAttentionResponse =
   | {readonly body: ManagerContextHealthResponseV1 | ManagerReviewInboxResponseV1; readonly status: 200}
-  | {readonly body: {readonly code: 'invalid-project'; readonly error: string}; readonly status: 400};
+  | {readonly body: {readonly code: 'invalid-project' | 'invalid-view'; readonly error: string}; readonly status: 400};
 
 export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleRequest')(function* (request: {
   readonly config: RuntimeConfig;
@@ -38,11 +38,32 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   }
 
   if (request.url.pathname === '/api/reviews') {
-    const items = (yield* listCandidateReviews(request.config.agentContextHome))
-      .filter(review => review.project === project)
+    const view = request.url.searchParams.get('view');
+    if (view !== null && !['pending', 'deferred', 'history'].includes(view)) {
+      return {
+        body: {code: 'invalid-view', error: 'Select Pending, Deferred, or History.'},
+        status: 400,
+      } satisfies ManagerAttentionResponse;
+    }
+    const reviews = (yield* listCandidateReviews(request.config.agentContextHome)).filter(
+      review => review.project === project,
+    );
+    const pendingCount = reviews.reduce(
+      (count, review) => count + review.candidates.filter(candidate => isPending(candidate.state)).length,
+      0,
+    );
+    const items = reviews
       .map(review => ({
         candidates: review.candidates
-          .filter(candidate => isPending(candidate.state))
+          .filter(candidate =>
+            view === 'history'
+              ? !isPending(candidate.state)
+              : view === 'deferred'
+                ? candidate.state === 'deferred'
+                : view === 'pending'
+                  ? candidate.state === 'pending' || candidate.state === 'applying'
+                  : isPending(candidate.state),
+          )
           .map(candidate => ({
             candidateId: candidate.candidateId,
             categories: candidate.categories,
@@ -68,7 +89,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     return {
       body: {
         items,
-        pendingCount: items.reduce((count, review) => count + review.candidates.length, 0),
+        pendingCount,
         project,
         version: 1,
       },

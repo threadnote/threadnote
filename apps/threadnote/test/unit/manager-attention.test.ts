@@ -99,6 +99,71 @@ describe('Manager attention API', () => {
       expect(documents.map(document => reads.get(`${root}/${document.name}.md`))).toEqual([1, 1, 1]);
     }).pipe(TestClock.withLive, Effect.scoped, provideTestLayer(ApplicationLayer)),
   );
+  effectIt.effect('separates pending, deferred, and completed reviews without changing the total attention count', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-manager-review-tabs-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        manifestPath: `${home}/seed-manifest.yaml`,
+        user: 'tester',
+      };
+      const directory = `${home}/threadnote/candidates/v1/reviews`;
+      yield* fs.makeDirectory(directory, {recursive: true});
+      const states = ['pending', 'applying', 'deferred', 'applied', 'rejected', 'conflict'];
+      const review = {
+        version: 2,
+        reviewId: 'review-tabs',
+        revision: 1,
+        project: 'threadnote',
+        topic: 'tabs',
+        task: 'Synthetic review',
+        createdAt: '2026-10-07T00:00:00Z',
+        codeCitations: [],
+        auditEvents: [],
+        candidates: states.map(state => ({
+          candidateId: state,
+          state,
+          categories: ['decision'],
+          comparison: 'new',
+          confidence: 0.9,
+          proposedText: 'Synthetic proposed knowledge',
+          reason: 'Reusable decision',
+          recommendation: 'create',
+        })),
+      };
+      yield* fs.writeFileString(`${directory}/review-tabs.json`, JSON.stringify(review));
+      yield* fs.writeFileString(
+        `${directory}/other-project.json`,
+        JSON.stringify({...review, reviewId: 'other-project', project: 'unrelated'}),
+      );
+      for (const [view, expected] of [
+        ['pending', ['pending', 'applying']],
+        ['deferred', ['deferred']],
+        ['history', ['applied', 'rejected', 'conflict']],
+      ] as const) {
+        const response = yield* handleManagerAttentionRequest({
+          config,
+          method: 'GET',
+          url: new URL(`http://manager.test/api/reviews?project=threadnote&view=${view}`),
+        });
+        if (response?.status !== 200 || !('items' in response.body) || !response.body.items)
+          throw new Error('Expected review inbox');
+        expect(response.body.items.flatMap(item => item.candidates.map(candidate => candidate.state))).toEqual(
+          expected,
+        );
+        expect(response.body.pendingCount).toBe(3);
+      }
+      const invalid = yield* handleManagerAttentionRequest({
+        config,
+        method: 'GET',
+        url: new URL('http://manager.test/api/reviews?project=threadnote&view=unknown'),
+      });
+      expect(invalid?.status).toBe(400);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('returns a project-scoped empty review inbox from local state', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

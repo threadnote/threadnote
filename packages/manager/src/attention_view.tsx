@@ -1,3 +1,4 @@
+import {MarkdownViewer} from './ui/controls.js';
 import React, {useEffect, useRef, useState} from 'react';
 import type {
   ManagerCitationRepairJobResponseV1,
@@ -59,6 +60,7 @@ interface CitationRepairApplyResult {
 }
 
 export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
+  const [view, setView] = useState<'pending' | 'deferred' | 'history'>('pending');
   const [selected, setSelected] = useState<{reviewId: string; candidateId: string}>();
   const [generation, setGeneration] = useState(0);
   const [inbox, setInbox] = useState<ManagerReviewInboxResponseV1>();
@@ -73,7 +75,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     let cancelled = false;
     setLoading(true);
     setError('');
-    void api<ManagerReviewInboxResponseV1>(`/api/reviews?project=${encodeURIComponent(props.project)}`)
+    void api<ManagerReviewInboxResponseV1>(`/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`)
       .then(result => {
         if (!cancelled) setInbox(result);
       })
@@ -86,26 +88,37 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [props.project, props.refreshGeneration, generation]);
+  }, [props.project, props.refreshGeneration, generation, view]);
 
   return (
     <section aria-busy={loading} className="panel attention-panel is-active">
-      <AttentionHeader
-        eyebrow="Knowledge review"
-        onProjectChange={props.onProjectChange}
-        project={props.project}
-        projects={props.projects}
-        summary="Review the exact proposed memories that still need a decision."
-        title="Review inbox"
-      />
+      <div className="workspace-tabs" role="tablist" aria-label="Review sections">
+        {(['pending', 'deferred', 'history'] as const).map(value => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={view === value}
+            className={view === value ? 'is-active' : undefined}
+            onClick={() => setView(value)}
+          >
+            {value.charAt(0).toUpperCase() + value.slice(1)}
+          </button>
+        ))}
+      </div>
       {!props.project ? (
         <AttentionEmpty text="Select a project to load its pending reviews." />
       ) : error ? (
         <AttentionError error={error} />
       ) : loading ? (
         <AttentionEmpty text="Loading the review inbox…" />
-      ) : !inbox || inbox.pendingCount === 0 ? (
-        <AttentionEmpty text={`No knowledge reviews need attention for ${props.project}.`} />
+      ) : !inbox || inbox.items.length === 0 ? (
+        <AttentionEmpty
+          text={
+            view === 'pending'
+              ? `No knowledge reviews need attention for ${props.project}.`
+              : `No ${view === 'history' ? 'completed' : 'deferred'} reviews for ${props.project}.`
+          }
+        />
       ) : (
         <div className="attention-list">
           {inbox.items.map(review => (
@@ -128,13 +141,15 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
                       <span>{Math.round(candidate.confidence * 100)}% confidence</span>
                     </div>
+                    <div className="review-proposal-preview">
+                      <MarkdownViewer markdown={candidate.proposedText} />
+                    </div>
                     <button
-                      className="attention-item-button"
+                      className="attention-review-button"
                       onClick={() => setSelected({reviewId: review.reviewId, candidateId: candidate.candidateId})}
                       type="button"
                     >
-                      <pre>{candidate.proposedText}</pre>
-                      <strong>Review and decide →</strong>
+                      <strong>{view === 'history' ? 'View review details →' : 'Review and decide →'}</strong>
                     </button>
                     <p>{candidate.reason}</p>
                     {candidate.targetUri ? <code>{candidate.targetUri}</code> : null}
@@ -145,7 +160,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           ))}
         </div>
       )}
-      {inbox && inbox.pendingCount > 0 ? (
+      {inbox && inbox.items.length > 0 && view !== 'history' ? (
         <footer className="attention-footer">
           <p>Open a proposal to read it in full and approve, defer, or reject it.</p>
           <button onClick={() => props.onOpenLibrary()} type="button">

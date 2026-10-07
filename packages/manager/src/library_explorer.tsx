@@ -1,10 +1,16 @@
-import React, {useEffect, useRef} from 'react';
+import {Folder, FileText} from 'lucide-react';
+import React, {useEffect, useRef, useState} from 'react';
 import type {TreeNode} from '@threadnote/manager/ui/contracts';
-import {nodeMatches, selectableMemoryUris, treeItemClass} from '@threadnote/manager/ui/support';
+import {nodeMatches, treeItemClass} from '@threadnote/manager/ui/support';
+
+import {ActionMenu, type MenuAction} from './action_menu.js';
+import {descendantMemoryUris, libraryExplorerNodes, libraryItemTitle} from './library_model.js';
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
 
 export function LibraryExplorer(props: {
+  readonly scopeLabel?: string;
+  readonly actions: (node: TreeNode) => readonly MenuAction[];
   readonly busy: boolean;
   readonly controlsBlocked: boolean;
   readonly filter: string;
@@ -23,90 +29,44 @@ export function LibraryExplorer(props: {
 }): React.ReactElement {
   return (
     <aside className="library-explorer" aria-label="Memory browser">
-      <header>
-        <div>
-          <p className="eyebrow">Explorer</p>
-          <h2>Library</h2>
-        </div>
-        <button
-          aria-label="Refresh memory library"
-          className="icon-button"
-          disabled={props.busy}
-          onClick={props.onRefresh}
-          title="Refresh"
-          type="button"
-        >
-          ↻
-        </button>
+      <header className="explorer-heading">
+        <span>{props.navTreeTab === 'resources' ? 'Sources' : (props.scopeLabel ?? 'Local')}</span>
+        <span>
+          {(props.navTreeTab === 'resources' ? props.resourceTree : props.tree)
+            ? descendantMemoryUris((props.navTreeTab === 'resources' ? props.resourceTree : props.tree)!).length
+            : 0}
+        </span>
       </header>
-      <input
-        disabled={props.controlsBlocked}
-        value={props.filter}
-        onChange={event => props.onFilter(event.target.value)}
-        placeholder="Filter memories and folders"
-        type="search"
-      />
-      <div className="nav-tree-tabs" aria-label="Navigation tree">
-        <button
-          className={props.navTreeTab === 'memories' ? 'is-active' : undefined}
-          disabled={props.controlsBlocked}
-          onClick={() => props.onTab('memories')}
-          type="button"
-        >
-          Memories
-        </button>
-        <button
-          className={props.navTreeTab === 'resources' ? 'is-active' : undefined}
-          disabled={props.controlsBlocked}
-          onClick={() => props.onTab('resources')}
-          type="button"
-        >
-          Resources
-        </button>
-      </div>
-      <label className="check-row">
-        <input
-          checked={props.showSystem}
-          disabled={props.controlsBlocked}
-          onChange={event => props.onShowSystem(event.target.checked)}
-          type="checkbox"
-        />
-        <span>Show system files</span>
-      </label>
       <nav className="tree" aria-label="Context tree">
-        {props.navTreeTab === 'resources' ? (
-          props.resourceTree ? (
-            <Tree
-              filter={props.filter}
-              node={props.resourceTree}
-              onSelect={props.onSelect}
-              selectable={false}
-              selectedUri={props.selectedUri}
-              showSystem={props.showSystem}
-            />
-          ) : (
-            <p className="tree-empty">No resources</p>
-          )
-        ) : props.tree ? (
+        {libraryExplorerNodes(props.navTreeTab === 'resources' ? props.resourceTree : props.tree).map(node => (
           <Tree
+            key={node.uri}
+            depth={0}
+            actions={props.actions}
             filter={props.filter}
-            node={props.tree}
+            node={node}
             onSelect={props.onSelect}
             onToggleSelection={props.onToggleSelection}
+            selectable={props.navTreeTab === 'memories'}
             selectedUri={props.selectedUri}
             selectedUris={props.selectedUris}
-            selectionDisabled={props.busy}
+            selectionDisabled={props.busy || props.controlsBlocked}
             showSystem={props.showSystem}
           />
-        ) : (
-          <p className="tree-empty">No memories</p>
-        )}
+        ))}
       </nav>
+      <p className="explorer-note">
+        {props.navTreeTab === 'resources'
+          ? 'Resources keep their source identity. Memories capture what you learned from them.'
+          : 'Selecting a folder includes collapsed and filtered descendants.'}
+      </p>
     </aside>
   );
 }
 
 function Tree(props: {
+  readonly depth?: number;
+  readonly actions: (node: TreeNode) => readonly MenuAction[];
   readonly filter: string;
   readonly node: TreeNode;
   readonly onSelect: (uri: string) => void;
@@ -117,26 +77,26 @@ function Tree(props: {
   readonly selectionDisabled?: boolean;
   readonly showSystem: boolean;
 }): React.ReactElement | null {
-  const selectable = props.selectable !== false;
+  const [open, setOpen] = useState((props.depth ?? 0) === 0);
+  const selectable = props.selectable !== false && !props.node.isSystem;
   const selectedUris = props.selectedUris ?? EMPTY_SELECTED_URIS;
   if (!props.showSystem && props.node.isSystem) return null;
   if (props.filter && !nodeMatches(props.node, props.filter)) return null;
   if (props.node.isDir) {
-    const selectableUris = selectable
-      ? selectableMemoryUris(props.node, {filter: props.filter, showSystem: props.showSystem})
-      : [];
+    const selectableUris = selectable ? descendantMemoryUris(props.node) : [];
     const selectedCount = selectableUris.filter(uri => selectedUris.has(uri)).length;
     const checked = selectableUris.length > 0 && selectedCount === selectableUris.length;
     const indeterminate = selectedCount > 0 && selectedCount < selectableUris.length;
     return (
-      <details open={props.node.relativePath.split('/').length < 3}>
+      <details open={open} onToggle={event => setOpen(event.currentTarget.open)}>
         <summary
           className={treeItemClass(props.selectedUri === props.node.uri, !selectable)}
-          onClick={() => props.onSelect(props.node.uri)}
           title={props.node.uri}
+          style={{paddingLeft: 7 + 13 * (props.depth ?? 0)}}
         >
           {selectable ? (
             <TreeSelectionCheckbox
+              label={`Select folder ${props.node.name} and all descendant memories`}
               checked={checked}
               disabled={props.selectionDisabled === true || selectableUris.length === 0}
               indeterminate={indeterminate}
@@ -144,20 +104,35 @@ function Tree(props: {
             />
           ) : null}
           <span aria-hidden="true" className="tree-caret" />
-          <span className="tree-name">{props.node.name}</span>
+          <span className="tree-name">
+            <Folder aria-hidden="true" />
+            {libraryItemTitle(props.node)}
+          </span>
+          <span className="tree-count">{descendantMemoryUris(props.node).length}</span>
+          {!props.node.isSystem ? (
+            <ActionMenu
+              label={`Actions for ${props.node.name}`}
+              actions={props.actions(props.node)}
+              disabled={props.selectionDisabled}
+            />
+          ) : null}
         </summary>
         <div className="tree-children">
           {(props.node.children ?? []).map(child => (
-            <Tree {...props} key={child.uri} node={child} />
+            <Tree key={child.uri} {...props} node={child} depth={(props.depth ?? 0) + 1} />
           ))}
         </div>
       </details>
     );
   }
   return (
-    <div className={treeItemClass(props.selectedUri === props.node.uri, !selectable, 'tree-row')}>
+    <div
+      className={treeItemClass(props.selectedUri === props.node.uri, !selectable, 'tree-row')}
+      style={{paddingLeft: 7 + 13 * (props.depth ?? 0)}}
+    >
       {selectable ? (
         <input
+          aria-label={`Select ${props.node.name}`}
           checked={selectedUris.has(props.node.uri)}
           disabled={props.selectionDisabled === true}
           onChange={event => props.onToggleSelection?.(props.node, event.target.checked)}
@@ -165,13 +140,24 @@ function Tree(props: {
         />
       ) : null}
       <button className="tree-file" onClick={() => props.onSelect(props.node.uri)} title={props.node.uri}>
-        <span className="tree-name">{props.node.name}</span>
+        <span className="tree-name">
+          <FileText aria-hidden="true" />
+          {libraryItemTitle(props.node)}
+        </span>
       </button>
+      {!props.node.isSystem ? (
+        <ActionMenu
+          label={`Actions for ${props.node.name}`}
+          actions={props.actions(props.node)}
+          disabled={props.selectionDisabled}
+        />
+      ) : null}
     </div>
   );
 }
 
 function TreeSelectionCheckbox(props: {
+  readonly label: string;
   readonly checked: boolean;
   readonly disabled: boolean;
   readonly indeterminate: boolean;
@@ -183,6 +169,7 @@ function TreeSelectionCheckbox(props: {
   }, [props.indeterminate]);
   return (
     <input
+      aria-label={props.label}
       checked={props.checked}
       disabled={props.disabled}
       onChange={event => props.onChange(event.target.checked)}

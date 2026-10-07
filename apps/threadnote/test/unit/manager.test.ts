@@ -749,9 +749,10 @@ describe('manager http API', () => {
     homes.push(config.agentContextHome);
     const server = await startServer(config, 'secret');
     try {
-      const [htmlResponse, cssResponse] = await Promise.all([
+      const [htmlResponse, cssResponse, editorCssResponse] = await Promise.all([
         testHttpFetch(`${server.url}/`),
         testHttpFetch(`${server.url}/app.css`),
+        testHttpFetch(`${server.url}/editor.css`),
       ]);
 
       expect(htmlResponse.status).toBe(200);
@@ -760,6 +761,8 @@ describe('manager http API', () => {
       expect(cssResponse.status).toBe(200);
       expect(cssResponse.headers.get('content-type')).toContain('text/css');
       expect(await cssResponse.text()).toContain(':root');
+      expect(editorCssResponse.status).toBe(200);
+      expect(await editorCssResponse.text()).toContain('.mdxeditor');
     } finally {
       await server.close();
     }

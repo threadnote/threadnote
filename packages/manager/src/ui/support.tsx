@@ -1,7 +1,7 @@
+import {House, Library, ScanText, ListChecks, HeartPulse, Network, Blocks, Users, Cpu, ShieldCheck} from 'lucide-react';
 import {Schema} from 'effect';
-import React, {useMemo} from 'react';
+import React from 'react';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
-import {ManagerAutocompleteInput} from '@threadnote/manager/dialog';
 import type {
   GraphAnalysis,
   GraphAdministrationAction,
@@ -12,7 +12,7 @@ import type {
   GraphViewPage,
 } from '@threadnote/manager/graph';
 import type {ManagerGraphVisualizationLimits} from '@threadnote/graph/visualization/limits';
-import type {BulkItemResult, PanelName, ShareSummary, TreeNode} from '@threadnote/manager/ui/contracts';
+import type {BulkItemResult, PanelName, TreeNode} from '@threadnote/manager/ui/contracts';
 
 const token = typeof window === 'undefined' ? '' : (new URLSearchParams(window.location.search).get('token') ?? '');
 export const GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
@@ -20,10 +20,10 @@ export const isAgentClient = Schema.is(Schema.Literals(['claude', 'codex', 'copi
 export const isMemoryKind = Schema.is(Schema.Literals(['durable', 'handoff', 'incident', 'preference', 'smoke']));
 export const isMemoryStatus = Schema.is(Schema.Literals(['active', 'archived', 'expired', 'superseded']));
 export const GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
-export const SIDEBAR_WIDTH_DEFAULT = 300;
-export const SIDEBAR_WIDTH_KEY = 'threadnote.manager.sidebarWidth';
+export const SIDEBAR_WIDTH_DEFAULT = 180;
+export const SIDEBAR_WIDTH_KEY = 'threadnote.manager.navigationWidth';
 export const SIDEBAR_WIDTH_MAX = 440;
-export const SIDEBAR_WIDTH_MIN = 260;
+export const SIDEBAR_WIDTH_MIN = 155;
 
 export function canPublishMemoryFromManager(
   uri: string | undefined,
@@ -57,124 +57,6 @@ export function clampSidebarWidth(width: number): number {
 export function loadSidebarWidth(): number {
   const stored = Number(window.localStorage.getItem(SIDEBAR_WIDTH_KEY));
   return Number.isFinite(stored) && stored > 0 ? clampSidebarWidth(stored) : SIDEBAR_WIDTH_DEFAULT;
-}
-
-function SharesPanel(props: {
-  readonly createShare: () => void;
-  readonly keepShareFiles: boolean;
-  readonly loadShares: () => void;
-  readonly preserveShare: boolean;
-  readonly removeShare: () => void;
-  readonly renameShare: () => void;
-  readonly renameShareTo: string;
-  readonly selectedShare: string;
-  readonly setKeepShareFiles: (value: boolean) => void;
-  readonly setPreserveShare: (value: boolean) => void;
-  readonly setRenameShareTo: (value: string) => void;
-  readonly setSelectedShare: (value: string) => void;
-  readonly setShareNewUrl: (value: string) => void;
-  readonly setShareRemote: (value: string) => void;
-  readonly setShareTeam: (value: string) => void;
-  readonly setShareUrl: () => void;
-  readonly shareNewUrl: string;
-  readonly shareRemote: string;
-  readonly shares: readonly ShareSummary[];
-  readonly shareTeam: string;
-  readonly syncShare: () => void;
-}): React.ReactElement {
-  const teamOptions = useMemo(
-    () => uniqueSelectorValues(['default', ...props.shares.map(share => share.name)]),
-    [props.shares],
-  );
-  return (
-    <section className="panel is-active">
-      <div className="split">
-        <section>
-          <div className="pane-head">
-            <h2>Team Shares</h2>
-            <button onClick={props.loadShares}>Refresh</button>
-          </div>
-          <div className="list">
-            {props.shares.map(share => (
-              <button
-                className={`list-item ${props.selectedShare === share.name ? 'is-selected' : ''}`}
-                key={share.name}
-                onClick={() => props.setSelectedShare(share.name)}
-              >
-                <strong>
-                  {share.name}
-                  {share.default ? ' · default' : ''}
-                </strong>
-                <span className={`badge ${share.dirty ? 'warn' : 'ok'}`}>{share.dirty ? 'dirty' : 'clean'}</span>
-                {share.behind ? <span className="badge warn">behind {share.behind}</span> : null}
-                {share.ahead ? <span className="badge warn">ahead {share.ahead}</span> : null}
-                <p>{share.remote}</p>
-                <p className="muted">{share.worktree}</p>
-                {share.warning ? <p className="danger-text">{share.warning}</p> : null}
-              </button>
-            ))}
-          </div>
-        </section>
-        <aside className="form-pane">
-          <h3>Create Share</h3>
-          <ManagerAutocompleteInput
-            allowCreate
-            onChange={props.setShareTeam}
-            options={teamOptions}
-            placeholder="team name"
-            value={props.shareTeam}
-          />
-          <input
-            value={props.shareRemote}
-            onChange={event => props.setShareRemote(event.target.value)}
-            placeholder="git remote URL"
-          />
-          <button onClick={props.createShare}>Create</button>
-          <h3>Selected Share</h3>
-          <ManagerAutocompleteInput
-            onChange={props.setSelectedShare}
-            options={teamOptions}
-            placeholder="team"
-            value={props.selectedShare}
-          />
-          <ManagerAutocompleteInput
-            allowCreate
-            onChange={props.setRenameShareTo}
-            options={teamOptions}
-            placeholder="new team name"
-            value={props.renameShareTo}
-          />
-          <button onClick={props.renameShare}>Rename</button>
-          <input
-            value={props.shareNewUrl}
-            onChange={event => props.setShareNewUrl(event.target.value)}
-            placeholder="new git remote URL"
-          />
-          <button onClick={props.setShareUrl}>Set URL</button>
-          <label className="check-row">
-            <input
-              checked={props.preserveShare}
-              onChange={event => props.setPreserveShare(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Preserve local copies</span>
-          </label>
-          <label className="check-row">
-            <input
-              checked={props.keepShareFiles}
-              onChange={event => props.setKeepShareFiles(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Keep files</span>
-          </label>
-          <button onClick={props.syncShare}>Sync</button>
-          <button className="danger" onClick={props.removeShare}>
-            Remove
-          </button>
-        </aside>
-      </div>
-    </section>
-  );
 }
 
 export class ManagerApiError extends Schema.TaggedError<ManagerApiError>()('ManagerApiError', {
@@ -494,7 +376,7 @@ function formatBulkResults(action: string, results: readonly BulkItemResult[]): 
   ].join('\n');
 }
 
-function bulkActionLabel(action: 'archive' | 'forget' | 'publish'): string {
+function bulkActionLabel(action: 'archive' | 'forget' | 'publish' | 'unpublish'): string {
   switch (action) {
     case 'archive':
       return 'Archive';
@@ -502,10 +384,12 @@ function bulkActionLabel(action: 'archive' | 'forget' | 'publish'): string {
       return 'Forget';
     case 'publish':
       return 'Publish';
+    case 'unpublish':
+      return 'Unpublish';
   }
 }
 
-function actionProgressLabel(action: 'archive' | 'forget' | 'publish'): string {
+function actionProgressLabel(action: 'archive' | 'forget' | 'publish' | 'unpublish'): string {
   switch (action) {
     case 'archive':
       return 'Archiving';
@@ -513,6 +397,8 @@ function actionProgressLabel(action: 'archive' | 'forget' | 'publish'): string {
       return 'Forgetting';
     case 'publish':
       return 'Publishing';
+    case 'unpublish':
+      return 'Unpublishing';
   }
 }
 
@@ -523,7 +409,7 @@ function tabTitle(name: PanelName): string {
     case 'context-health':
       return 'Context Health';
     case 'doctor':
-      return 'Health';
+      return 'Runtime Health';
     case 'graph':
       return 'Graph';
     case 'home':
@@ -536,37 +422,33 @@ function tabTitle(name: PanelName): string {
       return 'Reviews';
     case 'shares':
       return 'Sharing';
-    case 'tools':
-      return 'Tools';
     case 'worksets':
       return 'Worksets';
   }
 }
 
-function panelIcon(name: PanelName): string {
+function panelIcon(name: PanelName): React.ReactElement {
   switch (name) {
     case 'context':
-      return '◎';
+      return <ScanText aria-hidden="true" />;
     case 'context-health':
-      return '♡';
+      return <HeartPulse aria-hidden="true" />;
     case 'doctor':
-      return '✓';
+      return <ShieldCheck aria-hidden="true" />;
     case 'graph':
-      return '◉';
+      return <Network aria-hidden="true" />;
     case 'home':
-      return '⌂';
+      return <House aria-hidden="true" />;
     case 'memory':
-      return '◇';
+      return <Library aria-hidden="true" />;
     case 'processes':
-      return '▣';
+      return <Cpu aria-hidden="true" />;
     case 'reviews':
-      return '☷';
+      return <ListChecks aria-hidden="true" />;
     case 'shares':
-      return '⇄';
-    case 'tools':
-      return '··';
+      return <Users aria-hidden="true" />;
     case 'worksets':
-      return '⌘';
+      return <Blocks aria-hidden="true" />;
   }
 }
 
@@ -590,8 +472,6 @@ function panelNavDescription(name: PanelName): string {
       return 'Knowledge awaiting review';
     case 'shares':
       return 'Team repositories';
-    case 'tools':
-      return 'Recall and maintenance';
     case 'worksets':
       return 'Cross-repository work';
   }
@@ -600,27 +480,25 @@ function panelNavDescription(name: PanelName): string {
 function panelDescription(name: PanelName): string {
   switch (name) {
     case 'context':
-      return 'Compose Context Briefs and read ranked memory';
+      return 'Find useful context for the work ahead.';
     case 'context-health':
-      return 'Inspect actionable quality findings for project context';
+      return 'Keep project knowledge accurate and useful.';
     case 'doctor':
-      return 'Diagnostics and runtime repair';
+      return 'Check the installation and resolve runtime issues.';
     case 'graph':
-      return 'Repository architecture explorer';
+      return 'Explore source structure and relationships.';
     case 'home':
-      return 'Review project attention and continue local work';
+      return 'Your project’s context and next steps.';
     case 'memory':
-      return 'Browse, edit, and consolidate context';
+      return 'Memories and the resources behind them.';
     case 'processes':
-      return 'Inspect and safely terminate registered Threadnote runtimes';
+      return 'Inspect active operations and verified runtimes.';
     case 'reviews':
-      return 'Inspect proposed memories that need a decision';
+      return 'Read the proposal. Make the decision.';
     case 'shares':
-      return 'Manage synchronized team context';
-    case 'tools':
-      return 'Recall, compact, import, export, and seed';
+      return 'Manage the teams you share knowledge with.';
     case 'worksets':
-      return 'Manage and search published cross-repository worksets';
+      return 'Manage projects and cross-repository context.';
   }
 }
 
@@ -629,7 +507,6 @@ function errorMessage(err: unknown): string {
 }
 
 export {
-  SharesPanel,
   actionProgressLabel,
   api,
   bulkActionLabel,

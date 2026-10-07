@@ -13,6 +13,7 @@ interface DropdownOption {
 
 export function TargetFields(props: {
   readonly disabled: boolean;
+  readonly hideTopic?: boolean;
   readonly onChange: (value: TargetForm) => void;
   readonly openSelect?: SelectId;
   readonly projectOptions: readonly string[];
@@ -56,12 +57,15 @@ export function TargetFields(props: {
         placeholder="project"
         value={props.target.project}
       />
-      <input
-        disabled={props.disabled}
-        value={props.target.topic}
-        onChange={event => set({topic: event.target.value})}
-        placeholder="topic"
-      />
+      {!props.hideTopic ? (
+        <input
+          aria-label="Memory topic"
+          disabled={props.disabled}
+          value={props.target.topic}
+          onChange={event => set({topic: event.target.value})}
+          placeholder="topic"
+        />
+      ) : null}
     </div>
   );
 }

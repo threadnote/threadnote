@@ -1,3 +1,5 @@
+import {ArrowLeft, Layers, Plus} from 'lucide-react';
+import {PageActions} from './workspace.js';
 import {Schema} from 'effect';
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {CONTEXT_BRIEF_MODES} from '@threadnote/context/types';
@@ -41,6 +43,7 @@ export function WorksetsPanel(): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [catalog, setCatalog] = useState<ManagerWorksetCatalog>();
   const [catalogError, setCatalogError] = useState('');
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [managementView, setManagementView] = useState<ManifestManagementView>('worksets');
   const [selectedName, setSelectedName] = useState('');
   const [selectedDefinition, setSelectedDefinition] = useState<ManagerWorksetDefinition>();
@@ -573,6 +576,19 @@ export function WorksetsPanel(): React.ReactElement {
 
   return (
     <div className="worksets-management">
+      {managementView === 'worksets' ? (
+        <PageActions>
+          <button
+            className="primary"
+            aria-label="Create workset"
+            disabled={!!definitionDraft || !catalog || catalog.readOnly || catalog.projects.length === 0}
+            onClick={openCreateDefinition}
+          >
+            <Plus />
+            Create workset
+          </button>
+        </PageActions>
+      ) : null}
       <div aria-label="Seed manifest management" className="worksets-management-tabs" role="tablist">
         <button
           aria-controls="manifest-management-panel-projects"
@@ -612,245 +628,302 @@ export function WorksetsPanel(): React.ReactElement {
           onSwitchToWorksets={showWorksets}
         />
       ) : (
-        <div
-          aria-labelledby="manifest-management-tab-worksets"
-          className="worksets-workspace"
-          id="manifest-management-panel-worksets"
-          role="tabpanel"
-        >
-          <aside
-            aria-hidden={definitionDraft ? true : undefined}
-            aria-label="Workset definitions"
-            className="worksets-catalog"
-            inert={definitionDraft ? true : undefined}
-          >
-            <div className="worksets-section-head">
-              <div>
-                <p className="eyebrow">Seed manifest</p>
-                <h2>Worksets</h2>
-              </div>
-              <button
-                aria-label="Create workset"
-                disabled={!catalog || catalog.readOnly || catalog.projects.length === 0}
-                onClick={openCreateDefinition}
-                title="Create workset"
-                type="button"
-              >
-                +
-              </button>
-            </div>
-            <p className="worksets-boundary">
-              {catalog?.readOnly
-                ? catalog.editability.reason === 'manifest-symlink'
-                  ? 'This manifest is a symbolic link, so definitions are read-only in Manager.'
-                  : 'These definitions use YAML aliases or shapes that Manager will preserve but cannot edit safely.'
-                : 'Definitions are edited atomically in the authoritative seed manifest.'}
-            </p>
-            {catalogError ? <p className="worksets-error">{catalogError}</p> : null}
-            <div className="worksets-definition-list">
-              {catalog?.definitions.map(definition => (
-                <button
-                  aria-current={selectedName === definition.name ? 'true' : undefined}
-                  className={selectedName === definition.name ? 'is-selected' : undefined}
-                  key={definition.name}
-                  onClick={() => setSelectedName(definition.name)}
-                  type="button"
-                >
-                  <strong>{definition.name}</strong>
-                  <span>
-                    {definition.memberCount} {definition.memberCount === 1 ? 'member' : 'members'}
-                  </span>
-                </button>
-              ))}
-              {catalog && catalog.definitions.length === 0 ? <p>No worksets yet. Create one to start.</p> : null}
-            </div>
-            <button className="quiet-button" onClick={() => void loadCatalog()} type="button">
-              Refresh definitions
-            </button>
-          </aside>
-
-          <section
-            aria-hidden={definitionDraft ? true : undefined}
-            className="worksets-main"
-            inert={definitionDraft ? true : undefined}
-          >
-            {selected ? (
-              <>
-                <header className="worksets-header">
-                  <div>
-                    <p className="eyebrow">Cross-repository workspace</p>
-                    <h2>{selected.name}</h2>
-                    <p>{selected.description || 'No description'}</p>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      disabled={catalog?.readOnly || !selectedDefinition}
-                      onClick={() => selectedDefinition && openEditDefinition(selectedDefinition)}
-                      type="button"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className="danger"
-                      disabled={definitionBusy || catalog?.readOnly}
-                      onClick={() => void deleteDefinition(selected)}
-                      type="button"
-                    >
-                      Delete
-                    </button>
-                    <button
-                      disabled={job?.status === 'running' || job?.status === 'cancelling'}
-                      onClick={() => void startPrepare()}
-                      type="button"
-                    >
-                      Prepare
-                    </button>
-                  </div>
-                </header>
-                {notice ? (
-                  <p className="worksets-notice" role="status">
-                    {notice}
-                  </p>
-                ) : null}
-                {operationError ? (
-                  <p className="worksets-error" role="alert">
-                    {operationError}
-                  </p>
-                ) : null}
-                <WorksetStatusPanel
-                  definition={selectedDefinition}
-                  loading={statusLoading}
-                  onRefresh={() => void loadStatus(selected.name)}
-                  status={status}
-                  statusError={statusError}
-                />
-                {job ? (
-                  <PrepareJobPanel
-                    definition={job.workset === selectedDefinition?.name ? selectedDefinition : undefined}
-                    job={job}
-                    onCancel={() => void cancelPrepare()}
-                  />
-                ) : null}
-                <div className="worksets-operation-tabs" role="tablist" aria-label="Workset operations">
-                  {WORKSET_OPERATIONS.map(value => (
-                    <button
-                      aria-controls={`worksets-panel-${value}`}
-                      aria-selected={operation === value}
-                      className={operation === value ? 'is-active' : undefined}
-                      id={`worksets-tab-${value}`}
-                      key={value}
-                      onClick={() => setOperation(value)}
-                      onKeyDown={event => selectOperationFromKeyboard(event, value)}
-                      role="tab"
-                      tabIndex={operation === value ? 0 : -1}
-                      type="button"
-                    >
-                      {value === 'brief' ? 'Context brief' : value[0].toUpperCase() + value.slice(1)}
-                    </button>
-                  ))}
-                </div>
-                {operation === 'query' ? (
-                  <QueryPanel
-                    budget={queryBudget}
-                    busy={operationBusy}
-                    includeHeuristic={includeHeuristic}
-                    includeModelAssociations={includeModelAssociations}
-                    onBudget={setQueryBudget}
-                    onCancel={cancelOperation}
-                    onContinue={continueQuery}
-                    onHeuristic={setIncludeHeuristic}
-                    onModelAssociations={setIncludeModelAssociations}
-                    onQuery={setQuery}
-                    onRun={runQuery}
-                    onUseReference={useTraversalReference}
-                    pages={queryPages}
-                    query={query}
-                    repositoryLabel={repositoryKey => managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)}
-                  />
-                ) : null}
-                {operation === 'traversal' ? (
-                  <TraversalPanel
-                    busy={operationBusy}
-                    from={pathFrom}
-                    impactQuery={impactQuery}
-                    mode={traversalMode}
-                    onFrom={setPathFrom}
-                    onImpactQuery={setImpactQuery}
-                    onMode={setTraversalMode}
-                    onRun={runTraversal}
-                    onTo={setPathTo}
-                    result={traversalResult}
-                    repositoryLabel={repositoryKey => managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)}
-                    to={pathTo}
-                  />
-                ) : null}
-                {operation === 'topology' ? (
-                  <TopologyPanel
-                    busy={operationBusy}
-                    onRun={runTopology}
-                    repositoryLabel={repositoryKey => managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)}
-                    result={topologyResult}
-                  />
-                ) : null}
-                {operation === 'brief' ? (
-                  <ContextBriefPanel
-                    budget={briefBudget}
-                    busy={operationBusy}
-                    mode={briefMode}
-                    onBudget={setBriefBudget}
-                    onMode={setBriefMode}
-                    onRun={runBrief}
-                    onTask={setBriefTask}
-                    result={briefResult}
-                    repositoryLabel={repositoryKey => managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)}
-                    task={briefTask}
-                  />
-                ) : null}
-              </>
-            ) : (
-              <div className="worksets-empty">
-                <h2>No workset selected</h2>
-                <p>
-                  {catalog?.projects.length === 0
-                    ? 'Add a manifest project before creating a Workset.'
-                    : 'Create a named set of manifest projects, then prepare it explicitly.'}
+        <>
+          {!detailsOpen && !definitionDraft ? (
+            <div className="workspace-stack worksets-overview">
+              {notice ? (
+                <p className="workspace-note" role="status">
+                  {notice}
                 </p>
-                <button
-                  disabled={!catalog || (catalog.projects.length === 0 ? catalog.projectsReadOnly : catalog.readOnly)}
-                  onClick={catalog?.projects.length === 0 ? () => setManagementView('projects') : openCreateDefinition}
-                  type="button"
-                >
-                  {catalog?.projects.length === 0 ? 'Add first project' : 'Create workset'}
-                </button>
-              </div>
-            )}
-          </section>
-
-          {definitionDraft && catalog ? (
-            <DefinitionEditor
-              busy={definitionBusy}
-              draft={definitionDraft}
-              filter={definitionFilter}
-              onCancel={() => setDefinitionDraft(undefined)}
-              onChange={setDefinitionDraft}
-              onFilter={value => {
-                setDefinitionFilter(value);
-                setDefinitionProjectPage(0);
-              }}
-              onPage={setDefinitionProjectPage}
-              onSave={() => void saveDefinition()}
-              onSelectedOnly={value => {
-                setDefinitionSelectedOnly(value);
-                setDefinitionProjectPage(0);
-              }}
-              page={projectPicker.page}
-              pageCount={projectPicker.pageCount}
-              projects={projectPicker.items}
-              selectedOnly={definitionSelectedOnly}
-              totalProjects={projectPicker.total}
-            />
+              ) : null}
+              {catalogError ? <p role="alert">{catalogError}</p> : null}
+              {catalog?.definitions.map(definition => (
+                <section className="workspace-card" key={definition.name}>
+                  <div className="workspace-row">
+                    <Layers />
+                    <div className="row-copy">
+                      <strong>{definition.name}</strong>
+                      <p>
+                        {definition.description ||
+                          `${definition.memberCount} ${definition.memberCount === 1 ? 'project' : 'projects'} in this workspace`}
+                      </p>
+                    </div>
+                    <span className="workspace-status neutral">
+                      {definition.memberCount} {definition.memberCount === 1 ? 'project' : 'projects'}
+                    </span>
+                    <button
+                      onClick={() => {
+                        setSelectedName(definition.name);
+                        setDetailsOpen(true);
+                      }}
+                    >
+                      Open workset
+                    </button>
+                  </div>
+                </section>
+              ))}
+              {catalog && catalog.definitions.length === 0 ? (
+                <section className="workspace-card">
+                  <div className="workspace-pad">
+                    <h3>Connect your repositories</h3>
+                    <p>Create a workset to query related projects together and prepare their shared code graph.</p>
+                    {catalog.projects.length === 0 ? (
+                      <button onClick={() => setManagementView('projects')}>Add a project first</button>
+                    ) : (
+                      <button onClick={openCreateDefinition}>Create your first workset</button>
+                    )}
+                  </div>
+                </section>
+              ) : null}
+            </div>
           ) : null}
-        </div>
+          {detailsOpen && !definitionDraft ? (
+            <button className="back-to-library" onClick={() => setDetailsOpen(false)}>
+              <ArrowLeft />
+              All worksets
+            </button>
+          ) : null}
+          <div
+            hidden={!detailsOpen && !definitionDraft}
+            aria-labelledby="manifest-management-tab-worksets"
+            className="worksets-workspace"
+            id="manifest-management-panel-worksets"
+            role="tabpanel"
+          >
+            <aside
+              aria-hidden={definitionDraft ? true : undefined}
+              aria-label="Workset definitions"
+              className="worksets-catalog"
+              inert={definitionDraft ? true : undefined}
+            >
+              <div className="worksets-section-head">
+                <div>
+                  <h3>Worksets</h3>
+                </div>
+              </div>
+              <p hidden={!catalog?.readOnly} className="worksets-boundary">
+                {catalog?.readOnly
+                  ? catalog.editability.reason === 'manifest-symlink'
+                    ? 'This manifest is a symbolic link, so definitions are read-only in Manager.'
+                    : 'These definitions use YAML aliases or shapes that Manager will preserve but cannot edit safely.'
+                  : 'Definitions are edited atomically in the authoritative seed manifest.'}
+              </p>
+              {catalogError ? <p className="worksets-error">{catalogError}</p> : null}
+              <div className="worksets-definition-list">
+                {catalog?.definitions.map(definition => (
+                  <button
+                    aria-current={selectedName === definition.name ? 'true' : undefined}
+                    className={selectedName === definition.name ? 'is-selected' : undefined}
+                    key={definition.name}
+                    onClick={() => setSelectedName(definition.name)}
+                    type="button"
+                  >
+                    <strong>{definition.name}</strong>
+                    <span>
+                      {definition.memberCount} {definition.memberCount === 1 ? 'member' : 'members'}
+                    </span>
+                  </button>
+                ))}
+                {catalog && catalog.definitions.length === 0 ? <p>No worksets yet. Create one to start.</p> : null}
+              </div>
+              <button className="quiet-button" onClick={() => void loadCatalog()} type="button">
+                Refresh definitions
+              </button>
+            </aside>
+
+            <section
+              aria-hidden={definitionDraft ? true : undefined}
+              className="worksets-main"
+              inert={definitionDraft ? true : undefined}
+            >
+              {selected ? (
+                <>
+                  <header className="worksets-header">
+                    <div>
+                      <p className="eyebrow">Cross-repository workspace</p>
+                      <h2>{selected.name}</h2>
+                      <p>{selected.description || 'No description'}</p>
+                    </div>
+                    <div className="button-row">
+                      <button
+                        disabled={catalog?.readOnly || !selectedDefinition}
+                        onClick={() => selectedDefinition && openEditDefinition(selectedDefinition)}
+                        type="button"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="danger"
+                        disabled={definitionBusy || catalog?.readOnly}
+                        onClick={() => void deleteDefinition(selected)}
+                        type="button"
+                      >
+                        Delete
+                      </button>
+                      <button
+                        disabled={job?.status === 'running' || job?.status === 'cancelling'}
+                        onClick={() => void startPrepare()}
+                        type="button"
+                      >
+                        Prepare
+                      </button>
+                    </div>
+                  </header>
+                  {notice ? (
+                    <p className="worksets-notice" role="status">
+                      {notice}
+                    </p>
+                  ) : null}
+                  {operationError ? (
+                    <p className="worksets-error" role="alert">
+                      {operationError}
+                    </p>
+                  ) : null}
+                  <WorksetStatusPanel
+                    definition={selectedDefinition}
+                    loading={statusLoading}
+                    onRefresh={() => void loadStatus(selected.name)}
+                    status={status}
+                    statusError={statusError}
+                  />
+                  {job ? (
+                    <PrepareJobPanel
+                      definition={job.workset === selectedDefinition?.name ? selectedDefinition : undefined}
+                      job={job}
+                      onCancel={() => void cancelPrepare()}
+                    />
+                  ) : null}
+                  <div className="worksets-operation-tabs" role="tablist" aria-label="Workset operations">
+                    {WORKSET_OPERATIONS.map(value => (
+                      <button
+                        aria-controls={`worksets-panel-${value}`}
+                        aria-selected={operation === value}
+                        className={operation === value ? 'is-active' : undefined}
+                        id={`worksets-tab-${value}`}
+                        key={value}
+                        onClick={() => setOperation(value)}
+                        onKeyDown={event => selectOperationFromKeyboard(event, value)}
+                        role="tab"
+                        tabIndex={operation === value ? 0 : -1}
+                        type="button"
+                      >
+                        {value === 'brief' ? 'Context brief' : value[0].toUpperCase() + value.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                  {operation === 'query' ? (
+                    <QueryPanel
+                      budget={queryBudget}
+                      busy={operationBusy}
+                      includeHeuristic={includeHeuristic}
+                      includeModelAssociations={includeModelAssociations}
+                      onBudget={setQueryBudget}
+                      onCancel={cancelOperation}
+                      onContinue={continueQuery}
+                      onHeuristic={setIncludeHeuristic}
+                      onModelAssociations={setIncludeModelAssociations}
+                      onQuery={setQuery}
+                      onRun={runQuery}
+                      onUseReference={useTraversalReference}
+                      pages={queryPages}
+                      query={query}
+                      repositoryLabel={repositoryKey =>
+                        managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)
+                      }
+                    />
+                  ) : null}
+                  {operation === 'traversal' ? (
+                    <TraversalPanel
+                      busy={operationBusy}
+                      from={pathFrom}
+                      impactQuery={impactQuery}
+                      mode={traversalMode}
+                      onFrom={setPathFrom}
+                      onImpactQuery={setImpactQuery}
+                      onMode={setTraversalMode}
+                      onRun={runTraversal}
+                      onTo={setPathTo}
+                      result={traversalResult}
+                      repositoryLabel={repositoryKey =>
+                        managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)
+                      }
+                      to={pathTo}
+                    />
+                  ) : null}
+                  {operation === 'topology' ? (
+                    <TopologyPanel
+                      busy={operationBusy}
+                      onRun={runTopology}
+                      repositoryLabel={repositoryKey =>
+                        managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)
+                      }
+                      result={topologyResult}
+                    />
+                  ) : null}
+                  {operation === 'brief' ? (
+                    <ContextBriefPanel
+                      budget={briefBudget}
+                      busy={operationBusy}
+                      mode={briefMode}
+                      onBudget={setBriefBudget}
+                      onMode={setBriefMode}
+                      onRun={runBrief}
+                      onTask={setBriefTask}
+                      result={briefResult}
+                      repositoryLabel={repositoryKey =>
+                        managerWorksetRepositoryLabel(repositoryKey, selectedDefinition)
+                      }
+                      task={briefTask}
+                    />
+                  ) : null}
+                </>
+              ) : (
+                <div className="worksets-empty">
+                  <h2>No workset selected</h2>
+                  <p>
+                    {catalog?.projects.length === 0
+                      ? 'Add a manifest project before creating a Workset.'
+                      : 'Create a named set of manifest projects, then prepare it explicitly.'}
+                  </p>
+                  <button
+                    disabled={!catalog || (catalog.projects.length === 0 ? catalog.projectsReadOnly : catalog.readOnly)}
+                    onClick={
+                      catalog?.projects.length === 0 ? () => setManagementView('projects') : openCreateDefinition
+                    }
+                    type="button"
+                  >
+                    {catalog?.projects.length === 0 ? 'Add first project' : 'Create workset'}
+                  </button>
+                </div>
+              )}
+            </section>
+
+            {definitionDraft && catalog ? (
+              <DefinitionEditor
+                busy={definitionBusy}
+                draft={definitionDraft}
+                filter={definitionFilter}
+                onCancel={() => setDefinitionDraft(undefined)}
+                onChange={setDefinitionDraft}
+                onFilter={value => {
+                  setDefinitionFilter(value);
+                  setDefinitionProjectPage(0);
+                }}
+                onPage={setDefinitionProjectPage}
+                onSave={() => void saveDefinition()}
+                onSelectedOnly={value => {
+                  setDefinitionSelectedOnly(value);
+                  setDefinitionProjectPage(0);
+                }}
+                page={projectPicker.page}
+                pageCount={projectPicker.pageCount}
+                projects={projectPicker.items}
+                selectedOnly={definitionSelectedOnly}
+                totalProjects={projectPicker.total}
+              />
+            ) : null}
+          </div>
+        </>
       )}
     </div>
   );

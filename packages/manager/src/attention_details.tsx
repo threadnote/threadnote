@@ -42,6 +42,7 @@ export function ReviewDetail(props: {
     };
   }, [props.project, props.reviewId]);
   const candidate = preview?.review.candidates.find(item => item.candidateId === props.candidateId);
+  const canDecide = candidate?.state === 'pending' || candidate?.state === 'deferred';
   const mutation = preview?.delta.items.find(item => item.candidateId === props.candidateId)?.mutationPreview;
   const reviewedOperation =
     mutation?.operation === 'create' || mutation?.operation === 'replace' ? mutation.operation : '';
@@ -65,7 +66,7 @@ export function ReviewDetail(props: {
     (!personalCopyRequired || selectedOperation === 'create') &&
     replacementCheckSatisfied;
   async function refreshSafety(): Promise<void> {
-    if (!preview || busy) return;
+    if (!preview || busy || !canDecide) return;
     setBusy(true);
     setError('');
     try {
@@ -93,7 +94,7 @@ export function ReviewDetail(props: {
     }
   }
   async function decide(action: 'approve' | 'defer' | 'reject'): Promise<void> {
-    if (!preview || busy) return;
+    if (!preview || busy || !canDecide) return;
     setBusy(true);
     setError('');
     try {
@@ -126,7 +127,7 @@ export function ReviewDetail(props: {
             {candidate.kind} · {candidate.topic} · revision {preview.review.revision} · {candidate.state}
           </p>
           <MemoryBody content={candidate.applyBodyText ?? candidate.proposedText} />
-          <h3>What will change</h3>
+          <h3>{canDecide ? 'What will change' : 'Review outcome'}</h3>
           <p>{candidate.reason}</p>
           <p>
             Operation:{' '}
@@ -139,97 +140,103 @@ export function ReviewDetail(props: {
               Inspect existing memory in Library
             </button>
           ) : null}
-          {personalCopyRequired ? (
-            <section className="review-safety-state" role="status">
-              <h3>Personal copy of shared memory</h3>
-              <p>
-                The existing memory belongs to a shared team. You can approve this proposal as a personal memory. The
-                shared source will stay unchanged.
-              </p>
-            </section>
-          ) : needsSafetyRefresh && missingTarget ? (
-            <section className="review-safety-state">
-              <h3>Previous memory no longer exists</h3>
-              <p>
-                The memory this proposal was going to replace has been removed. Creating the proposal now will not
-                overwrite another memory. Threadnote will check its project, topic, and kind again before writing.
-              </p>
-              <label className="review-confirmation">
-                <input
-                  checked={missingTargetApproved}
-                  onChange={event => setMissingTargetApproved(event.target.checked)}
-                  type="checkbox"
-                />
-                <span>
-                  <strong>Create this as the current memory</strong>
-                  <small>A new durable memory will be written from the reviewed proposal.</small>
-                </span>
-              </label>
-              <p className="muted" role="status">
-                {missingTargetApproved
-                  ? 'Ready to create. Use “Create current memory” below.'
-                  : 'Select the option above to enable creation.'}
-              </p>
-            </section>
-          ) : needsSafetyRefresh ? (
-            <section className="review-safety-state">
-              <h3>Check the memory being replaced</h3>
-              <p>
-                Before approval, Threadnote verifies that the same reviewed memory still exists and checks whether this
-                proposal would remove sections from it. This check does not change any memory.
-              </p>
-              <button disabled={busy} onClick={() => void refreshSafety()} type="button">
-                {busy ? 'Checking current memory…' : 'Check current memory'}
-              </button>
-            </section>
-          ) : mutation?.replacementSafety?.classification === 'preserving' ? (
-            <section className="review-safety-state" role="status">
-              <h3>Replacement check passed</h3>
-              <p>The existing memory still matches this review. Approval will replace that exact version.</p>
-            </section>
-          ) : mutation?.replacementSafety?.warning ? (
-            <p role="alert">{managerReplacementWarning(mutation.replacementSafety.warning)}</p>
-          ) : null}
-          {needsOperationChoice ? (
-            <label>
-              Choose the intended change
-              <select
-                value={operation}
-                onChange={event =>
-                  setOperation(
-                    event.target.value === 'create' || event.target.value === 'replace' ? event.target.value : '',
-                  )
-                }
-              >
-                <option value="">Select an operation</option>
-                <option value="create">
-                  {personalCopyRequired ? 'Create a personal copy' : 'Create a separate memory'}
-                </option>
-                {candidate.targetUri && !personalCopyRequired ? (
-                  <option value="replace">Replace the reviewed existing memory</option>
-                ) : null}
-              </select>
-            </label>
-          ) : null}
-          {!personalCopyRequired && mutation?.replacementSafety?.classification === 'destructive-loss-risk' ? (
-            <label>
-              <input
-                type="checkbox"
-                checked={replacementApproved}
-                onChange={event => setReplacementApproved(event.target.checked)}
-              />
-              I reviewed the existing memory and approve the content removal described above.
-            </label>
-          ) : null}
-          {!canApprove && !needsSafetyRefresh ? (
-            <p>
-              {personalCopyRequired
-                ? mutation?.truncated
-                  ? 'This preview is incomplete and cannot be approved. You can defer or reject the proposal here.'
-                  : 'Choose the personal-copy option before approving. You can defer or reject the proposal here.'
-                : 'Review the required operation and replacement warning before approving. You can defer or reject the proposal here.'}
-            </p>
-          ) : null}
+          {canDecide ? (
+            <>
+              {personalCopyRequired ? (
+                <section className="review-safety-state" role="status">
+                  <h3>Personal copy of shared memory</h3>
+                  <p>
+                    The existing memory belongs to a shared team. You can approve this proposal as a personal memory.
+                    The shared source will stay unchanged.
+                  </p>
+                </section>
+              ) : needsSafetyRefresh && missingTarget ? (
+                <section className="review-safety-state">
+                  <h3>Previous memory no longer exists</h3>
+                  <p>
+                    The memory this proposal was going to replace has been removed. Creating the proposal now will not
+                    overwrite another memory. Threadnote will check its project, topic, and kind again before writing.
+                  </p>
+                  <label className="review-confirmation">
+                    <input
+                      checked={missingTargetApproved}
+                      onChange={event => setMissingTargetApproved(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>Create this as the current memory</strong>
+                      <small>A new durable memory will be written from the reviewed proposal.</small>
+                    </span>
+                  </label>
+                  <p className="muted" role="status">
+                    {missingTargetApproved
+                      ? 'Ready to create. Use “Create current memory” below.'
+                      : 'Select the option above to enable creation.'}
+                  </p>
+                </section>
+              ) : needsSafetyRefresh ? (
+                <section className="review-safety-state">
+                  <h3>Check the memory being replaced</h3>
+                  <p>
+                    Before approval, Threadnote verifies that the same reviewed memory still exists and checks whether
+                    this proposal would remove sections from it. This check does not change any memory.
+                  </p>
+                  <button disabled={busy} onClick={() => void refreshSafety()} type="button">
+                    {busy ? 'Checking current memory…' : 'Check current memory'}
+                  </button>
+                </section>
+              ) : mutation?.replacementSafety?.classification === 'preserving' ? (
+                <section className="review-safety-state" role="status">
+                  <h3>Replacement check passed</h3>
+                  <p>The existing memory still matches this review. Approval will replace that exact version.</p>
+                </section>
+              ) : mutation?.replacementSafety?.warning ? (
+                <p role="alert">{managerReplacementWarning(mutation.replacementSafety.warning)}</p>
+              ) : null}
+              {needsOperationChoice ? (
+                <label>
+                  Choose the intended change
+                  <select
+                    value={operation}
+                    onChange={event =>
+                      setOperation(
+                        event.target.value === 'create' || event.target.value === 'replace' ? event.target.value : '',
+                      )
+                    }
+                  >
+                    <option value="">Select an operation</option>
+                    <option value="create">
+                      {personalCopyRequired ? 'Create a personal copy' : 'Create a separate memory'}
+                    </option>
+                    {candidate.targetUri && !personalCopyRequired ? (
+                      <option value="replace">Replace the reviewed existing memory</option>
+                    ) : null}
+                  </select>
+                </label>
+              ) : null}
+              {!personalCopyRequired && mutation?.replacementSafety?.classification === 'destructive-loss-risk' ? (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={replacementApproved}
+                    onChange={event => setReplacementApproved(event.target.checked)}
+                  />
+                  I reviewed the existing memory and approve the content removal described above.
+                </label>
+              ) : null}
+              {!canApprove && !needsSafetyRefresh ? (
+                <p>
+                  {personalCopyRequired
+                    ? mutation?.truncated
+                      ? 'This preview is incomplete and cannot be approved. You can defer or reject the proposal here.'
+                      : 'Choose the personal-copy option before approving. You can defer or reject the proposal here.'
+                    : 'Review the required operation and replacement warning before approving. You can defer or reject the proposal here.'}
+                </p>
+              ) : null}
+            </>
+          ) : (
+            <p className="workspace-note">This proposal is {candidate.state}. Its decision controls are read-only.</p>
+          )}
           {candidate.evidence.length > 0 ? (
             <details>
               <summary>Source evidence</summary>
@@ -241,23 +248,25 @@ export function ReviewDetail(props: {
             </details>
           ) : null}
           {error ? <p role="alert">{error}</p> : null}
-          <footer>
-            <button disabled={busy || !canApprove} onClick={() => void decide('approve')} type="button">
-              {personalCopyRequired
-                ? 'Approve and create personal copy'
-                : missingTarget && selectedOperation === 'create'
-                  ? 'Create current memory'
-                  : mutation?.operation === 'no_action'
-                    ? 'Confirm no change needed'
-                    : 'Approve and apply'}
-            </button>
-            <button disabled={busy} onClick={() => void decide('defer')} type="button">
-              Defer
-            </button>
-            <button className="danger" disabled={busy} onClick={() => void decide('reject')} type="button">
-              Reject
-            </button>
-          </footer>
+          {canDecide ? (
+            <footer>
+              <button disabled={busy || !canApprove} onClick={() => void decide('approve')} type="button">
+                {personalCopyRequired
+                  ? 'Approve and create personal copy'
+                  : missingTarget && selectedOperation === 'create'
+                    ? 'Create current memory'
+                    : mutation?.operation === 'no_action'
+                      ? 'Confirm no change needed'
+                      : 'Approve and apply'}
+              </button>
+              <button disabled={busy} onClick={() => void decide('defer')} type="button">
+                Defer
+              </button>
+              <button className="danger" disabled={busy} onClick={() => void decide('reject')} type="button">
+                Reject
+              </button>
+            </footer>
+          ) : null}
         </>
       ) : !error ? (
         <p role="status">Loading full review…</p>

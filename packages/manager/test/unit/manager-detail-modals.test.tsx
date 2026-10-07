@@ -387,7 +387,7 @@ it('reads the canonical handoff only on opening its dialog', async () => {
   expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/api/memory?uri=');
   expect(document.body.textContent).toContain('All next steps.');
 });
-it('renders an actionable live attention flow without fabricated trends', async () => {
+it('renders an actionable project overview without fabricated trends', async () => {
   fetchMock.mockResolvedValue(
     response({
       project: 'threadnote',
@@ -417,8 +417,9 @@ it('renders an actionable live attention flow without fabricated trends', async 
   expect(document.body.textContent).toContain('9');
   expect(document.body.textContent).not.toContain('Motion shows workflow direction, not volume');
   expect(document.body.textContent).not.toContain('Project Setup');
-  expect(document.body.textContent).not.toContain('9 findings need review.');
-  expect(document.querySelectorAll('.home-flow-node')).toHaveLength(4);
+  expect(document.body.textContent).toContain('9 findings need review.');
+  expect(document.querySelectorAll('.home-overview > button')).toHaveLength(3);
+  expect(document.body.textContent).toContain('New memory');
   expect(document.querySelector('.home-lanes')).toBeNull();
 });
 

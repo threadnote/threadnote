@@ -1,7 +1,16 @@
 // @vitest-environment happy-dom
 
-import {act} from 'react';
-import {describe, expect, it} from 'vitest';
+import React, {act} from 'react';
+import {describe, expect, it, vi} from 'vitest';
+
+vi.mock('../../src/memory_editor.js', () => ({
+  MemoryEditor: (props: {content: string; disabled: boolean; onChange: (value: string) => void}) =>
+    React.createElement('textarea', {
+      value: props.content,
+      disabled: props.disabled,
+      onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => props.onChange(event.target.value),
+    }),
+}));
 
 const firstUri = 'threadnote://user/test/memories/handoffs/active/threadnote/first.md';
 const secondUri = 'threadnote://user/test/memories/handoffs/active/threadnote/second.md';
@@ -154,12 +163,12 @@ describe('Manager disconnect recovery', () => {
         await flush();
         if (actionButton('Edit')?.disabled === false) break;
       }
-      expect(root.textContent).toContain(firstUri);
-      expect(root.textContent).not.toContain(firstAliasUri);
+      expect(root.querySelector(`.tree-file[title="${firstUri}"]`)).not.toBeNull();
+      expect(root.querySelector(`.tree-file[title="${firstAliasUri}"]`)).toBeNull();
       expect(actionButton('Edit')?.disabled).toBe(false);
       await clickButton('Library');
       await flush();
-      await clickButton('New');
+      await clickButton('New memory');
       await editTextarea('Unsaved new memory');
       online = false;
       await refresh();
@@ -179,22 +188,25 @@ describe('Manager disconnect recovery', () => {
       expect(root.textContent).toContain('Unsaved handoff edit');
       expect(root.textContent).toContain('Your unsaved draft is preserved');
       expect(root.textContent).toContain('Review the reloaded record');
-      expect(actionButton('Save')?.disabled).toBe(true);
+      expect(actionButton('Save')?.disabled ?? true).toBe(true);
 
+      await clickButton('Load reloaded record');
+      await clickButton('Edit');
+      expect(editor()?.value).toBe('Changed on disk');
       await selectMemory(secondUri);
       expect(editor()?.value).toBe('Second handoff');
       expect(actionButton('Save')?.disabled).toBe(false);
-      await clickButton('Forget');
+      await openSelectedMenu();
+      await clickButton('Forget…');
       await clickButton('Forget memory');
-      expect(editor()?.value).toBe('');
-      await selectMemory(firstUri, false);
-      expect(root.textContent).toContain('Your unsaved draft is preserved');
-      expect(root.textContent).toContain('Unsaved handoff edit');
-      await clickButton('Load reloaded record');
-      await clickButton('Edit');
-      await clickButton('Forget');
+      expect(editor()).toBeNull();
+      await selectMemory(firstUri);
+      expect(root.textContent).not.toContain('Your unsaved draft is preserved');
+      expect(editor()?.value).toBe('Changed on disk');
+      await openSelectedMenu();
+      await clickButton('Forget…');
       await clickButton('Forget memory');
-      expect(editor()?.value).toBe('');
+      expect(editor()).toBeNull();
     } finally {
       globalThis.fetch = originalFetch;
       document.body.replaceChildren();
@@ -250,9 +262,17 @@ async function refresh(): Promise<void> {
 }
 
 async function selectMemory(uri: string, edit = true): Promise<void> {
+  if (!document.querySelector(`.tree-file[title="${uri}"]`)) {
+    await clickButton('Back to Library');
+    if (document.querySelector('dialog')?.textContent?.includes('Discard unsaved changes?'))
+      await clickButton('Discard changes');
+  }
   const button = document.querySelector<HTMLButtonElement>(`.tree-file[title="${uri}"]`);
   expect(button).not.toBeNull();
   await act(async () => button?.click());
+  await flush();
+  if (document.querySelector('dialog')?.textContent?.includes('Discard unsaved changes?'))
+    await clickButton('Discard changes');
   if (edit) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await flush();
@@ -280,7 +300,11 @@ function editor(): HTMLTextAreaElement | null {
 }
 
 function actionButton(label: string): HTMLButtonElement | undefined {
-  return [...document.querySelectorAll<HTMLButtonElement>('.editor-pane .action-row button')].find(
-    button => button.textContent?.trim() === label,
-  );
+  return [
+    ...document.querySelectorAll<HTMLButtonElement>('.editor-pane .action-row button, .topbar .action-row button'),
+  ].find(button => button.textContent?.trim() === label);
+}
+
+async function openSelectedMenu(): Promise<void> {
+  await act(async () => document.querySelector<HTMLButtonElement>('.pane-head [aria-haspopup="menu"]')?.click());
 }

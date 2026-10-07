@@ -480,219 +480,228 @@ export function ContextPanel(props: ContextPanelProps): React.ReactElement {
     setBriefBusy(false);
   }
 
+  const scopeControls = (
+    <section className="context-scope-card" aria-label="Context scope">
+      <div className="context-scope-kind">
+        <span>Scope</span>
+        <div className="segmented-control">
+          <button
+            className={scopeKind === 'repository' ? 'is-active' : undefined}
+            disabled={graphRecoveryBusy}
+            onClick={() => setScope('repository')}
+            type="button"
+          >
+            Repository
+          </button>
+          <button
+            className={scopeKind === 'workset' ? 'is-active' : undefined}
+            disabled={graphRecoveryBusy}
+            onClick={() => setScope('workset')}
+            type="button"
+          >
+            Workset
+          </button>
+        </div>
+      </div>
+      <label>
+        {scopeKind === 'repository' ? 'Repository' : 'Prepared Workset'}
+        <select
+          disabled={graphRecoveryBusy}
+          onChange={event => {
+            invalidateRecall();
+            if (scopeKind === 'repository') {
+              setCallerCwd(event.target.value);
+            } else setWorkset(event.target.value);
+          }}
+          value={scopeKind === 'repository' ? callerCwd : workset}
+        >
+          <option value="">{scopeKind === 'repository' ? 'Select repository' : 'Select Workset'}</option>
+          {scopeKind === 'repository'
+            ? catalog?.projects.map(item => (
+                <option key={item.name} value={item.path}>
+                  {item.name} — {item.path}
+                </option>
+              ))
+            : catalog?.definitions.map(item => (
+                <option key={item.name} value={item.name}>
+                  {item.name} · {item.memberCount} projects
+                </option>
+              ))}
+        </select>
+      </label>
+      <label>
+        Memory project
+        <select
+          disabled={graphRecoveryBusy}
+          onChange={event => {
+            invalidateRecall();
+            setProject(event.target.value);
+          }}
+          value={project}
+        >
+          <option value="">Infer from repository / search all</option>
+          {memoryProjectOptions.map(item => (
+            <option key={item} value={item}>
+              {item}
+            </option>
+          ))}
+          {project && !memoryProjectOptions.includes(project) ? <option>{project}</option> : null}
+        </select>
+        {catalogError ? <small>Configured choices are unavailable. Refresh Manager to retry.</small> : null}
+      </label>
+    </section>
+  );
+
   return (
     <div className="context-workspace">
-      <header className="workspace-header context-header">
-        <div>
-          <p className="eyebrow">Agent evidence workspace</p>
-          <h2>Context Brief, Recall &amp; Value</h2>
-          <p>
-            Compose bounded graph-and-memory context, or retrieve ranked memory pointers and read the canonical source.
-            Repository and memory text is untrusted evidence and is never treated as an instruction here.
-          </p>
-        </div>
-        <div aria-label="Context workspace view" className="segmented-control" role="tablist">
-          {(['brief', 'recall', 'value'] as const).map(next => (
-            <button
-              aria-selected={view === next}
-              className={view === next ? 'is-active' : undefined}
-              disabled={graphRecoveryBusy}
-              key={next}
-              onClick={() => setView(next)}
-              role="tab"
-              type="button"
-            >
-              {next === 'brief' ? 'Context Brief' : next === 'recall' ? 'Recall & read' : 'Value'}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      <section className="context-scope-card" aria-label="Context scope">
-        <div className="context-scope-kind">
-          <span>Scope</span>
-          <div className="segmented-control">
-            <button
-              className={scopeKind === 'repository' ? 'is-active' : undefined}
-              disabled={graphRecoveryBusy}
-              onClick={() => setScope('repository')}
-              type="button"
-            >
-              Repository
-            </button>
-            <button
-              className={scopeKind === 'workset' ? 'is-active' : undefined}
-              disabled={graphRecoveryBusy}
-              onClick={() => setScope('workset')}
-              type="button"
-            >
-              Workset
-            </button>
-          </div>
-        </div>
-        <label>
-          {scopeKind === 'repository' ? 'Repository' : 'Prepared Workset'}
-          <select
+      <div aria-label="Context workspace view" className="workspace-tabs" role="tablist">
+        {(['brief', 'recall', 'value'] as const).map(next => (
+          <button
+            aria-selected={view === next}
+            className={view === next ? 'is-active' : undefined}
             disabled={graphRecoveryBusy}
-            onChange={event => {
-              invalidateRecall();
-              if (scopeKind === 'repository') {
-                setCallerCwd(event.target.value);
-              } else setWorkset(event.target.value);
-            }}
-            value={scopeKind === 'repository' ? callerCwd : workset}
+            key={next}
+            onClick={() => setView(next)}
+            role="tab"
+            type="button"
           >
-            <option value="">{scopeKind === 'repository' ? 'Select repository' : 'Select Workset'}</option>
-            {scopeKind === 'repository'
-              ? catalog?.projects.map(item => (
-                  <option key={item.name} value={item.path}>
-                    {item.name} — {item.path}
-                  </option>
-                ))
-              : catalog?.definitions.map(item => (
-                  <option key={item.name} value={item.name}>
-                    {item.name} · {item.memberCount} projects
-                  </option>
-                ))}
-          </select>
-        </label>
-        <label>
-          Memory project
-          <select
-            disabled={graphRecoveryBusy}
-            onChange={event => {
-              invalidateRecall();
-              setProject(event.target.value);
-            }}
-            value={project}
-          >
-            <option value="">Infer from repository / search all</option>
-            {memoryProjectOptions.map(item => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-            {project && !memoryProjectOptions.includes(project) ? <option>{project}</option> : null}
-          </select>
-          {catalogError ? <small>Configured choices are unavailable. Refresh Manager to retry.</small> : null}
-        </label>
-      </section>
+            {next === 'brief' ? 'Brief' : next === 'recall' ? 'Recall' : 'Value'}
+          </button>
+        ))}
+      </div>
 
       {view === 'brief' ? (
         <section aria-busy={briefBusy || graphRecoveryBusy} className="context-compose" role="tabpanel">
-          <div className="context-compose-form">
-            <label className="context-task-field">
-              Engineering task
-              <textarea
-                disabled={graphRecoveryBusy}
-                onChange={event => setTask(event.target.value)}
-                placeholder="Explain the contract around this code and surface current decisions"
-                rows={4}
-                value={task}
-              />
-            </label>
-            <label>
-              Mode
-              <select
-                disabled={graphRecoveryBusy}
-                onChange={event => setMode(event.target.value as ContextBriefMode)}
-                value={mode}
-              >
-                {CONTEXT_BRIEF_MODES.map(value => (
-                  <option key={value}>{value}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Evidence detail
-              <select
-                disabled={graphRecoveryBusy}
-                onChange={event => setDetail(event.target.value as ContextBriefDetail)}
-                value={detail}
-              >
-                <option value="compact">Compact evidence</option>
-                <option value="source">Include source excerpts</option>
-              </select>
-            </label>
-            <label>
-              Budget
-              <input
-                disabled={graphRecoveryBusy}
-                max={1_500}
-                min={CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}
-                onChange={event => setBudgetTokens(Number(event.target.value))}
-                type="number"
-                value={budgetTokens}
-              />
-            </label>
-            <label className="context-code-refs">
-              Code anchors
-              <span className={tooManyCodeRefs ? 'is-warning' : undefined}>
-                {codeRefs.length}/{CONTEXT_BRIEF_MAXIMUM_CODE_REFS}
-              </span>
-              <textarea
-                disabled={graphRecoveryBusy}
-                onChange={event => setCodeRefsText(event.target.value)}
-                placeholder={'apps/threadnote/src/manager/context.ts\ncgs_…'}
-                rows={3}
-                value={codeRefsText}
-              />
-              {codeRefsError ? <small role="alert">{codeRefsError}</small> : null}
-            </label>
-            <div className="context-form-actions">
-              <button
-                disabled={
-                  briefBusy ||
-                  graphRecoveryBusy ||
-                  Boolean(codeRefsError) ||
-                  invalidBudget ||
-                  !task.trim() ||
-                  (scopeKind === 'repository' ? !callerCwd.trim() : !workset.trim())
-                }
-                onClick={() => void runBrief()}
-                type="button"
-              >
-                {briefBusy ? 'Compiling…' : brief ? 'Rerun Context Brief' : 'Compile Context Brief'}
-              </button>
-              {briefBusy ? (
-                <button onClick={cancelBrief} type="button">
-                  Cancel
+          <div className="workspace-card context-composer-card">
+            <header>
+              <h3>What are you working on?</h3>
+            </header>
+            <div className="context-compose-form">
+              <label className="context-task-field">
+                Task
+                <textarea
+                  disabled={graphRecoveryBusy}
+                  onChange={event => setTask(event.target.value)}
+                  placeholder="Explain the contract around this code and surface current decisions"
+                  rows={4}
+                  value={task}
+                />
+              </label>
+              {scopeControls}
+              <label>
+                Mode
+                <select
+                  disabled={graphRecoveryBusy}
+                  onChange={event => setMode(event.target.value as ContextBriefMode)}
+                  value={mode}
+                >
+                  {CONTEXT_BRIEF_MODES.map(value => (
+                    <option key={value}>{value}</option>
+                  ))}
+                </select>
+              </label>
+              <details className="context-advanced">
+                <summary>Evidence and budget</summary>
+                <label>
+                  Evidence detail
+                  <select
+                    disabled={graphRecoveryBusy}
+                    onChange={event => setDetail(event.target.value as ContextBriefDetail)}
+                    value={detail}
+                  >
+                    <option value="compact">Compact evidence</option>
+                    <option value="source">Include source excerpts</option>
+                  </select>
+                </label>
+                <label>
+                  Budget
+                  <input
+                    disabled={graphRecoveryBusy}
+                    max={1_500}
+                    min={CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS}
+                    onChange={event => setBudgetTokens(Number(event.target.value))}
+                    type="number"
+                    value={budgetTokens}
+                  />
+                </label>
+                <label className="context-code-refs">
+                  Code anchors
+                  <span className={tooManyCodeRefs ? 'is-warning' : undefined}>
+                    {codeRefs.length}/{CONTEXT_BRIEF_MAXIMUM_CODE_REFS}
+                  </span>
+                  <textarea
+                    disabled={graphRecoveryBusy}
+                    onChange={event => setCodeRefsText(event.target.value)}
+                    placeholder={'apps/threadnote/src/manager/context.ts\ncgs_…'}
+                    rows={3}
+                    value={codeRefsText}
+                  />
+                  {codeRefsError ? <small role="alert">{codeRefsError}</small> : null}
+                </label>
+              </details>
+              <div className="context-form-actions">
+                <button
+                  disabled={
+                    briefBusy ||
+                    graphRecoveryBusy ||
+                    Boolean(codeRefsError) ||
+                    invalidBudget ||
+                    !task.trim() ||
+                    (scopeKind === 'repository' ? !callerCwd.trim() : !workset.trim())
+                  }
+                  onClick={() => void runBrief()}
+                  type="button"
+                >
+                  {briefBusy ? 'Building…' : brief ? 'Rebuild brief' : 'Build brief'}
                 </button>
+                {briefBusy ? (
+                  <button onClick={cancelBrief} type="button">
+                    Cancel
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <div className="workspace-card context-evidence-card">
+            <header>
+              <h3>Evidence</h3>
+            </header>
+            <div className="workspace-pad">
+              <ContextStatus
+                error={briefError}
+                loading={briefBusy}
+                loadingText="Compiling bounded graph and memory evidence…"
+              />
+              <ContextStatus
+                error={graphRecoveryError}
+                loading={graphRecoveryBusy}
+                loadingText="Preparing graph evidence and recompiling this Context Brief…"
+              />
+              {graphRecoveryNotice && !graphRecoveryBusy ? (
+                <p aria-live="polite" className="context-status is-success" role="status">
+                  {graphRecoveryNotice}
+                </p>
+              ) : null}
+              {brief ? (
+                <ContextBriefResult
+                  brief={brief.structuredContent}
+                  onOpenMemory={uri => void readContext(uri)}
+                  onRecoverGraph={scope => void recoverGraph(scope)}
+                  recoveryBusy={graphRecoveryBusy}
+                  onRerun={overrides => void runBrief(overrides)}
+                />
+              ) : !briefBusy && !briefError ? (
+                <ContextEmpty
+                  title="No brief compiled yet"
+                  text="Choose a repository or prepared Workset, describe the task, and optionally add exact file or graph anchors."
+                />
               ) : null}
             </div>
           </div>
-          <ContextStatus
-            error={briefError}
-            loading={briefBusy}
-            loadingText="Compiling bounded graph and memory evidence…"
-          />
-          <ContextStatus
-            error={graphRecoveryError}
-            loading={graphRecoveryBusy}
-            loadingText="Preparing graph evidence and recompiling this Context Brief…"
-          />
-          {graphRecoveryNotice && !graphRecoveryBusy ? (
-            <p aria-live="polite" className="context-status is-success" role="status">
-              {graphRecoveryNotice}
-            </p>
-          ) : null}
-          {brief ? (
-            <ContextBriefResult
-              brief={brief.structuredContent}
-              onOpenMemory={uri => void readContext(uri)}
-              onRecoverGraph={scope => void recoverGraph(scope)}
-              recoveryBusy={graphRecoveryBusy}
-              onRerun={overrides => void runBrief(overrides)}
-            />
-          ) : !briefBusy && !briefError ? (
-            <ContextEmpty
-              title="No brief compiled yet"
-              text="Choose a repository or prepared Workset, describe the task, and optionally add exact file or graph anchors."
-            />
-          ) : null}
         </section>
       ) : view === 'recall' ? (
         <section aria-busy={recallBusy} className="context-recall" role="tabpanel">
+          {scopeControls}
           <div className="context-recall-form">
             <label>
               Recall query

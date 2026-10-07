@@ -35,3 +35,38 @@ export function createManagerHttpServer<R>(handle: ManagerRouteHandler<R>) {
     return (yield* handle(managerRequest)) ?? HttpServerResponse.empty({status: 204});
   });
 }
+
+export const MANAGER_STATIC_FILES: Readonly<
+  Record<
+    string,
+    {
+      readonly contentType: string;
+      readonly directory?: 'assets/brand' | 'manager';
+      readonly path: string;
+      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static' | 'node_modules/@mdxeditor/editor/dist';
+    }
+  >
+> = {
+  '/': {contentType: 'text/html; charset=utf-8', path: 'index.html', sourceDirectory: 'packages/manager/static'},
+  '/index.html': {
+    contentType: 'text/html; charset=utf-8',
+    path: 'index.html',
+    sourceDirectory: 'packages/manager/static',
+  },
+  '/app.css': {
+    contentType: 'text/css; charset=utf-8',
+    path: 'app.css',
+    sourceDirectory: 'packages/manager/static',
+  },
+  '/editor.css': {
+    contentType: 'text/css; charset=utf-8',
+    path: 'style.css',
+    sourceDirectory: 'node_modules/@mdxeditor/editor/dist',
+  },
+  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
+  '/threadnote-logo.svg': {
+    contentType: 'image/svg+xml; charset=utf-8',
+    directory: 'assets/brand',
+    path: 'threadnote-logo.svg',
+  },
+};

@@ -106,7 +106,7 @@ describe('Manager Processes panel', () => {
     expect(processList?.querySelectorAll('[role="listitem"]')).toHaveLength(5);
     expect(document.body.textContent).toContain('Graph compaction worker');
     expect(document.body.textContent).toContain('Compact graph storage');
-    expect(document.body.textContent).toContain('Manager · PID 80276');
+    expect(document.body.textContent).toContain('This session · Verified runtime');
     expect(document.body.textContent).toContain('MCP server');
     expect(document.body.textContent).toContain('Graph builder activity');
     expect(document.body.textContent).toContain('Graph query worker');
@@ -119,21 +119,19 @@ describe('Manager Processes panel', () => {
     const managerStop = document.querySelector<HTMLButtonElement>('[aria-label="Terminate Manager process 80276"]');
     expect(stop?.title).toBe('Terminate Graph compaction worker');
     expect(stop?.disabled).toBe(false);
-    expect(managerStop?.title).toBe('The current Manager process is protected');
-    expect(managerStop?.disabled).toBe(true);
+    expect(managerStop).toBeNull();
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('[aria-label="Inspect Manager process 80276"]')?.click(),
+    );
+    expect(document.querySelector('dialog')?.textContent).toContain('80276');
   });
 
   it('puts active work ahead of idle registered and legacy runtimes', async () => {
     await renderProcesses();
-    const titles = [...document.querySelectorAll('.process-card-title strong')].map(element => element.textContent);
-    expect(titles).toEqual([
-      'Graph compaction worker',
-      'MCP server',
-      'Graph query worker',
-      'Manager',
-      'Legacy runtime',
-    ]);
-    expect(document.body.textContent).toContain('Active operations appear first');
+    const titles = [...document.querySelectorAll('.process-row .row-copy strong')].map(element => element.textContent);
+    expect(titles).toEqual(['Compact graph storage', 'Index repository', 'Impact query', 'Manager', 'Legacy runtime']);
+    expect(document.body.textContent).toContain('Active operations');
+    expect(document.body.textContent).toContain('Other runtimes');
   });
 
   it('orders every process by attention rank without mutating the API response', () => {

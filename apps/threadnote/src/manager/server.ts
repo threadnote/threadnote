@@ -18,7 +18,11 @@ import {
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
-import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
+import {
+  createManagerHttpServer,
+  MANAGER_STATIC_FILES as STATIC_FILES,
+  type ManagerHttpRequest,
+} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
   ensureEffectAiReady,
@@ -325,36 +329,6 @@ interface BulkItemResult {
   readonly uri: string;
   readonly error?: string;
 }
-
-const STATIC_FILES: Readonly<
-  Record<
-    string,
-    {
-      readonly contentType: string;
-      readonly directory?: 'assets/brand' | 'manager';
-      readonly path: string;
-      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static';
-    }
-  >
-> = {
-  '/': {contentType: 'text/html; charset=utf-8', path: 'index.html', sourceDirectory: 'packages/manager/static'},
-  '/index.html': {
-    contentType: 'text/html; charset=utf-8',
-    path: 'index.html',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.css': {
-    contentType: 'text/css; charset=utf-8',
-    path: 'app.css',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
-  '/threadnote-logo.svg': {
-    contentType: 'image/svg+xml; charset=utf-8',
-    directory: 'assets/brand',
-    path: 'threadnote-logo.svg',
-  },
-};
 
 export function runManage(config: RuntimeConfig, options: ManageOptions) {
   return Effect.scoped(
@@ -1338,6 +1312,11 @@ const runBulk = Effect.fn('manager.runBulk')(function* (
         } else if (action === 'publish') {
           output = (yield* runCaptured(
             () => runSharePublish(config, uri, {team: optionalString(body.team)}),
+            runEffect,
+          )).output;
+        } else if (action === 'unpublish') {
+          output = (yield* runCaptured(
+            () => runShareUnpublish(config, uri, {team: optionalString(body.team)}),
             runEffect,
           )).output;
         } else {

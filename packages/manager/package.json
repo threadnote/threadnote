@@ -53,19 +53,21 @@
     "./attention/maintenance-view": "./src/attention/maintenance_view.tsx"
   },
   "dependencies": {
-    "@threadnote/integrations": "workspace:*",
+    "@mdxeditor/editor": "^4.3.2",
+    "@threadnote/context": "workspace:*",
     "@threadnote/graph": "workspace:*",
+    "@threadnote/integrations": "workspace:*",
     "@threadnote/memory": "workspace:*",
     "@threadnote/platform": "workspace:*",
-    "react": "^19.3.0",
-    "three": "^0.186.0",
-    "effect": "4.0.0",
     "@threadnote/recall": "workspace:*",
-    "@threadnote/context": "workspace:*",
     "@threadnote/workspace": "workspace:*",
+    "effect": "4.0.0",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "three": "^0.186.0"
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",

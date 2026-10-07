@@ -1,3 +1,5 @@
+import {ShieldCheck} from 'lucide-react';
+import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import type {
@@ -32,6 +34,7 @@ interface Props {
 }
 
 export function ContextMaintenanceView(props: Props): React.ReactElement {
+  const [tab, setTab] = useState<'decisions' | 'recovery' | 'history' | 'hygiene'>('decisions');
   const [snapshot, setSnapshot] = useState<{
     project: string;
     status: ManagerContextMaintenanceStatusV2;
@@ -299,38 +302,37 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   );
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
-      <header className="attention-header">
-        <div>
-          <p className="eyebrow">Living context</p>
-          <h2>Context health</h2>
-          <p
-            role="status"
-            aria-live="polite"
-            className="health-overview-status"
-            data-tone={decisionCount > 0 ? 'warning' : coverage === 'complete' ? 'success' : 'info'}
+      <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
+        {(
+          [
+            ['decisions', 'Needs a decision'],
+            ['recovery', 'Automatic recovery'],
+            ['history', 'History'],
+            ['hygiene', 'Hygiene'],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            role="tab"
+            aria-selected={tab === value}
+            className={tab === value ? 'is-active' : undefined}
+            onClick={() => setTab(value)}
           >
-            {maintenanceStatusLabel({
-              decisions: decisionCount,
-              coverage,
-              paused: status?.paused ?? false,
-              state: status?.state,
-            })}
-          </p>
-        </div>
-        <label>
-          Project
-          <select
-            aria-label="Context health project"
-            value={props.project}
-            onChange={event => props.onProjectChange(event.target.value)}
-          >
-            {props.projects.map(project => (
-              <option key={project}>{project}</option>
-            ))}
-          </select>
-        </label>
-      </header>
-      <div className="attention-metrics">
+            {label}
+            {value === 'decisions' && decisionCount > 0 ? <span>{decisionCount}</span> : null}
+          </button>
+        ))}
+      </div>
+      <p role="status" aria-live="polite" className="workspace-note">
+        <ShieldCheck />
+        {maintenanceStatusLabel({
+          decisions: decisionCount,
+          coverage,
+          paused: status?.paused ?? false,
+          state: status?.state,
+        })}
+      </p>
+      <div className="attention-metrics" hidden={tab !== 'recovery'}>
         <Metric
           label="Needs your decision"
           value={`${decisionCount.toLocaleString()} ${decisionCount === 1 ? 'memory' : 'memories'}`}
@@ -348,7 +350,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           tone="neutral"
         />
       </div>
-      <section className="attention-bulk-repair" aria-label="Maintenance controls">
+      <section hidden={tab !== 'recovery'} className="attention-bulk-repair" aria-label="Maintenance controls">
         <div>
           <div className="health-maintenance-heading">
             <strong>Automatic maintenance</strong>
@@ -435,7 +437,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           )}
         </section>
       ) : null}
-      <section aria-label="Evidence coverage" className="attention-card health-coverage-card">
+      <section
+        hidden={tab !== 'recovery'}
+        aria-label="Evidence coverage"
+        className="attention-card health-coverage-card"
+      >
         <header>
           <h3>Evidence coverage</h3>
           <span className="health-status-badge" data-tone={coverage === 'complete' ? 'success' : 'info'}>
@@ -545,10 +551,14 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ))}
         </details>
       </section>
-      <section aria-label="Needs your decision" className="attention-list health-record-list">
+      <section
+        hidden={tab !== 'decisions'}
+        aria-label="Needs your decision"
+        className="attention-list health-record-list"
+      >
         <h3>Needs your decision</h3>
         {groups.length === 0 && unloadedDecisions.length === 0 ? (
-          <p>No supported decisions are waiting in the loaded context. Evidence coverage remains visible above.</p>
+          <p>No decisions are waiting in the loaded context. Open Automatic recovery to inspect evidence coverage.</p>
         ) : null}
         {groups.map(group => (
           <article key={group.uri} className="attention-card health-record health-decision-card">
@@ -675,7 +685,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           />
         </section>
       ) : null}
-      <section aria-label="Automatic recovery" className="attention-list health-recovery-list">
+      <section
+        hidden={tab !== 'recovery'}
+        aria-label="Automatic recovery"
+        className="attention-list health-recovery-list"
+      >
         <h3>Automatic recovery</h3>
         {causes.length === 0 ? (
           <p>No blocked recovery groups are reported. Queued evidence checks are tracked in coverage.</p>
@@ -702,7 +716,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ))
         )}
       </section>
-      <section aria-label="Recent maintenance and history" className="attention-list health-history-list">
+      <section
+        hidden={tab !== 'history'}
+        aria-label="Recent maintenance and history"
+        className="attention-list health-history-list"
+      >
         <h3>Recent maintenance and history</h3>
         <p>
           Last progress:{' '}
@@ -774,6 +792,26 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           ) : null}
         </details>
       </section>
+      {tab === 'hygiene' ? (
+        <section className="workspace-card">
+          <header>
+            <h3>Memory hygiene</h3>
+          </header>
+          <div className="workspace-pad">
+            <p>
+              Find overlapping memories and preview a smaller, clearer set of context. Review the proposed changes
+              before applying.
+            </p>
+            <WorkspaceUtilities
+              inline
+              panel="context-health"
+              project={props.project}
+              projects={props.projects}
+              onChanged={async () => props.onChanged()}
+            />
+          </div>
+        </section>
+      ) : null}
       {retainedCase ? (
         <section className="attention-card" aria-label="Retained maintenance case">
           <h3>Retained case history</h3>

@@ -173,8 +173,8 @@ export function ThreeGraph(props: {
     edgeGeometry.setAttribute('position', edgePosition);
     edgeGeometry.setAttribute('color', new THREE.Float32BufferAttribute(edgeColors, 3));
     const edgeMaterial = new THREE.LineBasicMaterial({
-      blending: THREE.AdditiveBlending,
-      opacity: props.graph.mode === 'overview' ? 0.34 : 0.18,
+      blending: THREE.NormalBlending,
+      opacity: props.graph.mode === 'overview' ? 0.5 : 0.32,
       transparent: true,
       vertexColors: true,
     });
@@ -212,7 +212,7 @@ export function ThreeGraph(props: {
       highlightPosition = new THREE.Float32BufferAttribute(highlightPositions, 3);
       highlightGeometry.setAttribute('position', highlightPosition);
       highlightMaterial = new THREE.LineBasicMaterial({
-        blending: THREE.AdditiveBlending,
+        blending: THREE.NormalBlending,
         color: SELECTED_NODE_COLOR,
         opacity: 0.72,
         transparent: true,
@@ -1144,7 +1144,7 @@ function directionalEdgePositions(
 
 function graphPointMaterial(scale: number, zoom: number): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     depthWrite: false,
     fragmentShader: `
       varying vec3 vColor;

@@ -104,10 +104,17 @@ const build = Effect.gen(function* () {
     entrypoints: [path.join(root, 'packages', 'manager', 'src', 'ui.tsx')],
     format: 'iife',
     minify: true,
-    naming: 'app.js',
+    naming: 'app.[ext]',
     outdir: path.join(outputRoot, 'manager'),
     target: 'browser',
   });
+
+  // Bun emits imported editor styles alongside the UI entry. Keep app styles last in the cascade.
+  yield* fs.rename(path.join(outputRoot, 'manager', 'app.css'), path.join(outputRoot, 'manager', 'style.css'));
+  yield* fs.copyFile(
+    path.join(root, 'packages', 'manager', 'static', 'app.css'),
+    path.join(outputRoot, 'manager', 'app.css'),
+  );
 
   const nativeRuntimeRoot = path.join(outputRoot, 'runtime');
   if (target.includes('darwin')) {

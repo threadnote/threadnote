@@ -8,7 +8,6 @@ export type PanelName =
   | 'processes'
   | 'reviews'
   | 'shares'
-  | 'tools'
   | 'worksets';
 export type SelectId = 'agent' | 'kind' | 'status';
 export type ManagerMemoryKind = 'durable' | 'handoff' | 'incident' | 'preference' | 'smoke';
