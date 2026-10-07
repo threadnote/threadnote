@@ -67,10 +67,11 @@ const ALLOWED_LEGACY_IDENTIFIER_SOURCES = new Set([
   'apps/threadnote/src/migration/layout.ts',
   'packages/store/src/resource-id.ts',
 ]);
-const ALLOWED_PYTHON_LANGUAGE_PACK_SOURCES = new Set([
+const ALLOWED_PYTHON_LANGUAGE_METADATA_SOURCES = new Set([
   'packages/graph/src/languages/catalog.generated.ts',
   'packages/graph/src/languages/generic/definitions.ts',
   'packages/graph/src/languages/tree_sitter_assets.ts',
+  'packages/manager/src/memory_editor_languages.ts',
 ]);
 
 const checkSelfContained = Effect.gen(function* () {
@@ -102,9 +103,9 @@ const checkSelfContained = Effect.gen(function* () {
     if (
       /\bpython\b/i.test(content) &&
       relativePath !== 'apps/threadnote/src/migration/legacy-installations.ts' &&
-      !ALLOWED_PYTHON_LANGUAGE_PACK_SOURCES.has(relativePath)
+      !ALLOWED_PYTHON_LANGUAGE_METADATA_SOURCES.has(relativePath)
     ) {
-      failures.push(`Python runtime token outside migration or language-pack metadata: ${relativePath}`);
+      failures.push(`Python runtime token outside migration or language metadata: ${relativePath}`);
     }
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {
       failures.push(`legacy identifier or storage path outside compatibility boundary: ${relativePath}`);

@@ -25,6 +25,7 @@ import {
   Separator,
 } from '@mdxeditor/editor';
 import {memoryDocumentParts, replaceMemoryBody} from './library_model.js';
+import {MEMORY_EDITOR_LANGUAGES} from './memory_editor_languages.js';
 
 export function MemoryEditor({
   content,
@@ -75,19 +76,7 @@ export function MemoryEditor({
         tablePlugin(),
         codeBlockPlugin({defaultCodeBlockLanguage: 'ts'}),
         codeMirrorPlugin({
-          codeBlockLanguages: {
-            '': 'Plain text',
-            ts: 'TypeScript',
-            tsx: 'TSX',
-            js: 'JavaScript',
-            json: 'JSON',
-            css: 'CSS',
-            python: 'Python',
-            bash: 'Shell',
-            sql: 'SQL',
-            go: 'Go',
-            rust: 'Rust',
-          },
+          codeBlockLanguages: MEMORY_EDITOR_LANGUAGES,
         }),
         diffSourcePlugin(),
         markdownShortcutPlugin(),

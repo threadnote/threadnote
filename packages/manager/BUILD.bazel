@@ -450,6 +450,7 @@ bun_test(
         "//packages/manager:src/manifest_projects_view.tsx",
         "//packages/manager:src/memory/contracts.ts",
         "//packages/manager:src/memory_editor.tsx",
+        "//packages/manager:src/memory_editor_languages.ts",
         "//packages/manager:src/navigation.tsx",
         "//packages/manager:src/process/contracts.ts",
         "//packages/manager:src/processes_view.tsx",

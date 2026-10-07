@@ -7016,6 +7016,7 @@ h4 {
   border-radius: 0;
   border-block: 1px solid var(--line);
   padding: 8px 12px;
+  flex-wrap: wrap;
 }
 .memory-rich-editor [role='toolbar'] button {
   min-height: 28px;
