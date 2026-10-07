@@ -43,17 +43,70 @@ export function mergeMaintenanceStatusPage(
   };
 }
 
-export function healthDecisionGroups(report: ManagerContextHealthResponseV1) {
+export function healthDecisionGroups(
+  report: ManagerContextHealthResponseV1,
+  cases: readonly ManagerContextMaintenanceCaseV2[] = [],
+) {
   const previews = new Map(report.recordPreviews.map(item => [item.uri, item]));
-  const groups = new Map<string, Finding[]>();
+  const groups = new Map<
+    string,
+    {key: string; uri?: string; findings: Finding[]; cases: ManagerContextMaintenanceCaseV2[]}
+  >();
+  const represented = new Set<string>();
   for (const finding of report.findings) {
     if ((finding.classification ?? classifyContextHealthFindingV2(finding)) !== 'actionable') continue;
     const uri = finding.repair.subjectUri ?? finding.uris[0] ?? finding.id;
-    groups.set(uri, [...(groups.get(uri) ?? []), finding]);
+    const group = groups.get(uri) ?? {key: uri, uri, findings: [], cases: []};
+    group.findings.push(finding);
+    groups.set(uri, group);
+    if (finding.caseId) represented.add(finding.caseId);
   }
-  return [...groups]
-    .sort(([left], [right]) => compare(left, right))
-    .map(([uri, findings]) => ({uri, findings, preview: previews.get(uri)}));
+  for (const item of [...cases].sort((left, right) => compare(left.caseId, right.caseId))) {
+    if (item.disposition !== 'needs-decision' || represented.has(item.caseId)) continue;
+    represented.add(item.caseId);
+    const uri = maintenanceCaseMemoryUri(item);
+    const key = uri ?? (item.family === 'candidate' ? item.caseId : item.memoryId);
+    const group = groups.get(key) ?? {key, uri, findings: [], cases: []};
+    group.cases.push(item);
+    groups.set(key, group);
+  }
+  return [...groups.values()]
+    .sort((left, right) => compare(left.key, right.key))
+    .map(group => ({...group, preview: group.uri ? previews.get(group.uri) : undefined}));
+}
+
+export function maintenanceCaseMemoryUri(item: ManagerContextMaintenanceCaseV2 | undefined): string | undefined {
+  return item?.subjectUri ?? item?.subjectContentHashes?.[0]?.uri ?? item?.archivedUri;
+}
+
+export function maintenanceMemoryTitle(uri: string | undefined): string {
+  if (!uri) return 'Memory needing a decision';
+  const filename = uri.split('/').pop()?.replace(/\.md$/u, '') ?? '';
+  try {
+    return decodeURIComponent(filename).replaceAll('-', ' ') || 'Memory needing a decision';
+  } catch {
+    return filename || 'Memory needing a decision';
+  }
+}
+
+export function maintenanceDecisionExplanation(reason: string): string {
+  if (reason.includes('owner') || reason.includes('shared-canonical'))
+    return 'This shared memory needs a change reviewed by its team owner. Review the affected links and prepare a proposal for the owner.';
+  if (reason === 'source-changed' || reason === 'citation-changed')
+    return 'The source changed since this memory was written. Compare the stored claim with current and historical evidence, then update the advice if it no longer applies.';
+  if (reason.includes('ambiguous'))
+    return 'More than one source could support this memory. Review the candidates and choose the correct repository or claim.';
+  if (reason.includes('relation'))
+    return 'A related memory is unavailable or inactive. Review the link before replacing or removing it.';
+  return 'Review this memory and its evidence to decide whether to update its advice, preserve it as historical, or archive it.';
+}
+
+export function maintenanceDecisionLabel(reason: string): string {
+  if (reason.includes('owner') || reason.includes('shared-canonical')) return 'Team owner review';
+  if (reason === 'source-changed' || reason === 'citation-changed') return 'Source changed';
+  if (reason.includes('ambiguous')) return 'Choose a source';
+  if (reason.includes('relation')) return 'Review a memory link';
+  return reason.replaceAll('-', ' ');
 }
 
 export function groupMaintenanceCauses(cases: readonly ManagerContextMaintenanceCaseV2[]) {
@@ -107,9 +160,13 @@ export function maintenanceRecoveryInstruction(reason: string): string {
   return 'The case waits for changed source, memory, or policy evidence. Unchanged retries do not create additional decisions.';
 }
 
-export function healthDecisionTask(project: string, findings: readonly Finding[], choice: string): string {
+export function healthDecisionTask(
+  project: string,
+  findings: readonly ({readonly caseId: string} | {readonly caseId?: string; readonly id: string})[],
+  choice: string,
+): string {
   return `Use $threadnote-health for project ${JSON.stringify(project)}. Decision: ${choice}. Exact cases: ${findings
-    .map(item => item.caseId ?? item.id)
+    .map(item => item.caseId ?? ('id' in item ? item.id : undefined))
     .map(value => JSON.stringify(value))
     .join(
       ', ',

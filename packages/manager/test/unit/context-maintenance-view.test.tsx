@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
-import {afterEach, describe, expect, it, vi} from 'vitest';
+import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
 import type {
@@ -10,6 +10,14 @@ import type {
 } from '@threadnote/manager/attention/contracts';
 
 let root: Root | undefined;
+beforeEach(() => {
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = true;
+  });
+  vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = false;
+  });
+});
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;
@@ -233,7 +241,9 @@ describe('context maintenance view', () => {
     await click('Load more retained cases');
     await click('Load more retained changes and undo');
     await click('Inspect exact case and evidence');
-    expect(document.body.textContent).toContain('retained historical declaration');
+    expect(document.querySelector('dialog')?.open).toBe(true);
+    expect(document.querySelector('dialog')?.textContent).toContain('retained historical declaration');
+    await click('Close');
     expect(calls.filter(url => url.searchParams.has('caseId'))[0].searchParams.get('project')).toBe('threadnote');
     await click('Undo this change');
     expect(undone).toBe(true);
@@ -249,6 +259,63 @@ describe('context maintenance view', () => {
     hidden.mockReturnValue(false);
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('keeps the review visible when background maintenance advances its generation', async () => {
+    vi.useFakeTimers();
+    let advanced = false;
+    const memoryUri = 'threadnote://user/tester/memories/example.md';
+    const item = {
+      caseId: 'case-visible',
+      project: 'threadnote',
+      memoryId: 'memory-visible',
+      family: 'citation',
+      slot: 'anchor',
+      evidenceRevision: 'revision',
+      disposition: 'needs-decision',
+      reason: 'source-changed',
+      subjectContentHashes: [{uri: memoryUri, hash: 'hash'}],
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = new URL(input, 'http://manager.test');
+        if (url.pathname === '/api/memory') return new Response(JSON.stringify({content: '# Visible memory'}));
+        if (url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status')
+          return new Response(
+            JSON.stringify({
+              version: 2,
+              project: 'threadnote',
+              caseId: item.caseId,
+              memoryUri,
+              evidenceRevision: 'revision',
+              expectedContentHash: 'hash',
+              reason: 'source-changed',
+              choices: ['Review the claim'],
+              allowedOperations: [],
+              instructions: 'Compare the source.',
+            }),
+          );
+        return new Response(
+          JSON.stringify({...status(), cases: [item], page: {generation: advanced ? 'second' : 'first'}}),
+        );
+      }),
+    );
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    const review = [...document.querySelectorAll('button')].find(
+      button => button.textContent === 'Review memory and evidence',
+    );
+    await act(async () => review!.click());
+    expect(document.querySelector('dialog')?.open).toBe(true);
+    advanced = true;
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(document.querySelector('dialog')?.open).toBe(true);
+    expect(document.querySelector('dialog')?.textContent).toContain('Visible memory');
   });
 
   it('refreshes evidence when background proof advances without a corpus change', async () => {
@@ -387,10 +454,11 @@ describe('context maintenance view', () => {
     expect(document.querySelectorAll('.health-record')).toHaveLength(1);
     expect(document.body.textContent).toContain('1 memory needs your decision');
     const prepare = Array.from(document.querySelectorAll('button')).find(
-      item => item.textContent === 'Prepare claim review task',
+      item => item.textContent === 'Review with agent…',
     );
     await act(async () => prepare?.click());
-    const task = document.querySelector('textarea')?.value;
+    expect(document.querySelector('dialog')?.open).toBe(true);
+    const task = document.querySelector<HTMLTextAreaElement>('dialog textarea')?.value;
     expect(task).toContain('$threadnote-health');
     expect(task).toContain('case-0');
     expect(task).toContain('case-1');

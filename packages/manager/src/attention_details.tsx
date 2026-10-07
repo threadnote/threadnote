@@ -390,7 +390,7 @@ export function HealthDetail(props: {
       ) : null}
       {error ? <p role="alert">{error}</p> : null}
       {notice ? <p role="status">{notice}</p> : null}
-      {!props.repairsAvailable ? (
+      {!props.repairsAvailable && finding.category.startsWith('citation-') ? (
         <p role="status">Repository-backed repairs require a configured local checkout for this project.</p>
       ) : proposal ? (
         <section>

@@ -13027,6 +13027,7 @@ bun_workspace_test(
         "//packages/manager:src/action_menu.tsx",
         "//packages/manager:src/attention/contracts.ts",
         "//packages/manager:src/attention/maintenance.ts",
+        "//packages/manager:src/attention/maintenance_dialogs.tsx",
         "//packages/manager:src/attention/maintenance_view.tsx",
         "//packages/manager:src/attention_details.tsx",
         "//packages/manager:src/attention_view.tsx",

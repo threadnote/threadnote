@@ -115,6 +115,7 @@ export interface ManagerContextMaintenanceCaseV2 {
   readonly memoryId: string;
   readonly subjectUri?: string;
   readonly archivedUri?: string;
+  readonly subjectContentHashes?: readonly {readonly uri: string; readonly hash: string}[];
   readonly family: string;
   readonly slot: string;
   readonly evidenceRevision: string;

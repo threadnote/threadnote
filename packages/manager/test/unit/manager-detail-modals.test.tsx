@@ -423,7 +423,7 @@ it('renders an actionable project overview without fabricated trends', async () 
   expect(document.querySelector('.home-lanes')).toBeNull();
 });
 
-it('requires a repair preview before applying its exact revision', async () => {
+it('allows a memory relation repair without a repository and requires its exact preview revision', async () => {
   fetchMock
     .mockResolvedValueOnce(
       response({
@@ -441,7 +441,7 @@ it('requires a repair preview before applying its exact revision', async () => {
   await render(
     <HealthDetail
       {...base}
-      repairsAvailable={true}
+      repairsAvailable={false}
       finding={{
         id: 'finding-2',
         category: 'relation-target-missing',

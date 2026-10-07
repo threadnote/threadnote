@@ -5793,6 +5793,66 @@ dd {
   gap: 12px;
   margin-top: 24px;
 }
+.health-dialog-section-heading {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+.health-decision-explanation {
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  padding: 14px 18px;
+}
+.health-case-selector {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 18px;
+  max-width: 400px;
+}
+.health-decision-explanation strong {
+  color: var(--warn);
+  text-transform: capitalize;
+}
+.health-case-memory {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+}
+.health-case-memory .markdown-viewer {
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 12px;
+}
+.health-evidence-selectors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.health-evidence-comparison {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+.health-task-dialog textarea {
+  box-sizing: border-box;
+  min-height: 180px;
+  width: 100%;
+}
+.health-task-dialog footer [role='status'] {
+  align-self: center;
+  color: var(--muted);
+}
+.health-case-dialog footer {
+  background: var(--panel-raised);
+  border-top: 1px solid var(--line);
+  bottom: -24px;
+  padding: 16px 0;
+  position: sticky;
+}
 .review-safety-state {
   background: var(--code-bg);
   border: 1px solid var(--line-soft);
