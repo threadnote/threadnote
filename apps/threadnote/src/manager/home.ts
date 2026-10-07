@@ -3,6 +3,7 @@ import {managerHomeLanes, type ManagerHomeLane} from '@threadnote/manager/home';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
 import {readMaintenanceMemoryRecords} from '../memory/maintenance/records.js';
 import {collectContextHealth} from '../memory/context/health_commands.js';
+import {readContextMaintenanceStatus} from '../memory/context/maintenance.js';
 import {buildLocalValueReport} from '../value_report/commands.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -21,6 +22,7 @@ export interface ManagerHomeResponseV1 {
     readonly scanned?: number;
     readonly pending?: number;
     readonly outcomes?: number;
+    readonly decisionMemories?: number;
   };
   readonly lanes: readonly ManagerHomeLane[];
   readonly project: string;
@@ -44,6 +46,7 @@ const homeSources = {
   value: buildLocalValueReport,
   root: managerAttentionProjectRoot,
   health: collectContextHealth,
+  maintenance: readContextMaintenanceStatus,
 };
 
 export type ManagerHomeSources<R = never> = {
@@ -89,14 +92,15 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
       }),
     );
   });
-  const [corpusResult, reviewsResult, valueResult, healthResult] = yield* Effect.all(
+  const [corpusResult, reviewsResult, valueResult, healthResult, maintenanceResult] = yield* Effect.all(
     [
       Fiber.join(corpusFiber),
       observe(sources.reviews(request.config.agentContextHome)),
       observe(sources.value(request.config, {period: 30, project})),
       healthObservation,
+      observe(sources.maintenance(request.config, project)),
     ],
-    {concurrency: 4},
+    {concurrency: 5},
   );
   const recordsResult = Result.map(corpusResult, records => activeProjectRecords(records, project));
   const handoffs = Result.isSuccess(recordsResult)
@@ -122,14 +126,21 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
             candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
         ).length
     : undefined;
+  const healthReport = healthResult && Result.isSuccess(healthResult) ? healthResult.success : undefined;
+  const retainedDecisions = Result.isSuccess(maintenanceResult)
+    ? maintenanceResult.success.counts?.decisionMemories
+    : undefined;
+  const reportDecisions = healthReport?.maintenance?.affectedMemories;
+  const decisionMemories =
+    retainedDecisions === undefined ? reportDecisions : Math.max(retainedDecisions, reportDecisions ?? 0);
   const health =
-    healthResult && Result.isSuccess(healthResult)
+    healthReport || decisionMemories !== undefined
       ? {
-          findingCount: healthResult.success.findings.length + healthResult.success.omittedFindings,
-          decisionMemories: healthResult.success.maintenance?.affectedMemories,
-          automaticCount: healthResult.success.maintenance?.automaticallyManagedFindings,
-          coverage: healthResult.success.maintenance?.citationCoverage.state,
-          status: healthResult.success.status,
+          findingCount: healthReport ? healthReport.findings.length + healthReport.omittedFindings : 0,
+          decisionMemories,
+          automaticCount: healthReport?.maintenance?.automaticallyManagedFindings,
+          coverage: healthReport?.maintenance?.citationCoverage.state,
+          status: healthReport?.status ?? ('unknown' as const),
         }
       : undefined;
   const value = Result.isSuccess(valueResult) ? valueResult.success : undefined;
@@ -142,10 +153,10 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
           ? {
               coverage: healthResult.success.semanticCompleteness.state,
               scanned: healthResult.success.recordsScanned,
-              decisionMemories: healthResult.success.maintenance?.affectedMemories,
               healthCoverage: healthResult.success.maintenance?.citationCoverage.state,
             }
           : {}),
+        ...(decisionMemories === undefined ? {} : {decisionMemories}),
         ...(pendingCount === undefined ? {} : {pending: pendingCount}),
         ...(value
           ? {
