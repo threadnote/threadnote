@@ -1,4 +1,16 @@
-import {House, Library, ScanText, ListChecks, HeartPulse, Network, Blocks, Users, Cpu, ShieldCheck} from 'lucide-react';
+import {
+  House,
+  Library,
+  ScanText,
+  ListChecks,
+  HeartPulse,
+  Network,
+  Blocks,
+  Users,
+  Cpu,
+  ShieldCheck,
+  Plug,
+} from 'lucide-react';
 import {Schema} from 'effect';
 import React from 'react';
 import {trimTrailingCharacters} from '@threadnote/platform/string-boundaries';
@@ -404,6 +416,8 @@ function actionProgressLabel(action: 'archive' | 'forget' | 'publish' | 'unpubli
 
 function tabTitle(name: PanelName): string {
   switch (name) {
+    case 'integrations':
+      return 'Integrations';
     case 'context':
       return 'Context';
     case 'context-health':
@@ -429,6 +443,8 @@ function tabTitle(name: PanelName): string {
 
 function panelIcon(name: PanelName): React.ReactElement {
   switch (name) {
+    case 'integrations':
+      return <Plug aria-hidden="true" />;
     case 'context':
       return <ScanText aria-hidden="true" />;
     case 'context-health':
@@ -454,6 +470,8 @@ function panelIcon(name: PanelName): React.ReactElement {
 
 function panelNavDescription(name: PanelName): string {
   switch (name) {
+    case 'integrations':
+      return 'Connected apps and vaults';
     case 'context':
       return 'Briefs and recall';
     case 'context-health':
@@ -479,6 +497,8 @@ function panelNavDescription(name: PanelName): string {
 
 function panelDescription(name: PanelName): string {
   switch (name) {
+    case 'integrations':
+      return 'Connect the tools where your knowledge lives.';
     case 'context':
       return 'Find useful context for the work ahead.';
     case 'context-health':

@@ -64,6 +64,11 @@ export const MANAGER_STATIC_FILES: Readonly<
     sourceDirectory: 'node_modules/@mdxeditor/editor/dist',
   },
   '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
+  '/favicon.svg': {
+    contentType: 'image/svg+xml; charset=utf-8',
+    directory: 'assets/brand',
+    path: 'continuum/threadnote-circle-brand-dark.svg',
+  },
   '/threadnote-logo.svg': {
     contentType: 'image/svg+xml; charset=utf-8',
     directory: 'assets/brand',

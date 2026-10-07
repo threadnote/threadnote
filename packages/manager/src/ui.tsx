@@ -1,4 +1,5 @@
 import {SharingPanel} from './sharing_view.js';
+import {IntegrationsPanel} from './integrations_view.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
 import '@mdxeditor/editor/style.css';
 import {
@@ -1385,6 +1386,8 @@ function App(): React.ReactElement {
   return (
     <div className={`app${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`} style={appStyle}>
       <ManagerNavigation
+        project={workspaceProject}
+        refreshGeneration={attentionRefreshGeneration}
         panel={panel}
         disabled={controlsBlocked}
         connected={!!state}
@@ -1924,6 +1927,9 @@ function App(): React.ReactElement {
             </section>
           ) : null}
 
+          {panel === 'integrations' ? (
+            <IntegrationsPanel onChanged={refreshAll} onReviews={() => setPanel('reviews')} />
+          ) : null}
           {panel === 'shares' ? (
             <SharingPanel
               shares={shares}

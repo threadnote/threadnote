@@ -123,11 +123,12 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
   const vault = yield* canonicalDirectory(options.vault, 'Obsidian vault');
   const inbox = options.inbox ? normalizeRelativePath(options.inbox, 'Inbox folder') : undefined;
   const current = yield* readObsidianConfiguration(config);
+  const existing = current.sources.find(source => source.id === id);
   const managedProjectionExcludes = current.projections
     .filter(projection => projection.vault === vault)
     .map(projection => `${projection.folder}/**`);
   const source: ObsidianSourceConfig = {
-    enabled: true,
+    enabled: existing?.enabled ?? true,
     exclude: safePatterns(
       [
         ...DEFAULT_OBSIDIAN_EXCLUDES,
@@ -142,7 +143,7 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
     include: safePatterns(options.include, 'Source include'),
     type: 'obsidian',
     vault,
-    watch: false,
+    watch: existing?.watch ?? false,
   };
   const next = upsertObsidianSource(current, source);
   if (options.apply !== true) {

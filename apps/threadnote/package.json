@@ -220,6 +220,8 @@
     "./manager/memory/relations": "./src/manager/memory/relations.ts",
     "./manager/memory/save": "./src/manager/memory/save.ts",
     "./manager/processes": "./src/manager/processes.ts",
+    "./manager/sharing-conflicts": "./src/manager/sharing_conflicts.ts",
+    "./manager/integrations": "./src/manager/integrations.ts",
     "./manager/project/graph_scope": "./src/manager/project/graph_scope.ts",
     "./manager/project/manifest_values": "./src/manager/project/manifest_values.ts",
     "./manager/project/roots": "./src/manager/project/roots.ts",

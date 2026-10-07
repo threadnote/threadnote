@@ -100,6 +100,8 @@ import {runSeed, runSeedSkills} from '../seeding.js';
 import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
 import {handleManagerProcessRequest} from './processes.js';
+import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
+import {handleManagerIntegrationRequest} from './integrations.js';
 import {handleManagerWorkspaceRequest} from './value.js';
 import {emptyManagerTree, readManagerTreeRoot} from '@threadnote/manager/tree';
 import {
@@ -530,6 +532,10 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
   if (!isAuthorized(context, request)) {
     writeJson(response, 401, {error: 'Unauthorized'});
     return;
+  }
+  for (const handler of [handleManagerSharingConflictRequest, handleManagerIntegrationRequest]) {
+    const result = yield* handler({body: request.body, config: context.config, method: request.method, url});
+    if (result) return writeJson(response, result.status, result.body);
   }
   const workflowResponse = yield* handleManagerWorkflowRequest({
     body: request.body,

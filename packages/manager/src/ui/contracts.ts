@@ -4,6 +4,7 @@ export type PanelName =
   | 'doctor'
   | 'graph'
   | 'home'
+  | 'integrations'
   | 'memory'
   | 'processes'
   | 'reviews'

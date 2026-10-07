@@ -1,5 +1,6 @@
 import React, {useState} from 'react';
 import {PanelLeftClose, PanelLeftOpen, ShieldCheck} from 'lucide-react';
+import {navigationAttentionLabel, useNavigationAttention} from './navigation_attention.js';
 import {ThemeSwitch} from './theme.js';
 import {readManagerPreference, writeManagerPreference} from './preferences.js';
 import type {PanelName} from './ui/contracts.js';
@@ -7,6 +8,8 @@ import {panelIcon, panelNavDescription, tabTitle, SIDEBAR_WIDTH_MAX, SIDEBAR_WID
 
 export function ManagerNavigation(props: {
   readonly panel: PanelName;
+  readonly project: string;
+  readonly refreshGeneration: number;
   readonly disabled: boolean;
   readonly connected: boolean;
   readonly onSelect: (panel: PanelName) => void;
@@ -15,6 +18,7 @@ export function ManagerNavigation(props: {
   readonly onResizePointerDown: React.PointerEventHandler<HTMLDivElement>;
   readonly updateIndicator?: {readonly label: string; readonly detail: string};
 }): React.ReactElement {
+  const attention = useNavigationAttention(props.project, props.refreshGeneration, props.panel, props.connected);
   return (
     <>
       <aside className="sidebar" id="manager-navigation">
@@ -31,7 +35,7 @@ export function ManagerNavigation(props: {
           {(
             [
               {label: 'Knowledge', items: ['home', 'memory', 'context', 'reviews', 'context-health', 'graph']},
-              {label: 'Workspace', items: ['worksets', 'shares']},
+              {label: 'Workspace', items: ['worksets', 'shares', 'integrations']},
               {label: 'System', items: ['processes', 'doctor']},
             ] as const
           ).map(group => (
@@ -51,6 +55,15 @@ export function ManagerNavigation(props: {
                     {panelIcon(name)}
                   </span>
                   <strong>{tabTitle(name)}</strong>
+                  {(name === 'shares' || name === 'context-health') && (attention[name] ?? 0) > 0 ? (
+                    <span
+                      className="nav-attention-badge"
+                      aria-label={navigationAttentionLabel(name, attention[name]!, props.project)}
+                      title={navigationAttentionLabel(name, attention[name]!, props.project)}
+                    >
+                      {attention[name]!.toLocaleString()}
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>

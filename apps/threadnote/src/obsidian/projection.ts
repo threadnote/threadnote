@@ -33,6 +33,8 @@ class ObsidianProjectionError extends Schema.TaggedError<ObsidianProjectionError
 }) {}
 
 export interface ObsidianProjectionAddOptions {
+  /** Omit to preserve selection; null explicitly selects all matching memories. */
+  readonly selectedUris?: readonly string[] | null;
   readonly apply?: boolean;
   readonly folder: string;
   readonly id: string;
@@ -114,12 +116,19 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
   const current = yield* readObsidianConfiguration(config);
   const existing = current.projections.find(projection => projection.id === id);
   const projection: ObsidianProjectionConfig = {
-    enabled: true,
+    enabled: existing?.enabled ?? true,
     folder,
     id,
     includeShared: options.includeShared !== false,
     kinds: options.kinds?.length ? [...new Set(options.kinds)] : ['durable', 'handoff'],
-    selectedUris: existing?.selectedUris ?? [],
+    selectedUris:
+      options.selectedUris === null
+        ? undefined
+        : options.selectedUris !== undefined
+          ? normalizeProjectionMemoryUris(config, options.selectedUris)
+          : existing
+            ? existing.selectedUris
+            : [],
     statuses: options.statuses?.length ? [...new Set(options.statuses)] : ['active'],
     type: 'obsidian',
     vault,

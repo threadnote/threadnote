@@ -372,6 +372,7 @@ export interface ShareConflictSummary {
 }
 
 export interface ShareConflictDetail extends ShareConflictSummary {
+  readonly revision: string;
   readonly diff: string;
   readonly localContent?: string;
   readonly previousContent?: string;
@@ -388,7 +389,7 @@ export interface ShareConflictResolveResult {
   readonly uri: string;
 }
 
-type InspectedShareConflict = Omit<ShareConflictDetail, 'diff' | 'resolutionGuidance'>;
+type InspectedShareConflict = Omit<ShareConflictDetail, 'diff' | 'resolutionGuidance' | 'revision'>;
 
 interface ShareUpdateStatus {
   readonly behind: number;

@@ -1,6 +1,7 @@
 import {Console, Effect, Result} from 'effect';
 
 import {applyScrubber} from '@threadnote/platform/scrubber';
+import {sha256Hex} from '@threadnote/platform/digest';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {classifyMemoryIdentityCandidates} from '@threadnote/recall/memory/identity';
 import {loadRecallMemoryIdentities} from '@threadnote/recall/index';
@@ -163,6 +164,7 @@ export const showShareConflict = Effect.fn('share.showShareConflict')(function* 
   const inspected = yield* inspectShareConflict(config, conflict.team, conflict.change);
   return {
     ...inspected,
+    revision: yield* shareConflictRevision(inspected),
     diff: formatShareConflictDiff(inspected),
     resolutionGuidance: shareConflictResolutionGuidance(inspected),
   };
@@ -190,6 +192,14 @@ export const resolveShareConflict = Effect.fn('share.resolveShareConflict')(func
   if (take !== 'shared') assertShareTeamWritable(conflict.team, 'publish conflict resolutions');
   const inspected = yield* inspectShareConflict(config, conflict.team, conflict.change);
   const dryRun = options.dryRun === true;
+  if (
+    options.expectedRevision !== undefined &&
+    options.expectedRevision !== (yield* shareConflictRevision(inspected))
+  ) {
+    throw ShareOperationError.make({
+      message: 'This conflict changed after you opened it. Reload the versions before resolving it.',
+    });
+  }
   const ov = NATIVE_RESOURCE_BACKEND;
   const messages: string[] = [];
   const gitMessages: string[] = [];
@@ -279,6 +289,20 @@ interface TakeSharedPlan {
   readonly acceptedContent: string;
   readonly publishIdentityRepair: boolean;
   readonly writeWorktree: boolean;
+}
+
+export function shareConflictRevision(conflict: InspectedShareConflict) {
+  return sha256Hex(
+    JSON.stringify([
+      conflict.id,
+      conflict.uri,
+      conflict.status,
+      conflict.reason,
+      conflict.localContent ?? null,
+      conflict.sharedContent ?? null,
+      conflict.previousContent ?? null,
+    ]),
+  );
 }
 
 const prepareTakeSharedPlan = Effect.fn('share.prepareTakeSharedPlan')(function* (

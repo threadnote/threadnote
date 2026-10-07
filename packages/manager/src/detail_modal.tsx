@@ -6,6 +6,7 @@ export function DetailModal(props: {
   readonly title: string;
   readonly onClose: () => void;
   readonly children: React.ReactNode;
+  readonly className?: string;
 }): React.ReactElement {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -21,7 +22,7 @@ export function DetailModal(props: {
   return (
     <dialog
       ref={ref}
-      className="detail-modal"
+      className={['detail-modal', props.className].filter(Boolean).join(' ')}
       aria-labelledby={titleId}
       aria-modal="true"
       onCancel={event => {

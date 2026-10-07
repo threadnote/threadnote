@@ -53,6 +53,10 @@ it.each([
       expect(editorStyles.status).toBe(200);
       expect(editorStyles.headers.get('content-type')).toContain('text/css');
       expect(await editorStyles.text()).toBe(styles);
+      const favicon = await testHttpFetch(`${server.url}/favicon.svg`);
+      expect(favicon.status).toBe(200);
+      expect(favicon.headers.get('content-type')).toContain('image/svg+xml');
+      expect(await favicon.text()).toBe('<svg>dark</svg>');
       for (const theme of ['light', 'dark']) {
         const logo = await testHttpFetch(`${server.url}/threadnote-logo-${theme}.svg`);
         expect(logo.status).toBe(200);

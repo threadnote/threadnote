@@ -364,6 +364,8 @@ export interface ShareConflictShowOptions {
 export type ShareConflictTake = 'local' | 'shared';
 
 export interface ShareConflictResolveOptions {
+  /** Refuse to resolve if any inspected version changed since review. */
+  readonly expectedRevision?: string;
   readonly dryRun?: boolean;
   readonly fromFile?: string;
   readonly mergedContent?: string;

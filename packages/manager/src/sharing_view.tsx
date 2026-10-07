@@ -1,8 +1,9 @@
 import React, {useState} from 'react';
-import {Check, GitBranch, Pencil, Plus, RefreshCw, Unlink, Users} from 'lucide-react';
+import {AlertTriangle, Check, GitBranch, Pencil, Plus, RefreshCw, Unlink, Users} from 'lucide-react';
 import {ActionMenu} from './action_menu.js';
 import {useManagerDialogs} from './dialog.js';
 import {PageActions} from './workspace.js';
+import {SharingConflicts} from './sharing_conflicts.js';
 import type {ShareSummary} from './ui/contracts.js';
 import {api, errorMessage} from './ui/support.js';
 
@@ -15,6 +16,8 @@ export function SharingPanel(props: {
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [conflictCounts, setConflictCounts] = useState<Readonly<Record<string, number>>>({});
   async function run(team: string, path: string, body: Record<string, unknown>): Promise<void> {
     if (busy) return;
     setBusy(team || 'new');
@@ -23,7 +26,8 @@ export function SharingPanel(props: {
     try {
       await api(path, body);
       await props.onChanged();
-      setNotice('Team settings updated.');
+      setRefreshVersion(value => value + 1);
+      setNotice(path.endsWith('/sync') ? 'Sync finished. Review any conflicts below.' : 'Team settings updated.');
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -114,6 +118,7 @@ export function SharingPanel(props: {
         </p>
       ) : null}
       <div className="workspace-stack">
+        <SharingConflicts refreshVersion={refreshVersion} onChanged={props.onChanged} onLoaded={setConflictCounts} />
         {props.shares.length ? (
           props.shares.map(share => (
             <section className="workspace-card" key={share.name}>
@@ -126,18 +131,20 @@ export function SharingPanel(props: {
               <div className="workspace-pad">
                 <div className="memory-tags">
                   <span
-                    className={`workspace-status ${share.dirty || share.warning || share.behind || share.ahead ? 'warn' : ''}`}
+                    className={`workspace-status ${conflictCounts[share.name] || share.dirty || share.warning || share.behind || share.ahead ? 'warn' : ''}`}
                   >
-                    <Check />
-                    {share.dirty
-                      ? 'Local changes'
-                      : share.warning
-                        ? 'Needs attention'
-                        : share.behind
-                          ? `${share.behind} incoming`
-                          : share.ahead
-                            ? `${share.ahead} outgoing`
-                            : 'In sync'}
+                    {conflictCounts[share.name] ? <AlertTriangle /> : <Check />}
+                    {conflictCounts[share.name]
+                      ? `${conflictCounts[share.name]} ${conflictCounts[share.name] === 1 ? 'conflict' : 'conflicts'}`
+                      : share.dirty
+                        ? 'Local changes'
+                        : share.warning
+                          ? 'Needs attention'
+                          : share.behind
+                            ? `${share.behind} incoming`
+                            : share.ahead
+                              ? `${share.ahead} outgoing`
+                              : 'Repository up to date'}
                   </span>
                   <span className="muted">Shared team knowledge</span>
                 </div>
