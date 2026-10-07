@@ -1,5 +1,6 @@
 import React, {useEffect, useState} from 'react';
 import {
+  AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
   BookOpen,
@@ -71,6 +72,26 @@ export function IntegrationsPanel({
     setGeneration(value => value + 1);
     setNotice(message);
     await onChanged();
+  }
+  async function exportMemories(id: string): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<IntegrationResult>('/api/integrations/obsidian', {
+        action: 'sync-projection',
+        id,
+        apply: true,
+        confirm: true,
+      });
+      setOperation({action: 'sync-projection', id, title: 'Export results', result});
+      await changed('Memory export completed.');
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
   }
   async function preview(action: ObsidianAction, id: string, title: string): Promise<void> {
     if (busy) return;
@@ -234,7 +255,7 @@ export function IntegrationsPanel({
               <div className="integration-empty">
                 <ArrowUpFromLine />
                 <h4>Read your memories in Obsidian</h4>
-                <p>Choose what to export and preview every sync before applying it.</p>
+                <p>Choose the memories to keep available in your vault.</p>
                 <button disabled={busy} onClick={() => setConnection({kind: 'projection'})}>
                   Set up memory export
                 </button>
@@ -261,11 +282,8 @@ export function IntegrationsPanel({
                     </p>
                   </div>
                   <div className="integration-row-actions">
-                    <button
-                      disabled={busy || !projection.enabled}
-                      onClick={() => void preview('sync-projection', projection.id, 'Preview memory export')}
-                    >
-                      <RefreshCw /> Preview export
+                    <button disabled={busy || !projection.enabled} onClick={() => void exportMemories(projection.id)}>
+                      <ArrowUpFromLine /> Export memories
                     </button>
                     <ActionMenu
                       label={'Actions for memory export ' + projection.id}
@@ -354,6 +372,7 @@ function IntegrationPreview({
     }
   }
   const changes = result.entries.filter(entry => ['add', 'update', 'remove'].includes(entry.action)).length;
+  const protectedEdits = result.entries.filter(entry => entry.action === 'drift').length;
   return (
     <DetailModal
       title={operation.title}
@@ -369,7 +388,10 @@ function IntegrationPreview({
       ) : null}
       {result.applied ? (
         <p className="workspace-note" role="status">
-          <Check /> Completed.
+          {protectedEdits ? <AlertTriangle /> : <Check />}
+          {protectedEdits
+            ? `Completed. ${protectedEdits} ${protectedEdits === 1 ? 'edited file was' : 'edited files were'} left untouched.`
+            : 'Completed.'}
         </p>
       ) : (
         <p className="workspace-note">

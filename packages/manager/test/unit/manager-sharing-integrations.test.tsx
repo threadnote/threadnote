@@ -122,7 +122,10 @@ describe('Sharing conflict resolution', () => {
   });
 });
 describe('Obsidian integrations', () => {
-  it('previews import changes before applying and displays the affected note', async () => {
+  it.each([
+    {label: 'Preview import', action: 'sync-source', id: 'notes', title: 'Preview vault import'},
+    {label: 'Export memories', action: 'sync-projection', id: 'library', title: 'Export results'},
+  ])('handles $label with the intended confirmation flow', async ({label, action, id, title}) => {
     const calls: Record<string, unknown>[] = [];
     vi.stubGlobal(
       'fetch',
@@ -131,7 +134,17 @@ describe('Obsidian integrations', () => {
           return new Response(
             JSON.stringify({
               sources: [{id: 'notes', vault: '/vault', include: ['**/*.md'], exclude: [], enabled: true, watch: false}],
-              projections: [],
+              projections: [
+                {
+                  id: 'library',
+                  vault: '/vault',
+                  folder: 'Threadnote',
+                  enabled: true,
+                  kinds: ['durable'],
+                  statuses: ['active'],
+                  includeShared: false,
+                },
+              ],
             }),
           );
         const body = JSON.parse(init.body);
@@ -140,17 +153,36 @@ describe('Obsidian integrations', () => {
           JSON.stringify({
             applied: body.apply === true,
             output: '',
-            entries: [{action: 'add', relativePath: 'Engineering/Architecture.md'}],
+            entries: [
+              {action: 'add', relativePath: 'Engineering/Architecture.md'},
+              ...(body.action === 'sync-projection' ? [{action: 'drift', relativePath: 'Edited note.md'}] : []),
+            ],
           }),
         );
       }),
     );
     await render(<IntegrationsPanel onChanged={async () => undefined} onReviews={() => undefined} />);
-    await act(async () => button('Preview import').click());
-    expect(calls).toEqual([{action: 'sync-source', id: 'notes', apply: false}]);
+    await act(async () => button(label).click());
+    expect(document.body.textContent).toContain(title);
+    if (action === 'sync-source') {
+      expect(calls).toEqual([{action, id, apply: false}]);
+      expect(document.body.textContent).toContain('Preview only.');
+      expect(document.body.textContent).toContain('Engineering/Architecture.md');
+      await act(async () => button('Apply changes').click());
+      expect(calls).toEqual([
+        {action, id, apply: false},
+        {action, id, apply: true, confirm: true},
+      ]);
+    } else {
+      expect(calls).toEqual([{action, id, apply: true, confirm: true}]);
+      expect(document.body.textContent).not.toContain('Preview only.');
+    }
+    expect(Array.from(document.querySelectorAll('button')).some(item => item.textContent === 'Apply changes')).toBe(
+      false,
+    );
     expect(document.body.textContent).toContain('Engineering/Architecture.md');
-    await act(async () => button('Apply changes').click());
-    expect(calls[1]).toEqual({action: 'sync-source', id: 'notes', apply: true, confirm: true});
+    expect(button('Done').disabled).toBe(false);
     expect(document.body.textContent).toContain('Completed.');
+    if (action === 'sync-projection') expect(document.body.textContent).toContain('1 edited file was left untouched.');
   });
 });
