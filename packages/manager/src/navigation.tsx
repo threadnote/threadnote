@@ -20,8 +20,8 @@ export function ManagerNavigation(props: {
       <aside className="sidebar" id="manager-navigation">
         <div className="brand">
           <div className="brand-title">
-            <img alt="" className="brand-logo brand-logo-light" src="/threadnote-logo-light.svg" />
-            <img alt="" className="brand-logo brand-logo-dark" src="/threadnote-logo-dark.svg" />
+            <img alt="" className="brand-logo brand-logo-light" src="/threadnote-logo-dark.svg" />
+            <img alt="" className="brand-logo brand-logo-dark" src="/threadnote-logo-light.svg" />
             <div>
               <h1>Threadnote</h1>
             </div>
