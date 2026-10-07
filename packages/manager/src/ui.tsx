@@ -44,6 +44,7 @@ import {
   type LibraryScope,
 } from './library_model.js';
 import {LibraryExplorer} from './library_explorer.js';
+import {useLibraryNavigatorResize} from './library_layout.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
 import {DropdownSelect, Metadata, TargetFields} from '@threadnote/manager/ui/controls';
 import {
@@ -269,6 +270,7 @@ function App(): React.ReactElement {
   const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | 'unpublish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
   const [sidebarCollapsed, toggleSidebar] = useNavigationCollapse();
+  const libraryNavigator = useLibraryNavigatorResize();
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [libraryError, setLibraryError] = useState('');
 
@@ -1732,7 +1734,11 @@ function App(): React.ReactElement {
                   </span>
                 </div>
               )}
-              <div className="library-workspace">
+              <div
+                className={`library-workspace${libraryNavigator.resizing ? ' is-resizing' : ''}`}
+                ref={libraryNavigator.workspaceRef}
+                style={libraryNavigator.style}
+              >
                 {selectedUri && !selectedIsDir && !selectedIsReadable ? (
                   <div className="library-record-status" role="status">
                     {availability.selection === 'failed'
@@ -1763,6 +1769,7 @@ function App(): React.ReactElement {
                     tree={scopedTree}
                   />
                 ) : null}
+                {!authoringMemory ? libraryNavigator.resizer : null}
                 <div className="content-grid">
                   <section className="editor-pane">
                     <div className="pane-head reader-head">

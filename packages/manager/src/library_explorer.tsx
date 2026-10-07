@@ -28,7 +28,7 @@ export function LibraryExplorer(props: {
   readonly tree?: TreeNode;
 }): React.ReactElement {
   return (
-    <aside className="library-explorer" aria-label="Memory browser">
+    <aside className="library-explorer" id="library-navigator" aria-label="Memory browser">
       <header className="explorer-heading">
         <span>{props.navTreeTab === 'resources' ? 'Sources' : (props.scopeLabel ?? 'Local')}</span>
         <span>
@@ -106,7 +106,7 @@ function Tree(props: {
           <span aria-hidden="true" className="tree-caret" />
           <span className="tree-name">
             <Folder aria-hidden="true" />
-            {libraryItemTitle(props.node)}
+            <span className="tree-label">{libraryItemTitle(props.node)}</span>
           </span>
           <span className="tree-count">{descendantMemoryUris(props.node).length}</span>
           {!props.node.isSystem ? (
@@ -142,7 +142,7 @@ function Tree(props: {
       <button className="tree-file" onClick={() => props.onSelect(props.node.uri)} title={props.node.uri}>
         <span className="tree-name">
           <FileText aria-hidden="true" />
-          {libraryItemTitle(props.node)}
+          <span className="tree-label">{libraryItemTitle(props.node)}</span>
         </span>
       </button>
       {!props.node.isSystem ? (

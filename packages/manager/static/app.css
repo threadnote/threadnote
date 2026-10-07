@@ -6670,7 +6670,7 @@ h4 {
 }
 .library-workspace {
   display: grid;
-  grid-template-columns: 231px minmax(0, 1fr);
+  grid-template-columns: var(--library-navigator-width, 231px) 1px minmax(0, 1fr);
   min-height: 530px;
   height: auto;
   padding: 0;
@@ -6684,7 +6684,7 @@ h4 {
   flex-direction: column;
   gap: 0;
   border: 0;
-  border-right: 1px solid var(--line);
+  border-right: 0;
   border-radius: 8px 0 0 8px;
   background: var(--sidebar-bg);
   padding: 11px 8px;
@@ -6739,12 +6739,43 @@ h4 {
   font-size: 11px;
   line-height: 1.5;
   font-weight: 400;
+  min-width: 0;
+  width: 100%;
   overflow: hidden;
 }
 .tree-name svg {
   width: 14px;
   height: 14px;
   color: var(--muted);
+  flex-shrink: 0;
+}
+.tree-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-navigator-resizer {
+  position: relative;
+  background: var(--line);
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+.library-navigator-resizer::before {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+.library-navigator-resizer:hover,
+.library-navigator-resizer:focus-visible,
+.library-workspace.is-resizing .library-navigator-resizer {
+  background: var(--accent);
+}
+.library-workspace.is-resizing,
+.library-workspace.is-resizing * {
+  cursor: col-resize;
+  user-select: none;
 }
 .tree-count {
   font-size: 11px;
@@ -7441,9 +7472,6 @@ h4 {
   box-shadow: var(--shadow);
 }
 @media (max-width: 900px) {
-  .library-workspace {
-    grid-template-columns: 215px minmax(0, 1fr);
-  }
   .content-grid {
     display: block;
     height: auto;
@@ -7531,6 +7559,9 @@ h4 {
   }
   .library-workspace {
     grid-template-columns: 1fr;
+  }
+  .library-navigator-resizer {
+    display: none;
   }
   .library-explorer {
     border-right: 0;

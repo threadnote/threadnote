@@ -13052,6 +13052,7 @@ bun_workspace_test(
         "//packages/manager:src/library_actions.tsx",
         "//packages/manager:src/library_article.tsx",
         "//packages/manager:src/library_explorer.tsx",
+        "//packages/manager:src/library_layout.tsx",
         "//packages/manager:src/library_model.ts",
         "//packages/manager:src/manifest_projects_view.tsx",
         "//packages/manager:src/memory/contracts.ts",
