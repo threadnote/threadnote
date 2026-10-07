@@ -2,6 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {Effect} from 'effect';
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
 import {
   fetchThreadnoteReleaseNotes,
   formatWhatsNew,
@@ -75,6 +76,31 @@ describe('fetchThreadnoteReleaseNotes', () => {
 });
 
 describe('releasesBetween', () => {
+  it('partitions installed and upgrade notes in version order without mutating discovery results', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({min: 0, max: 40}), {maxLength: 30}),
+        fc.integer({min: 0, max: 30}),
+        fc.integer({min: 0, max: 10}),
+        (patches, current, distance) => {
+          const notes = patches.map(patch => ({version: '5.1.' + patch, title: 'Release', body: ''}));
+          const before = structuredClone(notes);
+          const upper = current + distance;
+          const installed = releaseForVersion(notes, '5.1.' + current);
+          const available = releasesBetween(notes, '5.1.' + current, '5.1.' + upper);
+          expect(installed.map(note => note.version)).toEqual(patches.includes(current) ? ['5.1.' + current] : []);
+          expect(available.map(note => note.version)).toEqual(
+            patches
+              .filter(patch => patch > current && patch <= upper)
+              .sort((a, b) => a - b)
+              .map(patch => '5.1.' + patch),
+          );
+          expect(notes).toEqual(before);
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
   it('returns newer releases up to latest in ascending order', () => {
     expect(releasesBetween(releases, '0.7.7', '0.7.9').map(release => release.version)).toEqual(['0.7.8', '0.7.9']);
   });

@@ -8474,3 +8474,107 @@ h4 {
   font-variant-numeric: tabular-nums;
   text-align: center;
 }
+
+.runtime-updates {
+  display: grid;
+  gap: 20px;
+}
+.runtime-updates .workspace-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.runtime-release-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.runtime-release-heading > svg {
+  width: 17px;
+  height: 17px;
+  color: var(--muted);
+}
+.runtime-version {
+  display: inline-block;
+  margin-left: 8px;
+  overflow-wrap: anywhere;
+}
+.runtime-version-row strong {
+  display: block;
+}
+.runtime-update-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.runtime-update-switch > span:first-child {
+  display: block;
+  width: 32px;
+  height: 18px;
+  border-radius: 20px;
+  padding: 2px;
+  background: var(--muted);
+}
+.runtime-update-switch > span:first-child::after {
+  content: '';
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--panel);
+  transition: transform 120ms ease;
+}
+.runtime-update-switch[aria-checked='true'] > span:first-child {
+  background: var(--accent);
+}
+.runtime-update-switch[aria-checked='true'] > span:first-child::after {
+  transform: translateX(14px);
+  background: var(--accent-contrast);
+}
+.runtime-update-message,
+.runtime-update-restart {
+  margin: 18px 20px;
+  overflow-wrap: anywhere;
+}
+.runtime-update-message pre {
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+}
+.runtime-update-error,
+.runtime-update-message[role='alert'] {
+  color: var(--danger);
+}
+.runtime-release-notes > details + details {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
+.runtime-release-notes {
+  max-height: 420px;
+  overflow: auto;
+  padding-right: 12px;
+  scrollbar-gutter: stable;
+}
+.runtime-release-notes summary {
+  cursor: pointer;
+  font-weight: 500;
+}
+.runtime-release-notes details[open] > summary {
+  margin-bottom: 16px;
+}
+.runtime-release-notes .markdown-viewer :is(h1, h2, h3) {
+  font-size: 15px;
+  margin: 18px 0 10px;
+}
+.runtime-release-notes .markdown-viewer :is(p, li) {
+  font-size: 13px;
+  line-height: 1.7;
+}
+.runtime-release-notes .markdown-viewer {
+  padding: 0;
+  min-height: 0;
+}

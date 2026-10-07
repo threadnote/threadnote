@@ -1955,11 +1955,6 @@ function App(): React.ReactElement {
               }
               onRepair={() => void repairThreadnote()}
               onRefresh={() => void refreshAll()}
-              version={state?.version}
-              latestVersion={state?.latestVersion}
-              updateAvailable={state?.updateAvailable}
-              policy={state?.autoUpdate.effectivePolicy}
-              updateNotice={updateIndicator ? `${updateIndicator.label} · ${updateIndicator.detail}` : undefined}
             />
           ) : null}
         </div>

@@ -52,7 +52,8 @@
     "./value_view": "./src/value_view.tsx",
     "./value/contracts": "./src/value/contracts.ts",
     "./attention/maintenance": "./src/attention/maintenance.ts",
-    "./attention/maintenance-view": "./src/attention/maintenance_view.tsx"
+    "./attention/maintenance-view": "./src/attention/maintenance_view.tsx",
+    "./update-contracts": "./src/update_contracts.ts"
   },
   "dependencies": {
     "@mdxeditor/editor": "^4.3.2",

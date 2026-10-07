@@ -1,5 +1,7 @@
 import React, {useState} from 'react';
-import {Check, CircleAlert, CircleCheck, Database, Plug, RefreshCw, Settings2, ShieldCheck} from 'lucide-react';
+import {Check, CircleAlert, CircleCheck, Database, Plug, RefreshCw, Settings2} from 'lucide-react';
+
+import {RuntimeUpdatesPanel} from './runtime_updates_view.js';
 
 export interface RuntimeCheck {
   readonly detail: string;
@@ -64,11 +66,6 @@ export function RuntimeHealthPanel(props: {
   readonly onPreviewRepair: () => Promise<boolean>;
   readonly onRepair: () => void;
   readonly onRefresh: () => void;
-  readonly version?: string;
-  readonly latestVersion?: string;
-  readonly updateAvailable?: boolean;
-  readonly policy?: 'automatic' | 'notify';
-  readonly updateNotice?: string;
 }): React.ReactElement {
   const [tab, setTab] = useState<'diagnostics' | 'repair' | 'updates'>('diagnostics');
   const [previewed, setPreviewed] = useState(false);
@@ -174,41 +171,7 @@ export function RuntimeHealthPanel(props: {
           </div>
         </section>
       ) : (
-        <section className="workspace-card">
-          <header>
-            <h3>Updates</h3>
-          </header>
-          <div className="workspace-row">
-            <ShieldCheck />
-            <div className="row-copy">
-              <strong>Installed runtime</strong>
-              <p>{props.version ? `Version ${props.version}` : 'Version unavailable'}</p>
-            </div>
-            {props.updateAvailable && props.latestVersion ? (
-              <span className="workspace-status warn">v{props.latestVersion} available</span>
-            ) : (
-              <span className="workspace-status neutral">
-                {props.latestVersion ? 'Up to date' : 'No update information'}
-              </span>
-            )}
-          </div>
-          <div className="workspace-row">
-            <Settings2 />
-            <div className="row-copy">
-              <strong>Update policy</strong>
-              <p>
-                {props.policy === 'automatic'
-                  ? 'Install eligible updates automatically.'
-                  : 'Notify when a new version is available.'}
-              </p>
-              {props.updateNotice ? <p>{props.updateNotice}</p> : null}
-            </div>
-            <button onClick={props.onRefresh}>
-              <RefreshCw />
-              Refresh status
-            </button>
-          </div>
-        </section>
+        <RuntimeUpdatesPanel onChanged={props.onRefresh} />
       )}
     </section>
   );
