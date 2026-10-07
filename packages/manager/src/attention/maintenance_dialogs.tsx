@@ -60,6 +60,7 @@ export function MaintenanceTaskDialog(props: {
 export function MaintenanceCaseDialog(props: {
   readonly project: string;
   readonly caseId: string;
+  readonly memoryUri?: string;
   readonly initialCase?: ManagerContextMaintenanceCaseV2;
   readonly relatedCases?: readonly ManagerContextMaintenanceCaseV2[];
   readonly title?: string;
@@ -87,8 +88,9 @@ export function MaintenanceCaseDialog(props: {
         const details = await api<ManagerContextMaintenanceStatusV2>(`${path}&view=status`, undefined, options);
         if (!current()) return;
         setItem(details.cases?.find(value => value.caseId === caseId));
+        const selectedUri = selection?.memoryUri ?? props.memoryUri;
         const result = await api<ManagerContextMaintenancePacketV2>(
-          `${path}${selection ? `&memoryUri=${encodeURIComponent(selection.memoryUri)}&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
+          `${path}${selectedUri ? `&memoryUri=${encodeURIComponent(selectedUri)}` : ''}${selection ? `&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
           undefined,
           options,
         );
@@ -104,8 +106,8 @@ export function MaintenanceCaseDialog(props: {
     }
     void load();
     return () => controller.abort();
-  }, [props.project, caseId, refresh, selection]);
-  const uri = packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
+  }, [props.project, props.memoryUri, caseId, refresh, selection]);
+  const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
   const reason = packet?.reason ?? item?.reason;
   return (
     <DetailModal
@@ -251,7 +253,7 @@ export function MaintenanceCaseDialog(props: {
           type="button"
           onClick={() =>
             props.onTask(
-              healthDecisionTask(props.project, [{caseId}], 'Review this memory and propose a supported change'),
+              healthDecisionTask(props.project, [{caseId}], 'Review this memory and propose a supported change', uri),
             )
           }
         >

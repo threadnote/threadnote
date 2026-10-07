@@ -52,23 +52,33 @@ export function healthDecisionGroups(
     string,
     {key: string; uri?: string; findings: Finding[]; cases: ManagerContextMaintenanceCaseV2[]}
   >();
-  const represented = new Set<string>();
+  const represented = new Map<string, Set<string>>();
   for (const finding of report.findings) {
     if ((finding.classification ?? classifyContextHealthFindingV2(finding)) !== 'actionable') continue;
     const uri = finding.repair.subjectUri ?? finding.uris[0] ?? finding.id;
     const group = groups.get(uri) ?? {key: uri, uri, findings: [], cases: []};
     group.findings.push(finding);
     groups.set(uri, group);
-    if (finding.caseId) represented.add(finding.caseId);
+    if (finding.caseId) {
+      const subjects = represented.get(finding.caseId) ?? new Set<string>();
+      subjects.add(uri);
+      represented.set(finding.caseId, subjects);
+    }
   }
   for (const item of [...cases].sort((left, right) => compare(left.caseId, right.caseId))) {
-    if (item.disposition !== 'needs-decision' || represented.has(item.caseId)) continue;
-    represented.add(item.caseId);
-    const uri = maintenanceCaseMemoryUri(item);
-    const key = uri ?? (item.family === 'candidate' ? item.caseId : item.memoryId);
-    const group = groups.get(key) ?? {key, uri, findings: [], cases: []};
-    group.cases.push(item);
-    groups.set(key, group);
+    if (item.disposition !== 'needs-decision') continue;
+    const subjects = [...new Set(item.subjectContentHashes?.map(subject => subject.uri) ?? [])];
+    const uris = subjects.length > 0 ? subjects : [maintenanceCaseMemoryUri(item)];
+    for (const uri of uris) {
+      const key = uri ?? (item.family === 'candidate' ? item.caseId : item.memoryId);
+      const representedSubjects = represented.get(item.caseId) ?? new Set<string>();
+      if (representedSubjects.has(key)) continue;
+      representedSubjects.add(key);
+      represented.set(item.caseId, representedSubjects);
+      const group = groups.get(key) ?? {key, uri, findings: [], cases: []};
+      group.cases.push(item);
+      groups.set(key, group);
+    }
   }
   return [...groups.values()]
     .sort((left, right) => compare(left.key, right.key))
@@ -164,8 +174,9 @@ export function healthDecisionTask(
   project: string,
   findings: readonly ({readonly caseId: string} | {readonly caseId?: string; readonly id: string})[],
   choice: string,
+  memoryUri?: string,
 ): string {
-  return `Use $threadnote-health for project ${JSON.stringify(project)}. Decision: ${choice}. Exact cases: ${findings
+  return `Use $threadnote-health for project ${JSON.stringify(project)}. Decision: ${choice}.${memoryUri ? ` Selected memory: ${JSON.stringify(memoryUri)}.` : ''} Exact cases: ${findings
     .map(item => item.caseId ?? ('id' in item ? item.id : undefined))
     .map(value => JSON.stringify(value))
     .join(

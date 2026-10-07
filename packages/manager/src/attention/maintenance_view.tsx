@@ -46,7 +46,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [task, setTask] = useState('');
-  const [inspectedCase, setInspectedCase] = useState<{caseId: string; title?: string}>();
+  const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
   const [loadingHistory, setLoadingHistory] = useState(false);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
@@ -212,6 +212,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const summary = props.report.maintenance;
   const cases = (status?.cases ?? []).filter(item => item.project === props.project);
   const groups = healthDecisionGroups(props.report, cases);
+  const moreDecisionCases =
+    status?.page?.caseNextCursor !== undefined &&
+    (status.counts?.['needs-decision'] ?? Infinity) >
+      cases.filter(item => item.disposition === 'needs-decision').length;
   const decisionCount = Math.max(
     summary?.affectedMemories ?? 0,
     status?.counts?.decisionMemories ?? 0,
@@ -608,7 +612,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 <button
                   type="button"
                   className="health-primary-action"
-                  onClick={() => setInspectedCase({caseId: group.cases[0].caseId, title: group.preview?.title})}
+                  onClick={() =>
+                    setInspectedCase({
+                      caseId: group.cases[0].caseId,
+                      memoryUri: group.uri,
+                      title: group.preview?.title,
+                    })
+                  }
                 >
                   Review memory and evidence
                 </button>
@@ -626,6 +636,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                       props.project,
                       [...group.findings, ...group.cases],
                       'Determine the supported current claim',
+                      group.uri,
                     ),
                   )
                 }
@@ -640,6 +651,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                       props.project,
                       [...group.findings, ...group.cases],
                       'Review whether the memory should be historical or archived',
+                      group.uri,
                     ),
                   )
                 }
@@ -649,6 +661,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             </div>
           </article>
         ))}
+        {moreDecisionCases ? (
+          <button type="button" disabled={loadingHistory} onClick={() => void loadHistory('cases')}>
+            {loadingHistory ? 'Loading more reviews…' : 'Load more memories to review'}
+          </button>
+        ) : null}
         {props.nextCursor ? (
           <button type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>
             {props.loadingMore ? 'Loading decision details…' : 'Load more decision details'}
@@ -784,11 +801,18 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       ) : null}
       {inspectedCase ? (
         <MaintenanceCaseDialog
-          key={`${props.project}:${inspectedCase.caseId}`}
+          key={`${props.project}:${inspectedCase.caseId}:${inspectedCase.memoryUri ?? ''}`}
           project={props.project}
           caseId={inspectedCase.caseId}
+          memoryUri={inspectedCase.memoryUri}
           initialCase={cases.find(item => item.caseId === inspectedCase.caseId)}
-          relatedCases={groups.find(group => group.cases.some(item => item.caseId === inspectedCase.caseId))?.cases}
+          relatedCases={
+            groups.find(
+              group =>
+                (inspectedCase.memoryUri === undefined || group.uri === inspectedCase.memoryUri) &&
+                group.cases.some(item => item.caseId === inspectedCase.caseId),
+            )?.cases
+          }
           title={inspectedCase.title}
           onClose={() => setInspectedCase(undefined)}
           onOpenLibrary={uri => {

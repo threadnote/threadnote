@@ -388,6 +388,50 @@ describe('context maintenance view', () => {
     expect(document.body.textContent).not.toContain('No blocked recovery groups');
   });
 
+  it('loads remaining decisions directly in the decision queue without requiring History', async () => {
+    const cases: ManagerContextMaintenanceStatusV2['cases'] = ['first', 'second'].map(name => ({
+      caseId: name,
+      project: 'threadnote',
+      memoryId: name,
+      family: 'citation',
+      slot: 'anchor',
+      disposition: 'needs-decision',
+      reason: 'source-changed',
+      evidenceRevision: 'revision',
+      subjectContentHashes: [{uri: `threadnote://user/tester/memories/${name}.md`, hash: 'hash'}],
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    }));
+    const fetch = vi.fn(async (input: string, init?: RequestInit) => {
+      expect(init?.method).not.toBe('POST');
+      const next = new URL(input, 'http://manager.test').searchParams.get('caseCursor') === 'next-decisions';
+      return new Response(
+        JSON.stringify({
+          ...status(),
+          cases: [cases[next ? 1 : 0]],
+          counts: {decisionMemories: 2, 'needs-decision': 2},
+          page: {generation: 'same-generation', caseNextCursor: next ? undefined : 'next-decisions'},
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetch);
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    const queue = document.querySelector('[aria-label="Needs your decision"]');
+    expect(queue?.querySelectorAll('article')).toHaveLength(1);
+    const more = [...queue!.querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent === 'Load more memories to review',
+    );
+    expect(more).toBeDefined();
+    await act(async () => more!.click());
+    expect(queue?.querySelectorAll('article')).toHaveLength(2);
+    expect(queue?.querySelectorAll('h3')[2].textContent).toBe('second');
+    expect(queue?.textContent).not.toContain('Load more memories to review');
+    expect(document.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('Needs a decision');
+  });
+
   it('routes V2 health reports through the canonical service without starting the legacy citation worker', async () => {
     const requests: string[] = [];
     vi.stubGlobal(

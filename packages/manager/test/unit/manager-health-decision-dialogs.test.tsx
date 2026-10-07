@@ -155,6 +155,42 @@ it('keeps case errors inside the open review and recovers after refreshing evide
   expect(document.querySelector('dialog')?.textContent).toContain('current declaration');
 });
 
+it('reviews the chosen memory in a case spanning several subjects and preserves that choice in its task', async () => {
+  const selectedUri = 'threadnote://user/tester/memories/durable/projects/threadnote/second-memory.md';
+  const scopedCase = {
+    ...item,
+    family: 'repository-recovery',
+    subjectContentHashes: [...item.subjectContentHashes!, {uri: selectedUri, hash: 'second-hash'}],
+  };
+  const fetch = vi.fn(async (input: string) => {
+    const url = new URL(input, 'http://manager.test');
+    if (url.pathname === '/api/memory') {
+      expect(url.searchParams.get('uri')).toBe(selectedUri);
+      return response({content: '# The selected second memory'});
+    }
+    if (url.searchParams.get('view') === 'status') return response({version: 2, cases: [scopedCase]});
+    expect(url.searchParams.get('memoryUri')).toBe(selectedUri);
+    return response(packet);
+  });
+  vi.stubGlobal('fetch', fetch);
+  const open = vi.fn();
+  const task = vi.fn();
+  await render(
+    <MaintenanceCaseDialog
+      {...base}
+      initialCase={scopedCase}
+      memoryUri={selectedUri}
+      onOpenLibrary={open}
+      onTask={task}
+    />,
+  );
+  expect(document.querySelector('dialog')?.textContent).toContain('The selected second memory');
+  await click('Edit or archive in Library');
+  expect(open).toHaveBeenCalledWith(selectedUri);
+  await click('Review with agent…');
+  expect(task).toHaveBeenCalledWith(expect.stringContaining(`Selected memory: "${selectedUri}"`));
+});
+
 it('keeps the old project response out of a newly selected case', async () => {
   const pending = Promise.withResolvers<Response>();
   serveCase(() => pending.promise);

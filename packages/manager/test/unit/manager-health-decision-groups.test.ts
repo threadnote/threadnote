@@ -67,25 +67,62 @@ it('groups represented and retained checks by memory without hiding the remainin
   expect(groups[0].uri).toBe(first.subjectContentHashes![0].uri);
 });
 
-it('preserves every distinct case once and keeps grouping stable under pagination order and duplicate delivery', () => {
+it('keeps all subjects of a repository review accessible when one subject already has a finding', () => {
+  const first = makeCase(1, 1);
+  const other = makeCase(2, 2);
+  const sharedCase = {
+    ...first,
+    family: 'repository-recovery',
+    subjectContentHashes: [...first.subjectContentHashes!, ...other.subjectContentHashes!],
+  };
+  const finding: ManagerContextHealthResponseV1['findings'][number] = {
+    id: 'finding-one',
+    caseId: first.caseId,
+    classification: 'actionable',
+    category: 'citation-changed',
+    confidence: 'high',
+    severity: 'high',
+    summary: 'Review source',
+    repairability: 'manual-review',
+    uris: [first.subjectContentHashes![0].uri],
+    repair: {kind: 'review-memory', summary: 'Review claim'},
+  };
+  const groups = healthDecisionGroups({...report, findings: [finding]}, [sharedCase, sharedCase]);
+  expect(groups).toHaveLength(2);
+  expect(groups[0].findings).toEqual([finding]);
+  expect(groups[0].cases).toEqual([]);
+  expect(groups[1].uri).toBe(other.subjectContentHashes![0].uri);
+  expect(groups[1].cases).toEqual([sharedCase]);
+});
+
+it('preserves every case for every subject and keeps grouping stable under page order and duplicate delivery', () => {
   fc.assert(
-    fc.property(fc.array(fc.integer({min: 0, max: 8}), {maxLength: 30}), memories => {
-      const cases = memories.map(makeCase);
-      const before = JSON.stringify(cases);
-      const groups = healthDecisionGroups(report, cases);
-      const reversed = healthDecisionGroups(
-        report,
-        [...cases].reverse().flatMap(item => [item, item]),
-      );
-      expect(groups.map(group => group.uri)).toEqual(
-        [...new Set(memories.map(memory => `threadnote://user/tester/memories/memory-${memory}.md`))].sort(),
-      );
-      expect(groups.flatMap(group => group.cases.map(item => item.caseId)).sort()).toEqual(
-        cases.map(item => item.caseId).sort(),
-      );
-      expect(reversed).toEqual(groups);
-      expect(JSON.stringify(cases)).toBe(before);
-    }),
+    fc.property(
+      fc.array(fc.uniqueArray(fc.integer({min: 0, max: 8}), {minLength: 1, maxLength: 4}), {maxLength: 30}),
+      memories => {
+        const cases = memories.map((subjects, index) => ({
+          ...makeCase(subjects[0], index),
+          subjectContentHashes: subjects.map(memory => ({
+            uri: `threadnote://user/tester/memories/memory-${memory}.md`,
+            hash: 'hash',
+          })),
+        }));
+        const before = JSON.stringify(cases);
+        const groups = healthDecisionGroups(report, cases);
+        const reversed = healthDecisionGroups(
+          report,
+          [...cases].reverse().flatMap(item => [item, item]),
+        );
+        expect(groups.map(group => group.uri)).toEqual(
+          [...new Set(memories.flat().map(memory => `threadnote://user/tester/memories/memory-${memory}.md`))].sort(),
+        );
+        expect(groups.flatMap(group => group.cases.map(item => `${item.caseId}:${group.uri}`)).sort()).toEqual(
+          cases.flatMap(item => item.subjectContentHashes.map(subject => `${item.caseId}:${subject.uri}`)).sort(),
+        );
+        expect(reversed).toEqual(groups);
+        expect(JSON.stringify(cases)).toBe(before);
+      },
+    ),
     {numRuns: 60},
   );
 });
