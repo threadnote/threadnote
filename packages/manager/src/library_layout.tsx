@@ -24,7 +24,6 @@ export function useLibraryNavigatorResize() {
   const [preferredWidth, setPreferredWidth] = useState(() =>
     clampLibraryNavigatorWidth(Number(readManagerPreference(WIDTH_KEY) ?? DEFAULT_WIDTH)),
   );
-  const latestWidth = useRef(preferredWidth);
   const [availableWidth, setAvailableWidth] = useState(Infinity);
   const [resizing, setResizing] = useState(false);
   const width = clampLibraryNavigatorWidth(preferredWidth, availableWidth);
@@ -46,19 +45,17 @@ export function useLibraryNavigatorResize() {
     return () => observer.disconnect();
   }, [workspace]);
 
-  function update(next: number, persist = true) {
+  function update(next: number) {
     const measured = workspace?.getBoundingClientRect().width;
     const bounded = clampLibraryNavigatorWidth(next, measured && measured > 0 ? measured : availableWidth);
-    latestWidth.current = bounded;
     setPreferredWidth(bounded);
-    if (persist) writeManagerPreference(WIDTH_KEY, String(bounded));
+    writeManagerPreference(WIDTH_KEY, String(bounded));
   }
 
   function stop(event: React.PointerEvent<HTMLDivElement>) {
     if (drag.current?.pointerId !== event.pointerId) return;
     drag.current = undefined;
     setResizing(false);
-    writeManagerPreference(WIDTH_KEY, String(latestWidth.current));
     if (event.currentTarget.hasPointerCapture(event.pointerId))
       event.currentTarget.releasePointerCapture(event.pointerId);
   }
@@ -80,12 +77,11 @@ export function useLibraryNavigatorResize() {
         event.preventDefault();
         event.currentTarget.setPointerCapture(event.pointerId);
         drag.current = {pointerId: event.pointerId, startX: event.clientX, width};
-        latestWidth.current = width;
         setResizing(true);
       }}
       onPointerMove={event => {
         if (drag.current?.pointerId === event.pointerId)
-          update(drag.current.width + event.clientX - drag.current.startX, false);
+          update(drag.current.width + event.clientX - drag.current.startX);
       }}
       onPointerUp={stop}
       onPointerCancel={stop}

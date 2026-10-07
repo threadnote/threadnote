@@ -7547,6 +7547,7 @@ h4 {
   }
   .workspace-bar {
     padding: 10px 16px;
+    flex-wrap: wrap;
   }
   .topbar {
     padding: 23px 16px 18px;

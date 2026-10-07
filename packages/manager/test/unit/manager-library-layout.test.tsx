@@ -153,7 +153,7 @@ it('drags only the captured pointer, saves the final width and resets on double 
   expect(width()).toBe(231);
   await pointer('pointermove', 440);
   expect(width()).toBe(431);
-  expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+  expect(localStorage.getItem(WIDTH_KEY)).toBe('431');
   expect(container.firstElementChild?.getAttribute('data-resizing')).toBe('true');
   await pointer('pointerup', 440);
   expect(captured).toBeUndefined();
