@@ -74,8 +74,8 @@ describe('website and standalone release boundary', () => {
       readFile(websitePath, 'utf8'),
       readFile(join(root, 'README.md'), 'utf8'),
       readFile(join(root, 'apps', 'website', 'src', 'components', 'Brand.tsx'), 'utf8'),
-      readFile(join(root, 'apps', 'threadnote', 'src', 'manager', 'server.ts'), 'utf8'),
-      readFile(join(root, 'packages', 'manager', 'src', 'ui.tsx'), 'utf8'),
+      readFile(join(root, 'packages', 'manager', 'src', 'server.ts'), 'utf8'),
+      readFile(join(root, 'packages', 'manager', 'src', 'navigation.tsx'), 'utf8'),
       readFile(join(root, 'scripts', 'check-self-contained.ts'), 'utf8'),
     ]);
 
@@ -93,7 +93,11 @@ describe('website and standalone release boundary', () => {
     expect(brand).not.toContain('<svg');
     expect(managerSource).toContain("directory: 'assets/brand'");
     expect(managerSource).not.toContain('threadnote-logo-inverted.svg');
-    expect(managerUi).toContain('src="/threadnote-logo.svg"');
+    for (const theme of ['light', 'dark']) {
+      expect(managerSource).toContain(`'/threadnote-logo-${theme}.svg'`);
+      expect(managerSource).toContain(`path: 'continuum/threadnote-circle-brand-${theme}.svg'`);
+      expect(managerUi).toContain(`src="/threadnote-logo-${theme}.svg"`);
+    }
     expect(selfContainedCheck).toContain('standalone build output does not contain the canonical Threadnote logo');
 
     expect(canonical).toContain('viewBox="0 0 256 256"');

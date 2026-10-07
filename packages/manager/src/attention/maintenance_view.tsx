@@ -267,15 +267,18 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     (projectProgress !== undefined &&
       projectProgress.checked === projectProgress.eligible &&
       status?.preparation?.complete !== false);
-  const scanLabel = status?.paused
-    ? 'Paused'
-    : status?.state === 'failed'
+  const scanTone =
+    status?.state === 'failed' ? 'danger' : status?.paused ? 'warning' : scanComplete ? 'success' : 'info';
+  const scanLabel =
+    status?.state === 'failed'
       ? 'Stopped'
-      : !status
-        ? 'Checking…'
-        : scanComplete
-          ? 'Caught up'
-          : 'Scanning';
+      : status?.paused
+        ? 'Paused'
+        : !status
+          ? 'Checking…'
+          : scanComplete
+            ? 'Caught up'
+            : 'Scanning';
   const causes =
     status?.groups === undefined
       ? groupMaintenanceCauses((status?.cases ?? []).filter(item => item.project === props.project))
@@ -456,16 +459,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             {coverage}
           </span>
         </header>
-        <div
-          className="health-scan-progress"
-          aria-label="Background scan"
-          data-tone={
-            status?.state === 'failed' ? 'danger' : status?.paused ? 'warning' : scanComplete ? 'success' : 'info'
-          }
-        >
+        <div className="health-scan-progress" aria-label="Background scan" data-tone={scanTone}>
           <header>
             <strong>Background scan</strong>
-            <span className="health-status-badge" data-tone={scanComplete ? 'success' : 'info'}>
+            <span className="health-status-badge" data-tone={scanTone}>
               {scanLabel}
             </span>
           </header>

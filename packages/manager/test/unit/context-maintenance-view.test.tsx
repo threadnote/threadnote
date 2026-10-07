@@ -141,6 +141,9 @@ describe('context maintenance view', () => {
     expect(document.body.textContent).toContain('Preserve a backup');
     expect(document.body.textContent).not.toContain('inspect the diagnostic');
     expect(document.body.textContent).toContain('Stopped');
+    expect(
+      document.querySelector('[aria-label="Background scan"] .health-status-badge')?.getAttribute('data-tone'),
+    ).toBe('danger');
   });
 
   it('loads retained case and receipt pages and opens exact evidence and old undo', async () => {
@@ -463,6 +466,9 @@ describe('context maintenance view', () => {
       ),
     );
     expect(document.body.textContent).toContain('Automatic maintenance is paused');
+    expect(
+      document.querySelector('[aria-label="Background scan"] .health-status-badge')?.getAttribute('data-tone'),
+    ).toBe('warning');
     expect(document.body.textContent).not.toContain('OLD PROJECT ERROR');
   });
   it('reports undo conflicts without claiming a reverted mutation', async () => {
