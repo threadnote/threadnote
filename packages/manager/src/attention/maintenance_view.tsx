@@ -356,7 +356,15 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             <strong>Automatic maintenance</strong>
             <span
               className="health-status-badge"
-              data-tone={status?.paused ? 'neutral' : status?.state === 'failed' ? 'warning' : 'success'}
+              data-tone={
+                status?.state === 'failed'
+                  ? 'danger'
+                  : status?.paused
+                    ? 'warning'
+                    : status?.state === 'running'
+                      ? 'info'
+                      : 'neutral'
+              }
             >
               {status?.paused
                 ? 'Paused'
@@ -448,7 +456,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             {coverage}
           </span>
         </header>
-        <div className="health-scan-progress" aria-label="Background scan">
+        <div
+          className="health-scan-progress"
+          aria-label="Background scan"
+          data-tone={
+            status?.state === 'failed' ? 'danger' : status?.paused ? 'warning' : scanComplete ? 'success' : 'info'
+          }
+        >
           <header>
             <strong>Background scan</strong>
             <span className="health-status-badge" data-tone={scanComplete ? 'success' : 'info'}>

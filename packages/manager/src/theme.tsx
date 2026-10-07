@@ -1,5 +1,6 @@
 import {Sun, Moon, Monitor} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
+import {readManagerPreference, writeManagerPreference} from './preferences.js';
 
 export type ManagerTheme = 'light' | 'dark' | 'system';
 export const MANAGER_THEME_KEY = 'threadnote.manager.theme';
@@ -8,24 +9,14 @@ export function managerTheme(value: string | null): ManagerTheme {
 }
 
 export function ThemeSwitch(): React.ReactElement {
-  const [theme, setTheme] = useState<ManagerTheme>(() => {
-    try {
-      return managerTheme(localStorage.getItem(MANAGER_THEME_KEY));
-    } catch {
-      return 'system';
-    }
-  });
+  const [theme, setTheme] = useState<ManagerTheme>(() => managerTheme(readManagerPreference(MANAGER_THEME_KEY)));
   useEffect(() => {
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const apply = () => {
       document.documentElement.dataset.theme = theme === 'system' ? (media.matches ? 'dark' : 'light') : theme;
     };
     apply();
-    try {
-      localStorage.setItem(MANAGER_THEME_KEY, theme);
-    } catch {
-      /* Session theme still works without storage. */
-    }
+    writeManagerPreference(MANAGER_THEME_KEY, theme);
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
   }, [theme]);

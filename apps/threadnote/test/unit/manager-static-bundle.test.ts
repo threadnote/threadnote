@@ -24,6 +24,13 @@ it.each([
     await writeFile(join(root, directory, 'app.js'), script);
     await mkdir(join(root, styleDirectory), {recursive: true});
     await writeFile(join(root, styleDirectory, 'style.css'), styles);
+    await mkdir(join(root, 'assets/brand/continuum'), {recursive: true});
+    for (const theme of ['light', 'dark']) {
+      await writeFile(
+        join(root, 'assets/brand/continuum', `threadnote-circle-brand-${theme}.svg`),
+        `<svg>${theme}</svg>`,
+      );
+    }
     vi.mocked(installation.toolRoot).mockImplementation(() => Effect.succeed(root));
     vi.stubGlobal('THREADNOTE_STANDALONE', standalone);
     const server = await startManagerTestServer(
@@ -46,6 +53,12 @@ it.each([
       expect(editorStyles.status).toBe(200);
       expect(editorStyles.headers.get('content-type')).toContain('text/css');
       expect(await editorStyles.text()).toBe(styles);
+      for (const theme of ['light', 'dark']) {
+        const logo = await testHttpFetch(`${server.url}/threadnote-logo-${theme}.svg`);
+        expect(logo.status).toBe(200);
+        expect(logo.headers.get('content-type')).toContain('image/svg+xml');
+        expect(await logo.text()).toBe(`<svg>${theme}</svg>`);
+      }
     } finally {
       await server.close();
     }

@@ -7892,8 +7892,7 @@ h4 {
 .graph-stage::after {
   display: none;
 }
-:root[data-theme='light'] .webgl-graph canvas,
-:root[data-theme='light'] .brand-logo {
+:root[data-theme='light'] .webgl-graph canvas {
   filter: brightness(0.55) saturate(1.4);
 }
 .graph-database-issue,
@@ -7910,6 +7909,8 @@ h4 {
 }
 .graph-inspector {
   border-left: 1px solid var(--line);
+  min-height: 0;
+  overflow: auto;
 }
 .graph-labels > span,
 .graph-labels > span.is-highlighted {
@@ -7968,7 +7969,10 @@ h4 {
   gap: 14px;
 }
 .graph-explorer-tab .graph-body {
-  min-height: 400px;
+  height: clamp(420px, 60dvh, 720px);
+  min-height: 420px;
+  flex: 0 0 auto;
+  grid-template-rows: minmax(0, 1fr);
 }
 .graph-toolbar {
   grid-template-areas: 'scope node stats';
@@ -8015,4 +8019,99 @@ h4 {
   .graph-advanced-content {
     grid-template-columns: 1fr;
   }
+}
+
+/* Compact controls and stable graph/inspector geometry. */
+.graph-configured-project-controls {
+  grid-template-columns: minmax(150px, 200px) minmax(0, 1fr) auto;
+  gap: 12px;
+}
+.graph-configured-project-controls select {
+  min-height: 32px;
+  padding-block: 5px;
+}
+.graph-configured-project-controls label > span {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+@media (max-width: 900px) {
+  .graph-explorer-tab .graph-body {
+    height: 720px;
+    grid-template-rows: 380px minmax(0, 1fr);
+  }
+  .graph-explorer-tab .graph-body.is-empty {
+    height: 420px;
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+@media (max-width: 600px) {
+  .graph-configured-project-controls {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .graph-configured-project-detail {
+    grid-row: 2;
+    grid-column: 1/-1;
+    white-space: normal;
+  }
+}
+.context-health {
+  --health-info: #9abbff;
+}
+:root[data-theme='light'] .context-health {
+  --health-info: #365fa5;
+}
+.context-health > section:not([hidden]) {
+  margin-bottom: 20px;
+}
+.context-health .attention-bulk-repair {
+  background: var(--sidebar-bg);
+  border-color: var(--line);
+  padding: 18px;
+}
+.context-health [data-tone='danger'] {
+  --health-tone: var(--danger);
+}
+.context-health .health-scan-progress {
+  background: var(--sidebar-bg);
+  border-color: var(--line);
+}
+.context-health .health-scan-progress p > strong {
+  color: var(--health-tone);
+}
+.context-health .health-scan-progress progress {
+  accent-color: var(--health-tone);
+}
+.context-health .health-scan-progress progress::-webkit-progress-value {
+  background: var(--health-tone);
+}
+.brand-logo {
+  width: 26px;
+  height: 26px;
+}
+.brand-logo-light {
+  display: none;
+}
+:root[data-theme='light'] .brand-logo-light {
+  display: block;
+}
+:root[data-theme='light'] .brand-logo-dark {
+  display: none;
+}
+.navigation-toggle {
+  flex-shrink: 0;
+  margin-right: 10px;
+}
+.app.is-sidebar-collapsed {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.app.is-sidebar-collapsed > .sidebar,
+.app.is-sidebar-collapsed > .sidebar-resizer {
+  display: none;
+}
+.app.is-sidebar-collapsed > .main {
+  grid-column: 1;
+  grid-row: 1;
 }

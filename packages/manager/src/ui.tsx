@@ -29,7 +29,7 @@ import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
-import {ManagerNavigation} from './navigation.js';
+import {ManagerNavigation, NavigationToggle, useNavigationCollapse} from './navigation.js';
 import {ActionMenu} from './action_menu.js';
 import {libraryItemActions} from './library_actions.js';
 import {MemoryEditor} from './memory_editor.js';
@@ -267,6 +267,7 @@ function App(): React.ReactElement {
   const [consolidationSourceUris, setConsolidationSourceUris] = useState<readonly string[]>([]);
   const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | 'unpublish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
+  const [sidebarCollapsed, toggleSidebar] = useNavigationCollapse();
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [libraryError, setLibraryError] = useState('');
 
@@ -1382,7 +1383,7 @@ function App(): React.ReactElement {
   );
 
   return (
-    <div className="app" style={appStyle}>
+    <div className={`app${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`} style={appStyle}>
       <ManagerNavigation
         panel={panel}
         disabled={controlsBlocked}
@@ -1396,6 +1397,7 @@ function App(): React.ReactElement {
 
       <main className="main">
         <div className="workspace-bar">
+          <NavigationToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
           <nav className="workspace-breadcrumb" aria-label="Breadcrumb">
             <span>Manager</span>
             <ChevronRight aria-hidden="true" />

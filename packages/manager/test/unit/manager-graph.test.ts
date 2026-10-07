@@ -331,9 +331,9 @@ describe('manager graph focus', () => {
     );
 
     expect(markup).toContain('<strong>Configured projects</strong>');
-    expect(markup).toContain('cold-project · needs initialization');
-    expect(markup).toContain('ready-project · ready snapshot');
-    expect(markup).toContain('hidden-project · ready state not shown');
+    expect(markup).toContain('<option value="cold-project" selected="">cold-project</option>');
+    expect(markup).toContain('<option value="ready-project">ready-project</option>');
+    expect(markup).toContain('<option value="hidden-project">hidden-project</option>');
     expect(markup).toContain('No ready snapshot · /repos/cold-project');
     expect(markup).toContain('>Index graph</button>');
     expect(markup).toContain('3 configured projects are ready to initialize from Manager.');

@@ -551,7 +551,7 @@ export function GraphAdministration(props: {
                   ) : (
                     props.configuredProjects.map(project => (
                       <option key={project.name} value={project.name}>
-                        {project.name} · {graphConfiguredProjectStateLabel(project.graphState)}
+                        {project.name}
                       </option>
                     ))
                   )}
@@ -1020,17 +1020,6 @@ export function GraphAdministration(props: {
       </div>
     </details>
   );
-}
-
-function graphConfiguredProjectStateLabel(state: GraphConfiguredProject['graphState']): string {
-  switch (state) {
-    case 'not-indexed':
-      return 'needs initialization';
-    case 'ready':
-      return 'ready snapshot';
-    case 'unknown':
-      return 'ready state not shown';
-  }
 }
 
 function graphConfiguredProjectStateDetail(state: GraphConfiguredProject['graphState']): string {

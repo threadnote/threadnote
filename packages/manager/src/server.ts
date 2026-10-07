@@ -69,4 +69,14 @@ export const MANAGER_STATIC_FILES: Readonly<
     directory: 'assets/brand',
     path: 'threadnote-logo.svg',
   },
+  '/threadnote-logo-light.svg': {
+    contentType: 'image/svg+xml; charset=utf-8',
+    directory: 'assets/brand',
+    path: 'continuum/threadnote-circle-brand-light.svg',
+  },
+  '/threadnote-logo-dark.svg': {
+    contentType: 'image/svg+xml; charset=utf-8',
+    directory: 'assets/brand',
+    path: 'continuum/threadnote-circle-brand-dark.svg',
+  },
 };

@@ -1,6 +1,7 @@
-import React from 'react';
-import {ShieldCheck} from 'lucide-react';
+import React, {useState} from 'react';
+import {PanelLeftClose, PanelLeftOpen, ShieldCheck} from 'lucide-react';
 import {ThemeSwitch} from './theme.js';
+import {readManagerPreference, writeManagerPreference} from './preferences.js';
 import type {PanelName} from './ui/contracts.js';
 import {panelIcon, panelNavDescription, tabTitle, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN} from './ui/support.js';
 
@@ -16,10 +17,11 @@ export function ManagerNavigation(props: {
 }): React.ReactElement {
   return (
     <>
-      <aside className="sidebar">
+      <aside className="sidebar" id="manager-navigation">
         <div className="brand">
           <div className="brand-title">
-            <img alt="" className="brand-logo" src="/threadnote-logo.svg" />
+            <img alt="" className="brand-logo brand-logo-light" src="/threadnote-logo-light.svg" />
+            <img alt="" className="brand-logo brand-logo-dark" src="/threadnote-logo-dark.svg" />
             <div>
               <h1>Threadnote</h1>
             </div>
@@ -84,5 +86,39 @@ export function ManagerNavigation(props: {
         title="Drag to resize navigation"
       />
     </>
+  );
+}
+
+export function useNavigationCollapse(): readonly [boolean, () => void] {
+  const [collapsed, setCollapsed] = useState(
+    () => readManagerPreference('threadnote.manager.navigationCollapsed') === 'true',
+  );
+  return [
+    collapsed,
+    () =>
+      setCollapsed(current => {
+        writeManagerPreference('threadnote.manager.navigationCollapsed', String(!current));
+        return !current;
+      }),
+  ];
+}
+
+export function NavigationToggle(props: {
+  readonly collapsed: boolean;
+  readonly onToggle: () => void;
+}): React.ReactElement {
+  const label = props.collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+  return (
+    <button
+      type="button"
+      className="quiet-icon navigation-toggle"
+      aria-label={label}
+      title={label}
+      aria-controls="manager-navigation"
+      aria-expanded={!props.collapsed}
+      onClick={props.onToggle}
+    >
+      {props.collapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+    </button>
   );
 }
