@@ -23,7 +23,7 @@ import {execFileSync, spawn} from '@threadnote/testing/node-child-process';
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Context, DateTime, Deferred, Effect, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
+import {Clock, Context, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -199,7 +199,7 @@ describe('native code graph lifecycle', () => {
         );
         expect(queryOnly).toBe(1);
 
-        const selectedBehindWriterGate = yield* Deferred.make<void>();
+        const selectedBehindWriterGate = yield* Deferred.make<void, unknown>();
         const writerGateLayout = codeGraphLayout(
           yield* Path.Path,
           home,
@@ -223,7 +223,12 @@ describe('native code graph lifecycle', () => {
                 refresh: false,
                 threadnoteHome: home,
               })
-              .pipe(Effect.forkChild);
+              .pipe(
+                Effect.onExit(exit =>
+                  Exit.isFailure(exit) ? Deferred.failCause(selectedBehindWriterGate, exit.cause) : Effect.void,
+                ),
+                Effect.forkChild,
+              );
             yield* Deferred.await(selectedBehindWriterGate);
             return yield* Fiber.join(reader).pipe(
               Effect.timeoutOrElse({
@@ -291,7 +296,7 @@ describe('native code graph lifecycle', () => {
         expect(results).toHaveLength(8);
         expect(results.every(result => result.nodes.some(node => node.name === 'withExclusiveFileLock'))).toBe(true);
 
-        const readCompleted = yield* Deferred.make<void>();
+        const readCompleted = yield* Deferred.make<void, unknown>();
         const finish = yield* Deferred.make<void>();
         const retiredSnapshots = yield* Ref.make(0);
         const query = yield* graph
@@ -316,7 +321,10 @@ describe('native code graph lifecycle', () => {
             refresh: false,
             threadnoteHome: home,
           })
-          .pipe(Effect.forkChild);
+          .pipe(
+            Effect.onExit(exit => (Exit.isFailure(exit) ? Deferred.failCause(readCompleted, exit.cause) : Effect.void)),
+            Effect.forkChild,
+          );
         yield* Deferred.await(readCompleted);
         const active = yield* Effect.sync(() => snapshotLeaseCount(databasePath));
         yield* Deferred.succeed(finish, undefined);
