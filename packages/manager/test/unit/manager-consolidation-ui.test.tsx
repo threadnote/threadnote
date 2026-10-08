@@ -46,6 +46,7 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   let memoryReads = 0;
   const posts: {path: string; body: Record<string, unknown>}[] = [];
   let failDraft = true;
+  let failModels = true;
   const json = (value: unknown) => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
@@ -74,6 +75,17 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
       );
     if (url.pathname === '/api/graphs')
       return Promise.resolve(json({repositories: [], builds: [], diagnostics: [], views: []}));
+    if (url.pathname === '/api/consolidation-models')
+      return Promise.resolve(
+        failModels
+          ? new Response(JSON.stringify({error: 'Model catalog temporarily unavailable'}), {status: 503})
+          : json({
+              models: [
+                {id: 'test-standard', label: 'Test standard', isDefault: true},
+                {id: 'test-fast', label: 'Test fast', isDefault: false},
+              ],
+            }),
+      );
     if (url.pathname === '/api/shares') return Promise.resolve(json({shares: []}));
     if (url.pathname === '/api/home')
       return Promise.resolve(json({version: 1, project: 'project', lanes: [], handoffs: [], stats: {memories: 2}}));
@@ -146,12 +158,25 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   expect(container.querySelector('dialog[open] h2')?.textContent).toBe('Consolidate memories');
   expect(container.querySelector('dialog[open] details.consolidation-details')).toBeNull();
   expect(button('Generate draft')).toBeDefined();
+  expect(button('Generate draft').disabled).toBe(true);
+  expect(container.textContent).toContain('Could not load models');
+  failModels = false;
+  await act(async () => button('Reload models').click());
+  const model = container.querySelector<HTMLSelectElement>('[aria-label="Consolidation model"]')!;
+  expect(model.value).toBe('test-standard');
+  await act(async () => {
+    model.value = 'test-fast';
+    model.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(button('Generate draft').disabled).toBe(false);
   expect(memoryReads).toBe(0);
   expect(container.querySelector<HTMLInputElement>('[aria-label="Consolidated memory topic"]')?.value).toBe('');
   await act(async () => button('Generate draft').click());
   expect(container.querySelector('[aria-label="Consolidation draft"]')).toBeNull();
   expect(container.querySelectorAll('fieldset')).toHaveLength(0);
   expect(container.querySelector('[role="alert"]')?.textContent).toContain('Codex model is not supported.');
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Choose another model');
+  expect(posts.filter(p => p.path === '/api/consolidations').at(-1)?.body.model).toBe('test-fast');
   expect(button('Save memory')).toBeUndefined();
   failDraft = false;
   await act(async () => button('Generate draft').click());

@@ -125,6 +125,7 @@ export {
 } from '@threadnote/manager/ui/support';
 
 import type {
+  ConsolidationJobResponse as ConsolidationJob,
   TreeResponse,
   DoctorCheck,
   MemoryResponse,
@@ -178,16 +179,6 @@ interface StateResponse {
   readonly latestVersion?: string;
   readonly updateAvailable: boolean;
   readonly version: string;
-}
-
-interface ConsolidationJob {
-  readonly sources?: readonly ConsolidationSource[];
-  readonly agent: AgentClient;
-  readonly draft?: string;
-  readonly error?: string;
-  readonly id: string;
-  readonly sourceUris: readonly string[];
-  readonly status: 'completed' | 'failed' | 'running';
 }
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
@@ -1076,7 +1067,7 @@ function App(): React.ReactElement {
     setLibraryDialog('consolidate');
   }
 
-  async function draftConsolidation(): Promise<void> {
+  async function draftConsolidation(model: string): Promise<void> {
     if (draftingConsolidation || applyingConsolidation) {
       return;
     }
@@ -1091,6 +1082,7 @@ function App(): React.ReactElement {
     try {
       const result = await api<{job: ConsolidationJob}>('/api/consolidations', {
         agent,
+        model,
         kind: 'durable',
         project: consolidationProject ?? target.project,
         status: 'active',
@@ -1376,7 +1368,7 @@ function App(): React.ReactElement {
       onDraftChange={setDraft}
       onReviewChange={setConsolidationReviews}
       hasJob={!!jobId}
-      onDraft={() => void draftConsolidation()}
+      onDraft={model => void draftConsolidation(model)}
       onApply={() => void applyConsolidation()}
       onResume={() => void resumeConsolidationCleanup()}
     />

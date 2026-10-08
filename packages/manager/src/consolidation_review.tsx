@@ -1,4 +1,9 @@
-import React from 'react';
+import React, {useState} from 'react';
+import {
+  ConsolidationModelPicker,
+  consolidationFailureGuidance,
+  useConsolidationModels,
+} from './consolidation_models.js';
 import {DropdownSelect} from './ui/controls.js';
 import type {SelectId} from './ui/contracts.js';
 import {
@@ -263,13 +268,21 @@ export function ConsolidationPanel(props: {
   readonly onDraftChange: (draft: string) => void;
   readonly onReviewChange: (reviews: readonly ConsolidationReview[]) => void;
   readonly hasJob: boolean;
-  readonly onDraft: () => void;
+  readonly onDraft: (model: string) => void;
   readonly onApply: () => void;
   readonly onResume: () => void;
 }): React.ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const modelSelection = useConsolidationModels(props.agent, props.standalone === true || expanded);
+  const guidance = props.draftError ? consolidationFailureGuidance(props.draftError) : undefined;
   const Container = props.standalone ? 'section' : 'details';
   return (
-    <Container className="consolidation-details">
+    <Container
+      className="consolidation-details"
+      onToggle={event => {
+        if (event.currentTarget instanceof HTMLDetailsElement) setExpanded(event.currentTarget.open);
+      }}
+    >
       {props.standalone ? null : <summary>Consolidate memories</summary>}
       <p className="consolidation-intro">
         Create one new memory from the selected sources. Review it before saving. Personal sources are then archived
@@ -303,28 +316,49 @@ export function ConsolidationPanel(props: {
           onChange={event => props.onProjectChange(event.target.value)}
         />
       </label>
-      <div className="field-row select-row">
-        <DropdownSelect
-          id="agent"
-          label="Agent"
-          onChange={props.onAgentChange}
-          openSelect={props.openSelect}
-          options={props.agents.map(item => ({
-            disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
-            label: `${item.label}${item.available ? '' : ' unavailable'}`,
-            value: item.id,
-          }))}
-          setOpenSelect={props.setOpenSelect}
-          value={props.agent}
-        />
+      <div className="consolidation-agent-model">
+        <label>
+          Agent
+          <DropdownSelect
+            id="agent"
+            disabled={props.disabled}
+            label="Agent"
+            onChange={props.onAgentChange}
+            openSelect={props.openSelect}
+            options={props.agents.map(item => ({
+              disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
+              label: `${item.label}${item.available ? '' : ' unavailable'}`,
+              value: item.id,
+            }))}
+            setOpenSelect={props.setOpenSelect}
+            value={props.agent}
+          />
+        </label>
+        <ConsolidationModelPicker selection={modelSelection} disabled={props.disabled} />
         <button
           style={{flexShrink: 0, whiteSpace: 'nowrap'}}
-          disabled={props.disabled || !props.canDraft}
-          onClick={() => void props.onDraft()}
+          disabled={props.disabled || !props.canDraft || !modelSelection.model}
+          onClick={() => modelSelection.model && props.onDraft(modelSelection.model)}
         >
           {props.drafting ? 'Generating…' : 'Generate draft'}
         </button>
       </div>
+      {modelSelection.error ||
+      (!modelSelection.loading && !modelSelection.models.length && (props.standalone || expanded)) ? (
+        <section className="consolidation-error" role="alert">
+          <strong>Could not load models</strong>
+          <p>Reload the model list or choose another agent to continue.</p>
+          <button disabled={props.disabled} onClick={modelSelection.reload}>
+            Reload models
+          </button>
+          {modelSelection.error ? (
+            <details>
+              <summary>Technical details</summary>
+              <pre>{modelSelection.error}</pre>
+            </details>
+          ) : null}
+        </section>
+      ) : null}
       {!props.canDraft ? (
         <p className="consolidation-hint">
           Select 2–{MAX_CONSOLIDATION_SOURCES} memories in Library using their checkboxes.
@@ -332,11 +366,11 @@ export function ConsolidationPanel(props: {
       ) : null}
       {props.draftError ? (
         <section className="consolidation-error" role="alert">
-          <strong>Draft generation failed</strong>
-          <p>
-            The agent could not create a draft. Choose another agent or check its settings, then try again. Your source
-            memories have not been changed.
-          </p>
+          <strong>{guidance?.title}</strong>
+          <p>{guidance?.message} Your source memories have not been changed.</p>
+          <button disabled={props.disabled} onClick={modelSelection.reload}>
+            Reload models
+          </button>
           <details>
             <summary>Show agent error</summary>
             <pre>{props.draftError}</pre>

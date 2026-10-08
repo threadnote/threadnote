@@ -1,6 +1,7 @@
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {shellQuote} from '../utils.js';
+import type {ConsolidationModel} from './consolidation_models.js';
 import type {AgentClient} from '../types.js';
 
 const MAX_DRAFT_BYTES = 32 * 1024;
@@ -9,12 +10,16 @@ export class ConsolidationAgentError extends Schema.TaggedError<ConsolidationAge
   message: Schema.String,
 }) {}
 
-export function consolidationAgentScript(agent: AgentClient, executable: string): string {
+export function consolidationAgentScript(agent: AgentClient, executable: string, model?: ConsolidationModel): string {
+  const modelFlag = model ? ` --model ${shellQuote(model.id)}` : '';
+  const effortFlag = model?.reasoningEffort
+    ? ` -c ${shellQuote(`model_reasoning_effort=${JSON.stringify(model.reasoningEffort)}`)}`
+    : '';
   if (agent === 'codex') {
-    return `${shellQuote(executable)} exec --sandbox read-only --skip-git-repo-check --json --output-last-message "$2" - < "$1"`;
+    return `${shellQuote(executable)} exec${modelFlag}${effortFlag} --sandbox read-only --skip-git-repo-check --json --output-last-message "$2" - < "$1"`;
   }
   if (agent === 'claude') {
-    return `${shellQuote(executable)} --print --permission-mode default < "$1"`;
+    return `${shellQuote(executable)} --print${modelFlag} --permission-mode default < "$1"`;
   }
   throw ConsolidationAgentError.make({
     message: `${agent} does not expose a supported non-interactive consolidation mode.`,
@@ -25,6 +30,7 @@ export const runConsolidationAgentCommand = Effect.fn('manager.runConsolidationA
   agent: 'codex' | 'claude',
   executable: string,
   prompt: string,
+  model?: ConsolidationModel,
 ) {
   return yield* Effect.scoped(
     Effect.gen(function* () {
@@ -34,7 +40,7 @@ export const runConsolidationAgentCommand = Effect.fn('manager.runConsolidationA
       const promptPath = path.join(stagingDir, 'prompt.txt');
       const finalPath = path.join(stagingDir, 'final.txt');
       yield* fs.writeFileString(promptPath, prompt, {mode: 0o600});
-      const script = consolidationAgentScript(agent, executable);
+      const script = consolidationAgentScript(agent, executable, model);
       const result = yield* runCommandEffect('sh', ['-lc', script, 'threadnote-consolidate', promptPath, finalPath], {
         allowFailure: true,
         maxOutputBytes: 1024 * 1024,

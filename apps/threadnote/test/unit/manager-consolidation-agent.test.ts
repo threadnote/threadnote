@@ -45,6 +45,47 @@ function finalAnswerCommandLayer(stdout: string, stderr: string, finalAnswer: st
 }
 
 describe('external consolidation agent output boundary', () => {
+  effectIt.effect('passes the exact Codex choice and catalog effort ahead of inherited CLI settings', () =>
+    Effect.gen(function* () {
+      const executable = yield* fakeExecutable(
+        `out=
+model=
+effort=
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+ --output-last-message) out="$2"; shift 2;;
+ --model) model="$2"; shift 2;;
+ -c) effort="$2"; shift 2;;
+ *) shift;;
+ esac
+done
+printf '%s\\n%s' "$model" "$effort" > "$out"`,
+      );
+      const model = {id: "chosen'; echo injected", label: 'Chosen', isDefault: true, reasoningEffort: 'low'};
+      expect(yield* runConsolidationAgentCommand('codex', executable, 'source prompt', model)).toBe(
+        `${model.id}\nmodel_reasoning_effort="low"`,
+      );
+    }).pipe(provideTestLayer(commandLayer)),
+  );
+  effectIt.effect('passes the exact Claude model alias', () =>
+    Effect.gen(function* () {
+      const executable = yield* fakeExecutable(
+        `while [ "$#" -gt 0 ]; do
+ if [ "$1" = "--model" ]; then printf '%s' "$2"; exit 0; fi
+ shift
+done
+exit 1`,
+      );
+      expect(
+        yield* runConsolidationAgentCommand('claude', executable, 'prompt', {
+          id: 'haiku',
+          label: 'Haiku',
+          isDefault: false,
+        }),
+      ).toBe('haiku');
+    }).pipe(provideTestLayer(commandLayer)),
+  );
+
   effectIt.effect('uses only Codex final-answer output despite stdout and stderr diagnostics', () =>
     Effect.gen(function* () {
       const executable = yield* fakeExecutable(

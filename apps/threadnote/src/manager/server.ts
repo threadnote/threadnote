@@ -38,6 +38,12 @@ import {
 } from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {
+  discoverConsolidationModels,
+  selectConsolidationModel,
+  ConsolidationModelsError,
+  type ConsolidationModel,
+} from './consolidation_models.js';
 import {runConsolidationAgentCommand} from './consolidation_agent.js';
 export {consolidationAgentScript} from './consolidation_agent.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
@@ -45,6 +51,8 @@ import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {ApplicationServices} from '../effect/runtime.js';
 import {withSharedRepositoryLock} from '../effect/share/lock.js';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {telemetryChildEnvironmentPolicy} from '../telemetry/session.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   runShareInit,
@@ -313,6 +321,7 @@ const GRAPH_MAINTENANCE_BUSY_MESSAGE =
 type ConsolidationStatus = 'completed' | 'failed' | 'running';
 
 interface ConsolidationJob extends ReviewedConsolidationJob {
+  readonly model?: string;
   readonly agent: ConsolidationAgent;
   readonly createdAt: string;
   readonly id: string;
@@ -463,7 +472,7 @@ export const readContextUri = Effect.fn('manager.readContextUri')(function* (
 export {detectConsolidationAgents} from './state.js';
 function handleRequestEffect(context: ApiContext, request: ManagerRequest, response: ManagerResponseSink) {
   const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-  let requestEffect;
+  let requestEffect: Effect.Effect<void, unknown, ApplicationServices>;
   if (request.method === 'GET' && url.pathname === '/api/health') {
     requestEffect = Effect.sync(() => {
       const authorized = isAuthorized(context, request);
@@ -480,6 +489,18 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
         ...state,
         config: publicConfig(context.config),
       });
+    });
+  } else if (request.method === 'GET' && url.pathname === '/api/consolidation-models') {
+    requestEffect = Effect.gen(function* () {
+      if (!isAuthorized(context, request)) {
+        writeJson(response, 401, {error: 'Unauthorized'});
+        return;
+      }
+      const agent = url.searchParams.get('agent');
+      if (agent !== 'codex' && agent !== 'claude')
+        return yield* ConsolidationModelsError.make({message: 'Choose Codex or Claude to load model choices.'});
+      const models = yield* availableConsolidationModels(agent);
+      writeJson(response, 200, {models: models.map(({id, label, isDefault}) => ({id, label, isDefault}))});
     });
   } else if (request.method === 'POST' && url.pathname === '/api/consolidations') {
     requestEffect = Effect.gen(function* () {
@@ -518,6 +539,7 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
           return writeJson(response, error.status, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
         if (Schema.is(graphProjects.ManagerGraphProjectActionError)(error))
           return writeJson(response, 409, {code: error.code, error: error.message, retryAfterMilliseconds: 0});
+        if (Schema.is(ConsolidationModelsError)(error)) return writeJson(response, 400, {error: error.message});
         writeJson(response, 500, {error: errorMessage(error)});
       }),
     ),
@@ -1362,8 +1384,24 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
     });
     if (input.sourceUris.length < 2 || input.sourceUris.length > MAX_CONSOLIDATION_SOURCES)
       return yield* ManagerOperationError.make({message: 'Select 2–16 source memories.'});
+    let selectedModel: ConsolidationModel | undefined;
+    if (input.agent === 'codex' || input.agent === 'claude') {
+      yield* Effect.try({
+        try: () => {
+          if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256)
+            throw ConsolidationModelsError.make({message: 'Choose a model before generating a consolidation draft.'});
+        },
+        catch: cause => cause as ConsolidationModelsError,
+      });
+      const models = yield* availableConsolidationModels(input.agent);
+      selectedModel = yield* Effect.try({
+        try: () => selectConsolidationModel(body.model, models),
+        catch: cause => cause as ConsolidationModelsError,
+      });
+    }
     const job: ConsolidationJob = {
       agent: input.agent,
+      ...(selectedModel ? {model: selectedModel.id} : {}),
       createdAt: DateTime.formatIso(yield* DateTime.now),
       id: yield* crypto.randomUUIDv4,
       sourceUris: input.sourceUris,
@@ -1379,7 +1417,7 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       });
       if (new Set(job.sources.map(source => source.uri)).size !== job.sources.length)
         return yield* ManagerOperationError.make({message: 'Select distinct source memories.'});
-      job.draft = yield* runConsolidationAgent(context.config, input.agent, sources);
+      job.draft = yield* runConsolidationAgent(context.config, input.agent, sources, selectedModel);
       job.status = 'completed';
     }).pipe(
       Effect.catch(error =>
@@ -1406,10 +1444,24 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
   return yield* applyReviewedConsolidation(config, job, id, body);
 });
 
+const availableConsolidationModels = Effect.fn('manager.availableConsolidationModels')(function* (
+  agent: 'codex' | 'claude',
+) {
+  const executable = yield* findExecutable([agent]);
+  if (!executable)
+    return yield* ConsolidationModelsError.make({
+      message: `${agent} executable was not found. Install it and reload model choices.`,
+    });
+  return yield* discoverConsolidationModels(agent, executable).pipe(
+    Effect.provideService(ChildEnvironmentPolicy, telemetryChildEnvironmentPolicy),
+  );
+});
+
 function runConsolidationAgent(
   runtimeConfig: RuntimeConfig,
   agent: ConsolidationAgent,
   sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[],
+  model?: ConsolidationModel,
 ) {
   const prompt = consolidationPrompt(sources);
   if (agent === 'effect-ai') {
@@ -1439,7 +1491,7 @@ function runConsolidationAgent(
     if (!executable) {
       return yield* ManagerOperationError.make({message: `${agent} executable was not found.`});
     }
-    return yield* runConsolidationAgentCommand(agent, executable, prompt).pipe(
+    return yield* runConsolidationAgentCommand(agent, executable, prompt, model).pipe(
       Effect.catch(error => ManagerOperationError.make({message: errorMessage(error)})),
     );
   });

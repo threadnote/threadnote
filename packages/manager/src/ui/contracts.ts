@@ -1,4 +1,25 @@
-import type {ConsolidationProvenance} from '@threadnote/memory/consolidation';
+import type {ConsolidationProvenance, ConsolidationSource} from '@threadnote/memory/consolidation';
+
+export interface ConsolidationModelOption {
+  readonly id: string;
+  readonly label: string;
+  readonly isDefault: boolean;
+}
+
+export interface ConsolidationModelsResponse {
+  readonly models: readonly ConsolidationModelOption[];
+}
+
+export interface ConsolidationJobResponse {
+  readonly sources?: readonly ConsolidationSource[];
+  readonly agent: string;
+  readonly model?: string;
+  readonly draft?: string;
+  readonly error?: string;
+  readonly id: string;
+  readonly sourceUris: readonly string[];
+  readonly status: 'completed' | 'failed' | 'running';
+}
 
 export type PanelName =
   | 'context'

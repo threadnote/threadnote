@@ -7279,19 +7279,38 @@ h4 {
   color: var(--muted);
   font-size: 12px;
 }
-.consolidation-details > .field-row {
-  align-items: center;
+.consolidation-agent-model {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
   gap: 12px;
   margin: 16px 0;
 }
-.consolidation-details > .field-row > .select-field {
-  flex: 1;
+.consolidation-agent-model > label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
-.consolidation-details > .field-row > button {
-  flex: none;
+.consolidation-agent-model .select-field,
+.consolidation-agent-model select {
+  width: 100%;
+  min-width: 0;
+}
+.consolidation-agent-model > button {
   min-width: 96px;
   min-height: 38px;
   white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .consolidation-agent-model {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .consolidation-agent-model > button {
+    grid-column: 1 / -1;
+    justify-self: end;
+  }
 }
 .consolidation-details [aria-label='Consolidation evidence review'] {
   display: grid;
