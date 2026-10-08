@@ -7055,11 +7055,26 @@ h4 {
 }
 .inspector .metadata dd {
   font-size: 12px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 .inspector .metadata dt {
-  font-size: 11px;
-  margin-top: 10px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.inspector .metadata {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 14px 24px;
+}
+.metadata-item {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+.detail-modal-body > .inspector > h3 {
+  display: none;
 }
 .inspector .target-fields {
   gap: 14px;
@@ -7158,18 +7173,127 @@ h4 {
   max-height: 220px;
 }
 .consolidation-details {
-  margin-top: 20px;
-  border-top: 1px solid var(--line);
-  padding-top: 14px;
+  margin-top: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-alt);
+  padding: 16px;
 }
-.consolidation-details summary {
-  font-size: 12px;
+.consolidation-details > summary {
+  font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
+  margin: 0;
+}
+.consolidation-details[open] > summary {
+  margin-bottom: 18px;
+}
+.consolidation-details > label {
+  display: grid;
+  gap: 6px;
   margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.consolidation-details > .field-row {
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+}
+.consolidation-details > .field-row > .select-field {
+  flex: 1;
+}
+.consolidation-details > .field-row > button {
+  flex: none;
+  min-width: 96px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+.consolidation-details [aria-label='Consolidation evidence review'] {
+  display: grid;
+  gap: 16px;
 }
 .consolidation-details textarea {
-  min-height: 160px;
-  margin: 10px 0;
+  min-height: 144px;
+  margin: 0;
+  padding: 14px;
+  resize: vertical;
+}
+.consolidation-details [aria-label='Consolidation evidence review'] p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.consolidation-details [role='status'] {
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.consolidation-details fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.consolidation-details legend {
+  padding: 0 6px;
+  font-weight: 600;
+  font-size: 12px;
+}
+.consolidation-details fieldset pre {
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  margin: 0 0 14px;
+}
+.consolidation-details fieldset label:not(.check-row) {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.consolidation-details fieldset details {
+  border-top: 1px solid var(--line);
+  padding: 12px 0 0;
+  margin-top: 12px;
+}
+.consolidation-details fieldset summary {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.consolidation-details fieldset details[open] > summary {
+  margin-bottom: 12px;
+}
+.consolidation-details .check-row {
+  align-items: flex-start;
+  margin: 12px 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.consolidation-details .check-row input {
+  flex: none;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+.consolidation-details > button:last-child {
+  margin-top: 18px;
+  min-height: 40px;
+  padding: 9px 18px;
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.consolidation-details > button:last-child:disabled {
+  border-color: var(--line);
+  background: var(--panel);
+  color: var(--muted);
 }
 .workspace-card {
   border: 1px solid var(--line);

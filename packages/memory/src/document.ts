@@ -1,4 +1,9 @@
 import type {MemoryKind, MemoryStatus} from './types.js';
+import {
+  MAX_CONSOLIDATION_BYTES,
+  validateConsolidationProvenance,
+  type ConsolidationProvenance,
+} from './consolidation.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
   assertMemorySchemaWritable,
@@ -36,6 +41,9 @@ export interface MemoryMetadata {
   readonly codeCitations?: readonly MemoryCodeCitationV1[];
   /** Closed parse/bounds errors that force precise freshness to abstain. */
   readonly citationErrors?: readonly MemoryCodeCitationError[];
+  /** Reviewed derivation history; active dependencies remain in codeCitations/relations. */
+  readonly consolidation?: ConsolidationProvenance;
+  readonly consolidationError?: string;
   readonly createdAt?: string;
   readonly evidence?: readonly string[];
   readonly kind: MemoryKind;
@@ -114,6 +122,38 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     memoryCodeCitationHeaderValues(lines),
     canonicalCodeCitationSchemaVersion(lines, schemaVersion),
   );
+  const consolidationLines = lines.filter(line => /^\s*consolidation\s*:/u.test(line));
+  const consolidationValues = memoryHeaderValues(lines, 'consolidation') ?? [];
+  let consolidation: ConsolidationProvenance | undefined;
+  let consolidationError: string | undefined;
+  if (consolidationLines.length) {
+    try {
+      if (
+        schemaVersion !== 6 ||
+        consolidationLines.length !== 1 ||
+        !consolidationLines[0].startsWith('consolidation: ') ||
+        consolidationValues.length !== 1 ||
+        new TextEncoder().encode(consolidationValues[0]).byteLength > MAX_CONSOLIDATION_BYTES
+      )
+        throw new Error('Invalid consolidation schema, duplicate header, or evidence bounds.');
+      const parsedConsolidation: unknown = JSON.parse(consolidationValues[0]);
+      const evidence = validateConsolidationProvenance(
+        parsedConsolidation,
+        body,
+        memoryHeaderValueFromLines(lines, 'status') === 'archived',
+      );
+      consolidation = evidence.provenance;
+      if (
+        JSON.stringify(evidence.codeCitations) !== JSON.stringify(codeCitationMetadata.citations ?? []) ||
+        JSON.stringify(evidence.relations) !==
+          JSON.stringify(parseMemoryRelations(memoryHeaderValues(lines, 'relation')) ?? [])
+      )
+        throw new Error('Active evidence differs from the reviewed consolidation.');
+    } catch (error) {
+      consolidationError = error instanceof Error ? error.message : 'Invalid consolidation evidence.';
+      consolidation = undefined;
+    }
+  }
   return {
     body,
     content: trimmed,
@@ -123,7 +163,11 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       authority: parseMemoryAuthority(memoryHeaderValueFromLines(lines, 'authority')),
       candidateId: memoryHeaderValueFromLines(lines, 'candidate_id'),
       codeCitations: codeCitationMetadata.citations,
-      citationErrors: codeCitationMetadata.errors,
+      citationErrors: consolidationError
+        ? [...(codeCitationMetadata.errors ?? []), {reason: 'invalid-shape'}]
+        : codeCitationMetadata.errors,
+      consolidation,
+      consolidationError,
       createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
       evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
       kind,
@@ -160,6 +204,20 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
 
 export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: MemoryMetadata, body: string): string {
   assertMemorySchemaWritable(metadata.schemaVersion);
+  if (metadata.consolidationError) throw new Error(metadata.consolidationError);
+  if (metadata.consolidation) {
+    if (metadata.schemaVersion !== 6) throw new Error('Consolidation provenance requires memory schema version 6.');
+    const reviewed = validateConsolidationProvenance(
+      metadata.consolidation,
+      body.trim(),
+      metadata.status === 'archived',
+    );
+    if (
+      JSON.stringify(reviewed.codeCitations) !== JSON.stringify(metadata.codeCitations ?? []) ||
+      JSON.stringify(reviewed.relations) !== JSON.stringify(metadata.relations ?? [])
+    )
+      throw new Error('Active evidence differs from reviewed consolidation.');
+  }
   if (metadata.citationErrors && metadata.citationErrors.length > 0) {
     throw new Error('Cannot format memory metadata with unresolved code-citation errors.');
   }
@@ -196,6 +254,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     memoryHeaderLine('source_session_id', metadata.sourceSessionId),
     memoryHeaderLine('source_commit', metadata.sourceCommit),
     ...codeCitationLines,
+    metadata.consolidation ? memoryHeaderLine('consolidation', JSON.stringify(metadata.consolidation)) : undefined,
     memoryHeaderLine('candidate_id', metadata.candidateId),
     memoryHeaderLine('source_hash', metadata.sourceHash),
     memoryHeaderLine('supersedes', metadata.supersedes),
@@ -307,6 +366,11 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
   const canonical = normalizeMemoryDocumentLineEndings(canonicalMemoryDocumentContent(content));
   const separatorIndex = canonical.indexOf('\n\n');
   const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
+  if (header.split('\n').some(line => /^\s*consolidation\s*:/u.test(line))) {
+    const record = parseMemoryDocument('threadnote://memory/consolidation-check', content);
+    if (!record?.metadata.consolidation || record.metadata.consolidationError)
+      throw new Error(record?.metadata.consolidationError ?? 'Malformed consolidation provenance.');
+  }
   const schemaLines = header.split('\n').filter(line => /^\s*schema_version\s*:/u.test(line));
   if (schemaLines.length === 0) return;
   if (schemaLines.length !== 1) {
@@ -411,6 +475,9 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
   const parseable = normalizeMemoryDocumentLineEndings(memory);
   const header = parseable.slice(0, Math.max(0, parseable.indexOf('\n\n')) || parseable.length);
   const lines = header.split('\n');
+  const parsedRecord = lines.some(line => /^\s*consolidation\s*:/u.test(line))
+    ? parseMemoryDocument('threadnote://memory/inferred', memory)
+    : undefined;
   const firstLine = lines[0]?.trim();
   const schemaVersion = parseSchemaVersion(memoryHeaderValueFromLines(lines, 'schema_version'));
   const codeCitationMetadata = parseMemoryCodeCitationHeaders(
@@ -422,7 +489,9 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
     authority: parseMemoryAuthority(memoryHeaderValueFromLines(lines, 'authority')),
     candidateId: memoryHeaderValueFromLines(lines, 'candidate_id'),
     codeCitations: codeCitationMetadata.citations,
-    citationErrors: codeCitationMetadata.errors,
+    citationErrors: parsedRecord?.metadata.citationErrors ?? codeCitationMetadata.errors,
+    consolidation: parsedRecord?.metadata.consolidation,
+    consolidationError: parsedRecord?.metadata.consolidationError,
     createdAt: memoryHeaderValueFromLines(lines, 'created_at'),
     evidence: canonicalResourceInputs(memoryHeaderValues(lines, 'evidence')),
     kind:

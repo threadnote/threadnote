@@ -147,12 +147,12 @@ export function Metadata(props: {readonly metadata?: MemoryMetadata; readonly no
     ['size', props.node?.size === undefined ? undefined : `${props.node.size} bytes`],
   ].filter((row): row is [string, string] => typeof row[1] === 'string' && row[1].length > 0);
   return (
-    <dl>
+    <dl className="metadata">
       {rows.map(([label, value]) => (
-        <React.Fragment key={label}>
+        <div key={label} className="metadata-item">
           <dt>{label}</dt>
           <dd>{value}</dd>
-        </React.Fragment>
+        </div>
       ))}
     </dl>
   );

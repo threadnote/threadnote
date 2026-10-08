@@ -7,7 +7,7 @@ import {
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
-import {migrateMemoryDocumentV4ToV5} from '../migrations.js';
+import {migrateMemoryDocumentToCurrent} from '../migrations.js';
 
 export const MAINTENANCE_METADATA_VERSION = 1 as const;
 const OWNER_MAXIMUM_CHARACTERS = 128;
@@ -120,7 +120,7 @@ export function rewriteMaintenanceMetadata(
   patch: MaintenanceMetadataPatchV1,
   updatedAt: string,
 ): string {
-  const canonical = migrateMemoryDocumentV4ToV5(canonicalMemoryDocumentContent(content)).replace(/\r\n?/gu, '\n');
+  const canonical = migrateMemoryDocumentToCurrent(canonicalMemoryDocumentContent(content)).replace(/\r\n?/gu, '\n');
   const separator = canonical.indexOf('\n\n');
   const header = separator === -1 ? canonical : canonical.slice(0, separator);
   const body = separator === -1 ? '' : canonical.slice(separator + 2);

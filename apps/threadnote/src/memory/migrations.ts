@@ -853,11 +853,19 @@ export function removeResourceWithRetry(
   _ov: string,
   config: RuntimeConfig,
   uri: string,
-  options: {readonly alreadyLocked?: boolean; readonly expectedContent?: string; readonly recursive?: boolean} = {},
+  options: {
+    readonly alreadyLocked?: boolean;
+    readonly expectedContent?: string;
+    readonly expectedFingerprint?: string;
+    readonly recursive?: boolean;
+  } = {},
 ) {
   const remove = Effect.gen(function* () {
     const store = yield* ResourceStore;
-    yield* store.remove(resourceStoreLocation(config), uri, {recursive: options.recursive === true});
+    yield* store.remove(resourceStoreLocation(config), uri, {
+      recursive: options.recursive === true,
+      expectedFingerprint: options.expectedFingerprint,
+    });
     return true;
   }).pipe(Effect.catchTag('ResourceNotFound', () => Effect.succeed(false)));
   if (options.alreadyLocked) {

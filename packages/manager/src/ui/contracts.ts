@@ -1,3 +1,5 @@
+import type {ConsolidationProvenance} from '@threadnote/memory/consolidation';
+
 export type PanelName =
   | 'context'
   | 'context-health'
@@ -15,6 +17,8 @@ export type ManagerMemoryKind = 'durable' | 'handoff' | 'incident' | 'preference
 export type ManagerMemoryStatus = 'active' | 'archived' | 'expired' | 'superseded';
 
 export interface MemoryMetadata {
+  readonly consolidation?: ConsolidationProvenance;
+  readonly consolidationError?: string;
   readonly archivedFrom?: string;
   readonly kind: ManagerMemoryKind;
   readonly project?: string;
@@ -66,4 +70,31 @@ export interface TargetForm {
   status: ManagerMemoryStatus;
   team: string;
   topic: string;
+}
+
+export interface MemoryResponse {
+  readonly content: string;
+  readonly node: TreeNode;
+  readonly record?: {
+    readonly body: string;
+    readonly content: string;
+    readonly metadata: MemoryMetadata;
+    readonly uri: string;
+  };
+}
+export interface ReadResponse {
+  readonly content: string;
+  readonly localMemory?: MemoryResponse;
+  readonly output: string;
+}
+
+export interface TreeResponse {
+  readonly resourcesTree: TreeNode;
+  readonly tree: TreeNode;
+}
+
+export interface DoctorCheck {
+  readonly detail: string;
+  readonly name: string;
+  readonly status: 'fail' | 'ok' | 'warn';
 }

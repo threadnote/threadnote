@@ -1,3 +1,5 @@
+import {ConsolidationPanel} from './consolidation_review.js';
+import type {ConsolidationReview, ConsolidationSource} from '@threadnote/memory/consolidation';
 import {SharingPanel} from './sharing_view.js';
 import {IntegrationsPanel} from './integrations_view.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
@@ -46,7 +48,7 @@ import {
 import {LibraryExplorer} from './library_explorer.js';
 import {useLibraryNavigatorResize} from './library_layout.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
-import {DropdownSelect, Metadata, TargetFields} from '@threadnote/manager/ui/controls';
+import {Metadata, TargetFields} from '@threadnote/manager/ui/controls';
 import {
   initialManagerAvailability,
   managerActionsAreAvailable,
@@ -119,8 +121,11 @@ export {
 } from '@threadnote/manager/ui/support';
 
 import type {
+  TreeResponse,
+  DoctorCheck,
+  MemoryResponse,
+  ReadResponse,
   BulkItemResult,
-  MemoryMetadata,
   PanelName,
   SelectId,
   ShareSummary,
@@ -138,30 +143,8 @@ export type {
 } from '@threadnote/manager/ui/contracts';
 
 type NavTreeTab = 'memories' | 'resources';
-type CheckStatus = 'fail' | 'ok' | 'warn';
 type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai';
 type MemoryViewMode = 'edit' | 'preview';
-
-interface MemoryResponse {
-  readonly content: string;
-  readonly node: TreeNode;
-  readonly record?: {
-    readonly body: string;
-    readonly content: string;
-    readonly metadata: MemoryMetadata;
-    readonly uri: string;
-  };
-}
-interface ReadResponse {
-  readonly content: string;
-  readonly localMemory?: MemoryResponse;
-  readonly output: string;
-}
-
-interface TreeResponse {
-  readonly resourcesTree: TreeNode;
-  readonly tree: TreeNode;
-}
 
 interface AgentOption {
   readonly available: boolean;
@@ -193,13 +176,8 @@ interface StateResponse {
   readonly version: string;
 }
 
-interface DoctorCheck {
-  readonly detail: string;
-  readonly name: string;
-  readonly status: CheckStatus;
-}
-
 interface ConsolidationJob {
+  readonly sources?: readonly ConsolidationSource[];
   readonly agent: AgentClient;
   readonly draft?: string;
   readonly error?: string;
@@ -263,9 +241,13 @@ function App(): React.ReactElement {
   });
   const [agent, setAgent] = useState<AgentClient>('codex');
   const [draft, setDraft] = useState('');
+  const [consolidationTopic, setConsolidationTopic] = useState('');
+  const [consolidationProject, setConsolidationProject] = useState<string | undefined>();
   const [jobId, setJobId] = useState<string | undefined>();
   const [draftingConsolidation, setDraftingConsolidation] = useState(false);
   const [applyingConsolidation, setApplyingConsolidation] = useState(false);
+  const [consolidationSources, setConsolidationSources] = useState<readonly ConsolidationSource[]>([]);
+  const [consolidationReviews, setConsolidationReviews] = useState<readonly ConsolidationReview[]>([]);
   const [consolidationSourceUris, setConsolidationSourceUris] = useState<readonly string[]>([]);
   const [bulkAction, setBulkAction] = useState<'archive' | 'forget' | 'publish' | 'unpublish' | undefined>();
   const [sidebarWidth, setSidebarWidth] = useState(loadSidebarWidth);
@@ -1080,20 +1062,23 @@ function App(): React.ReactElement {
     setDraftingConsolidation(true);
     setJobId(undefined);
     setDraft('');
+    setConsolidationSources([]);
+    setConsolidationReviews([]);
     setConsolidationSourceUris(uris);
     try {
       const result = await api<{job: ConsolidationJob}>('/api/consolidations', {
         agent,
-        kind: target.kind,
-        project: target.project,
-        status: target.status,
-        topic: target.topic,
+        kind: 'durable',
+        project: consolidationProject ?? target.project,
+        status: 'active',
+        topic: consolidationTopic,
         uris,
       });
       if (result.job.status === 'completed') {
         setJobId(result.job.id);
         setDraft(result.job.draft ?? '');
         setConsolidationSourceUris(result.job.sourceUris);
+        setConsolidationSources(result.job.sources ?? []);
         toastMessage('Draft ready');
       } else {
         setConsolidationSourceUris([]);
@@ -1106,6 +1091,31 @@ function App(): React.ReactElement {
       toastMessage(errorMessage(err));
     } finally {
       setDraftingConsolidation(false);
+    }
+  }
+
+  async function resumeConsolidationCleanup(): Promise<void> {
+    const receipt = memory?.record?.metadata.consolidation;
+    if (!receipt || !memory?.record || applyingConsolidation) return;
+    const confirmed = await dialogs.confirm({
+      confirmLabel: 'Resume cleanup',
+      title: 'Resume saved source cleanup?',
+      message: `Verify the saved result and resume its approved ${receipt.cleanup} cleanup. Changed source revisions will be preserved.`,
+    });
+    if (!confirmed) return;
+    setApplyingConsolidation(true);
+    try {
+      const result = await api<{readonly output?: string}>(`/api/consolidations/${receipt.operationId}/apply`, {
+        confirm: true,
+        resultUri: memory.record.uri,
+      });
+      if (result.output) setOutput(result.output);
+      await refreshAll();
+      toastMessage('Saved consolidation cleanup verified');
+    } catch (err) {
+      toastMessage(errorMessage(err));
+    } finally {
+      setApplyingConsolidation(false);
     }
   }
 
@@ -1125,10 +1135,11 @@ function App(): React.ReactElement {
         cleanup: 'archive',
         confirm: true,
         draft,
-        kind: target.kind,
-        project: target.project,
-        status: target.status,
-        topic: target.topic,
+        reviews: consolidationReviews,
+        kind: 'durable',
+        project: consolidationProject ?? target.project,
+        status: 'active',
+        topic: consolidationTopic,
       });
       if (result.output) {
         setOutput(result.output);
@@ -1136,6 +1147,8 @@ function App(): React.ReactElement {
       setDraft('');
       setJobId(undefined);
       setConsolidationSourceUris([]);
+      setConsolidationSources([]);
+      setConsolidationReviews([]);
       setSelectedUris(new Set());
       if (currentSelectedUri && sourceUris.includes(currentSelectedUri)) {
         setSelectedUri(undefined);
@@ -1343,44 +1356,33 @@ function App(): React.ReactElement {
         </>
       )}
       {!selectedIsResource && !creatingMemory ? (
-        <details className="consolidation-details">
-          <summary>Consolidate memories</summary>
-          <div className="field-row select-row">
-            <DropdownSelect
-              id="agent"
-              label="Agent"
-              onChange={value => void (isAgentClient(value) && setAgent(value))}
-              openSelect={openSelect}
-              options={(state?.agents ?? []).map(item => ({
-                disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
-                label: `${item.label}${item.available ? '' : ' unavailable'}`,
-                value: item.id,
-              }))}
-              setOpenSelect={setOpenSelect}
-              value={agent}
-            />
-            <button
-              disabled={consolidationBusy || controlsBlocked || !canDraftConsolidation}
-              onClick={() => void draftConsolidation()}
-            >
-              {draftingConsolidation ? 'Drafting...' : 'Draft'}
-            </button>
-          </div>
-          <textarea
-            aria-busy={consolidationBusy}
-            placeholder={draftingConsolidation ? 'Generating draft...' : 'Draft preview'}
-            readOnly={consolidationBusy || controlsBlocked}
-            value={draft}
-            onChange={event => setDraft(event.target.value)}
-            spellCheck={false}
-          />
-          <button
-            disabled={consolidationBusy || controlsBlocked || !jobId || !draft}
-            onClick={() => void applyConsolidation()}
-          >
-            {applyingConsolidation ? 'Applying...' : 'Apply draft'}
-          </button>
-        </details>
+        <ConsolidationPanel
+          disabled={consolidationBusy || controlsBlocked}
+          busy={consolidationBusy}
+          canResume={!!memory?.record?.metadata.consolidation}
+          error={memory?.record?.metadata.consolidationError}
+          topic={consolidationTopic}
+          project={consolidationProject ?? target.project}
+          onTopicChange={setConsolidationTopic}
+          onProjectChange={setConsolidationProject}
+          agents={state?.agents ?? []}
+          agent={agent}
+          onAgentChange={value => void (isAgentClient(value) && setAgent(value))}
+          openSelect={openSelect}
+          setOpenSelect={setOpenSelect}
+          canDraft={canDraftConsolidation}
+          drafting={draftingConsolidation}
+          applying={applyingConsolidation}
+          draft={draft}
+          sources={consolidationSources}
+          reviews={consolidationReviews}
+          onDraftChange={setDraft}
+          onReviewChange={setConsolidationReviews}
+          hasJob={!!jobId}
+          onDraft={() => void draftConsolidation()}
+          onApply={() => void applyConsolidation()}
+          onResume={() => void resumeConsolidationCleanup()}
+        />
       ) : null}
     </aside>
   );

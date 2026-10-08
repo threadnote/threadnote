@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     "./candidate": "./src/candidate.ts",
+    "./consolidation": "./src/consolidation.ts",
     "./code/citation": "./src/code/citation.ts",
     "./code/citation-policy": "./src/code/citation-policy.ts",
     "./document": "./src/document.ts",

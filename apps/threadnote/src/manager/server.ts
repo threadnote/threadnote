@@ -30,6 +30,12 @@ import {
   runEffectAiConsolidation,
   runNativeAiConsolidation,
 } from '../effect/ai/consolidator.js';
+import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
+import {
+  captureConsolidationSource,
+  MAX_CONSOLIDATION_SOURCES,
+  type ConsolidationSource,
+} from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
@@ -112,7 +118,6 @@ import {
 import * as graphProjects from './graph/projects.js';
 import * as graphActions from './graph/actions.js';
 import {
-  cleanupMode,
   consolidationAgent,
   memoryKind,
   memoryStatus,
@@ -305,13 +310,15 @@ const GRAPH_MAINTENANCE_BUSY_MESSAGE =
 
 type ConsolidationStatus = 'completed' | 'failed' | 'running';
 
-interface ConsolidationJob {
+interface ConsolidationJob extends ReviewedConsolidationJob {
   readonly agent: ConsolidationAgent;
   readonly createdAt: string;
   readonly id: string;
   readonly sourceUris: readonly string[];
   readonly target: TargetMemoryInput;
   draft?: string;
+  sources?: readonly ConsolidationSource[];
+  resultUri?: string;
   error?: string;
   status: ConsolidationStatus;
 }
@@ -1351,6 +1358,8 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       }),
       catch: managerOperationError,
     });
+    if (input.sourceUris.length < 2 || input.sourceUris.length > MAX_CONSOLIDATION_SOURCES)
+      return yield* ManagerOperationError.make({message: 'Select 2–16 source memories.'});
     const job: ConsolidationJob = {
       agent: input.agent,
       createdAt: DateTime.formatIso(yield* DateTime.now),
@@ -1362,6 +1371,12 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
     context.jobs.set(job.id, job);
     yield* Effect.gen(function* () {
       const sources = yield* Effect.forEach(input.sourceUris, uri => readManagedMemory(context.config, uri));
+      job.sources = yield* Effect.try({
+        try: () => sources.map(source => captureConsolidationSource({uri: source.node.uri, content: source.content})),
+        catch: managerOperationError,
+      });
+      if (new Set(job.sources.map(source => source.uri)).size !== job.sources.length)
+        return yield* ManagerOperationError.make({message: 'Select distinct source memories.'});
       job.draft = yield* runConsolidationAgent(context.config, input.agent, sources);
       job.status = 'completed';
     }).pipe(
@@ -1381,42 +1396,12 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
   jobs: Map<string, ConsolidationJob>,
   id: string,
   body: Record<string, unknown>,
-  runEffect: ManagerEffectPromise | undefined,
+  _runEffect: ManagerEffectPromise | undefined,
 ) {
   const job = jobs.get(id);
-  if (!job) {
-    throw ManagerOperationError.make({message: 'Consolidation job not found.'});
-  }
-  if (job.status !== 'completed' || !job.draft) {
-    throw ManagerOperationError.make({message: 'Consolidation job is not completed.'});
-  }
-  const draft = optionalString(body.draft) ?? job.draft;
-  const target = targetFromBody({...job.target, ...body});
-  const saved = yield* runCaptured(
-    () =>
-      runRemember(config, {
-        kind: target.kind ?? 'durable',
-        project: target.project,
-        sourceAgentClient: target.sourceAgentClient ?? 'manager',
-        status: target.status ?? 'active',
-        text: draft,
-        topic: target.topic,
-      }),
-    runEffect,
-  );
-  const cleanup = cleanupMode(body.cleanup);
-  const cleanupOutputs: string[] = [];
-  if (cleanup !== 'keep') {
-    for (const uri of job.sourceUris) {
-      if (isInSharedNamespace(config, uri) && body.cleanupShared !== true) {
-        cleanupOutputs.push(`Skipped shared source cleanup: ${uri}`);
-        continue;
-      }
-      const action = cleanup === 'forget' ? () => runForget(config, uri, {}) : () => runArchive(config, uri, {});
-      cleanupOutputs.push((yield* runCaptured(action, runEffect)).output);
-    }
-  }
-  return {output: [saved.output, ...cleanupOutputs].filter(Boolean).join('\n')};
+  if (job && (job.status !== 'completed' || !job.draft))
+    return yield* ManagerOperationError.make({message: 'Consolidation job is not completed.'});
+  return yield* applyReviewedConsolidation(config, job, id, body);
 });
 
 function runConsolidationAgent(

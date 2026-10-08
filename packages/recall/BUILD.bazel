@@ -37,6 +37,7 @@ bun_test(
         "//packages/inference:src/vector-search.ts",
         "//packages/memory:package.json",
         "//packages/memory:src/code/citation.ts",
+        "//packages/memory:src/consolidation.ts",
         "//packages/memory:src/document.ts",
         "//packages/memory:src/hygiene/provenance.ts",
         "//packages/memory:src/identity-alias.ts",

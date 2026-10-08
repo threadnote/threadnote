@@ -457,6 +457,7 @@ bun_test(
         "//packages/integrations:src/agents.ts",
         "//packages/memory:package.json",
         "//packages/memory:src/code/citation.ts",
+        "//packages/memory:src/consolidation.ts",
         "//packages/memory:src/document.ts",
         "//packages/memory:src/hygiene/provenance.ts",
         "//packages/memory:src/identity-alias.ts",

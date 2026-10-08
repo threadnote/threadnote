@@ -184,7 +184,7 @@ export interface ResourceStoreShape {
   readonly remove: (
     location: ResourceStoreLocation,
     uri: string,
-    options?: {readonly recursive?: boolean},
+    options?: {readonly expectedFingerprint?: string; readonly recursive?: boolean},
   ) => Effect.Effect<void, ResourceStoreError>;
   readonly stat: (
     location: ResourceStoreLocation,

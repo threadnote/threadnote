@@ -1,3 +1,12 @@
+import {it as effectIt} from '@effect/vitest';
+import {Effect, FileSystem, Path} from 'effect';
+import {TestClock} from 'effect/testing';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {consolidatedMemory, privateRelation} from '../helpers/consolidated-memory.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -8,7 +17,10 @@ import {
   previewContextHealthRepairPlanV1,
   type ContextHealthRepairProposalV1,
 } from '@threadnote/threadnote/memory/context/health_repair';
-import {contextHealthRepairLockScopeV1} from '@threadnote/threadnote/memory/context/health_repair_commands';
+import {
+  applyContextHealthCitationRepairBatch,
+  contextHealthRepairLockScopeV1,
+} from '@threadnote/threadnote/memory/context/health_repair_commands';
 import {
   formatMemoryDocument,
   parseMemoryDocument,
@@ -16,12 +28,121 @@ import {
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import type {ContextHealthFindingV1, ContextHealthReportV1} from '@threadnote/context/health';
-import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 
 const PROJECT = 'threadnote';
 const NOW = '2026-09-17T12:00:00.000Z';
 
 describe('context health repair proposals', () => {
+  it('requires consolidation review for single and batch citation replacement without rewriting history', () => {
+    const source = consolidatedMemory();
+    const previous = source.metadata.codeCitations![0];
+    const replacement = replacementCitation(previous);
+    const citationFinding = finding('citation-changed', 'repair-citation', source.uri, `${source.uri}#${previous.id}`);
+    const plain = record('result', source.body, {...source.metadata, consolidation: undefined}, source.uri);
+    const oldProposal = previewContextHealthRepairPlanV1(healthReport([citationFinding]), [plain], {
+      citationReplacements: new Map([[citationFinding.id, replacement]]),
+    }).proposals[0];
+    expect(oldProposal.mutation.kind).toBe('replace-citation');
+    const bound = {
+      ...oldProposal,
+      preconditions: [
+        {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+      ],
+    };
+    const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
+    expect(
+      applyContextHealthRepairProposalV1({expectedRevision: proposal.revision, proposal, records: [source]}).status,
+    ).toBe('review-required');
+    const preview = previewContextHealthRepairPlanV1(healthReport([citationFinding]), [source], {
+      citationReplacements: new Map([[citationFinding.id, replacement]]),
+    });
+    expect(preview.proposals[0]?.mutation).toMatchObject({
+      kind: 'review-only',
+      reason: expect.stringMatching(/consolidation/i),
+    });
+    expect(memoryContentWithCitationReplacementsV1(source, [{citationId: previous.id, replacement}])).toBeUndefined();
+    expect(parseMemoryDocument(source.uri, source.content)?.metadata.consolidation).toEqual(
+      source.metadata.consolidation,
+    );
+  });
+
+  effectIt.effect('blocks approved batch citation mutation of a persisted consolidated result', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-consolidation-batch-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        user: 'tester',
+        manifestPath: path.join(home, 'manifest.yaml'),
+      };
+      const source = consolidatedMemory();
+      const previous = source.metadata.codeCitations![0];
+      const replacement = replacementCitation(previous);
+      const findingV1 = finding('citation-changed', 'repair-citation', source.uri, `${source.uri}#${previous.id}`);
+      const plain = record(
+        'result',
+        source.body,
+        {
+          ...source.metadata,
+          consolidation: undefined,
+        },
+        source.uri,
+      );
+      const original = previewContextHealthRepairPlanV1(healthReport([findingV1]), [plain], {
+        citationReplacements: new Map([[findingV1.id, replacement]]),
+      }).proposals[0];
+      expect(original.mutation.kind).toBe('replace-citation');
+      const bound = {
+        ...original,
+        preconditions: [
+          {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+        ],
+      };
+      const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
+      const store = yield* ResourceStore;
+      const location = {account: config.account, home, user: config.user};
+      yield* store.write(location, source.uri, source.content, {mode: 'create'});
+      const results = yield* applyContextHealthCitationRepairBatch(config, {project: PROJECT, proposals: [proposal]});
+      expect(results).toEqual([
+        {findingId: findingV1.id, status: 'conflict', error: expect.stringMatching(/consolidation/i)},
+      ]);
+      expect(yield* store.read(location, source.uri)).toBe(source.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it('requires consolidation review before removing a pinned active relation', () => {
+    const source = consolidatedMemory();
+    const relationFinding = finding('relation-target-missing', 'repair-relation', source.uri, privateRelation);
+    const plain = record('result', source.body, {...source.metadata, consolidation: undefined}, source.uri);
+    const oldProposal = previewContextHealthRepairPlanV1(healthReport([relationFinding]), [plain], {
+      absentTargetUris: [privateRelation],
+    }).proposals[0];
+    const bound = {
+      ...oldProposal,
+      preconditions: [
+        {uri: source.uri, expectedProject: PROJECT, expectedContentHash: sha256HexSync(source.content.trim())},
+      ],
+    };
+    const proposal = {...bound, revision: contextHealthRepairProposalRevisionV1(bound)};
+    expect(
+      applyContextHealthRepairProposalV1({
+        expectedRevision: proposal.revision,
+        proposal,
+        records: [source],
+        absentTargetUris: [privateRelation],
+      }).status,
+    ).toBe('review-required');
+    expect(
+      previewContextHealthRepairPlanV1(healthReport([relationFinding]), [source], {
+        absentTargetUris: [privateRelation],
+      }).proposals[0]?.mutation,
+    ).toMatchObject({kind: 'review-only', reason: expect.stringMatching(/consolidation/i)});
+  });
+
   it('projects exact bounded mutations and leaves evidence inputs unchanged', () => {
     const missingUri = 'threadnote://user/me/memories/durable/projects/threadnote/missing.md';
     const expired = record('expired', 'Expired memory.', {
@@ -893,5 +1014,20 @@ function fileCitation(path: string, hashSeed: string, commitSeed: string, snapsh
     sourceSnapshotId: `cgsn_${snapshotSeed.repeat(40)}`,
     target: {kind: 'file'},
     version: 1,
+  });
+}
+
+function replacementCitation(previous: MemoryCodeCitationV1): MemoryCodeCitationV1 {
+  return createMemoryCodeCitation({
+    version: previous.version,
+    extractorSet: previous.extractorSet,
+    repositoryId: previous.repositoryId,
+    repositoryIdentityKind: previous.repositoryIdentityKind,
+    sourceCommit: 'e'.repeat(40),
+    sourceSnapshotId: previous.sourceSnapshotId,
+    sourceDirty: false,
+    fileContentHash: previous.fileContentHash,
+    path: previous.path,
+    target: previous.target,
   });
 }

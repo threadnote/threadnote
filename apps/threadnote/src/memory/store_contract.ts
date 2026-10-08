@@ -2,6 +2,10 @@ import type {MemoryMetadata} from '@threadnote/memory/document';
 import type {DeferredCodeAnchorWriteRequest} from './deferred/code_anchor.js';
 
 export interface StoreMemoryOptions {
+  /** Internal create fence for a new reviewed result; cannot replace a concurrent destination. */
+  readonly createOnly?: boolean;
+  /** Internal deterministic archive destination; retries may reuse identical bytes only. */
+  readonly consolidationArchiveKey?: string;
   readonly bodyText: string;
   readonly dryRun: boolean;
   readonly deferredCodeAnchor?: DeferredCodeAnchorWriteRequest;

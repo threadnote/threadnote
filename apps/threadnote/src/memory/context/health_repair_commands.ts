@@ -23,6 +23,7 @@ import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {collectContextHealth} from './health_commands.js';
 import {
   applyContextHealthRepairProposalV1,
+  consolidationEvidenceRepairBlocker,
   isAutomaticRelationRepairTargetV1,
   memoryContentWithCitationReplacementsV1,
   previewContextHealthRepairPlanV1,
@@ -141,6 +142,8 @@ export const applyContextHealthCitationRepairBatch = Effect.fn('memory.contextHe
           Effect.gen(function* () {
             const [source] = yield* readMemoryRecordsByUri(config, [subjectUri]);
             if (source === undefined) return batchConflicts(proposals, 'The affected memory no longer exists.');
+            const blocker = consolidationEvidenceRepairBlocker(source);
+            if (blocker !== undefined) return batchConflicts(proposals, blocker);
             const invalid = proposals.find(proposal => {
               const verification = applyContextHealthRepairProposalV1({
                 expectedRevision: proposal.revision,

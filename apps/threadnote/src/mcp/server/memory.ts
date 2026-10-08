@@ -1461,6 +1461,24 @@ export function writeMemoryContentWithExpectedHash(
       if (!current || current.content !== expectedContent) {
         return argumentError(`Memory ${uri} changed after compact_context planned its update. Re-run the plan.`);
       }
+      const schemaError = memorySchemaRewriteError(content);
+      const postcondition = parseMemoryDocument(uri, content);
+      if (
+        schemaError ||
+        !postcondition ||
+        postcondition.metadata.consolidationError ||
+        (postcondition.metadata.citationErrors?.length ?? 0) > 0
+      ) {
+        return argumentError(schemaError?.message ?? `Repair would produce invalid memory evidence for ${uri}.`);
+      }
+      if (
+        current.metadata.consolidation !== undefined &&
+        JSON.stringify(current.metadata.consolidation) !== JSON.stringify(postcondition.metadata.consolidation)
+      ) {
+        return argumentError(
+          'Consolidation derivation requires evidence review before replacement; repair must preserve its pinned receipt.',
+        );
+      }
       yield* writeMemoryFile(config, ov, uri, content, 'replace', false, {quiet: true});
       yield* discardDeferredCodeAnchorIntent(config, uri);
       return {content: [{type: 'text' as const, text: `Updated memory: ${uri}`}]};

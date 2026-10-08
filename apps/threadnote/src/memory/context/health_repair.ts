@@ -258,6 +258,12 @@ export function applyContextHealthRepairProposalV1(
   if (subject?.metadata.project !== undefined && subject.metadata.project !== proposal.project) {
     return conflict(input, 'project-mismatch', `Repair subject ${subjectUri} belongs to another project.`);
   }
+  if (
+    subject !== undefined &&
+    (mutation.kind === 'replace-citation' || mutation.kind === 'remove-relations') &&
+    consolidationEvidenceRepairBlocker(subject) !== undefined
+  )
+    return {records, status: 'review-required'};
   if (mutation.kind === 'remove-relations' && subject !== undefined) {
     const resultContent = relationRepairContent(subject, mutation.targetUri);
     if (
@@ -329,7 +335,12 @@ export function applyContextHealthRepairProposalV1(
     return conflict(input, 'precondition-failed', 'The repair postcondition no longer matches its preview.');
   }
   const nextRecord = parseMemoryDocument(subject.uri, nextContent);
-  if (nextRecord === undefined || nextRecord.metadata.project !== proposal.project) {
+  if (
+    nextRecord === undefined ||
+    nextRecord.metadata.project !== proposal.project ||
+    nextRecord.metadata.consolidationError !== undefined ||
+    (nextRecord.metadata.citationErrors?.length ?? 0) > 0
+  ) {
     return conflict(input, 'invalid-proposal', 'The repair would produce an invalid project memory.');
   }
   return {
@@ -489,6 +500,20 @@ function mutationForFinding(
   const targetUri = directedFinding?.currentUri ?? finding.repair.targetUri;
   const subject = subjectUri === undefined ? undefined : recordsByUri.get(subjectUri);
   const target = targetUri === undefined ? undefined : recordsByUri.get(targetUri);
+  if (
+    subject !== undefined &&
+    (finding.repair.kind === 'repair-citation' || finding.repair.kind === 'repair-relation')
+  ) {
+    const reason = consolidationEvidenceRepairBlocker(subject);
+    if (reason !== undefined)
+      return {
+        kind: 'review-only',
+        reason,
+        repairKind: finding.repair.kind,
+        subjectUri: subject.uri,
+        ...(targetUri === undefined ? {} : {targetUri}),
+      };
+  }
   const subjectMemoryId = subject?.metadata.memoryId;
   const targetMemoryId = target?.metadata.memoryId;
   if (subjectUri !== undefined && isSharedMemoryUri(subjectUri)) {
@@ -749,7 +774,14 @@ function memoryContentWithoutTargetRelations(record: MemoryRecord, targetUri: st
   return memoryContentWithRelations(record.content, relations);
 }
 
+export function consolidationEvidenceRepairBlocker(record: MemoryRecord): string | undefined {
+  return record.metadata.consolidation !== undefined || record.metadata.consolidationError !== undefined
+    ? 'Consolidation evidence is pinned to its reviewed derivation. Review the final claims and evidence before changing citations or relations.'
+    : undefined;
+}
+
 function relationRepairContent(record: MemoryRecord, targetUri: string): string | undefined {
+  if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
   try {
     return memoryContentWithoutTargetRelations(record, targetUri);
   } catch {
@@ -770,6 +802,7 @@ function citationRepairContent(
 ): string | undefined {
   try {
     assertMemoryDocumentSchemaWritable(record.content);
+    if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if ((record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
     const citations = record.metadata.codeCitations ?? [];
     if (citations.filter(citation => citation.id === citationId).length !== 1) return undefined;
@@ -803,6 +836,7 @@ export function memoryContentWithCitationReplacementsV1(
 ): string | undefined {
   try {
     assertMemoryDocumentSchemaWritable(record.content);
+    if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if (replacements.length === 0 || (record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
     const citations = record.metadata.codeCitations ?? [];
     const replacementById = new Map(replacements.map(item => [item.citationId, item.replacement] as const));

@@ -274,6 +274,8 @@ export interface HandoffOptions {
 }
 
 export interface ArchiveOptions {
+  /** Internal recoverable consolidation cleanup identity and stable timestamp. */
+  readonly consolidationCleanup?: {readonly key: string; readonly timestamp: string};
   /** Internal composite-mutation option; the caller must refresh recall indexes from the final state. */
   readonly deferRecallIndexRefresh?: boolean;
   /** Internal accumulator for the archive URI created by a composite mutation. */
@@ -281,6 +283,8 @@ export interface ArchiveOptions {
   readonly dryRun?: boolean;
   /** Internal optimistic-concurrency guard used by hygiene apply. */
   readonly expectedContent?: string;
+  /** Reviewed consolidation source revision, checked under the mutation lock. */
+  readonly expectedRevision?: string;
   readonly kind?: MemoryKind;
   readonly project?: string;
   readonly topic?: string;
@@ -295,6 +299,8 @@ export interface PackOptions {
 
 export interface ForgetOptions {
   readonly dryRun?: boolean;
+  /** Reviewed consolidation source revision, checked under the mutation lock. */
+  readonly expectedRevision?: string;
 }
 
 export interface InitManifestOptions {

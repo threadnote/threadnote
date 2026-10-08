@@ -123,7 +123,7 @@ export function validatePortableSegment(value: string, input = value): string {
   }
   if (/[ .]$/.test(value)) return invalid(input, 'path segment may not end with a space or dot');
   if (WINDOWS_RESERVED_NAME.test(value)) return invalid(input, 'path segment is a Windows reserved name');
-  if (Buffer.byteLength(value, 'utf8') > 255) return invalid(input, 'path segment exceeds 255 UTF-8 bytes');
+  if (new TextEncoder().encode(value).byteLength > 255) return invalid(input, 'path segment exceeds 255 UTF-8 bytes');
   return value;
 }
 

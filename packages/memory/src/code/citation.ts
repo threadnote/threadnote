@@ -1,7 +1,7 @@
 import {Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
-export const MEMORY_SCHEMA_VERSION = 5 as const;
+export const MEMORY_SCHEMA_VERSION = 6 as const;
 export const MEMORY_CODE_CITATION_SCHEMA_VERSION = 4 as const;
 export const MEMORY_CODE_CITATION_VERSION = 1 as const;
 export const MEMORY_CODE_CITATION_HEADER = 'code_citation' as const;
@@ -168,7 +168,11 @@ export function canWriteMemorySchemaVersion(schemaVersion: number | undefined): 
 
 /** Code-citation v1 remains readable across the additive memory-schema v4→v5 migration. */
 export function isMemoryCodeCitationSchemaVersion(schemaVersion: number | undefined): boolean {
-  return schemaVersion === MEMORY_CODE_CITATION_SCHEMA_VERSION || schemaVersion === MEMORY_SCHEMA_VERSION;
+  return (
+    schemaVersion === MEMORY_CODE_CITATION_SCHEMA_VERSION ||
+    schemaVersion === 5 ||
+    schemaVersion === MEMORY_SCHEMA_VERSION
+  );
 }
 
 /** Writers call this before reformatting an existing record so future fields cannot be dropped. */

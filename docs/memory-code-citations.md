@@ -6,6 +6,30 @@ against an already-ready current graph and returns a disposable validation recei
 
 Code citations are optional. Existing uncited memories remain recallable after upgrading.
 
+## Consolidation in Manager
+
+Consolidation reviews evidence against the final draft, one paragraph at a time. Choose direct support, context only,
+or explicitly unsupported for each paragraph. For supported paragraphs, select the source fragments and the individual
+code citations or relations that apply. Editing the draft clears its reviews, and unresolved reviews block Apply.
+
+Only selected direct support becomes active citations and relations. The result also stores the source revision hashes,
+captured fragments, and review decisions as derivation history. Those retained fragments remain inspectable after source
+cleanup. More than eight selected citations, sixteen selected relations, or the bounded provenance budget blocks Apply;
+split the consolidation or revise its evidence selection explicitly.
+
+Apply saves and verifies the result before cleaning up sources. A changed source revision produces a conflict. Cleanup
+retries reuse the saved result and its deterministic archives; select the result and use **Resume saved source cleanup**
+after a Manager restart. An active relation to an input keeps that input available. Shared sources require explicit
+cleanup approval.
+
+Consolidation provenance uses memory schema v6. Older writers refuse to rewrite these results; use an upgraded writer
+to preserve the reviewed evidence.
+
+Derivation history is personal workflow provenance and is excluded from shared publication, ingest, and replacement
+payloads. Shared copies keep the approved prose, portable active citations, and stable memory relations allowed by
+the existing sharing policy. Citation refreshes and relation removals on a private consolidated result require a new
+evidence review; health repair cannot change those active bindings while retaining the original receipt.
+
 ## Organization remote Context Brief v1
 
 The organization HTTP composer has a deployment-scoped, read-only `context_brief` v1 projection. It is not a

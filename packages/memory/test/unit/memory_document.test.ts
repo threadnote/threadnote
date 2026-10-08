@@ -372,9 +372,9 @@ describe('memory document contract', () => {
     const migrated = migrateMemoryDocumentV4ToV5(v4);
     const parsed = parseMemoryDocument('threadnote://user/me/migrated.md', migrated);
 
-    expect(migrated).toBe(v4.replace('schema_version: 4', `schema_version: ${MEMORY_SCHEMA_VERSION}`));
+    expect(migrated).toBe(v4.replace('schema_version: 4', 'schema_version: 5'));
     expect(migrateMemoryDocumentV4ToV5(migrated)).toBe(migrated);
-    expect(parsed?.metadata).toMatchObject({codeCitations: [citation], schemaVersion: MEMORY_SCHEMA_VERSION});
+    expect(parsed?.metadata).toMatchObject({codeCitations: [citation], schemaVersion: 5});
     expect(parsed?.metadata.owner).toBeUndefined();
     expect(parsed?.metadata.reviewAfter).toBeUndefined();
   });
@@ -399,7 +399,7 @@ describe('memory document contract', () => {
 
         expect(migrateMemoryDocumentV4ToV5(v4)).toBe(migrated);
         expect(migrateMemoryDocumentV4ToV5(migrated)).toBe(migrated);
-        expect(parsed?.metadata.schemaVersion).toBe(MEMORY_SCHEMA_VERSION);
+        expect(parsed?.metadata.schemaVersion).toBe(5);
         expect(parsed?.metadata.owner).toBeUndefined();
         expect(parsed?.metadata.reviewAfter).toBeUndefined();
         expect(parsed?.body).toBe(body.replace(/\r\n?/gu, '\n').trim());

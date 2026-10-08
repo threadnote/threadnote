@@ -884,7 +884,9 @@ export function stripPersonalProvenance(
     const stableRelation = options.preserveStableMemoryRelations === true && isStableMemoryRelationHeader(line);
     if (
       !stableRelation &&
-      /^\s*(?:archived_from|candidate_id|evidence|references|relation|source_session_id|supersedes):/.test(line)
+      /^\s*(?:archived_from|candidate_id|consolidation|evidence|references|relation|source_session_id|supersedes):/.test(
+        line,
+      )
     ) {
       continue;
     }

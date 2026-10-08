@@ -13,5 +13,11 @@ export function migrateMemoryDocumentV4ToV5(content: string): string {
   if (parseMemoryDocument('threadnote://memory/migration', content)?.metadata.schemaVersion !== 4) {
     return content;
   }
-  return content.replace(/^schema_version: 4(\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
+  return content.replace(/^schema_version: 4(\r?)$/mu, 'schema_version: 5$1');
+}
+
+/** Current authoring schema adds optional derivation; upgrading preserves existing evidence verbatim. */
+export function migrateMemoryDocumentToCurrent(content: string): string {
+  const v5 = migrateMemoryDocumentV4ToV5(content);
+  return v5.replace(/^schema_version: 5(\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
 }
