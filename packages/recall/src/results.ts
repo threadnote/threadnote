@@ -20,6 +20,7 @@ import {
 import {recallRankCandidateIsEligible, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallTokens} from './tokenize.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
+import {isExternalResourceUri} from '@threadnote/store/external-resource';
 import {isJsonObject} from '@threadnote/platform/json';
 import {escapeRegExp} from '@threadnote/platform/glob';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
@@ -253,6 +254,11 @@ export interface RecallHit {
   readonly category: RecallCategory;
   readonly contextType: string;
   readonly equivalentUris?: readonly string[];
+  readonly external?: NonNullable<RecallCandidate['externalSource']> & {
+    readonly provider: 'superhuman';
+    readonly authority: 'external';
+    readonly trust: 'untrusted';
+  };
   readonly identityConflict?: boolean;
   /** Stable memory identity retained for internal consumers that must prove semantic discovery before exact read. */
   readonly memoryId?: string;
@@ -643,7 +649,10 @@ function renderRecallHits(
           .join('; ')}`
       : undefined;
     const warnings = hit.rankWarnings?.length ? `   warning: ${hit.rankWarnings.join('; ')}` : undefined;
-    return [head, hit.snippet ? `   ${hit.snippet}` : undefined, explanation, warnings].filter(
+    const externalWarning = isExternalResourceUri(hit.uri)
+      ? '   warning: untrusted external evidence; verify the source before using it as guidance.'
+      : undefined;
+    return [head, externalWarning, hit.snippet ? `   ${hit.snippet}` : undefined, explanation, warnings].filter(
       (line): line is string => line !== undefined,
     );
   });
@@ -896,6 +905,16 @@ function hybridRankRecallHits(
             return {
               ...hit,
               equivalentUris: ranked.candidate.equivalentUris,
+              ...(isExternalResourceUri(ranked.candidate.uri) && ranked.candidate.externalSource !== undefined
+                ? {
+                    external: {
+                      ...ranked.candidate.externalSource,
+                      provider: 'superhuman' as const,
+                      authority: 'external' as const,
+                      trust: 'untrusted' as const,
+                    },
+                  }
+                : {}),
               identityConflict: ranked.candidate.identityConflict,
               memoryId: ranked.candidate.memoryId,
               score: Math.max(hit.score, ranked.signals.semantic),

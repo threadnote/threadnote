@@ -13,25 +13,25 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
+  isExternalResourceUri,
+  loadExternalResourceAccess,
+  externalResourceAccess,
+  parseExternalResourceIdentity,
+  readExternalDocumentManifest,
+} from '@threadnote/store/external-resource';
+import {
   readCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
 } from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
 import {parseSeedManifest} from '@threadnote/workspace/manifest';
-import {
-  boundedMemoryAuthority,
-  boundedMemoryTrust,
-  parseMemoryDocument,
-  type MemoryRelation,
-} from '@threadnote/memory/document';
-import {redactSensitiveText} from '@threadnote/platform/scrubber';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import {errorMessage} from '@threadnote/platform/errors';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {expandPath} from '@threadnote/platform/paths';
 import {
   candidatePostings,
-  identifiers,
   indexTerms,
   postingLexicalScore,
   selectQueryTerms,
@@ -39,18 +39,14 @@ import {
 } from './index/lexical.js';
 import {
   deduplicateLogicalRecallCandidates,
-  recallMemoryContentHash,
   recallDocumentTerms,
   type RecallCandidate,
   type RecallCorpusStatistics,
 } from './rank.js';
 import {normalizeRecallSearchText} from './tokenize.js';
+import {indexCandidate, recallExactSearchText, recallIndexCandidateIsEligible} from './index/candidate.js';
 import {removeLegacyRecallIndexArtifacts} from './index/cleanup.js';
-import {
-  recallCandidateIsEligible,
-  recallEligibilityPolicyRestrictsCandidates,
-  type RecallEligibilityPolicy,
-} from './eligibility.js';
+import {recallEligibilityPolicyRestrictsCandidates, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallCandidateIsValid} from './candidate_validation.js';
 import {recallEligibilityPredicate} from './index/eligibility.js';
 import {
@@ -338,32 +334,52 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
         },
         indexLockHeld,
       );
-      const result = yield* 'anchors' in options
-        ? selectRecallCodeLinks(sql, options)
-        : 'memorySeeds' in options
-          ? selectRecallMemoryLinks(sql, options)
+      const externalResources = yield* loadExternalResourceAccess({
+        home: config.agentContextHome,
+        account: config.account,
+        user: config.user,
+      });
+      const accessEligibility = (policy: RecallEligibilityPolicy | undefined): RecallEligibilityPolicy => ({
+        ...(policy ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
+        externalResources,
+      });
+      const effectiveOptions =
+        'selections' in options
+          ? {
+              ...options,
+              selections: options.selections.map(selection => ({
+                ...selection,
+                eligibility: accessEligibility(selection.eligibility),
+              })),
+            }
+          : {...options, eligibility: accessEligibility(options.eligibility)};
+      const result = yield* 'anchors' in effectiveOptions
+        ? selectRecallCodeLinks(sql, effectiveOptions)
+        : 'memorySeeds' in effectiveOptions
+          ? selectRecallMemoryLinks(sql, effectiveOptions)
           : Effect.gen(function* () {
               const metadata = yield* loadRecallMetadata(sql);
               const generation = metadata.get('content_generation') ?? '';
-              const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(options));
+              const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
               const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
               const selectData = (selection: LoadRecallIndexOptions) =>
                 selectRecallIndexData(sql, corpusStatistics, generation, selection, loadIdentityConflicts);
-              return 'terms' in options
-                ? yield* selectRecallExactMatches(sql, options)
-                : 'selections' in options
+              return 'terms' in effectiveOptions
+                ? yield* selectRecallExactMatches(sql, effectiveOptions)
+                : 'selections' in effectiveOptions
                   ? yield* Effect.forEach(
-                      options.selections,
-                      selection => selectData({...selection, includeInactive: options.includeInactive}),
+                      effectiveOptions.selections,
+                      selection => selectData({...selection, includeInactive: effectiveOptions.includeInactive}),
                       {concurrency: 1},
                     )
-                  : yield* selectData(options);
+                  : yield* selectData(effectiveOptions);
             });
+      const finalResult = yield* filterExternalRecallResult(result, config, externalResources);
       if (prepareForActivation) {
         yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
         yield* sql.unsafe('PRAGMA journal_mode = DELETE');
       }
-      return result;
+      return finalResult;
     }),
   );
 });
@@ -719,7 +735,9 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
             options.workspaceScope !== undefined
           ? yield* selectRecallDocumentSample(sql, options)
           : yield* sql<RecallDocumentRow>`SELECT id, uri, candidate_json FROM documents ORDER BY uri`;
-    const logicalCandidates = deduplicateLogicalRecallCandidates(rows.map(decodeCandidateRow));
+    const logicalCandidates = deduplicateLogicalRecallCandidates(
+      rows.map(decodeCandidateRow).filter(candidate => recallIndexCandidateIsEligible(options.eligibility, candidate)),
+    );
     const candidates = options.limit === undefined ? logicalCandidates : logicalCandidates.slice(0, options.limit);
     const identityConflicts = yield* loadIdentityConflicts(
       options.allowedUriScopes,
@@ -1337,8 +1355,23 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
           Effect.gen(function* () {
             const content = yield* fs.readFileString(source.path);
             const canonicalResource = yield* verifyCanonicalResource(fs, source.uri, content, canonicalResourcePolicy);
-            const memory = parseMemoryDocument(source.uri, content);
-            const candidate = indexCandidate(source.uri, content, canonicalResource, memory);
+            const memory = isExternalResourceUri(source.uri) ? undefined : parseMemoryDocument(source.uri, content);
+            const externalIdentity = parseExternalResourceIdentity(source.uri);
+            const externalManifest =
+              externalIdentity === undefined
+                ? undefined
+                : yield* readExternalDocumentManifest(
+                    {home: config.agentContextHome, account: config.account, user: config.user},
+                    externalIdentity.sourceId,
+                    externalIdentity.documentId,
+                  );
+            const candidate = indexCandidate(
+              source.uri,
+              content,
+              canonicalResource,
+              memory,
+              externalManifest?.fetchedAt,
+            );
             const memoryLinkProjection = deriveIndexedRecallMemoryLinks(memory);
             const postings = candidatePostings(candidate);
             return {
@@ -1649,20 +1682,6 @@ function decodeCandidateRow(row: RecallDocumentRow): RecallCandidate {
   return value;
 }
 
-function recallIndexCandidateIsEligible(
-  policy: RecallEligibilityPolicy | undefined,
-  candidate: RecallCandidate,
-): boolean {
-  return (
-    policy === undefined ||
-    recallCandidateIsEligible(policy, {
-      authority: candidate.authority,
-      project: candidate.fields?.project,
-      trust: candidate.trust,
-    })
-  );
-}
-
 function withRecallIndexLock<A, E, R>(
   fs: FileSystem.FileSystem,
   path: Path.Path,
@@ -1731,92 +1750,6 @@ function chunkValues<Value>(values: readonly Value[], size: number): readonly (r
     chunks.push(values.slice(index, index + size));
   }
   return chunks;
-}
-
-function indexCandidate(
-  uri: string,
-  content: string,
-  canonicalResource: boolean,
-  memory = parseMemoryDocument(uri, content),
-): RecallCandidate {
-  const text = redactSensitiveText(memory?.body ?? content);
-  const fields = {
-    identifiers: identifiers(text),
-    keywords: memory?.metadata.keywords,
-    project: memory?.metadata.project ?? resourceProject(uri),
-    title: firstHeading(text) ?? uriBasename(uri),
-    topic: memory?.metadata.topic ?? uriTopic(uri),
-    workspaceScope: memory?.metadata.workspaceScope,
-  };
-  return {
-    authority: boundedMemoryAuthority(uri, memory?.metadata, {canonicalResource}),
-    contentHash: memory ? recallMemoryContentHash(memory.body) : undefined,
-    fields,
-    kind: memory?.metadata.kind,
-    memoryId: memory?.metadata.memoryId,
-    relations: memoryRelations(memory),
-    status: memory?.metadata.status,
-    text,
-    timestamp: memory?.metadata.timestamp,
-    trust: boundedMemoryTrust(uri, memory?.metadata, {canonicalResource}),
-    uri,
-    validFrom: memory?.metadata.validFrom,
-    validTo: memory?.metadata.validTo,
-  };
-}
-
-/**
- * Exact search is a user-content surface, not a serialization search. Keep the
- * parsed body and intentional low-entropy discovery fields while excluding
- * machine headers such as citation IDs, hashes, snapshots, and repository IDs.
- */
-function recallExactSearchText(candidate: RecallCandidate): string {
-  const fields = candidate.fields;
-  return normalizeRecallSearchText(
-    redactSensitiveText(
-      [
-        candidate.text,
-        fields?.title,
-        fields?.topic,
-        fields?.project,
-        fields?.workspaceScope,
-        ...(fields?.keywords ?? []),
-      ]
-        .filter((value): value is string => value !== undefined && value.length > 0)
-        .join('\n'),
-    ),
-  );
-}
-
-function memoryRelations(memory: ReturnType<typeof parseMemoryDocument>): readonly MemoryRelation[] | undefined {
-  if (!memory) {
-    return undefined;
-  }
-  const relations: MemoryRelation[] = [
-    ...(memory.metadata.relations ?? []),
-    ...(memory.metadata.references ?? []).map(uri => ({type: 'references' as const, uri})),
-    ...(memory.metadata.evidence ?? [])
-      .filter(evidence => evidence.startsWith('threadnote://'))
-      .map(uri => ({type: 'evidence_for' as const, uri})),
-    ...(memory.metadata.supersedes ? [{type: 'supersedes' as const, uri: memory.metadata.supersedes}] : []),
-  ];
-  return relations.length > 0 ? relations : undefined;
-}
-
-function firstHeading(value: string): string | undefined {
-  return /^#{1,3}\s+(.+)$/m.exec(value)?.[1]?.trim();
-}
-
-function resourceProject(uri: string): string | undefined {
-  return /^threadnote:\/\/resources\/repos\/([^/]+)/.exec(uri)?.[1];
-}
-
-function uriTopic(uri: string): string {
-  return uriBasename(uri).replace(/\.[a-z0-9]+$/i, '');
-}
-
-function uriBasename(uri: string): string {
-  return uri.slice(uri.lastIndexOf('/') + 1);
 }
 
 function loadCanonicalResourcePolicy(
@@ -1996,4 +1929,44 @@ function verifyCanonicalResource(
     Effect.map(sourceContent => sourceContent === indexedContent),
     Effect.orElseSucceed(() => false),
   );
+}
+
+function filterExternalRecallResult<A>(
+  result: A,
+  config: RecallIndexConfig,
+  externalResources: Readonly<Record<string, string>>,
+): Effect.Effect<A, never, FileSystem.FileSystem | Path.Path> {
+  const location = {home: config.agentContextHome, account: config.account, user: config.user};
+  const allowed = (candidate: RecallCandidate) =>
+    !isExternalResourceUri(candidate.uri)
+      ? Effect.succeed(true)
+      : externalResourceAccess(location, candidate.uri, undefined, candidate.contentHash).pipe(
+          Effect.map(access => access && candidate.authority === 'external' && candidate.trust === 'untrusted'),
+        );
+  const filterData = (data: RecallIndexData) =>
+    Effect.gen(function* () {
+      const candidates = yield* Effect.filter(data.candidates, allowed);
+      const recentCandidates =
+        data.recentCandidates === undefined ? undefined : yield* Effect.filter(data.recentCandidates, allowed);
+      return {...data, candidates, ...(recentCandidates === undefined ? {} : {recentCandidates})};
+    });
+  if (Array.isArray(result))
+    return Effect.forEach(result, value => {
+      if (typeof value === 'object' && value !== null && 'candidates' in value)
+        return filterData(value as RecallIndexData);
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        'uri' in value &&
+        typeof value.uri === 'string' &&
+        isExternalResourceUri(value.uri)
+      )
+        return externalResourceAccess(location, value.uri, undefined, externalResources[value.uri]).pipe(
+          Effect.map(access => (access ? value : undefined)),
+        );
+      return Effect.succeed(value);
+    }).pipe(Effect.map(value => value.filter(item => item !== undefined) as A));
+  if (typeof result === 'object' && result !== null && 'candidates' in result)
+    return filterData(result as unknown as RecallIndexData).pipe(Effect.map(value => value as A));
+  return Effect.succeed(result);
 }

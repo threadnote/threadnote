@@ -527,6 +527,12 @@ describe('Cursor Cloud integration', () => {
                 uri: 'threadnote://user/cloud-user/memories/durable/projects/threadnote/private.md',
               }),
             ).resolves.toContain('must stay within');
+            const externalUri =
+              'threadnote://resources/external/superhuman/docs-source/docs/doc_test/pages/page_test/chunk_test.md';
+            await expect(callError(client, 'read_context', {uri: externalUri})).resolves.toContain('must stay within');
+            await expect(
+              callError(client, 'recall_context', {query: 'canvas notes', uri: externalUri}),
+            ).resolves.toContain('must stay within');
             const listed = await client.callTool({
               arguments: {recursive: true, team: 'engineering'},
               name: 'list_context',

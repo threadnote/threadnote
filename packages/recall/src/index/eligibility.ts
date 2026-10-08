@@ -17,16 +17,30 @@ export function recallApprovedAuthoritative(
 export function recallEligibilityPredicate(
   alias: string,
   policy: RecallEligibilityPolicy | undefined,
+  externalHashExpression: string | false = `json_extract(${alias}.candidate_json, '$.contentHash')`,
 ): RecallSqlPredicate {
+  const root = 'threadnote://resources/external/superhuman';
+  const outside = `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`;
+  const access = policy?.externalResources ?? {};
+  const externalPredicate =
+    Object.keys(access).length === 0
+      ? outside
+      : `(${outside} OR EXISTS (SELECT 1 FROM json_each(?) AS external_access WHERE external_access.key = ${alias}.uri ${externalHashExpression === false ? '' : `AND external_access.value = ${externalHashExpression}`}))`;
+  const externalParams = [
+    root,
+    `${root}/`,
+    `${root}0`,
+    ...(Object.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
+  ];
   if (policy === undefined || policy.kind === 'pinned-hard-uri-bypass') {
-    return {params: [], restricted: false, sql: '1 = 1'};
+    return {params: externalParams, restricted: true, sql: externalPredicate};
   }
   if (policy.projects.mode === 'deny-all') {
     return {params: [], restricted: true, sql: '0 = 1'};
   }
 
-  const predicates: string[] = [];
-  const params: string[] = [];
+  const predicates: string[] = [externalPredicate];
+  const params: string[] = externalParams;
   if (policy.projects.mode === 'projectless-only') {
     predicates.push(`${alias}.project IS NULL`);
   } else if (policy.projects.mode === 'allow-projects-and-projectless') {

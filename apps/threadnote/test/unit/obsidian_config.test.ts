@@ -1,13 +1,83 @@
 import {describe, expect, it} from 'vitest';
+import {it as effectIt} from '@effect/vitest';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import fc from 'fast-check';
+import {Effect, FileSystem, Layer} from 'effect';
+import {TestClock} from 'effect/testing';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {
   emptyObsidianConfiguration,
+  mutateSourceConfiguration,
   parseObsidianConfiguration,
+  readSourceConfiguration,
+  removeObsidianSource,
   renderObsidianConfiguration,
+  requireObsidianSource,
+  requireSuperhumanSource,
+  sourceConfigurationFingerprint,
   upsertObsidianProjection,
   upsertObsidianSource,
+  upsertSuperhumanSource,
+  validateSuperhumanDocumentId,
 } from '@threadnote/threadnote/obsidian/config';
 
 describe('Obsidian source configuration', () => {
+  it('does not include configuration bytes in malformed YAML errors', () => {
+    const privateValue = 'SYNTHETIC_PRIVATE_CONFIGURATION_SENTINEL';
+    let failure: unknown;
+    try {
+      parseObsidianConfiguration(`version: 2\nsources: [${privateValue}\nprojections: []`);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeDefined();
+    expect(String(failure)).not.toContain(privateValue);
+    expect(JSON.stringify(failure)).not.toContain(privateValue);
+  });
+
+  effectIt.effect('serializes concurrent mixed-source read-modify-write transactions', () =>
+    TestClock.withLive(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const agentContextHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-source-config-'});
+        const config = {agentContextHome};
+        yield* Effect.all(
+          [
+            mutateSourceConfiguration(config, current =>
+              upsertObsidianSource(current, {
+                enabled: true,
+                exclude: [],
+                id: 'vault',
+                include: ['**/*.md'],
+                type: 'obsidian',
+                vault: '/vault',
+                watch: false,
+              }),
+            ),
+            mutateSourceConfiguration(config, current =>
+              upsertSuperhumanSource(current, {
+                type: 'superhuman',
+                id: 'docs',
+                enabled: true,
+                credentialEnv: 'SUPERHUMAN_DOCS_API_TOKEN',
+                project: null,
+                documents: [{id: 'Doc_Inner_S'}],
+                includeHidden: false,
+                refreshIntervalMinutes: 15,
+                maxStaleHours: 24,
+              }),
+            ),
+          ],
+          {concurrency: 2},
+        );
+        const result = yield* readSourceConfiguration(config);
+        expect(result.version).toBe(2);
+        expect(result.sources.map(source => source.id).sort()).toEqual(['docs', 'vault']);
+      }).pipe(provideTestLayer(Layer.merge(BunServices.layer, TestSystemInfoLayer))),
+    ),
+  );
+
   it('round-trips versioned sources and projections', () => {
     const configuration = upsertObsidianProjection(
       upsertObsidianSource(emptyObsidianConfiguration(), {
@@ -166,18 +236,121 @@ describe('Obsidian source configuration', () => {
       ),
     ).toThrow(/vault must be an absolute path/i);
 
-    expect(
-      parseObsidianConfiguration(
-        [
-          'version: 1',
-          'sources:',
-          '  - id: engineering',
-          '    type: obsidian',
-          '    vault: "C:\\\\Users\\\\example\\\\Vault"',
-          '    include: ["Engineering/**"]',
-          'projections: []',
-        ].join('\n'),
-      ).sources[0]?.vault,
-    ).toBe('C:\\Users\\example\\Vault');
+    const configuration = parseObsidianConfiguration(
+      [
+        'version: 1',
+        'sources:',
+        '  - id: engineering',
+        '    type: obsidian',
+        '    vault: "C:\\\\Users\\\\example\\\\Vault"',
+        '    include: ["Engineering/**"]',
+        'projections: []',
+      ].join('\n'),
+    );
+    expect(requireObsidianSource(configuration, 'engineering').vault).toBe('C:\\Users\\example\\Vault');
+  });
+
+  it('upgrades only when a Superhuman source is added and retains Obsidian projections', () => {
+    const legacy = upsertObsidianProjection(emptyObsidianConfiguration(), {
+      enabled: true,
+      folder: 'Threadnote',
+      id: 'memories',
+      includeShared: true,
+      kinds: ['durable'],
+      statuses: ['active'],
+      type: 'obsidian',
+      vault: '/vault',
+    });
+    expect(parseObsidianConfiguration(renderObsidianConfiguration(legacy))).toEqual(legacy);
+    const mixed = upsertSuperhumanSource(legacy, {
+      type: 'superhuman',
+      id: 'docs',
+      enabled: true,
+      credentialEnv: 'SUPERHUMAN_DOCS_API_TOKEN',
+      project: null,
+      documents: [{id: 'Doc_Inner_S', pages: ['Page_A']}],
+      includeHidden: false,
+      refreshIntervalMinutes: 15,
+      maxStaleHours: 24,
+    });
+    expect(mixed.version).toBe(2);
+    expect(parseObsidianConfiguration(renderObsidianConfiguration(mixed))).toEqual(mixed);
+    expect(requireSuperhumanSource(mixed, 'docs').documents[0]?.id).toBe('Doc_Inner_S');
+    expect(() => requireObsidianSource(mixed, 'docs')).toThrow(/No Obsidian source/);
+    const changedProjection = upsertObsidianProjection(mixed, {...mixed.projections[0], folder: 'Updated'});
+    expect(requireSuperhumanSource(changedProjection, 'docs')).toEqual(requireSuperhumanSource(mixed, 'docs'));
+    expect(parseObsidianConfiguration(renderObsidianConfiguration(changedProjection))).toEqual(changedProjection);
+    expect(requireSuperhumanSource(removeObsidianSource(mixed, 'docs'), 'docs')).toEqual(
+      requireSuperhumanSource(mixed, 'docs'),
+    );
+  });
+
+  it('rejects invalid or duplicate provider IDs and cross-provider source ID replacement', () => {
+    expect(() => validateSuperhumanDocumentId('Doc_Inner_S')).not.toThrow();
+    for (const invalid of ['a/b', 'a.b', 'a b', 'x'.repeat(129), 'con', 'CON', 'NUL', 'COM1']) {
+      expect(() => validateSuperhumanDocumentId(invalid)).toThrow();
+    }
+    const source = {
+      type: 'superhuman' as const,
+      id: 'docs',
+      enabled: true,
+      credentialEnv: 'SUPERHUMAN_DOCS_API_TOKEN',
+      project: null,
+      documents: [{id: 'Doc_Inner_S'}],
+      includeHidden: false,
+      refreshIntervalMinutes: 15,
+      maxStaleHours: 24,
+    };
+    for (const id of ['docs.', 'con'])
+      expect(() => upsertSuperhumanSource(emptyObsidianConfiguration(), {...source, id})).toThrow();
+    expect(() =>
+      upsertSuperhumanSource(emptyObsidianConfiguration(), {...source, documents: [{id: 'doc_1', pages: ['CON']}]}),
+    ).toThrow();
+    expect(() =>
+      upsertSuperhumanSource(
+        upsertObsidianSource(emptyObsidianConfiguration(), {
+          enabled: true,
+          exclude: [],
+          id: 'docs',
+          include: ['**/*.md'],
+          type: 'obsidian',
+          vault: '/vault',
+          watch: false,
+        }),
+        source,
+      ),
+    ).toThrow(/another type/);
+  });
+
+  it('round-trips bounded mixed document allowlists and fingerprints are order-insensitive', () => {
+    const idArb = fc
+      .array(fc.constantFrom('A', 'b', '3', '_', '-'), {minLength: 1, maxLength: 12})
+      .map(chars => chars.join(''));
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(idArb, {minLength: 1, maxLength: 8}),
+        fc.array(idArb, {maxLength: 8}),
+        (ids, pageIds) => {
+          const pages = [...new Set(pageIds)];
+          const source = {
+            type: 'superhuman' as const,
+            id: 'docs',
+            enabled: true,
+            credentialEnv: 'SUPERHUMAN_DOCS_API_TOKEN',
+            project: 'engineering',
+            documents: ids.map((id, index) => ({id, ...(index === 0 && pages.length ? {pages} : {})})),
+            includeHidden: false,
+            refreshIntervalMinutes: 15,
+            maxStaleHours: 24,
+          };
+          const config = upsertSuperhumanSource(emptyObsidianConfiguration(), source);
+          expect(parseObsidianConfiguration(renderObsidianConfiguration(config))).toEqual(config);
+          expect(sourceConfigurationFingerprint({...source, documents: [...source.documents].reverse()})).toBe(
+            sourceConfigurationFingerprint(source),
+          );
+        },
+      ),
+      {numRuns: 40},
+    );
   });
 });

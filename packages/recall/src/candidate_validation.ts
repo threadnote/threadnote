@@ -1,3 +1,4 @@
+import {externalResourceUri, isExternalResourceMetadata} from '@threadnote/store/external-resource';
 import type {RecallCandidate} from './rank.js';
 
 /** Runtime guard for candidate JSON loaded from the rebuildable SQLite index. */
@@ -20,6 +21,15 @@ export function recallCandidateIsValid(value: unknown): value is RecallCandidate
   if (value.identityConflict !== undefined && typeof value.identityConflict !== 'boolean') return false;
   if (value.exactTerms !== undefined && !isStringArray(value.exactTerms)) return false;
   if (value.equivalentUris !== undefined && !isStringArray(value.equivalentUris)) return false;
+  if (
+    value.externalSource !== undefined &&
+    (!isPlainRecord(value.externalSource) ||
+      !isExternalResourceMetadata(value.externalSource) ||
+      !isFiniteNumber(value.externalSource.fetchedAt) ||
+      value.externalSource.fetchedAt < 0 ||
+      externalResourceUri(value.externalSource) !== value.uri.split('#', 1)[0])
+  )
+    return false;
   if (value.fields !== undefined) {
     if (!isPlainRecord(value.fields)) return false;
     const fields = value.fields;

@@ -1,7 +1,8 @@
 import {Crypto, Effect, FileSystem, Path, Schema} from 'effect';
 import * as yaml from 'js-yaml';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {parseResourceId, resourceIdWithoutAnchor} from '@threadnote/store/resource-id';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {parseResourceId, resourceIdWithoutAnchor, validatePortableSegment} from '@threadnote/store/resource-id';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {isJsonObject} from '../utils.js';
@@ -29,11 +30,38 @@ export interface ObsidianProjectionConfig {
   readonly vault: string;
 }
 
-export interface ObsidianConfiguration {
-  readonly projections: readonly ObsidianProjectionConfig[];
-  readonly sources: readonly ObsidianSourceConfig[];
-  readonly version: 1;
+export interface SuperhumanDocumentConfig {
+  readonly id: string;
+  readonly pages?: readonly string[];
 }
+
+export interface SuperhumanSourceConfig {
+  readonly type: 'superhuman';
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly credentialEnv: string;
+  readonly project: string | null;
+  readonly documents: readonly SuperhumanDocumentConfig[];
+  readonly includeHidden: boolean;
+  readonly refreshIntervalMinutes: number;
+  readonly maxStaleHours: number;
+}
+
+export type SourceConfig = ObsidianSourceConfig | SuperhumanSourceConfig;
+
+export type SourceConfiguration =
+  | {
+      readonly projections: readonly ObsidianProjectionConfig[];
+      readonly sources: readonly ObsidianSourceConfig[];
+      readonly version: 1;
+    }
+  | {
+      readonly projections: readonly ObsidianProjectionConfig[];
+      readonly sources: readonly SourceConfig[];
+      readonly version: 2;
+    };
+
+export type ObsidianConfiguration = SourceConfiguration;
 
 class ObsidianConfigurationError extends Schema.TaggedError<ObsidianConfigurationError>()(
   'ObsidianConfigurationError',
@@ -46,6 +74,9 @@ class ObsidianConfigurationError extends Schema.TaggedError<ObsidianConfiguratio
 export const DEFAULT_OBSIDIAN_EXCLUDES = ['.obsidian/**', '.trash/**'] as const;
 export const DEFAULT_PROJECTION_KINDS = ['durable', 'handoff'] as const;
 export const DEFAULT_PROJECTION_STATUSES = ['active'] as const;
+export const DEFAULT_SUPERHUMAN_CREDENTIAL_ENV = 'SUPERHUMAN_DOCS_API_TOKEN';
+export const DEFAULT_SUPERHUMAN_REFRESH_INTERVAL_MINUTES = 15;
+export const DEFAULT_SUPERHUMAN_MAX_STALE_HOURS = 24;
 
 const CONFIGURATION_VERSION = 1;
 const CONFIGURATION_FILENAME = 'sources.yaml';
@@ -58,7 +89,9 @@ const CONFIGURATION_LOCK_OPTIONS = {
   waitTimeoutMilliseconds: CONFIGURATION_LOCK_WAIT_MILLISECONDS,
 } as const;
 const CONFIGURATION_FILE_MODE = 0o600;
-const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
+const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const PROVIDER_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const CREDENTIAL_ENV_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
 
 export function emptyObsidianConfiguration(): ObsidianConfiguration {
   return {projections: [], sources: [], version: CONFIGURATION_VERSION};
@@ -74,8 +107,12 @@ export const obsidianConfigurationPath = Effect.fn('obsidian.configurationPath')
 export const readObsidianConfiguration = Effect.fn('obsidian.readConfiguration')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
 ) {
-  const fs = yield* FileSystem.FileSystem;
   const path = yield* obsidianConfigurationPath(config);
+  return yield* readConfigurationAt(path);
+});
+
+const readConfigurationAt = Effect.fn('source.readConfigurationAt')(function* (path: string) {
+  const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(path))) {
     return emptyObsidianConfiguration();
   }
@@ -85,44 +122,76 @@ export const readObsidianConfiguration = Effect.fn('obsidian.readConfiguration')
     catch: cause =>
       Schema.is(ObsidianConfigurationError)(cause)
         ? cause
-        : ObsidianConfigurationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
+        : ObsidianConfigurationError.make({message: 'Source configuration could not be parsed.'}),
   });
 });
+
+export const readSourceConfiguration = readObsidianConfiguration;
 
 export const writeObsidianConfiguration = Effect.fn('obsidian.writeConfiguration')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   value: ObsidianConfiguration,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const pathService = yield* Path.Path;
   const path = yield* obsidianConfigurationPath(config);
   const serialized = renderObsidianConfiguration(value);
+  yield* withExclusiveFileLock(fs, `${path}.lock`, CONFIGURATION_LOCK_OPTIONS, writeConfigurationAt(path, serialized));
+  return path;
+});
+
+const writeConfigurationAt = Effect.fn('source.writeConfigurationAt')(function* (path: string, serialized: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
+  const crypto = yield* Crypto.Crypto;
+  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  yield* fs.writeFileString(temporaryPath, serialized, {mode: CONFIGURATION_FILE_MODE});
+  yield* fs
+    .rename(temporaryPath, path)
+    .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
+  yield* fs.chmod(path, CONFIGURATION_FILE_MODE);
+});
+
+export const writeSourceConfiguration = writeObsidianConfiguration;
+
+export const mutateSourceConfiguration = Effect.fn('source.mutateConfiguration')(function* (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  update: (current: SourceConfiguration) => SourceConfiguration,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* obsidianConfigurationPath(config);
   yield* withExclusiveFileLock(
     fs,
     `${path}.lock`,
     CONFIGURATION_LOCK_OPTIONS,
     Effect.gen(function* () {
-      yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-      const crypto = yield* Crypto.Crypto;
-      const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
-      yield* fs.writeFileString(temporaryPath, serialized, {mode: CONFIGURATION_FILE_MODE});
-      yield* fs
-        .rename(temporaryPath, path)
-        .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
-      yield* fs.chmod(path, CONFIGURATION_FILE_MODE);
+      const current = yield* readConfigurationAt(path);
+      const next = yield* Effect.try({
+        try: () => update(current),
+        catch: cause =>
+          Schema.is(ObsidianConfigurationError)(cause)
+            ? cause
+            : ObsidianConfigurationError.make({message: 'Source configuration update failed.'}),
+      });
+      yield* writeConfigurationAt(path, renderObsidianConfiguration(next));
     }),
   );
   return path;
 });
 
 export function parseObsidianConfiguration(raw: string, path = CONFIGURATION_FILENAME): ObsidianConfiguration {
-  const loaded = yaml.load(raw);
+  let loaded: unknown;
+  try {
+    loaded = yaml.load(raw);
+  } catch {
+    throw ObsidianConfigurationError.make({message: `Source configuration contains invalid YAML: ${path}`});
+  }
   if (!isJsonObject(loaded)) {
     throw ObsidianConfigurationError.make({message: `Obsidian source configuration must be an object: ${path}`});
   }
-  if (loaded.version !== CONFIGURATION_VERSION) {
+  if (loaded.version !== 1 && loaded.version !== 2) {
     throw ObsidianConfigurationError.make({
-      message: `Unsupported Obsidian source configuration version in ${path}. Expected 1.`,
+      message: `Unsupported source configuration version in ${path}. Expected 1 or 2.`,
     });
   }
   if (!Array.isArray(loaded.sources) || !Array.isArray(loaded.projections)) {
@@ -130,25 +199,47 @@ export function parseObsidianConfiguration(raw: string, path = CONFIGURATION_FIL
       message: `Obsidian source configuration requires sources and projections arrays: ${path}`,
     });
   }
-  const sources = loaded.sources.map((value, index) => parseSource(value, `${path} sources[${index}]`));
+  const version = loaded.version;
+  const sources = loaded.sources.map((value, index) => parseSource(value, `${path} sources[${index}]`, version));
   const projections = loaded.projections.map((value, index) => parseProjection(value, `${path} projections[${index}]`));
   assertUniqueIds(sources, projections, path);
-  return {projections, sources, version: CONFIGURATION_VERSION};
+  return loaded.version === 1
+    ? {projections, sources: sources.map(source => requireParsedObsidianSource(source)), version: 1}
+    : {projections, sources, version: 2};
 }
+
+export const parseSourceConfiguration = parseObsidianConfiguration;
 
 export function renderObsidianConfiguration(value: ObsidianConfiguration): string {
   const normalized = {
-    version: CONFIGURATION_VERSION,
-    sources: value.sources.map(source => ({
-      id: source.id,
-      type: source.type,
-      vault: source.vault,
-      include: [...source.include],
-      exclude: [...source.exclude],
-      enabled: source.enabled,
-      watch: source.watch,
-      ...(source.inbox ? {inbox: source.inbox} : {}),
-    })),
+    version: value.version,
+    sources: value.sources.map(source =>
+      source.type === 'obsidian'
+        ? {
+            id: source.id,
+            type: source.type,
+            vault: source.vault,
+            include: [...source.include],
+            exclude: [...source.exclude],
+            enabled: source.enabled,
+            watch: source.watch,
+            ...(source.inbox ? {inbox: source.inbox} : {}),
+          }
+        : {
+            id: source.id,
+            type: source.type,
+            enabled: source.enabled,
+            credential_env: source.credentialEnv,
+            project: source.project,
+            documents: source.documents.map(document => ({
+              id: document.id,
+              ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
+            })),
+            include_hidden: source.includeHidden,
+            refresh_interval_minutes: source.refreshIntervalMinutes,
+            max_stale_hours: source.maxStaleHours,
+          },
+    ),
     projections: value.projections.map(projection => ({
       id: projection.id,
       type: projection.type,
@@ -164,13 +255,35 @@ export function renderObsidianConfiguration(value: ObsidianConfiguration): strin
   return yaml.dump(normalized, {lineWidth: 100, noRefs: true, sortKeys: false});
 }
 
+export const renderSourceConfiguration = renderObsidianConfiguration;
+
 export function upsertObsidianSource(
   configuration: ObsidianConfiguration,
   source: ObsidianSourceConfig,
 ): ObsidianConfiguration {
+  if (configuration.sources.some(item => item.id === source.id && item.type !== source.type)) {
+    throw ObsidianConfigurationError.make({message: `Source "${source.id}" already has another type.`});
+  }
+  const sources = [...configuration.sources.filter(item => item.id !== source.id), source].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  return configuration.version === 1
+    ? {version: 1, sources: sources.filter(isObsidianSource), projections: configuration.projections}
+    : {version: 2, sources, projections: configuration.projections};
+}
+
+export function upsertSuperhumanSource(
+  configuration: SourceConfiguration,
+  source: SuperhumanSourceConfig,
+): SourceConfiguration {
+  const checked = validateSuperhumanSourceConfig(source);
+  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type)) {
+    throw ObsidianConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
+  }
   return {
-    ...configuration,
-    sources: [...configuration.sources.filter(item => item.id !== source.id), source].sort((left, right) =>
+    version: 2,
+    projections: configuration.projections,
+    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((left, right) =>
       left.id.localeCompare(right.id),
     ),
   };
@@ -180,28 +293,60 @@ export function upsertObsidianProjection(
   configuration: ObsidianConfiguration,
   projection: ObsidianProjectionConfig,
 ): ObsidianConfiguration {
-  return {
-    ...configuration,
-    projections: [...configuration.projections.filter(item => item.id !== projection.id), projection].sort(
-      (left, right) => left.id.localeCompare(right.id),
-    ),
-  };
+  const projections = [...configuration.projections.filter(item => item.id !== projection.id), projection].sort(
+    (left, right) => left.id.localeCompare(right.id),
+  );
+  return configuration.version === 1
+    ? {version: 1, sources: configuration.sources, projections}
+    : {version: 2, sources: configuration.sources, projections};
 }
 
 export function removeObsidianSource(configuration: ObsidianConfiguration, id: string): ObsidianConfiguration {
-  return {...configuration, sources: configuration.sources.filter(source => source.id !== id)};
+  return configuration.version === 1
+    ? {
+        version: 1,
+        projections: configuration.projections,
+        sources: configuration.sources.filter(source => source.id !== id),
+      }
+    : {
+        version: 2,
+        projections: configuration.projections,
+        sources: configuration.sources.filter(source => source.id !== id || source.type !== 'obsidian'),
+      };
 }
 
 export function removeObsidianProjection(configuration: ObsidianConfiguration, id: string): ObsidianConfiguration {
-  return {...configuration, projections: configuration.projections.filter(projection => projection.id !== id)};
+  return configuration.version === 1
+    ? {
+        version: 1,
+        sources: configuration.sources,
+        projections: configuration.projections.filter(item => item.id !== id),
+      }
+    : {
+        version: 2,
+        sources: configuration.sources,
+        projections: configuration.projections.filter(item => item.id !== id),
+      };
 }
 
 export function requireObsidianSource(configuration: ObsidianConfiguration, id: string): ObsidianSourceConfig {
   const source = configuration.sources.find(item => item.id === id);
-  if (!source) {
+  if (!source || !isObsidianSource(source)) {
     throw ObsidianConfigurationError.make({message: `No Obsidian source named "${id}".`});
   }
   return source;
+}
+
+export function requireSuperhumanSource(configuration: SourceConfiguration, id: string): SuperhumanSourceConfig {
+  const source = configuration.sources.find(item => item.id === id);
+  if (!source || source.type !== 'superhuman') {
+    throw ObsidianConfigurationError.make({message: `No Superhuman source named "${id}".`});
+  }
+  return source;
+}
+
+export function isObsidianSource(source: SourceConfig): source is ObsidianSourceConfig {
+  return source.type === 'obsidian';
 }
 
 export function requireObsidianProjection(configuration: ObsidianConfiguration, id: string): ObsidianProjectionConfig {
@@ -222,14 +367,60 @@ export function validateObsidianIdentifier(value: string, label: string): string
   return normalized;
 }
 
-function parseSource(value: unknown, label: string): ObsidianSourceConfig {
+export function validateSuperhumanDocumentId(value: string): string {
+  return requiredProviderId(value, 'document id');
+}
+
+export function validateSuperhumanPageId(value: string): string {
+  return requiredProviderId(value, 'page id');
+}
+
+export function validateSuperhumanSourceConfig(source: SuperhumanSourceConfig): SuperhumanSourceConfig {
+  return parseSuperhumanSource(
+    {
+      id: source.id,
+      type: source.type,
+      enabled: source.enabled,
+      credential_env: source.credentialEnv,
+      project: source.project,
+      documents: source.documents.map(document => ({id: document.id, pages: document.pages})),
+      include_hidden: source.includeHidden,
+      refresh_interval_minutes: source.refreshIntervalMinutes,
+      max_stale_hours: source.maxStaleHours,
+    },
+    'superhuman source',
+  );
+}
+
+export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig): string {
+  return sha256HexSync(
+    JSON.stringify({
+      type: source.type,
+      id: source.id,
+      enabled: source.enabled,
+      credentialEnv: source.credentialEnv,
+      project: source.project,
+      documents: source.documents
+        .map(document => ({id: document.id, pages: document.pages ? [...document.pages].sort() : null}))
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      includeHidden: source.includeHidden,
+      refreshIntervalMinutes: source.refreshIntervalMinutes,
+      maxStaleHours: source.maxStaleHours,
+    }),
+  );
+}
+
+function parseSource(value: unknown, label: string, version: 1 | 2): SourceConfig {
   if (!isJsonObject(value)) {
     throw ObsidianConfigurationError.make({message: `${label} must be an object.`});
   }
-  const id = requiredIdentifier(value.id, `${label}.id`);
+  if (value.type === 'superhuman' && version === 2) return parseSuperhumanSource(value, label);
   if (value.type !== 'obsidian') {
-    throw ObsidianConfigurationError.make({message: `${label}.type must be "obsidian".`});
+    throw ObsidianConfigurationError.make({
+      message: `${label}.type must be "obsidian"${version === 2 ? ' or "superhuman"' : ''}.`,
+    });
   }
+  const id = requiredIdentifier(value.id, `${label}.id`);
   const include = sourcePatterns(value.include, `${label}.include`);
   if (include.length === 0) {
     throw ObsidianConfigurationError.make({message: `${label}.include must contain at least one allowlist pattern.`});
@@ -243,6 +434,58 @@ function parseSource(value: unknown, label: string): ObsidianSourceConfig {
     type: 'obsidian',
     vault: requiredAbsoluteVaultPath(value.vault, `${label}.vault`),
     watch: optionalBoolean(value.watch, false, `${label}.watch`),
+  };
+}
+
+function requireParsedObsidianSource(source: SourceConfig): ObsidianSourceConfig {
+  if (!isObsidianSource(source))
+    throw ObsidianConfigurationError.make({message: 'Version 1 sources must be Obsidian.'});
+  return source;
+}
+
+function parseSuperhumanSource(value: Record<string, unknown>, label: string): SuperhumanSourceConfig {
+  const id = portableIdentifier(requiredIdentifier(value.id, `${label}.id`), `${label}.id`);
+  const credentialEnv =
+    value.credential_env === undefined
+      ? DEFAULT_SUPERHUMAN_CREDENTIAL_ENV
+      : requiredString(value.credential_env, `${label}.credential_env`);
+  if (!CREDENTIAL_ENV_PATTERN.test(credentialEnv)) {
+    throw ObsidianConfigurationError.make({message: `${label}.credential_env must be an environment variable name.`});
+  }
+  const project = value.project === null ? null : requiredIdentifier(value.project, `${label}.project`);
+  if (!Array.isArray(value.documents) || value.documents.length === 0 || value.documents.length > 64) {
+    throw ObsidianConfigurationError.make({message: `${label}.documents must contain 1 to 64 documents.`});
+  }
+  const documents = value.documents.map((raw, index) => {
+    const documentLabel = `${label}.documents[${index}]`;
+    if (!isJsonObject(raw)) throw ObsidianConfigurationError.make({message: `${documentLabel} must be an object.`});
+    const documentId = requiredProviderId(raw.id, `${documentLabel}.id`);
+    const pages = raw.pages === undefined ? undefined : providerIds(raw.pages, `${documentLabel}.pages`, 256);
+    return {id: documentId, ...(pages === undefined ? {} : {pages})};
+  });
+  if (new Set(documents.map(document => document.id)).size !== documents.length) {
+    throw ObsidianConfigurationError.make({message: `${label}.documents contains duplicate ids.`});
+  }
+  return {
+    type: 'superhuman',
+    id,
+    enabled: optionalBoolean(value.enabled, true, `${label}.enabled`),
+    credentialEnv,
+    project,
+    documents,
+    includeHidden: optionalBoolean(value.include_hidden, false, `${label}.include_hidden`),
+    refreshIntervalMinutes: positiveInteger(
+      value.refresh_interval_minutes,
+      DEFAULT_SUPERHUMAN_REFRESH_INTERVAL_MINUTES,
+      10_080,
+      `${label}.refresh_interval_minutes`,
+    ),
+    maxStaleHours: positiveInteger(
+      value.max_stale_hours,
+      DEFAULT_SUPERHUMAN_MAX_STALE_HOURS,
+      8_760,
+      `${label}.max_stale_hours`,
+    ),
   };
 }
 
@@ -270,7 +513,7 @@ function parseProjection(value: unknown, label: string): ObsidianProjectionConfi
 }
 
 function assertUniqueIds(
-  sources: readonly ObsidianSourceConfig[],
+  sources: readonly SourceConfig[],
   projections: readonly ObsidianProjectionConfig[],
   path: string,
 ): void {
@@ -292,6 +535,43 @@ function assertUniqueIds(
 
 function requiredIdentifier(value: unknown, label: string): string {
   return validateObsidianIdentifier(requiredString(value, label), label);
+}
+
+function requiredProviderId(value: unknown, label: string): string {
+  const id = requiredString(value, label);
+  if (!PROVIDER_ID_PATTERN.test(id)) {
+    throw ObsidianConfigurationError.make({
+      message: `${label} must be 1 to 128 ASCII letters, digits, underscores, or hyphens.`,
+    });
+  }
+  return portableIdentifier(id, label);
+}
+
+function portableIdentifier(value: string, label: string): string {
+  try {
+    return validatePortableSegment(value);
+  } catch {
+    throw ObsidianConfigurationError.make({message: `${label} must be a portable resource path segment.`});
+  }
+}
+
+function providerIds(value: unknown, label: string, maximum: number): readonly string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) {
+    throw ObsidianConfigurationError.make({message: `${label} must contain 1 to ${maximum} ids.`});
+  }
+  const ids = value.map(item => requiredProviderId(item, label));
+  if (new Set(ids).size !== ids.length) {
+    throw ObsidianConfigurationError.make({message: `${label} contains duplicate ids.`});
+  }
+  return ids;
+}
+
+function positiveInteger(value: unknown, fallback: number, maximum: number, label: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > maximum) {
+    throw ObsidianConfigurationError.make({message: `${label} must be an integer from 1 to ${maximum}.`});
+  }
+  return value as number;
 }
 
 function requiredString(value: unknown, label: string): string {

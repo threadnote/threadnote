@@ -19,7 +19,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
-import {syncObsidianSourcesBeforeRecall} from '../obsidian/source.js';
+import {syncSourcesBeforeRecall} from '../sources/source.js';
 import {
   canonicalResourceUri,
   parseResourceId,
@@ -387,7 +387,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const navigationOnly = query.length === 0;
   if (options.dryRun !== true) {
     yield* withAnonymousTelemetryPhase('recall.shared-sync', syncSharedReposAndLog(config));
-    yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncObsidianSourcesAndLog(config));
+    yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncSourcesAndLog(config));
   }
   const includeWorkspaceComponent = !navigationOnly && !options.uri && !options.workset;
   const workspaceOptions = options.callerCwd
@@ -819,18 +819,18 @@ function formatSharedCompactAudit(audit: {
   ].join('\n');
 }
 
-const syncObsidianSourcesAndLog = Effect.fn('memory.syncObsidianSourcesAndLog')(function* (config: RuntimeConfig) {
-  const syncResult = yield* syncObsidianSourcesBeforeRecall(config).pipe(
+const syncSourcesAndLog = Effect.fn('memory.syncSourcesAndLog')(function* (config: RuntimeConfig) {
+  const syncResult = yield* syncSourcesBeforeRecall(config).pipe(
     Effect.catch(error => {
       const message = error instanceof Error ? error.message : String(error);
-      return Console.error(`Auto-sync warning: Obsidian source refresh failed: ${message}`).pipe(Effect.as(undefined));
+      return Console.error(`Auto-sync warning: Source refresh failed: ${message}`).pipe(Effect.as(undefined));
     }),
   );
   if (!syncResult) {
     return;
   }
   if (syncResult.syncedSources.length > 0) {
-    yield* Console.error(`Auto-synced Obsidian sources: ${syncResult.syncedSources.join(', ')}`);
+    yield* Console.error(`Auto-synced sources: ${syncResult.syncedSources.join(', ')}`);
   }
   for (const warning of syncResult.warnings) {
     yield* Console.error(`Auto-sync warning: ${warning}`);

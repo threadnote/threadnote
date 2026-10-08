@@ -3,6 +3,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-id';
+import {isExternalResourceUri, loadExternalResourceAccess} from '@threadnote/store/external-resource';
 import type {IndexedRecallCodeLink} from '../code_links.js';
 import {memoryLinkLocatorDigest, type IndexedRecallMemoryLink} from '../memory/links.js';
 import {normalizeRecallProject} from '../eligibility.js';
@@ -97,6 +98,11 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   invalidatedUris: ReadonlySet<string>,
 ) {
   yield* prepareRecallSourceScan(sql);
+  const externalAccess = yield* loadExternalResourceAccess({
+    home: config.agentContextHome,
+    account: config.account,
+    user: config.user,
+  });
   let pendingSources: RecallRefreshSourceInsert[] = [];
   let scannedSourceCount = 0;
   let skippedOversizedDocumentCount = 0;
@@ -140,6 +146,7 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
             .split(path.sep)
             .map(segment => segment.normalize('NFC'));
           const uri = canonicalResourceUri(rootId.namespace, [...rootId.segments, ...relativeSegments]);
+          if (isExternalResourceUri(uri) && externalAccess[uri] === undefined) return;
           pendingSources.push({
             authorityPolicyKey: canonicalResourcePolicy.entryKeyByUri.get(uri) ?? null,
             invalidated: invalidatedUris.has(uri),

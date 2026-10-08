@@ -17,6 +17,11 @@ import {
 } from './index/scope.js';
 import type {RecallCandidate} from './rank.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  externalResourceAccess,
+  isExternalResourceUri,
+  loadExternalResourceAccess,
+} from '@threadnote/store/external-resource';
 import {chunkRecallDocument, RECALL_CHUNKER_VERSION, type RecallChunk} from './chunker.js';
 import {normalizeVector, type VectorSearchResult} from '@threadnote/inference/vector-search';
 
@@ -500,7 +505,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
 });
 
 export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticScores')(function* <R = never>(
-  config: {readonly agentContextHome: string},
+  config: {readonly agentContextHome: string; readonly account?: string; readonly user?: string},
   query: string,
   options: SemanticScoreOptions<R> = {},
 ) {
@@ -535,6 +540,15 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
           ),
         );
 
+  const externalLocation =
+    config.account !== undefined && config.user !== undefined
+      ? {home: config.agentContextHome, account: config.account, user: config.user}
+      : undefined;
+  const externalResources = externalLocation === undefined ? {} : yield* loadExternalResourceAccess(externalLocation);
+  const eligibility: RecallEligibilityPolicy = {
+    ...(options.eligibility ?? {kind: 'candidate-policy', authority: 'any', projects: {mode: 'unrestricted'}}),
+    externalResources,
+  };
   const scores = yield* useVectorDatabaseReadOnly(
     databasePath,
     Effect.gen(function* () {
@@ -552,7 +566,7 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
             });
           }
           const limit = Math.min(active.chunk_count, options.limit ?? 500);
-          const selection = vectorChunkSelectionPredicate(options.eligibility, options.allowedUriScopes);
+          const selection = vectorChunkSelectionPredicate(eligibility, options.allowedUriScopes);
           let cursor = '';
           let best: readonly SemanticChunkMatch[] = [];
           for (;;) {
@@ -588,7 +602,7 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
             sql,
             active.generation,
             [...scores.keys()],
-            options.eligibility,
+            eligibility,
             options.allowedUriScopes,
           );
           for (const alias of aliases) {
@@ -613,6 +627,16 @@ export const selectedSemanticScores = Effect.fn('vectorIndex.selectedSemanticSco
   // changing lexical corpus after releasing that read snapshot so a long paged
   // scan cannot return scores for a corpus that was superseded mid-query.
   yield* verifyCurrentCorpusGeneration(manifest, options);
+  if (scores !== undefined) {
+    for (const uri of scores.keys()) {
+      if (
+        isExternalResourceUri(uri) &&
+        (externalLocation === undefined ||
+          !(yield* externalResourceAccess(externalLocation, uri, undefined, externalResources[uri])))
+      )
+        scores.delete(uri);
+    }
+  }
   return scores;
 });
 
@@ -996,7 +1020,7 @@ const loadVectorAliasesForRepresentatives = Effect.fn('vectorIndex.loadAliasesFo
   eligibilityPolicy?: RecallEligibilityPolicy,
   allowedUriScopes?: readonly string[],
 ) {
-  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy);
+  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy, false);
   const uriScope = recallUriScopePredicate('alias', allowedUriScopes);
   const aliases: VectorAliasRow[] = [];
   for (let start = 0; start < representativeUris.length; start += VECTOR_INDEX_INSERT_BATCH_SIZE) {
@@ -1027,7 +1051,7 @@ function vectorChunkSelectionPredicate(
   eligibilityPolicy: RecallEligibilityPolicy | undefined,
   allowedUriScopes: readonly string[] | undefined,
 ): RecallSqlPredicate {
-  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy);
+  const eligibility = recallEligibilityPredicate('chunk', eligibilityPolicy, false);
   const directUriScope = recallUriScopePredicate('chunk', allowedUriScopes);
   if (!directUriScope.restricted) return combineRecallSqlPredicates(eligibility, directUriScope);
 

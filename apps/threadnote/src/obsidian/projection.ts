@@ -14,11 +14,12 @@ import {
 } from '@threadnote/memory/document';
 import {
   type ObsidianProjectionConfig,
+  isObsidianSource,
+  mutateSourceConfiguration,
   readObsidianConfiguration,
   removeObsidianProjection,
   requireObsidianProjection,
   upsertObsidianProjection,
-  writeObsidianConfiguration,
 } from './config.js';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {parseResourceId, resourceIdWithoutAnchor} from '@threadnote/store/resource-id';
@@ -134,12 +135,24 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
     vault,
   };
   const projectionExclude = `${folder}/**`;
-  const sources = current.sources.map(source =>
-    source.vault === vault && !source.exclude.includes(projectionExclude)
-      ? {...source, exclude: [...source.exclude, projectionExclude]}
-      : source,
-  );
-  const next = upsertObsidianProjection({...current, sources}, projection);
+  const withProjection = (configuration: typeof current) => {
+    const sources = configuration.sources.map(source =>
+      isObsidianSource(source) && source.vault === vault && !source.exclude.includes(projectionExclude)
+        ? {...source, exclude: [...source.exclude, projectionExclude]}
+        : source,
+    );
+    const next =
+      configuration.version === 1
+        ? {version: 1 as const, sources: sources.filter(isObsidianSource), projections: configuration.projections}
+        : {version: 2 as const, sources, projections: configuration.projections};
+    const latest = configuration.projections.find(item => item.id === id);
+    return upsertObsidianProjection(next, {
+      ...projection,
+      enabled: latest?.enabled ?? true,
+      selectedUris: options.selectedUris !== undefined ? projection.selectedUris : latest ? latest.selectedUris : [],
+    });
+  };
+  const sources = withProjection(current).sources;
   if (options.apply !== true) {
     yield* Console.log(`Would configure Obsidian projection "${id}":`);
     yield* Console.log(projectionSummary(projection));
@@ -149,7 +162,7 @@ export const runObsidianProjectionAdd = Effect.fn('obsidian.projectionAdd')(func
     yield* Console.log('Re-run with --apply to write the configuration.');
     return;
   }
-  const path = yield* writeObsidianConfiguration(config, next);
+  const path = yield* mutateSourceConfiguration(config, withProjection);
   yield* Console.log(`Configured Obsidian projection "${id}" in ${path}.`);
 });
 
@@ -298,7 +311,16 @@ export const runObsidianProjectionPublish = Effect.fn('obsidian.projectionPublis
     yield* Console.log('Dry run complete. Re-run with --apply to write the selected memories to the vault.');
     return plan.entries;
   }
-  yield* writeObsidianConfiguration(config, upsertObsidianProjection(configuration, nextProjection));
+  yield* mutateSourceConfiguration(config, latest => {
+    const currentProjection = requireObsidianProjection(latest, projection.id);
+    const currentSelection = currentProjection.selectedUris ?? [];
+    return upsertObsidianProjection(latest, {
+      ...currentProjection,
+      selectedUris: [...new Set([...currentSelection, ...requestedUris])].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    });
+  });
   return yield* runObsidianProjectionSync(config, {
     apply: true,
     force: options.force,
@@ -340,7 +362,7 @@ export const runObsidianProjectionRemove = Effect.fn('obsidian.projectionRemove'
         yield* fs.remove(yield* safeProjectionTarget(root, entry.relativePath), {force: true});
       }
       yield* fs.remove(statePath, {force: true});
-      yield* writeObsidianConfiguration(config, removeObsidianProjection(configuration, projection.id));
+      yield* mutateSourceConfiguration(config, latest => removeObsidianProjection(latest, projection.id));
       yield* removeEmptyProjectionDirectories(root);
     }),
   );

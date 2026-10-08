@@ -69,13 +69,13 @@ import {
   runObsidianProjectionSync,
 } from '../obsidian/projection.js';
 import {
-  runObsidianSourceAdd,
-  runObsidianSourceInventory,
-  runObsidianSourceList,
-  runObsidianSourceRemove,
-  runObsidianSourceStatus,
-  runObsidianSourceSync,
-} from '../obsidian/source.js';
+  runSourceAdd,
+  runSourceInventory,
+  runSourceList,
+  runSourceRemove,
+  runSourceStatus,
+  runSourceSync,
+} from '../sources/source.js';
 import {ensureUserManifestRuntimeConfig, getRuntimeConfig} from '../runtime.js';
 import {runInitManifest, runSeed, runSeedSkills} from '../seeding.js';
 import {makeWorksetCommand} from './workset_cli.js';
@@ -1040,22 +1040,36 @@ const sourceAdd = Command.make(
   'add',
   {
     apply: boolean('apply', 'Write the source configuration; without this, print a preview'),
+    credentialEnv: optionalString('credential-env', 'Environment variable containing the source credential'),
+    documents: repeatedString('doc', 'Stable document ID allowlist; repeat for multiple documents', 64),
     exclude: repeatedString('exclude', 'Vault-relative exclusion glob; repeat for multiple'),
     id: requiredString('id', 'Stable source identifier'),
+    includeHidden: boolean('include-hidden', 'Include hidden pages within selected documents'),
     inbox: optionalString('inbox', 'Vault-relative Threadnote Inbox folder'),
     include: repeatedString('include', 'Required vault-relative allowlist glob; repeat for multiple'),
-    type: defaultChoice('type', ['obsidian'], 'External source type', 'obsidian'),
-    vault: requiredString('vault', 'Obsidian vault directory'),
+    maxStaleHours: optional(
+      integerFlag('max-stale-hours').pipe(Flag.withDescription('Maximum source staleness in hours')),
+    ),
+    pages: repeatedString('page', 'Stable page ID allowlist; only with one --doc', 256),
+    project: optionalString('project', 'Local project slug for imported pages'),
+    projectless: boolean('projectless', 'Import pages without a project'),
+    refreshIntervalMinutes: optional(
+      integerFlag('refresh-interval-minutes').pipe(Flag.withDescription('Minimum minutes between source refreshes')),
+    ),
+    type: defaultChoice('type', ['obsidian', 'superhuman'], 'External source type', 'obsidian'),
+    vault: optionalString('vault', 'Obsidian vault directory'),
   },
-  ({type: _type, ...options}) => withRuntimeEffect(config => runObsidianSourceAdd(config, options)),
+  options =>
+    withRuntimeEffect(config =>
+      runSourceAdd(config, {...options, pages: options.pages.length ? options.pages : undefined}),
+    ),
 ).pipe(Command.withDescription('Configure an allowlisted read-only external source'));
 
-const sourceList = Command.make('list', {}, () => withRuntimeEffect(config => runObsidianSourceList(config))).pipe(
+const sourceList = Command.make('list', {}, () => withRuntimeEffect(config => runSourceList(config))).pipe(
   Command.withDescription('List configured external sources'),
 );
-
 const sourceInventory = Command.make('inventory', {id: argument('id', 'Source identifier')}, ({id}) =>
-  withRuntimeEffect(config => runObsidianSourceInventory(config, id)),
+  withRuntimeEffect(config => runSourceInventory(config, id)),
 ).pipe(Command.withDescription('Inventory allowed, changed, removed, and unsafe source notes'));
 
 const sourceSync = Command.make(
@@ -1065,11 +1079,11 @@ const sourceSync = Command.make(
     apply: boolean('apply', 'Update the external index; without this, print a dry run'),
     dryRun: boolean('dry-run', 'Print changes without updating the external index'),
   },
-  options => withRuntimeEffect(config => runObsidianSourceSync(config, options)),
+  options => withRuntimeEffect(config => runSourceSync(config, options)),
 ).pipe(Command.withDescription('Incrementally synchronize an allowlisted external source'));
 
 const sourceStatus = Command.make('status', {id: argument('id', 'Source identifier')}, ({id}) =>
-  withRuntimeEffect(config => runObsidianSourceStatus(config, id)),
+  withRuntimeEffect(config => runSourceStatus(config, id)),
 ).pipe(Command.withDescription('Show source configuration and pending changes'));
 
 const sourceRemove = Command.make(
@@ -1079,7 +1093,7 @@ const sourceRemove = Command.make(
     apply: boolean('apply', 'Remove source configuration and its external index'),
     dryRun: boolean('dry-run', 'Print removal without changing anything'),
   },
-  options => withRuntimeEffect(config => runObsidianSourceRemove(config, options)),
+  options => withRuntimeEffect(config => runSourceRemove(config, options)),
 ).pipe(Command.withDescription('Remove a source index while preserving its vault and Threadnote memories'));
 
 const source = Command.make('source').pipe(
