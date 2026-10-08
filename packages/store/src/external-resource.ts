@@ -5,7 +5,8 @@ import type {ResourceStoreLocation} from './resource-store.js';
 
 const SUPERHUMAN_ROOT = 'threadnote://resources/external/superhuman';
 const POCKET_ROOT = 'threadnote://resources/external/pocket';
-export type ExternalProvider = 'superhuman' | 'pocket';
+const LINEAR_ROOT = 'threadnote://resources/external/linear';
+export type ExternalProvider = 'superhuman' | 'pocket' | 'linear';
 const ENVELOPE = 'THREADNOTE EXTERNAL RESOURCE/1\n';
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -28,7 +29,7 @@ export interface ExternalResourceMetadata extends ExternalResourceIdentity {
   readonly remoteRevision?: string;
   readonly rendererVersion: string;
   readonly scrubberVersion: string;
-  readonly coverage: 'canvas-plain-text' | 'pocket-api-text';
+  readonly coverage: 'canvas-plain-text' | 'pocket-api-text' | 'linear-api-text';
 }
 
 export interface ExternalDocumentManifest {
@@ -56,11 +57,13 @@ export interface ExternalSourceReceipt {
   readonly inventoryPage?: number;
   readonly inventoryOffset?: number;
   readonly inventoryGeneration?: string;
+  readonly credentialFingerprint?: string;
   readonly completedAt?: number;
   readonly nextAttemptAt?: number;
 }
 
 export interface ExternalSourceAccessPolicy {
+  readonly credentialFingerprint?: string;
   readonly enabled: boolean;
   readonly configFingerprint: string;
   readonly maxStaleMilliseconds?: number;
@@ -80,7 +83,7 @@ export class ExternalSourcePolicy extends Context.Service<
 
 export function isExternalResourceUri(uri: string): boolean {
   const value = uri.split('#', 1)[0];
-  return [SUPERHUMAN_ROOT, POCKET_ROOT].some(root => value === root || value.startsWith(`${root}/`));
+  return [SUPERHUMAN_ROOT, POCKET_ROOT, LINEAR_ROOT].some(root => value === root || value.startsWith(`${root}/`));
 }
 
 export function externalResourceUri(identity: ExternalResourceIdentity): string {
@@ -119,7 +122,7 @@ export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): 
 export function parseExternalResourceIdentity(uri: string): ExternalResourceIdentity | undefined {
   const value = uri.split('#', 1)[0];
   const match =
-    /^threadnote:\/\/resources\/external\/(superhuman|pocket)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
+    /^threadnote:\/\/resources\/external\/(superhuman|pocket|linear)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
       value,
     );
   if (!match) return undefined;
@@ -269,8 +272,12 @@ export const loadExternalResourceAccess = Effect.fn('external.loadAccess')(funct
   if (realHome === undefined) return allowed;
   const canonicalLocation = {...location, home: realHome};
   const now = yield* Clock.currentTimeMillis;
-  for (const provider of ['superhuman', 'pocket'] as const) {
-    const root = resourcePath(path, canonicalLocation, provider === 'pocket' ? POCKET_ROOT : SUPERHUMAN_ROOT);
+  for (const provider of ['superhuman', 'pocket', 'linear'] as const) {
+    const root = resourcePath(
+      path,
+      canonicalLocation,
+      provider === 'linear' ? LINEAR_ROOT : provider === 'pocket' ? POCKET_ROOT : SUPERHUMAN_ROOT,
+    );
     const sources = yield* safeDirectories(fs, path, root);
     for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
       const policy = yield* policyService.value.current(location, sourceId, provider);
@@ -299,7 +306,12 @@ function manifestPermits(
     manifest?.status === 'active' &&
     sourceReceipt !== null &&
     (sourceReceipt === undefined ||
-      (manifest.provider === 'pocket' ? sourceReceipt.status === 'active' : sourceReceipt.status !== 'cleanup')) &&
+      (manifest.provider === 'pocket' || manifest.provider === 'linear'
+        ? sourceReceipt.status === 'active'
+        : sourceReceipt.status !== 'cleanup')) &&
+    (manifest.provider !== 'linear' ||
+      (policy.credentialFingerprint !== undefined &&
+        policy.credentialFingerprint === sourceReceipt?.credentialFingerprint)) &&
     manifest.accessEpoch === sourceReceipt?.accessEpoch &&
     policy.configFingerprint === manifest.configFingerprint &&
     now >= manifest.fetchedAt &&
@@ -412,8 +424,13 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
   if (
     !record(value) ||
     value.version !== 1 ||
-    (value.coverage !== 'canvas-plain-text' && value.coverage !== 'pocket-api-text') ||
-    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
+    (value.coverage !== 'canvas-plain-text' &&
+      value.coverage !== 'pocket-api-text' &&
+      value.coverage !== 'linear-api-text') ||
+    (value.provider !== undefined &&
+      value.provider !== 'superhuman' &&
+      value.provider !== 'pocket' &&
+      value.provider !== 'linear') ||
     !['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'].every(
       key => typeof value[key] === 'string',
     )
@@ -437,8 +454,9 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
     try {
       const url = new URL(value.browserLink);
       if (
-        url.origin !== 'https://docs.superhuman.com' ||
-        !url.pathname.startsWith('/d/') ||
+        (value.provider === 'linear'
+          ? url.origin !== 'https://linear.app'
+          : url.origin !== 'https://docs.superhuman.com' || !url.pathname.startsWith('/d/')) ||
         url.username ||
         url.password ||
         url.search
@@ -455,7 +473,10 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
   if (
     !record(value) ||
     value.version !== 1 ||
-    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
+    (value.provider !== undefined &&
+      value.provider !== 'superhuman' &&
+      value.provider !== 'pocket' &&
+      value.provider !== 'linear') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.documentId !== 'string' ||
@@ -506,12 +527,20 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
   if (
     !record(value) ||
     value.version !== 1 ||
-    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
+    (value.provider !== undefined &&
+      value.provider !== 'superhuman' &&
+      value.provider !== 'pocket' &&
+      value.provider !== 'linear') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.accessEpoch !== 'string' ||
     !HASH.test(value.accessEpoch) ||
     (value.status !== 'authentication-rejected' && value.status !== 'cleanup' && value.status !== 'active')
+  )
+    return false;
+  if (
+    value.credentialFingerprint !== undefined &&
+    (typeof value.credentialFingerprint !== 'string' || !HASH.test(value.credentialFingerprint))
   )
     return false;
   if (

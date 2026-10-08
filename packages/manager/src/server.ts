@@ -73,6 +73,11 @@ export const MANAGER_STATIC_FILES: Readonly<
     path: 'integrations/pocket.png',
     sourceDirectory: 'packages/manager/static',
   },
+  '/integrations/linear.svg': {
+    contentType: 'image/svg+xml',
+    path: 'integrations/linear.svg',
+    sourceDirectory: 'packages/manager/static',
+  },
   '/editor.css': {
     contentType: 'text/css; charset=utf-8',
     path: 'style.css',

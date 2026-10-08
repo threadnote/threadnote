@@ -2,6 +2,8 @@ import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   externalResourceUri,
+  isExternalResourceUri,
+  parseExternalResourceIdentity,
   parseExternalResource,
   renderExternalResource,
   serializeExternalDocumentManifest,
@@ -98,5 +100,34 @@ describe('external resource representation', () => {
       ),
       {numRuns: 40},
     );
+  });
+  it('round-trips Linear envelopes with canonical URLs and protects provider isolation', () => {
+    const linear = {
+      ...metadata,
+      provider: 'linear' as const,
+      coverage: 'linear-api-text' as const,
+      browserLink: 'https://linear.app/synthetic/issue/T-1#comment-one',
+    };
+    const uri = externalResourceUri(linear);
+    const content = renderExternalResource(linear, 'Untrusted Linear text');
+    expect(isExternalResourceUri(uri)).toBe(true);
+    expect(parseExternalResourceIdentity(uri)?.provider).toBe('linear');
+    expect(parseExternalResource(uri, content)).toEqual({metadata: linear, body: 'Untrusted Linear text'});
+    expect(parseExternalResource(uri.replace('/linear/', '/pocket/'), content)).toBeUndefined();
+    expect(() => renderExternalResource({...linear, browserLink: 'https://evil.example/issue/T-1'}, 'body')).toThrow();
+    expect(() =>
+      renderExternalResource({...linear, browserLink: 'https://linear.app/issue/T-1?token=capability'}, 'body'),
+    ).toThrow();
+    expect(
+      JSON.parse(
+        serializeExternalSourceReceipt({
+          version: 1,
+          provider: 'linear',
+          sourceId: metadata.sourceId,
+          status: 'authentication-rejected',
+          accessEpoch: 'a'.repeat(64),
+        }),
+      ).provider,
+    ).toBe('linear');
   });
 });

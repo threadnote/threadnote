@@ -25,6 +25,7 @@ import {
 import type {
   IntegrationProductId,
   IntegrationResult,
+  LinearSource,
   ManagerIntegrations,
   ObsidianAction,
   ObsidianProjection,
@@ -35,6 +36,7 @@ import type {
 import {ObsidianConnectionForm} from './obsidian_connection_form.js';
 import {SuperhumanConnectionForm} from './superhuman_connection_form.js';
 import {PocketConnectionForm} from './pocket_connection_form.js';
+import {LinearConnectionForm} from './linear_connection_form.js';
 import {PageActions} from './workspace.js';
 import {api, errorMessage} from './ui/support.js';
 
@@ -42,7 +44,8 @@ type Connection =
   | {readonly kind: 'source'; readonly value?: ObsidianSource}
   | {readonly kind: 'projection'; readonly value?: ObsidianProjection}
   | {readonly kind: 'superhuman'; readonly value?: SuperhumanSource}
-  | {readonly kind: 'pocket'; readonly value?: PocketSource};
+  | {readonly kind: 'pocket'; readonly value?: PocketSource}
+  | {readonly kind: 'linear'; readonly value?: LinearSource};
 interface Operation {
   readonly id: string;
   readonly action: ObsidianAction;
@@ -53,6 +56,7 @@ const empty: ManagerIntegrations = {
   obsidian: {sources: [], projections: []},
   superhuman: {sources: []},
   pocket: {sources: []},
+  linear: {sources: []},
 };
 
 export function IntegrationsPanel({
@@ -72,6 +76,7 @@ export function IntegrationsPanel({
   const [operation, setOperation] = useState<Operation>();
   const [superhumanResult, setSuperhumanResult] = useState<IntegrationResult>();
   const [pocketResult, setPocketResult] = useState<IntegrationResult>();
+  const [linearResult, setLinearResult] = useState<IntegrationResult>();
   const [query, setQuery] = useState('');
   const [productFilter, setProductFilter] = useState<IntegrationProductId | 'all'>('all');
   const [activeTab, setActiveTab] = useState<'connections' | 'catalog'>('connections');
@@ -270,6 +275,53 @@ export function IntegrationsPanel({
     }
   }
 
+  async function linearAction(
+    action: 'sync-source' | 'remove-source' | 'set-enabled',
+    source: LinearSource,
+  ): Promise<void> {
+    if (busy) return;
+    if (
+      action === 'remove-source' &&
+      !(await dialogs.confirm({
+        title: 'Disconnect Linear?',
+        message:
+          'This removes the local connection, imported content, and saved key. It does not change your Linear issues.',
+        confirmLabel: 'Disconnect',
+        tone: 'danger',
+      }))
+    )
+      return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<IntegrationResult>('/api/integrations/linear', {
+        action,
+        id: source.id,
+        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+        apply: true,
+        confirm: true,
+      });
+      if (action === 'sync-source') setLinearResult(result);
+      if (!result.applied) throw new Error('Connection change was not applied.');
+      await changed(
+        action === 'sync-source'
+          ? result.warnings?.length
+            ? 'Linear sync finished with warnings.'
+            : 'Linear sync completed.'
+          : action === 'remove-source'
+            ? 'Connection disconnected.'
+            : source.enabled
+              ? 'Connection paused.'
+              : 'Connection enabled.',
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const matches = (product: IntegrationProductId, ...values: string[]) =>
     (productFilter === 'all' || productFilter === product) &&
     (!query.trim() ||
@@ -280,17 +332,22 @@ export function IntegrationsPanel({
   const projections = data.obsidian.projections.filter(item => matches('obsidian', item.id, item.vault));
   const documents = data.superhuman.sources.filter(source => matches('superhuman', source.id, source.project ?? ''));
   const recordings = (data.pocket?.sources ?? []).filter(source => matches('pocket', source.id, source.project ?? ''));
+  const linearSources = (data.linear?.sources ?? []).filter(source =>
+    matches('linear', source.id, source.project ?? ''),
+  );
   const connectionCount =
     data.obsidian.sources.length +
     data.obsidian.projections.length +
     data.superhuman.sources.length +
-    (data.pocket?.sources.length ?? 0);
+    (data.pocket?.sources.length ?? 0) +
+    (data.linear?.sources.length ?? 0);
   const products = filteredIntegrationProducts(query).filter(
     product => productFilter === 'all' || product.id === productFilter,
   );
   const obsidian = integrationProduct('obsidian');
   const superhuman = integrationProduct('superhuman');
   const pocket = integrationProduct('pocket');
+  const linear = integrationProduct('linear');
 
   return (
     <section className="panel is-active integrations-workspace">
@@ -387,6 +444,7 @@ export function IntegrationsPanel({
                     <div className="integration-product-title">
                       <IntegrationLogo product={product} decorative />
                       <h4>{product.name}</h4>
+                      {product.id === 'linear' ? <span className="workspace-status neutral">Beta</span> : null}
                     </div>
                     <p>{product.description}</p>
                     <div className="integration-capabilities">
@@ -406,6 +464,10 @@ export function IntegrationsPanel({
                         </>
                       ) : product.id === 'pocket' ? (
                         <button disabled={busy} onClick={() => setConnection({kind: 'pocket'})}>
+                          {product.setupLabel}
+                        </button>
+                      ) : product.id === 'linear' ? (
+                        <button disabled={busy} onClick={() => setConnection({kind: 'linear'})}>
                           {product.setupLabel}
                         </button>
                       ) : (
@@ -431,7 +493,8 @@ export function IntegrationsPanel({
               <header>
                 <p className="muted">Manage scope, sync, and access for each connection.</p>
               </header>
-              {sources.length + projections.length + documents.length + recordings.length === 0 ? (
+              {sources.length + projections.length + documents.length + recordings.length + linearSources.length ===
+              0 ? (
                 <div className="integration-empty">
                   <h4>{connectionCount ? 'No matching connections' : 'No connections yet'}</h4>
                   <p>
@@ -665,11 +728,93 @@ export function IntegrationsPanel({
                   </div>
                 </div>
               ))}
+              {linearSources.map(source => (
+                <div className="integration-row" key={'linear-' + source.id}>
+                  <IntegrationLogo product={linear} decorative />
+                  <div className="integration-row-main">
+                    <h4>
+                      {source.id}
+                      <span className="workspace-status neutral">Beta</span>
+                      <span
+                        className={
+                          'workspace-status ' +
+                          (source.enabled && source.credentialConfigured && source.status === 'active' ? '' : 'neutral')
+                        }
+                      >
+                        {superhumanStatus(source)}
+                      </span>
+                    </h4>
+                    <p className="integration-path">
+                      Linear · Selected issues and projects · {source.project ?? 'Projectless'}
+                    </p>
+                    <p className="muted">
+                      {source.teamIds.length} teams · {source.projectIds.length} selected projects ·{' '}
+                      {source.issueIds.length} selected issues
+                      {' · '}
+                      {source.issues} imported issues · {source.documents} documents · {source.updates} updates ·{' '}
+                      {source.chunks} chunks
+                      {source.progress
+                        ? ` · Sync progress: ${source.progress.completed} of ${source.progress.total}`
+                        : ''}
+                      {source.lastSyncedAt ? ' · Last synced ' + new Date(source.lastSyncedAt).toLocaleString() : ''}
+                      {source.nextAttemptAt ? ' · Next attempt ' + new Date(source.nextAttemptAt).toLocaleString() : ''}
+                    </p>
+                    <p className="muted">
+                      Published issue discussion and selected project context. Inline comments and project update
+                      comments are unavailable.
+                    </p>
+                  </div>
+                  <div className="integration-row-actions">
+                    <button
+                      disabled={busy || !source.enabled || !source.credentialConfigured}
+                      onClick={() => void linearAction('sync-source', source)}
+                    >
+                      <RefreshCw /> Sync now
+                    </button>
+                    <ActionMenu
+                      label={'Actions for Linear ' + source.id}
+                      disabled={busy}
+                      actions={[
+                        {
+                          label: 'Connection settings…',
+                          icon: <Pencil />,
+                          onSelect: () => setConnection({kind: 'linear', value: source}),
+                        },
+                        {
+                          label: source.enabled ? 'Pause connection' : 'Enable connection',
+                          icon: source.enabled ? <Pause /> : <Play />,
+                          onSelect: () => void linearAction('set-enabled', source),
+                        },
+                        {
+                          label: 'Disconnect…',
+                          icon: <Unplug />,
+                          danger: true,
+                          onSelect: () => void linearAction('remove-source', source),
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
+              ))}
             </section>
           )}
         </div>
       )}
-      {connection?.kind === 'pocket' ? (
+      {connection?.kind === 'linear' ? (
+        <LinearConnectionForm
+          source={connection.value}
+          onClose={() => setConnection(undefined)}
+          onSaved={async () => {
+            setConnection(undefined);
+            showTab('connections');
+            await changed(
+              connection.value
+                ? 'Linear settings saved.'
+                : 'Linear connection saved. Choose Sync now to import selected evidence.',
+            );
+          }}
+        />
+      ) : connection?.kind === 'pocket' ? (
         <PocketConnectionForm
           source={connection.value}
           onClose={() => setConnection(undefined)}
@@ -750,6 +895,26 @@ export function IntegrationsPanel({
           <p>{pocketResult.output}</p>
           <footer className="conflict-footer">
             <button onClick={() => setPocketResult(undefined)}>Done</button>
+          </footer>
+        </DetailModal>
+      ) : null}
+      {linearResult ? (
+        <DetailModal title="Linear sync results" onClose={() => setLinearResult(undefined)}>
+          <p role="status" className="workspace-note">
+            {linearResult.warnings?.length ? 'Sync finished with warnings.' : 'Sync completed.'}
+          </p>
+          {linearResult.warnings?.length ? (
+            <ul className="integration-warnings">
+              {linearResult.warnings.map((warning, index) => (
+                <li key={index}>
+                  <AlertTriangle /> {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>{linearResult.output}</p>
+          <footer className="conflict-footer">
+            <button onClick={() => setLinearResult(undefined)}>Done</button>
           </footer>
         </DetailModal>
       ) : null}

@@ -1,3 +1,4 @@
+import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
 import * as hooksCli from './hooks_cli.js';
@@ -1036,33 +1037,10 @@ const graphCommand = Command.make('graph').pipe(
   ]),
 );
 
-const sourceAdd = Command.make(
-  'add',
-  {
-    apply: boolean('apply', 'Write the source configuration; without this, print a preview'),
-    credentialEnv: optionalString('credential-env', 'Environment variable containing the source credential'),
-    documents: repeatedString('doc', 'Stable document ID allowlist; repeat for multiple documents', 64),
-    exclude: repeatedString('exclude', 'Vault-relative exclusion glob; repeat for multiple'),
-    id: requiredString('id', 'Stable source identifier'),
-    includeHidden: boolean('include-hidden', 'Include hidden pages within selected documents'),
-    inbox: optionalString('inbox', 'Vault-relative Threadnote Inbox folder'),
-    include: repeatedString('include', 'Required vault-relative allowlist glob; repeat for multiple'),
-    maxStaleHours: optional(
-      integerFlag('max-stale-hours').pipe(Flag.withDescription('Maximum source staleness in hours')),
-    ),
-    pages: repeatedString('page', 'Stable page ID allowlist; only with one --doc', 256),
-    project: optionalString('project', 'Local project slug for imported pages'),
-    projectless: boolean('projectless', 'Import pages without a project'),
-    refreshIntervalMinutes: optional(
-      integerFlag('refresh-interval-minutes').pipe(Flag.withDescription('Minimum minutes between source refreshes')),
-    ),
-    type: defaultChoice('type', ['obsidian', 'superhuman', 'pocket'], 'External source type', 'obsidian'),
-    vault: optionalString('vault', 'Obsidian vault directory'),
-  },
-  options =>
-    withRuntimeEffect(config =>
-      runSourceAdd(config, {...options, pages: options.pages.length ? options.pages : undefined}),
-    ),
+const sourceAdd = Command.make('add', sourceAddFlags, options =>
+  withRuntimeEffect(config =>
+    runSourceAdd(config, {...options, pages: options.pages.length ? options.pages : undefined}),
+  ),
 ).pipe(Command.withDescription('Configure an allowlisted read-only external source'));
 
 const sourceList = Command.make('list', {}, () => withRuntimeEffect(config => runSourceList(config))).pipe(

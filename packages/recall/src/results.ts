@@ -255,7 +255,7 @@ export interface RecallHit {
   readonly contextType: string;
   readonly equivalentUris?: readonly string[];
   readonly external?: NonNullable<RecallCandidate['externalSource']> & {
-    readonly provider: 'superhuman' | 'pocket';
+    readonly provider: 'superhuman' | 'pocket' | 'linear';
     readonly authority: 'external';
     readonly trust: 'untrusted';
   };

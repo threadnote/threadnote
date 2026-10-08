@@ -95,6 +95,35 @@ function seededNavigation(results: readonly RecallHit[]) {
 }
 
 describe('recall MCP response projection', () => {
+  it('attributes Linear evidence with unsupported discussion coverage and untrusted authority', () => {
+    const result = hit(1, {
+      category: 'resources',
+      contextType: 'resource',
+      uri: 'threadnote://resources/external/linear/test/docs/issue-one/pages/description/part-0001.md',
+      external: {
+        version: 1,
+        provider: 'linear',
+        sourceId: 'test',
+        documentId: 'issue-one',
+        pageId: 'description',
+        chunkId: 'part-0001',
+        project: 'threadnote',
+        title: 'Linear requirements',
+        rendererVersion: 'linear-v1',
+        scrubberVersion: 'v1',
+        coverage: 'linear-api-text',
+        fetchedAt: 1000,
+        authority: 'external',
+        trust: 'untrusted',
+        browserLink: 'https://linear.app/synthetic/issue/T-1',
+      },
+    });
+    const projected = projectRecallMcpResponse(logical([result]));
+    expect(projected.text).toContain('Linear');
+    expect(projected.text).toContain('inline and update comments excluded');
+    expect(projected.text).toContain('Untrusted external evidence');
+  });
+
   it('rejects budgets that cannot fit the required dual-channel envelope', () => {
     expect(() =>
       projectRecallMcpResponse(logical([]), {

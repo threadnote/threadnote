@@ -6,6 +6,14 @@ import {parseResourceId, resourceIdWithoutAnchor, validatePortableSegment} from 
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {isJsonObject} from '../utils.js';
+import {
+  parseLinearSource,
+  serializeLinearSource,
+  linearConfigurationFingerprint,
+  validateLinearSourceConfig,
+  type LinearSourceConfig,
+} from './linear/config.js';
+export {validateLinearSourceConfig, type LinearSourceConfig} from './linear/config.js';
 
 export interface ObsidianSourceConfig {
   readonly enabled: boolean;
@@ -59,7 +67,7 @@ export interface PocketSourceConfig {
   readonly maxStaleHours: number;
 }
 
-export type SourceConfig = ObsidianSourceConfig | SuperhumanSourceConfig | PocketSourceConfig;
+export type SourceConfig = ObsidianSourceConfig | SuperhumanSourceConfig | PocketSourceConfig | LinearSourceConfig;
 
 export type SourceConfiguration =
   | {
@@ -238,32 +246,34 @@ export function renderObsidianConfiguration(value: ObsidianConfiguration): strin
             watch: source.watch,
             ...(source.inbox ? {inbox: source.inbox} : {}),
           }
-        : source.type === 'pocket'
-          ? {
-              id: source.id,
-              type: source.type,
-              enabled: source.enabled,
-              credential_env: source.credentialEnv,
-              ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
-              project: source.project,
-              refresh_interval_minutes: source.refreshIntervalMinutes,
-              max_stale_hours: source.maxStaleHours,
-            }
-          : {
-              id: source.id,
-              type: source.type,
-              enabled: source.enabled,
-              credential_env: source.credentialEnv,
-              ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
-              project: source.project,
-              documents: source.documents.map(document => ({
-                id: document.id,
-                ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
-              })),
-              include_hidden: source.includeHidden,
-              refresh_interval_minutes: source.refreshIntervalMinutes,
-              max_stale_hours: source.maxStaleHours,
-            },
+        : source.type === 'linear'
+          ? serializeLinearSource(source)
+          : source.type === 'pocket'
+            ? {
+                id: source.id,
+                type: source.type,
+                enabled: source.enabled,
+                credential_env: source.credentialEnv,
+                ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
+                project: source.project,
+                refresh_interval_minutes: source.refreshIntervalMinutes,
+                max_stale_hours: source.maxStaleHours,
+              }
+            : {
+                id: source.id,
+                type: source.type,
+                enabled: source.enabled,
+                credential_env: source.credentialEnv,
+                ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
+                project: source.project,
+                documents: source.documents.map(document => ({
+                  id: document.id,
+                  ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
+                })),
+                include_hidden: source.includeHidden,
+                refresh_interval_minutes: source.refreshIntervalMinutes,
+                max_stale_hours: source.maxStaleHours,
+              },
     ),
     projections: value.projections.map(projection => ({
       id: projection.id,
@@ -328,6 +338,28 @@ export function upsertPocketSource(
       a.id.localeCompare(b.id),
     ),
   };
+}
+
+export function upsertLinearSource(
+  configuration: SourceConfiguration,
+  source: LinearSourceConfig,
+): SourceConfiguration {
+  const checked = validateLinearSourceConfig(source);
+  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type))
+    throw ObsidianConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
+  return {
+    version: 2,
+    projections: configuration.projections,
+    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((a, b) =>
+      a.id.localeCompare(b.id),
+    ),
+  };
+}
+export function requireLinearSource(configuration: SourceConfiguration, id: string): LinearSourceConfig {
+  const source = configuration.sources.find(item => item.id === id);
+  if (!source || source.type !== 'linear')
+    throw ObsidianConfigurationError.make({message: `No Linear source named "${id}".`});
+  return source;
 }
 
 export function upsertObsidianProjection(
@@ -457,7 +489,10 @@ export function validatePocketSourceConfig(source: PocketSourceConfig): PocketSo
   );
 }
 
-export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig | PocketSourceConfig): string {
+export function sourceConfigurationFingerprint(
+  source: SuperhumanSourceConfig | PocketSourceConfig | LinearSourceConfig,
+): string {
+  if (source.type === 'linear') return linearConfigurationFingerprint(source);
   if (source.type === 'pocket')
     return sha256HexSync(
       JSON.stringify({
@@ -495,6 +530,7 @@ function parseSource(value: unknown, label: string, version: 1 | 2): SourceConfi
   }
   if (value.type === 'superhuman' && version === 2) return parseSuperhumanSource(value, label);
   if (value.type === 'pocket' && version === 2) return parsePocketSource(value, label);
+  if (value.type === 'linear' && version === 2) return parseLinearSource(value);
   if (value.type !== 'obsidian') {
     throw ObsidianConfigurationError.make({
       message: `${label}.type must be "obsidian"${version === 2 ? ', "superhuman", or "pocket"' : ''}.`,

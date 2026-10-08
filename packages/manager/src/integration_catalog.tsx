@@ -35,6 +35,14 @@ export const integrationProducts: readonly IntegrationProduct[] = [
     capabilities: ['Import recordings', 'Transcripts and summaries', 'Read only'],
     setupLabel: 'Connect Pocket',
   },
+  {
+    id: 'linear',
+    name: 'Linear',
+    logo: '/integrations/linear.svg',
+    description: 'Bring selected issues, discussions, and project context into task recall.',
+    capabilities: ['Selected scope', 'Issue discussions', 'Read only'],
+    setupLabel: 'Connect Linear',
+  },
 ];
 
 export function integrationProduct(id: IntegrationProductId): IntegrationProduct {

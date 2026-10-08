@@ -106,12 +106,12 @@ export interface RecallMcpResult {
   readonly aliases?: readonly string[];
   readonly category: RecallHit['category'];
   readonly external?: {
-    readonly provider: 'superhuman' | 'pocket';
+    readonly provider: 'superhuman' | 'pocket' | 'linear';
     readonly authority: 'external';
     readonly trust: 'untrusted';
     readonly project: string | null;
     readonly fetchedAt?: number;
-    readonly coverage: 'canvas-plain-text' | 'pocket-api-text';
+    readonly coverage: 'canvas-plain-text' | 'pocket-api-text' | 'linear-api-text';
   };
   readonly confidence: number;
   readonly finalScore?: number;
@@ -298,8 +298,30 @@ export function renderRecallMcpAgentText(
     if (result.external !== undefined) {
       const fetched =
         result.external.fetchedAt === undefined ? '' : `; fetched ${new Date(result.external.fetchedAt).toISOString()}`;
-      const sourceName = result.external.provider === 'pocket' ? 'Pocket' : 'Superhuman Docs';
-      const coverage = result.external.coverage === 'pocket-api-text' ? 'Pocket API text' : 'canvas plain text';
+      let sourceName: string;
+      switch (result.external.provider) {
+        case 'linear':
+          sourceName = 'Linear';
+          break;
+        case 'pocket':
+          sourceName = 'Pocket';
+          break;
+        case 'superhuman':
+          sourceName = 'Superhuman Docs';
+          break;
+      }
+      let coverage: string;
+      switch (result.external.coverage) {
+        case 'linear-api-text':
+          coverage = 'Linear API text (inline and update comments excluded)';
+          break;
+        case 'pocket-api-text':
+          coverage = 'Pocket API text';
+          break;
+        case 'canvas-plain-text':
+          coverage = 'canvas plain text';
+          break;
+      }
       lines.push(
         `   Source: ${sourceName}; project ${oneLine(result.external.project ?? 'projectless')}${fetched}; ${coverage}.`,
       );

@@ -20,7 +20,7 @@ const invalid = () =>
   });
 type CredentialConfig = Pick<RuntimeConfig, 'agentContextHome'>;
 type CredentialSource = {readonly id: string; readonly credentialEnv: string; readonly credentialStorage?: 'local'};
-type CredentialProvider = 'pocket' | 'superhuman';
+type CredentialProvider = 'pocket' | 'superhuman' | 'linear';
 type Validator = (token: Redacted.Redacted<string>) => boolean;
 
 export function validExternalApiToken(token: Redacted.Redacted<string>): boolean {
