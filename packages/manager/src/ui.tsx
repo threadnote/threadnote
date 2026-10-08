@@ -148,7 +148,7 @@ export type {
 } from '@threadnote/manager/ui/contracts';
 
 type NavTreeTab = 'memories' | 'resources';
-type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai';
+type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai' | 'local-ai';
 type MemoryViewMode = 'edit' | 'preview';
 
 interface AgentOption {
@@ -427,8 +427,8 @@ function App(): React.ReactElement {
 
   useEffect(() => {
     const firstAvailable =
-      state?.agents.find(item => item.available && (item.id === 'codex' || item.id === 'claude')) ??
-      state?.agents.find(item => item.available);
+      state?.agents.find(item => item.available && item.id === 'local-ai') ??
+      state?.agents.find(item => item.available && ['codex', 'claude', 'effect-ai'].includes(item.id));
     if (firstAvailable) {
       setAgent(firstAvailable.id);
     }

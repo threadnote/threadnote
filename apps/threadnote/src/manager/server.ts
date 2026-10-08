@@ -39,7 +39,7 @@ import {
 import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {
-  discoverConsolidationModels,
+  availableConsolidationModels,
   selectConsolidationModel,
   ConsolidationModelsError,
   type ConsolidationModel,
@@ -51,8 +51,6 @@ import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {ApplicationServices} from '../effect/runtime.js';
 import {withSharedRepositoryLock} from '../effect/share/lock.js';
-import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
-import {telemetryChildEnvironmentPolicy} from '../telemetry/session.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   runShareInit,
@@ -497,9 +495,9 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
         return;
       }
       const agent = url.searchParams.get('agent');
-      if (agent !== 'codex' && agent !== 'claude')
-        return yield* ConsolidationModelsError.make({message: 'Choose Codex or Claude to load model choices.'});
-      const models = yield* availableConsolidationModels(agent);
+      if (agent !== 'codex' && agent !== 'claude' && agent !== 'local-ai' && agent !== 'effect-ai')
+        return yield* ConsolidationModelsError.make({message: 'Choose a supported agent to load model choices.'});
+      const models = yield* availableConsolidationModels(context.config, agent);
       writeJson(response, 200, {models: models.map(({id, label, isDefault}) => ({id, label, isDefault}))});
     });
   } else if (request.method === 'POST' && url.pathname === '/api/consolidations') {
@@ -1385,7 +1383,12 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
     if (input.sourceUris.length < 2 || input.sourceUris.length > MAX_CONSOLIDATION_SOURCES)
       return yield* ManagerOperationError.make({message: 'Select 2–16 source memories.'});
     let selectedModel: ConsolidationModel | undefined;
-    if (input.agent === 'codex' || input.agent === 'claude') {
+    if (
+      input.agent === 'codex' ||
+      input.agent === 'claude' ||
+      input.agent === 'local-ai' ||
+      input.agent === 'effect-ai'
+    ) {
       yield* Effect.try({
         try: () => {
           if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 256)
@@ -1393,7 +1396,11 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
         },
         catch: cause => cause as ConsolidationModelsError,
       });
-      const models = yield* availableConsolidationModels(input.agent);
+      const models = yield* availableConsolidationModels(context.config, input.agent);
+      if (input.agent === 'local-ai' && models.length === 0)
+        return yield* ConsolidationModelsError.make({
+          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
+        });
       selectedModel = yield* Effect.try({
         try: () => selectConsolidationModel(body.model, models),
         catch: cause => cause as ConsolidationModelsError,
@@ -1444,19 +1451,6 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
   return yield* applyReviewedConsolidation(config, job, id, body);
 });
 
-const availableConsolidationModels = Effect.fn('manager.availableConsolidationModels')(function* (
-  agent: 'codex' | 'claude',
-) {
-  const executable = yield* findExecutable([agent]);
-  if (!executable)
-    return yield* ConsolidationModelsError.make({
-      message: `${agent} executable was not found. Install it and reload model choices.`,
-    });
-  return yield* discoverConsolidationModels(agent, executable).pipe(
-    Effect.provideService(ChildEnvironmentPolicy, telemetryChildEnvironmentPolicy),
-  );
-});
-
 function runConsolidationAgent(
   runtimeConfig: RuntimeConfig,
   agent: ConsolidationAgent,
@@ -1464,21 +1458,35 @@ function runConsolidationAgent(
   model?: ConsolidationModel,
 ) {
   const prompt = consolidationPrompt(sources);
+  if (agent === 'local-ai') {
+    return Effect.gen(function* () {
+      if (!model)
+        return yield* ConsolidationModelsError.make({
+          message: 'Choose a model before generating a consolidation draft.',
+        });
+      const native = yield* runNativeAiConsolidation(runtimeConfig, prompt, model.id);
+      return (
+        native ??
+        (yield* ManagerOperationError.make({
+          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
+        }))
+      );
+    });
+  }
   if (agent === 'effect-ai') {
     return Effect.gen(function* () {
       const resolved = yield* resolveEffectAiConfiguration(runtimeConfig, (yield* SystemInfo).environment());
       if (resolved) {
+        if (!model || model.id !== resolved.configuration.model)
+          return yield* ConsolidationModelsError.make({
+            message: 'This model is no longer available. Reload model choices and select a model again.',
+          });
         yield* ensureEffectAiReady(runtimeConfig, resolved);
         return yield* runEffectAiConsolidation(prompt, resolved.configuration);
       }
-      const native = yield* runNativeAiConsolidation(runtimeConfig, prompt);
-      return (
-        native ??
-        (yield* ManagerOperationError.make({
-          message:
-            'No generation model is selected. Install and select one with `threadnote models`, or configure an explicit remote Effect AI provider.',
-        }))
-      );
+      return yield* ManagerOperationError.make({
+        message: 'Configure an explicit remote Effect AI provider and reload model choices.',
+      });
     });
   }
   if (agent !== 'codex' && agent !== 'claude') {

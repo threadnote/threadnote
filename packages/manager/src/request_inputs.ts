@@ -82,7 +82,14 @@ export function memoryStatus(value: unknown): MemoryStatus | undefined {
 }
 
 export function consolidationAgent(value: string): ConsolidationAgent {
-  if (value === 'codex' || value === 'claude' || value === 'cursor' || value === 'copilot' || value === 'effect-ai') {
+  if (
+    value === 'codex' ||
+    value === 'claude' ||
+    value === 'cursor' ||
+    value === 'copilot' ||
+    value === 'effect-ai' ||
+    value === 'local-ai'
+  ) {
     return value;
   }
   throw ManagerRequestInputError.make({message: `Unsupported consolidation agent: ${value}`});

@@ -4,6 +4,13 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {resolveCommandInvocation} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {ConsolidationModelOption} from '@threadnote/manager/ui/contracts';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {LocalModelStore} from '@threadnote/inference/models/store';
+import {readModelSelection} from '@threadnote/inference/models/selection';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {findExecutable} from '../utils.js';
+import {resolveEffectAiConfiguration} from '../effect/ai/consolidator.js';
+import {telemetryChildEnvironmentPolicy} from '../telemetry/session.js';
 
 export interface ConsolidationModel extends ConsolidationModelOption {
   readonly reasoningEffort?: string;
@@ -65,6 +72,21 @@ export function selectConsolidationModel(value: unknown, models: readonly Consol
   if (!selected) throw error('This model is no longer available. Reload model choices and select a model again.');
   return selected;
 }
+
+export const discoverLocalConsolidationModels = Effect.fn('manager.discoverLocalConsolidationModels')(function* (
+  home: string,
+) {
+  const catalog = yield* LocalModelCatalog;
+  const store = yield* LocalModelStore;
+  const selection = yield* readModelSelection(home);
+  const manifests = yield* catalog.list('generation');
+  const models: ConsolidationModel[] = [];
+  for (const manifest of manifests) {
+    if (!(yield* store.status(home, manifest)).installed) continue;
+    models.push({id: manifest.id, label: manifest.id, isDefault: selection.roles.generation === manifest.id});
+  }
+  return models;
+});
 
 export const discoverConsolidationModels = Effect.fn('manager.discoverConsolidationModels')(function* (
   agent: 'codex' | 'claude',
@@ -195,5 +217,30 @@ export const discoverConsolidationModels = Effect.fn('manager.discoverConsolidat
         ? cause
         : error('Could not load Codex model choices. Check that Codex is installed and signed in.'),
     ),
+  );
+});
+
+export const availableConsolidationModels = Effect.fn('manager.availableConsolidationModels')(function* (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  agent: 'codex' | 'claude' | 'local-ai' | 'effect-ai',
+) {
+  if (agent === 'local-ai') {
+    return yield* discoverLocalConsolidationModels(config.agentContextHome);
+  }
+  if (agent === 'effect-ai') {
+    const resolved = yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment());
+    if (!resolved)
+      return yield* ConsolidationModelsError.make({
+        message: 'Configure an explicit remote Effect AI provider and reload model choices.',
+      });
+    return [{id: resolved.configuration.model, label: resolved.configuration.model, isDefault: true}];
+  }
+  const executable = yield* findExecutable([agent]);
+  if (!executable)
+    return yield* ConsolidationModelsError.make({
+      message: `${agent} executable was not found. Install it and reload model choices.`,
+    });
+  return yield* discoverConsolidationModels(agent, executable).pipe(
+    Effect.provideService(ChildEnvironmentPolicy, telemetryChildEnvironmentPolicy),
   );
 });

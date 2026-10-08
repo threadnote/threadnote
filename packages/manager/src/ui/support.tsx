@@ -28,7 +28,9 @@ import type {BulkItemResult, PanelName, TreeNode} from '@threadnote/manager/ui/c
 
 const token = typeof window === 'undefined' ? '' : (new URLSearchParams(window.location.search).get('token') ?? '');
 export const GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS = 10_000;
-export const isAgentClient = Schema.is(Schema.Literals(['claude', 'codex', 'copilot', 'cursor', 'effect-ai']));
+export const isAgentClient = Schema.is(
+  Schema.Literals(['claude', 'codex', 'copilot', 'cursor', 'effect-ai', 'local-ai']),
+);
 export const isMemoryKind = Schema.is(Schema.Literals(['durable', 'handoff', 'incident', 'preference', 'smoke']));
 export const isMemoryStatus = Schema.is(Schema.Literals(['active', 'archived', 'expired', 'superseded']));
 export const GRAPH_DETAIL_REQUEST_TIMEOUT_MILLISECONDS = 30_000;

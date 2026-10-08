@@ -4,6 +4,9 @@ import {Context, Effect, Layer, Redacted, Schema} from 'effect';
 import {LanguageModel} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {generateWithSelectedLocalModel} from '@threadnote/inference/models/inference';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {LocalModelStore} from '@threadnote/inference/models/store';
+import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
 export const EFFECT_AI_API_KEY_ENV = 'THREADNOTE_EFFECT_AI_API_KEY';
@@ -140,14 +143,32 @@ export function runEffectAiConsolidation(prompt: string, config: EffectAiConfigu
 export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNative')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   prompt: string,
+  modelId?: string,
 ) {
-  const output = yield* generateWithSelectedLocalModel(config.agentContextHome, {
+  const request = {
     jsonSchema: Schema.toJsonSchemaDocument(ConsolidationDraft).schema,
     maxTokens: 4000,
     prompt,
     seed: 0,
     system: 'Return only the requested Threadnote consolidation object.',
-  });
+  };
+  const output = yield* modelId === undefined
+    ? generateWithSelectedLocalModel(config.agentContextHome, request)
+    : Effect.gen(function* () {
+        const catalog = yield* LocalModelCatalog;
+        const manifest = yield* catalog.get(modelId);
+        const store = yield* LocalModelStore;
+        const status = yield* store.status(config.agentContextHome, manifest);
+        if (manifest.role !== 'generation' || !status.installed) {
+          return yield* AiConsolidationFailed.make({
+            cause: modelId,
+            message:
+              'This generation model is no longer installed. Install one with `threadnote models` and reload model choices.',
+          });
+        }
+        const runtime = yield* LocalModelRuntime;
+        return yield* runtime.generate({...request, manifest, modelPath: status.path});
+      });
   if (output === undefined) return undefined;
   const draft = yield* Schema.decodeUnknownEffect(ConsolidationDraft)(output).pipe(
     Effect.mapError(cause =>

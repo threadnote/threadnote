@@ -100,7 +100,15 @@ export function ConsolidationModelPicker(props: {
   );
 }
 
-export function consolidationFailureGuidance(error: string): {readonly title: string; readonly message: string} {
+export function consolidationFailureGuidance(
+  error: string,
+  agent?: string,
+): {readonly title: string; readonly message: string} {
+  if (agent === 'local-ai')
+    return {
+      title: 'Local generation failed',
+      message: 'Reload installed models and try again, or choose another model.',
+    };
   if (
     /model.*(?:not supported|unsupported|unavailable|not available|no longer available|not found)|model_not_found/iu.test(
       error,

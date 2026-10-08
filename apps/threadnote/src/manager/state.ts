@@ -1,7 +1,7 @@
 import {Effect} from 'effect';
 import {resolveEffectAiConfiguration} from '../effect/ai/consolidator.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {resolveSelectedLocalModel} from '@threadnote/inference/models/inference';
+import {discoverLocalConsolidationModels} from './consolidation_models.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {currentPackageVersion, fetchLatestVersion, releaseSource} from '../release/index.js';
 import {selectUpdateChannel} from '../release/channel.js';
@@ -13,7 +13,7 @@ export const detectConsolidationAgents = Effect.fn('manager.detectConsolidationA
   config: Pick<RuntimeConfig, 'agentContextHome'>,
 ) {
   const effectAi = yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment());
-  const nativeGeneration = yield* resolveSelectedLocalModel(config.agentContextHome, 'generation');
+  const nativeModels = yield* discoverLocalConsolidationModels(config.agentContextHome);
   const [codex, claude, cursor, copilot] = yield* Effect.all([
     findExecutable(['codex']),
     findExecutable(['claude']),
@@ -26,10 +26,16 @@ export const detectConsolidationAgents = Effect.fn('manager.detectConsolidationA
     {available: cursor !== undefined, command: cursor, id: 'cursor', label: 'Cursor'},
     {available: copilot !== undefined, command: copilot, id: 'copilot', label: 'Copilot'},
     {
-      available: nativeGeneration !== undefined || effectAi !== undefined,
-      command: nativeGeneration?.manifest.id ?? effectAi?.configuration.model,
+      available: nativeModels.length > 0,
+      command: nativeModels.find(model => model.isDefault)?.id ?? nativeModels[0]?.id,
+      id: 'local-ai',
+      label: 'Threadnote local AI',
+    },
+    {
+      available: effectAi !== undefined,
+      command: effectAi?.configuration.model,
       id: 'effect-ai',
-      label: nativeGeneration ? 'Threadnote local AI' : 'Effect AI (explicit remote provider)',
+      label: 'Configured remote AI',
     },
   ];
 });

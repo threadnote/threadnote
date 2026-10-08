@@ -6,6 +6,8 @@ import {Effect} from 'effect';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import * as utils from '../../src/utils.js';
+import * as consolidator from '../../src/effect/ai/consolidator.js';
+import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import type {ConsolidationJobResponse, ConsolidationModelOption} from '@threadnote/manager/ui/contracts';
 
 // Real HTTP and child-process boundaries deliberately use Promise tests.
@@ -16,6 +18,7 @@ const token = 'consolidation-model-test-token';
 const uris = [0, 1].map(i => `threadnote://user/tester/memories/durable/projects/threadnote/source-${i}.md`);
 const body = {agent: 'codex', uris, kind: 'durable', status: 'active', project: 'threadnote', topic: 'result'};
 beforeEach(async () => {
+  vi.stubEnv('THREADNOTE_EFFECT_AI', '');
   home = await mkdtemp(join(tmpdir(), 'threadnote-models-http-'));
   generationMarker = join(home, 'generation.txt');
   const executable = join(home, 'codex');
@@ -80,6 +83,7 @@ fi
 afterEach(async () => {
   await server?.close();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   if (home) await rm(home, {recursive: true, force: true});
 });
 async function request(path: string, payload?: Record<string, unknown>, authorized = true) {
@@ -133,5 +137,94 @@ describe('Manager consolidation model HTTP boundary', () => {
       draft: 'A generated consolidation draft.',
     });
     expect(await readFile(generationMarker, 'utf8')).toBe('current-choice\nmodel_reasoning_effort="low"');
+  });
+  it('exposes installed generation choices without a global selection and never leaks paths or receipts', async () => {
+    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const directory = join(home, 'models', 'generation', model.id);
+    await mkdir(directory, {recursive: true});
+    await writeFile(join(directory, `${model.sha256}.gguf`), 'disposable installation fixture');
+    const embedding = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'embedding')!;
+    const embeddingDirectory = join(home, 'models', 'embedding', embedding.id);
+    await mkdir(embeddingDirectory, {recursive: true});
+    await writeFile(join(embeddingDirectory, `${embedding.sha256}.gguf`), 'disposable embedding fixture');
+    expect((await request('/api/consolidation-models?agent=local-ai', undefined, false)).status).toBe(401);
+    expect(await request('/api/consolidation-models?agent=local-ai')).toEqual({
+      status: 200,
+      body: {models: [{id: model.id, label: model.id, isDefault: false}]},
+    });
+    await writeFile(join(home, 'models/selection.json'), JSON.stringify({version: 1, roles: {generation: model.id}}));
+    expect((await request('/api/consolidation-models?agent=local-ai')).body.models).toEqual([
+      {id: model.id, label: model.id, isDefault: true},
+    ]);
+    await expect(readFile(generationMarker, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+  });
+  it('rejects missing and removed local models before creating a job with installation guidance', async () => {
+    const native = vi
+      .spyOn(consolidator, 'runNativeAiConsolidation')
+      .mockImplementation(() => Effect.succeed('Unexpected draft.'));
+    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const directory = join(home, 'models', 'generation', model.id);
+    const file = join(directory, `${model.sha256}.gguf`);
+    await mkdir(directory, {recursive: true});
+    await writeFile(file, 'disposable installation fixture');
+    const missing = await request('/api/consolidations', {...body, agent: 'local-ai'});
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toContain('Choose a model');
+    const stale = await request('/api/consolidations', {...body, agent: 'local-ai', model: 'no-longer-installed'});
+    expect(stale.status).toBe(400);
+    expect(stale.body.error).toContain('no longer available');
+    await rm(file);
+    const removed = await request('/api/consolidations', {...body, agent: 'local-ai', model: model.id});
+    expect(removed.status).toBe(400);
+    expect(removed.body.error).toContain('threadnote models');
+    expect(removed.body.job).toBeUndefined();
+    expect(await request('/api/consolidation-models?agent=local-ai')).toEqual({status: 200, body: {models: []}});
+    expect(native).not.toHaveBeenCalled();
+  });
+  it('records and dispatches the explicit local model even with a configured remote provider', async () => {
+    vi.stubEnv('THREADNOTE_EFFECT_AI', 'true');
+    vi.stubEnv('THREADNOTE_EFFECT_AI_MODEL', 'explicit-remote');
+    const native = vi
+      .spyOn(consolidator, 'runNativeAiConsolidation')
+      .mockImplementation(() => Effect.succeed('Local draft.'));
+    const remote = vi
+      .spyOn(consolidator, 'runEffectAiConsolidation')
+      .mockImplementation(() => Effect.succeed('Remote draft.'));
+    const model = BUILTIN_MODEL_MANIFESTS.find(model => model.role === 'generation')!;
+    const directory = join(home, 'models', 'generation', model.id);
+    await mkdir(directory, {recursive: true});
+    await writeFile(join(directory, `${model.sha256}.gguf`), 'disposable installation fixture');
+    const local = await request('/api/consolidations', {...body, agent: 'local-ai', model: model.id});
+    expect(local.body.job).toMatchObject({status: 'completed', model: model.id, draft: 'Local draft.'});
+    expect(native).toHaveBeenCalledWith(
+      expect.objectContaining({agentContextHome: home}),
+      expect.any(String),
+      model.id,
+    );
+    expect(remote).not.toHaveBeenCalled();
+    await expect(readFile(join(home, 'models/selection.json'), 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+    expect(await request('/api/consolidation-models?agent=effect-ai')).toEqual({
+      status: 200,
+      body: {models: [{id: 'explicit-remote', label: 'explicit-remote', isDefault: true}]},
+    });
+    const stale = await request('/api/consolidations', {...body, agent: 'effect-ai', model: model.id});
+    expect(stale.status).toBe(400);
+    expect(stale.body.job).toBeUndefined();
+    const configured = await request('/api/consolidations', {...body, agent: 'effect-ai', model: 'explicit-remote'});
+    expect(configured.body.job).toMatchObject({status: 'completed', model: 'explicit-remote', draft: 'Remote draft.'});
+    expect(remote).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({model: 'explicit-remote'}));
+    expect(native).toHaveBeenCalledTimes(1);
+  });
+  it('does not fall back from unavailable local AI to the configured remote provider', async () => {
+    vi.stubEnv('THREADNOTE_EFFECT_AI', 'true');
+    vi.stubEnv('THREADNOTE_EFFECT_AI_MODEL', 'explicit-remote');
+    const remote = vi
+      .spyOn(consolidator, 'runEffectAiConsolidation')
+      .mockImplementation(() => Effect.succeed('Unexpected remote draft.'));
+    const result = await request('/api/consolidations', {...body, agent: 'local-ai', model: 'explicit-remote'});
+    expect(result.status).toBe(400);
+    expect(result.body.error).toContain('threadnote models');
+    expect(result.body.job).toBeUndefined();
+    expect(remote).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,14 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, expect, it, vi} from 'vitest';
 import {ConsolidationModelPicker, useConsolidationModels} from '../../src/consolidation_models.js';
 import type {ConsolidationModelOption} from '../../src/ui/contracts.js';
+import {consolidationAgent} from '../../src/request_inputs.js';
+import {isAgentClient} from '../../src/ui/support.js';
+
+it('accepts local AI at the consolidation request boundary', () => {
+  expect(consolidationAgent('local-ai')).toBe('local-ai');
+  expect(isAgentClient('local-ai')).toBe(true);
+  expect(() => consolidationAgent('unknown-provider')).toThrow();
+});
 
 let root: Root | undefined;
 afterEach(async () => {

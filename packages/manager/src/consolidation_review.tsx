@@ -274,7 +274,7 @@ export function ConsolidationPanel(props: {
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
   const modelSelection = useConsolidationModels(props.agent, props.standalone === true || expanded);
-  const guidance = props.draftError ? consolidationFailureGuidance(props.draftError) : undefined;
+  const guidance = props.draftError ? consolidationFailureGuidance(props.draftError, props.agent) : undefined;
   const Container = props.standalone ? 'section' : 'details';
   return (
     <Container
@@ -318,18 +318,23 @@ export function ConsolidationPanel(props: {
       </label>
       <div className="consolidation-agent-model">
         <label>
-          Agent
+          Generate with
           <DropdownSelect
             id="agent"
             disabled={props.disabled}
-            label="Agent"
+            label="AI provider"
             onChange={props.onAgentChange}
             openSelect={props.openSelect}
-            options={props.agents.map(item => ({
-              disabled: !item.available || (item.id !== 'codex' && item.id !== 'claude'),
-              label: `${item.label}${item.available ? '' : ' unavailable'}`,
-              value: item.id,
-            }))}
+            options={props.agents
+              .filter(
+                item =>
+                  ['codex', 'claude', 'local-ai'].includes(item.id) || (item.id === 'effect-ai' && item.available),
+              )
+              .map(item => ({
+                disabled: !item.available && item.id !== 'local-ai',
+                label: `${item.label}${item.available ? '' : item.id === 'local-ai' ? ' (install a model)' : ' unavailable'}`,
+                value: item.id,
+              }))}
             setOpenSelect={props.setOpenSelect}
             value={props.agent}
           />
@@ -343,11 +348,25 @@ export function ConsolidationPanel(props: {
           {props.drafting ? 'Generating…' : 'Generate draft'}
         </button>
       </div>
+      {props.agent === 'local-ai' ? (
+        <p className="consolidation-hint">Your selected memories are processed on this computer.</p>
+      ) : null}
       {modelSelection.error ||
       (!modelSelection.loading && !modelSelection.models.length && (props.standalone || expanded)) ? (
         <section className="consolidation-error" role="alert">
-          <strong>Could not load models</strong>
-          <p>Reload the model list or choose another agent to continue.</p>
+          <strong>
+            {props.agent === 'local-ai' && !modelSelection.error ? 'Install a local model' : 'Could not load models'}
+          </strong>
+          <p>
+            {props.agent === 'local-ai' && !modelSelection.error ? (
+              <>
+                Run <code>threadnote models list</code>, then install a generation model with{' '}
+                <code>threadnote models install &lt;model-id&gt;</code> and reload the list.
+              </>
+            ) : (
+              'Reload the model list or choose another provider to continue.'
+            )}
+          </p>
           <button disabled={props.disabled} onClick={modelSelection.reload}>
             Reload models
           </button>
