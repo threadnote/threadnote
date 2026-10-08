@@ -1,6 +1,6 @@
 import {TestError} from '@threadnote/testing/test-error';
 import {spawn, type ChildProcess} from '@threadnote/testing/node-child-process';
-import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
+import {copyFile, cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {createServer} from '@threadnote/testing/node-net';
 import {networkInterfaces, tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
@@ -17,7 +17,7 @@ describe('Effect manager lifecycle', () => {
   it('serves authenticated APIs only on an ephemeral loopback port and closes on SIGINT', async () => {
     const home = await mkdtemp(join(tmpdir(), 'threadnote-manager-lifecycle-'));
     try {
-      child = spawnManager(home, 0);
+      child = await spawnManager(home, 0);
       const url = await managerUrl(child);
       const parsed = new URL(url);
       const token = parsed.searchParams.get('token');
@@ -28,6 +28,12 @@ describe('Effect manager lifecycle', () => {
       const response = await fetch(url);
       expect(response.status).toBe(200);
       expect(await response.text()).toContain('Threadnote');
+
+      const bundle = await fetch(`${parsed.origin}/app.js`, {
+        headers: {authorization: `Bearer ${token}`},
+      });
+      expect(bundle.status).toBe(200);
+      expect(await bundle.text()).toBe('// Synthetic lifecycle prerequisite.\n');
 
       const unauthorized = await fetch(`${parsed.origin}/api/graphs`);
       expect(unauthorized.status).toBe(401);
@@ -66,7 +72,7 @@ describe('Effect manager lifecycle', () => {
     const home = await mkdtemp(join(tmpdir(), 'threadnote-manager-fixed-port-'));
     try {
       const requestedPort = await availableLoopbackPort();
-      child = spawnManager(home, requestedPort);
+      child = await spawnManager(home, requestedPort);
       const url = new URL(await managerUrl(child));
       expect(url.hostname).toBe('127.0.0.1');
       expect(Number(url.port)).toBe(requestedPort);
@@ -82,13 +88,46 @@ describe('Effect manager lifecycle', () => {
   });
 });
 
-function spawnManager(home: string, uiPort: number): ChildProcess {
+async function spawnManager(home: string, uiPort: number): Promise<ChildProcess> {
+  // Copy the source entrypoint and installation resolver so assets belong to this
+  // temporary fixture, independent of a contributor's dist/manager directory.
+  const root = join(home, 'source');
+  for (const [directory, manifest] of [
+    ['apps/threadnote', 'apps/threadnote/package.json'],
+    ['packages/workspace', 'packages/workspace/package.json'],
+  ] as const) {
+    await mkdir(join(root, directory), {recursive: true});
+    await cp(join(process.cwd(), directory, 'src'), join(root, directory, 'src'), {recursive: true});
+    await copyFile(join(process.cwd(), manifest), join(root, directory, 'package.json'));
+  }
+  await symlink(join(process.cwd(), 'apps/threadnote/embedded'), join(root, 'apps/threadnote/embedded'), 'dir');
+  const modules = join(root, 'node_modules');
+  await mkdir(join(modules, '@threadnote'), {recursive: true});
+  for (const name of await readdir(join(process.cwd(), 'node_modules'))) {
+    if (name !== '@threadnote') await symlink(join(process.cwd(), 'node_modules', name), join(modules, name), 'dir');
+  }
+  for (const name of await readdir(join(process.cwd(), 'node_modules/@threadnote'))) {
+    const target =
+      name === 'threadnote'
+        ? join(root, 'apps/threadnote')
+        : name === 'workspace'
+          ? join(root, 'packages/workspace')
+          : join(process.cwd(), 'node_modules/@threadnote', name);
+    await symlink(target, join(modules, '@threadnote', name), 'dir');
+  }
+  await mkdir(join(root, 'packages/manager/static'), {recursive: true});
+  await copyFile(
+    join(process.cwd(), 'packages/manager/static/index.html'),
+    join(root, 'packages/manager/static/index.html'),
+  );
+  await mkdir(join(root, 'dist/manager'), {recursive: true});
+  await writeFile(join(root, 'dist/manager/app.js'), '// Synthetic lifecycle prerequisite.\n');
   return spawn(
     process.execPath,
     ['apps/threadnote/src/standalone.ts', '--home', home, 'manage', '--ui-port', String(uiPort), '--no-open'],
     {
-      cwd: process.cwd(),
-      env: {...process.env, NO_COLOR: '1'},
+      cwd: root,
+      env: {...process.env, NO_COLOR: '1', BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'},
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   );

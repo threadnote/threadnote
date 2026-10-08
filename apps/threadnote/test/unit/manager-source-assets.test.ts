@@ -11,6 +11,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import * as installation from '@threadnote/workspace/installation';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runManage} from '@threadnote/threadnote/manager/server';
+import {withCodeGraphMaintenanceIntent} from '@threadnote/graph/maintenance/gate';
 import {assertManagerSourceAssets} from '../../src/manager/source_assets.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -54,6 +55,30 @@ effectIt.effect('skips source asset lookup in standalone mode', () =>
     yield* assertManagerSourceAssets();
     expect(installation.toolRoot).not.toHaveBeenCalled();
   }).pipe(provideTestLayer(sourceAssetLayer)),
+);
+
+effectIt.effect('refuses to start while native graph repair or maintenance is active with source assets present', () =>
+  Effect.gen(function* () {
+    const {fs, root} = yield* sourceAssetTest();
+    yield* fs.makeDirectory(`${root}/dist/manager`, {recursive: true});
+    yield* fs.writeFileString(`${root}/dist/manager/app.js`, '// Synthetic lifecycle prerequisite.\n');
+    const config = {
+      account: 'local',
+      agentContextHome: `${root}/home`,
+      agentId: 'threadnote',
+      manifestPath: `${root}/manifest.yaml`,
+      user: 'synthetic',
+    };
+    const result = yield* Effect.result(
+      withCodeGraphMaintenanceIntent(config.agentContextHome, runManage(config, {open: false, uiPort: 0})),
+    );
+    expect(result).toMatchObject({
+      failure: {
+        _tag: 'ManagerOperationError',
+        message: expect.stringContaining('Native code graph repair or maintenance is in progress'),
+      },
+    });
+  }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
 );
 
 fcEffectProp(

@@ -147,7 +147,8 @@ const packageTestClosureEntries = {
 const packageRuntimeTestEntries = {
   'packages/context': ['apps/threadnote/src/standalone.ts'],
   'packages/graph': ['apps/threadnote/src/standalone.ts'],
-  'packages/manager': ['apps/threadnote/src/standalone.ts'],
+  // The lifecycle fixture copies the source application and its real manifest.
+  'packages/manager': ['apps/threadnote/src/standalone.ts', 'apps/threadnote/package.json'],
   'packages/memory': ['apps/threadnote/src/standalone.ts'],
   'packages/platform': ['apps/threadnote/src/standalone.ts', 'scripts/remote-memory-canary.ts'],
 };

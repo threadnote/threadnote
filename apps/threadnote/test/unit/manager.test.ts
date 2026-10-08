@@ -17,7 +17,6 @@ import {
   parseDoctorChecksFromOutput,
   readManagedMemory,
   resourcesTree,
-  runManage,
 } from '@threadnote/threadnote/manager/index';
 import {
   removeManagerSharedMemorySource,
@@ -534,14 +533,6 @@ describe('manager catalog', () => {
           Effect.as({queryExpansions: [], ranked: [], totalRanked: 0, warnings: []}),
         ),
       );
-  });
-
-  it('refuses to start while native graph repair or maintenance is active', async () => {
-    const config = await makeRuntime();
-    homes.push(config.agentContextHome);
-    await expect(
-      runEffect(withCodeGraphMaintenanceIntent(config.agentContextHome, runManage(config, {open: false, uiPort: 0}))),
-    ).rejects.toThrow('Native code graph repair or maintenance is in progress');
   });
 
   it('maps local memory files into Threadnote URIs with parsed metadata', async () => {

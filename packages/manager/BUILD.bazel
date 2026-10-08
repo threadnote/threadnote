@@ -705,6 +705,7 @@ bun_test(
     name = "test_runtime",
     srcs = [
         "//apps/threadnote:embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf",
+        "//apps/threadnote:package.json",
         "//apps/threadnote:src/activation/commands.ts",
         "//apps/threadnote:src/activation/contract.ts",
         "//apps/threadnote:src/activation/imports.ts",
