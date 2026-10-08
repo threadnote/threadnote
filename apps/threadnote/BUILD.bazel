@@ -13322,6 +13322,7 @@ bun_workspace_test(
         "//packages/manager:src/sharing_view.tsx",
         "//packages/manager:src/superhuman_connection_form.tsx",
         "//packages/manager:src/superhuman_selection.ts",
+        "//packages/manager:src/superhuman_selection_icon.tsx",
         "//packages/manager:src/theme.tsx",
         "//packages/manager:src/tree.ts",
         "//packages/manager:src/ui.tsx",

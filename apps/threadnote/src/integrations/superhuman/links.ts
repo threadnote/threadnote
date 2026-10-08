@@ -57,6 +57,37 @@ function safeName(value: unknown, secret: string, fallback: string): string {
   return cleaned.slice(0, 256) || fallback;
 }
 
+/** Optional artwork uses the provider's public asset origins, never the API credential. */
+function iconUrl(value: unknown, secret: string): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const icon = value as Record<string, unknown>;
+  if (
+    typeof icon.type !== 'string' ||
+    !/^image\/[a-z0-9.+-]{1,64}$/i.test(icon.type) ||
+    typeof icon.browserLink !== 'string' ||
+    icon.browserLink.length > 2048
+  )
+    return undefined;
+  let url: URL;
+  let decoded: string;
+  try {
+    url = new URL(icon.browserLink);
+    decoded = decodeURIComponent(url.href);
+  } catch {
+    return undefined;
+  }
+  if (icon.browserLink.includes(secret) || decoded.includes(secret))
+    conflict('Superhuman returned sensitive link metadata.');
+  if (
+    !['https://cdn.coda.io', 'https://codahosted.io'].includes(url.origin) ||
+    url.username ||
+    url.password ||
+    url.hash
+  )
+    return undefined;
+  return url.href;
+}
+
 function resolvedResource(response: unknown, token: Redacted.Redacted<string>) {
   if (!response || typeof response !== 'object' || Array.isArray(response))
     invalid('Superhuman returned an invalid link.');
@@ -112,7 +143,12 @@ export async function resolveSuperhumanBrowserLinks(
   const secret = Redacted.value(token);
   if (urls.some(url => url.includes(secret) || decodeURIComponent(url).includes(secret)))
     conflict('Superhuman returned sensitive link metadata.');
-  const session = createSuperhumanRestSession(token, {...options, maxRequests: MAX_SUPERHUMAN_MANAGER_LINKS});
+  const deadlineAt = Date.now() + Math.min(options.totalTimeoutMilliseconds ?? 30_000, 30_000);
+  const session = createSuperhumanRestSession(token, {
+    ...options,
+    maxRequests: MAX_SUPERHUMAN_MANAGER_LINKS,
+    totalTimeoutMilliseconds: Math.max(1, deadlineAt - Date.now()),
+  });
   try {
     const selections: ResolvedSuperhumanSelection['selections'][number][] = [];
     for (const url of urls) {
@@ -120,23 +156,32 @@ export async function resolveSuperhumanBrowserLinks(
       resolve.searchParams.set('url', url);
       selections.push({...resolvedResource(await session.get(resolve.href), token), browserLink: url});
     }
-    return mergeResolvedSuperhumanSelections(selections);
+    const resolved = mergeResolvedSuperhumanSelections(selections);
+    // resolveBrowserLink returns an API reference without its icon. Read the
+    // selected metadata only, after deduplication, under the same deadline.
+    const described = await readSelectionMetadata(resolved.selections, token, {
+      ...options,
+      totalTimeoutMilliseconds: Math.max(1, deadlineAt - Date.now()),
+    });
+    return {...resolved, selections: described};
   } finally {
     session.close();
   }
 }
 
-/** Metadata-only reads for the saved allowlist, with a bounded request budget. */
-export async function describeSuperhumanSelection(
-  documents: readonly SuperhumanDocumentConfig[],
+async function readSelectionMetadata(
+  retained: ResolvedSuperhumanSelection['selections'],
   token: Redacted.Redacted<string>,
   options: SuperhumanClientOptions = {},
-): Promise<ResolvedSuperhumanSelection> {
-  const retained = retainedSuperhumanSelection(documents);
-  const selections = [...retained.selections];
-  const session = createSuperhumanRestSession(token, {...options, maxRequests: 64, totalTimeoutMilliseconds: 10_000});
+): Promise<ResolvedSuperhumanSelection['selections']> {
+  const selections = [...retained];
+  const session = createSuperhumanRestSession(token, {
+    ...options,
+    maxRequests: MAX_SUPERHUMAN_MANAGER_LINKS,
+    totalTimeoutMilliseconds: Math.min(options.totalTimeoutMilliseconds ?? 10_000, 10_000),
+  });
   try {
-    for (let index = 0; index < Math.min(selections.length, 64); index++) {
+    for (let index = 0; index < Math.min(selections.length, MAX_SUPERHUMAN_MANAGER_LINKS); index++) {
       const item = selections[index];
       const documentId = validateSuperhumanDocumentId(item.documentId);
       const pageId = item.pageId === undefined ? undefined : validateSuperhumanPageId(item.pageId);
@@ -162,14 +207,26 @@ export async function describeSuperhumanSelection(
         if (link.includes(secret) || decodeURIComponent(link).includes(secret))
           conflict('Superhuman returned sensitive link metadata.');
       }
+      const artwork = iconUrl(resource.icon, secret);
       selections[index] = {
         ...item,
         name: safeName(resource.name, secret, item.name),
         ...(link === undefined ? {} : {browserLink: link}),
+        ...(artwork === undefined ? {} : {iconUrl: artwork}),
       };
     }
-    return {documents, selections};
+    return selections;
   } finally {
     session.close();
   }
+}
+
+/** Metadata-only reads for the saved allowlist, with a bounded request budget. */
+export async function describeSuperhumanSelection(
+  documents: readonly SuperhumanDocumentConfig[],
+  token: Redacted.Redacted<string>,
+  options: SuperhumanClientOptions = {},
+): Promise<ResolvedSuperhumanSelection> {
+  const retained = retainedSuperhumanSelection(documents);
+  return {...retained, selections: await readSelectionMetadata(retained.selections, token, options)};
 }

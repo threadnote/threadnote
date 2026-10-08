@@ -34,7 +34,7 @@ export function mergeResolvedSuperhumanSelections(
     const key = `${selection.documentId}\0${selection.pageId ?? ''}`;
     const previous = bySelection.get(key);
     const rank = (item: typeof selection) =>
-      `${item.browserLink === undefined ? '1' : '0'}\0${item.name}\0${item.browserLink ?? ''}`;
+      `${item.browserLink === undefined ? '1' : '0'}${item.iconUrl === undefined ? '1' : '0'}\0${item.name}\0${item.browserLink ?? ''}\0${item.iconUrl ?? ''}`;
     if (!previous || rank(selection).localeCompare(rank(previous)) < 0) bySelection.set(key, selection);
   }
   return {

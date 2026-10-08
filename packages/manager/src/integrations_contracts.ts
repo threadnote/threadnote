@@ -97,5 +97,6 @@ export interface ResolvedSuperhumanSelection {
     readonly pageId?: string;
     readonly name: string;
     readonly browserLink?: string;
+    readonly iconUrl?: string;
   }[];
 }

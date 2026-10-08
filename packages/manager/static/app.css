@@ -8704,9 +8704,17 @@ h4 {
   border-radius: 12px;
   background: var(--panel-alt);
 }
-.integration-link-chip > svg {
+.integration-link-chip-icon {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   color: var(--muted);
+}
+.integration-link-chip-icon img {
+  display: block;
+  object-fit: contain;
 }
 .integration-link-chip-label {
   display: grid;

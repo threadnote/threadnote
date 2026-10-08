@@ -1,5 +1,6 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {Files, FileText, X} from 'lucide-react';
+import {X} from 'lucide-react';
+import {SuperhumanSelectionIcon} from './superhuman_selection_icon.js';
 import {
   MAX_SUPERHUMAN_MANAGER_LINKS,
   mergeResolvedSuperhumanSelections,
@@ -301,7 +302,7 @@ export function SuperhumanConnectionForm({
                     key={`${item.documentId}/${item.pageId ?? ''}`}
                     data-kind={item.pageId ? 'page' : 'document'}
                   >
-                    {item.pageId ? <FileText size={16} aria-hidden="true" /> : <Files size={16} aria-hidden="true" />}
+                    <SuperhumanSelectionIcon iconUrl={item.iconUrl} page={item.pageId !== undefined} />
                     <span className="integration-link-chip-label">
                       {item.browserLink ? (
                         <a href={item.browserLink} target="_blank" rel="noreferrer" title={item.name}>

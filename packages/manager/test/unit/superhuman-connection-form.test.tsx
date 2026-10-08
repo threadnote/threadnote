@@ -60,6 +60,7 @@ const pageA = {
   pageId: 'page_a',
   name: 'Launch checklist',
   browserLink: 'https://docs.superhuman.com/d/_ddoc_a/Checklist_spage_a',
+  iconUrl: 'https://cdn.coda.io/icons/png/color/checklist.png',
 };
 const pageB = {
   documentId: 'doc_a',
@@ -67,7 +68,12 @@ const pageB = {
   name: 'Handoff notes',
   browserLink: 'https://docs.superhuman.com/d/_ddoc_a/Handoff_spage_b',
 };
-const whole = {documentId: 'doc_b', name: 'Team handbook', browserLink: 'https://docs.superhuman.com/d/_ddoc_b'};
+const whole = {
+  documentId: 'doc_b',
+  name: 'Team handbook',
+  browserLink: 'https://docs.superhuman.com/d/_ddoc_b',
+  iconUrl: 'https://codahosted.io/docs/doc_b/blobs/upload/book.png',
+};
 const selection = {documents: source.documents, selections: [pageA, pageB, whole]};
 
 describe('Superhuman link chips', () => {
@@ -85,18 +91,41 @@ describe('Superhuman link chips', () => {
     await render(source);
     expect(document.querySelectorAll('.integration-link-chip')).toHaveLength(3);
     expect(document.body.textContent).toContain('Page page_a');
+    expect(document.querySelectorAll('.integration-link-chip-icon svg')).toHaveLength(3);
     expect(button('Save settings').disabled).toBe(false);
     await act(async () => metadata.resolve(json(selection)));
     expect(document.querySelectorAll('.integration-link-chip[data-kind="page"]')).toHaveLength(2);
     expect(document.querySelectorAll('.integration-link-chip[data-kind="document"]')).toHaveLength(1);
     expect(document.querySelector('.integration-link-chip a')?.getAttribute('href')).toBe(pageA.browserLink);
     expect(document.body.textContent).toContain('Team handbook');
+    expect(
+      [...document.querySelectorAll('.integration-link-chip-icon img')].map(item => item.getAttribute('src')),
+    ).toEqual([pageA.iconUrl, whole.iconUrl]);
+    expect(document.querySelector('.integration-link-chip-icon img')?.getAttribute('referrerpolicy')).toBe(
+      'no-referrer',
+    );
     expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
     await act(async () => button('Save settings').click());
     expect(calls[0]).toEqual({action: 'describe-selection', id: 'docs'});
     expect(calls[1]).toMatchObject({action: 'save-source', documents: source.documents});
     expect(calls[1]).not.toHaveProperty('token');
     expect(calls[1]).not.toHaveProperty('links');
+  });
+
+  it('retains usable page/document fallback icons when assigned artwork fails to load', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json(selection)),
+    );
+    await render(source);
+    for (const image of [...document.querySelectorAll('.integration-link-chip-icon img')]) {
+      await act(async () => image.dispatchEvent(new Event('error')));
+    }
+    expect(document.querySelectorAll('.integration-link-chip-icon img')).toHaveLength(0);
+    expect(document.querySelectorAll('.integration-link-chip-icon svg')).toHaveLength(3);
+    expect(document.querySelectorAll('.integration-link-chip')).toHaveLength(3);
+    expect(document.body.textContent).toContain('Launch checklist');
+    expect(button('Save settings').disabled).toBe(false);
   });
 
   it('preserves visible scope when titles cannot be loaded and removes only the chosen page', async () => {
@@ -167,10 +196,13 @@ describe('Superhuman link chips', () => {
         document.querySelector('textarea')!.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})),
       );
       expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('');
+      if (url === pageA.browserLink)
+        expect(document.querySelector('.integration-link-chip-icon img')?.getAttribute('src')).toBe(pageA.iconUrl);
     }
     expect(document.querySelectorAll('.integration-link-chip')).toHaveLength(1);
     expect(document.querySelector('.integration-link-chip')?.getAttribute('data-kind')).toBe('document');
     expect(document.body.textContent).toContain('Project plan');
+    expect(document.querySelector('.integration-link-chip-icon img')?.getAttribute('src')).toBe(docA.iconUrl);
     expect(document.body.textContent).not.toContain('Launch checklist');
     await act(async () => button('Create connection').click());
     expect(calls.at(-1)?.documents).toEqual([{id: 'doc_a'}]);
