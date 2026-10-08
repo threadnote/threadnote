@@ -4,6 +4,7 @@ import {
   isSharedMemoryUri,
   type MemoryRecord,
   type MemoryRelation,
+  canonicalMemoryDocumentContent,
 } from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
@@ -14,6 +15,16 @@ import {
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
 
 const MAX_EVENTS = 8;
+
+export function maintenanceContentHash(content: string) {
+  return sha256HexSync(canonicalMemoryDocumentContent(content));
+}
+
+export function nextMaintenanceDeadline(record: MemoryRecord, now: string): string | undefined {
+  return [record.metadata.validTo, record.metadata.reviewAfter]
+    .filter((value): value is string => value !== undefined && Date.parse(value) > Date.parse(now))
+    .sort()[0];
+}
 
 export function artifactOnlySharedRelationProposal(
   item: ContextMaintenanceCaseV2,
@@ -92,6 +103,24 @@ export function selectFairMaintenanceWork<T extends {readonly project: string}>(
     if (!added) break;
   }
   return result;
+}
+
+export function selectMaintenanceCitationCaseTask<
+  T extends {readonly record: MemoryRecord; readonly project: string; readonly chunk: number},
+>(items: readonly T[], selected: ContextMaintenanceCaseV2): T | undefined {
+  const matches = items.filter(
+    item =>
+      item.project === selected.project &&
+      (item.record.metadata.memoryId ?? item.record.uri) === selected.memoryId &&
+      (selected.subjectUri === undefined || selected.subjectUri === item.record.uri) &&
+      (selected.family === 'citation-coverage'
+        ? String(item.chunk) === selected.slot
+        : selected.family === 'citation' &&
+          (item.record.metadata.codeCitations?.slice(item.chunk * 64, (item.chunk + 1) * 64) ?? []).some(
+            citation => contextHealthCitationCaseSlotV2(citation) === selected.slot,
+          )),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function updateMaintenanceCase(

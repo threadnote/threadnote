@@ -1,7 +1,12 @@
-import {publicStatus, renderContextMaintenanceStatus} from './maintenance_projection.js';
+import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
+import type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
+export type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
 import {
   selectFairMaintenanceWork,
+  selectMaintenanceCitationCaseTask,
+  nextMaintenanceDeadline,
+  maintenanceContentHash as contentHash,
   maintenanceCheckpointCurrent,
   duplicateArchiveSafe,
   artifactOnlySharedRelationProposal,
@@ -20,6 +25,7 @@ export {renderContextMaintenanceStatus} from './maintenance_projection.js';
 export {planMaintenanceWorkerBatches, maintenanceWorkerRecordValidations} from './maintenance_batch.js';
 export {
   selectFairMaintenanceWork,
+  nextMaintenanceDeadline,
   updateMaintenanceCase,
   reconcileRepositoryRecoveryCases,
   resolveRelationTarget,
@@ -77,7 +83,7 @@ import {
   type MaintenanceWorkSchedule,
 } from './maintenance_decisions.js';
 import {readMemoryRecordsByUri, resourceExists} from '../../mcp/server/memory.js';
-import {writeFinalCliOutput} from '../../effect/cli/output.js';
+export {runContextMaintainCommand} from './maintenance_commands.js';
 import {collectContextHealthEvidence} from './health_commands.js';
 import {contextHealthFindingCaseIdentityV2} from '@threadnote/context/health_maintenance';
 import {writeMemoryFile, writeMemoryFileChecked} from '../../share/index.js';
@@ -157,16 +163,6 @@ export interface ContextMaintenanceCaseV2 {
     readonly revision: string;
   }[];
   readonly events: readonly {readonly at: string; readonly reason: string}[];
-}
-
-export interface ContextMaintenanceReceiptV2 {
-  readonly receiptId: string;
-  readonly project: string;
-  readonly subjectUri: string;
-  readonly archivedUri?: string;
-  readonly postHash: string;
-  readonly timestamp: string;
-  readonly state: 'applying' | 'applied' | 'undone' | 'conflict';
 }
 
 interface UndoJournal extends ContextMaintenanceReceiptV2 {
@@ -261,14 +257,6 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly workSchedule?: MaintenanceWorkSchedule;
 }
 
-export interface ContextMaintenanceReadOptions {
-  readonly limit?: number;
-  readonly caseCursor?: string;
-  readonly receiptCursor?: string;
-  readonly caseId?: string;
-  readonly receiptId?: string;
-}
-
 export const readContextMaintenanceStatus = Effect.fn('contextMaintenance.status')(function* (
   config: RuntimeConfig,
   project?: string,
@@ -305,7 +293,7 @@ export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')
 
 export const runContextMaintenance = Effect.fn('contextMaintenance.run')(function* (
   config: RuntimeConfig,
-  options: {readonly cwd: string; readonly project?: string; readonly maxRecords?: number},
+  options: {readonly cwd: string; readonly project?: string; readonly maxRecords?: number; readonly caseId?: string},
 ) {
   const path = yield* Path.Path;
   if (!path.isAbsolute(options.cwd)) return yield* fail('Maintenance cwd must be absolute.');
@@ -314,6 +302,15 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
     config,
     Effect.gen(function* () {
       let state = yield* readState(config);
+      const selectedCase =
+        options.caseId === undefined ? undefined : state.cases.find(item => item.caseId === options.caseId);
+      if (options.caseId !== undefined) {
+        if (selectedCase === undefined || (options.project !== undefined && selectedCase.project !== options.project))
+          return yield* fail('The exact maintenance case is unavailable in this project.');
+        if (selectedCase.family !== 'citation' && selectedCase.family !== 'citation-coverage')
+          return yield* fail('Exact maintenance refresh supports citation cases only.');
+        options = {...options, project: selectedCase.project};
+      }
       if (state.paused) return publicStatus(state);
       const started = yield* Clock.currentTimeMillis;
       let snapshot = yield* prepareContextMaintenanceInventory(
@@ -342,7 +339,11 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       const corpus = snapshot.success.records;
       const logicalHashes = snapshot.success.canonicalContentHashes;
-      state = {...state, cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes, snapshot.success.complete)};
+      if (selectedCase === undefined)
+        state = {
+          ...state,
+          cases: migrateMaintenanceCases(state.cases, corpus, logicalHashes, snapshot.success.complete),
+        };
       const active = corpus
         .filter(record => record.metadata.status === 'active')
         .map(record =>
@@ -367,7 +368,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         state.workSchedule?.requestDiscovery?.lastFile,
       );
       const evidenceRequests = evidencePage.requests;
-      const candidateDecisions = yield* readMaintenanceCandidateDecisions(config, options.project);
+      const candidateDecisions =
+        selectedCase === undefined ? yield* readMaintenanceCandidateDecisions(config, options.project) : [];
       const pendingCandidateIds = new Set<string>();
       for (const decision of candidateDecisions) {
         const identity = {
@@ -403,6 +405,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       for (const [id, item] of caseMap)
         if (
+          selectedCase === undefined &&
           item.family === 'candidate' &&
           (options.project === undefined || item.project === options.project) &&
           !pendingCandidateIds.has(id)
@@ -410,10 +413,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           caseMap.set(id, {...item, disposition: 'resolved', reason: 'candidate-review-completed', lastChecked: now});
       const receipts = [
         ...new Map(
-          [...state.receipts, ...(yield* recoverReceiptJournals(config, state.receipts))].map(item => [
-            item.receiptId,
-            item,
-          ]),
+          [
+            ...state.receipts,
+            ...(selectedCase === undefined ? yield* recoverReceiptJournals(config, state.receipts) : []),
+          ].map(item => [item.receiptId, item]),
         ).values(),
       ];
       const sourceRevisions = new Map<string, string>();
@@ -429,10 +432,17 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         }));
       });
       const keys = new Set(tasks.map(task => task.key));
-      pruneAbsentMaintenanceCheckpoints(checkpoints, keys, {
-        project: options.project,
-        complete: snapshot.success.complete,
-      });
+      const selectedTask =
+        selectedCase === undefined ? undefined : selectMaintenanceCitationCaseTask(tasks, selectedCase);
+      if (selectedCase !== undefined && selectedTask === undefined)
+        return yield* fail(
+          'The selected citation subject or anchor is unavailable; refresh inventory or review its current identity.',
+        );
+      if (selectedCase === undefined)
+        pruneAbsentMaintenanceCheckpoints(checkpoints, keys, {
+          project: options.project,
+          complete: snapshot.success.complete,
+        });
       const pending = tasks.filter(task => options.project === undefined || task.project === options.project);
       const rotated = [...pending].sort((left, right) => {
         const priority = (task: typeof left) => {
@@ -469,13 +479,13 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       state = {
         ...state,
         generation,
-        semanticProgress,
-        workSchedule: {...work.next, requestDiscovery},
+        semanticProgress: selectedCase === undefined ? semanticProgress : state.semanticProgress,
+        workSchedule: selectedCase === undefined ? {...work.next, requestDiscovery} : state.workSchedule,
         state: 'running',
         error: undefined,
       };
       yield* writeState(config, state);
-      if (work.phase === 'semantic') {
+      if (selectedCase === undefined && work.phase === 'semantic') {
         const project = work.project!;
         const revision = semanticGenerations.get(project)!;
         const progress = semanticProgress[project];
@@ -497,17 +507,19 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           },
         };
       }
-      if (work.phase === 'requested') {
+      if (selectedCase === undefined && work.phase === 'requested') {
         const request = evidenceRequests.find(item => contextMaintenanceEvidenceRequestKey(item) === work.root)!;
         yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
       }
       // maxRecords still controls inventory pagination; record work remains four per tick.
       const selected =
-        work.phase === 'records'
-          ? selectRelationBoundedMaintenanceWindow(
-              selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4)),
-            )
-          : [];
+        selectedTask !== undefined
+          ? [selectedTask]
+          : work.phase === 'records'
+            ? selectRelationBoundedMaintenanceWindow(
+                selectFairMaintenanceWork(rotated, state.lastProject, Math.min(maxRecords, 4)),
+              )
+            : [];
       const {batches, batchByTask} = yield* prepareMaintenanceWorkerBatches(
         config,
         selected,
@@ -515,7 +527,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         options.cwd,
         started,
         now,
-        checkpoints,
+        selectedCase === undefined ? checkpoints : {},
         caseMap,
       );
       const workStarted = yield* Clock.currentTimeMillis;
@@ -523,6 +535,16 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       for (const task of selected) {
         if (task !== selected[0] && (yield* Clock.currentTimeMillis) - workStarted > 5_000) break;
         const currentRecord = (yield* readMemoryRecordsByUri(config, [task.record.uri]))[0];
+        if (
+          selectedCase !== undefined &&
+          (currentRecord?.metadata.status !== 'active' ||
+            contentHash(currentRecord.content) !== logicalHashes.get(task.record.uri) ||
+            selectMaintenanceCitationCaseTask(
+              [{...task, record: currentRecord, project: currentRecord.metadata.project ?? 'unscoped'}],
+              selectedCase,
+            ) === undefined)
+        )
+          return yield* fail('The selected citation subject changed during refresh. Retry with current evidence.');
         if (currentRecord === undefined || currentRecord.metadata.status !== 'active') continue;
         const record =
           currentRecord.metadata.project === undefined
@@ -531,11 +553,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         if (selected.length > 1 && (record.metadata.relations?.length ?? 0) > 0) break;
         const memoryId = record.metadata.memoryId ?? record.uri;
         let postMutationHash: string | undefined;
-        state = {
-          ...state,
-          lastProject: task.project,
-          lastTaskByProject: {...state.lastTaskByProject, [task.project]: task.key},
-        };
+        if (selectedCase === undefined)
+          state = {
+            ...state,
+            lastProject: task.project,
+            lastTaskByProject: {...state.lastTaskByProject, [task.project]: task.key},
+          };
         if ((record.metadata.codeCitations?.length ?? 0) > 0) {
           const source = yield* maintenanceRecordSourceObservation(
             config,
@@ -543,6 +566,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             roots.get(task.project) ?? options.cwd,
             sourceRevisions.get(task.project),
             batchByTask.get(task.key)?.observation,
+            selectedCase !== undefined,
           );
           sourceRevisions.set(task.project, source.epoch);
           recordSourceRevisions.set(record.uri, source.revision);
@@ -566,7 +590,11 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             ['needs-decision', 'waiting-evidence'].includes(item.disposition) &&
             item.subjectContentHashes === undefined,
         );
-        if (maintenanceWorkerCheckpointReusable(record, check, workerEvidence, task.revision, now, legacy)) continue;
+        if (
+          selectedCase === undefined &&
+          maintenanceWorkerCheckpointReusable(record, check, workerEvidence, task.revision, now, legacy)
+        )
+          continue;
         const previousCases = [...caseMap.values()].filter(
           item =>
             item.project === task.project &&
@@ -577,10 +605,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 : (record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? []).some(
                     citation => contextHealthCitationCaseSlotV2(citation) === item.slot,
                   )
-              : task.chunk === 0),
+              : selectedCase === undefined && task.chunk === 0),
         );
         const seen = new Set<string>();
-        if (task.chunk === 0) {
+        if (selectedCase === undefined && task.chunk === 0) {
           const changes = (record.metadata.relations ?? []).flatMap(relation => {
             const policy = resolveMaintenanceRelationPolicy(
               record,
@@ -742,7 +770,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           ? Result.succeed(collected.success.report)
           : Result.fail(collected.failure);
         if (Result.isSuccess(report)) {
-          if (task.chunk === 0 && !isSharedMemoryUri(record.uri)) {
+          if (selectedCase === undefined && task.chunk === 0 && !isSharedMemoryUri(record.uri)) {
             const archive = previewContextHealthRepairPlanV1(report.success, repairCorpus).proposals.find(
               proposal =>
                 proposal.mutation.kind === 'archive-memory' &&
@@ -829,6 +857,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             }
           }
           for (const finding of report.success.findings) {
+            if (selectedCase !== undefined && !finding.category.startsWith('citation-')) continue;
             if (finding.caseIdentity?.family === 'candidate') continue;
             if (finding.category.startsWith('relation-')) continue;
             if (
@@ -918,13 +947,16 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
               )
             )
               seen.add(item.caseId);
-            if (!seen.has(item.caseId) && item.disposition !== 'retired')
+            if (!seen.has(item.caseId) && item.disposition !== 'retired') {
               caseMap.set(item.caseId, {
                 ...item,
+                ...(selectedCase === undefined ? {} : {evidenceRevision: task.revision}),
                 disposition: 'resolved',
                 reason: 'postcondition-verified',
                 lastChecked: now,
               });
+              if (selectedCase !== undefined) seen.add(item.caseId);
+            }
           }
         } else {
           const item = upsertCase(
@@ -964,35 +996,39 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
               : {}),
           });
         }
-        checkpoints[task.key] = {
-          ...(batchByTask.get(task.key)?.observation !== undefined && Result.isSuccess(report)
-            ? {citationAdmissionVersion: CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION}
-            : {}),
-          inventoryComplete: snapshot.success.complete,
-          memoryHash: postMutationHash ?? contentHash(record.content),
-          sourceEpoch: sourceRevisions.get(task.project),
-          sourceRevision: recordSourceRevisions.get(record.uri),
-          retryAt: nextMaintenanceDeadline(record, now),
-          checkedCitations: Result.isSuccess(report)
-            ? (report.success.maintenance?.citationCoverage.checked ?? 0) +
-              (report.success.maintenance?.citationCoverage.historicalVerified ?? 0)
-            : 0,
-          attemptedCitations: citations.length,
-          revision:
-            postMutationHash === undefined ? task.revision : `${task.revision}:postmutation:${postMutationHash}`,
-          checkedAt: now,
-          ...(waiting.length === 0
-            ? {}
-            : {
-                retryAt: [nextMaintenanceDeadline(record, now), ...waiting.map(item => item?.nextAttemptAt)]
-                  .filter((date): date is string => date !== undefined)
-                  .sort()[0],
-              }),
-        };
+        if (selectedCase === undefined)
+          checkpoints[task.key] = {
+            ...(batchByTask.get(task.key)?.observation !== undefined && Result.isSuccess(report)
+              ? {citationAdmissionVersion: CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION}
+              : {}),
+            inventoryComplete: snapshot.success.complete,
+            memoryHash: postMutationHash ?? contentHash(record.content),
+            sourceEpoch: sourceRevisions.get(task.project),
+            sourceRevision: recordSourceRevisions.get(record.uri),
+            retryAt: nextMaintenanceDeadline(record, now),
+            checkedCitations: Result.isSuccess(report)
+              ? (report.success.maintenance?.citationCoverage.checked ?? 0) +
+                (report.success.maintenance?.citationCoverage.historicalVerified ?? 0)
+              : 0,
+            attemptedCitations: citations.length,
+            revision:
+              postMutationHash === undefined ? task.revision : `${task.revision}:postmutation:${postMutationHash}`,
+            checkedAt: now,
+            ...(waiting.length === 0
+              ? {}
+              : {
+                  retryAt: [nextMaintenanceDeadline(record, now), ...waiting.map(item => item?.nextAttemptAt)]
+                    .filter((date): date is string => date !== undefined)
+                    .sort()[0],
+                }),
+          };
         state = {
           ...state,
-          lastProject: task.project,
-          lastTaskByProject: {...state.lastTaskByProject, [task.project]: task.key},
+          lastProject: selectedCase === undefined ? task.project : state.lastProject,
+          lastTaskByProject:
+            selectedCase === undefined
+              ? {...state.lastTaskByProject, [task.project]: task.key}
+              : state.lastTaskByProject,
           lastProgressAt: now,
           checkpoints,
           cases: [...caseMap.values()],
@@ -1002,8 +1038,13 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       for (const batch of batches)
         if (!(yield* maintenanceWorkerBatchCurrent(config, batch)))
-          invalidateMaintenanceWorkerBatch(batch, caseMap, previousCitationCases, checkpoints);
-      if (snapshot.success.complete) {
+          invalidateMaintenanceWorkerBatch(
+            batch,
+            caseMap,
+            previousCitationCases,
+            selectedCase === undefined ? checkpoints : {},
+          );
+      if (selectedCase === undefined && snapshot.success.complete) {
         for (const record of active.filter(
           record => options.project === undefined || record.metadata.project === options.project,
         )) {
@@ -1014,9 +1055,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             reconcileAbsentMaintenanceAnchors(caseMap, fresh, now);
         }
       }
-      reconcileRepositoryRecoveryCases(caseMap, now);
+      if (selectedCase === undefined) reconcileRepositoryRecoveryCases(caseMap, now);
       const activeIds = new Set(active.map(record => record.metadata.memoryId ?? record.uri));
       const caseValues = [...caseMap.values()].map(item =>
+        selectedCase !== undefined ||
         (item.family === 'candidate' && pendingCandidateIds.has(item.caseId)) ||
         (item.family === 'repository-recovery' &&
           item.subjectContentHashes?.some(subject => active.some(record => record.uri === subject.uri))) ||
@@ -1034,12 +1076,15 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         .filter(item => ['resolved', 'retired'].includes(item.disposition) && item.retirement === undefined)
         .sort((a, b) => b.lastChecked.localeCompare(a.lastChecked))
         .slice(0, 200);
-      const cases = [
-        ...caseValues.filter(
-          item => !['resolved', 'retired'].includes(item.disposition) || item.retirement !== undefined,
-        ),
-        ...terminal,
-      ];
+      const cases =
+        selectedCase !== undefined
+          ? caseValues
+          : [
+              ...caseValues.filter(
+                item => !['resolved', 'retired'].includes(item.disposition) || item.retirement !== undefined,
+              ),
+              ...terminal,
+            ];
       const closingSourceEpochs = new Map<string, string>();
       for (const task of tasks) {
         if (
@@ -1123,12 +1168,19 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         }),
       };
       yield* writeState(config, state);
-      yield* pruneReceiptJournals(config, state.receipts);
-      return publicStatus(state);
+      if (selectedCase === undefined) yield* pruneReceiptJournals(config, state.receipts);
+      return selectedCase === undefined
+        ? publicStatus(state)
+        : publicStatus(state, options.project, {caseId: options.caseId});
     }),
   ).pipe(
     Effect.catchIf(
-      error => typeof error === 'object' && error !== null && '_tag' in error && error._tag === 'FileLockTimeout',
+      error =>
+        options.caseId === undefined &&
+        typeof error === 'object' &&
+        error !== null &&
+        '_tag' in error &&
+        error._tag === 'FileLockTimeout',
       () => readContextMaintenanceStatus(config),
     ),
   );
@@ -1551,60 +1603,6 @@ export const wakeContextMaintenance = Effect.fn('contextMaintenance.wake')(funct
   });
 });
 
-export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')(function* (
-  config: RuntimeConfig,
-  options: {
-    readonly project?: string;
-    readonly maxRecords?: number;
-    readonly json?: boolean;
-    readonly action?: string;
-    readonly receiptId?: string;
-    readonly caseId?: string;
-    readonly caseCursor?: string;
-    readonly receiptCursor?: string;
-    readonly limit?: number;
-    readonly evidenceRevision?: string;
-    readonly expectedContentHash?: string;
-    readonly citationId?: string;
-    readonly memoryUri?: string;
-    readonly startLine?: number;
-    readonly maximumLines?: number;
-  },
-) {
-  const result =
-    options.action === 'retire-anchor'
-      ? yield* retireContextMaintenanceAnchor(config, {
-          caseId: options.caseId ?? '',
-          evidenceRevision: options.evidenceRevision ?? '',
-          expectedContentHash: options.expectedContentHash ?? '',
-        })
-      : options.action === 'packet'
-        ? yield* readContextMaintenancePacket(config, options.caseId ?? '', options)
-        : options.action === 'status'
-          ? yield* readContextMaintenanceStatus(config, options.project, options)
-          : options.action === 'pause' || options.action === 'resume'
-            ? yield* setContextMaintenancePaused(config, options.action === 'pause')
-            : options.action === 'undo'
-              ? yield* undoContextMaintenance(config, options.receiptId ?? '')
-              : yield* runContextMaintenance(config, {
-                  cwd: (yield* SystemInfo).currentDirectory(),
-                  project: options.project,
-                  maxRecords: options.maxRecords,
-                });
-  yield* writeFinalCliOutput(
-    options.json
-      ? JSON.stringify(result)
-      : 'projects' in result
-        ? renderContextMaintenanceStatus(result)
-        : 'status' in result
-          ? `Maintenance undo: ${result.status}`
-          : JSON.stringify(result, null, 2),
-  );
-});
-
-function contentHash(content: string) {
-  return sha256HexSync(canonicalMemoryDocumentContent(content));
-}
 function fail(message: string) {
   return ContextMaintenanceError.make({message});
 }
@@ -1732,12 +1730,6 @@ export const proveAutomaticDuplicateArchive = Effect.fn('contextMaintenance.dupl
   if (before !== after || activeIncomingDependency(subject, records))
     return yield* fail('Duplicate dependency proof changed or found an active incoming dependency.');
 });
-
-export function nextMaintenanceDeadline(record: MemoryRecord, now: string): string | undefined {
-  return [record.metadata.validTo, record.metadata.reviewAfter]
-    .filter((value): value is string => value !== undefined && Date.parse(value) > Date.parse(now))
-    .sort()[0];
-}
 
 const sourceGeneration = readContextMaintenanceSourceEpoch;
 

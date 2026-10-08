@@ -301,7 +301,7 @@ function contextIssues(memories: readonly ContextBriefMemoryEvidenceV1[]): reado
         id: issueId('invalid-code-citation', [memory.uri]),
         kind: 'invalid-code-citation',
         rank: issues.length,
-        summary: `${memory.citationErrorCount ?? 0} malformed code citation line(s) were ignored for ${memory.topic ?? memory.uri}.`,
+        summary: `${memory.citationErrorCount ?? 0} code citation metadata error(s) were detected for ${memory.topic ?? memory.uri}.`,
         uris: [memory.uri],
       });
     }

@@ -87,7 +87,8 @@ export interface ManagerIntegrations {
   readonly pocket: {readonly sources: readonly PocketSource[]};
 }
 
-export type SuperhumanAction = 'save-source' | 'sync-source' | 'remove-source' | 'set-enabled' | 'resolve-links';
+export type SuperhumanAction =
+  'save-source' | 'sync-source' | 'remove-source' | 'set-enabled' | 'resolve-links' | 'describe-selection';
 
 export interface ResolvedSuperhumanSelection {
   readonly documents: readonly SuperhumanDocumentSelection[];
@@ -95,5 +96,7 @@ export interface ResolvedSuperhumanSelection {
     readonly documentId: string;
     readonly pageId?: string;
     readonly name: string;
+    readonly browserLink?: string;
+    readonly iconUrl?: string;
   }[];
 }

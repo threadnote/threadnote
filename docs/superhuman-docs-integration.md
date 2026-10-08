@@ -4,7 +4,7 @@ Threadnote reads explicitly selected Superhuman Docs documents through the [publ
 
 ## Set up in Manager
 
-Open **Integrations**, then **Add integration** or **Available integrations**, and choose **Superhuman Docs**. Enter a connection name, a Read only API token, and document or page links. **Check links** verifies their API identities and shows the selected scope: a document link selects the whole document, while a page link selects that page. Choose a project association or explicitly keep the connection projectless, then create the connection.
+Open **Integrations**, then **Add integration** or **Available integrations**, and choose **Superhuman Docs**. Enter a connection name, a Read only API token, and document or page links. **Add links** (or Enter) verifies their API identities and turns them into removable chips with titles and the icons assigned in Docs: a document link selects the whole document, while a page link selects that page. Choose a project association or explicitly keep the connection projectless, then create the connection. Reopening settings restores the saved selections immediately and loads their current titles, links, and icons. A generic document/page icon is shown when no assigned icon is available; if Docs is unavailable, the selected IDs remain visible and editable.
 
 Manager stores the token in a bounded, owner-only local credential file, outside memories, imported resources, and source YAML. It never returns the saved value to the browser. Reopening settings leaves the token field blank; a token-only update retains the selected document and page IDs. Disconnect removes the saved token along with the local connection and cache. Rotation and removal deny the old cache before cleanup.
 

@@ -58,8 +58,10 @@ Both rules copy declared inputs into an isolated staging tree. They do not inspe
 Git, use checkout `node_modules`, execute package scripts, or escape through
 `BUILD_WORKSPACE_DIRECTORY`. Environment values are declared in `env`; HOME,
 temporary files, and Bun/Node executable lookup default to the stage. The runner
-also exposes `/usr/bin` and `/bin` for integration tests that exercise host tools
-such as Git. Build and test actions run sandboxed with network access disabled.
+also exposes `/usr/bin`, `/bin`, `/usr/sbin`, and `/sbin` for integration tests that
+exercise host tools such as Git and macOS `sysctl`. Workspace tests retain the
+incoming PATH and append the system administration directories as well. Build and
+test actions run sandboxed with network access disabled.
 Fetching occurs only in the repository rule.
 
 The npm repository installs the single root `bun.lock` with `--frozen-lockfile`,

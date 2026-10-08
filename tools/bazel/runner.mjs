@@ -32,7 +32,7 @@ if (workspaceTesting) {
       ...process.env,
       HOME: home,
       TMPDIR: temp,
-      PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+      PATH: `${bin}${delimiter}${process.env.PATH ?? ''}${delimiter}/usr/sbin${delimiter}/sbin`,
       TZ: 'UTC',
       NO_COLOR: '1',
       BUN_INSTALL_NO_TRACK: '1',
@@ -83,7 +83,7 @@ try {
     env: {
       HOME: home,
       TMPDIR: temp,
-      PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin`,
+      PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin${delimiter}/usr/sbin${delimiter}/sbin`,
       TZ: 'UTC',
       NO_COLOR: '1',
       BUN_INSTALL_NO_TRACK: '1',

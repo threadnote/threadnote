@@ -144,8 +144,14 @@ export const maintenanceRecordSourceObservation = Effect.fn('contextMaintenance.
   root: string,
   previousEpoch: string | undefined,
   observed?: ContextMaintenanceWorkerObservation,
+  fullAssociation = false,
 ) {
   const epoch = observed?.sourceEpoch ?? previousEpoch ?? (yield* readContextMaintenanceSourceEpoch(config, root));
-  const revision = yield* recordSourceRevision(config, record, root, observed?.association);
+  const revision = yield* recordSourceRevision(
+    config,
+    record,
+    root,
+    fullAssociation ? undefined : observed?.association,
+  );
   return {epoch, revision};
 });

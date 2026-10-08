@@ -418,7 +418,7 @@ export function makeContextMaintainCommand<E, R>(
       ),
       project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
       receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
-      caseId: optionalString('case-id', 'Exact local maintenance case for a bounded agent packet or status selector'),
+      caseId: optionalString('case-id', 'Exact citation case refresh, bounded agent packet, or status selector'),
       caseCursor: optionalString('case-cursor', 'Generation-bound next retained case page'),
       receiptCursor: optionalString('receipt-cursor', 'Generation-bound next retained receipt page'),
       citationId: optionalString('citation-id', 'Exact scoped citation evidence selector'),

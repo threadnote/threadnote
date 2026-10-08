@@ -5,6 +5,7 @@
   "exports": {
     "./sharing-contracts": "./src/sharing_contracts.ts",
     "./integrations-contracts": "./src/integrations_contracts.ts",
+    "./superhuman-selection": "./src/superhuman_selection.ts",
     "./attention/contracts": "./src/attention/contracts.ts",
     "./attention-view": "./src/attention_view.tsx",
     "./attention_view": "./src/attention_view.tsx",
