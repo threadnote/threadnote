@@ -898,6 +898,7 @@ function hybridRankRecallHits(
               equivalentUris: ranked.candidate.equivalentUris,
               identityConflict: ranked.candidate.identityConflict,
               memoryId: ranked.candidate.memoryId,
+              score: Math.max(hit.score, ranked.signals.semantic),
               finalScore: ranked.finalScore,
               rankReasons: ranked.reasons,
               rankSignals: ranked.signals,

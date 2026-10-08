@@ -117,6 +117,7 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       explicitProject: params.project,
       originalQuery: query,
       pinnedHardUri: params.pinnedUri !== undefined,
+      workspaceProject: workset ? undefined : recallProjectName,
       worksetProjectNames: workset?.projects.map(member => member.name),
     });
 

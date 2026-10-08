@@ -3,8 +3,11 @@ import {it as effectIt} from '@effect/vitest';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
-import {Effect} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
+import {TestClock} from 'effect/testing';
 import {inheritedProcessEnvironment} from '@threadnote/testing/process-environment';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {loadRecallIndex} from '@threadnote/recall/index';
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
@@ -103,6 +106,67 @@ describe('runRecall native index', () => {
       expect(output).toContain('Would search native recall index');
       expect(output).toContain('availability check');
     }),
+  );
+  effectIt.effect('restricts unqualified CLI recall to the caller repository project', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-recall-caller-project-'});
+      const manifestPath = path.join(home, 'seed-manifest.yaml');
+      yield* fs.writeFileString(manifestPath, 'version: 1\nprojects: []\n');
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        manifestPath,
+        user: 'denys',
+      };
+      const outerRepo = path.join(home, 'outer-repository');
+      const callerRepo = path.join(home, 'caller-repository');
+      yield* fs.makeDirectory(outerRepo, {recursive: true});
+      yield* fs.makeDirectory(callerRepo, {recursive: true});
+      yield* utils.runCommand('git', ['init', '--quiet'], {cwd: outerRepo});
+      yield* utils.runCommand('git', ['remote', 'add', 'origin', 'https://github.com/synthetic/outer-project.git'], {
+        cwd: outerRepo,
+      });
+      yield* utils.runCommand('git', ['init', '--quiet'], {cwd: callerRepo});
+      yield* utils.runCommand('git', ['remote', 'add', 'origin', 'https://github.com/synthetic/caller-project.git'], {
+        cwd: callerRepo,
+      });
+
+      const query = 'orbital gearbox calibration';
+      const outerUri = 'threadnote://user/denys/memories/durable/projects/outer-project/orbital.md';
+      const callerUri = 'threadnote://user/denys/memories/durable/projects/caller-project/orbital.md';
+      const memory = (project: string) =>
+        [
+          'MEMORY',
+          'kind: durable',
+          'status: active',
+          `project: ${project}`,
+          'topic: calibration',
+          'source_agent_client: integration-test',
+          'timestamp: 2026-09-01T00:00:00.000Z',
+          '',
+          `The ${query} procedure uses a guarded service boundary.`,
+        ].join('\n');
+      const store = yield* ResourceStore;
+      yield* store.mutate(
+        {account: config.account, home, user: config.user},
+        [outerUri, callerUri].map((uri, index) => ({
+          content: memory(index === 0 ? 'outer-project' : 'caller-project'),
+          options: {mode: 'create' as const},
+          type: 'write' as const,
+          uri,
+        })),
+      );
+      yield* loadRecallIndex(config, {forceRefresh: true, includeInactive: false, query});
+
+      const recalled = yield* captureRecall(config, {callerCwd: callerRepo, query});
+      expect(recalled.value.ranked.map(candidate => candidate.uri)).toContain(callerUri);
+      expect(recalled.value.ranked.map(candidate => candidate.uri)).not.toContain(outerUri);
+      expect(recalled.output).toContain('caller-project');
+      expect(recalled.output).not.toContain('outer-project');
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
   effectIt.effect('accepts bounded seeded one-hop controls and prints premise evidence', () =>
     Effect.gen(function* () {

@@ -513,6 +513,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     explicitProject: options.project?.trim() || undefined,
     originalQuery: query,
     pinnedHardUri: explicitUri !== undefined,
+    workspaceProject: workset ? undefined : recallProjectName,
     worksetProjectNames: workset?.projects.map(member => member.name),
   });
 
@@ -578,6 +579,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
       Effect.gen(function* () {
         const prepared = yield* prepareRecallSections(config, {
           allowExactRescue: !thresholdConfigured,
+          allowSemanticRescue: !thresholdConfigured,
           allowedUriScopes: explicitUri ? [explicitUri] : undefined,
           candidateUris,
           exactMatches,

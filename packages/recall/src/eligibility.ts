@@ -25,8 +25,10 @@ export interface DeriveRecallEligibilityPolicyInput {
   readonly originalQuery: string;
   /** Whether a separate hard URI boundary governs this recall. */
   readonly pinnedHardUri?: boolean;
-  /** Caller-supplied project only; cwd-derived ranking context stays soft/global. */
+  /** Caller-supplied project. */
   readonly explicitProject?: string;
+  /** Project resolved from the caller workspace or manifest; unrelated projects stay ineligible. */
+  readonly workspaceProject?: string;
   /** Undefined means no workset; an explicitly empty resolved workset fails closed. */
   readonly worksetProjectNames?: readonly string[];
 }
@@ -121,6 +123,7 @@ export function deriveRecallEligibilityPolicy(input: DeriveRecallEligibilityPoli
     input.worksetProjectNames === undefined ? undefined : normalizeRecallProjectNames(input.worksetProjectNames);
   const projects = normalizeRecallProjectNames([
     ...(input.explicitProject === undefined ? [] : [input.explicitProject]),
+    ...(input.workspaceProject === undefined ? [] : [input.workspaceProject]),
     ...(resolvedWorksetProjects ?? []),
   ]);
 

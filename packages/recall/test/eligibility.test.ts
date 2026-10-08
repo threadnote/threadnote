@@ -39,6 +39,17 @@ describe('recall eligibility policy', () => {
     expect(recallEligibilityPolicyRestrictsCandidates(policy)).toBe(true);
   });
 
+  it('restricts inferred workspace recall to the caller project while retaining projectless guidance', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: 'How does the checkout work?',
+      workspaceProject: 'nested-repository',
+    });
+
+    expect(recallCandidateIsEligible(policy, {project: 'nested-repository'})).toBe(true);
+    expect(recallCandidateIsEligible(policy, {project: 'parent-repository'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {})).toBe(true);
+  });
+
   it('does not partition same-project monorepo siblings', () => {
     const policy = deriveRecallEligibilityPolicy({explicitProject: 'monorepo', originalQuery: 'shared build behavior'});
 
@@ -170,6 +181,31 @@ describe('recall eligibility policy', () => {
           if (recallCandidateIsEligible(basePolicy, candidate)) {
             expect(recallCandidateIsEligible(expandedPolicy, candidate)).toBe(true);
           }
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
+  it('keeps inferred workspace eligibility bounded to the same project for generated project names', () => {
+    fc.assert(
+      fc.property(
+        fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/),
+        fc.option(fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/), {nil: undefined}),
+        (workspaceProject, candidateProject) => {
+          const policy = deriveRecallEligibilityPolicy({
+            originalQuery: 'ordinary workspace recall',
+            workspaceProject,
+          });
+          const eligible = recallCandidateIsEligible(
+            policy,
+            candidateProject === undefined ? {} : {project: candidateProject},
+          );
+          const normalizedWorkspace = normalizeRecallProjectNames([workspaceProject])[0];
+          const normalizedCandidate =
+            candidateProject === undefined ? undefined : normalizeRecallProjectNames([candidateProject])[0];
+
+          expect(eligible).toBe(normalizedCandidate === undefined || normalizedCandidate === normalizedWorkspace);
         },
       ),
       {numRuns: 100},

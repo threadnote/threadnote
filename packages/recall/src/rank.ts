@@ -44,6 +44,7 @@ export interface RecallCandidate {
 
 export interface RecallRankContext {
   readonly allowExactRescue?: boolean;
+  readonly allowSemanticRescue?: boolean;
   readonly corpusStatistics?: RecallCorpusStatistics;
   readonly eligibility?: RecallEligibilityPolicy;
   readonly includeInactive?: boolean;
@@ -313,11 +314,16 @@ export function rankRecallCandidates(
     )
     .filter(result => {
       const protectedResult = protectedRecallOrdinal(result.candidate, protectedOrdinalByUri) !== undefined;
+      const semanticRescue =
+        context.allowSemanticRescue === true &&
+        result.signals.semantic >= CORROBORATING_SIGNAL_MINIMUM &&
+        result.relevanceScore >= SEMANTIC_ONLY_ANSWER_MINIMUM;
       return (
         (protectedResult ||
           (result.passedRelevanceGate &&
             (context.minimumScore === undefined ||
               result.relevanceScore >= context.minimumScore ||
+              semanticRescue ||
               (context.allowExactRescue === true &&
                 result.signals.exact >= EXACT_TERM_RESCUE_MINIMUM &&
                 (result.signals.kindIntent === 1 ||

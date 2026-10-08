@@ -1150,6 +1150,7 @@ function runRecallTool(
             Effect.gen(function* () {
               const prepared = yield* prepareRecallSections(config, {
                 allowExactRescue: !thresholdConfigured,
+                allowSemanticRescue: !thresholdConfigured,
                 allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
                 candidateUris,
                 eligibility,

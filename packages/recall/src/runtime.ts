@@ -67,6 +67,7 @@ interface RecallRuntimeConfig {
 
 interface PrepareRecallSectionsInput<R> {
   readonly allowExactRescue: boolean;
+  readonly allowSemanticRescue?: boolean;
   readonly allowedUriScopes?: readonly string[];
   readonly candidateUris?: readonly string[];
   readonly exactMatches: readonly ExactMatch[];
@@ -506,6 +507,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const sections = buildRecallSections(input.passes, input.exactMatches, input.limit, {
     absentMemoryUris,
     allowExactRescue: input.allowExactRescue,
+    allowSemanticRescue: input.allowSemanticRescue,
     allowedUriScopes: input.allowedUriScopes,
     candidateUris: input.candidateUris,
     corpusStatistics: workspaceScope ? undefined : recallIndex?.corpusStatistics,
