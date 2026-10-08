@@ -7,8 +7,8 @@ import {MAXIMUM_CONTEXT_HEALTH_FINDING_LIMIT, type ContextHealthReportV1} from '
 import {
   CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
   MAXIMUM_CONTEXT_HEALTH_SEMANTIC_CLAIMS,
-  type ContextHealthSemanticCompletenessV1,
-  type ContextHealthSemanticUnknownReasonV1,
+  type ContextHealthSemanticCompletenessV2,
+  type ContextHealthSemanticUnknownReasonV2,
 } from './health_semantic.js';
 
 export const CONTEXT_HEALTH_AGGREGATE_VERSION = 1 as const;
@@ -407,7 +407,7 @@ function validateReport(report: ContextHealthReportV1, project: string, sourceKe
   }
 }
 
-const SEMANTIC_UNKNOWN_REASONS = new Set<ContextHealthSemanticUnknownReasonV1>([
+const SEMANTIC_UNKNOWN_REASONS = new Set<ContextHealthSemanticUnknownReasonV2>([
   'body-limit',
   'claim-budget',
   'claim-limit',
@@ -415,10 +415,11 @@ const SEMANTIC_UNKNOWN_REASONS = new Set<ContextHealthSemanticUnknownReasonV1>([
   'contradiction-limit',
   'no-claims',
   'record-limit',
+  'unsupported-extraction',
 ]);
 
 function validateSemanticCompleteness(
-  completeness: ContextHealthSemanticCompletenessV1,
+  completeness: ContextHealthSemanticCompletenessV2,
   recordsScanned: number,
   sourceKey: string,
 ): void {
@@ -429,6 +430,8 @@ function validateSemanticCompleteness(
   const boundedCounts = [
     completeness.analyzedRecords,
     completeness.claimsAnalyzed,
+    completeness.supportedClaims,
+    completeness.unsupportedClaims,
     completeness.contradictionCount,
     completeness.eligibleRecords,
     completeness.omittedContradictions,
@@ -441,6 +444,8 @@ function validateSemanticCompleteness(
   const maximumPairs = (completeness.claimsAnalyzed * (completeness.claimsAnalyzed - 1)) / 2;
   if (
     completeness.version !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION ||
+    completeness.coverage !== 'bounded-English-extraction' ||
+    completeness.supportedClaims + completeness.unsupportedClaims !== completeness.claimsAnalyzed ||
     completeness.eligibleRecords > recordsScanned ||
     completeness.analyzedRecords + completeness.unknownRecords !== completeness.eligibleRecords ||
     completeness.claimsAnalyzed > MAXIMUM_CONTEXT_HEALTH_SEMANTIC_CLAIMS ||
@@ -452,7 +457,7 @@ function validateSemanticCompleteness(
   ) {
     fail(`Context health source ${sourceKey} has invalid semantic completeness.`);
   }
-  const seenReasons = new Set<ContextHealthSemanticUnknownReasonV1>();
+  const seenReasons = new Set<ContextHealthSemanticUnknownReasonV2>();
   for (const entry of completeness.unknownReasons) {
     if (
       typeof entry !== 'object' ||

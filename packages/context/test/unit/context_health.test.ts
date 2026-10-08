@@ -580,6 +580,71 @@ describe('buildContextHealthReport', () => {
     });
   });
 
+  it('distinguishes uncertain applicability from extraction coverage and finding confidence', () => {
+    for (const knownEnvironment of [false, true]) {
+      for (const knownValidity of [false, true]) {
+        const metadata = knownValidity ? {validFrom: '2026-01-01', validTo: '2027-01-01'} : {};
+        const environment = knownEnvironment ? 'production ' : '';
+        const report = buildContextHealthReport({
+          now,
+          project: 'threadnote',
+          records: [
+            record('threadnote://memory/tn_left', `The ${environment}request timeout is 30 seconds.`, metadata),
+            record('threadnote://memory/tn_right', `The ${environment}request timeout is 60 seconds.`, metadata),
+          ],
+        });
+        const finding = report.findings.find(item => item.category === 'semantic-contradiction');
+        expect(report.semanticCompleteness).toMatchObject({state: 'complete', supportedClaims: 2});
+        expect(finding).toMatchObject({
+          confidence: knownEnvironment && knownValidity ? 'medium' : 'low',
+          repairability: 'manual-review',
+          semanticEvidence: {
+            classification: knownEnvironment && knownValidity ? 'incompatibility' : 'uncertain-comparison',
+          },
+        });
+      }
+    }
+  });
+
+  it('keeps extraction coverage truthful when exact reviewed comparisons leave the queue', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 2, max: 5}), count => {
+        const records = Array.from({length: count}, (_, index) =>
+          record(`threadnote://memory/tn_${index}`, `The production request timeout is ${index + 1} seconds.`, {
+            validFrom: '2026-01-01',
+            validTo: '2027-01-01',
+          }),
+        );
+        const before = structuredClone(records);
+        const input = {now, project: 'threadnote', records};
+        const report = buildContextHealthReport(input);
+        const selected = report.findings.find(item => item.category === 'semantic-contradiction')!;
+        const contradictionId = selected.semanticEvidence!.contradictionId;
+        const reviewed = buildContextHealthReport({
+          ...input,
+          reviewedSemanticContradictionIds: [contradictionId, contradictionId, 'unrelated-id'],
+        });
+        expect(reviewed.findings).toEqual(report.findings.filter(item => item.id !== selected.id));
+        expect(reviewed.semanticCompleteness).toEqual(report.semanticCompleteness);
+        const changedUri = selected.semanticEvidence!.left.recordUri;
+        const changed = records.map(item =>
+          item.uri === changedUri ? record(item.uri, `${item.body}\nAdditional source context.`, item.metadata) : item,
+        );
+        const fresh = buildContextHealthReport({now, project: 'threadnote', records: changed});
+        expect(
+          buildContextHealthReport({
+            now,
+            project: 'threadnote',
+            records: changed,
+            reviewedSemanticContradictionIds: [contradictionId],
+          }).findings,
+        ).toEqual(fresh.findings);
+        expect(records).toEqual(before);
+      }),
+      {numRuns: 24, seed: 753},
+    );
+  });
+
   it('reports semantic limits without manufacturing actionable content findings', () => {
     const records = Array.from({length: 130}, (_, index) =>
       record(`threadnote://memory/tn_${index}`, `Unique module claim ${index}.`),
@@ -587,9 +652,9 @@ describe('buildContextHealthReport', () => {
     const report = buildContextHealthReport({now, project: 'threadnote', records});
     expect(report.maintenance?.actionableFindings).toBe(0);
     expect(report.maintenance?.semanticCoverage).toMatchObject({
-      state: 'partial',
+      state: 'unavailable',
       eligibleRecords: 130,
-      unknownRecords: 2,
+      unknownRecords: 130,
     });
     expect(report.status).toBe('unknown');
   });

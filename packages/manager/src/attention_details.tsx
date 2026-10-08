@@ -1,3 +1,4 @@
+import {SemanticResolutionReview} from './attention/semantic_comparison.js';
 import React, {useEffect, useState} from 'react';
 import {Schema} from 'effect';
 import type {CandidateReview} from '@threadnote/memory/candidate';
@@ -303,6 +304,7 @@ export function HealthDetail(props: {
   readonly after?: string;
   readonly onClose: () => void;
   readonly onChanged: () => void;
+  readonly onRefresh?: () => void;
   readonly onOpenLibrary: (uri?: string) => void;
 }): React.ReactElement {
   const [proposal, setProposal] = useState<RepairProposal>();
@@ -358,6 +360,37 @@ export function HealthDetail(props: {
     } finally {
       setBusy(false);
     }
+  }
+  if (finding.category === 'semantic-contradiction') {
+    return (
+      <DetailModal title="Compare conflicting memories" onClose={props.onClose} className="semantic-review-dialog">
+        {finding.semanticEvidence ? (
+          <SemanticResolutionReview
+            project={props.project}
+            evidence={finding.semanticEvidence}
+            onOpenLibrary={props.onOpenLibrary}
+            onResolved={() => {
+              props.onChanged();
+              props.onClose();
+            }}
+            onRefresh={() => {
+              (props.onRefresh ?? props.onChanged)();
+              props.onClose();
+            }}
+          />
+        ) : (
+          <>
+            <p>These memories may disagree. Open both to compare their advice and the situations it applies to.</p>
+            <p className="muted">Comparison evidence is unavailable. Review any change in Library.</p>
+            {finding.uris.map((uri, index) => (
+              <button key={uri} type="button" onClick={() => props.onOpenLibrary(uri)}>
+                Open memory {index === 0 ? 'A' : 'B'}
+              </button>
+            ))}
+          </>
+        )}
+      </DetailModal>
+    );
   }
   return (
     <DetailModal title={finding.category.replaceAll('-', ' ')} onClose={props.onClose}>
@@ -532,7 +565,7 @@ function healthFindingNextStep(category: Finding['category']): string {
     case 'candidate-possible-duplicate':
       return 'Compare the proposal with current knowledge before accepting or rejecting it.';
     case 'semantic-contradiction':
-      return 'Compare the conflicting memories and update the one that no longer reflects the current decision.';
+      return 'Compare both source claims, applicability, and roles. Preserve compatible rules and historical decisions; review any policy violation or correction explicitly.';
     case 'guidance-locally-modified':
     case 'guidance-missing-block':
     case 'guidance-stale-sources':

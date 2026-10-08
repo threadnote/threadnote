@@ -7,8 +7,8 @@ import type {CandidateComparison} from '@threadnote/memory/candidate';
 import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
 import {
   analyzeContextHealthSemantics,
-  type ContextHealthSemanticCompletenessV1,
-  type ContextHealthSemanticContradictionV1,
+  type ContextHealthSemanticCompletenessV2,
+  type ContextHealthSemanticContradictionV2,
 } from './health_semantic.js';
 import {
   classifyContextHealthFindingV2,
@@ -72,7 +72,7 @@ export interface ContextHealthFindingV1 {
   readonly id: string;
   readonly repair: ContextHealthRepairDescriptorV1;
   readonly repairability: ContextHealthRepairabilityV1;
-  readonly semanticEvidence?: ContextHealthSemanticContradictionV1;
+  readonly semanticEvidence?: ContextHealthSemanticContradictionV2;
   readonly severity: ContextHealthSeverityV1;
   readonly summary: string;
   readonly uris: readonly string[];
@@ -113,6 +113,8 @@ export interface ContextHealthReportInputV1 {
   readonly project: string;
   readonly records: readonly MemoryRecord[];
   readonly relationEvidence?: readonly ContextHealthRelationEvidenceV1[];
+  /** Applied human reviews whose exact source revisions still match. */
+  readonly reviewedSemanticContradictionIds?: readonly string[];
 }
 
 export interface ContextHealthReportV1 {
@@ -125,7 +127,7 @@ export interface ContextHealthReportV1 {
   readonly recordsScanned: number;
   /** Findings after this page; unlike omittedFindings, excludes earlier pages. */
   readonly remainingFindings?: number;
-  readonly semanticCompleteness: ContextHealthSemanticCompletenessV1;
+  readonly semanticCompleteness: ContextHealthSemanticCompletenessV2;
   readonly status: 'clean' | 'findings' | 'unknown';
   readonly version: typeof CONTEXT_HEALTH_REPORT_VERSION;
 }
@@ -140,6 +142,7 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
     input.includeFindingCategories === undefined ? undefined : new Set(input.includeFindingCategories);
   const includeFindingUris = input.includeFindingUris === undefined ? undefined : new Set(input.includeFindingUris);
   const semanticAnalysis = analyzeContextHealthSemantics({project: input.project, records});
+  const reviewedSemanticIds = new Set(input.reviewedSemanticContradictionIds ?? []);
   const duplicateCorpus = (input.duplicateCorpus ?? records)
     .filter(record => record.metadata.status === 'active' && record.metadata.project === input.project)
     .sort(compareRecords);
@@ -152,7 +155,9 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
       ...duplicateFindings(duplicateCorpus, input.project, input.now),
       ...candidateFindings(input.candidateEvidence ?? [], input.project),
       ...guidanceFindings(input.guidanceEvidence ?? []),
-      ...semanticFindings(semanticAnalysis.contradictions),
+      ...semanticFindings(
+        semanticAnalysis.contradictions.filter(item => !reviewedSemanticIds.has(item.contradictionId)),
+      ),
     ].sort(compareFindings),
   )
     .map(finding => projectFinding(finding, input.project, input.records))
@@ -243,23 +248,37 @@ function contextHealthCursorDigest(
 }
 
 function semanticFindings(
-  contradictions: readonly ContextHealthSemanticContradictionV1[],
+  contradictions: readonly ContextHealthSemanticContradictionV2[],
 ): readonly ContextHealthFindingV1[] {
   return contradictions.map(semanticEvidence => ({
     ...finding(
       'semantic-contradiction',
       [semanticEvidence.left.recordUri, semanticEvidence.right.recordUri],
-      `claims ${semanticEvidence.left.claimId} and ${semanticEvidence.right.claimId} have opposing assertions`,
+      semanticReviewSummary(semanticEvidence),
       {
-        confidence: 'medium',
+        confidence: semanticEvidence.classification === 'uncertain-comparison' ? 'low' : 'medium',
         kind: 'review-memory',
         repairability: 'manual-review',
         severity: 'medium',
-        summary: 'Review both durable claims, designate which assertion is stale, then supersede or correct it.',
+        summary:
+          'Review both source claims, scope, validity, and roles; preserve compatible rules and history. No source wins automatically.',
       },
     ),
+    id: `semantic-contradiction\u0000${semanticEvidence.contradictionId}`,
     semanticEvidence,
   }));
+}
+
+function semanticReviewSummary(evidence: ContextHealthSemanticContradictionV2): string {
+  const property = evidence.left.property ?? evidence.right.property;
+  const uncertainty = evidence.classification === 'uncertain-comparison' ? ' Applicability needs context.' : '';
+  if (evidence.reason === 'policy-conflict')
+    return `Possible policy violation: observed behavior differs from a requirement.${uncertainty}`;
+  if (evidence.reason === 'opposite-polarity')
+    return `These rules require opposing behavior where they overlap.${uncertainty}`;
+  if (evidence.reason === 'incompatible-values')
+    return `Conflicting ${property ?? 'property'} values require review.${uncertainty}`;
+  return 'These statements may differ; more context is needed to compare their meaning.';
 }
 
 function guidanceFindings(evidence: readonly ContextHealthGuidanceEvidenceV1[]): readonly ContextHealthFindingV1[] {

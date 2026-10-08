@@ -1,4 +1,5 @@
 import {publicStatus, renderContextMaintenanceStatus} from './maintenance_projection.js';
+import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
 import {
   selectFairMaintenanceWork,
   maintenanceCheckpointCurrent,
@@ -273,12 +274,20 @@ export const readContextMaintenanceStatus = Effect.fn('contextMaintenance.status
   project?: string,
   options: ContextMaintenanceReadOptions = {},
 ) {
-  const yieldedState = yield* readState(config);
+  const rawState = yield* readState(config);
+  const yieldedState = {...rawState, cases: yield* reviewedSemanticMaintenanceCases(config, rawState.cases, project)};
   return yield* Effect.try({
     try: () => publicStatus(yieldedState, project, options),
     catch: error => fail(error instanceof Error ? error.message : 'Invalid maintenance selector.'),
   });
 });
+export const reconcileSemanticReviewMaintenanceCases = (config: RuntimeConfig) =>
+  withStateLock(
+    config,
+    readState(config).pipe(
+      Effect.flatMap(state => saveReviewedSemanticMaintenanceCases(config, state, next => writeState(config, next))),
+    ),
+  );
 
 export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')(function* (
   config: RuntimeConfig,

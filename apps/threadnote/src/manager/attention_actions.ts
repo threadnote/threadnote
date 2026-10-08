@@ -31,6 +31,10 @@ import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
 import {managerAttentionProjectRoot} from './attention.js';
 import {runManagerExplicitCwdGraphIndex} from './graph/actions.js';
 import type {ContextHealthRepairProposalV1} from '../memory/context/health_repair.js';
+import {previewSemanticReview, applySemanticReview} from '../memory/context/semantic_review.js';
+import type {ManagerSemanticReviewInputV1} from '@threadnote/manager/attention/contracts';
+import {SemanticReviewError} from '../memory/context/semantic_review_state.js';
+import {ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-store';
 
 const CITATION_FINDING_CATEGORIES = ['citation-changed', 'citation-missing', 'citation-unknown'] as const;
 const MAXIMUM_MANAGER_BULK_CITATION_REPAIRS = 100;
@@ -138,6 +142,8 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       '/api/context-health/citations/apply',
       '/api/context-health/citations/rebuild',
       '/api/context-health/citations/jobs',
+      '/api/context-health/semantic/preview',
+      '/api/context-health/semantic/apply',
     ].includes(route) ||
     request.method !== 'POST'
   )
@@ -145,6 +151,52 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   const body = yield* request.body;
   const project = typeof body.project === 'string' ? body.project : '';
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project)) return invalid('Select a valid project.');
+  if (route === '/api/context-health/semantic/preview') {
+    if (body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
+      return invalid('Choose which memory to keep, or keep both.');
+    if (typeof body.contradictionId !== 'string' || !/^[a-f0-9]{64}$/u.test(body.contradictionId))
+      return invalid('Select an exact semantic comparison.');
+    const sources = [body.left, body.right];
+    if (
+      !sources.every(
+        value =>
+          typeof value === 'object' &&
+          value !== null &&
+          typeof (value as Record<string, unknown>).recordUri === 'string' &&
+          typeof (value as Record<string, unknown>).recordContentFingerprint === 'string',
+      )
+    )
+      return invalid('Select both source revisions.');
+    const result = yield* previewSemanticReview(request.config, {
+      project,
+      contradictionId: body.contradictionId,
+      choice: body.choice,
+      left: body.left as ManagerSemanticReviewInputV1['left'],
+      right: body.right as ManagerSemanticReviewInputV1['right'],
+    }).pipe(Effect.result);
+    return Result.isSuccess(result)
+      ? {status: 200, body: {preview: result.success}}
+      : semanticReviewFailureResponse(result.failure);
+  }
+  if (route === '/api/context-health/semantic/apply') {
+    if (body.approved !== true) return invalid('Explicit approval is required.');
+    if (
+      typeof body.previewId !== 'string' ||
+      !/^semantic-review-[a-f0-9]{40}$/u.test(body.previewId) ||
+      typeof body.revision !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(body.revision)
+    )
+      return invalid('Select an exact saved semantic preview.');
+    const result = yield* applySemanticReview(request.config, {
+      project,
+      previewId: body.previewId,
+      revision: body.revision,
+      approved: true,
+    }).pipe(Effect.result);
+    return Result.isSuccess(result)
+      ? {status: 200, body: {result: result.success}}
+      : semanticReviewFailureResponse(result.failure);
+  }
   if (route.startsWith('/api/reviews/')) {
     if (typeof body.reviewId !== 'string' || !/^review-[a-zA-Z0-9_-]+$/u.test(body.reviewId))
       return invalid('Invalid review identifier.');
@@ -766,6 +818,29 @@ function managerTimestamp(epochMilliseconds: number): string {
 
 function invalid(error: string) {
   return {status: 400, body: {error}};
+}
+
+export function semanticReviewFailureResponse(error: unknown) {
+  if (Schema.is(SemanticReviewError)(error)) {
+    return error.reason === 'stale'
+      ? conflict('A source memory or the saved preview changed. Reopen the comparison and review your choice again.')
+      : {
+          status: 422,
+          body: {
+            error:
+              "This decision couldn't be completed safely. Check the source memories and review storage before retrying; preserve existing history.",
+          },
+        };
+  }
+  if (Schema.is(ResourceConflict)(error) || Schema.is(ResourceNotFound)(error))
+    return conflict('A source memory changed while confirming your choice. Reopen the comparison and review it again.');
+  return {
+    status: 503,
+    body: {
+      error:
+        "Couldn't confirm completion. Reopen the comparison to check the source memories and preserved history before retrying.",
+    },
+  };
 }
 
 function conflict(error: string, code?: string) {

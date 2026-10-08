@@ -1,6 +1,6 @@
 import type {ContextBriefMemoryCitationValidationV2} from './types.js';
 import type {ContextHealthFindingV1} from './health.js';
-import type {ContextHealthSemanticCompletenessV1} from './health_semantic.js';
+import type {ContextHealthSemanticCompletenessV2} from './health_semantic.js';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {memoryCodeCitationAnchorId, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
@@ -57,7 +57,7 @@ export interface ContextHealthMaintenanceSummaryV2 {
   readonly historicalFindings: number;
   readonly affectedMemories: number;
   readonly citationCoverage: ContextHealthCitationCoverageV2;
-  readonly semanticCoverage: ContextHealthSemanticCompletenessV1;
+  readonly semanticCoverage: ContextHealthSemanticCompletenessV2;
 }
 
 export interface ContextHealthCaseIdentityV2 {
@@ -244,7 +244,7 @@ export function contextHealthCitationCoverageV2(input: {
 export function summarizeContextHealthMaintenanceV2(input: {
   readonly findings: readonly ContextHealthFindingV1[];
   readonly citationCoverage: ContextHealthCitationCoverageV2;
-  readonly semanticCoverage: ContextHealthSemanticCompletenessV1;
+  readonly semanticCoverage: ContextHealthSemanticCompletenessV2;
 }): ContextHealthMaintenanceSummaryV2 {
   const count = (classification: ContextHealthFindingClassificationV2) =>
     input.findings.filter(finding => finding.classification === classification).length;

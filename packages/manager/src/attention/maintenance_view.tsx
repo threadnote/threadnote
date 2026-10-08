@@ -134,6 +134,17 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     };
   }, [props.project, refresh]);
 
+  function refreshEvidence() {
+    setNotice('');
+    mutationEpoch.current += 1;
+    setRefresh(value => value + 1);
+    onChanged.current();
+  }
+  function refreshAfterDecision() {
+    refreshEvidence();
+    setNotice('Change saved.');
+  }
+
   async function act(action: 'run-now' | 'pause' | 'resume' | 'undo', receiptId?: string) {
     if (actionBusy.current) return;
     const project = props.project;
@@ -499,9 +510,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           retried automatically when sources change.
         </p>
         <p>
-          This report fully analyzes claims in {semantic.analyzedRecords?.toLocaleString() ?? '0'} of{' '}
-          {semantic.eligibleRecords?.toLocaleString() ?? '0'} durable memories. Heuristic coverage can remain partial
-          after scanning finishes. Only supported conflicts need your decision.
+          The bounded English extractor assessed supported claims in {semantic.analyzedRecords?.toLocaleString() ?? '0'}{' '}
+          of {semantic.eligibleRecords?.toLocaleString() ?? '0'} durable memories. Extraction coverage can remain
+          partial after scanning finishes and does not establish semantic correctness. Comparisons with missing context
+          require review.
         </p>
         {props.report.repositoryEvidence.state === 'unavailable' ? (
           <p>
@@ -815,6 +827,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           }
           title={inspectedCase.title}
           onClose={() => setInspectedCase(undefined)}
+          onChanged={refreshAfterDecision}
           onOpenLibrary={uri => {
             setInspectedCase(undefined);
             props.onOpenLibrary(uri);
@@ -833,7 +846,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           finding={selected}
           repairsAvailable={props.report.repositoryEvidence.state === 'available'}
           onClose={() => setSelected(undefined)}
-          onChanged={props.onChanged}
+          onChanged={refreshAfterDecision}
+          onRefresh={refreshEvidence}
           onOpenLibrary={props.onOpenLibrary}
         />
       ) : null}

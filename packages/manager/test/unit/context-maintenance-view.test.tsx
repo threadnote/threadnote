@@ -2,6 +2,8 @@
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import {buildContextHealthReport} from '@threadnote/context/health';
+import type {MemoryRecord} from '@threadnote/memory/document';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
 import type {
@@ -37,12 +39,15 @@ const report = (project = 'threadnote'): ManagerContextHealthResponseV1 => ({
   repositoryEvidence: {state: 'unavailable', reason: 'repository-unavailable'},
   status: 'unknown',
   semanticCompleteness: {
-    version: 1,
+    version: 2,
     state: 'partial',
     eligibleRecords: 384,
     analyzedRecords: 11,
     unknownRecords: 373,
     claimsAnalyzed: 11,
+    supportedClaims: 11,
+    unsupportedClaims: 0,
+    coverage: 'bounded-English-extraction',
     contradictionCount: 0,
     pairsCompared: 0,
     omittedContradictions: 0,
@@ -65,12 +70,15 @@ const report = (project = 'threadnote'): ManagerContextHealthResponseV1 => ({
       reasons: [{reason: 'citation-limit', count: 1_917}],
     },
     semanticCoverage: {
-      version: 1,
+      version: 2,
       state: 'partial',
       eligibleRecords: 384,
       analyzedRecords: 11,
       unknownRecords: 373,
       claimsAnalyzed: 11,
+      supportedClaims: 11,
+      unsupportedClaims: 0,
+      coverage: 'bounded-English-extraction',
       contradictionCount: 0,
       pairsCompared: 0,
       omittedContradictions: 0,
@@ -115,6 +123,230 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it('opens a persisted semantic case with both quotes, context, reason, and evidence revisions', async () => {
+    const memory = (name: string, body: string): MemoryRecord => ({
+      body,
+      content: body,
+      headerTitle: 'MEMORY',
+      uri: `threadnote://memory/${name}`,
+      metadata: {
+        kind: 'durable',
+        project: 'threadnote',
+        sourceAgentClient: 'test',
+        status: 'active',
+        timestamp: '2026-01-01',
+      },
+    });
+    const records = [
+      memory('a', '# Production\nTimeout is 60 seconds.'),
+      memory('b', '# Production\nTimeout must be 30 seconds.'),
+    ];
+    const health = buildContextHealthReport({project: 'threadnote', records, now: new Date('2026-06-01')});
+    const finding = health.findings[0];
+    const item = {
+      ...finding.caseIdentity!,
+      caseId: finding.caseId!,
+      evidenceRevision: 'revision',
+      disposition: 'needs-decision' as const,
+      reason: finding.summary,
+      firstSeen: '2026-06-01',
+      lastSeen: '2026-06-01',
+      lastChecked: '2026-06-01',
+      attemptCount: 0,
+      subjectUri: records[0].uri,
+      events: [],
+    };
+    const retained = {...status(), state: 'needs-decision', cases: [item]};
+    const packet = {
+      version: 2,
+      caseId: item.caseId,
+      project: 'threadnote',
+      memoryUri: records[0].uri,
+      evidenceRevision: 'revision',
+      expectedContentHash: 'hash',
+      reason: finding.summary,
+      choices: ['Review applicability and policy'],
+      allowedOperations: ['read_context'],
+      instructions: 'No source wins automatically.',
+      semanticEvidence: finding.semanticEvidence,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://manager.test');
+        const result =
+          url.pathname === '/api/memory'
+            ? {content: records[0].content}
+            : url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status'
+              ? packet
+              : retained;
+        return new Response(JSON.stringify(result), {headers: {'content-type': 'application/json'}});
+      }),
+    );
+    const openMemory = vi.fn();
+    await render(
+      <ContextMaintenanceView
+        {...props}
+        onOpenLibrary={openMemory}
+        project="threadnote"
+        report={{...health, findings: [], recordPreviews: [], repositoryEvidence: {state: 'available'}}}
+      />,
+    );
+    const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent === 'Review memory and evidence',
+    );
+    expect(button).toBeDefined();
+    await act(async () => button?.click());
+    const evidence = document.querySelector('dialog [aria-label="Semantic comparison evidence"]');
+    expect(evidence?.textContent).toContain('Timeout is 60 seconds.');
+    expect(evidence?.textContent).toContain('Timeout must be 30 seconds.');
+    expect(evidence?.textContent).toContain('policy conflict');
+    expect(evidence?.textContent).toContain('unknown validity');
+    expect(evidence?.textContent).toContain('Production');
+    expect(evidence?.textContent).toContain(finding.semanticEvidence?.right.recordContentFingerprint);
+    expect(document.querySelector('dialog')?.textContent).not.toContain('No source excerpt is available');
+    expect(document.querySelector('dialog h2')?.textContent).toBe('Compare conflicting memories');
+    expect(document.querySelector('dialog [aria-label="Memory being reviewed"]')).toBeNull();
+    expect(document.querySelector('dialog')?.textContent).not.toContain('Edit or archive in Library');
+    const openB = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
+      button => button.textContent?.trim() === 'Open memory B',
+    );
+    await act(async () => openB?.click());
+    expect(openMemory).toHaveBeenCalledWith(records[1].uri);
+  });
+  it.each(['finding', 'retained'] as const)(
+    'refreshes the retained decision queue immediately after confirming a semantic %s review',
+    async path => {
+      vi.useFakeTimers();
+      const memory = (name: string, body: string): MemoryRecord => ({
+        uri: `threadnote://memory/${name}`,
+        body,
+        content: body,
+        headerTitle: 'MEMORY',
+        metadata: {
+          kind: 'durable',
+          project: 'threadnote',
+          sourceAgentClient: 'test',
+          status: 'active',
+          timestamp: '2026-01-01',
+        },
+      });
+      const records = [
+        memory('a', '# Production\nTimeout is 60 seconds.'),
+        memory('b', '# Production\nTimeout must be 30 seconds.'),
+      ];
+      const health = buildContextHealthReport({project: 'threadnote', records, now: new Date('2026-06-01')});
+      const finding = health.findings[0];
+      const evidence = finding.semanticEvidence!;
+      const item = {
+        ...finding.caseIdentity!,
+        caseId: finding.caseId!,
+        evidenceRevision: 'revision',
+        disposition: 'needs-decision' as const,
+        reason: 'Opposing canonical claims',
+        firstSeen: '2026-06-01',
+        lastSeen: '2026-06-01',
+        lastChecked: '2026-06-01',
+        attemptCount: 0,
+        subjectContentHashes: records.map(record => ({uri: record.uri, hash: 'hash'})),
+        events: [],
+      };
+      let applied = false;
+      let statusReads = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: RequestInfo | URL) => {
+          const url = new URL(String(input), 'http://manager.test');
+          let result: unknown;
+          if (url.pathname.endsWith('/semantic/preview'))
+            result = {
+              preview: {
+                previewId: 'semantic-preview',
+                revision: 'semantic-revision',
+                choice: 'left',
+                mode: 'archive-other',
+                summary: 'Keep memory A current; move memory B to history.',
+                keptUri: evidence.left.recordUri,
+                archivedUri: evidence.right.recordUri,
+                archivedContent: records[1].body,
+                constraints: [],
+              },
+            };
+          else if (url.pathname.endsWith('/semantic/apply')) {
+            applied = true;
+            result = {result: {status: 'applied', choice: 'left'}};
+          } else if (url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status') {
+            result = {
+              version: 2,
+              project: 'threadnote',
+              caseId: item.caseId,
+              memoryUri: evidence.left.recordUri,
+              reason: item.reason,
+              evidenceRevision: 'revision',
+              semanticEvidence: evidence,
+              choices: [],
+              instructions: 'Review both memories.',
+            };
+          } else {
+            if (!url.searchParams.has('caseId')) statusReads += 1;
+            result = {
+              ...status(),
+              state: applied ? 'idle' : 'needs-decision',
+              cases: [{...item, disposition: applied ? 'resolved' : 'needs-decision'}],
+              counts: {decisionMemories: applied ? 0 : 2},
+            };
+          }
+          return new Response(JSON.stringify(result), {headers: {'content-type': 'application/json'}});
+        }),
+      );
+      let currentReport = {
+        ...report(),
+        ...health,
+        recordPreviews: [],
+        findings: path === 'finding' ? health.findings : [],
+        repositoryEvidence: {state: 'available' as const},
+      };
+      const onChanged = vi.fn(() => {
+        currentReport = {
+          ...currentReport,
+          findings: [],
+          maintenance: {...currentReport.maintenance!, affectedMemories: 0, actionableFindings: 0},
+        };
+        root?.render(
+          <ContextMaintenanceView {...props} project="threadnote" report={currentReport} onChanged={onChanged} />,
+        );
+      });
+      await render(
+        <ContextMaintenanceView {...props} project="threadnote" report={currentReport} onChanged={onChanged} />,
+      );
+      expect(document.querySelectorAll('.health-record')).toHaveLength(2);
+      const initialReads = statusReads;
+      const click = async (label: string) => {
+        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+          value => value.textContent?.trim() === label,
+        );
+        expect(button).toBeDefined();
+        await act(async () => button!.click());
+      };
+      await click(path === 'finding' ? 'Compare evidence and preview change' : 'Review memory and evidence');
+      await act(async () => document.querySelector<HTMLInputElement>('dialog input[value="left"]')!.click());
+      await click('Preview my choice');
+      await act(async () => document.querySelector<HTMLInputElement>('dialog input[type="checkbox"]')!.click());
+      await click('Confirm and move memory B to history');
+      expect(onChanged).toHaveBeenCalledOnce();
+      expect(statusReads).toBeGreaterThan(initialReads);
+      expect(document.querySelector('dialog')).toBeNull();
+      expect(document.querySelectorAll('.health-record')).toHaveLength(0);
+      expect(document.querySelector('[aria-label="Needs your decision"]')?.textContent).not.toContain(
+        'Opposing canonical claims',
+      );
+      expect(document.body.textContent).toContain('No decisions are waiting');
+      expect(
+        [...document.querySelectorAll('[role="status"]')].some(value => value.textContent === 'Change saved.'),
+      ).toBe(true);
+    },
+  );
+
   it('shows the affected memory, safe cause and concrete recovery when inventory stops', async () => {
     const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/broken.md';
     vi.stubGlobal(
@@ -517,7 +749,7 @@ describe('context maintenance view', () => {
     expect(document.body.textContent).toContain('No decisions needed; evidence checks are incomplete');
     expect(document.body.textContent).toContain('96 of 1,712 background checks completed');
     expect(document.body.textContent).toContain('Current source checks96');
-    expect(document.body.textContent).toContain('Heuristic coverage can remain partial after scanning finishes');
+    expect(document.body.textContent).toContain('Extraction coverage can remain partial after scanning finishes');
     expect(document.body.textContent).toContain('Run maintenance now');
     expect(document.body.textContent).not.toContain('Repair all');
     expect(document.body.textContent).not.toContain('2,013 issues');

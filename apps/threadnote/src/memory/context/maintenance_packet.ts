@@ -2,6 +2,7 @@ import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {canonicalMemoryDocumentContent, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {memoryCodeCitationAnchorId} from '@threadnote/memory/code/citation';
+import {analyzeContextHealthSemantics} from '@threadnote/context/health_semantic';
 import {resolveContextHealthRelationTargetV2} from '@threadnote/context/health_maintenance';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -175,6 +176,17 @@ export function buildContextMaintenancePacket<E, R>(
           evidenceRevision: item.evidenceRevision,
           expectedContentHash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
           reason: item.reason,
+          ...(item.family === 'semantic-contradiction'
+            ? {
+                semanticEvidence: analyzeContextHealthSemantics({
+                  project: item.project,
+                  records: scopedRecords,
+                }).contradictions.find(
+                  finding =>
+                    [finding.left.claimFingerprint, finding.right.claimFingerprint].sort().join(':') === item.slot,
+                ),
+              }
+            : {}),
           disposition: item.disposition,
           relatedMemories: (item.subjectContentHashes ?? [])
             .slice(0, 32)
@@ -253,9 +265,9 @@ export function buildContextMaintenancePacket<E, R>(
                 ]
               : item.family === 'semantic-contradiction'
                 ? [
-                    'Read both current claims and supporting evidence',
-                    'Choose the current assertion',
-                    'Preview exact supersession of the stale claim',
+                    'Read both source claims, inherited context, and exact revisions',
+                    'Compare overlapping scope, validity, and descriptive or policy roles',
+                    'Preserve compatible rules and history; review any correction explicitly',
                   ]
                 : citation === undefined
                   ? [

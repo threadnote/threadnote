@@ -191,6 +191,31 @@ Its additive version-2 maintenance projection separates decisions, automatic wor
 Severity, confidence, and repairability are separate fields. Findings are deterministic and bounded. A citation that
 has not been checked because of a batch limit contributes to coverage, rather than becoming another issue.
 
+Semantic analyzer version 2 compares a bounded English grammar across active durable records in the selected project.
+It recognizes exact subject/property measurements with `is`, `must be`, `=`, `<`, `<=`, `>`, `>=`, or inclusive
+`between ... and ...` ranges. Duration and decimal byte units are normalized; equivalent values and overlapping
+constraints coexist. Explicit finite identifier sets (`one of [sqlite, postgres]`), identifier equality with `=`,
+and identifier-valued engine/protocol/format/mode properties are supported. Exact modal polarity (`must`, `shall`,
+`do`, `does`) remains review evidence; broad lexical negation is explicitly uncertain.
+
+Production, local, staging, development, and testing scope can come from the sentence or Markdown headings.
+Repository-wide rules overlap narrower environments. Canonical workspace roots overlap their descendants;
+absent `workspace_scope` means repository-wide under the memory metadata contract. Unspecified environment or
+validity remains unknown. Only explicit `valid_from`/`valid_to` metadata supplies time bounds, with half-open
+intervals; timestamps and ingestion order never decide which claim wins. Conflicting heading/inline environments,
+invalid applicability, and incomparable constraints produce uncertain comparisons when a supported comparison exists.
+Historical headings and past-tense claims remain history. An observed value that violates a required value is
+reported as a policy conflict rather than an automatic replacement decision.
+
+Each semantic finding and its maintenance review packet exposes both claim texts, inherited headings and metadata,
+UTF-16 body/heading spans, normalized constraints, claim roles, extraction method, and the record-content SHA-256
+revision. IDs bind these revisions and context, so edits reopen the corresponding evidence case. The analyzer remains
+bounded to 128 records, 256 claims, 16 claims per record, and 100 surfaced comparisons. It skips code fences and
+compares claims across records. Unsupported prose, hedging/conditional grammar, synonyms, general enum semantics,
+non-English claims, and uncited code/dependency/configuration changes are outside this extractor's guarantee.
+`complete` means supported extraction coverage within these bounds; it does not establish universal semantic
+correctness. Unsupported extraction makes coverage unknown even when some useful comparisons are available.
+
 The health report remains read-only. Automatic maintenance uses a separate persistent worker to make proven safe,
 private structural repairs and record recovery receipts. Changed engineering claims, ambiguous matches, and shared
 canonical changes require review. Unavailable current evidence remains unverified; recovering an original snapshot
@@ -282,6 +307,20 @@ binds the direction, selected proposal IDs, proposal revisions, and both record 
 approval tuple; it does not apply the semantic judgment. A downstream reviewed lifecycle operation must keep the stale
 record's memory ID in `status: superseded` history with `archived_from` provenance instead of silently deleting or
 overwriting it.
+
+Manager's semantic comparison also supports an explicit human decision: keep A, keep B, or keep both. Its separate
+preview shows both full original bodies. Keeping A or B moves the **entire other memory** to personal archived history
+only after explicit confirmation that the whole memory is outdated. The archive preserves the original body, stable
+identity, citations, scope and knowledge edges; the chosen memory stays unchanged. Unknown applicability and policy
+comparisons include caveats: an observation and requirement can both be true, and retiring an observation does not fix
+a policy violation. Shared records, unsupported schemas, malformed citations and pinned consolidation evidence require
+source editing or manual review.
+
+The saved preview binds the exact comparison and both source revisions. Apply checks both again under memory and
+storage locks; changed evidence requires a new review. Receipts support crash recovery and repeat approval safely.
+Keeping both changes no memory text and records a private reviewed decision for this exact pair. Health and retained
+maintenance cases honor it, and source edits invalidate it. These actions do not change the CLI's review-only directed
+repair contract or let the analyzer choose a winner.
 
 ## Context Check
 

@@ -603,7 +603,7 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          personalMemory('broken', 'Team snapshots require shared visibility.'),
+          personalMemory('broken', 'Team snapshots must use shared visibility.'),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'mismatched visibility']);
@@ -651,7 +651,9 @@ describe('context health aggregate runtime', () => {
 
         yield* fixture.fs.writeFileString(
           target,
-          memory('broken', 'visibility: external').replace('\nvisibility: shared', '').replaceAll('\n', '\r\n'),
+          memory('broken', 'Team snapshots must retain evidence.\nvisibility: external')
+            .replace('\nvisibility: shared', '')
+            .replaceAll('\n', '\r\n'),
         );
         yield* git(fixture.worktrees.platform, ['add', '.']);
         yield* git(fixture.worktrees.platform, ['commit', '--quiet', '--message', 'body visibility']);
@@ -660,8 +662,8 @@ describe('context health aggregate runtime', () => {
           project: 'threadnote',
           teams: ['platform'],
         }).pipe(TestClock.withLive);
-        expect(bodyVisibility).toMatchObject({exitCode: 0, status: 'clean'});
-        expect(bodyVisibility.sources[1]).toMatchObject({recordsScanned: 1, state: 'complete'});
+        expect(bodyVisibility).toMatchObject({exitCode: 2, status: 'unknown', knownFindings: 0});
+        expect(bodyVisibility.sources[1]).toMatchObject({reason: 'evidence-incomplete', state: 'unknown'});
 
         yield* fixture.fs.writeFileString(
           target,
@@ -704,7 +706,7 @@ describe('context health aggregate runtime', () => {
         const archived = yield* teamMemoryPath(fixture, 'platform', 'archived');
         yield* fixture.fs.writeFileString(
           active,
-          memory('active', 'Active records may depend on archived team knowledge.').replace(
+          memory('active', 'Active records must retain archived team knowledge.').replace(
             'visibility: shared',
             'relation: depends_on threadnote://memory/tn_archived\n',
           ),
@@ -719,13 +721,13 @@ describe('context health aggregate runtime', () => {
         const legacyVisibility = yield* teamMemoryPath(fixture, 'platform', 'legacy-visibility');
         yield* fixture.fs.writeFileString(
           legacyVisibility,
-          memory('legacy-visibility', 'Legacy team records may omit visibility.').replace('\nvisibility: shared', ''),
+          memory('legacy-visibility', 'Legacy team records must retain evidence.').replace('\nvisibility: shared', ''),
         );
         const updatedTopic = 'provider-neutral-credentials';
         const stableTopicPath = yield* teamMemoryPath(fixture, 'platform', 'legacy-credentials');
         yield* fixture.fs.writeFileString(
           stableTopicPath,
-          memory(updatedTopic, 'Shared replacements may evolve topic metadata while keeping their stable path.'),
+          memory(updatedTopic, 'Shared replacements must keep their stable path.'),
         );
         yield* commitTeams(fixture);
 
@@ -759,7 +761,7 @@ describe('context health aggregate runtime', () => {
           const target = yield* teamMemoryPath(fixture, 'platform', 'stable-shared-location');
           yield* fixture.fs.writeFileString(
             target,
-            memory(topic, 'Replacement topic metadata evolved in place.').replace(
+            memory(topic, 'Replacements must retain their stable path.').replace(
               /^memory_id: .*$/mu,
               'memory_id: tn_stable_shared_location',
             ),
@@ -839,7 +841,7 @@ describe('context health aggregate runtime', () => {
           fixture,
           'threadnote',
           'source.md',
-          personalMemory('source', 'Source depends on retired knowledge.', {
+          personalMemory('source', 'Sources must retain retired knowledge.', {
             memoryId: 'tn_relation_source',
             relations: [
               {type: 'depends_on', uri: 'threadnote://memory/tn_archived_target'},
@@ -894,7 +896,7 @@ describe('context health aggregate runtime', () => {
           fixture,
           'threadnote',
           'source.md',
-          personalMemory('source', 'Source depends on retired knowledge.', {
+          personalMemory('source', 'Sources must retain retired knowledge.', {
             relations: [{type: 'depends_on', uri: retiredUri}],
           }),
         );
@@ -929,12 +931,12 @@ describe('context health aggregate runtime', () => {
           fixture,
           segment,
           'personal.md',
-          personalMemory('personal', 'Personal project identity is preserved.', {project}),
+          personalMemory('personal', 'Personal projects must retain their identity.', {project}),
         );
         const teamTarget = yield* teamProjectMemoryPath(fixture, 'platform', segment, 'shared');
         yield* fixture.fs.writeFileString(
           teamTarget,
-          memory('shared', 'Shared project identity is preserved.', project),
+          memory('shared', 'Shared projects must retain their identity.', project),
         );
         yield* commitTeams(fixture);
 

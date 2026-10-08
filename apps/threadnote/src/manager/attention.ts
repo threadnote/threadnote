@@ -1,3 +1,4 @@
+import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {Effect, Result} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
@@ -240,6 +241,9 @@ function unavailableContextHealth(
     semanticCompleteness: {
       analyzedRecords: 0,
       claimsAnalyzed: 0,
+      supportedClaims: 0,
+      unsupportedClaims: 0,
+      coverage: 'bounded-English-extraction',
       contradictionCount: 0,
       eligibleRecords,
       omittedContradictions: 0,
@@ -247,7 +251,7 @@ function unavailableContextHealth(
       state: eligibleRecords === 0 ? 'complete' : 'unavailable',
       unknownReasons: [],
       unknownRecords: eligibleRecords,
-      version: 1,
+      version: CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
     },
     status: 'unknown',
     version: 1,

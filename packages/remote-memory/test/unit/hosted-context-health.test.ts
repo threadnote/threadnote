@@ -323,6 +323,9 @@ function report(): ContextHealthReportV1 {
     semanticCompleteness: {
       analyzedRecords: 1,
       claimsAnalyzed: 1,
+      supportedClaims: 1,
+      unsupportedClaims: 0,
+      coverage: 'bounded-English-extraction',
       contradictionCount: 0,
       eligibleRecords: 1,
       omittedContradictions: 0,
@@ -330,7 +333,7 @@ function report(): ContextHealthReportV1 {
       state: 'complete',
       unknownReasons: [],
       unknownRecords: 0,
-      version: 1,
+      version: 2,
     },
     status: 'clean',
     version: 1,

@@ -5853,6 +5853,282 @@ dd {
   padding: 16px 0;
   position: sticky;
 }
+.semantic-comparison {
+  display: grid;
+  gap: 20px;
+}
+.semantic-comparison-intro p {
+  line-height: 1.6;
+  margin: 12px 0 0;
+}
+.semantic-comparison-status,
+.semantic-claim-role {
+  align-items: center;
+  border-radius: 6px;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.5;
+  padding: 5px 9px;
+}
+.semantic-comparison-status {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.semantic-memory-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+}
+.semantic-memory-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.semantic-memory-card > header {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 20px 20px 0;
+}
+.semantic-memory-card h3 {
+  font-size: 16px;
+  margin: 0;
+}
+.semantic-claim-role {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.semantic-memory-card > .semantic-memory-name {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 8px 0 0;
+  padding: 0 20px;
+  overflow-wrap: anywhere;
+}
+.semantic-memory-card blockquote {
+  border-left: 3px solid var(--accent);
+  font-size: 16px;
+  line-height: 1.65;
+  margin: 22px 20px;
+  padding: 0 0 0 14px;
+  white-space: pre-wrap;
+}
+.semantic-memory-context {
+  display: grid;
+  font-size: 12px;
+  gap: 10px;
+  line-height: 1.5;
+  margin: 0 20px 20px;
+}
+.semantic-memory-context > div {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 90px minmax(0, 1fr);
+}
+.semantic-memory-context dt {
+  color: var(--muted);
+}
+.semantic-memory-context dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.semantic-memory-actions {
+  border-top: 1px solid var(--line);
+  margin-top: auto;
+  padding: 16px 20px;
+}
+.semantic-memory-actions button {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+  width: 100%;
+  justify-content: center;
+}
+.semantic-memory-card.is-selected,
+.semantic-both-choice.is-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.semantic-choice-intro h3 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+.semantic-choice-intro p {
+  color: var(--muted);
+  line-height: 1.6;
+  margin: 0;
+}
+.semantic-memory-choice,
+.semantic-both-choice {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  line-height: 1.5;
+  padding: 16px 20px;
+}
+.semantic-memory-choice {
+  background: var(--accent-soft);
+  border-top: 1px solid var(--line);
+  margin-top: auto;
+}
+.semantic-memory-choice + .semantic-memory-actions {
+  margin-top: 0;
+}
+.semantic-memory-choice input[type='radio'],
+.semantic-both-choice input[type='radio'],
+.semantic-archive-confirmation input[type='checkbox'] {
+  accent-color: var(--accent);
+  appearance: auto;
+  border: 0;
+  box-sizing: border-box;
+  flex: 0 0 16px;
+  height: 16px;
+  margin: 0;
+  min-height: 16px;
+  min-width: 16px;
+  padding: 0;
+  width: 16px;
+}
+.semantic-memory-choice,
+.semantic-both-choice,
+.semantic-archive-confirmation {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+}
+.semantic-memory-choice > span,
+.semantic-both-choice > span,
+.semantic-archive-confirmation > span {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.semantic-both-choice {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  margin-top: 18px;
+}
+.semantic-both-choice span {
+  display: grid;
+  gap: 4px;
+}
+.semantic-both-choice small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+.semantic-resolution {
+  border-top: 1px solid var(--line);
+  line-height: 1.65;
+  margin-top: 22px;
+  padding-top: 22px;
+}
+.semantic-resolution h3 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+.semantic-resolution-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+.semantic-resolution-actions .muted {
+  font-size: 12px;
+}
+.semantic-archive-warning {
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+  padding: 14px 18px;
+}
+.semantic-whole-memory {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 16px 0;
+  padding: 14px 18px;
+}
+.semantic-whole-memory summary {
+  cursor: pointer;
+}
+.semantic-whole-memory .markdown-viewer {
+  margin-top: 16px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.semantic-archive-confirmation {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  line-height: 1.6;
+}
+.semantic-archive-confirmation input[type='checkbox'] {
+  margin-top: 4px;
+}
+.semantic-source-details {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.semantic-source-details summary {
+  cursor: pointer;
+}
+.semantic-memory-card > .semantic-source-details {
+  border-top: 1px solid var(--line);
+  padding: 14px 20px;
+}
+.semantic-source-details code {
+  font-size: 11px;
+  white-space: normal;
+}
+.semantic-review-guide {
+  background: var(--sidebar-bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  line-height: 1.65;
+  padding: 20px;
+}
+.semantic-review-guide h3 {
+  font-size: 15px;
+  margin: 0;
+}
+.semantic-review-guide ol {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+  padding-left: 20px;
+}
+.semantic-review-guide p {
+  font-size: 12px;
+  margin-bottom: 0;
+}
+.semantic-review-dialog .health-dialog-section-heading {
+  margin-bottom: 18px;
+}
+@media (max-width: 600px) {
+  .semantic-review-dialog > header,
+  .semantic-review-dialog .detail-modal-body {
+    padding: 18px;
+  }
+  .semantic-review-dialog h2 {
+    font-size: 19px;
+  }
+  .semantic-memory-card > header {
+    align-items: flex-start;
+  }
+  .semantic-review-dialog > header > button {
+    flex-shrink: 0;
+  }
+}
 .review-safety-state {
   background: var(--code-bg);
   border: 1px solid var(--line-soft);

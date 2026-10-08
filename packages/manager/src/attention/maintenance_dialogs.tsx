@@ -1,3 +1,4 @@
+import {SemanticResolutionReview} from './semantic_comparison.js';
 import {Copy, ExternalLink, RefreshCw} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
@@ -67,6 +68,7 @@ export function MaintenanceCaseDialog(props: {
   readonly onClose: () => void;
   readonly onOpenLibrary: (uri: string) => void;
   readonly onTask: (task: string) => void;
+  readonly onChanged?: () => void;
 }): React.ReactElement {
   const [caseId, setCaseId] = useState(props.caseId);
   const [item, setItem] = useState(props.initialCase);
@@ -109,11 +111,12 @@ export function MaintenanceCaseDialog(props: {
   }, [props.project, props.memoryUri, caseId, refresh, selection]);
   const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
   const reason = packet?.reason ?? item?.reason;
+  const semanticReview = packet?.semanticEvidence !== undefined || item?.family === 'semantic-contradiction';
   return (
     <DetailModal
-      title={props.title ?? maintenanceMemoryTitle(uri)}
+      title={semanticReview ? 'Compare conflicting memories' : (props.title ?? maintenanceMemoryTitle(uri))}
       onClose={props.onClose}
-      className="health-case-dialog"
+      className={`health-case-dialog${semanticReview ? ' semantic-review-dialog' : ''}`}
     >
       {(props.relatedCases?.length ?? 0) > 1 ? (
         <label className="health-case-selector">
@@ -135,16 +138,16 @@ export function MaintenanceCaseDialog(props: {
           </select>
         </label>
       ) : null}
-      {reason ? (
+      {reason && !semanticReview ? (
         <section className="health-decision-explanation">
           <strong>{maintenanceDecisionLabel(reason)}</strong>
           <p>{maintenanceDecisionExplanation(reason)}</p>
         </section>
       ) : null}
-      {uri ? <CaseMemory uri={uri} refresh={refresh} /> : null}
+      {uri && !semanticReview ? <CaseMemory uri={uri} refresh={refresh} /> : null}
       <section aria-label="Case evidence" aria-busy={loading}>
         <header className="health-dialog-section-heading">
-          <h3>Source evidence</h3>
+          <h3>{semanticReview ? 'Compare the original statements' : 'Source evidence'}</h3>
           <button disabled={loading} type="button" onClick={() => setRefresh(value => value + 1)}>
             <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
           </button>
@@ -179,6 +182,18 @@ export function MaintenanceCaseDialog(props: {
             {(packet.omittedEvidenceSelectors ?? 0) > 0 ? (
               <p className="muted">More references are available in the full memory in Library.</p>
             ) : null}
+            {packet.semanticEvidence ? (
+              <SemanticResolutionReview
+                project={props.project}
+                evidence={packet.semanticEvidence}
+                onOpenLibrary={props.onOpenLibrary}
+                onResolved={() => {
+                  props.onChanged?.();
+                  props.onClose();
+                }}
+                onRefresh={() => setRefresh(value => value + 1)}
+              />
+            ) : null}
             <div className="health-evidence-comparison">
               {packet.evidence?.excerpts.map(excerpt => (
                 <section className="health-code-preview" key={`${excerpt.provenance}:${excerpt.excerptHash}`}>
@@ -199,15 +214,19 @@ export function MaintenanceCaseDialog(props: {
                 </section>
               ))}
             </div>
-            {!packet.evidence?.excerpts.length ? (
+            {!packet.evidence?.excerpts.length && !packet.semanticEvidence ? (
               <p>No source excerpt is available for this case. Review the memory and the choices below.</p>
             ) : null}
-            <h3>What you can do</h3>
-            <ul>
-              {packet.choices.map(choice => (
-                <li key={choice}>{choice}</li>
-              ))}
-            </ul>
+            {!semanticReview ? (
+              <>
+                <h3>What you can do</h3>
+                <ul>
+                  {packet.choices.map(choice => (
+                    <li key={choice}>{choice}</li>
+                  ))}
+                </ul>
+              </>
+            ) : null}
             {packet.ownerProposal ? (
               <section aria-label="Shared owner proposal">
                 <h4>Proposed changes for the team owner</h4>
@@ -244,7 +263,7 @@ export function MaintenanceCaseDialog(props: {
         ) : null}
       </section>
       <footer>
-        {uri ? (
+        {uri && (!semanticReview || !packet?.semanticEvidence) ? (
           <button type="button" className="primary" onClick={() => props.onOpenLibrary(uri)}>
             <ExternalLink size={14} aria-hidden="true" /> Edit or archive in Library
           </button>
@@ -253,7 +272,14 @@ export function MaintenanceCaseDialog(props: {
           type="button"
           onClick={() =>
             props.onTask(
-              healthDecisionTask(props.project, [{caseId}], 'Review this memory and propose a supported change', uri),
+              healthDecisionTask(
+                props.project,
+                [{caseId}],
+                semanticReview
+                  ? 'Compare both memories and their applicability before proposing any change'
+                  : 'Review this memory and propose a supported change',
+                uri,
+              ),
             )
           }
         >

@@ -1,4 +1,5 @@
 import {Effect} from 'effect';
+import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
@@ -14,6 +15,7 @@ import {
   type ContextMaintenanceEvidenceRequestPage,
 } from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
+import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
 
 export const readMaintenanceCandidateDecisions = Effect.fn('contextMaintenance.candidateDecisions')(function* (
   config: RuntimeConfig,
@@ -97,10 +99,13 @@ export function prepareMaintenanceSemanticProgress(
     projects.map(project => [
       project,
       sha256HexSync(
-        active
-          .filter(record => record.metadata.project === project)
-          .map(record => `${record.uri}:${hashes.get(record.uri)}`)
-          .join('|'),
+        JSON.stringify([
+          CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION,
+          active
+            .filter(record => record.metadata.project === project)
+            .map(record => `${record.uri}:${hashes.get(record.uri)}`)
+            .sort(),
+        ]),
       ),
     ]),
   );
@@ -199,7 +204,14 @@ export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semant
 ) {
   const batch = yield* readMaintenanceSemanticRecords(config, project, inventory, cursor);
   const subjects = batch.records;
-  const semantic = buildMaintenanceSemanticReport(project, subjects, now);
+  const reviewedIds = yield* reviewedSemanticContradictionIds(config, project, subjects);
+  const raw = buildMaintenanceSemanticReport(project, subjects, now);
+  const reviewedSlots = new Set(
+    raw.findings
+      .filter(finding => finding.semanticEvidence && reviewedIds.includes(finding.semanticEvidence.contradictionId))
+      .map(finding => finding.caseIdentity?.slot),
+  );
+  const semantic = buildMaintenanceSemanticReport(project, subjects, now, reviewedIds);
   const semanticIds = new Set<string>();
   for (const finding of semantic.findings.filter(finding => finding.category === 'semantic-contradiction')) {
     const identity = contextHealthFindingCaseIdentityV2({project, finding, records: subjects});
@@ -218,16 +230,32 @@ export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semant
         .map(subject => ({uri: subject.uri, hash: sha256HexSync(canonicalMemoryDocumentContent(subject.content))})),
     });
   }
-  for (const [id, item] of cases)
+  for (const [id, item] of cases) {
     if (
-      item.project === project &&
-      item.family === 'semantic-contradiction' &&
-      semantic.semanticCompleteness?.state === 'complete' &&
-      !semanticIds.has(id) &&
-      item.subjectContentHashes?.length === 2 &&
-      item.subjectContentHashes.every(subject => subjects.some(record => record.uri === subject.uri))
+      item.project !== project ||
+      item.family !== 'semantic-contradiction' ||
+      semanticIds.has(id) ||
+      item.subjectContentHashes?.length !== 2 ||
+      !item.subjectContentHashes.every(subject => subjects.some(record => record.uri === subject.uri)) ||
+      ['historical', 'resolved', 'retired'].includes(item.disposition)
     )
+      continue;
+    if (reviewedSlots.has(item.slot)) {
+      cases.set(id, upsertCase(cases, {...item, disposition: 'resolved', reason: 'human-reviewed-keep-both'}, now));
+    } else if (item.evidenceRevision !== revision) {
+      upsertCase(
+        cases,
+        {
+          ...item,
+          disposition: 'historical',
+          reason: `semantic-analyzer-v${CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION}-evidence-superseded`,
+        },
+        now,
+      );
+    } else if (semantic.semanticCompleteness.state === 'complete') {
       cases.set(id, {...item, disposition: 'resolved', reason: 'semantic-postcondition-verified', lastChecked: now});
+    }
+  }
   return {
     generation: revision,
     cursor: cursor + 1,
@@ -237,9 +265,15 @@ export const runMaintenanceSemanticWindow = Effect.fn('contextMaintenance.semant
   };
 });
 
-export function buildMaintenanceSemanticReport(project: string, records: readonly MemoryRecord[], now: string) {
+export function buildMaintenanceSemanticReport(
+  project: string,
+  records: readonly MemoryRecord[],
+  now: string,
+  reviewedIds?: readonly string[],
+) {
   return buildContextHealthReport({
     project,
+    reviewedSemanticContradictionIds: reviewedIds,
     now: new Date(now),
     records: records.map(record => ({
       ...record,

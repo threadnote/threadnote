@@ -33,6 +33,7 @@ import {
   projectContextHealthRecords,
   type ContextHealthSelectorV1,
 } from './health_selector.js';
+import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
 
 export interface RunContextHealthOptionsV1 {
   readonly after?: string;
@@ -129,6 +130,7 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   const candidateEvidence = yield* candidateStatusEvidence(config, project);
   const guidanceEvidence = yield* guidanceHealthEvidence(config, project, cwd);
   const report = buildContextHealthReport({
+    reviewedSemanticContradictionIds: yield* reviewedSemanticContradictionIds(config, project, records),
     after: options.after,
     candidateEvidence,
     guidanceEvidence,
@@ -271,13 +273,22 @@ export function renderContextHealth(
           `Maintenance progress: threadnote context maintain --action status --project ${shellQuote(report.project)}`,
         ]),
     ...(selector === undefined ? [] : [`Active selector: ${contextHealthSelectorDescription(selector)}.`]),
-    `Semantic evidence: ${report.semanticCompleteness.state}; ${report.semanticCompleteness.analyzedRecords}/${report.semanticCompleteness.eligibleRecords} durable record(s) analyzed, ${report.semanticCompleteness.unknownRecords} unknown.`,
+    `Bounded English extraction: ${report.semanticCompleteness.state}; ${report.semanticCompleteness.analyzedRecords}/${report.semanticCompleteness.eligibleRecords} durable record(s) analyzed, ${report.semanticCompleteness.unknownRecords} unknown.`,
   ];
   if (visibleFindings.length <= 12) {
     lines.push(
       ...visibleFindings.flatMap(finding => [
         `- ${finding.severity} ${finding.category}: ${finding.summary}`,
         ...(findingOwner(finding) === undefined ? [] : [`  owner: ${findingOwner(finding)}`]),
+        ...(finding.semanticEvidence === undefined
+          ? []
+          : [
+              `  comparison: ${finding.semanticEvidence.reason}; ${finding.semanticEvidence.classification}${finding.semanticEvidence.uncertainty.length === 0 ? '' : `; needs context: ${finding.semanticEvidence.uncertainty.join(', ')}`}`,
+              ...[finding.semanticEvidence.left, finding.semanticEvidence.right].map(
+                claim =>
+                  `  claim: ${JSON.stringify(claim.text)} (${claim.role}; environment=${claim.context.environment ?? 'unknown'}; headings=${claim.context.headings.join(' / ') || 'none'}; workspace=${claim.context.workspaceScope ?? 'repository'}; validity=${claim.context.validFrom ?? 'unknown'}..${claim.context.validTo ?? 'unknown'}; uri=${claim.recordUri}; body-span=${claim.span.start}..${claim.span.end}; revision=${claim.recordContentFingerprint})`,
+              ),
+            ]),
       ]),
     );
   } else {

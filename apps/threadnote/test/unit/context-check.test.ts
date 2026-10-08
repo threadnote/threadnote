@@ -24,6 +24,9 @@ function healthReport(findings: readonly ContextHealthFindingV1[], omittedFindin
     semanticCompleteness: {
       analyzedRecords: 4,
       claimsAnalyzed: 4,
+      supportedClaims: 4,
+      unsupportedClaims: 0,
+      coverage: 'bounded-English-extraction',
       contradictionCount: 0,
       eligibleRecords: 4,
       omittedContradictions: 0,
@@ -31,7 +34,7 @@ function healthReport(findings: readonly ContextHealthFindingV1[], omittedFindin
       state: 'complete',
       unknownReasons: [],
       unknownRecords: 0,
-      version: 1,
+      version: 2,
     },
     status: findings.length > 0 || omittedFindings > 0 ? 'findings' : 'clean',
     version: 1,
@@ -174,7 +177,7 @@ describe('buildContextCheckReport', () => {
       project: 'threadnote',
       records: [duplicateRecord('only-record')],
     });
-    expect(filtered).toMatchObject({semanticCompleteness: {state: 'complete'}, status: 'unknown'});
+    expect(filtered).toMatchObject({semanticCompleteness: {state: 'unavailable'}, status: 'unknown'});
 
     expect(
       buildContextCheckReport({

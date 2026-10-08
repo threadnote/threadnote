@@ -1,3 +1,4 @@
+import type {ContextHealthSemanticContradictionV2} from '@threadnote/context/health_semantic';
 import type {
   CandidateCategory,
   CandidateComparison,
@@ -7,6 +8,33 @@ import type {
 import type {ContextHealthReportV1} from '@threadnote/context/health';
 import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import type {MemoryKind} from '@threadnote/memory/types';
+
+export interface ManagerSemanticReviewInputV1 {
+  readonly project: string;
+  readonly contradictionId: string;
+  readonly left: {readonly recordUri: string; readonly recordContentFingerprint: string};
+  readonly right: {readonly recordUri: string; readonly recordContentFingerprint: string};
+  readonly choice: 'left' | 'right' | 'both';
+}
+export interface ManagerSemanticReviewPreviewV1 {
+  readonly previewId: string;
+  readonly revision: string;
+  readonly choice: 'left' | 'right' | 'both';
+  readonly mode: 'archive-other' | 'keep-both' | 'review-only';
+  readonly summary: string;
+  readonly reason?: string;
+  readonly keptUri?: string;
+  readonly archivedUri?: string;
+  readonly keptContent?: string;
+  readonly archivedContent?: string;
+  readonly constraints: readonly string[];
+}
+export interface ManagerSemanticReviewApplyResultV1 {
+  readonly status: 'applied' | 'already-applied';
+  readonly choice: 'left' | 'right' | 'both';
+  readonly keptUri?: string;
+  readonly archivedUri?: string;
+}
 
 export type ManagerRepositoryEvidenceUnavailableReasonV1 =
   'foreign-host' | 'manifest-unavailable' | 'project-not-configured' | 'repository-unavailable';
@@ -205,6 +233,7 @@ export interface ManagerContextMaintenancePacketV2 {
   readonly choices: readonly string[];
   readonly allowedOperations: readonly string[];
   readonly instructions: string;
+  readonly semanticEvidence?: ContextHealthSemanticContradictionV2;
   readonly evidence?: ManagerContextHealthCodePreviewV1['evidence'];
   readonly evidenceSelectors?: readonly {
     readonly caseId: string;
