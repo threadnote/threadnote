@@ -16550,6 +16550,8 @@
         "package.json",
         "packages/testing/package.json",
         "packages/testing/src/node-fs.ts",
+        "packages/testing/src/node-os.ts",
+        "packages/testing/src/node-path.ts",
         "tools/bazel/application-test-groups.mjs",
         "tools/bazel/declaration-paths.mjs",
         "tools/bazel/project-vitest.config.ts",
