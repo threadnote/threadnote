@@ -793,18 +793,34 @@ const runOmpMcpInstall = Effect.fn('mcp.runOmpInstall')(function* (
   const path = yield* ompMcpConfigPath(options.project, options.hostRoot);
   const previous = (yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp;
   const previousHostRoot = previous?.hostRoot;
-  const relocatingHost =
+  const sameScope = (options.project === undefined) === (previous?.cwd === undefined);
+  if (sameScope && previous?.cwd !== undefined && !pathService.isAbsolute(previous.cwd)) {
+    return yield* McpOperationError.make({
+      message: 'The previous OMP project receipt has no absolute target; cannot safely relocate it.',
+    });
+  }
+  const relocatingPersonalHost =
+    sameScope &&
     options.project === undefined &&
-    previous?.cwd === undefined &&
     previousHostRoot !== undefined &&
     previousHostRoot !== options.hostRoot;
-  const relocatingPersonalMcp = relocatingHost && previous?.cwd === undefined;
+  const relocatingMcp =
+    sameScope && previous !== undefined && (yield* ompMcpConfigPath(previous.cwd, previousHostRoot)) !== path;
   const serverConfig = yield* buildOmpMcpServerConfig(config, {
     toolset: options.toolset,
   });
   const currentContent = yield* readFileIfExists(path);
   const current = jsonMcpConfigurationMatches(currentContent, 'mcpServers', name, serverConfig, true);
   const nextContent = renderOmpMcpConfig(path, currentContent, name, serverConfig);
+
+  if (relocatingMcp && previous !== undefined) {
+    const removed = yield* removeOmpMcpConfig(previous.name, !options.apply, previous.cwd, previousHostRoot);
+    if (!removed) {
+      return yield* McpOperationError.make({
+        message: 'Cannot safely remove the previous OMP MCP configuration; its receipt and artifacts were retained.',
+      });
+    }
+  }
 
   if (!options.apply) {
     yield* Console.log(
@@ -817,11 +833,8 @@ const runOmpMcpInstall = Effect.fn('mcp.runOmpInstall')(function* (
       project: options.project,
       toolset: options.toolset,
     });
-    if (relocatingHost) {
+    if (relocatingPersonalHost) {
       yield* relocateManagedOmpHook(previousHostRoot, options.hostRoot, true);
-    }
-    if (relocatingPersonalMcp) {
-      yield* removeOmpMcpConfig(name, true, undefined, previousHostRoot);
     }
     return;
   }
@@ -835,11 +848,8 @@ const runOmpMcpInstall = Effect.fn('mcp.runOmpInstall')(function* (
       currentContent === undefined ? `Wrote omp MCP config: ${path}` : `Updated omp MCP config: ${path}`,
     );
   }
-  if (relocatingHost) {
+  if (relocatingPersonalHost) {
     yield* relocateManagedOmpHook(previousHostRoot, options.hostRoot, false);
-  }
-  if (relocatingPersonalMcp) {
-    yield* removeOmpMcpConfig(name, false, undefined, previousHostRoot);
   }
 });
 

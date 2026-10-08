@@ -263,9 +263,11 @@ export const installAgentIntegrationInTransaction = Effect.fn('agentIntegrations
   const installedVersion = yield* getThreadnoteVersion();
   const receipt = hostReceipt(plan, installedVersion, mcp, 'pending');
   const previous = currentRegistry.hosts[agent];
+  const previousRootMatchesScope =
+    previous?.mcp.cwd === undefined || previous.mcp.hostRoot === (yield* Path.Path).join(previous.mcp.cwd, '.omp');
   const previousPlan =
-    mcp.cwd === undefined &&
-    previous?.mcp.cwd === undefined &&
+    (mcp.cwd === undefined) === (previous?.mcp.cwd === undefined) &&
+    previousRootMatchesScope &&
     previous?.mcp.hostRoot !== undefined &&
     previous.mcp.hostRoot !== plan.hostRoot
       ? yield* agentArtifacts(agent, previous.mcp.artifactProfile, previous.mcp.hostRoot)

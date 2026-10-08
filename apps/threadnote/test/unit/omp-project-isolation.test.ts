@@ -197,6 +197,183 @@ describe('OMP project isolation', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  for (const apply of [false, true]) {
+    effectIt.effect(`retargets managed project artifacts without changing unrelated files (apply=${apply})`, () =>
+      Effect.gen(function* () {
+        const {fs, path, root, user, project, home, testSystem} = yield* fixture;
+        const config = runtime(home);
+        const nextProject = path.join(root, 'next-project');
+        const previousRoot = path.join(project, '.omp');
+        yield* fs.makeDirectory(nextProject, {recursive: true});
+        yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(Effect.provideService(SystemInfo, testSystem));
+        const mcpPath = path.join(previousRoot, 'mcp.json');
+        const previousMcp = JSON.parse(yield* fs.readFileString(mcpPath));
+        previousMcp.mcpServers.other = {command: 'keep-other-server'};
+        previousMcp.mcpServers.retargeted = {command: 'keep-unrelated-name-collision'};
+        yield* fs.writeFileString(mcpPath, JSON.stringify(previousMcp));
+        const instructions = path.join(previousRoot, 'AGENTS.md');
+        yield* fs.writeFileString(
+          instructions,
+          `Keep project instructions.\n${yield* fs.readFileString(instructions)}`,
+        );
+        const hook = path.join(previousRoot, 'hooks', 'pre', 'threadnote.ts');
+        yield* fs.makeDirectory(path.dirname(hook), {recursive: true});
+        yield* fs.writeFileString(hook, '// Keep project hook.\n');
+        const customSkill = path.join(previousRoot, 'skills', 'custom', 'SKILL.md');
+        yield* fs.makeDirectory(path.dirname(customSkill), {recursive: true});
+        yield* fs.writeFileString(customSkill, 'Keep custom skill.\n');
+        const before = yield* snapshot(root);
+        const userBefore = yield* snapshot(user);
+        yield* runMcpInstall(config, 'omp', {apply, project: nextProject, name: 'retargeted'}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        if (!apply) {
+          expect(yield* snapshot(root)).toEqual(before);
+          return;
+        }
+        expect({
+          managedMcp: JSON.parse(yield* fs.readFileString(mcpPath)).mcpServers.threadnote !== undefined,
+          managedGuidance: (yield* fs.readFileString(instructions)).includes(USER_INSTRUCTIONS_START_MARKER),
+          managedSkill: yield* fs.exists(path.join(previousRoot, 'skills', 'threadnote-context', 'SKILL.md')),
+        }).toEqual({managedMcp: false, managedGuidance: false, managedSkill: false});
+        expect(JSON.parse(yield* fs.readFileString(mcpPath)).mcpServers.other).toEqual(previousMcp.mcpServers.other);
+        expect(JSON.parse(yield* fs.readFileString(mcpPath)).mcpServers.retargeted).toEqual(
+          previousMcp.mcpServers.retargeted,
+        );
+        expect(yield* fs.readFileString(instructions)).toContain('Keep project instructions.');
+        expect(yield* fs.readFileString(hook)).toBe('// Keep project hook.\n');
+        expect(yield* fs.readFileString(customSkill)).toBe('Keep custom skill.\n');
+        expect(yield* fs.exists(path.join(nextProject, '.omp', 'mcp.json'))).toBe(true);
+        expect(yield* fs.exists(path.join(nextProject, '.omp', 'AGENTS.md'))).toBe(true);
+        expect(yield* fs.exists(path.join(nextProject, '.omp', 'skills', 'threadnote-context', 'SKILL.md'))).toBe(true);
+        expect((yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp.cwd).toBe(nextProject);
+        expect((yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp.name).toBe('retargeted');
+        expect(yield* snapshot(user)).toEqual(userBefore);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect('upgrades a legacy project receipt without removing its new MCP entry or personal artifacts', () =>
+    Effect.gen(function* () {
+      const {fs, path, user, project, home, testSystem} = yield* fixture;
+      const config = runtime(home);
+      yield* installAgentIntegration(config, 'omp', {dryRun: false, name: 'threadnote', toolset: 'core'}).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+      );
+      const registryPath = path.join(home, 'integrations', 'agents.json');
+      const legacy = JSON.parse(yield* fs.readFileString(registryPath));
+      legacy.hosts.omp.mcp.cwd = project;
+      yield* fs.writeFileString(registryPath, JSON.stringify(legacy));
+      yield* fs.makeDirectory(path.join(project, '.omp'), {recursive: true});
+      yield* fs.writeFileString(
+        path.join(project, '.omp', 'mcp.json'),
+        '{"mcpServers":{"threadnote":{"command":"stale-command"}}}\n',
+      );
+      const userBefore = yield* snapshot(user);
+      yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(Effect.provideService(SystemInfo, testSystem));
+      expect(
+        JSON.parse(yield* fs.readFileString(path.join(project, '.omp', 'mcp.json'))).mcpServers.threadnote,
+      ).toBeDefined();
+      expect((yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp.hostRoot).toBe(path.join(project, '.omp'));
+      expect(yield* snapshot(user)).toEqual(userBefore);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const apply of [false, true]) {
+    effectIt.effect(
+      `refuses retargeting unreadable previous MCP without changing its receipt or artifacts (apply=${apply})`,
+      () =>
+        Effect.gen(function* () {
+          const {fs, path, root, project, home, testSystem} = yield* fixture;
+          const config = runtime(home);
+          yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          yield* fs.writeFileString(path.join(project, '.omp', 'mcp.json'), '{malformed');
+          const nextProject = path.join(root, 'next-project');
+          yield* fs.makeDirectory(nextProject, {recursive: true});
+          const before = yield* snapshot(root);
+          const result = yield* runMcpInstall(config, 'omp', {apply, project: nextProject}).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+            Effect.exit,
+          );
+          expect(Exit.isFailure(result)).toBe(true);
+          expect(yield* snapshot(root)).toEqual(before);
+        }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect('refuses relocation from a legacy relative receipt instead of guessing its original directory', () =>
+    Effect.gen(function* () {
+      const {fs, path, root, project, home, testSystem} = yield* fixture;
+      const config = runtime(home);
+      const isolatedPath = Path.Path.of({...path, resolve: (...parts) => path.resolve(root, ...parts)});
+      yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+        Effect.provideService(Path.Path, isolatedPath),
+      );
+      const registryPath = path.join(home, 'integrations', 'agents.json');
+      const legacy = JSON.parse(yield* fs.readFileString(registryPath));
+      legacy.hosts.omp.mcp.cwd = 'project';
+      yield* fs.writeFileString(registryPath, JSON.stringify(legacy));
+      const nextProject = path.join(root, 'next-project');
+      yield* fs.makeDirectory(nextProject, {recursive: true});
+      const before = yield* snapshot(root);
+      const result = yield* runMcpInstall(config, 'omp', {apply: true, project: nextProject}).pipe(
+        Effect.provideService(SystemInfo, testSystem),
+        Effect.provideService(Path.Path, isolatedPath),
+        Effect.exit,
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(yield* snapshot(root)).toEqual(before);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'retargeting leaves managed artifacts only in the current project and preserves other content',
+    {targets: fc.array(fc.integer({min: 1, max: 2}), {minLength: 1, maxLength: 3})},
+    ({targets}) =>
+      Effect.gen(function* () {
+        const {fs, path, root, user, home, testSystem} = yield* fixture;
+        const config = runtime(home);
+        const projects = [0, 1, 2].map(index => path.join(root, `target-${index}`));
+        for (const project of projects) {
+          yield* fs.makeDirectory(path.join(project, '.omp'), {recursive: true});
+          yield* fs.writeFileString(
+            path.join(project, '.omp', 'mcp.json'),
+            '{"mcpServers":{"other":{"command":"keep-other-server"}}}\n',
+          );
+          yield* fs.writeFileString(path.join(project, '.omp', 'AGENTS.md'), 'Keep project instructions.\n');
+        }
+        const userBefore = yield* snapshot(user);
+        const visited = new Set<number>();
+        for (const target of [0, ...targets]) {
+          const project = projects[target];
+          const name = `managed-${target}`;
+          yield* runMcpInstall(config, 'omp', {apply: true, project, name}).pipe(
+            Effect.provideService(SystemInfo, testSystem),
+          );
+          visited.add(target);
+          expect((yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp.cwd).toBe(project);
+          for (const index of visited) {
+            const host = path.join(projects[index], '.omp');
+            const mcp = JSON.parse(yield* fs.readFileString(path.join(host, 'mcp.json')));
+            expect(Object.keys(mcp.mcpServers).sort()).toEqual(index === target ? [name, 'other'] : ['other']);
+            expect(mcp.mcpServers.other).toEqual({command: 'keep-other-server'});
+            const guidance = yield* fs.readFileString(path.join(host, 'AGENTS.md'));
+            expect(guidance.includes(USER_INSTRUCTIONS_START_MARKER)).toBe(index === target);
+            expect(guidance).toContain('Keep project instructions.');
+            expect(yield* fs.exists(path.join(host, 'skills', 'threadnote-context', 'SKILL.md'))).toBe(
+              index === target,
+            );
+          }
+          expect(yield* snapshot(user)).toEqual(userBefore);
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 8}},
+  );
+
   fcEffectProp(
     effectIt,
     'project installation preserves every global host file across profiles and repeated applies',
