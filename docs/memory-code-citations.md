@@ -89,7 +89,10 @@ a retryable missing, stale, deferred, or racing graph-admission failure stores t
 stages the requested locators in the private outbox. This matches the common agent closeout path: memory storage does
 not wait for graph preparation.
 
-`--defer-code-refs` and MCP `citationPolicy: "defer"` remain accepted as explicit compatibility spellings:
+`--defer-code-refs` and MCP `citationPolicy: "defer"` remain accepted as explicit compatibility spellings.
+For `remember_context`, explicit `defer` requires at least one `codeRef` and `status: "active"` (the default).
+It rejects `archived`, `expired`, and `superseded` before writing, even when the references can be captured immediately.
+Use strict capture for an inactive memory.
 
 ```sh
 threadnote remember \

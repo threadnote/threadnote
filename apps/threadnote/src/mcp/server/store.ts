@@ -70,8 +70,11 @@ export function registerStoreTool(
           `Graph-indexed repository-relative path/cgs_/cgr_; max ${MAX_MEMORY_CODE_CITATIONS}`,
           {maximumItems: MAX_MEMORY_CODE_CITATIONS},
         ),
-        citationPolicy: McpInput.literals(['require-current', 'defer'], 'codeRefs policy'),
-        clearKeywords: McpInput.boolean('Clear keywords (handoff/smoke allowed)'),
+        citationPolicy: McpInput.literals(
+          ['require-current', 'defer'],
+          'defer: nonempty codeRefs; status=active (default)',
+        ),
+        clearKeywords: McpInput.boolean('handoff/smoke allowed'),
         kind: McpInput.literals(['durable', 'handoff', 'incident', 'preference', 'smoke']),
         keywords: McpInput.stringOrStrings('Explicit search keywords; no smoke', {
           maximumItems: 32,
@@ -91,7 +94,7 @@ export function registerStoreTool(
             }),
         ),
         replaceUri: McpInput.string('Replaced memory URI'),
-        regenerateKeywords: McpInput.boolean('Regenerate keywords; no handoff/smoke'),
+        regenerateKeywords: McpInput.boolean('no handoff/smoke'),
         text: McpInput.string(),
         sourceAgentClient: McpInput.string(),
         status: McpInput.literals(['active', 'archived', 'expired', 'superseded']),
