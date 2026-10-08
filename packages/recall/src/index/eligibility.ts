@@ -27,7 +27,9 @@ export function recallEligibilityPredicate(
 
   const predicates: string[] = [];
   const params: string[] = [];
-  if (policy.projects.mode === 'allow-projects-and-projectless') {
+  if (policy.projects.mode === 'projectless-only') {
+    predicates.push(`${alias}.project IS NULL`);
+  } else if (policy.projects.mode === 'allow-projects-and-projectless') {
     const projects = policy.projects.projects
       .map(normalizeRecallProject)
       .filter((project): project is string => project !== undefined);

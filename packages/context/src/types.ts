@@ -148,6 +148,7 @@ export interface ContextBriefPlanV1 {
     readonly candidateLimit: number;
     readonly codeRefs: readonly string[];
     readonly project?: string;
+    readonly query: string;
     readonly scope: ContextBriefScopeV1;
   };
   readonly graph: {
@@ -165,9 +166,9 @@ export interface ContextBriefPlanV1 {
   readonly detail: ContextBriefDetail;
   readonly memory: {
     readonly candidateLimit: number;
-    readonly project?: string;
     readonly query: string;
     readonly requireResolvableMemoryIdentity: boolean;
+    readonly scope: ContextBriefScopeV1;
   };
   readonly mode: ContextBriefMode;
   readonly outputBudgetTokens: number;

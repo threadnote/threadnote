@@ -251,6 +251,7 @@ const writePolyglotRepository = Effect.fn('smokeSelfContained.writePolyglotRepos
       timeoutMs: 30_000,
     });
   yield* git(['init', '-q']);
+  yield* git(['remote', 'add', 'origin', 'https://github.com/threadnote/threadnote.git']);
   yield* git(['config', 'user.email', 'threadnote@example.test']);
   yield* git(['config', 'user.name', 'Threadnote Test']);
   yield* git(['add', '.']);

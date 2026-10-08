@@ -398,6 +398,7 @@ function codeAnchorPlan(codeRefs: readonly string[]): ContextBriefPlanV1['codeAn
     candidateLimit: 24,
     codeRefs,
     project: 'threadnote',
+    query: 'retry the documented contract',
     scope: {callerCwd: '/workspace/threadnote', kind: 'repository', project: 'threadnote'},
   };
 }

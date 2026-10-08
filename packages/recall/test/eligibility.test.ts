@@ -9,6 +9,7 @@ import {
   recallCandidateIsEligible,
   recallEligibilityPolicyRestrictsCandidates,
 } from '@threadnote/recall/eligibility';
+import {recallEligibilityPredicate} from '@threadnote/recall/index/eligibility';
 
 describe('recall eligibility policy', () => {
   it('keeps an omitted explicit project global', () => {
@@ -20,7 +21,7 @@ describe('recall eligibility policy', () => {
     expect(recallEligibilityPolicyRestrictsCandidates(policy)).toBe(false);
   });
 
-  it('allows the selected projects and projectless guidance while excluding other projects', () => {
+  it('narrows a workset to an explicitly selected member and keeps projectless guidance', () => {
     const policy = deriveRecallEligibilityPolicy({
       originalQuery: 'How does recall work?',
       explicitProject: ' ThrEadNote ',
@@ -30,13 +31,25 @@ describe('recall eligibility policy', () => {
     expect(policy).toEqual({
       authority: 'any',
       kind: 'candidate-policy',
-      projects: {mode: 'allow-projects-and-projectless', projects: ['mobile', 'threadnote']},
+      projects: {mode: 'allow-projects-and-projectless', projects: ['threadnote']},
     });
     expect(recallCandidateIsEligible(policy, {project: 'THREADNOTE'})).toBe(true);
-    expect(recallCandidateIsEligible(policy, {project: 'mobile'})).toBe(true);
+    expect(recallCandidateIsEligible(policy, {project: 'mobile'})).toBe(false);
     expect(recallCandidateIsEligible(policy, {})).toBe(true);
     expect(recallCandidateIsEligible(policy, {project: 'website'})).toBe(false);
     expect(recallEligibilityPolicyRestrictsCandidates(policy)).toBe(true);
+  });
+
+  it('allows every configured workset member when no project narrows the set', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: 'How does recall work?',
+      worksetProjectNames: ['mobile', 'threadnote'],
+    });
+
+    expect(recallCandidateIsEligible(policy, {project: 'mobile'})).toBe(true);
+    expect(recallCandidateIsEligible(policy, {project: 'threadnote'})).toBe(true);
+    expect(recallCandidateIsEligible(policy, {project: 'website'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {})).toBe(true);
   });
 
   it('restricts inferred workspace recall to the caller project while retaining projectless guidance', () => {
@@ -67,6 +80,36 @@ describe('recall eligibility policy', () => {
     expect(policy).toEqual({authority: 'any', kind: 'candidate-policy', projects: {mode: 'deny-all'}});
     expect(recallCandidateIsEligible(policy, {project: 'threadnote'})).toBe(false);
     expect(recallCandidateIsEligible(policy, {})).toBe(false);
+  });
+
+  it('intersects an explicit project with its workset instead of widening the workset', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: 'ordinary recall',
+      explicitProject: 'outside',
+      worksetProjectNames: ['inside'],
+    });
+
+    expect(policy.kind).toBe('candidate-policy');
+    if (policy.kind !== 'candidate-policy') throw new Error('Expected candidate policy');
+    expect(policy.projects).toEqual({mode: 'deny-all'});
+    expect(recallCandidateIsEligible(policy, {project: 'outside'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {project: 'inside'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {})).toBe(false);
+  });
+
+  it('keeps projectless-only scopes distinct from an empty project allow-list', () => {
+    const policy = {
+      ...deriveRecallEligibilityPolicy({originalQuery: 'ordinary guidance'}),
+      projects: {mode: 'projectless-only' as const},
+    };
+
+    expect(recallCandidateIsEligible(policy, {})).toBe(true);
+    expect(recallCandidateIsEligible(policy, {project: 'another-project'})).toBe(false);
+    expect(recallEligibilityPredicate('d', policy)).toEqual({
+      params: [],
+      restricted: true,
+      sql: 'd.project IS NULL',
+    });
   });
 
   it('represents pinned hard-URI recall as an explicit project and authority bypass', () => {

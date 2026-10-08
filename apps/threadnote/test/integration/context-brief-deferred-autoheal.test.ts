@@ -66,11 +66,11 @@ describe('Context Brief deferred code-anchor recovery', () => {
               manifestPath,
               user: 'tester',
             };
-            const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/context-brief-autoheal.md';
+            const memoryUri = 'threadnote://user/tester/memories/durable/projects/repository/context-brief-autoheal.md';
             const metadata: MemoryMetadata = {
               kind: 'durable',
               memoryId: 'tn_context_brief_autoheal',
-              project: 'threadnote',
+              project: 'repository',
               schemaVersion: MEMORY_SCHEMA_VERSION,
               sourceAgentClient: 'test',
               status: 'active',

@@ -10,8 +10,9 @@ import {
   stableUnique,
 } from '@threadnote/context/memory-evidence';
 export * from '@threadnote/context/memory-evidence';
-import {Effect, Result, Schedule, Schema} from 'effect';
+import {Effect, Option, Result, Schedule, Schema} from 'effect';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {resolveWorkset} from '@threadnote/workspace/manifest';
 import {readMemoryRecordsByUri} from '../memory/index.js';
 import {captureMemoryCodeCitations, MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {
@@ -27,13 +28,20 @@ import {
   loadRecallIndexData,
   loadRecallMemoryIdentities,
 } from '@threadnote/recall/index';
+import {
+  deriveRecallEligibilityPolicy,
+  normalizeRecallProjectNames,
+  type RecallEligibilityPolicy,
+} from '@threadnote/recall/eligibility';
 import {classifyMemoryIdentityCandidates} from '@threadnote/recall/memory/identity';
+import {resolveWorkspaceRepoName} from '../utils.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {
   ContextBriefMemoryCandidateV1,
   ContextBriefMemoryRetrievalV1,
   ContextBriefPlanV1,
+  ContextBriefScopeV1,
 } from '@threadnote/context/types';
 const MEMORY_RETRIEVAL_MULTIPLIER = 4;
 const CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT = 4;
@@ -44,16 +52,86 @@ const CONTEXT_BRIEF_CODE_ANCHOR_RETRY_MILLISECONDS = 25;
 import {MEMORY_RECALL_EMPTY_GAP} from '@threadnote/context/memory-evidence';
 const THREADNOTE_MEMORY_URI = /^threadnote:\/\/user\/[^/]+\/memories\//u;
 
+type ContextBriefMemoryScopeResolution =
+  | {readonly kind: 'repository'; readonly project?: string}
+  | {readonly kind: 'workset'; readonly projects?: readonly string[]};
+
+/** Derive a fail-closed project boundary for Context Brief memory retrieval. */
+export function contextBriefMemoryEligibilityPolicy(
+  scope: ContextBriefScopeV1,
+  query: string,
+  resolution: ContextBriefMemoryScopeResolution,
+): {readonly gap?: string; readonly policy: RecallEligibilityPolicy} {
+  if (scope.kind === 'repository') {
+    const project = scope.project ?? (resolution.kind === 'repository' ? resolution.project : undefined);
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: query,
+      ...(scope.project === undefined
+        ? project === undefined
+          ? {}
+          : {workspaceProject: project}
+        : {explicitProject: scope.project}),
+    });
+    return project === undefined
+      ? {
+          gap: 'memory-project-scope-unavailable',
+          policy: projectlessOnlyRecallEligibility(policy),
+        }
+      : {policy};
+  }
+
+  if (resolution.kind !== 'workset' || resolution.projects === undefined) {
+    return {
+      gap: 'memory-workset-scope-unavailable',
+      policy: projectlessOnlyRecallEligibility(deriveRecallEligibilityPolicy({originalQuery: query})),
+    };
+  }
+  const members = normalizeRecallProjectNames(resolution.projects);
+  const explicitProject = scope.project === undefined ? undefined : normalizeRecallProjectNames([scope.project])[0];
+  const selectedMembers =
+    explicitProject === undefined ? members : members.filter(project => explicitProject === project);
+  return {
+    policy: deriveRecallEligibilityPolicy({originalQuery: query, worksetProjectNames: selectedMembers}),
+  };
+}
+
+const contextBriefMemoryEligibility = Effect.fn('contextBrief.resolveMemoryEligibility')(function* (
+  config: RuntimeConfig,
+  scope: ContextBriefScopeV1,
+  query: string,
+) {
+  if (scope.kind === 'repository') {
+    const project =
+      scope.project ??
+      (yield* resolveWorkspaceRepoName({cwd: scope.callerCwd, includeProcessCwd: false}).pipe(
+        Effect.option,
+        Effect.map(Option.getOrUndefined),
+      ));
+    return contextBriefMemoryEligibilityPolicy(scope, query, {kind: 'repository', project});
+  }
+  const resolved = yield* resolveWorkset(config.manifestPath, scope.name).pipe(Effect.option);
+  const projects =
+    resolved._tag === 'Some' && resolved.value !== undefined
+      ? resolved.value.projects.map(project => project.name)
+      : undefined;
+  return contextBriefMemoryEligibilityPolicy(scope, query, {kind: 'workset', projects});
+});
+
+function projectlessOnlyRecallEligibility(policy: RecallEligibilityPolicy): RecallEligibilityPolicy {
+  return policy.kind === 'candidate-policy' ? {...policy, projects: {mode: 'projectless-only'}} : policy;
+}
+
 /** Local lexical retrieval only: no hosted service, model, or interpretation of memory body text. */
 export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrieveMemoryEvidence')(function* (
   config: RuntimeConfig,
   plan: ContextBriefPlanV1['memory'],
 ) {
+  const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
   const index = yield* loadRecallIndexData(config, {
     allowedUriScopes: [contextBriefMemoryUriScope(config.user)],
+    eligibility: scopedEligibility.policy,
     includeInactive: false,
     limit: Math.max(plan.candidateLimit, plan.candidateLimit * MEMORY_RETRIEVAL_MULTIPLIER),
-    ...(plan.project === undefined ? {} : {project: plan.project}),
     query: plan.query,
   });
   const rankedUris = index.candidates
@@ -77,6 +155,7 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
     consideredCandidates: index.candidates.length,
     gaps: [
       ...(candidates.length === 0 ? [MEMORY_RECALL_EMPTY_GAP] : []),
+      ...(scopedEligibility.gap === undefined ? [] : [scopedEligibility.gap]),
       ...(read.stableIdentityUnavailable ? ['stable-memory-identity-unavailable'] : []),
     ],
     trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
@@ -106,6 +185,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     if (plan.scope.kind !== 'repository') {
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-scope-unsupported');
     }
+    const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
     const callerCwd = plan.scope.callerCwd;
     if (plan.codeRefs.some(ref => ref.startsWith('cgr_'))) {
       return unavailableContextBriefCodeLinkedMemoryEvidence(requested, 'code-anchor-ref-unsupported');
@@ -233,13 +313,13 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     const linked = yield* loadRecallCodeLinks(config, {
       allowedUriScopes: [contextBriefMemoryUriScope(config.user)],
       anchors: resolvedAnchors.map(resolved => resolved.anchor),
+      eligibility: scopedEligibility.policy,
       ...(forceRecallRefresh ? {forceRefresh: true} : {}),
       includeInactive: false,
       limit: plan.candidateLimit,
       onSearchTruncated: count => {
         truncatedSelectorCount += count;
       },
-      ...(plan.project === undefined ? {} : {project: plan.project}),
     }).pipe(Effect.option);
     if (linked._tag === 'None') {
       return unavailableContextBriefCodeLinkedMemoryEvidenceAfterCapture(
@@ -289,6 +369,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
         ),
         ...(finalizationUnavailable ? ['code-anchor-recall-unavailable'] : []),
         ...(captureUnavailable ? ['code-anchor-resolution-unavailable'] : []),
+        ...(scopedEligibility.gap === undefined ? [] : [scopedEligibility.gap]),
         ...(readCandidates.stableIdentityUnavailable ? ['stable-memory-identity-unavailable'] : []),
       ]),
       trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},

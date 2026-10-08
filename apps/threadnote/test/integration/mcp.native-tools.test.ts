@@ -2456,7 +2456,7 @@ describe('Threadnote MCP toolsets', () => {
     );
   });
 
-  it('treats an explicit recall project as an eligibility boundary while omitted project stays global', async () => {
+  it('treats explicit project as a boundary and scopes omitted project to the caller workspace', async () => {
     await withMcpClient(
       async (client, fixture) => {
         const workspace = join(fixture.root, 'workspace');
@@ -2518,7 +2518,7 @@ describe('Threadnote MCP toolsets', () => {
         expect(uris?.[0]).toBe(requestedUri);
         expect(uris).not.toContain(workspaceUri);
 
-        const global = await client.callTool(
+        const defaultScoped = await client.callTool(
           {
             arguments: {
               callerCwd: workspace,
@@ -2532,11 +2532,12 @@ describe('Threadnote MCP toolsets', () => {
           undefined,
           {timeout: 10_000},
         );
-        expect(global.isError).not.toBe(true);
-        const globalUris = (
-          global.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]} | undefined
+        expect(defaultScoped.isError).not.toBe(true);
+        const defaultScopedUris = (
+          defaultScoped.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]} | undefined
         )?.results?.map(item => item.uri);
-        expect(globalUris).toEqual(expect.arrayContaining([requestedUri, workspaceUri]));
+        expect(defaultScopedUris).toContain(workspaceUri);
+        expect(defaultScopedUris).not.toContain(requestedUri);
       },
       {toolset: 'core'},
     );

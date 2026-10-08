@@ -55,6 +55,7 @@ export function planContextBrief(input: ContextBriefRequestV1 | unknown): Contex
       candidateLimit: CONTEXT_BRIEF_MAXIMUM_CODE_REFS,
       codeRefs: request.codeRefs ?? [],
       ...(request.scope.project === undefined ? {} : {project: request.scope.project}),
+      query: request.task,
       scope: request.scope,
     },
     graph: {
@@ -77,9 +78,9 @@ export function planContextBrief(input: ContextBriefRequestV1 | unknown): Contex
     detail,
     memory: {
       candidateLimit: 24,
-      ...(request.scope.project === undefined ? {} : {project: request.scope.project}),
       query: request.task,
       requireResolvableMemoryIdentity: (request.codeRefs?.length ?? 0) > 0,
+      scope: request.scope,
     },
     mode: request.mode,
     outputBudgetTokens: request.budgetTokens,
