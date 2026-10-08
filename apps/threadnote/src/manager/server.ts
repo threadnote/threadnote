@@ -37,6 +37,8 @@ import {
   type ConsolidationSource,
 } from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
+import {ManagerOperationError} from './operation_error.js';
+import {assertManagerSourceAssets} from './source_assets.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {
   availableConsolidationModels,
@@ -188,11 +190,6 @@ interface ManagerDirectoryEntry {
   readonly isDirectory: () => boolean;
   readonly isFile: () => boolean;
 }
-class ManagerOperationError extends Schema.TaggedError<ManagerOperationError>()('ManagerOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
-
 function managerOperationError(cause: unknown): ManagerOperationError {
   return Schema.is(ManagerOperationError)(cause)
     ? cause
@@ -350,7 +347,8 @@ interface BulkItemResult {
 
 export function runManage(config: RuntimeConfig, options: ManageOptions) {
   return Effect.scoped(
-    Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0})).pipe(
+    assertManagerSourceAssets().pipe(
+      Effect.andThen(Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0}))),
       Effect.flatMap(context =>
         Effect.gen(function* () {
           if (yield* codeGraphMaintenanceIntentActive(config.agentContextHome)) {

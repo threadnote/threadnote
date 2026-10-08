@@ -19,6 +19,12 @@ Prepare website metadata before generation or repository checks, including for
 non-website changes. Generation validates every target's declared data, and the
 ignored metadata file is absent in a fresh checkout.
 
+Source-mode `manage` also requires the Manager browser bundle in `dist/manager`.
+Run `bun run build` from the repository root before starting Manager after a
+fresh dependency install. Startup reports a missing bundle before opening a
+listener; it does not build browser assets automatically. Installed standalone
+Manager uses the assets shipped with its binary.
+
 Use `apps/threadnote` for product entrypoints and cross-domain composition,
 `apps/website` for the public site, an existing `packages/*` workspace for a
 reusable domain or infrastructure capability, `tools` for repository automation,
