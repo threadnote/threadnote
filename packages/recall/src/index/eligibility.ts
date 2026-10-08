@@ -19,17 +19,15 @@ export function recallEligibilityPredicate(
   policy: RecallEligibilityPolicy | undefined,
   externalHashExpression: string | false = `json_extract(${alias}.candidate_json, '$.contentHash')`,
 ): RecallSqlPredicate {
-  const root = 'threadnote://resources/external/superhuman';
-  const outside = `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`;
+  const roots = ['threadnote://resources/external/superhuman', 'threadnote://resources/external/pocket'];
+  const outside = roots.map(() => `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`).join(' AND ');
   const access = policy?.externalResources ?? {};
   const externalPredicate =
     Object.keys(access).length === 0
       ? outside
       : `(${outside} OR EXISTS (SELECT 1 FROM json_each(?) AS external_access WHERE external_access.key = ${alias}.uri ${externalHashExpression === false ? '' : `AND external_access.value = ${externalHashExpression}`}))`;
   const externalParams = [
-    root,
-    `${root}/`,
-    `${root}0`,
+    ...roots.flatMap(root => [root, `${root}/`, `${root}0`]),
     ...(Object.keys(access).length === 0 ? [] : [JSON.stringify(access)]),
   ];
   if (policy === undefined || policy.kind === 'pinned-hard-uri-bypass') {

@@ -4,6 +4,8 @@ import {canonicalResourceUri, parseResourceId, validatePortableSegment} from './
 import type {ResourceStoreLocation} from './resource-store.js';
 
 const SUPERHUMAN_ROOT = 'threadnote://resources/external/superhuman';
+const POCKET_ROOT = 'threadnote://resources/external/pocket';
+export type ExternalProvider = 'superhuman' | 'pocket';
 const ENVELOPE = 'THREADNOTE EXTERNAL RESOURCE/1\n';
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -11,6 +13,7 @@ const HASH = /^[a-f0-9]{64}$/;
 const MAX_RECEIPT_BYTES = 1024 * 1024;
 
 export interface ExternalResourceIdentity {
+  readonly provider?: ExternalProvider;
   readonly sourceId: string;
   readonly documentId: string;
   readonly pageId: string;
@@ -25,10 +28,11 @@ export interface ExternalResourceMetadata extends ExternalResourceIdentity {
   readonly remoteRevision?: string;
   readonly rendererVersion: string;
   readonly scrubberVersion: string;
-  readonly coverage: 'canvas-plain-text';
+  readonly coverage: 'canvas-plain-text' | 'pocket-api-text';
 }
 
 export interface ExternalDocumentManifest {
+  readonly provider?: ExternalProvider;
   readonly version: 1;
   readonly sourceId: string;
   readonly documentId: string;
@@ -40,13 +44,20 @@ export interface ExternalDocumentManifest {
   readonly nextAttemptAt?: number;
   readonly retryKind?: 'quota' | 'transient';
   readonly accessEpoch?: string;
+  readonly inventoryGeneration?: string;
 }
 
 export interface ExternalSourceReceipt {
+  readonly provider?: ExternalProvider;
   readonly version: 1;
   readonly sourceId: string;
   readonly accessEpoch: string;
-  readonly status: 'authentication-rejected' | 'cleanup';
+  readonly status: 'active' | 'authentication-rejected' | 'cleanup';
+  readonly inventoryPage?: number;
+  readonly inventoryOffset?: number;
+  readonly inventoryGeneration?: string;
+  readonly completedAt?: number;
+  readonly nextAttemptAt?: number;
 }
 
 export interface ExternalSourceAccessPolicy {
@@ -62,20 +73,21 @@ export class ExternalSourcePolicy extends Context.Service<
     readonly current: (
       location: ResourceStoreLocation,
       sourceId: string,
+      provider?: ExternalProvider,
     ) => Effect.Effect<ExternalSourceAccessPolicy | undefined>;
   }
 >()('@threadnote/store/external-resource/ExternalSourcePolicy') {}
 
 export function isExternalResourceUri(uri: string): boolean {
   const value = uri.split('#', 1)[0];
-  return value === SUPERHUMAN_ROOT || value.startsWith(`${SUPERHUMAN_ROOT}/`);
+  return [SUPERHUMAN_ROOT, POCKET_ROOT].some(root => value === root || value.startsWith(`${root}/`));
 }
 
 export function externalResourceUri(identity: ExternalResourceIdentity): string {
   if (!validIdentity(identity)) throw new Error('Invalid external resource identity.');
   return canonicalResourceUri('resources', [
     'external',
-    'superhuman',
+    identity.provider ?? 'superhuman',
     identity.sourceId,
     'docs',
     identity.documentId,
@@ -85,14 +97,18 @@ export function externalResourceUri(identity: ExternalResourceIdentity): string 
   ]);
 }
 
-export function externalDocumentManifestUri(sourceId: string, documentId: string): string {
+export function externalDocumentManifestUri(
+  sourceId: string,
+  documentId: string,
+  provider: ExternalProvider = 'superhuman',
+): string {
   if (!SOURCE_ID.test(sourceId) || !ID.test(documentId)) throw new Error('Invalid external document identity.');
-  return canonicalResourceUri('resources', ['external', 'superhuman', sourceId, 'docs', documentId, '.manifest.json']);
+  return canonicalResourceUri('resources', ['external', provider, sourceId, 'docs', documentId, '.manifest.json']);
 }
 
-export function externalSourceReceiptUri(sourceId: string): string {
+export function externalSourceReceiptUri(sourceId: string, provider: ExternalProvider = 'superhuman'): string {
   if (!SOURCE_ID.test(sourceId)) throw new Error('Invalid external source identity.');
-  return canonicalResourceUri('resources', ['external', 'superhuman', sourceId, '.access.json']);
+  return canonicalResourceUri('resources', ['external', provider, sourceId, '.access.json']);
 }
 
 export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): string {
@@ -103,9 +119,17 @@ export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): 
 export function parseExternalResourceIdentity(uri: string): ExternalResourceIdentity | undefined {
   const value = uri.split('#', 1)[0];
   const match =
-    /^threadnote:\/\/resources\/external\/superhuman\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(value);
+    /^threadnote:\/\/resources\/external\/(superhuman|pocket)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
+      value,
+    );
   if (!match) return undefined;
-  const identity = {sourceId: match[1], documentId: match[2], pageId: match[3], chunkId: match[4]};
+  const identity = {
+    provider: match[1] as ExternalProvider,
+    sourceId: match[2],
+    documentId: match[3],
+    pageId: match[4],
+    chunkId: match[5],
+  };
   return validIdentity(identity) && externalResourceUri(identity) === value ? identity : undefined;
 }
 
@@ -147,10 +171,11 @@ export const readExternalDocumentManifest = Effect.fn('external.readManifest')(f
   location: ResourceStoreLocation,
   sourceId: string,
   documentId: string,
+  provider: ExternalProvider = 'superhuman',
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const uri = yield* Effect.try(() => externalDocumentManifestUri(sourceId, documentId)).pipe(
+  const uri = yield* Effect.try(() => externalDocumentManifestUri(sourceId, documentId, provider)).pipe(
     Effect.orElseSucceed(() => undefined),
   );
   if (uri === undefined) return undefined;
@@ -160,7 +185,10 @@ export const readExternalDocumentManifest = Effect.fn('external.readManifest')(f
   if (content === undefined) return undefined;
   return yield* Effect.try(() => {
     const manifest: unknown = JSON.parse(content);
-    return validManifest(manifest) && manifest.sourceId === sourceId && manifest.documentId === documentId
+    return validManifest(manifest) &&
+      (manifest.provider ?? 'superhuman') === provider &&
+      manifest.sourceId === sourceId &&
+      manifest.documentId === documentId
       ? manifest
       : undefined;
   }).pipe(Effect.orElseSucceed(() => undefined));
@@ -169,10 +197,13 @@ export const readExternalDocumentManifest = Effect.fn('external.readManifest')(f
 export const readExternalSourceReceipt = Effect.fn('external.readSourceReceipt')(function* (
   location: ResourceStoreLocation,
   sourceId: string,
+  provider: ExternalProvider = 'superhuman',
 ): Effect.fn.Return<ExternalSourceReceipt | undefined | null, never, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const uri = yield* Effect.try(() => externalSourceReceiptUri(sourceId)).pipe(Effect.orElseSucceed(() => undefined));
+  const uri = yield* Effect.try(() => externalSourceReceiptUri(sourceId, provider)).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
   if (uri === undefined) return null;
   const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
   if (realHome === undefined) return null;
@@ -183,7 +214,11 @@ export const readExternalSourceReceipt = Effect.fn('external.readSourceReceipt')
   if (content === undefined) return null;
   return yield* Effect.try(() => {
     const receipt: unknown = JSON.parse(content);
-    return validSourceReceipt(receipt) && receipt.sourceId === sourceId ? receipt : null;
+    return validSourceReceipt(receipt) &&
+      (receipt.provider ?? 'superhuman') === provider &&
+      receipt.sourceId === sourceId
+      ? receipt
+      : null;
   }).pipe(Effect.orElseSucceed(() => null));
 });
 
@@ -198,9 +233,10 @@ export const externalResourceAccess = Effect.fn('external.resourceAccess')(funct
   if (!identity) return false;
   const policyService = yield* Effect.serviceOption(ExternalSourcePolicy);
   if (Option.isNone(policyService)) return false;
-  const policy = yield* policyService.value.current(location, identity.sourceId);
-  const sourceReceipt = yield* readExternalSourceReceipt(location, identity.sourceId);
-  const manifest = yield* readExternalDocumentManifest(location, identity.sourceId, identity.documentId);
+  const provider = identity.provider ?? 'superhuman';
+  const policy = yield* policyService.value.current(location, identity.sourceId, provider);
+  const sourceReceipt = yield* readExternalSourceReceipt(location, identity.sourceId, provider);
+  const manifest = yield* readExternalDocumentManifest(location, identity.sourceId, identity.documentId, provider);
   const now = yield* Clock.currentTimeMillis;
   if (!manifestPermits(manifest, policy, sourceReceipt, now)) return false;
   const expectedHash = manifest!.chunks[externalResourceUri(identity)];
@@ -232,19 +268,21 @@ export const loadExternalResourceAccess = Effect.fn('external.loadAccess')(funct
   const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
   if (realHome === undefined) return allowed;
   const canonicalLocation = {...location, home: realHome};
-  const root = resourcePath(path, canonicalLocation, SUPERHUMAN_ROOT);
-  const sources = yield* safeDirectories(fs, path, root);
   const now = yield* Clock.currentTimeMillis;
-  for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
-    const policy = yield* policyService.value.current(location, sourceId);
-    if (policy?.enabled !== true) continue;
-    const sourceReceipt = yield* readExternalSourceReceipt(location, sourceId);
-    for (const documentId of (yield* safeDirectories(fs, path, path.join(root, sourceId, 'docs'))).filter(value =>
-      ID.test(value),
-    )) {
-      const manifest = yield* readExternalDocumentManifest(location, sourceId, documentId);
-      if (!manifestPermits(manifest, policy, sourceReceipt, now)) continue;
-      for (const [uri, expectedHash] of Object.entries(manifest!.chunks)) allowed[uri] = expectedHash;
+  for (const provider of ['superhuman', 'pocket'] as const) {
+    const root = resourcePath(path, canonicalLocation, provider === 'pocket' ? POCKET_ROOT : SUPERHUMAN_ROOT);
+    const sources = yield* safeDirectories(fs, path, root);
+    for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
+      const policy = yield* policyService.value.current(location, sourceId, provider);
+      if (policy?.enabled !== true) continue;
+      const sourceReceipt = yield* readExternalSourceReceipt(location, sourceId, provider);
+      for (const documentId of (yield* safeDirectories(fs, path, path.join(root, sourceId, 'docs'))).filter(value =>
+        ID.test(value),
+      )) {
+        const manifest = yield* readExternalDocumentManifest(location, sourceId, documentId, provider);
+        if (!manifestPermits(manifest, policy, sourceReceipt, now)) continue;
+        for (const [uri, expectedHash] of Object.entries(manifest!.chunks)) allowed[uri] = expectedHash;
+      }
     }
   }
   return allowed;
@@ -260,7 +298,8 @@ function manifestPermits(
     policy?.enabled === true &&
     manifest?.status === 'active' &&
     sourceReceipt !== null &&
-    sourceReceipt?.status !== 'cleanup' &&
+    (sourceReceipt === undefined ||
+      (manifest.provider === 'pocket' ? sourceReceipt.status === 'active' : sourceReceipt.status !== 'cleanup')) &&
     manifest.accessEpoch === sourceReceipt?.accessEpoch &&
     policy.configFingerprint === manifest.configFingerprint &&
     now >= manifest.fetchedAt &&
@@ -373,7 +412,8 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
   if (
     !record(value) ||
     value.version !== 1 ||
-    value.coverage !== 'canvas-plain-text' ||
+    (value.coverage !== 'canvas-plain-text' && value.coverage !== 'pocket-api-text') ||
+    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
     !['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'].every(
       key => typeof value[key] === 'string',
     )
@@ -392,6 +432,7 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
   )
     return false;
   if (value.browserLink !== undefined) {
+    if (value.provider === 'pocket') return false;
     if (typeof value.browserLink !== 'string' || value.browserLink.length > 2048) return false;
     try {
       const url = new URL(value.browserLink);
@@ -414,6 +455,7 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
   if (
     !record(value) ||
     value.version !== 1 ||
+    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.documentId !== 'string' ||
@@ -442,10 +484,16 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
   if (value.retryKind !== undefined && value.retryKind !== 'quota' && value.retryKind !== 'transient') return false;
   if (value.accessEpoch !== undefined && (typeof value.accessEpoch !== 'string' || !HASH.test(value.accessEpoch)))
     return false;
+  if (
+    value.inventoryGeneration !== undefined &&
+    (typeof value.inventoryGeneration !== 'string' || !HASH.test(value.inventoryGeneration))
+  )
+    return false;
   return Object.entries(value.chunks).every(([uri, hash]) => {
     const identity = parseExternalResourceIdentity(uri);
     return (
       identity !== undefined &&
+      (identity.provider ?? 'superhuman') === (value.provider ?? 'superhuman') &&
       identity.sourceId === value.sourceId &&
       identity.documentId === value.documentId &&
       typeof hash === 'string' &&
@@ -458,15 +506,46 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
   if (
     !record(value) ||
     value.version !== 1 ||
+    (value.provider !== undefined && value.provider !== 'superhuman' && value.provider !== 'pocket') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.accessEpoch !== 'string' ||
     !HASH.test(value.accessEpoch) ||
-    (value.status !== 'authentication-rejected' && value.status !== 'cleanup')
+    (value.status !== 'authentication-rejected' && value.status !== 'cleanup' && value.status !== 'active')
+  )
+    return false;
+  if (
+    value.inventoryPage !== undefined &&
+    (!Number.isSafeInteger(value.inventoryPage) || (value.inventoryPage as number) < 1)
+  )
+    return false;
+  if (
+    value.inventoryOffset !== undefined &&
+    (!Number.isSafeInteger(value.inventoryOffset) ||
+      (value.inventoryOffset as number) < 0 ||
+      (value.inventoryOffset as number) > 100)
+  )
+    return false;
+  if (
+    value.inventoryGeneration !== undefined &&
+    (typeof value.inventoryGeneration !== 'string' || !HASH.test(value.inventoryGeneration))
+  )
+    return false;
+  if (
+    value.completedAt !== undefined &&
+    (typeof value.completedAt !== 'number' || !Number.isFinite(value.completedAt) || value.completedAt < 0)
+  )
+    return false;
+  if (
+    value.nextAttemptAt !== undefined &&
+    (typeof value.nextAttemptAt !== 'number' ||
+      !Number.isFinite(value.nextAttemptAt) ||
+      value.nextAttemptAt < 0 ||
+      value.nextAttemptAt >= 8_640_000_000_000_000)
   )
     return false;
   try {
-    externalSourceReceiptUri(value.sourceId);
+    externalSourceReceiptUri(value.sourceId, value.provider ?? 'superhuman');
     return true;
   } catch {
     return false;

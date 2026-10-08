@@ -1056,7 +1056,7 @@ const sourceAdd = Command.make(
     refreshIntervalMinutes: optional(
       integerFlag('refresh-interval-minutes').pipe(Flag.withDescription('Minimum minutes between source refreshes')),
     ),
-    type: defaultChoice('type', ['obsidian', 'superhuman'], 'External source type', 'obsidian'),
+    type: defaultChoice('type', ['obsidian', 'superhuman', 'pocket'], 'External source type', 'obsidian'),
     vault: optionalString('vault', 'Obsidian vault directory'),
   },
   options =>

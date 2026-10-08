@@ -48,7 +48,18 @@ export interface SuperhumanSourceConfig {
   readonly maxStaleHours: number;
 }
 
-export type SourceConfig = ObsidianSourceConfig | SuperhumanSourceConfig;
+export interface PocketSourceConfig {
+  readonly type: 'pocket';
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly credentialEnv: string;
+  readonly credentialStorage?: 'local';
+  readonly project: string | null;
+  readonly refreshIntervalMinutes: number;
+  readonly maxStaleHours: number;
+}
+
+export type SourceConfig = ObsidianSourceConfig | SuperhumanSourceConfig | PocketSourceConfig;
 
 export type SourceConfiguration =
   | {
@@ -78,6 +89,7 @@ export const DEFAULT_PROJECTION_STATUSES = ['active'] as const;
 export const DEFAULT_SUPERHUMAN_CREDENTIAL_ENV = 'SUPERHUMAN_DOCS_API_TOKEN';
 export const DEFAULT_SUPERHUMAN_REFRESH_INTERVAL_MINUTES = 15;
 export const DEFAULT_SUPERHUMAN_MAX_STALE_HOURS = 24;
+export const DEFAULT_POCKET_CREDENTIAL_ENV = 'POCKET_API_KEY';
 
 const CONFIGURATION_VERSION = 1;
 const CONFIGURATION_FILENAME = 'sources.yaml';
@@ -226,21 +238,32 @@ export function renderObsidianConfiguration(value: ObsidianConfiguration): strin
             watch: source.watch,
             ...(source.inbox ? {inbox: source.inbox} : {}),
           }
-        : {
-            id: source.id,
-            type: source.type,
-            enabled: source.enabled,
-            credential_env: source.credentialEnv,
-            ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
-            project: source.project,
-            documents: source.documents.map(document => ({
-              id: document.id,
-              ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
-            })),
-            include_hidden: source.includeHidden,
-            refresh_interval_minutes: source.refreshIntervalMinutes,
-            max_stale_hours: source.maxStaleHours,
-          },
+        : source.type === 'pocket'
+          ? {
+              id: source.id,
+              type: source.type,
+              enabled: source.enabled,
+              credential_env: source.credentialEnv,
+              ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
+              project: source.project,
+              refresh_interval_minutes: source.refreshIntervalMinutes,
+              max_stale_hours: source.maxStaleHours,
+            }
+          : {
+              id: source.id,
+              type: source.type,
+              enabled: source.enabled,
+              credential_env: source.credentialEnv,
+              ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
+              project: source.project,
+              documents: source.documents.map(document => ({
+                id: document.id,
+                ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
+              })),
+              include_hidden: source.includeHidden,
+              refresh_interval_minutes: source.refreshIntervalMinutes,
+              max_stale_hours: source.maxStaleHours,
+            },
     ),
     projections: value.projections.map(projection => ({
       id: projection.id,
@@ -287,6 +310,22 @@ export function upsertSuperhumanSource(
     projections: configuration.projections,
     sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((left, right) =>
       left.id.localeCompare(right.id),
+    ),
+  };
+}
+
+export function upsertPocketSource(
+  configuration: SourceConfiguration,
+  source: PocketSourceConfig,
+): SourceConfiguration {
+  const checked = validatePocketSourceConfig(source);
+  if (configuration.sources.some(item => item.id === checked.id && item.type !== checked.type))
+    throw ObsidianConfigurationError.make({message: `Source "${checked.id}" already has another type.`});
+  return {
+    version: 2,
+    projections: configuration.projections,
+    sources: [...configuration.sources.filter(item => item.id !== checked.id), checked].sort((a, b) =>
+      a.id.localeCompare(b.id),
     ),
   };
 }
@@ -347,6 +386,13 @@ export function requireSuperhumanSource(configuration: SourceConfiguration, id: 
   return source;
 }
 
+export function requirePocketSource(configuration: SourceConfiguration, id: string): PocketSourceConfig {
+  const source = configuration.sources.find(item => item.id === id);
+  if (!source || source.type !== 'pocket')
+    throw ObsidianConfigurationError.make({message: `No Pocket source named "${id}".`});
+  return source;
+}
+
 export function isObsidianSource(source: SourceConfig): source is ObsidianSourceConfig {
   return source.type === 'obsidian';
 }
@@ -395,7 +441,36 @@ export function validateSuperhumanSourceConfig(source: SuperhumanSourceConfig): 
   );
 }
 
-export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig): string {
+export function validatePocketSourceConfig(source: PocketSourceConfig): PocketSourceConfig {
+  return parsePocketSource(
+    {
+      id: source.id,
+      type: source.type,
+      enabled: source.enabled,
+      credential_env: source.credentialEnv,
+      credential_storage: source.credentialStorage,
+      project: source.project,
+      refresh_interval_minutes: source.refreshIntervalMinutes,
+      max_stale_hours: source.maxStaleHours,
+    },
+    'pocket source',
+  );
+}
+
+export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig | PocketSourceConfig): string {
+  if (source.type === 'pocket')
+    return sha256HexSync(
+      JSON.stringify({
+        type: source.type,
+        id: source.id,
+        enabled: source.enabled,
+        credentialEnv: source.credentialEnv,
+        credentialStorage: source.credentialStorage ?? null,
+        project: source.project,
+        refreshIntervalMinutes: source.refreshIntervalMinutes,
+        maxStaleHours: source.maxStaleHours,
+      }),
+    );
   return sha256HexSync(
     JSON.stringify({
       type: source.type,
@@ -419,9 +494,10 @@ function parseSource(value: unknown, label: string, version: 1 | 2): SourceConfi
     throw ObsidianConfigurationError.make({message: `${label} must be an object.`});
   }
   if (value.type === 'superhuman' && version === 2) return parseSuperhumanSource(value, label);
+  if (value.type === 'pocket' && version === 2) return parsePocketSource(value, label);
   if (value.type !== 'obsidian') {
     throw ObsidianConfigurationError.make({
-      message: `${label}.type must be "obsidian"${version === 2 ? ' or "superhuman"' : ''}.`,
+      message: `${label}.type must be "obsidian"${version === 2 ? ', "superhuman", or "pocket"' : ''}.`,
     });
   }
   const id = requiredIdentifier(value.id, `${label}.id`);
@@ -493,6 +569,34 @@ function parseSuperhumanSource(value: Record<string, unknown>, label: string): S
       8_760,
       `${label}.max_stale_hours`,
     ),
+  };
+}
+
+function parsePocketSource(value: Record<string, unknown>, label: string): PocketSourceConfig {
+  const id = portableIdentifier(requiredIdentifier(value.id, `${label}.id`), `${label}.id`);
+  const credentialEnv =
+    value.credential_env === undefined
+      ? DEFAULT_POCKET_CREDENTIAL_ENV
+      : requiredString(value.credential_env, `${label}.credential_env`);
+  if (!CREDENTIAL_ENV_PATTERN.test(credentialEnv))
+    throw ObsidianConfigurationError.make({message: `${label}.credential_env must be an environment variable name.`});
+  if (value.credential_storage !== undefined && value.credential_storage !== 'local')
+    throw ObsidianConfigurationError.make({message: `${label}.credential_storage must be "local" when present.`});
+  const project = value.project === null ? null : requiredIdentifier(value.project, `${label}.project`);
+  return {
+    type: 'pocket',
+    id,
+    enabled: optionalBoolean(value.enabled, true, `${label}.enabled`),
+    credentialEnv,
+    ...(value.credential_storage === 'local' ? {credentialStorage: 'local' as const} : {}),
+    project,
+    refreshIntervalMinutes: positiveInteger(
+      value.refresh_interval_minutes,
+      15,
+      10_080,
+      `${label}.refresh_interval_minutes`,
+    ),
+    maxStaleHours: positiveInteger(value.max_stale_hours, 24, 8_760, `${label}.max_stale_hours`),
   };
 }
 

@@ -285,7 +285,8 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
         try: () => checkExpectedConfiguration(existing),
         catch: () => SuperhumanSourceConflictError.make({}),
       });
-      if (existing?.type === 'obsidian') return yield* safeError(`Source "${id}" is already an Obsidian source.`);
+      if (existing && existing.type !== 'superhuman')
+        return yield* safeError(`Source "${id}" already has another type.`);
       const source = yield* Effect.try({
         try: () => sourceFor(existing),
         catch: () => safeError('Invalid Superhuman source configuration.'),
@@ -317,7 +318,27 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
           throw safeError('Superhuman source configuration changed before update.');
         return upsertSuperhumanSource(current, source);
       });
-      if (cleanup) yield* purgeSource(config, source);
+      if (cleanup) {
+        yield* purgeSource(config, source);
+        const activeReceipt: ExternalSourceReceipt = {
+          version: 1,
+          sourceId: source.id,
+          accessEpoch: sha256HexSync(`${yield* Clock.currentTimeMillis}:${yield* Random.next}`),
+          status: 'active',
+        };
+        yield* (yield* ResourceStore).mutateChecked(
+          location(config),
+          [
+            {
+              type: 'write',
+              uri: externalSourceReceiptUri(source.id),
+              content: serializeExternalSourceReceipt(activeReceipt),
+              options: {mode: 'upsert'},
+            },
+          ],
+          configFence(config, source.id, sourceConfigurationFingerprint(source), false),
+        );
+      }
     }),
   );
   yield* Console.log(`Configured Superhuman source "${id}".`);

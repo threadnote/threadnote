@@ -255,7 +255,7 @@ export interface RecallHit {
   readonly contextType: string;
   readonly equivalentUris?: readonly string[];
   readonly external?: NonNullable<RecallCandidate['externalSource']> & {
-    readonly provider: 'superhuman';
+    readonly provider: 'superhuman' | 'pocket';
     readonly authority: 'external';
     readonly trust: 'untrusted';
   };
@@ -909,7 +909,7 @@ function hybridRankRecallHits(
                 ? {
                     external: {
                       ...ranked.candidate.externalSource,
-                      provider: 'superhuman' as const,
+                      provider: ranked.candidate.externalSource.provider ?? 'superhuman',
                       authority: 'external' as const,
                       trust: 'untrusted' as const,
                     },

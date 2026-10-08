@@ -7,6 +7,7 @@ import {ManagerDialogProvider} from '../../src/dialog.js';
 import {filteredIntegrationProducts, integrationProducts} from '../../src/integration_catalog.js';
 import {IntegrationsPanel} from '../../src/integrations_view.js';
 import {SuperhumanConnectionForm} from '../../src/superhuman_connection_form.js';
+import {PocketConnectionForm} from '../../src/pocket_connection_form.js';
 import {MANAGER_STATIC_FILES} from '../../src/server.js';
 import type {SuperhumanSource} from '../../src/integrations_contracts.js';
 
@@ -69,6 +70,8 @@ describe('Integration catalog', () => {
   it('registers official product images and filters by product or capability', () => {
     expect(MANAGER_STATIC_FILES['/integrations/obsidian.svg']?.sourceDirectory).toBe('packages/manager/static');
     expect(MANAGER_STATIC_FILES['/integrations/superhuman-docs.png']?.contentType).toBe('image/png');
+    expect(MANAGER_STATIC_FILES['/integrations/pocket.png']?.contentType).toBe('image/png');
+    expect(filteredIntegrationProducts('recordings').map(product => product.id)).toEqual(['pocket']);
     expect(filteredIntegrationProducts('canvas').map(product => product.id)).toEqual(['superhuman']);
     expect(filteredIntegrationProducts('export').map(product => product.id)).toEqual(['obsidian']);
   });
@@ -112,7 +115,7 @@ describe('Integration catalog', () => {
     expect(document.querySelector<HTMLButtonElement>('#integration-catalog-tab')?.getAttribute('aria-selected')).toBe(
       'true',
     );
-    expect(document.querySelectorAll('.integration-product')).toHaveLength(2);
+    expect(document.querySelectorAll('.integration-product')).toHaveLength(3);
     expect(document.querySelectorAll('.integration-row')).toHaveLength(0);
     await act(async () => button('Your connections').click());
     await act(async () => button('All').click());
@@ -154,7 +157,7 @@ describe('Integration catalog', () => {
     ).toBe('true');
     expect(document.body.textContent).toContain('No connections yet');
     await act(async () => button('Browse integrations').click());
-    expect(document.querySelectorAll('.integration-product')).toHaveLength(2);
+    expect(document.querySelectorAll('.integration-product')).toHaveLength(3);
     await act(async () => button('Connect Superhuman Docs').click());
     await fill(document.querySelector<HTMLInputElement>('input[placeholder="team-docs"]')!, 'team-docs');
     await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'synthetic-token');
@@ -416,5 +419,154 @@ describe('Superhuman Docs connection', () => {
     expect(calls).toHaveLength(2);
     await act(async () => button('Disconnect').click());
     expect(calls[2]).toEqual({action: 'remove-source', id: 'team-docs', apply: true, confirm: true});
+  });
+});
+
+describe('Pocket connection', () => {
+  it('does not show an empty state when Pocket is the only connection', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              obsidian: {sources: [], projections: []},
+              superhuman: {sources: []},
+              pocket: {
+                sources: [
+                  {
+                    id: 'only-pocket',
+                    enabled: true,
+                    project: null,
+                    credentialEnv: 'POCKET_API_KEY',
+                    credentialStorage: 'local',
+                    credentialConfigured: true,
+                    refreshIntervalMinutes: 15,
+                    maxStaleHours: 24,
+                    status: 'needs-sync',
+                    recordings: 0,
+                    chunks: 0,
+                  },
+                ],
+              },
+            }),
+          ),
+      ),
+    );
+    await render(<IntegrationsPanel onChanged={async () => undefined} onReviews={() => undefined} />);
+    expect(document.body.textContent).toContain('only-pocket');
+    expect(document.body.textContent).not.toContain('No matching connections');
+    expect(document.body.textContent).not.toContain('No connections yet');
+  });
+  it('shows a Pocket connection and sends confirmed sync and pause actions', async () => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: string, init: RequestInit) => {
+        if (!init.body)
+          return new Response(
+            JSON.stringify({
+              ...mixed,
+              pocket: {
+                sources: [
+                  {
+                    id: 'my-pocket',
+                    enabled: true,
+                    project: null,
+                    credentialEnv: 'POCKET_API_KEY',
+                    credentialStorage: 'local',
+                    credentialConfigured: true,
+                    refreshIntervalMinutes: 15,
+                    maxStaleHours: 24,
+                    status: 'active',
+                    recordings: 2,
+                    chunks: 4,
+                  },
+                ],
+              },
+            }),
+          );
+        calls.push(JSON.parse(String(init.body)));
+        return new Response(JSON.stringify({applied: true, output: '2 recording(s) refreshed.', entries: []}));
+      }),
+    );
+    await render(<IntegrationsPanel onChanged={async () => undefined} onReviews={() => undefined} />);
+    expect(document.body.textContent).toContain('my-pocket');
+    expect(document.body.textContent).toContain('2 recordings');
+    await act(async () => button('Pocket').click());
+    expect(document.body.textContent).not.toContain('team-docs');
+    await act(async () => button('Sync now').click());
+    expect(calls[0]).toEqual({action: 'sync-source', id: 'my-pocket', apply: true, confirm: true});
+    await act(async () => button('Done').click());
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('button[aria-label="Actions for Pocket my-pocket"]')!.click(),
+    );
+    await act(async () => button('Pause connection').click());
+    expect(calls[1]).toEqual({action: 'set-enabled', id: 'my-pocket', enabled: false, apply: true, confirm: true});
+  });
+  it('saves a key and projectless scope without a recording picker', async () => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: string, init: RequestInit) => {
+        calls.push(JSON.parse(String(init.body)));
+        return new Response('{}');
+      }),
+    );
+    await render(<PocketConnectionForm onClose={() => undefined} onSaved={async () => undefined} />);
+    expect(document.body.textContent).toContain('All recordings accessible to this API key are imported automatically');
+    expect(document.querySelector('textarea')).toBeNull();
+    await fill(document.querySelector<HTMLInputElement>('input[placeholder="my-pocket"]')!, 'my-pocket');
+    await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'synthetic-pocket-key');
+    await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
+    await act(async () => button('Connect and sync').click());
+    expect(calls).toEqual([
+      {
+        action: 'save-source',
+        id: 'my-pocket',
+        editing: false,
+        token: 'synthetic-pocket-key',
+        project: null,
+        refreshIntervalMinutes: 15,
+        maxStaleHours: 24,
+        apply: true,
+        confirm: true,
+      },
+    ]);
+    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+  });
+  it('retains the local key on a blank settings edit', async () => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: string, init: RequestInit) => {
+        calls.push(JSON.parse(String(init.body)));
+        return new Response('{}');
+      }),
+    );
+    await render(
+      <PocketConnectionForm
+        source={{
+          id: 'my-pocket',
+          enabled: true,
+          project: 'team',
+          credentialEnv: 'POCKET_API_KEY',
+          credentialStorage: 'local',
+          credentialConfigured: true,
+          refreshIntervalMinutes: 15,
+          maxStaleHours: 24,
+          status: 'active',
+          recordings: 2,
+          chunks: 4,
+        }}
+        onClose={() => undefined}
+        onSaved={async () => undefined}
+      />,
+    );
+    expect(button('Save settings').disabled).toBe(false);
+    await act(async () => button('Save settings').click());
+    expect(calls[0]).toMatchObject({action: 'save-source', id: 'my-pocket', editing: true, project: 'team'});
+    expect(calls[0]).not.toHaveProperty('token');
+    expect(document.body.textContent).toContain('leave blank to keep the saved key');
   });
 });

@@ -40,7 +40,24 @@ export interface IntegrationResult {
   readonly warnings?: readonly string[];
 }
 
-export type IntegrationProductId = 'obsidian' | 'superhuman';
+export type IntegrationProductId = 'obsidian' | 'superhuman' | 'pocket';
+
+export interface PocketSource {
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly project: string | null;
+  readonly credentialEnv: string;
+  readonly credentialStorage?: 'local';
+  readonly credentialConfigured: boolean;
+  readonly refreshIntervalMinutes: number;
+  readonly maxStaleHours: number;
+  readonly status: 'active' | 'needs-sync' | 'needs-attention';
+  readonly recordings: number;
+  readonly chunks: number;
+  readonly lastSyncedAt?: number;
+  readonly nextAttemptAt?: number;
+  readonly progress?: {readonly page: number; readonly offset: number};
+}
 
 export interface SuperhumanDocumentSelection {
   readonly id: string;
@@ -67,6 +84,7 @@ export interface SuperhumanSource {
 export interface ManagerIntegrations {
   readonly obsidian: ObsidianIntegration;
   readonly superhuman: {readonly sources: readonly SuperhumanSource[]};
+  readonly pocket: {readonly sources: readonly PocketSource[]};
 }
 
 export type SuperhumanAction = 'save-source' | 'sync-source' | 'remove-source' | 'set-enabled' | 'resolve-links';

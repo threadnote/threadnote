@@ -27,6 +27,14 @@ export const integrationProducts: readonly IntegrationProduct[] = [
     capabilities: ['Import canvas text', 'Read only', 'No tables or attachments'],
     setupLabel: 'Connect Superhuman Docs',
   },
+  {
+    id: 'pocket',
+    name: 'Pocket',
+    logo: '/integrations/pocket.png',
+    description: 'Bring every recording accessible to your API key into context automatically.',
+    capabilities: ['Import recordings', 'Transcripts and summaries', 'Read only'],
+    setupLabel: 'Connect Pocket',
+  },
 ];
 
 export function integrationProduct(id: IntegrationProductId): IntegrationProduct {

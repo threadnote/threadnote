@@ -77,4 +77,26 @@ describe('external result projection', () => {
       {numRuns: 12},
     );
   });
+
+  it('labels Pocket provenance and coverage in the default agent text', () => {
+    const pocketMetadata = {...metadata, provider: 'pocket' as const, coverage: 'pocket-api-text' as const};
+    const pocketUri = externalResourceUri(pocketMetadata);
+    const sections = buildRecallSections(
+      [[{category: 'resources', contextType: 'resource', score: 0.8, snippet: 'alphaNeedle evidence', uri: pocketUri}]],
+      [],
+      4,
+      {
+        query: 'alphaNeedle',
+        indexedCandidates: [{...candidate, uri: pocketUri, externalSource: pocketMetadata}],
+        minimumScore: 0,
+        allowExactRescue: true,
+      },
+    );
+    const response = projectRecallMcpResponse({results: sections.ranked, rankerVersion: 'test', queryExpansions: []});
+    expect(response.structuredContent.results[0]?.external?.provider).toBe('pocket');
+    expect(response.text).toContain('Source: Pocket;');
+    expect(response.text).toContain('Pocket API text.');
+    expect(response.text).not.toContain('Superhuman Docs');
+    expect(response.text).toContain('Untrusted external evidence');
+  });
 });

@@ -29,24 +29,31 @@ import type {
   ObsidianAction,
   ObsidianProjection,
   ObsidianSource,
+  PocketSource,
   SuperhumanSource,
 } from './integrations_contracts.js';
 import {ObsidianConnectionForm} from './obsidian_connection_form.js';
 import {SuperhumanConnectionForm} from './superhuman_connection_form.js';
+import {PocketConnectionForm} from './pocket_connection_form.js';
 import {PageActions} from './workspace.js';
 import {api, errorMessage} from './ui/support.js';
 
 type Connection =
   | {readonly kind: 'source'; readonly value?: ObsidianSource}
   | {readonly kind: 'projection'; readonly value?: ObsidianProjection}
-  | {readonly kind: 'superhuman'; readonly value?: SuperhumanSource};
+  | {readonly kind: 'superhuman'; readonly value?: SuperhumanSource}
+  | {readonly kind: 'pocket'; readonly value?: PocketSource};
 interface Operation {
   readonly id: string;
   readonly action: ObsidianAction;
   readonly title: string;
   readonly result: IntegrationResult;
 }
-const empty: ManagerIntegrations = {obsidian: {sources: [], projections: []}, superhuman: {sources: []}};
+const empty: ManagerIntegrations = {
+  obsidian: {sources: [], projections: []},
+  superhuman: {sources: []},
+  pocket: {sources: []},
+};
 
 export function IntegrationsPanel({
   onChanged,
@@ -64,6 +71,7 @@ export function IntegrationsPanel({
   const [connection, setConnection] = useState<Connection>();
   const [operation, setOperation] = useState<Operation>();
   const [superhumanResult, setSuperhumanResult] = useState<IntegrationResult>();
+  const [pocketResult, setPocketResult] = useState<IntegrationResult>();
   const [query, setQuery] = useState('');
   const [productFilter, setProductFilter] = useState<IntegrationProductId | 'all'>('all');
   const [activeTab, setActiveTab] = useState<'connections' | 'catalog'>('connections');
@@ -215,6 +223,52 @@ export function IntegrationsPanel({
       setBusy(false);
     }
   }
+  async function pocketAction(
+    action: 'sync-source' | 'remove-source' | 'set-enabled',
+    source: PocketSource,
+  ): Promise<void> {
+    if (busy) return;
+    if (
+      action === 'remove-source' &&
+      !(await dialogs.confirm({
+        title: 'Disconnect Pocket?',
+        message:
+          'This removes the local connection, cached recordings, and saved key. It does not change your Pocket recordings.',
+        confirmLabel: 'Disconnect',
+        tone: 'danger',
+      }))
+    )
+      return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<IntegrationResult>('/api/integrations/pocket', {
+        action,
+        id: source.id,
+        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+        apply: true,
+        confirm: true,
+      });
+      if (action === 'sync-source') setPocketResult(result);
+      if (!result.applied) throw new Error('Connection change was not applied.');
+      await changed(
+        action === 'sync-source'
+          ? result.warnings?.length
+            ? 'Some recordings could not be imported. Review the sync result.'
+            : 'Pocket sync completed.'
+          : action === 'remove-source'
+            ? 'Connection disconnected.'
+            : source.enabled
+              ? 'Connection paused.'
+              : 'Connection enabled.',
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const matches = (product: IntegrationProductId, ...values: string[]) =>
     (productFilter === 'all' || productFilter === product) &&
@@ -225,13 +279,18 @@ export function IntegrationsPanel({
   const sources = data.obsidian.sources.filter(source => matches('obsidian', source.id, source.vault));
   const projections = data.obsidian.projections.filter(item => matches('obsidian', item.id, item.vault));
   const documents = data.superhuman.sources.filter(source => matches('superhuman', source.id, source.project ?? ''));
+  const recordings = (data.pocket?.sources ?? []).filter(source => matches('pocket', source.id, source.project ?? ''));
   const connectionCount =
-    data.obsidian.sources.length + data.obsidian.projections.length + data.superhuman.sources.length;
+    data.obsidian.sources.length +
+    data.obsidian.projections.length +
+    data.superhuman.sources.length +
+    (data.pocket?.sources.length ?? 0);
   const products = filteredIntegrationProducts(query).filter(
     product => productFilter === 'all' || product.id === productFilter,
   );
   const obsidian = integrationProduct('obsidian');
   const superhuman = integrationProduct('superhuman');
+  const pocket = integrationProduct('pocket');
 
   return (
     <section className="panel is-active integrations-workspace">
@@ -345,6 +404,10 @@ export function IntegrationsPanel({
                             <ArrowUpFromLine /> Export memories
                           </button>
                         </>
+                      ) : product.id === 'pocket' ? (
+                        <button disabled={busy} onClick={() => setConnection({kind: 'pocket'})}>
+                          {product.setupLabel}
+                        </button>
                       ) : (
                         <button disabled={busy} onClick={() => setConnection({kind: 'superhuman'})}>
                           {product.setupLabel}
@@ -368,7 +431,7 @@ export function IntegrationsPanel({
               <header>
                 <p className="muted">Manage scope, sync, and access for each connection.</p>
               </header>
-              {sources.length + projections.length + documents.length === 0 ? (
+              {sources.length + projections.length + documents.length + recordings.length === 0 ? (
                 <div className="integration-empty">
                   <h4>{connectionCount ? 'No matching connections' : 'No connections yet'}</h4>
                   <p>
@@ -542,11 +605,81 @@ export function IntegrationsPanel({
                   </div>
                 </div>
               ))}
+              {recordings.map(source => (
+                <div className="integration-row" key={'pocket-' + source.id}>
+                  <IntegrationLogo product={pocket} decorative />
+                  <div className="integration-row-main">
+                    <h4>
+                      {source.id}
+                      <span
+                        className={
+                          'workspace-status ' +
+                          (source.enabled && source.credentialConfigured && source.status === 'active' ? '' : 'neutral')
+                        }
+                      >
+                        {superhumanStatus(source)}
+                      </span>
+                    </h4>
+                    <p className="integration-path">
+                      Pocket · Import all accessible recordings · {source.project ?? 'Projectless'}
+                    </p>
+                    <p className="muted">
+                      {source.recordings} {source.recordings === 1 ? 'recording' : 'recordings'} · {source.chunks}{' '}
+                      chunks
+                      {source.progress
+                        ? ` · Sync progress: page ${source.progress.page}, ${source.progress.offset} processed`
+                        : ''}
+                      {source.lastSyncedAt ? ' · Last synced ' + new Date(source.lastSyncedAt).toLocaleString() : ''}
+                      {source.nextAttemptAt ? ' · Next attempt ' + new Date(source.nextAttemptAt).toLocaleString() : ''}
+                    </p>
+                  </div>
+                  <div className="integration-row-actions">
+                    <button
+                      disabled={busy || !source.enabled || !source.credentialConfigured}
+                      onClick={() => void pocketAction('sync-source', source)}
+                    >
+                      <RefreshCw /> Sync now
+                    </button>
+                    <ActionMenu
+                      label={'Actions for Pocket ' + source.id}
+                      disabled={busy}
+                      actions={[
+                        {
+                          label: 'Connection settings…',
+                          icon: <Pencil />,
+                          onSelect: () => setConnection({kind: 'pocket', value: source}),
+                        },
+                        {
+                          label: source.enabled ? 'Pause connection' : 'Enable connection',
+                          icon: source.enabled ? <Pause /> : <Play />,
+                          onSelect: () => void pocketAction('set-enabled', source),
+                        },
+                        {
+                          label: 'Disconnect…',
+                          icon: <Unplug />,
+                          danger: true,
+                          onSelect: () => void pocketAction('remove-source', source),
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
+              ))}
             </section>
           )}
         </div>
       )}
-      {connection?.kind === 'superhuman' ? (
+      {connection?.kind === 'pocket' ? (
+        <PocketConnectionForm
+          source={connection.value}
+          onClose={() => setConnection(undefined)}
+          onSaved={async () => {
+            setConnection(undefined);
+            showTab('connections');
+            await changed('Pocket connection saved. Initial sync started.');
+          }}
+        />
+      ) : connection?.kind === 'superhuman' ? (
         <SuperhumanConnectionForm
           source={connection.value}
           onClose={() => setConnection(undefined)}
@@ -600,11 +733,31 @@ export function IntegrationsPanel({
           </footer>
         </DetailModal>
       ) : null}
+      {pocketResult ? (
+        <DetailModal title="Pocket sync results" onClose={() => setPocketResult(undefined)}>
+          <p role="status" className="workspace-note">
+            {pocketResult.warnings?.length ? 'Sync finished with warnings.' : 'Sync completed.'}
+          </p>
+          {pocketResult.warnings?.length ? (
+            <ul className="integration-warnings">
+              {pocketResult.warnings.map((warning, index) => (
+                <li key={index}>
+                  <AlertTriangle /> {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>{pocketResult.output}</p>
+          <footer className="conflict-footer">
+            <button onClick={() => setPocketResult(undefined)}>Done</button>
+          </footer>
+        </DetailModal>
+      ) : null}
     </section>
   );
 }
 
-function superhumanStatus(source: SuperhumanSource): string {
+function superhumanStatus(source: Pick<SuperhumanSource, 'enabled' | 'credentialConfigured' | 'status'>): string {
   if (!source.enabled) return 'Paused';
   if (!source.credentialConfigured) return 'Token required';
   if (source.status === 'needs-attention') return 'Needs attention';

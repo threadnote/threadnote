@@ -106,12 +106,12 @@ export interface RecallMcpResult {
   readonly aliases?: readonly string[];
   readonly category: RecallHit['category'];
   readonly external?: {
-    readonly provider: 'superhuman';
+    readonly provider: 'superhuman' | 'pocket';
     readonly authority: 'external';
     readonly trust: 'untrusted';
     readonly project: string | null;
     readonly fetchedAt?: number;
-    readonly coverage: 'canvas-plain-text';
+    readonly coverage: 'canvas-plain-text' | 'pocket-api-text';
   };
   readonly confidence: number;
   readonly finalScore?: number;
@@ -298,8 +298,10 @@ export function renderRecallMcpAgentText(
     if (result.external !== undefined) {
       const fetched =
         result.external.fetchedAt === undefined ? '' : `; fetched ${new Date(result.external.fetchedAt).toISOString()}`;
+      const sourceName = result.external.provider === 'pocket' ? 'Pocket' : 'Superhuman Docs';
+      const coverage = result.external.coverage === 'pocket-api-text' ? 'Pocket API text' : 'canvas plain text';
       lines.push(
-        `   Source: Superhuman Docs; project ${oneLine(result.external.project ?? 'projectless')}${fetched}; canvas plain text.`,
+        `   Source: ${sourceName}; project ${oneLine(result.external.project ?? 'projectless')}${fetched}; ${coverage}.`,
       );
     }
     if (result.aliases !== undefined) {
@@ -570,12 +572,12 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
     ...(external
       ? {
           external: {
-            provider: 'superhuman' as const,
+            provider: hit.external?.provider ?? 'superhuman',
             authority: 'external' as const,
             trust: 'untrusted' as const,
             project: hit.external?.project ?? null,
             ...(hit.external?.fetchedAt === undefined ? {} : {fetchedAt: hit.external.fetchedAt}),
-            coverage: 'canvas-plain-text' as const,
+            coverage: hit.external?.coverage ?? 'canvas-plain-text',
           },
         }
       : {}),

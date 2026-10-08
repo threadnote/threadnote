@@ -35,7 +35,7 @@ export function indexCandidate(
         identifiers: identifiers(text),
         project: external?.metadata.project ?? undefined,
         title: external?.metadata.title ?? uriBasename(uri),
-        topic: 'superhuman-docs',
+        topic: external?.metadata.provider === 'pocket' ? 'pocket-recordings' : 'superhuman-docs',
       },
     };
   }

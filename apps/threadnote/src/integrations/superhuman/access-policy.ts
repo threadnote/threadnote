@@ -7,13 +7,13 @@ export const superhumanExternalSourcePolicyLayer = Layer.effect(
   Effect.gen(function* () {
     const services = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
     return ExternalSourcePolicy.of({
-      current: (location, sourceId) =>
+      current: (location, sourceId, provider = 'superhuman') =>
         readSourceConfiguration({agentContextHome: location.home}).pipe(
           Effect.map(configuration => {
             const source = configuration.sources.find(
-              candidate => candidate.id === sourceId && candidate.type === 'superhuman',
+              candidate => candidate.id === sourceId && candidate.type === provider,
             );
-            return source?.type === 'superhuman'
+            return source?.type === 'superhuman' || source?.type === 'pocket'
               ? {
                   enabled: source.enabled,
                   configFingerprint: sourceConfigurationFingerprint(source),

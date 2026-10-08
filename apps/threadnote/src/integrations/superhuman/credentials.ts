@@ -1,239 +1,29 @@
-import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {Crypto, Effect, FileSystem, Option, Path, Redacted, Schema} from 'effect';
-import {
-  runtimeLstat,
-  runtimeReadBoundedStableRegularFile,
-  SystemInfo,
-  type RuntimeBigIntStats,
-} from '@threadnote/platform/system';
-import {validatePortableSegment} from '@threadnote/store/resource-id';
+import {Redacted} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {SuperhumanSourceConfig} from '../config.js';
+import {
+  ExternalCredentialError,
+  externalCredentialConfigured,
+  removeExternalCredential,
+  resolveExternalCredential,
+  storeExternalCredential,
+  validExternalApiToken,
+} from '../external-credentials.js';
 
-export class SuperhumanCredentialError extends Schema.TaggedError<SuperhumanCredentialError>()(
-  'SuperhumanCredentialError',
-  {message: Schema.String},
-) {}
-
-const unavailable = () =>
-  SuperhumanCredentialError.make({message: 'Superhuman credential is unavailable or insecure.'});
-const invalid = () =>
-  SuperhumanCredentialError.make({
-    message: 'Superhuman API token must be a nonempty UTF-8 value of at most 4096 bytes without whitespace.',
-  });
-type CredentialConfig = Pick<RuntimeConfig, 'agentContextHome'>;
-
-export function validSuperhumanApiToken(token: Redacted.Redacted<string>): boolean {
-  const value = Redacted.value(token);
-  if (value.length === 0 || value.length > 4096) return false;
-  const bytes = new TextEncoder().encode(value);
-  return (
-    bytes.length > 0 &&
-    bytes.length <= 4096 &&
-    !/\s|\p{Cc}/u.test(value) &&
-    new TextDecoder('utf-8', {fatal: true}).decode(bytes) === value
-  );
-}
-
-async function optionalNativeStat(target: string): Promise<RuntimeBigIntStats | undefined> {
-  try {
-    return await runtimeLstat(target);
-  } catch (error) {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return undefined;
-    throw unavailable();
-  }
-}
-
-const statOptional = (target: string) => fromPromiseInterruptible(() => optionalNativeStat(target), unavailable);
-
-const validateSourceId = (sourceId: string) =>
-  Effect.try({
-    try: () => {
-      if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(sourceId)) throw unavailable();
-      validatePortableSegment(sourceId, 'source id');
-    },
-    catch: unavailable,
-  });
-
-const inspect = Effect.fn('superhuman.inspectCredentialPath')(function* (
-  target: string,
-  kind: 'file' | 'directory',
-  privateMode: boolean,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const system = yield* SystemInfo;
-  const before = yield* statOptional(target);
-  if (before === undefined) return undefined;
-  if (before.isSymbolicLink() || (kind === 'file' ? !before.isFile() : !before.isDirectory()))
-    return yield* unavailable();
-  const info = yield* fs.stat(target).pipe(Effect.mapError(unavailable));
-  const owner = Option.getOrUndefined(info.uid);
-  if (
-    system.userId === undefined ||
-    owner !== system.userId ||
-    (info.mode & (privateMode ? 0o077 : 0o022)) !== 0 ||
-    (kind === 'file' && Option.getOrUndefined(info.nlink) !== 1)
-  )
-    return yield* unavailable();
-  const after = yield* statOptional(target);
-  if (
-    !after ||
-    !samePath(before, after) ||
-    BigInt(info.mode) !== before.mode ||
-    BigInt(info.dev) !== before.dev ||
-    (Option.isSome(info.ino) && BigInt(info.ino.value) !== before.ino)
-  )
-    return yield* unavailable();
-  return after;
-});
-
-function samePath(left: RuntimeBigIntStats, right: RuntimeBigIntStats): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.birthtimeNs === right.birthtimeNs &&
-    left.mode === right.mode
-  );
-}
-
-const paths = Effect.fn('superhuman.credentialPaths')(function* (config: CredentialConfig, sourceId: string) {
-  const system = yield* SystemInfo;
-  if (system.platform === 'win32' || system.userId === undefined)
-    return yield* SuperhumanCredentialError.make({
-      message:
-        'Protected Superhuman credential storage is unsupported on this platform. Use an environment credential binding.',
-    });
-  yield* validateSourceId(sourceId);
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  if (!path.isAbsolute(config.agentContextHome) || !(yield* inspect(config.agentContextHome, 'directory', false)))
-    return yield* unavailable();
-  const home = yield* fs.realPath(config.agentContextHome).pipe(Effect.mapError(unavailable));
-  const root = path.join(home, 'threadnote');
-  const directories = [root, path.join(root, 'credentials'), path.join(root, 'credentials', 'superhuman')];
-  return {directories, filename: path.join(directories[2], sourceId)};
-});
-
-const inspectDirectories = Effect.fn('superhuman.inspectCredentialDirectories')(function* (
-  directories: readonly string[],
-  create: boolean,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const states: RuntimeBigIntStats[] = [];
-  for (const [index, directory] of directories.entries()) {
-    if (create && (yield* statOptional(directory)) === undefined)
-      yield* fs.makeDirectory(directory, {mode: 0o700}).pipe(Effect.mapError(unavailable));
-    const state = yield* inspect(directory, 'directory', index > 0);
-    if (state === undefined) return undefined;
-    states.push(state);
-  }
-  return states;
-});
-
-const revalidate = Effect.fn('superhuman.revalidateCredentialDirectories')(function* (
-  directories: readonly string[],
-  before: readonly RuntimeBigIntStats[],
-) {
-  const after = yield* inspectDirectories(directories, false);
-  if (after === undefined || !before.every((entry, index) => samePath(entry, after[index])))
-    return yield* unavailable();
-});
-
-const readLocal = Effect.fn('superhuman.readLocalCredential')(function* (config: CredentialConfig, sourceId: string) {
-  const {directories, filename} = yield* paths(config, sourceId);
-  const before = yield* inspectDirectories(directories, false);
-  if (before === undefined) return yield* unavailable();
-  const fileBefore = yield* inspect(filename, 'file', true);
-  if (fileBefore === undefined || fileBefore.size > 4096n) return yield* unavailable();
-  const bytes = yield* fromPromiseInterruptible(() => runtimeReadBoundedStableRegularFile(filename, 4096), unavailable);
-  const token = yield* Effect.try({
-    try: () => Redacted.make(new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
-    catch: unavailable,
-  });
-  const fileAfter = yield* inspect(filename, 'file', true);
-  if (fileAfter === undefined || !samePath(fileBefore, fileAfter) || fileBefore.ctimeNs !== fileAfter.ctimeNs)
-    return yield* unavailable();
-  yield* revalidate(directories, before);
-  if (!validSuperhumanApiToken(token)) return yield* unavailable();
-  return token;
-});
-
-export const resolveSuperhumanCredential = Effect.fn('superhuman.resolveCredential')(function* (
-  config: CredentialConfig,
+export {ExternalCredentialError as SuperhumanCredentialError};
+export const validSuperhumanApiToken = validExternalApiToken;
+export const resolveSuperhumanCredential = (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
   source: SuperhumanSourceConfig,
-) {
-  if (source.credentialStorage === 'local') return yield* readLocal(config, source.id);
-  const system = yield* SystemInfo;
-  const value = system.environment()[source.credentialEnv];
-  if (typeof value !== 'string') return yield* unavailable();
-  const token = Redacted.make(value);
-  if (!validSuperhumanApiToken(token)) return yield* unavailable();
-  return token;
-});
-
-export const superhumanCredentialConfigured = (config: CredentialConfig, source: SuperhumanSourceConfig) =>
-  resolveSuperhumanCredential(config, source).pipe(
-    Effect.as(true),
-    Effect.orElseSucceed(() => false),
-  );
-
-export const storeSuperhumanCredential = Effect.fn('superhuman.storeCredential')(function* (
-  config: CredentialConfig,
+) => resolveExternalCredential(config, source, 'superhuman');
+export const superhumanCredentialConfigured = (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  source: SuperhumanSourceConfig,
+) => externalCredentialConfigured(config, source, 'superhuman');
+export const storeSuperhumanCredential = (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
   sourceId: string,
   token: Redacted.Redacted<string>,
-) {
-  if (!validSuperhumanApiToken(token)) return yield* invalid();
-  const fs = yield* FileSystem.FileSystem;
-  const crypto = yield* Crypto.Crypto;
-  const {directories, filename} = yield* paths(config, sourceId);
-  const before = yield* inspectDirectories(directories, true);
-  if (before === undefined) return yield* unavailable();
-  yield* inspect(filename, 'file', true);
-  const temporary = `${filename}.${yield* crypto.randomUUIDv4}.tmp`;
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600}).pipe(Effect.mapError(unavailable));
-      yield* file.writeAll(new TextEncoder().encode(Redacted.value(token))).pipe(Effect.mapError(unavailable));
-      yield* file.sync.pipe(Effect.mapError(unavailable));
-      yield* revalidate(directories, before);
-      yield* inspect(filename, 'file', true);
-      yield* fs.rename(temporary, filename).pipe(Effect.mapError(unavailable));
-      const directory = yield* fs.open(directories[2], {flag: 'r'}).pipe(Effect.mapError(unavailable));
-      yield* directory.sync.pipe(Effect.mapError(unavailable));
-      yield* revalidate(directories, before);
-      yield* inspect(filename, 'file', true);
-    }),
-  ).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
-});
-
-export const removeSuperhumanCredential = Effect.fn('superhuman.removeCredential')(function* (
-  config: CredentialConfig,
-  sourceId: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  yield* validateSourceId(sourceId);
-  if (!path.isAbsolute(config.agentContextHome)) return yield* unavailable();
-  if (
-    (yield* statOptional(path.join(config.agentContextHome, 'threadnote', 'credentials', 'superhuman', sourceId))) ===
-    undefined
-  )
-    return;
-  const {directories, filename} = yield* paths(config, sourceId);
-  const before = yield* inspectDirectories(directories, false);
-  if (before === undefined) return;
-  const file = yield* inspect(filename, 'file', true);
-  if (file === undefined) return;
-  yield* revalidate(directories, before);
-  const current = yield* inspect(filename, 'file', true);
-  if (current === undefined || !samePath(file, current) || file.ctimeNs !== current.ctimeNs)
-    return yield* unavailable();
-  yield* fs.remove(filename).pipe(Effect.mapError(unavailable));
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      const directory = yield* fs.open(directories[2], {flag: 'r'});
-      yield* directory.sync;
-    }).pipe(Effect.mapError(unavailable)),
-  );
-  yield* revalidate(directories, before);
-});
+) => storeExternalCredential(config, sourceId, token, 'superhuman');
+export const removeSuperhumanCredential = (config: Pick<RuntimeConfig, 'agentContextHome'>, sourceId: string) =>
+  removeExternalCredential(config, sourceId, 'superhuman');
