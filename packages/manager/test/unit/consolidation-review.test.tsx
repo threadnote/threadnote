@@ -57,7 +57,9 @@ it('requires an explicit decision and individual evidence selections; textarea e
   document.body.append(container);
   root = createRoot(container);
   await act(async () => root?.render(<Harness />));
-  expect(container.textContent).toContain('Support is unresolved.');
+  expect(container.textContent).toContain('Choose a support option above to continue.');
+  expect(container.textContent).toContain('0 of 1 reviewed');
+  expect(container.textContent).toContain('Background context');
   const decision = container.querySelector<HTMLSelectElement>('select')!;
   await act(async () => {
     decision.value = 'direct';
@@ -66,6 +68,7 @@ it('requires an explicit decision and individual evidence selections; textarea e
   const useFragment = container.querySelector<HTMLInputElement>('input')!;
   await act(async () => useFragment.click());
   expect(selections.at(-1)?.[0]?.supports[0]?.citationIds).toEqual([]);
+  expect(container.textContent).toContain('1 of 1 reviewed');
   const code = container.querySelector<HTMLInputElement>('[aria-label="source.ts for paragraph 1 fragment 1"]')!;
   await act(async () => code.click());
   expect(selections.at(-1)?.[0]?.supports[0]?.citationIds).toEqual([citation.id]);
@@ -77,7 +80,8 @@ it('requires an explicit decision and individual evidence selections; textarea e
     textarea.dispatchEvent(new Event('input', {bubbles: true}));
   });
   expect(selections.at(-1)).toEqual([]);
-  expect(container.textContent).toContain('Support is unresolved.');
+  expect(container.textContent).toContain('Choose a support option above to continue.');
+  expect(container.textContent).toContain('0 of 1 reviewed');
 });
 
 it('validates browser evidence without Node Buffer and preserves UTF-8 resource bounds', () => {

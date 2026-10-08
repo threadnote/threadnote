@@ -38,6 +38,8 @@ import {
 } from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {runConsolidationAgentCommand} from './consolidation_agent.js';
+export {consolidationAgentScript} from './consolidation_agent.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -167,10 +169,10 @@ import {
   managerGraphVisualization,
   managerGraphViewsPage,
 } from '@threadnote/graph/visualization';
-import type {AgentClient, ConsolidationAgent, DoctorCheck, ManageOptions} from '../types.js';
+import type {ConsolidationAgent, DoctorCheck, ManageOptions} from '../types.js';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256, shellQuote} from '../utils.js';
+import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256} from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {isRawMemoryDocument} from '../memory/parse.js';
@@ -1437,42 +1439,9 @@ function runConsolidationAgent(
     if (!executable) {
       return yield* ManagerOperationError.make({message: `${agent} executable was not found.`});
     }
-    return yield* Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const stagingDir = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-consolidate-'});
-        const promptPath = yield* pathJoin(stagingDir, 'prompt.txt');
-        yield* fs.writeFileString(promptPath, prompt, {mode: 0o600});
-        const script = consolidationAgentScript(agent, executable);
-        const result = yield* runCommandEffect('sh', ['-lc', script, 'threadnote-consolidate', promptPath], {
-          allowFailure: true,
-          maxOutputBytes: 1024 * 1024,
-          timeoutMs: 10 * 60 * 1000,
-        });
-        if (result.exitCode !== 0) {
-          return yield* ManagerOperationError.make({
-            message: result.stderr.trim() || result.stdout.trim() || `${agent} exited with ${result.exitCode}`,
-          });
-        }
-        const draft = result.stdout.trim();
-        if (!draft) {
-          return yield* ManagerOperationError.make({message: `${agent} returned an empty consolidation draft.`});
-        }
-        return draft;
-      }),
+    return yield* runConsolidationAgentCommand(agent, executable, prompt).pipe(
+      Effect.catch(error => ManagerOperationError.make({message: errorMessage(error)})),
     );
-  });
-}
-
-export function consolidationAgentScript(agent: AgentClient, executable: string): string {
-  if (agent === 'codex') {
-    return `${shellQuote(executable)} exec --sandbox read-only --skip-git-repo-check - < "$1"`;
-  }
-  if (agent === 'claude') {
-    return `${shellQuote(executable)} --print --permission-mode default < "$1"`;
-  }
-  throw ManagerOperationError.make({
-    message: `${agent} does not expose a supported non-interactive consolidation mode.`,
   });
 }
 

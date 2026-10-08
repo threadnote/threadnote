@@ -3341,7 +3341,9 @@ describe('manager consolidation agents', () => {
   it('uses the current codex exec CLI flags', () => {
     const script = consolidationAgentScript('codex', '/Applications/Codex CLI/codex');
 
-    expect(script).toBe('\'/Applications/Codex CLI/codex\' exec --sandbox read-only --skip-git-repo-check - < "$1"');
+    expect(script).toBe(
+      '\'/Applications/Codex CLI/codex\' exec --sandbox read-only --skip-git-repo-check --json --output-last-message "$2" - < "$1"',
+    );
     expect(script).not.toContain('--ask-for-approval');
   });
 

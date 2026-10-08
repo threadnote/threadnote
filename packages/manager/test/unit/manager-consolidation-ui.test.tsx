@@ -10,7 +10,7 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-it('drafts and applies to a separate result topic after opening a selected source', async () => {
+it('keeps failed agent output out of the draft, then retries and saves to a separate result topic', async () => {
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true,
@@ -44,6 +44,7 @@ it('drafts and applies to a separate result topic after opening a selected sourc
   });
   const leaves = [leaf('source-a'), leaf('source-b')];
   const posts: {path: string; body: Record<string, unknown>}[] = [];
+  let failDraft = true;
   const json = (value: unknown) => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
@@ -88,19 +89,29 @@ it('drafts and applies to a separate result topic after opening a selected sourc
     if (url.pathname === '/api/consolidations')
       return Promise.resolve(
         json({
-          job: {
-            id: 'job',
-            status: 'completed',
-            draft: 'Final claim.',
-            sourceUris: leaves.map(l => l.uri),
-            sources: leaves.map(l => ({
-              uri: l.uri,
-              revision: 'a'.repeat(64),
-              fragments: ['Claim.'],
-              codeCitations: [],
-              relations: [],
-            })),
-          },
+          ...(failDraft
+            ? {
+                job: {
+                  id: 'failed-job',
+                  status: 'failed',
+                  error: 'Codex model is not supported.\n\nERROR: generation failed.',
+                },
+              }
+            : {
+                job: {
+                  id: 'job',
+                  status: 'completed',
+                  draft: 'Final claim.',
+                  sourceUris: leaves.map(l => l.uri),
+                  sources: leaves.map(l => ({
+                    uri: l.uri,
+                    revision: 'a'.repeat(64),
+                    fragments: ['Claim.'],
+                    codeCitations: [],
+                    relations: [],
+                  })),
+                },
+              }),
         }),
       );
     if (url.pathname === '/api/consolidations/job/apply')
@@ -128,18 +139,35 @@ it('drafts and applies to a separate result topic after opening a selected sourc
   await act(async () => container.querySelector<HTMLButtonElement>(`button[title="${leaves[0].uri}"]`)!.click());
   await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Memory details"]')!.click());
   expect(container.querySelector<HTMLInputElement>('[aria-label="Consolidated memory topic"]')?.value).toBe('');
-  await act(async () => button('Draft').click());
+  await act(async () => button('Generate draft').click());
+  expect(container.querySelector('[aria-label="Consolidation draft"]')).toBeNull();
+  expect(container.querySelectorAll('fieldset')).toHaveLength(0);
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('Codex model is not supported.');
+  expect(button('Save memory')).toBeUndefined();
+  failDraft = false;
+  await act(async () => button('Generate draft').click());
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  const editDraft = async (value: string) =>
+    act(async () => {
+      const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Consolidation draft"]')!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, value);
+      textarea.dispatchEvent(new Event('input', {bubbles: true}));
+    });
+  await editDraft('');
+  expect(container.querySelector('[aria-label="Consolidation draft"]')).not.toBeNull();
+  expect(button('Save memory').disabled).toBe(true);
+  await editDraft('Final claim.');
   expect(posts.find(p => p.path === '/api/consolidations')?.body).toMatchObject({
     topic: '',
     kind: 'durable',
     status: 'active',
   });
-  const decision = container.querySelector<HTMLSelectElement>('[aria-label="Support decision for paragraph 1"]')!;
+  const decision = container.querySelector<HTMLSelectElement>('[aria-label="Support for paragraph 1"]')!;
   await act(async () => {
     decision.value = 'unsupported';
     decision.dispatchEvent(new Event('change', {bubbles: true}));
   });
-  await act(async () => button('Apply draft').click());
+  await act(async () => button('Save memory').click());
   await act(async () =>
     [...document.querySelectorAll<HTMLButtonElement>('dialog button[type="submit"]')].at(-1)!.click(),
   );

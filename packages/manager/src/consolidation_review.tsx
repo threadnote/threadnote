@@ -37,7 +37,7 @@ export function ConsolidationDraftReview(props: {
 }): React.ReactElement {
   let sections: readonly string[] = [];
   try {
-    if (props.draft) sections = consolidationSections(props.draft);
+    if (props.draft && props.sources.length) sections = consolidationSections(props.draft);
   } catch {
     /* The bound error is shown below. */
   }
@@ -53,8 +53,20 @@ export function ConsolidationDraftReview(props: {
     props.draft && props.sources.length
       ? consolidationReviewProblem(props.draft, props.sources, props.reviews)
       : undefined;
+  const reviewedCount = sections.filter((section, index) => {
+    const review = props.reviews[index];
+    return (
+      review?.section === section &&
+      (review.disposition === 'unsupported' ||
+        ((review.disposition === 'direct' || review.disposition === 'contextual') && review.supports.length > 0))
+    );
+  }).length;
   return (
     <section aria-label="Consolidation evidence review">
+      <div className="consolidation-step">
+        <h4>2. Edit and review</h4>
+        <p>Read the draft below and edit it as needed. Then choose how each paragraph is supported.</p>
+      </div>
       <textarea
         aria-label="Consolidation draft"
         aria-busy={props.busy}
@@ -67,13 +79,26 @@ export function ConsolidationDraftReview(props: {
           props.onReviewChange([]);
         }}
       />
-      {props.sources.length ? (
-        <p>
-          Review every final paragraph. Choose direct support, context, or explicitly unsupported. Editing the draft
-          clears its evidence reviews.
-        </p>
+      {sections.length ? (
+        <div className="consolidation-support-guide">
+          <div className="consolidation-review-progress">
+            <strong>Paragraph support</strong>
+            <span>
+              {reviewedCount} of {sections.length} reviewed
+            </span>
+          </div>
+          <dl>
+            <dt>Backed by a source</dt>
+            <dd>The source supports this claim. Choose its passage and the references to keep.</dd>
+            <dt>Background context</dt>
+            <dd>Related information only. Its evidence stays in review history, not active references.</dd>
+            <dt>No source support</dt>
+            <dd>Your own judgment or a new claim. Save it without supporting references.</dd>
+          </dl>
+          <p>Editing the draft resets these choices. Nothing is saved until you confirm.</p>
+        </div>
       ) : null}
-      {problem ? <p role="status">{problem}</p> : null}
+      {problem && reviewedCount === sections.length ? <p role="status">{problem}</p> : null}
       {sections.map((section, index) => {
         const review = props.reviews[index]?.section === section ? props.reviews[index] : undefined;
         return (
@@ -81,9 +106,9 @@ export function ConsolidationDraftReview(props: {
             <legend>Paragraph {index + 1}</legend>
             <pre style={{whiteSpace: 'pre-wrap'}}>{section}</pre>
             <label>
-              Support decision{' '}
+              How is this paragraph supported?{' '}
               <select
-                aria-label={`Support decision for paragraph ${index + 1}`}
+                aria-label={`Support for paragraph ${index + 1}`}
                 value={review?.disposition ?? 'unresolved'}
                 onChange={event => {
                   const value = event.target.value;
@@ -92,106 +117,118 @@ export function ConsolidationDraftReview(props: {
                 }}
               >
                 <option value="unresolved" disabled>
-                  Unresolved — choose a decision
+                  Choose support…
                 </option>
-                <option value="direct">Direct support</option>
-                <option value="contextual">Context only</option>
-                <option value="unsupported">Explicitly unsupported</option>
+                <option value="direct">Backed by a source</option>
+                <option value="contextual">Background context</option>
+                <option value="unsupported">No source support</option>
               </select>
             </label>
             {review?.disposition === 'unsupported' ? (
-              <p>This paragraph will have no active evidence.</p>
+              <p>This paragraph will be saved without supporting code references or memory links.</p>
             ) : review?.disposition && review.disposition !== 'unresolved' ? (
-              props.sources.map(source => (
-                <details key={source.uri}>
-                  <summary>
-                    {source.uri} — revision {source.revision.slice(0, 12)}
-                  </summary>
-                  {source.fragments.map((fragment, fragmentIndex) => {
-                    const support = review.supports.find(
-                      s => s.sourceUri === source.uri && s.fragment === fragmentIndex,
-                    );
-                    const setSupport = (change: Partial<NonNullable<typeof support>>) =>
-                      update(index, {supports: review.supports.map(s => (s === support ? {...s, ...change} : s))});
-                    return (
-                      <div key={fragmentIndex}>
-                        <label className="check-row">
-                          <input
-                            type="checkbox"
-                            aria-label={`Use source fragment ${fragmentIndex + 1} from ${source.uri} for paragraph ${index + 1}`}
-                            checked={!!support}
-                            onChange={event =>
-                              update(index, {
-                                supports: event.target.checked
-                                  ? [
-                                      ...review.supports,
-                                      {
-                                        sourceUri: source.uri,
-                                        fragment: fragmentIndex,
-                                        citationIds: [],
-                                        relationIndexes: [],
-                                      },
-                                    ]
-                                  : review.supports.filter(s => s !== support),
-                              })
-                            }
-                          />
-                          Use this source fragment
-                        </label>
-                        <pre style={{whiteSpace: 'pre-wrap'}}>{fragment}</pre>
-                        {support ? (
-                          <div>
-                            <p>
-                              Select only evidence that applies to this paragraph.{' '}
-                              {review.disposition === 'contextual'
-                                ? 'Context selections remain in derivation history.'
-                                : 'Direct selections become active dependencies.'}
-                            </p>
-                            {source.codeCitations.map(citation => (
-                              <label className="check-row" key={citation.id}>
-                                <input
-                                  type="checkbox"
-                                  aria-label={`${citation.path} for paragraph ${index + 1} fragment ${fragmentIndex + 1}`}
-                                  checked={support.citationIds.includes(citation.id)}
-                                  onChange={event =>
-                                    setSupport({
-                                      citationIds: event.target.checked
-                                        ? [...support.citationIds, citation.id]
-                                        : support.citationIds.filter(id => id !== citation.id),
-                                    })
-                                  }
-                                />
-                                Code: {citation.path} (
-                                {citation.target.kind === 'symbol' ? citation.target.qualifiedName : 'file'}) @{' '}
-                                {citation.sourceCommit.slice(0, 12)}
-                              </label>
-                            ))}
-                            {source.relations.map((relation, ordinal) => (
-                              <label className="check-row" key={ordinal}>
-                                <input
-                                  type="checkbox"
-                                  aria-label={`${relation.type} ${relation.uri} for paragraph ${index + 1}`}
-                                  checked={support.relationIndexes.includes(ordinal)}
-                                  onChange={event =>
-                                    setSupport({
-                                      relationIndexes: event.target.checked
-                                        ? [...support.relationIndexes, ordinal]
-                                        : support.relationIndexes.filter(i => i !== ordinal),
-                                    })
-                                  }
-                                />
-                                Relation: {relation.type} {relation.uri}
-                              </label>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </details>
-              ))
+              <>
+                <p>
+                  {review.disposition === 'direct'
+                    ? 'Open a source below and choose the passage that supports this claim. Then check the code references or memory links to keep.'
+                    : 'Open a source below and choose a passage that provides background. Its selected evidence will stay in review history.'}
+                </p>
+                {props.sources.map((source, sourceIndex) => (
+                  <details key={source.uri}>
+                    <summary>
+                      Source {sourceIndex + 1}: {source.uri.split('/').at(-1)?.replace(/\.md$/, '')}
+                    </summary>
+                    <p className="consolidation-source-origin">
+                      {source.uri}
+                      <br />
+                      Revision {source.revision.slice(0, 12)}
+                    </p>
+                    {source.fragments.map((fragment, fragmentIndex) => {
+                      const support = review.supports.find(
+                        s => s.sourceUri === source.uri && s.fragment === fragmentIndex,
+                      );
+                      const setSupport = (change: Partial<NonNullable<typeof support>>) =>
+                        update(index, {supports: review.supports.map(s => (s === support ? {...s, ...change} : s))});
+                      return (
+                        <div key={fragmentIndex}>
+                          <label className="check-row">
+                            <input
+                              type="checkbox"
+                              aria-label={`Use source fragment ${fragmentIndex + 1} from ${source.uri} for paragraph ${index + 1}`}
+                              checked={!!support}
+                              onChange={event =>
+                                update(index, {
+                                  supports: event.target.checked
+                                    ? [
+                                        ...review.supports,
+                                        {
+                                          sourceUri: source.uri,
+                                          fragment: fragmentIndex,
+                                          citationIds: [],
+                                          relationIndexes: [],
+                                        },
+                                      ]
+                                    : review.supports.filter(s => s !== support),
+                                })
+                              }
+                            />
+                            Use this passage
+                          </label>
+                          <pre style={{whiteSpace: 'pre-wrap'}}>{fragment}</pre>
+                          {support ? (
+                            <div>
+                              <p>
+                                References for this passage:{' '}
+                                {review.disposition === 'contextual'
+                                  ? 'kept as background only.'
+                                  : 'only checked references are carried into the saved memory.'}
+                              </p>
+                              {source.codeCitations.map(citation => (
+                                <label className="check-row" key={citation.id}>
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`${citation.path} for paragraph ${index + 1} fragment ${fragmentIndex + 1}`}
+                                    checked={support.citationIds.includes(citation.id)}
+                                    onChange={event =>
+                                      setSupport({
+                                        citationIds: event.target.checked
+                                          ? [...support.citationIds, citation.id]
+                                          : support.citationIds.filter(id => id !== citation.id),
+                                      })
+                                    }
+                                  />
+                                  Code: {citation.path} (
+                                  {citation.target.kind === 'symbol' ? citation.target.qualifiedName : 'file'}) @{' '}
+                                  {citation.sourceCommit.slice(0, 12)}
+                                </label>
+                              ))}
+                              {source.relations.map((relation, ordinal) => (
+                                <label className="check-row" key={ordinal}>
+                                  <input
+                                    type="checkbox"
+                                    aria-label={`${relation.type} ${relation.uri} for paragraph ${index + 1}`}
+                                    checked={support.relationIndexes.includes(ordinal)}
+                                    onChange={event =>
+                                      setSupport({
+                                        relationIndexes: event.target.checked
+                                          ? [...support.relationIndexes, ordinal]
+                                          : support.relationIndexes.filter(i => i !== ordinal),
+                                      })
+                                    }
+                                  />
+                                  Relation: {relation.type} {relation.uri}
+                                </label>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </details>
+                ))}
+              </>
             ) : (
-              <p>Support is unresolved.</p>
+              <p>Choose a support option above to continue.</p>
             )}
           </fieldset>
         );
@@ -205,6 +242,7 @@ export function ConsolidationPanel(props: {
   readonly busy: boolean;
   readonly canResume: boolean;
   readonly error?: string;
+  readonly draftError?: string;
   readonly topic: string;
   readonly project: string;
   readonly onTopicChange: (value: string) => void;
@@ -230,12 +268,19 @@ export function ConsolidationPanel(props: {
   return (
     <details className="consolidation-details">
       <summary>Consolidate memories</summary>
+      <p className="consolidation-intro">
+        Create one new memory from the selected sources. Review it before saving. Personal sources are then archived
+        unless the result still links to them. Shared memories stay available.
+      </p>
       {props.canResume ? (
         <button disabled={props.disabled} onClick={() => void props.onResume()}>
           Resume saved source cleanup
         </button>
       ) : null}
       {props.error ? <p role="alert">{props.error}</p> : null}
+      <div className="consolidation-step">
+        <h4>1. Generate a draft</h4>
+      </div>
       <label>
         Result topic
         <input
@@ -274,30 +319,57 @@ export function ConsolidationPanel(props: {
           disabled={props.disabled || !props.canDraft}
           onClick={() => void props.onDraft()}
         >
-          {props.drafting ? 'Drafting...' : 'Draft'}
+          {props.drafting ? 'Generating…' : 'Generate draft'}
         </button>
       </div>
-      <ConsolidationDraftReview
-        draft={props.draft}
-        sources={props.sources}
-        reviews={props.reviews}
-        disabled={props.disabled}
-        busy={props.busy}
-        onDraftChange={props.onDraftChange}
-        onReviewChange={props.onReviewChange}
-      />
-      <button
-        disabled={
-          props.busy ||
-          props.disabled ||
-          !props.hasJob ||
-          !props.draft ||
-          !!consolidationReviewProblem(props.draft, props.sources, props.reviews)
-        }
-        onClick={() => void props.onApply()}
-      >
-        {props.applying ? 'Applying...' : 'Apply draft'}
-      </button>
+      {!props.canDraft ? (
+        <p className="consolidation-hint">Select at least two memories in Library using their checkboxes.</p>
+      ) : null}
+      {props.draftError ? (
+        <section className="consolidation-error" role="alert">
+          <strong>Draft generation failed</strong>
+          <p>
+            The agent could not create a draft. Choose another agent or check its settings, then try again. Your source
+            memories have not been changed.
+          </p>
+          <details>
+            <summary>Show agent error</summary>
+            <pre>{props.draftError}</pre>
+          </details>
+        </section>
+      ) : null}
+      {props.hasJob ? (
+        <>
+          <ConsolidationDraftReview
+            draft={props.draft}
+            sources={props.sources}
+            reviews={props.reviews}
+            disabled={props.disabled}
+            busy={props.busy}
+            onDraftChange={props.onDraftChange}
+            onReviewChange={props.onReviewChange}
+          />
+          <div className="consolidation-step">
+            <h4>3. Save memory</h4>
+            <p>
+              Review every paragraph to enable saving. You’ll confirm before saving and archiving eligible personal
+              sources. Shared memories and sources kept as active links stay available.
+            </p>
+          </div>
+          <button
+            disabled={
+              props.busy ||
+              props.disabled ||
+              !props.hasJob ||
+              !props.draft ||
+              !!consolidationReviewProblem(props.draft, props.sources, props.reviews)
+            }
+            onClick={() => void props.onApply()}
+          >
+            {props.applying ? 'Saving…' : 'Save memory'}
+          </button>
+        </>
+      ) : null}
     </details>
   );
 }

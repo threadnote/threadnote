@@ -7188,6 +7188,90 @@ h4 {
 .consolidation-details[open] > summary {
   margin-bottom: 18px;
 }
+.consolidation-intro,
+.consolidation-hint,
+.consolidation-step p {
+  margin: 8px 0 16px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.consolidation-step {
+  margin: 18px 0 10px;
+}
+.consolidation-step h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.consolidation-support-guide {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.consolidation-review-progress {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+.consolidation-review-progress span {
+  color: var(--muted);
+}
+.consolidation-support-guide dl {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 3fr;
+  gap: 8px 16px;
+  margin: 14px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.consolidation-support-guide dt {
+  font-weight: 600;
+}
+.consolidation-support-guide dd {
+  margin: 0;
+  color: var(--muted);
+}
+.consolidation-error {
+  padding: 14px;
+  margin: 16px 0;
+  border: 1px solid var(--warn);
+  border-radius: 8px;
+  background: var(--warn-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.consolidation-error p {
+  margin: 8px 0;
+}
+.consolidation-error summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.consolidation-error pre {
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.consolidation-details .consolidation-source-origin {
+  margin-bottom: 12px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+@media (max-width: 640px) {
+  .consolidation-support-guide dl {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+  .consolidation-support-guide dd {
+    margin-bottom: 8px;
+  }
+}
 .consolidation-details > label {
   display: grid;
   gap: 6px;

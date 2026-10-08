@@ -1400,6 +1400,7 @@ bun_test(
         "//apps/threadnote:src/manager/attention.ts",
         "//apps/threadnote:src/manager/attention_actions.ts",
         "//apps/threadnote:src/manager/consolidation.ts",
+        "//apps/threadnote:src/manager/consolidation_agent.ts",
         "//apps/threadnote:src/manager/context.ts",
         "//apps/threadnote:src/manager/context_runtime.ts",
         "//apps/threadnote:src/manager/feature_errors.ts",

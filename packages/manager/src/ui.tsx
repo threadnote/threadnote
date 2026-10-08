@@ -241,6 +241,7 @@ function App(): React.ReactElement {
   });
   const [agent, setAgent] = useState<AgentClient>('codex');
   const [draft, setDraft] = useState('');
+  const [draftError, setDraftError] = useState<string | undefined>();
   const [consolidationTopic, setConsolidationTopic] = useState('');
   const [consolidationProject, setConsolidationProject] = useState<string | undefined>();
   const [jobId, setJobId] = useState<string | undefined>();
@@ -1062,6 +1063,7 @@ function App(): React.ReactElement {
     setDraftingConsolidation(true);
     setJobId(undefined);
     setDraft('');
+    setDraftError(undefined);
     setConsolidationSources([]);
     setConsolidationReviews([]);
     setConsolidationSourceUris(uris);
@@ -1082,12 +1084,12 @@ function App(): React.ReactElement {
         toastMessage('Draft ready');
       } else {
         setConsolidationSourceUris([]);
-        setDraft(result.job.error ?? 'Draft failed');
+        setDraftError(result.job.error ?? 'The agent did not produce a draft.');
         toastMessage('Draft failed');
       }
     } catch (err) {
       setConsolidationSourceUris([]);
-      setDraft(errorMessage(err));
+      setDraftError(errorMessage(err));
       toastMessage(errorMessage(err));
     } finally {
       setDraftingConsolidation(false);
@@ -1122,9 +1124,9 @@ function App(): React.ReactElement {
   async function applyConsolidation(): Promise<void> {
     if (draftingConsolidation || applyingConsolidation || !jobId || !draft) return;
     const confirmed = await dialogs.confirm({
-      confirmLabel: 'Apply consolidation',
-      message: `Store the consolidated memory and archive ${consolidationSourceUris.length} personal source${consolidationSourceUris.length === 1 ? '' : 's'}.`,
-      title: 'Apply this consolidation?',
+      confirmLabel: 'Save and archive sources',
+      message: `Save the new memory and archive eligible personal sources from ${consolidationSourceUris.length} selected memories.`,
+      title: 'Save this consolidated memory?',
     });
     if (!confirmed) return;
     const sourceUris = consolidationSourceUris;
@@ -1159,7 +1161,7 @@ function App(): React.ReactElement {
         await reloadSelected(currentSelectedUri);
       }
       await refreshTreeOnly();
-      toastMessage('Applied consolidation');
+      toastMessage('Consolidated memory saved');
     } catch (err) {
       toastMessage(errorMessage(err));
     } finally {
@@ -1307,7 +1309,7 @@ function App(): React.ReactElement {
   const markdownPreview = markdownBodyForPreview(content);
   const canMutate = Boolean(selectedUri && selectedIsReadable && !selectedIsDir && !selectedIsResource);
   const consolidationBusy = draftingConsolidation || applyingConsolidation;
-  const canDraftConsolidation = selectedList.length > 0 || !selectedIsResource;
+  const canDraftConsolidation = selectedList.length >= 2;
   const doctorBusy = doctorAction !== undefined;
   const selectedHasPendingCanonical = pendingCanonical !== undefined && pendingCanonical.node.uri === selectedUri;
   const controlsBlocked =
@@ -1361,6 +1363,7 @@ function App(): React.ReactElement {
           busy={consolidationBusy}
           canResume={!!memory?.record?.metadata.consolidation}
           error={memory?.record?.metadata.consolidationError}
+          draftError={draftError}
           topic={consolidationTopic}
           project={consolidationProject ?? target.project}
           onTopicChange={setConsolidationTopic}
