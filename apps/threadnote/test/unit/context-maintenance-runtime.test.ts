@@ -23,6 +23,7 @@ import {
   planMaintenanceWorkerBatches,
   maintenanceWorkerRecordValidations,
   renderContextMaintenanceStatus,
+  type MaintenanceState,
 } from '@threadnote/threadnote/memory/context/maintenance';
 import {
   canonicalMemoryDocumentContent,
@@ -75,6 +76,7 @@ import {
 import {
   hasAbsentMaintenanceAnchors,
   reconcileAbsentMaintenanceAnchors,
+  selectMaintenanceCitationCaseTask,
 } from '../../src/memory/context/maintenance_policy.js';
 
 const NOW = '2026-10-03T15:00:00.000Z';
@@ -2735,6 +2737,139 @@ describe('persistent context maintenance', () => {
     expect(migrateMaintenanceCases([legacy], [reordered])[0].slot).toBe(`legacy-unresolved:${legacy.caseId}`);
     expect(migrateMaintenanceCases(migrated, [reordered])[0].slot).toBe(migrated[0].slot);
   });
+
+  it('exact citation selection is order-independent, chunk-bounded, and fails closed on ambiguous subjects', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 130}), fc.nat(), fc.boolean(), (count, offset, reverse) => {
+        const source = legacyBatchSubject(
+          0,
+          'threadnote',
+          Array.from({length: count}, () => 0),
+        );
+        const selectedIndex = offset % count;
+        const selected = updateMaintenanceCase(
+          undefined,
+          {
+            project: 'threadnote',
+            memoryId: source.uri,
+            family: 'citation',
+            slot: contextHealthCitationCaseSlotV2(source.metadata.codeCitations[selectedIndex]),
+            evidenceRevision: 'revision',
+            disposition: 'waiting-evidence',
+            reason: 'not-ready',
+          },
+          NOW,
+        );
+        const tasks = Array.from({length: Math.ceil(count / 64)}, (_, chunk) => ({
+          record: source,
+          project: 'threadnote',
+          chunk,
+        }));
+        tasks.push({record: legacyBatchSubject(1, 'threadnote', [0]), project: 'threadnote', chunk: 0});
+        if (reverse) tasks.reverse();
+        const before = structuredClone(tasks);
+        const task = selectMaintenanceCitationCaseTask(tasks, selected)!;
+        expect(task.record.uri).toBe(source.uri);
+        expect(task.chunk).toBe(Math.floor(selectedIndex / 64));
+        expect(selectMaintenanceCitationCaseTask([...tasks, task], selected)).toBeUndefined();
+        expect(selectMaintenanceCitationCaseTask(tasks, {...selected, project: 'other'})).toBeUndefined();
+        expect(tasks).toEqual(before);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  effectIt.effect('refreshes an exact stale citation case without sweeping or mutating other memories', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const {repository, file, source} = yield* makeCitationRepository(fixture);
+      yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const first = yield* runContextMaintenance(fixture.config, {cwd: repository});
+      const selected = first.cases.find(item => item.family === 'citation')!;
+      expect(selected).toBeDefined();
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const before = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      const terminalHistory = Array.from({length: 200}, (_, index) =>
+        updateMaintenanceCase(
+          undefined,
+          {
+            project: 'other',
+            memoryId: `tn_history_${index}`,
+            family: 'review-overdue',
+            slot: 'record',
+            evidenceRevision: 'historical',
+            disposition: 'resolved',
+            reason: 'postcondition-verified',
+          },
+          NOW,
+        ),
+      );
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({...before, cases: [...before.cases, ...terminalHistory]}),
+      );
+      const unrelated = record('unrelated', {validTo: '2000-01-01T00:00:00.000Z'});
+      const unrelatedFile = fixture.path.join(fixture.directory, 'unrelated.md');
+      yield* fixture.fs.writeFileString(unrelatedFile, unrelated.content);
+      yield* fixture.fs.writeFileString(file, 'export const supported = "changed again";\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const stale = yield* readContextMaintenancePacket(fixture.config, selected.caseId).pipe(Effect.result);
+      expect(Result.isFailure(stale) && stale.failure.message).toContain('case is stale');
+      const refresh = {cwd: repository, project: 'threadnote', caseId: selected.caseId};
+      const result = yield* runContextMaintenance(fixture.config, refresh);
+      const packet = yield* readContextMaintenancePacket(fixture.config, selected.caseId);
+      expect(packet).toMatchObject({memoryUri: source.uri});
+      expect(result.cases).toHaveLength(1);
+      expect(result.cases[0].caseId).toBe(selected.caseId);
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
+      expect(yield* fixture.fs.readFileString(unrelatedFile)).toBe(unrelated.content);
+      const after = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      expect(after.checkpoints['tn_unrelated:0']).toBeUndefined();
+      expect(after.checkpoints).toEqual(before.checkpoints);
+      expect(after.workSchedule).toEqual(before.workSchedule);
+      expect(after.lastTaskByProject).toEqual(before.lastTaskByProject);
+      expect(after.receipts).toEqual(before.receipts);
+      const replay = yield* runContextMaintenance(fixture.config, refresh);
+      expect(replay.cases[0].attemptCount).toBe(result.cases[0].attemptCount + 1);
+      const invalid = yield* runContextMaintenance(fixture.config, {...refresh, project: 'other'}).pipe(Effect.result);
+      expect(Result.isFailure(invalid)).toBe(true);
+      const {id: _citationId, anchorId: _anchorId, ...baseCitation} = source.metadata.codeCitations![0];
+      const multiselector = record(
+        'source',
+        {
+          schemaVersion: 5,
+          codeCitations: [
+            ...Array.from({length: 1}, (_, index) =>
+              createMemoryCodeCitation({
+                ...baseCitation,
+                path: `unavailable-${index}.ts`,
+                sourceCommit: 'c'.repeat(40),
+              }),
+            ),
+            ...source.metadata.codeCitations!,
+          ],
+        },
+        source.body,
+      );
+      yield* fixture.fs.writeFileString(fixture.source, multiselector.content);
+      yield* runContextMaintenance(fixture.config, refresh);
+      expect(yield* readContextMaintenancePacket(fixture.config, selected.caseId)).toMatchObject({
+        memoryUri: source.uri,
+      });
+      expect(yield* fixture.fs.readFileString(fixture.source)).toBe(multiselector.content);
+      yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const resolved = yield* runContextMaintenance(fixture.config, refresh);
+      expect(resolved.cases[0].disposition).toBe('resolved');
+      expect(yield* readContextMaintenancePacket(fixture.config, selected.caseId)).toMatchObject({
+        memoryUri: source.uri,
+      });
+      const final = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      expect(final.cases.filter(item => item.project === 'other')).toEqual(terminalHistory);
+      expect(final.checkpoints).toEqual(before.checkpoints);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
 
   effectIt.effect('stores one unavailable anchor case matching core identity and a bounded packet', () =>
     Effect.gen(function* () {

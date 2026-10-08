@@ -55,7 +55,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         project: McpInput.string('Optional project; omitted work uses fair home-wide scheduling'),
         maxRecords: McpInput.integer('Bounded work tasks', {minimum: 1, maximum: 100}),
         receiptId: McpInput.string('Exact retained receipt for undo'),
-        caseId: McpInput.string('Exact reviewed deleted-anchor case'),
+        caseId: McpInput.string('Exact citation case to refresh, or reviewed deleted-anchor case to retire'),
         evidenceRevision: McpInput.string('Exact reviewed anchor evidence revision'),
         expectedContentHash: McpInput.string('Exact reviewed subject hash for anchor retirement'),
       },
@@ -75,7 +75,12 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
               ? yield* setContextMaintenancePaused(config, input.action === 'pause')
               : input.action === 'undo'
                 ? yield* undoContextMaintenance(config, input.receiptId ?? '')
-                : yield* runContextMaintenance(config, {cwd, project: input.project, maxRecords: input.maxRecords});
+                : yield* runContextMaintenance(config, {
+                    cwd,
+                    project: input.project,
+                    maxRecords: input.maxRecords,
+                    caseId: input.caseId,
+                  });
         return {
           content: [
             {
