@@ -26,6 +26,7 @@ import type {
   IntegrationProductId,
   IntegrationResult,
   LinearSource,
+  GitHubSource,
   ManagerIntegrations,
   ObsidianAction,
   ObsidianProjection,
@@ -37,6 +38,7 @@ import {ObsidianConnectionForm} from './obsidian_connection_form.js';
 import {SuperhumanConnectionForm} from './superhuman_connection_form.js';
 import {PocketConnectionForm} from './pocket_connection_form.js';
 import {LinearConnectionForm} from './linear_connection_form.js';
+import {GitHubConnectionForm} from './github_connection_form.js';
 import {PageActions} from './workspace.js';
 import {api, errorMessage} from './ui/support.js';
 
@@ -45,7 +47,8 @@ type Connection =
   | {readonly kind: 'projection'; readonly value?: ObsidianProjection}
   | {readonly kind: 'superhuman'; readonly value?: SuperhumanSource}
   | {readonly kind: 'pocket'; readonly value?: PocketSource}
-  | {readonly kind: 'linear'; readonly value?: LinearSource};
+  | {readonly kind: 'linear'; readonly value?: LinearSource}
+  | {readonly kind: 'github'; readonly value?: GitHubSource};
 interface Operation {
   readonly id: string;
   readonly action: ObsidianAction;
@@ -57,6 +60,7 @@ const empty: ManagerIntegrations = {
   superhuman: {sources: []},
   pocket: {sources: []},
   linear: {sources: []},
+  github: {sources: []},
 };
 
 export function IntegrationsPanel({
@@ -77,6 +81,7 @@ export function IntegrationsPanel({
   const [superhumanResult, setSuperhumanResult] = useState<IntegrationResult>();
   const [pocketResult, setPocketResult] = useState<IntegrationResult>();
   const [linearResult, setLinearResult] = useState<IntegrationResult>();
+  const [githubResult, setGithubResult] = useState<IntegrationResult>();
   const [query, setQuery] = useState('');
   const [productFilter, setProductFilter] = useState<IntegrationProductId | 'all'>('all');
   const [activeTab, setActiveTab] = useState<'connections' | 'catalog'>('connections');
@@ -322,6 +327,52 @@ export function IntegrationsPanel({
     }
   }
 
+  async function githubAction(
+    action: 'sync-source' | 'remove-source' | 'set-enabled',
+    source: GitHubSource,
+  ): Promise<void> {
+    if (busy) return;
+    if (
+      action === 'remove-source' &&
+      !(await dialogs.confirm({
+        title: 'Disconnect GitHub?',
+        message: 'This removes the local connection, imported discussions, and saved token.',
+        confirmLabel: 'Disconnect',
+        tone: 'danger',
+      }))
+    )
+      return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<IntegrationResult>('/api/integrations/github', {
+        action,
+        id: source.id,
+        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+        apply: true,
+        confirm: true,
+      });
+      if (action === 'sync-source') setGithubResult(result);
+      if (!result.applied) throw new Error('Connection change was not applied.');
+      await changed(
+        action === 'sync-source'
+          ? result.warnings?.length
+            ? 'Some repository discussions could not be imported. Review the sync result.'
+            : 'GitHub sync completed.'
+          : action === 'remove-source'
+            ? 'Connection disconnected.'
+            : source.enabled
+              ? 'Connection paused.'
+              : 'Connection enabled.',
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const matches = (product: IntegrationProductId, ...values: string[]) =>
     (productFilter === 'all' || productFilter === product) &&
     (!query.trim() ||
@@ -335,12 +386,16 @@ export function IntegrationsPanel({
   const linearSources = (data.linear?.sources ?? []).filter(source =>
     matches('linear', source.id, source.project ?? ''),
   );
+  const repositories = (data.github?.sources ?? []).filter(source =>
+    matches('github', source.id, source.project ?? '', ...source.repositories),
+  );
   const connectionCount =
     data.obsidian.sources.length +
     data.obsidian.projections.length +
     data.superhuman.sources.length +
     (data.pocket?.sources.length ?? 0) +
-    (data.linear?.sources.length ?? 0);
+    (data.linear?.sources.length ?? 0) +
+    (data.github?.sources.length ?? 0);
   const products = filteredIntegrationProducts(query).filter(
     product => productFilter === 'all' || product.id === productFilter,
   );
@@ -348,6 +403,7 @@ export function IntegrationsPanel({
   const superhuman = integrationProduct('superhuman');
   const pocket = integrationProduct('pocket');
   const linear = integrationProduct('linear');
+  const github = integrationProduct('github');
 
   return (
     <section className="panel is-active integrations-workspace">
@@ -470,6 +526,10 @@ export function IntegrationsPanel({
                         <button disabled={busy} onClick={() => setConnection({kind: 'linear'})}>
                           {product.setupLabel}
                         </button>
+                      ) : product.id === 'github' ? (
+                        <button disabled={busy} onClick={() => setConnection({kind: 'github'})}>
+                          {product.setupLabel}
+                        </button>
                       ) : (
                         <button disabled={busy} onClick={() => setConnection({kind: 'superhuman'})}>
                           {product.setupLabel}
@@ -493,7 +553,12 @@ export function IntegrationsPanel({
               <header>
                 <p className="muted">Manage scope, sync, and access for each connection.</p>
               </header>
-              {sources.length + projections.length + documents.length + recordings.length + linearSources.length ===
+              {sources.length +
+                projections.length +
+                documents.length +
+                recordings.length +
+                linearSources.length +
+                repositories.length ===
               0 ? (
                 <div className="integration-empty">
                   <h4>{connectionCount ? 'No matching connections' : 'No connections yet'}</h4>
@@ -796,6 +861,69 @@ export function IntegrationsPanel({
                   </div>
                 </div>
               ))}
+              {repositories.map(source => (
+                <div className="integration-row" key={'github-' + source.id}>
+                  <IntegrationLogo product={github} decorative />
+                  <div className="integration-row-main">
+                    <h4>
+                      {source.id}
+                      <span
+                        className={
+                          'workspace-status ' +
+                          (source.enabled && source.credentialConfigured && source.status === 'active' ? '' : 'neutral')
+                        }
+                      >
+                        {integrationStatus(source)}
+                      </span>
+                    </h4>
+                    <p className="integration-path">
+                      GitHub · {source.repositories.join(', ')} · {source.project ?? 'Projectless'}
+                    </p>
+                    <p className="muted">
+                      {source.conversations} {source.conversations === 1 ? 'conversation' : 'conversations'} ·{' '}
+                      {source.chunks} chunks
+                      {source.progress
+                        ? ` · Importing ${source.progress.repository}, page ${source.progress.page}, ${source.progress.offset} processed`
+                        : ''}
+                      {source.lastSyncedAt ? ' · Last synced ' + new Date(source.lastSyncedAt).toLocaleString() : ''}
+                      {source.lastReconciledAt
+                        ? ' · Discussions checked ' + new Date(source.lastReconciledAt).toLocaleString()
+                        : ''}
+                      {source.nextAttemptAt ? ' · Next attempt ' + new Date(source.nextAttemptAt).toLocaleString() : ''}
+                    </p>
+                  </div>
+                  <div className="integration-row-actions">
+                    <button
+                      disabled={busy || !source.enabled || !source.credentialConfigured}
+                      onClick={() => void githubAction('sync-source', source)}
+                    >
+                      <RefreshCw /> Sync now
+                    </button>
+                    <ActionMenu
+                      label={'Actions for GitHub ' + source.id}
+                      disabled={busy}
+                      actions={[
+                        {
+                          label: 'Connection settings…',
+                          icon: <Pencil />,
+                          onSelect: () => setConnection({kind: 'github', value: source}),
+                        },
+                        {
+                          label: source.enabled ? 'Pause connection' : 'Enable connection',
+                          icon: source.enabled ? <Pause /> : <Play />,
+                          onSelect: () => void githubAction('set-enabled', source),
+                        },
+                        {
+                          label: 'Disconnect…',
+                          icon: <Unplug />,
+                          danger: true,
+                          onSelect: () => void githubAction('remove-source', source),
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
+              ))}
             </section>
           )}
         </div>
@@ -812,6 +940,16 @@ export function IntegrationsPanel({
                 ? 'Linear settings saved.'
                 : 'Linear connection saved. Choose Sync now to import selected evidence.',
             );
+          }}
+        />
+      ) : connection?.kind === 'github' ? (
+        <GitHubConnectionForm
+          source={connection.value}
+          onClose={() => setConnection(undefined)}
+          onSaved={async () => {
+            setConnection(undefined);
+            showTab('connections');
+            await changed('GitHub connection saved.');
           }}
         />
       ) : connection?.kind === 'pocket' ? (
@@ -918,11 +1056,38 @@ export function IntegrationsPanel({
           </footer>
         </DetailModal>
       ) : null}
+      {githubResult ? (
+        <DetailModal title="GitHub sync results" onClose={() => setGithubResult(undefined)}>
+          <p role="status" className="workspace-note">
+            {githubResult.warnings?.length ? 'Sync finished with warnings.' : 'Sync completed.'}
+          </p>
+          {githubResult.warnings?.length ? (
+            <ul className="integration-warnings">
+              {githubResult.warnings.map((warning, index) => (
+                <li key={index}>
+                  <AlertTriangle /> {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>{githubResult.output}</p>
+          <footer className="conflict-footer">
+            <button onClick={() => setGithubResult(undefined)}>Done</button>
+          </footer>
+        </DetailModal>
+      ) : null}
     </section>
   );
 }
 
 function superhumanStatus(source: Pick<SuperhumanSource, 'enabled' | 'credentialConfigured' | 'status'>): string {
+  if (!source.enabled) return 'Paused';
+  if (!source.credentialConfigured) return 'Token required';
+  if (source.status === 'needs-attention') return 'Needs attention';
+  return source.status === 'needs-sync' ? 'Ready to sync' : 'Up to date';
+}
+
+function integrationStatus(source: Pick<GitHubSource, 'enabled' | 'credentialConfigured' | 'status'>): string {
   if (!source.enabled) return 'Paused';
   if (!source.credentialConfigured) return 'Token required';
   if (source.status === 'needs-attention') return 'Needs attention';

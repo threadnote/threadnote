@@ -1,4 +1,9 @@
-import {isExternalResourceUri} from '@threadnote/store/external-resource';
+import {
+  isExternalResourceUri,
+  parseExternalResourceIdentity,
+  type ExternalProvider,
+  type ExternalResourceMetadata,
+} from '@threadnote/store/external-resource';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   AgentResponseBudgetTooSmallError,
@@ -106,12 +111,12 @@ export interface RecallMcpResult {
   readonly aliases?: readonly string[];
   readonly category: RecallHit['category'];
   readonly external?: {
-    readonly provider: 'superhuman' | 'pocket' | 'linear';
+    readonly provider: ExternalProvider;
     readonly authority: 'external';
     readonly trust: 'untrusted';
     readonly project: string | null;
     readonly fetchedAt?: number;
-    readonly coverage: 'canvas-plain-text' | 'pocket-api-text' | 'linear-api-text';
+    readonly coverage: ExternalResourceMetadata['coverage'];
   };
   readonly confidence: number;
   readonly finalScore?: number;
@@ -300,6 +305,9 @@ export function renderRecallMcpAgentText(
         result.external.fetchedAt === undefined ? '' : `; fetched ${new Date(result.external.fetchedAt).toISOString()}`;
       let sourceName: string;
       switch (result.external.provider) {
+        case 'github':
+          sourceName = 'GitHub';
+          break;
         case 'linear':
           sourceName = 'Linear';
           break;
@@ -312,6 +320,9 @@ export function renderRecallMcpAgentText(
       }
       let coverage: string;
       switch (result.external.coverage) {
+        case 'github-conversation':
+          coverage = 'GitHub conversation';
+          break;
         case 'linear-api-text':
           coverage = 'Linear API text (inline and update comments excluded)';
           break;
@@ -584,6 +595,18 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
   const aliases = allAliases.slice(0, RESULT_ALIAS_LIMIT);
   const omittedAliases = allAliases.length - aliases.length;
   const external = isExternalResourceUri(hit.uri);
+  const provider = parseExternalResourceIdentity(hit.uri)?.provider ?? hit.external?.provider ?? 'superhuman';
+  const coverage =
+    hit.external?.provider === provider
+      ? hit.external.coverage
+      : (
+          {
+            superhuman: 'canvas-plain-text',
+            pocket: 'pocket-api-text',
+            linear: 'linear-api-text',
+            github: 'github-conversation',
+          } as const
+        )[provider];
   const warnings = [
     ...(external ? [EXTERNAL_EVIDENCE_WARNING] : []),
     ...(hit.identityConflict ? [MEMORY_IDENTITY_CONFLICT_WARNING] : []),
@@ -594,12 +617,12 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
     ...(external
       ? {
           external: {
-            provider: hit.external?.provider ?? 'superhuman',
+            provider,
             authority: 'external' as const,
             trust: 'untrusted' as const,
             project: hit.external?.project ?? null,
             ...(hit.external?.fetchedAt === undefined ? {} : {fetchedAt: hit.external.fetchedAt}),
-            coverage: hit.external?.coverage ?? 'canvas-plain-text',
+            coverage,
           },
         }
       : {}),

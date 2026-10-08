@@ -9,6 +9,7 @@ import {IntegrationsPanel} from '../../src/integrations_view.js';
 import {SuperhumanConnectionForm} from '../../src/superhuman_connection_form.js';
 import {PocketConnectionForm} from '../../src/pocket_connection_form.js';
 import {LinearConnectionForm, parseLinearIds} from '../../src/linear_connection_form.js';
+import {GitHubConnectionForm} from '../../src/github_connection_form.js';
 import {MANAGER_STATIC_FILES} from '../../src/server.js';
 import type {LinearSource, SuperhumanSource} from '../../src/integrations_contracts.js';
 
@@ -76,6 +77,49 @@ const mixed = {
     projections: [],
   },
   superhuman: {sources: [source]},
+  pocket: {sources: []},
+  linear: {
+    sources: [
+      {
+        id: 'linear-example',
+        enabled: true,
+        organizationId: 'org',
+        principalId: 'user',
+        teamIds: ['team'],
+        projectIds: ['project'],
+        issueIds: [],
+        project: null,
+        credentialEnv: 'THREADNOTE_LINEAR_API_KEY',
+        credentialConfigured: true,
+        refreshIntervalMinutes: 15,
+        maxStaleHours: 24,
+        status: 'active',
+        issues: 1,
+        documents: 0,
+        updates: 0,
+        chunks: 1,
+      },
+    ],
+  },
+  github: {
+    sources: [
+      {
+        id: 'repo-discussions',
+        enabled: true,
+        project: null,
+        repositories: ['openai/threadnote'],
+        credentialEnv: 'THREADNOTE_GITHUB_TOKEN',
+        credentialStorage: 'local' as const,
+        credentialConfigured: true,
+        refreshIntervalMinutes: 15,
+        maxStaleHours: 24,
+        status: 'active' as const,
+        conversations: 12,
+        chunks: 18,
+        lastReconciledAt: 1_800_000_000_000,
+      },
+    ],
+  },
 };
 
 describe('Integration catalog', () => {
@@ -84,10 +128,12 @@ describe('Integration catalog', () => {
     expect(MANAGER_STATIC_FILES['/integrations/superhuman-docs.png']?.contentType).toBe('image/png');
     expect(MANAGER_STATIC_FILES['/integrations/pocket.png']?.contentType).toBe('image/png');
     expect(MANAGER_STATIC_FILES['/integrations/linear.svg']?.contentType).toBe('image/svg+xml');
+    expect(MANAGER_STATIC_FILES['/integrations/github.svg']?.sourceDirectory).toBe('packages/manager/static');
     expect(filteredIntegrationProducts('recordings').map(product => product.id)).toEqual(['pocket']);
     expect(filteredIntegrationProducts('canvas').map(product => product.id)).toEqual(['superhuman']);
+    expect(filteredIntegrationProducts('repositories').map(product => product.id)).toEqual(['github']);
     expect(filteredIntegrationProducts('export').map(product => product.id)).toEqual(['obsidian']);
-    expect(filteredIntegrationProducts('issues').map(product => product.id)).toEqual(['linear']);
+    expect(filteredIntegrationProducts('issues').map(product => product.id)).toEqual(['linear', 'github']);
   });
   it('is invariant to query case and surrounding whitespace', () => {
     fc.assert(
@@ -108,6 +154,7 @@ describe('Integration catalog', () => {
     expect(document.body.textContent).toContain('Your connections');
     expect(document.body.textContent).toContain('notes');
     expect(document.body.textContent).toContain('team-docs');
+    expect(document.body.textContent).toContain('repo-discussions');
     expect(
       document.querySelector<HTMLButtonElement>('#integration-connections-tab')?.getAttribute('aria-selected'),
     ).toBe('true');
@@ -129,13 +176,18 @@ describe('Integration catalog', () => {
     expect(document.querySelector<HTMLButtonElement>('#integration-catalog-tab')?.getAttribute('aria-selected')).toBe(
       'true',
     );
-    expect(document.querySelectorAll('.integration-product')).toHaveLength(4);
+    expect(document.querySelectorAll('.integration-product')).toHaveLength(5);
     expect(document.querySelectorAll('.integration-row')).toHaveLength(0);
     await act(async () => button('Your connections').click());
     await act(async () => button('All').click());
     await fill(document.querySelector<HTMLInputElement>('input[aria-label="Search your connections"]')!, 'notes');
     expect(document.body.textContent).toContain('/vault');
     expect(document.body.textContent).not.toContain('team-docs');
+    await act(async () => button('All').click());
+    await act(async () => button('GitHub').click());
+    await fill(document.querySelector<HTMLInputElement>('input[aria-label="Search your connections"]')!, '');
+    expect(document.body.textContent).toContain('openai/threadnote');
+    expect(document.body.textContent).toContain('Discussions checked');
   });
   it('opens the catalog from an empty state and returns to connections after setup', async () => {
     let configured = false;
@@ -150,6 +202,9 @@ describe('Integration catalog', () => {
                 : {
                     obsidian: {sources: [], projections: []},
                     superhuman: {sources: []},
+                    pocket: {sources: []},
+                    linear: {sources: []},
+                    github: {sources: []},
                   },
             ),
           );
@@ -171,7 +226,7 @@ describe('Integration catalog', () => {
     ).toBe('true');
     expect(document.body.textContent).toContain('No connections yet');
     await act(async () => button('Browse integrations').click());
-    expect(document.querySelectorAll('.integration-product')).toHaveLength(4);
+    expect(document.querySelectorAll('.integration-product')).toHaveLength(5);
     await act(async () => button('Connect Superhuman Docs').click());
     await fill(document.querySelector<HTMLInputElement>('input[placeholder="team-docs"]')!, 'team-docs');
     await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'synthetic-token');
@@ -442,6 +497,38 @@ describe('Superhuman Docs connection', () => {
   });
 });
 
+describe('GitHub connection', () => {
+  it('saves only explicitly selected repositories with a protected local token and project choice', async () => {
+    let saved: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: string, init: RequestInit) => {
+        saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return new Response('{}');
+      }),
+    );
+    await render(<GitHubConnectionForm onClose={() => undefined} onSaved={async () => undefined} />);
+    await fill(document.querySelector<HTMLInputElement>('input[placeholder="engineering"]')!, 'eng');
+    await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'synthetic-token');
+    await fill(
+      document.querySelector<HTMLTextAreaElement>('textarea')!,
+      'openai/threadnote\nhttps://github.com/openai/codex',
+    );
+    await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
+    await act(async () => button('Connect and sync').click());
+    expect(saved).toMatchObject({
+      action: 'save-source',
+      id: 'eng',
+      repositories: ['openai/threadnote', 'https://github.com/openai/codex'],
+      token: 'synthetic-token',
+      project: null,
+      apply: true,
+      confirm: true,
+    });
+    expect(saved?.credentialEnv).toBeUndefined();
+  });
+});
+
 describe('Pocket connection', () => {
   it('does not show an empty state when Pocket is the only connection', async () => {
     vi.stubGlobal(
@@ -452,6 +539,7 @@ describe('Pocket connection', () => {
             JSON.stringify({
               obsidian: {sources: [], projections: []},
               superhuman: {sources: []},
+              github: {sources: []},
               pocket: {
                 sources: [
                   {

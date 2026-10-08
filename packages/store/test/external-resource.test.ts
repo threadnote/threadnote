@@ -130,4 +130,133 @@ describe('external resource representation', () => {
       ).provider,
     ).toBe('linear');
   });
+
+  it('validates GitHub conversation metadata and safe browser permalinks', () => {
+    const github = {
+      ...metadata,
+      provider: 'github' as const,
+      coverage: 'github-conversation' as const,
+      browserLink: 'https://github.com/Owner/Repo/pull/123#discussion_r456',
+    };
+    const uri = externalResourceUri(github);
+    expect(isExternalResourceUri(uri)).toBe(true);
+    expect(parseExternalResourceIdentity(uri)).toEqual({
+      provider: 'github',
+      sourceId: github.sourceId,
+      documentId: github.documentId,
+      pageId: github.pageId,
+      chunkId: github.chunkId,
+    });
+    expect(parseExternalResource(uri, renderExternalResource(github, 'body'))?.body).toBe('body');
+    for (const browserLink of [
+      'https://evil.example/Owner/Repo/pull/123',
+      'https://github.com/Owner/Repo/settings',
+      'https://github.com/Owner/Repo/pull/123?token=x',
+      'https://github.com/Owner/Repo/pull/123#unsafe.fragment',
+    ])
+      expect(() => renderExternalResource({...github, browserLink}, 'body')).toThrow();
+    expect(() => renderExternalResource({...github, browserLink: undefined}, 'body')).toThrow();
+    expect(() => renderExternalResource({...github, coverage: 'pocket-api-text'}, 'body')).toThrow();
+  });
+
+  it('binds GitHub manifests and receipts to the GitHub provider', () => {
+    const github = {...metadata, provider: 'github' as const};
+    const uri = externalResourceUri(github);
+    expect(() =>
+      serializeExternalDocumentManifest({
+        provider: 'github',
+        version: 1,
+        sourceId: github.sourceId,
+        documentId: github.documentId,
+        configFingerprint: 'a'.repeat(64),
+        status: 'active',
+        fetchedAt: 100,
+        maxStaleMilliseconds: 1000,
+        chunks: {[uri]: 'b'.repeat(64)},
+      }),
+    ).not.toThrow();
+    expect(() =>
+      serializeExternalDocumentManifest({
+        provider: 'pocket',
+        version: 1,
+        sourceId: github.sourceId,
+        documentId: github.documentId,
+        configFingerprint: 'a'.repeat(64),
+        status: 'active',
+        fetchedAt: 100,
+        maxStaleMilliseconds: 1000,
+        chunks: {[uri]: 'b'.repeat(64)},
+      }),
+    ).toThrow();
+    expect(() =>
+      serializeExternalSourceReceipt({
+        provider: 'github',
+        version: 1,
+        sourceId: github.sourceId,
+        status: 'active',
+        accessEpoch: 'a'.repeat(64),
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts only bounded unique numeric GitHub repository denial guards', () => {
+    const receipt = {
+      provider: 'github' as const,
+      version: 1 as const,
+      sourceId: 'github',
+      status: 'active' as const,
+      accessEpoch: 'a'.repeat(64),
+      deniedRepositoryIds: ['7', '9'],
+    };
+    expect(JSON.parse(serializeExternalSourceReceipt(receipt)).deniedRepositoryIds).toEqual(['7', '9']);
+    for (const deniedRepositoryIds of [['7', '7'], ['0'], ['../7'], Array.from({length: 101}, (_, i) => String(i + 1))])
+      expect(() => serializeExternalSourceReceipt({...receipt, deniedRepositoryIds})).toThrow();
+    expect(() => serializeExternalSourceReceipt({...receipt, provider: 'pocket'})).toThrow();
+  });
+
+  it('roundtrips bounded GitHub denial generations without mutating receipts', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({min: 1, max: 1000}), {minLength: 1, maxLength: 100}),
+        fc.uint8Array({minLength: 32, maxLength: 32}),
+        (ids, bytes) => {
+          const generation = Buffer.from(bytes).toString('hex');
+          const receipt = {
+            provider: 'github' as const,
+            version: 1 as const,
+            sourceId: 'github',
+            status: 'active' as const,
+            accessEpoch: 'a'.repeat(64),
+            deniedRepositoryIds: ids.map(String),
+            repositoryDenialGenerations: Object.fromEntries(ids.map(id => [String(id), generation])),
+          };
+          const before = structuredClone(receipt);
+          expect(JSON.parse(serializeExternalSourceReceipt(receipt))).toEqual(before);
+          expect(receipt).toEqual(before);
+        },
+      ),
+      {numRuns: 40, seed: 931},
+    );
+    const receipt = {
+      provider: 'github' as const,
+      version: 1 as const,
+      sourceId: 'github',
+      status: 'active' as const,
+      accessEpoch: 'a'.repeat(64),
+    };
+    for (const repositoryDenialGenerations of [
+      {'0': 'a'.repeat(64)},
+      {'../7': 'a'.repeat(64)},
+      {'7': 'invalid'},
+      Object.fromEntries(Array.from({length: 101}, (_, i) => [String(i + 1), 'a'.repeat(64)])),
+    ])
+      expect(() => serializeExternalSourceReceipt({...receipt, repositoryDenialGenerations})).toThrow();
+    expect(() =>
+      serializeExternalSourceReceipt({
+        ...receipt,
+        provider: 'pocket',
+        repositoryDenialGenerations: {'7': 'a'.repeat(64)},
+      }),
+    ).toThrow();
+  });
 });

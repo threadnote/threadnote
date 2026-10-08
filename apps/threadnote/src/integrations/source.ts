@@ -25,6 +25,13 @@ import {
   runPocketSourceSync,
   syncPocketSourcesBeforeRecall,
 } from './pocket/source.js';
+import {
+  runGitHubSourceAdd,
+  runGitHubSourceRemove,
+  runGitHubSourceStatus,
+  runGitHubSourceSync,
+  syncGitHubSourcesBeforeRecall,
+} from './github/source.js';
 
 import {
   runLinearSourceAdd,
@@ -35,7 +42,7 @@ import {
 } from './linear/source.js';
 
 export interface SourceAddOptions {
-  readonly type: 'obsidian' | 'superhuman' | 'pocket' | 'linear';
+  readonly type: 'obsidian' | 'superhuman' | 'pocket' | 'linear' | 'github';
   readonly id: string;
   readonly apply?: boolean;
   readonly vault?: string;
@@ -43,6 +50,7 @@ export interface SourceAddOptions {
   readonly exclude?: readonly string[];
   readonly inbox?: string;
   readonly documents: readonly string[];
+  readonly repositories?: readonly string[];
   readonly pages?: readonly string[];
   readonly credentialEnv?: string;
   readonly organizationId?: string;
@@ -69,6 +77,8 @@ class SourceCommandError extends Schema.TaggedError<SourceCommandError>()('Sourc
 
 export const runSourceAdd = Effect.fn('source.add')(function* (config: RuntimeConfig, options: SourceAddOptions) {
   if (options.type === 'linear') return yield* runLinearSourceAdd(config, options);
+  if (options.type === 'github')
+    return yield* runGitHubSourceAdd(config, {...options, repositories: options.repositories ?? []});
   if (options.type === 'pocket') return yield* runPocketSourceAdd(config, options);
   if (options.type === 'superhuman') {
     return yield* runSuperhumanSourceAdd(config, options);
@@ -91,9 +101,11 @@ export const runSourceList = Effect.fn('source.list')(function* (config: Runtime
         ? `${source.id} (obsidian): ${source.vault}; ${source.enabled ? 'enabled' : 'disabled'}`
         : source.type === 'linear'
           ? `${source.id} (linear): ${source.projectIds.length} selected project(s), ${source.issueIds.length} issue(s); project ${source.project}; ${source.enabled ? 'enabled' : 'disabled'}`
-          : source.type === 'pocket'
-            ? `${source.id} (pocket): all accessible recordings; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
-            : `${source.id} (superhuman): ${source.documents.length} document(s); project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`,
+          : source.type === 'github'
+            ? `${source.id} (github): ${source.repositories.join(', ')}; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
+            : source.type === 'pocket'
+              ? `${source.id} (pocket): all accessible recordings; project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`
+              : `${source.id} (superhuman): ${source.documents.length} document(s); project ${source.project ?? 'projectless'}; ${source.enabled ? 'enabled' : 'disabled'}`,
     );
   }
 });
@@ -108,6 +120,7 @@ const sourceType = Effect.fn('source.type')(function* (config: RuntimeConfig, id
 
 export const runSourceInventory = Effect.fn('source.inventory')(function* (config: RuntimeConfig, id: string) {
   if ((yield* sourceType(config, id)) === 'linear') return yield* runLinearSourceStatus(config, id);
+  if ((yield* sourceType(config, id)) === 'github') return yield* runGitHubSourceStatus(config, id);
   if ((yield* sourceType(config, id)) === 'pocket') {
     const inventory = yield* runPocketSourceInventory(config, id);
     yield* Console.log(`Pocket source "${id}": ${inventory.entries.length} cached item(s).`);
@@ -125,6 +138,7 @@ export const runSourceInventory = Effect.fn('source.inventory')(function* (confi
 
 export const runSourceStatus = Effect.fn('source.status')(function* (config: RuntimeConfig, id: string) {
   if ((yield* sourceType(config, id)) === 'linear') return yield* runLinearSourceStatus(config, id);
+  if ((yield* sourceType(config, id)) === 'github') return yield* runGitHubSourceStatus(config, id);
   if ((yield* sourceType(config, id)) === 'pocket') return yield* runPocketSourceStatus(config, id);
   if ((yield* sourceType(config, id)) === 'superhuman') {
     return yield* runSuperhumanSourceStatus(config, id);
@@ -134,6 +148,7 @@ export const runSourceStatus = Effect.fn('source.status')(function* (config: Run
 
 export const runSourceSync = Effect.fn('source.sync')(function* (config: RuntimeConfig, options: SourceCommandOptions) {
   if ((yield* sourceType(config, options.id)) === 'linear') return yield* runLinearSourceSync(config, options);
+  if ((yield* sourceType(config, options.id)) === 'github') return yield* runGitHubSourceSync(config, options);
   if ((yield* sourceType(config, options.id)) === 'pocket') return yield* runPocketSourceSync(config, options);
   if ((yield* sourceType(config, options.id)) === 'superhuman') {
     return yield* runSuperhumanSourceSync(config, options);
@@ -146,6 +161,7 @@ export const runSourceRemove = Effect.fn('source.remove')(function* (
   options: SourceCommandOptions,
 ) {
   if ((yield* sourceType(config, options.id)) === 'linear') return yield* runLinearSourceRemove(config, options);
+  if ((yield* sourceType(config, options.id)) === 'github') return yield* runGitHubSourceRemove(config, options);
   if ((yield* sourceType(config, options.id)) === 'pocket') return yield* runPocketSourceRemove(config, options);
   if ((yield* sourceType(config, options.id)) === 'superhuman') {
     return yield* runSuperhumanSourceRemove(config, options);
@@ -158,13 +174,21 @@ export const syncSourcesBeforeRecall = Effect.fn('source.syncBeforeRecall')(func
   const superhuman = yield* syncSuperhumanSourcesBeforeRecall(config);
   const pocket = yield* syncPocketSourcesBeforeRecall(config);
   const linear = yield* syncLinearSourcesBeforeRecall(config);
+  const github = yield* syncGitHubSourcesBeforeRecall(config);
   return {
     syncedSources: [
       ...obsidian.syncedSources,
       ...superhuman.syncedSources,
       ...pocket.syncedSources,
       ...linear.syncedSources,
+      ...github.syncedSources,
     ],
-    warnings: [...obsidian.warnings, ...superhuman.warnings, ...pocket.warnings, ...linear.warnings],
+    warnings: [
+      ...obsidian.warnings,
+      ...superhuman.warnings,
+      ...pocket.warnings,
+      ...linear.warnings,
+      ...github.warnings,
+    ],
   };
 });

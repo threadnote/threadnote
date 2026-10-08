@@ -150,6 +150,8 @@ describe('Obsidian integrations', () => {
                 ],
               },
               superhuman: {sources: []},
+              pocket: {sources: []},
+              github: {sources: []},
             }),
           );
         const body = JSON.parse(init.body);

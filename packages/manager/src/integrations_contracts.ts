@@ -40,7 +40,7 @@ export interface IntegrationResult {
   readonly warnings?: readonly string[];
 }
 
-export type IntegrationProductId = 'obsidian' | 'superhuman' | 'pocket' | 'linear';
+export type IntegrationProductId = 'obsidian' | 'superhuman' | 'pocket' | 'linear' | 'github';
 
 export interface LinearSource {
   readonly id: string;
@@ -80,6 +80,25 @@ export interface ResolvedLinearSelection {
     readonly teamId: string;
     readonly projectId?: string;
   }[];
+}
+
+export interface GitHubSource {
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly project: string | null;
+  readonly repositories: readonly string[];
+  readonly credentialEnv: string;
+  readonly credentialStorage?: 'local';
+  readonly credentialConfigured: boolean;
+  readonly refreshIntervalMinutes: number;
+  readonly maxStaleHours: number;
+  readonly status: 'active' | 'needs-sync' | 'needs-attention';
+  readonly conversations: number;
+  readonly chunks: number;
+  readonly lastSyncedAt?: number;
+  readonly nextAttemptAt?: number;
+  readonly progress?: {readonly repository: string; readonly page: number; readonly offset: number};
+  readonly lastReconciledAt?: number;
 }
 
 export interface PocketSource {
@@ -126,7 +145,10 @@ export interface ManagerIntegrations {
   readonly superhuman: {readonly sources: readonly SuperhumanSource[]};
   readonly pocket: {readonly sources: readonly PocketSource[]};
   readonly linear: {readonly sources: readonly LinearSource[]};
+  readonly github: {readonly sources: readonly GitHubSource[]};
 }
+
+export type GitHubAction = 'save-source' | 'sync-source' | 'remove-source' | 'set-enabled';
 
 export type SuperhumanAction =
   'save-source' | 'sync-source' | 'remove-source' | 'set-enabled' | 'resolve-links' | 'describe-selection';

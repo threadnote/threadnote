@@ -78,6 +78,11 @@ export const MANAGER_STATIC_FILES: Readonly<
     path: 'integrations/linear.svg',
     sourceDirectory: 'packages/manager/static',
   },
+  '/integrations/github.svg': {
+    contentType: 'image/svg+xml',
+    path: 'integrations/github.svg',
+    sourceDirectory: 'packages/manager/static',
+  },
   '/editor.css': {
     contentType: 'text/css; charset=utf-8',
     path: 'style.css',

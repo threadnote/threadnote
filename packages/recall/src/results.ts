@@ -20,7 +20,7 @@ import {
 import {recallRankCandidateIsEligible, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallTokens} from './tokenize.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
-import {isExternalResourceUri} from '@threadnote/store/external-resource';
+import {isExternalResourceUri, type ExternalProvider} from '@threadnote/store/external-resource';
 import {isJsonObject} from '@threadnote/platform/json';
 import {escapeRegExp} from '@threadnote/platform/glob';
 import {stripFragment} from '@threadnote/platform/string-boundaries';
@@ -255,7 +255,7 @@ export interface RecallHit {
   readonly contextType: string;
   readonly equivalentUris?: readonly string[];
   readonly external?: NonNullable<RecallCandidate['externalSource']> & {
-    readonly provider: 'superhuman' | 'pocket' | 'linear';
+    readonly provider: ExternalProvider;
     readonly authority: 'external';
     readonly trust: 'untrusted';
   };

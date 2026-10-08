@@ -43,6 +43,14 @@ export const integrationProducts: readonly IntegrationProduct[] = [
     capabilities: ['Selected scope', 'Issue discussions', 'Read only'],
     setupLabel: 'Connect Linear',
   },
+  {
+    id: 'github',
+    name: 'GitHub',
+    logo: '/integrations/github.svg',
+    description: 'Bring selected repository discussions and reviews into context.',
+    capabilities: ['Import issues and pull requests', 'Selected repositories', 'Read only'],
+    setupLabel: 'Connect GitHub',
+  },
 ];
 
 export function integrationProduct(id: IntegrationProductId): IntegrationProduct {

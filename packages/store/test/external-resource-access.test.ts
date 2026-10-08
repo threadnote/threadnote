@@ -12,8 +12,12 @@ import {
   ExternalSourcePolicy,
   externalDocumentManifestUri,
   externalResourceUri,
+  externalSourceReceiptUri,
+  readExternalSourceReceipt,
+  loadExternalResourceAccess,
   renderExternalResource,
   serializeExternalDocumentManifest,
+  serializeExternalSourceReceipt,
   type ExternalSourceAccessPolicy,
 } from '@threadnote/store/external-resource';
 
@@ -55,6 +59,111 @@ function provideLayer<Services, E, R>(layer: Layer.Layer<Services, E, R>) {
 }
 
 describe('external source access', () => {
+  effectIt.effect('requires an active matching GitHub receipt for direct and enumerated access', () => {
+    const dependencies = Layer.merge(
+      base,
+      Layer.succeed(ExternalSourcePolicy, {
+        current: (_location, _sourceId, provider) =>
+          Effect.succeed(
+            provider === 'github' ? {enabled: true, configFingerprint: fingerprint, project: 'threadnote'} : undefined,
+          ),
+      }),
+    );
+    return Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'github-access-'}));
+      const location = {home, account: 'local', user: 'tester'};
+      const store = yield* ResourceStore;
+      const github = {
+        ...metadata,
+        provider: 'github' as const,
+        coverage: 'github-conversation' as const,
+        browserLink: 'https://github.com/owner/repo/issues/42#issuecomment-1',
+      };
+      const githubUri = externalResourceUri(github);
+      const content = renderExternalResource(github, 'Synthetic conversation');
+      const epoch = 'b'.repeat(64);
+      const now = yield* Clock.currentTimeMillis;
+      const manifest = {
+        provider: 'github' as const,
+        version: 1 as const,
+        sourceId: github.sourceId,
+        documentId: github.documentId,
+        configFingerprint: fingerprint,
+        status: 'active' as const,
+        fetchedAt: now,
+        maxStaleMilliseconds: 100_000,
+        chunks: {[githubUri]: yield* store.fingerprint(content)},
+        accessEpoch: epoch,
+      };
+      yield* store.mutateChecked(
+        location,
+        [
+          {type: 'write', uri: githubUri, content, options: {mode: 'upsert'}},
+          {
+            type: 'write',
+            uri: externalDocumentManifestUri(github.sourceId, github.documentId, 'github'),
+            content: serializeExternalDocumentManifest(manifest),
+            options: {mode: 'upsert'},
+          },
+        ],
+        Effect.void,
+      );
+      expect(Result.isFailure(yield* store.read(location, githubUri).pipe(Effect.result))).toBe(true);
+      const receiptUri = externalSourceReceiptUri(github.sourceId, 'github');
+      yield* store.write(
+        location,
+        receiptUri,
+        serializeExternalSourceReceipt({
+          provider: 'github',
+          version: 1,
+          sourceId: github.sourceId,
+          accessEpoch: epoch,
+          status: 'active',
+        }),
+        {mode: 'upsert'},
+      );
+      expect(yield* store.read(location, githubUri)).toBe(content);
+      expect(yield* loadExternalResourceAccess(location)).toEqual({[githubUri]: manifest.chunks[githubUri]});
+      const generations = Object.fromEntries(Array.from({length: 100}, (_, i) => [String(i + 1), 'c'.repeat(64)]));
+      yield* store.write(
+        location,
+        receiptUri,
+        serializeExternalSourceReceipt({
+          provider: 'github',
+          version: 1,
+          sourceId: github.sourceId,
+          accessEpoch: epoch,
+          status: 'active',
+          repositoryDenialGenerations: generations,
+        }),
+        {mode: 'replace'},
+      );
+      expect(
+        (yield* readExternalSourceReceipt(location, github.sourceId, 'github'))?.repositoryDenialGenerations,
+      ).toEqual(generations);
+      expect(yield* store.read(location, githubUri)).toBe(content);
+      expect(yield* loadExternalResourceAccess(location)).toEqual({[githubUri]: manifest.chunks[githubUri]});
+      yield* store.write(
+        location,
+        receiptUri,
+        serializeExternalSourceReceipt({
+          provider: 'github',
+          version: 1,
+          sourceId: github.sourceId,
+          accessEpoch: epoch,
+          status: 'authentication-rejected',
+        }),
+        {mode: 'replace'},
+      );
+      expect(Result.isFailure(yield* store.read(location, githubUri).pipe(Effect.result))).toBe(true);
+      expect(yield* loadExternalResourceAccess(location)).toEqual({});
+    }).pipe(
+      TestClock.withLive,
+      provideLayer(Layer.merge(dependencies, ResourceStore.layer.pipe(Layer.provide(dependencies)))),
+    );
+  });
+
   effectIt.effect('grep authorizes the captured bytes even when the current file remains valid', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

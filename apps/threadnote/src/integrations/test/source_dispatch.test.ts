@@ -4,8 +4,15 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {SystemInfo} from '@threadnote/platform/system';
 import {readSourceConfiguration} from '@threadnote/threadnote/integrations/config';
-import {runSourceAdd, runSourceList, runSourceRemove} from '@threadnote/threadnote/integrations/source';
+import {
+  runSourceAdd,
+  runSourceInventory,
+  runSourceList,
+  runSourceRemove,
+  runSourceSync,
+} from '@threadnote/threadnote/integrations/source';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../../../test/helpers/effect-layer.js';
 
@@ -47,13 +54,35 @@ describe('source provider dispatch', () => {
         project: 'threadnote',
         apply: true,
       }).pipe(captureConsole);
+      yield* runSourceAdd(config, {
+        type: 'github',
+        id: 'repo-source',
+        repositories: ['https://github.com/Owner/Repo'],
+        credentialEnv: 'THREADNOTE_GITHUB_TOKEN',
+        projectless: true,
+        include: [],
+        documents: [],
+        apply: true,
+      }).pipe(captureConsole);
       const listed = yield* runSourceList(config).pipe(captureConsole);
       expect(listed.output).toContain('local-notes (obsidian)');
       expect(listed.output).toContain('canvas-notes (superhuman)');
+      expect(listed.output).toContain('repo-source (github): owner/repo');
+      const inventory = yield* runSourceInventory(config, 'repo-source').pipe(captureConsole);
+      expect(inventory.output).toContain('GitHub source "repo-source": 0 cached item(s).');
+      const system = yield* SystemInfo;
+      const sync = yield* runSourceSync(config, {id: 'repo-source', apply: true}).pipe(
+        Effect.provideService(SystemInfo, {...system, environment: () => ({})}),
+        captureConsole,
+      );
+      expect(sync.output).toContain('GitHub source authentication was rejected.');
       yield* runSourceRemove(config, {id: 'canvas-notes'}).pipe(captureConsole);
-      expect((yield* readSourceConfiguration(config)).sources).toHaveLength(2);
+      expect((yield* readSourceConfiguration(config)).sources).toHaveLength(3);
       yield* runSourceRemove(config, {id: 'canvas-notes', apply: true}).pipe(captureConsole);
-      expect((yield* readSourceConfiguration(config)).sources.map(source => source.id)).toEqual(['local-notes']);
+      expect((yield* readSourceConfiguration(config)).sources.map(source => source.id)).toEqual([
+        'local-notes',
+        'repo-source',
+      ]);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 

@@ -28,7 +28,7 @@ export const superhumanExternalSourcePolicyLayer = Layer.effect(
                 Effect.orElseSucceed(() => undefined),
               );
             return Effect.succeed(
-              source?.type === 'superhuman' || source?.type === 'pocket'
+              source?.type === 'superhuman' || source?.type === 'pocket' || source?.type === 'github'
                 ? {
                     enabled: source.enabled,
                     configFingerprint: sourceConfigurationFingerprint(source),

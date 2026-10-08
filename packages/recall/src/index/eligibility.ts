@@ -19,7 +19,11 @@ export function recallEligibilityPredicate(
   policy: RecallEligibilityPolicy | undefined,
   externalHashExpression: string | false = `json_extract(${alias}.candidate_json, '$.contentHash')`,
 ): RecallSqlPredicate {
-  const roots = ['threadnote://resources/external/superhuman', 'threadnote://resources/external/pocket'];
+  const roots = [
+    'threadnote://resources/external/superhuman',
+    'threadnote://resources/external/pocket',
+    'threadnote://resources/external/github',
+  ];
   const outside = roots.map(() => `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`).join(' AND ');
   const access = policy?.externalResources ?? {};
   const externalPredicate =

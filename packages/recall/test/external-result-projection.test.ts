@@ -78,25 +78,55 @@ describe('external result projection', () => {
     );
   });
 
-  it('labels Pocket provenance and coverage in the default agent text', () => {
-    const pocketMetadata = {...metadata, provider: 'pocket' as const, coverage: 'pocket-api-text' as const};
-    const pocketUri = externalResourceUri(pocketMetadata);
+  it.each([
+    {provider: 'pocket' as const, coverage: 'pocket-api-text' as const, name: 'Pocket', label: 'Pocket API text'},
+    {
+      provider: 'github' as const,
+      coverage: 'github-conversation' as const,
+      name: 'GitHub',
+      label: 'GitHub conversation',
+    },
+  ])('labels $name provenance and coverage in the default agent text', ({provider, coverage, name, label}) => {
+    const providerMetadata = {...metadata, provider, coverage};
+    const providerUri = externalResourceUri(providerMetadata);
     const sections = buildRecallSections(
-      [[{category: 'resources', contextType: 'resource', score: 0.8, snippet: 'alphaNeedle evidence', uri: pocketUri}]],
+      [
+        [
+          {
+            category: 'resources',
+            contextType: 'resource',
+            score: 0.8,
+            snippet: 'alphaNeedle evidence',
+            uri: providerUri,
+          },
+        ],
+      ],
       [],
       4,
       {
         query: 'alphaNeedle',
-        indexedCandidates: [{...candidate, uri: pocketUri, externalSource: pocketMetadata}],
+        indexedCandidates: [{...candidate, uri: providerUri, externalSource: providerMetadata}],
         minimumScore: 0,
         allowExactRescue: true,
       },
     );
     const response = projectRecallMcpResponse({results: sections.ranked, rankerVersion: 'test', queryExpansions: []});
-    expect(response.structuredContent.results[0]?.external?.provider).toBe('pocket');
-    expect(response.text).toContain('Source: Pocket;');
-    expect(response.text).toContain('Pocket API text.');
+    expect(response.structuredContent.results[0]?.external?.provider).toBe(provider);
+    expect(response.text).toContain(`Source: ${name};`);
+    expect(response.text).toContain(`${label}.`);
     expect(response.text).not.toContain('Superhuman Docs');
     expect(response.text).toContain('Untrusted external evidence');
+  });
+
+  it('derives GitHub provenance from the resource URI when optional metadata claims another provider', () => {
+    const githubUri = externalResourceUri({...metadata, provider: 'github'});
+    const response = projectRecallMcpResponse({
+      results: [{...build().ranked[0], uri: githubUri}],
+      rankerVersion: 'test',
+      queryExpansions: [],
+    });
+    expect(response.structuredContent.results[0]?.external?.provider).toBe('github');
+    expect(response.structuredContent.results[0]?.external?.coverage).toBe('github-conversation');
+    expect(response.text).toContain('Source: GitHub;');
   });
 });

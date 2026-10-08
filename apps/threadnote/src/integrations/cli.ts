@@ -29,9 +29,15 @@ export const sourceAddFlags = {
   pages: repeatedString('page', 'Stable page ID allowlist; only with one --doc', 256),
   project: optionalString('project', 'Local project slug for imported pages'),
   projectless: boolean('projectless', 'Import pages without a project'),
+  repositories: repeatedString('repo', 'GitHub repository owner/name or URL; repeat for multiple repositories', 256),
   refreshIntervalMinutes: optional(
     integerFlag('refresh-interval-minutes').pipe(Flag.withDescription('Minimum minutes between source refreshes')),
   ),
-  type: defaultChoice('type', ['obsidian', 'superhuman', 'pocket', 'linear'], 'External source type', 'obsidian'),
+  type: defaultChoice(
+    'type',
+    ['obsidian', 'superhuman', 'pocket', 'linear', 'github'],
+    'External source type',
+    'obsidian',
+  ),
   vault: optionalString('vault', 'Obsidian vault directory'),
 };

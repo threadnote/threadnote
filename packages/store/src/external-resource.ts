@@ -6,12 +6,14 @@ import type {ResourceStoreLocation} from './resource-store.js';
 const SUPERHUMAN_ROOT = 'threadnote://resources/external/superhuman';
 const POCKET_ROOT = 'threadnote://resources/external/pocket';
 const LINEAR_ROOT = 'threadnote://resources/external/linear';
-export type ExternalProvider = 'superhuman' | 'pocket' | 'linear';
+const GITHUB_ROOT = 'threadnote://resources/external/github';
+export type ExternalProvider = 'superhuman' | 'pocket' | 'linear' | 'github';
 const ENVELOPE = 'THREADNOTE EXTERNAL RESOURCE/1\n';
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_RECEIPT_BYTES = 1024 * 1024;
+const MAX_SOURCE_RECEIPT_BYTES = 32 * 1024;
 
 export interface ExternalResourceIdentity {
   readonly provider?: ExternalProvider;
@@ -29,7 +31,7 @@ export interface ExternalResourceMetadata extends ExternalResourceIdentity {
   readonly remoteRevision?: string;
   readonly rendererVersion: string;
   readonly scrubberVersion: string;
-  readonly coverage: 'canvas-plain-text' | 'pocket-api-text' | 'linear-api-text';
+  readonly coverage: 'canvas-plain-text' | 'pocket-api-text' | 'linear-api-text' | 'github-conversation';
 }
 
 export interface ExternalDocumentManifest {
@@ -60,6 +62,8 @@ export interface ExternalSourceReceipt {
   readonly credentialFingerprint?: string;
   readonly completedAt?: number;
   readonly nextAttemptAt?: number;
+  readonly deniedRepositoryIds?: readonly string[];
+  readonly repositoryDenialGenerations?: Readonly<Record<string, string>>;
 }
 
 export interface ExternalSourceAccessPolicy {
@@ -83,7 +87,9 @@ export class ExternalSourcePolicy extends Context.Service<
 
 export function isExternalResourceUri(uri: string): boolean {
   const value = uri.split('#', 1)[0];
-  return [SUPERHUMAN_ROOT, POCKET_ROOT, LINEAR_ROOT].some(root => value === root || value.startsWith(`${root}/`));
+  return [SUPERHUMAN_ROOT, POCKET_ROOT, LINEAR_ROOT, GITHUB_ROOT].some(
+    root => value === root || value.startsWith(`${root}/`),
+  );
 }
 
 export function externalResourceUri(identity: ExternalResourceIdentity): string {
@@ -116,13 +122,16 @@ export function externalSourceReceiptUri(sourceId: string, provider: ExternalPro
 
 export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): string {
   if (!validSourceReceipt(receipt)) throw new Error('Invalid external source receipt.');
-  return JSON.stringify(receipt) + '\n';
+  const content = JSON.stringify(receipt) + '\n';
+  if (new TextEncoder().encode(content).byteLength > MAX_SOURCE_RECEIPT_BYTES)
+    throw new Error('External source receipt exceeds its budget.');
+  return content;
 }
 
 export function parseExternalResourceIdentity(uri: string): ExternalResourceIdentity | undefined {
   const value = uri.split('#', 1)[0];
   const match =
-    /^threadnote:\/\/resources\/external\/(superhuman|pocket|linear)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
+    /^threadnote:\/\/resources\/external\/(superhuman|pocket|linear|github)\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(
       value,
     );
   if (!match) return undefined;
@@ -213,7 +222,7 @@ export const readExternalSourceReceipt = Effect.fn('external.readSourceReceipt')
   const filename = resourcePath(path, {...location, home: realHome}, uri);
   const info = yield* fs.stat(filename).pipe(Effect.result);
   if (Result.isFailure(info)) return info.failure.reason._tag === 'NotFound' ? undefined : null;
-  const content = yield* safeRead(fs, path, filename, 4096);
+  const content = yield* safeRead(fs, path, filename, MAX_SOURCE_RECEIPT_BYTES);
   if (content === undefined) return null;
   return yield* Effect.try(() => {
     const receipt: unknown = JSON.parse(content);
@@ -272,11 +281,17 @@ export const loadExternalResourceAccess = Effect.fn('external.loadAccess')(funct
   if (realHome === undefined) return allowed;
   const canonicalLocation = {...location, home: realHome};
   const now = yield* Clock.currentTimeMillis;
-  for (const provider of ['superhuman', 'pocket', 'linear'] as const) {
+  for (const provider of ['superhuman', 'pocket', 'linear', 'github'] as const) {
     const root = resourcePath(
       path,
       canonicalLocation,
-      provider === 'linear' ? LINEAR_ROOT : provider === 'pocket' ? POCKET_ROOT : SUPERHUMAN_ROOT,
+      provider === 'linear'
+        ? LINEAR_ROOT
+        : provider === 'pocket'
+          ? POCKET_ROOT
+          : provider === 'github'
+            ? GITHUB_ROOT
+            : SUPERHUMAN_ROOT,
     );
     const sources = yield* safeDirectories(fs, path, root);
     for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
@@ -305,10 +320,14 @@ function manifestPermits(
     policy?.enabled === true &&
     manifest?.status === 'active' &&
     sourceReceipt !== null &&
-    (sourceReceipt === undefined ||
-      (manifest.provider === 'pocket' || manifest.provider === 'linear'
-        ? sourceReceipt.status === 'active'
-        : sourceReceipt.status !== 'cleanup')) &&
+    (manifest.provider === 'github'
+      ? sourceReceipt?.status === 'active' &&
+        manifest.accessEpoch !== undefined &&
+        !sourceReceipt.deniedRepositoryIds?.some(id => manifest.documentId.startsWith(`r-${id}-`))
+      : sourceReceipt === undefined ||
+        (manifest.provider === 'pocket' || manifest.provider === 'linear'
+          ? sourceReceipt.status === 'active'
+          : sourceReceipt.status !== 'cleanup')) &&
     (manifest.provider !== 'linear' ||
       (policy.credentialFingerprint !== undefined &&
         policy.credentialFingerprint === sourceReceipt?.credentialFingerprint)) &&
@@ -397,6 +416,11 @@ function safeDirectories(
 
 function validIdentity(value: ExternalResourceIdentity): boolean {
   if (
+    (value.provider !== undefined &&
+      value.provider !== 'superhuman' &&
+      value.provider !== 'pocket' &&
+      value.provider !== 'linear' &&
+      value.provider !== 'github') ||
     !SOURCE_ID.test(value.sourceId) ||
     !ID.test(value.documentId) ||
     !ID.test(value.pageId) ||
@@ -426,15 +450,19 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
     value.version !== 1 ||
     (value.coverage !== 'canvas-plain-text' &&
       value.coverage !== 'pocket-api-text' &&
-      value.coverage !== 'linear-api-text') ||
+      value.coverage !== 'linear-api-text' &&
+      value.coverage !== 'github-conversation') ||
     (value.provider !== undefined &&
       value.provider !== 'superhuman' &&
       value.provider !== 'pocket' &&
-      value.provider !== 'linear') ||
+      value.provider !== 'linear' &&
+      value.provider !== 'github') ||
     !['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'].every(
       key => typeof value[key] === 'string',
     )
   )
+    return false;
+  if (value.provider === 'github' ? value.coverage !== 'github-conversation' : value.coverage === 'github-conversation')
     return false;
   if (
     !validIdentity(value as unknown as ExternalResourceIdentity) ||
@@ -453,6 +481,18 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
     if (typeof value.browserLink !== 'string' || value.browserLink.length > 2048) return false;
     try {
       const url = new URL(value.browserLink);
+      if (value.provider === 'github') {
+        if (
+          url.origin !== 'https://github.com' ||
+          !/^\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/(?:issues|pull)\/[1-9][0-9]*(?:\/files)?$/.test(url.pathname) ||
+          url.username ||
+          url.password ||
+          url.search ||
+          (url.hash !== '' && !/^#[A-Za-z0-9_-]+$/.test(url.hash))
+        )
+          return false;
+        return true;
+      }
       if (
         (value.provider === 'linear'
           ? url.origin !== 'https://linear.app'
@@ -466,6 +506,7 @@ function validMetadata(value: unknown): value is ExternalResourceMetadata {
       return false;
     }
   }
+  if (value.provider === 'github') return false;
   return true;
 }
 
@@ -476,7 +517,8 @@ function validManifest(value: unknown): value is ExternalDocumentManifest {
     (value.provider !== undefined &&
       value.provider !== 'superhuman' &&
       value.provider !== 'pocket' &&
-      value.provider !== 'linear') ||
+      value.provider !== 'linear' &&
+      value.provider !== 'github') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.documentId !== 'string' ||
@@ -530,7 +572,8 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
     (value.provider !== undefined &&
       value.provider !== 'superhuman' &&
       value.provider !== 'pocket' &&
-      value.provider !== 'linear') ||
+      value.provider !== 'linear' &&
+      value.provider !== 'github') ||
     typeof value.sourceId !== 'string' ||
     !SOURCE_ID.test(value.sourceId) ||
     typeof value.accessEpoch !== 'string' ||
@@ -541,6 +584,26 @@ function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
   if (
     value.credentialFingerprint !== undefined &&
     (typeof value.credentialFingerprint !== 'string' || !HASH.test(value.credentialFingerprint))
+  )
+    return false;
+  if (
+    value.deniedRepositoryIds !== undefined &&
+    (value.provider !== 'github' ||
+      !Array.isArray(value.deniedRepositoryIds) ||
+      value.deniedRepositoryIds.length > 100 ||
+      value.deniedRepositoryIds.some(id => typeof id !== 'string' || !/^[1-9][0-9]*$/.test(id)) ||
+      new Set(value.deniedRepositoryIds).size !== value.deniedRepositoryIds.length)
+  )
+    return false;
+  if (
+    value.repositoryDenialGenerations !== undefined &&
+    (value.provider !== 'github' ||
+      !record(value.repositoryDenialGenerations) ||
+      Object.keys(value.repositoryDenialGenerations).length > 100 ||
+      Object.entries(value.repositoryDenialGenerations).some(
+        ([id, generation]) =>
+          !/^[1-9][0-9]{0,127}$/.test(id) || typeof generation !== 'string' || !HASH.test(generation),
+      ))
   )
     return false;
   if (
