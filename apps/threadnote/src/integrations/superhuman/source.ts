@@ -1,3 +1,4 @@
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Clock, Console, DateTime, Effect, Random, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
@@ -137,11 +138,10 @@ const fetchDocument = Effect.fn('superhuman.fetchDocument')(function* (
   options: SuperhumanClientOptions,
 ) {
   const token = yield* resolveSuperhumanCredential(config, source);
-  return yield* Effect.tryPromise({
-    try: signal =>
-      readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, signal}),
-    catch: error => (error instanceof SuperhumanClientError ? error : safeError('Superhuman provider refresh failed.')),
-  });
+  return yield* fromPromiseInterruptible(
+    signal => readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, signal}),
+    error => (error instanceof SuperhumanClientError ? error : safeError('Superhuman provider refresh failed.')),
+  );
 });
 
 function containsCredential(value: unknown, token: string): boolean {

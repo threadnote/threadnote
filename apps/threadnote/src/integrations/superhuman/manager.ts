@@ -1,3 +1,4 @@
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Cause, Clock, Data, Effect, Redacted, Schema} from 'effect';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import type {
@@ -344,13 +345,13 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerPr
             request.config,
             requireSuperhumanSource(yield* readSourceConfiguration(request.config), sourceId(body.id)),
           ));
-    const resolved = yield* Effect.tryPromise({
-      try: signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal}),
-      catch: error =>
+    const resolved = yield* fromPromiseInterruptible(
+      signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal}),
+      error =>
         error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
           ? error
           : new ManagerSuperhumanError({status: 409, message: 'Superhuman could not resolve the selected links.'}),
-    });
+    );
     return {status: 200, body: resolved};
   }
   const id = sourceId(body.id);

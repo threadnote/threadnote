@@ -1,3 +1,4 @@
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type {FetchLike} from '@modelcontextprotocol/sdk/shared/transport.js';
@@ -593,9 +594,9 @@ export function probeSuperhumanTools(credentialEnvironmentName = SUPERHUMAN_TOKE
       return yield* new ProbeError({code: 'missing-credential'});
     }
     const token = Redacted.make(value);
-    return yield* Effect.tryPromise({
-      try: signal => discoverSuperhumanTools(token, {...options, signal}),
-      catch: error => (error instanceof ProbeError ? error : new ProbeError({code: 'transport-rejected'})),
-    });
+    return yield* fromPromiseInterruptible(
+      signal => discoverSuperhumanTools(token, {...options, signal}),
+      error => (error instanceof ProbeError ? error : new ProbeError({code: 'transport-rejected'})),
+    );
   });
 }

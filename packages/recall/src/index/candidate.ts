@@ -120,7 +120,7 @@ function memoryRelations(memory: ReturnType<typeof parseMemoryDocument>): readon
 }
 
 function firstHeading(value: string): string | undefined {
-  return /^#{1,3}\s+(.+)$/m.exec(value)?.[1]?.trim();
+  return /^#{1,3}[ \t]+(\S.*)$/m.exec(value)?.[1]?.trim();
 }
 
 function resourceProject(uri: string): string | undefined {

@@ -1,3 +1,4 @@
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Crypto, Effect, FileSystem, Option, Path, Redacted, Schema} from 'effect';
 import {
   runtimeLstat,
@@ -43,7 +44,7 @@ async function optionalNativeStat(target: string): Promise<RuntimeBigIntStats | 
   }
 }
 
-const statOptional = (target: string) => Effect.tryPromise({try: () => optionalNativeStat(target), catch: unavailable});
+const statOptional = (target: string) => fromPromiseInterruptible(() => optionalNativeStat(target), unavailable);
 
 const validateSourceId = (sourceId: string) =>
   Effect.try({
@@ -144,10 +145,7 @@ const readLocal = Effect.fn('superhuman.readLocalCredential')(function* (config:
   if (before === undefined) return yield* unavailable();
   const fileBefore = yield* inspect(filename, 'file', true);
   if (fileBefore === undefined || fileBefore.size > 4096n) return yield* unavailable();
-  const bytes = yield* Effect.tryPromise({
-    try: () => runtimeReadBoundedStableRegularFile(filename, 4096),
-    catch: unavailable,
-  });
+  const bytes = yield* fromPromiseInterruptible(() => runtimeReadBoundedStableRegularFile(filename, 4096), unavailable);
   const token = yield* Effect.try({
     try: () => Redacted.make(new TextDecoder('utf-8', {fatal: true}).decode(bytes)),
     catch: unavailable,
