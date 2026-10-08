@@ -7,7 +7,7 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {expect, it} from '@effect/vitest';
-import {Clock, Deferred, Effect, Fiber, FileSystem, PlatformError, Queue} from 'effect';
+import {Clock, Deferred, Duration, Effect, Fiber, FileSystem, PlatformError, Queue} from 'effect';
 import {TestClock, TestConsole} from 'effect/testing';
 import * as FC from 'fast-check';
 import {afterEach, beforeEach, describe} from 'vitest';
@@ -615,7 +615,7 @@ describe('process diagnostics', () => {
         sleep: duration =>
           Effect.gen(function* () {
             const fiber = yield* clock.sleep(duration).pipe(Effect.forkChild({startImmediately: true}));
-            yield* Queue.offer(reconcileSleeps, undefined);
+            if (Duration.toMillis(duration) === 30_000) yield* Queue.offer(reconcileSleeps, undefined);
             yield* Fiber.join(fiber);
           }),
       };
@@ -740,7 +740,10 @@ describe('process diagnostics', () => {
           child =>
             Effect.gen(function* () {
               const registrationPath = join(home, 'runtime', 'processes', `${child.pid}.json`);
-              for (let attempt = 0; attempt < 100 && !(yield* fileSystem.exists(registrationPath)); attempt += 1) {
+              // Startup can include process identity probes with five-second deadlines.
+              const deadline = (yield* Clock.currentTimeMillis) + 15_000;
+              while (!(yield* fileSystem.exists(registrationPath)) && (yield* Clock.currentTimeMillis) < deadline) {
+                expect(child.exitCode, 'Compaction worker exited before registration').toBeNull();
                 yield* Effect.sleep(25);
               }
               expect(yield* fileSystem.exists(registrationPath)).toBe(true);
