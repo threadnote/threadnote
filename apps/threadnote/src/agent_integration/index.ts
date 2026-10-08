@@ -438,10 +438,10 @@ function logArtifactPlan(artifact: AgentArtifact) {
   );
 }
 
-export const writeArtifact = Effect.fn('agentIntegrations.writeArtifact')(function* (artifact: AgentArtifact) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const current = yield* readFileIfExists(artifact.path);
+const plannedArtifactContent = Effect.fn('agentIntegrations.plannedArtifactContent')(function* (
+  artifact: AgentArtifact,
+  current: string | undefined,
+) {
   let next: string | undefined = artifact.content;
   if (artifact.kind === 'block') {
     next = upsertManagedBlock(current ?? '', artifact.content);
@@ -475,6 +475,25 @@ export const writeArtifact = Effect.fn('agentIntegrations.writeArtifact')(functi
       message: `${artifact.path} has partial Threadnote markers; not modifying it.`,
     });
   }
+  return next;
+});
+
+export const preflightAgentIntegrationArtifacts = Effect.fn('agentIntegrations.preflightArtifacts')(function* (
+  agent: AgentClient,
+  mcp: AgentIntegrationMcpReceipt,
+) {
+  const plan = yield* agentArtifacts(agent, mcp.artifactProfile, mcp.hostRoot);
+  for (const artifact of plan.artifacts) {
+    yield* assertAgentTargetNotSymlink(artifact.path);
+    yield* plannedArtifactContent(artifact, yield* readFileIfExists(artifact.path));
+  }
+});
+
+export const writeArtifact = Effect.fn('agentIntegrations.writeArtifact')(function* (artifact: AgentArtifact) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const current = yield* readFileIfExists(artifact.path);
+  const next = yield* plannedArtifactContent(artifact, current);
   if (current === next) {
     yield* Console.log(`${artifact.name} already current: ${artifact.path}`);
     return;

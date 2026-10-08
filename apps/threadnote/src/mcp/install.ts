@@ -2,6 +2,7 @@ import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
   installAgentIntegration,
   installAgentIntegrationInTransaction,
+  preflightAgentIntegrationArtifacts,
   migrateLegacyAgentIntegrationsInTransaction,
   readAgentIntegrationRegistry,
   registeredAgentClients,
@@ -207,6 +208,13 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
       projectDirectory === undefined
         ? (yield* resolveAgentHostPaths('omp', options.hostRoot))!.agentRoot
         : path.join(projectDirectory, '.omp');
+    yield* preflightAgentIntegrationArtifacts(agent, {
+      ...(projectDirectory === undefined ? {} : {cwd: projectDirectory}),
+      hostRoot,
+      name,
+      repair: true,
+      toolset,
+    });
     yield* runOmpMcpInstall(config, name, {
       apply,
       dryRunApplyCommand: options.dryRunApplyCommand,

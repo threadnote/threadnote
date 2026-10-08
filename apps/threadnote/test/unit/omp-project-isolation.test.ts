@@ -66,6 +66,32 @@ const snapshot = (root: string): Effect.Effect<Record<string, string>, unknown, 
     return result;
   });
 
+const refusesDestinationConflict = (conflict: string, apply: boolean, note = '') =>
+  Effect.gen(function* () {
+    const {fs, path, root, project, home, testSystem} = yield* fixture;
+    const config = runtime(home);
+    yield* runMcpInstall(config, 'omp', {apply: true, project}).pipe(Effect.provideService(SystemInfo, testSystem));
+    const nextProject = path.join(root, 'next-project');
+    const target = path.join(nextProject, '.omp', conflict);
+    yield* fs.makeDirectory(path.dirname(target), {recursive: true});
+    yield* fs.writeFileString(
+      target,
+      `${conflict === 'AGENTS.md' ? USER_INSTRUCTIONS_START_MARKER : 'Unowned skill.\n'}${note}`,
+    );
+    yield* fs.writeFileString(
+      path.join(nextProject, '.omp', 'mcp.json'),
+      '{"mcpServers":{"other":{"command":"keep"}}}\n',
+    );
+    const before = yield* snapshot(root);
+    const result = yield* runMcpInstall(config, 'omp', {apply, project: nextProject}).pipe(
+      Effect.provideService(SystemInfo, testSystem),
+      Effect.exit,
+    );
+    expect(Exit.isFailure(result)).toBe(true);
+    if (Exit.isFailure(result)) expect(Cause.squash(result.cause)).toMatchObject({_tag: 'AgentIntegrationError'});
+    expect(yield* snapshot(root)).toEqual(before);
+  }).pipe(provideTestLayer(ApplicationLayer));
+
 describe('OMP project isolation', () => {
   effectIt.effect('CLI refuses isolated setup without creating the fallback manifest', () =>
     Effect.gen(function* () {
@@ -327,6 +353,26 @@ describe('OMP project isolation', () => {
       expect(Exit.isFailure(result)).toBe(true);
       expect(yield* snapshot(root)).toEqual(before);
     }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const conflict of ['AGENTS.md', 'skills/threadnote-context/SKILL.md']) {
+    for (const apply of [false, true]) {
+      effectIt.effect(`refuses destination conflict before changing either project (${conflict}, apply=${apply})`, () =>
+        refusesDestinationConflict(conflict, apply),
+      );
+    }
+  }
+
+  fcEffectProp(
+    effectIt,
+    'destination conflicts preserve both projects and the registry for preview and apply',
+    {
+      conflict: fc.constantFrom('AGENTS.md', 'skills/threadnote-context/SKILL.md'),
+      apply: fc.boolean(),
+      note: fc.string({maxLength: 30}),
+    },
+    ({conflict, apply, note}) => refusesDestinationConflict(conflict, apply, note),
+    {fastCheck: {numRuns: 8}},
   );
 
   fcEffectProp(
