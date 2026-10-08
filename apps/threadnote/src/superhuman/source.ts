@@ -24,6 +24,8 @@ import {
   validateSuperhumanDocumentId,
   validateSuperhumanPageId,
   validateSuperhumanSourceConfig,
+  type SuperhumanDocumentConfig,
+  type SourceConfig,
   type SuperhumanSourceConfig,
 } from '../obsidian/config.js';
 import {withSourceLock} from '../sources/lock.js';
@@ -40,11 +42,22 @@ import {
   SUPERHUMAN_RENDERER_VERSION,
   SUPERHUMAN_SCRUBBER_VERSION,
 } from './render.js';
+import {
+  removeSuperhumanCredential,
+  resolveSuperhumanCredential,
+  storeSuperhumanCredential,
+  validSuperhumanApiToken,
+} from './credentials.js';
 
 export interface SuperhumanSourceAddOptions {
   readonly id: string;
   readonly apply?: boolean;
   readonly documents: readonly string[];
+  readonly documentSelection?: readonly SuperhumanDocumentConfig[];
+  readonly apiToken?: Redacted.Redacted<string>;
+  readonly credentialStorage?: 'local';
+  readonly enabled?: boolean;
+  readonly expectedFingerprint?: string | null;
   readonly pages?: readonly string[];
   readonly credentialEnv?: string;
   readonly project?: string;
@@ -83,6 +96,11 @@ class SuperhumanSourceError extends Schema.TaggedError<SuperhumanSourceError>()(
   message: Schema.String,
 }) {}
 
+export class SuperhumanSourceConflictError extends Schema.TaggedError<SuperhumanSourceConflictError>()(
+  'SuperhumanSourceConflictError',
+  {},
+) {}
+
 function location(config: RuntimeConfig) {
   return {account: config.account, home: config.agentContextHome, user: config.user};
 }
@@ -112,15 +130,35 @@ const configFence = Effect.fn('superhuman.configFence')(function* (
   }
 });
 
-async function fetchDocument(
+const fetchDocument = Effect.fn('superhuman.fetchDocument')(function* (
+  config: RuntimeConfig,
   source: SuperhumanSourceConfig,
   document: SuperhumanSourceConfig['documents'][number],
   options: SuperhumanClientOptions,
 ) {
-  const token = process.env[source.credentialEnv];
-  if (!token) throw safeError(`Credential environment variable ${source.credentialEnv} is unavailable.`);
-  return readSuperhumanDocument(Redacted.make(token), document.id, document.pages, source.includeHidden, options);
+  const token = yield* resolveSuperhumanCredential(config, source);
+  return yield* Effect.tryPromise({
+    try: signal =>
+      readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, signal}),
+    catch: error => (error instanceof SuperhumanClientError ? error : safeError('Superhuman provider refresh failed.')),
+  });
+});
+
+function containsCredential(value: unknown, token: string): boolean {
+  if (typeof value === 'string') return value.includes(token);
+  if (Array.isArray(value)) return value.some(item => containsCredential(item, token));
+  return (
+    typeof value === 'object' && value !== null && Object.values(value).some(item => containsCredential(item, token))
+  );
 }
+
+const checkCredentialReflection = Effect.fn('superhuman.checkCredentialReflection')(function* (
+  value: unknown,
+  token: Redacted.Redacted<string>,
+) {
+  if (containsCredential(value, Redacted.value(token)))
+    return yield* safeError('Superhuman source configuration contains credential material.');
+});
 
 function isDenied(error: unknown): boolean {
   return (
@@ -139,6 +177,10 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
   config: RuntimeConfig,
   options: SuperhumanSourceAddOptions,
 ) {
+  if (options.apiToken !== undefined) {
+    if (!validSuperhumanApiToken(options.apiToken)) return yield* safeError('Invalid Superhuman API token.');
+    yield* checkCredentialReflection({...options, apiToken: undefined}, options.apiToken);
+  }
   const id = validateObsidianIdentifier(options.id, 'source id');
   const documents = [...new Set(options.documents.map(validateSuperhumanDocumentId))];
   if (documents.length === 0) return yield* safeError('Superhuman sources require at least one document ID.');
@@ -147,6 +189,17 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
   if (pages && pages.length > 256) return yield* safeError('Superhuman sources support at most 256 selected pages.');
   if (pages?.length && documents.length !== 1)
     return yield* safeError('Selected page IDs require exactly one selected document.');
+  if (options.documentSelection !== undefined && options.pages !== undefined)
+    return yield* safeError('Choose document selections or legacy page IDs.');
+  const selection =
+    options.documentSelection ??
+    documents.map(documentId => ({id: documentId, ...(pages?.length ? {pages: [...new Set(pages)]} : {})}));
+  if (
+    selection.length !== documents.length ||
+    new Set(selection.map(document => document.id)).size !== documents.length ||
+    selection.some(document => !documents.includes(document.id))
+  )
+    return yield* safeError('Document selections must match the selected document IDs.');
   const credentialEnv = options.credentialEnv ?? 'SUPERHUMAN_DOCS_API_TOKEN';
   if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv))
     return yield* safeError('Invalid credential environment variable name.');
@@ -166,17 +219,58 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
   )
     return yield* safeError('Maximum stale age must be 1 to 8760 hours.');
   const project = options.projectless === true ? null : validateObsidianIdentifier(options.project!, 'project');
-  const source: SuperhumanSourceConfig = validateSuperhumanSourceConfig({
-    type: 'superhuman',
-    id,
-    enabled: true,
-    credentialEnv,
-    project,
-    documents: documents.map(documentId => ({id: documentId, ...(pages?.length ? {pages: [...new Set(pages)]} : {})})),
-    includeHidden: options.includeHidden === true,
-    refreshIntervalMinutes: options.refreshIntervalMinutes ?? 15,
-    maxStaleHours: options.maxStaleHours ?? 24,
+  const checkExpectedConfiguration = (existing: SourceConfig | undefined) => {
+    if (
+      options.expectedFingerprint !== undefined &&
+      (existing === undefined
+        ? null
+        : existing.type === 'superhuman'
+          ? sourceConfigurationFingerprint(existing)
+          : '') !== options.expectedFingerprint
+    )
+      throw SuperhumanSourceConflictError.make({});
+  };
+  const sourceFor = (existing?: SuperhumanSourceConfig): SuperhumanSourceConfig =>
+    validateSuperhumanSourceConfig({
+      type: 'superhuman',
+      id,
+      enabled: options.enabled ?? true,
+      credentialEnv,
+      ...(options.apiToken !== undefined ||
+      options.credentialStorage === 'local' ||
+      (options.credentialEnv === undefined && existing?.credentialStorage === 'local')
+        ? {credentialStorage: 'local' as const}
+        : {}),
+      project,
+      documents: selection,
+      includeHidden: options.includeHidden === true,
+      refreshIntervalMinutes: options.refreshIntervalMinutes ?? 15,
+      maxStaleHours: options.maxStaleHours ?? 24,
+    });
+  const credentialFor = Effect.fn('superhuman.sourceAddCredential')(function* (source: SuperhumanSourceConfig) {
+    const token =
+      options.apiToken ??
+      (yield* resolveSuperhumanCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
+    if (source.credentialStorage === 'local' && token === undefined)
+      return yield* safeError('A protected API token is required for this Superhuman source.');
+    if (token !== undefined) yield* checkCredentialReflection(source, token);
   });
+  const initial = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  yield* Effect.try({
+    try: () => checkExpectedConfiguration(initial),
+    catch: () => SuperhumanSourceConflictError.make({}),
+  });
+  const previewSource = yield* Effect.try({
+    try: () => sourceFor(initial?.type === 'superhuman' ? initial : undefined),
+    catch: () => safeError('Invalid Superhuman source configuration.'),
+  });
+  yield* credentialFor(previewSource);
+  if (initial?.type === 'superhuman' && initial.credentialStorage === 'local') {
+    const previousToken = yield* resolveSuperhumanCredential(config, initial).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    if (previousToken !== undefined) yield* checkCredentialReflection(previewSource, previousToken);
+  }
   if (options.apply !== true) {
     yield* Console.log(`Would configure Superhuman source "${id}" for ${documents.length} selected document(s).`);
     yield* Console.log('Re-run with --apply to write the configuration.');
@@ -187,15 +281,33 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     id,
     Effect.gen(function* () {
       const existing = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+      yield* Effect.try({
+        try: () => checkExpectedConfiguration(existing),
+        catch: () => SuperhumanSourceConflictError.make({}),
+      });
       if (existing?.type === 'obsidian') return yield* safeError(`Source "${id}" is already an Obsidian source.`);
+      const source = yield* Effect.try({
+        try: () => sourceFor(existing),
+        catch: () => safeError('Invalid Superhuman source configuration.'),
+      });
+      yield* credentialFor(source);
+      if (existing?.credentialStorage === 'local') {
+        const previousToken = yield* resolveSuperhumanCredential(config, existing).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (previousToken !== undefined) yield* checkCredentialReflection(source, previousToken);
+      }
       const receipt = yield* readExternalSourceReceipt(location(config), id);
       const previousFingerprint = existing ? sourceConfigurationFingerprint(existing) : undefined;
       const cleanup =
         !existing ||
         receipt === null ||
         receipt?.status === 'cleanup' ||
+        options.apiToken !== undefined ||
         previousFingerprint !== sourceConfigurationFingerprint(source);
       if (cleanup) yield* denySource(config, source, 'cleanup', previousFingerprint);
+      if (options.apiToken !== undefined) yield* storeSuperhumanCredential(config, id, options.apiToken);
+      else if (source.credentialStorage !== 'local') yield* removeSuperhumanCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
         const latest = current.sources.find(item => item.id === id);
         if (
@@ -318,15 +430,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           now - previous.fetchedAt < source.refreshIntervalMinutes * 60_000
         )
           continue;
-        const result = yield* Effect.result(
-          Effect.tryPromise({
-            try: signal => fetchDocument(source, document, {...options, signal}),
-            catch: error =>
-              error instanceof SuperhumanClientError || Schema.is(SuperhumanSourceError)(error)
-                ? error
-                : safeError('Superhuman provider refresh failed.'),
-          }),
-        );
+        const result = yield* fetchDocument(config, source, document, options).pipe(Effect.result);
         if (Result.isFailure(result)) {
           const error = result.failure;
           if (isDenied(error) || (error instanceof SuperhumanClientError && error.code === 'credential-reflected')) {
@@ -681,6 +785,7 @@ export const runSuperhumanSourceRemove = Effect.fn('superhuman.remove')(function
           throw safeError('Superhuman source configuration changed before removal.');
         return upsertSuperhumanSource(configuration, disabled);
       });
+      yield* removeSuperhumanCredential(config, source.id);
       yield* purgeSource(config, disabled);
       yield* mutateSourceConfiguration(config, configuration => {
         if (

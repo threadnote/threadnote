@@ -330,13 +330,15 @@ describe('Obsidian source configuration', () => {
       fc.property(
         fc.uniqueArray(idArb, {minLength: 1, maxLength: 8}),
         fc.array(idArb, {maxLength: 8}),
-        (ids, pageIds) => {
+        fc.boolean(),
+        (ids, pageIds, localCredential) => {
           const pages = [...new Set(pageIds)];
           const source = {
             type: 'superhuman' as const,
             id: 'docs',
             enabled: true,
             credentialEnv: 'SUPERHUMAN_DOCS_API_TOKEN',
+            ...(localCredential ? {credentialStorage: 'local' as const} : {}),
             project: 'engineering',
             documents: ids.map((id, index) => ({id, ...(index === 0 && pages.length ? {pages} : {})})),
             includeHidden: false,
@@ -345,6 +347,8 @@ describe('Obsidian source configuration', () => {
           };
           const config = upsertSuperhumanSource(emptyObsidianConfiguration(), source);
           expect(parseObsidianConfiguration(renderObsidianConfiguration(config))).toEqual(config);
+          const alternate = {...source, credentialStorage: localCredential ? undefined : ('local' as const)};
+          expect(sourceConfigurationFingerprint(alternate)).not.toBe(sourceConfigurationFingerprint(source));
           expect(sourceConfigurationFingerprint({...source, documents: [...source.documents].reverse()})).toBe(
             sourceConfigurationFingerprint(source),
           );

@@ -2,6 +2,18 @@
 
 Threadnote reads explicitly selected Superhuman Docs documents through the [public REST API](https://docs.superhuman.com/developers/apis/v1), using the fixed server in its [OpenAPI specification](https://docs.superhuman.com/apis/v1/openapi.json). Version 1 imports canvas plain-text lines. Tables, comments, attachments, images, embedded pages, and synced pages are outside that coverage. Hidden pages are excluded unless the source explicitly enables them.
 
+## Set up in Manager
+
+Open **Integrations**, then **Add integration** or **Available integrations**, and choose **Superhuman Docs**. Enter a connection name, a Read only API token, and document or page links. **Check links** verifies their API identities and shows the selected scope: a document link selects the whole document, while a page link selects that page. Choose a project association or explicitly keep the connection projectless, then create the connection.
+
+Manager stores the token in a bounded, owner-only local credential file, outside memories, imported resources, and source YAML. It never returns the saved value to the browser. Reopening settings leaves the token field blank; a token-only update retains the selected document and page IDs. Disconnect removes the saved token along with the local connection and cache. Rotation and removal deny the old cache before cleanup.
+
+An advanced **Environment variable** credential choice uses a variable already available to the Threadnote process. This also supports devices where protected local ownership cannot be verified, including the current Windows adapter; local token storage fails closed there rather than writing an unprotected credential.
+
+**Your connections** lists all configured products with their original product marks and relevant actions. Use **Sync now** to import selected Docs content, or settings, pause, enable, and disconnect controls to manage a connection. **Available integrations** is a separate searchable catalog, so adding products does not displace existing connection controls. Refresh interval, maximum cache age, and hidden-page inclusion are in advanced settings. Obsidian keeps its import preview, export, and Inbox review workflows.
+
+## Set up through the CLI
+
 Create a **Read only API** personal access token and set it privately in `SUPERHUMAN_DOCS_API_TOKEN` for the Threadnote process. A token restricted to MCP does not authorize REST access. Source configuration stores the environment variable name, never the credential. Avoid putting the token in shell history, tracked files, or source YAML.
 
 Configure an immutable document-ID allowlist, optionally restricted to page IDs. Choose a local project explicitly or use `--projectless`:

@@ -37,4 +37,45 @@ export interface IntegrationResult {
   readonly entries: readonly {readonly action: string; readonly relativePath: string; readonly detail?: string}[];
   readonly reviewCount?: number;
   readonly applied: boolean;
+  readonly warnings?: readonly string[];
+}
+
+export type IntegrationProductId = 'obsidian' | 'superhuman';
+
+export interface SuperhumanDocumentSelection {
+  readonly id: string;
+  readonly pages?: readonly string[];
+}
+
+export interface SuperhumanSource {
+  readonly id: string;
+  readonly enabled: boolean;
+  readonly project: string | null;
+  readonly documents: readonly SuperhumanDocumentSelection[];
+  readonly credentialEnv: string;
+  readonly credentialStorage?: 'local';
+  readonly credentialConfigured: boolean;
+  readonly includeHidden: boolean;
+  readonly refreshIntervalMinutes: number;
+  readonly maxStaleHours: number;
+  readonly status: 'active' | 'needs-sync' | 'needs-attention';
+  readonly chunks: number;
+  readonly lastSyncedAt?: number;
+  readonly nextAttemptAt?: number;
+}
+
+export interface ManagerIntegrations {
+  readonly obsidian: ObsidianIntegration;
+  readonly superhuman: {readonly sources: readonly SuperhumanSource[]};
+}
+
+export type SuperhumanAction = 'save-source' | 'sync-source' | 'remove-source' | 'set-enabled' | 'resolve-links';
+
+export interface ResolvedSuperhumanSelection {
+  readonly documents: readonly SuperhumanDocumentSelection[];
+  readonly selections: readonly {
+    readonly documentId: string;
+    readonly pageId?: string;
+    readonly name: string;
+  }[];
 }

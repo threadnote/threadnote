@@ -201,6 +201,7 @@ bun_test(
         "//apps/threadnote:src/sources/source.ts",
         "//apps/threadnote:src/superhuman/access-policy.ts",
         "//apps/threadnote:src/superhuman/client.ts",
+        "//apps/threadnote:src/superhuman/credentials.ts",
         "//apps/threadnote:src/superhuman/render.ts",
         "//apps/threadnote:src/superhuman/source.ts",
         "//apps/threadnote:src/telemetry/code_anchor_finalization.ts",

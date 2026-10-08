@@ -28,8 +28,25 @@ import {runObsidianInboxScan} from '../obsidian/inbox.js';
 import {captureConsole} from '../effect/console.js';
 import type {ManagerProcessApiRequest} from './processes.js';
 import {managerFeatureError} from './feature_errors.js';
+import {handleManagerSuperhumanIntegrationRequest, listSuperhumanIntegrations} from './superhuman_integrations.js';
 
 const routeManagerIntegration = Effect.fn('manager.integrations')(function* (request: ManagerProcessApiRequest) {
+  if (request.url.pathname === '/api/integrations/superhuman')
+    return yield* handleManagerSuperhumanIntegrationRequest(request);
+  if (request.url.pathname === '/api/integrations') {
+    if (request.method !== 'GET') return {status: 405, body: {error: 'Method not allowed'}};
+    return yield* Effect.gen(function* () {
+      const configuration = yield* readObsidianConfiguration(request.config);
+      const superhuman = yield* listSuperhumanIntegrations(request.config);
+      return {
+        status: 200,
+        body: {
+          obsidian: {sources: configuration.sources.filter(isObsidianSource), projections: configuration.projections},
+          superhuman,
+        },
+      };
+    }).pipe(Effect.catchCause(() => Effect.succeed({status: 409, body: {error: 'Connections could not be loaded.'}})));
+  }
   if (request.url.pathname !== '/api/integrations/obsidian') return undefined;
   if (request.method === 'GET') {
     const configuration = yield* readObsidianConfiguration(request.config);

@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Layer, Result} from 'effect';
+import {Clock, Effect, FileSystem, Layer, Redacted, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterAll, beforeAll, describe, expect} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -24,7 +24,10 @@ import {
   readSourceConfiguration,
   renderSourceConfiguration,
   upsertSuperhumanSource,
+  requireSuperhumanSource,
+  sourceConfigurationFingerprint,
 } from '../../src/obsidian/config.js';
+import {resolveSuperhumanCredential, superhumanCredentialConfigured} from '../../src/superhuman/credentials.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceRemove,
@@ -90,6 +93,250 @@ afterAll(() => {
 });
 
 describe('Superhuman source sync', () => {
+  effectIt.effect('checks Manager create and edit preconditions before changing credentials or scope', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-preconditions-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const base = {id: 'concurrent', project: 'test', apply: true};
+      const attempts = [0, 1].map(index => ({
+        ...base,
+        documents: [`doc_${index}`],
+        apiToken: Redacted.make(`synthetic-concurrent-${index}`),
+        expectedFingerprint: null,
+      }));
+      const results = yield* Effect.forEach(
+        attempts,
+        options => runSuperhumanSourceAdd(config, options).pipe(Effect.result),
+        {
+          concurrency: 2,
+        },
+      );
+      expect(results.filter(Result.isSuccess)).toHaveLength(1);
+      expect(results.filter(Result.isFailure)).toHaveLength(1);
+      const winner = results.findIndex(Result.isSuccess);
+      const source = requireSuperhumanSource(yield* readSourceConfiguration(config), base.id);
+      expect(source.documents).toEqual([{id: `doc_${winner}`}]);
+      expect(Redacted.value(yield* resolveSuperhumanCredential(config, source))).toBe(`synthetic-concurrent-${winner}`);
+      const expectedFingerprint = sourceConfigurationFingerprint(source);
+      yield* mutateSourceConfiguration(config, current => upsertSuperhumanSource(current, {...source, enabled: false}));
+      const staleEdit = yield* runSuperhumanSourceAdd(config, {
+        ...base,
+        documents: ['replacement'],
+        apiToken: Redacted.make('synthetic-stale-edit-token'),
+        enabled: true,
+        expectedFingerprint,
+      }).pipe(Effect.result);
+      expect(Result.isFailure(staleEdit)).toBe(true);
+      expect(requireSuperhumanSource(yield* readSourceConfiguration(config), base.id)).toEqual({
+        ...source,
+        enabled: false,
+      });
+      expect(Redacted.value(yield* resolveSuperhumanCredential(config, source))).toBe(`synthetic-concurrent-${winner}`);
+    }).pipe(TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect(
+    'cleans an orphaned credential after interrupted source creation when retried with environment mode',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-orphan-'});
+        const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+        const token = 'synthetic-interrupted-creation-token';
+        const options = {id: 'orphan', documents: ['doc_one'], project: 'test', apply: true};
+        const interrupted = FileSystem.FileSystem.of({
+          ...fs,
+          rename: (from, to) =>
+            to.endsWith('/sources.yaml') ? fs.rename(`${home}/missing-configuration`, to) : fs.rename(from, to),
+        });
+        const failure = yield* runSuperhumanSourceAdd(config, {...options, apiToken: Redacted.make(token)}).pipe(
+          Effect.provideService(FileSystem.FileSystem, interrupted),
+          Effect.result,
+        );
+        expect(Result.isFailure(failure)).toBe(true);
+        expect(JSON.stringify(failure)).not.toContain(token);
+        const tokenFile = `${home}/threadnote/credentials/superhuman/orphan`;
+        expect(yield* fs.exists(tokenFile)).toBe(true);
+        expect((yield* readSourceConfiguration(config)).sources).toEqual([]);
+        yield* runSuperhumanSourceAdd(config, {...options, credentialEnv: 'SUPERHUMAN_DOCS_TEST_TOKEN'});
+        expect(yield* fs.exists(tokenFile)).toBe(false);
+        expect(
+          requireSuperhumanSource(yield* readSourceConfiguration(config), options.id).credentialStorage,
+        ).toBeUndefined();
+      }).pipe(TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('stores only a local credential reference, preserves selections on edits, and removes on apply', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const token = 'synthetic-manager-token';
+      const options = {
+        id: 'managed',
+        documents: ['doc_one', 'doc_two'],
+        documentSelection: [{id: 'doc_one', pages: ['page_one']}, {id: 'doc_two'}],
+        project: 'test',
+        apiToken: Redacted.make(token),
+      };
+      yield* runSuperhumanSourceAdd(config, options);
+      expect(yield* fs.exists(`${home}/threadnote/credentials/superhuman/managed`)).toBe(false);
+      yield* runSuperhumanSourceAdd(config, {...options, apply: true});
+      let source = requireSuperhumanSource(yield* readSourceConfiguration(config), options.id);
+      expect(source.credentialStorage).toBe('local');
+      expect(source.documents).toEqual(options.documentSelection);
+      const yaml = yield* fs.readFileString(yield* obsidianConfigurationPath(config));
+      expect(yaml).toContain('credential_storage: local');
+      expect(yaml).not.toContain(token);
+      yield* runSuperhumanSourceSync(config, {
+        id: options.id,
+        apply: true,
+        clientOptions: {
+          fetch: async (url, init) => {
+            expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${token}`);
+            return safeFetch(url);
+          },
+        },
+      });
+      yield* runSuperhumanSourceAdd(config, {...options, apiToken: undefined, enabled: false, apply: true});
+      source = requireSuperhumanSource(yield* readSourceConfiguration(config), options.id);
+      expect(source.enabled).toBe(false);
+      expect(Redacted.value(yield* resolveSuperhumanCredential(config, source))).toBe(token);
+      yield* runSuperhumanSourceRemove(config, {id: options.id});
+      expect(yield* superhumanCredentialConfigured(config, source)).toBe(true);
+      yield* runSuperhumanSourceRemove(config, {id: options.id, apply: true});
+      expect(yield* fs.exists(`${home}/threadnote/credentials/superhuman/managed`)).toBe(false);
+    }).pipe(TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('denies cached resources before token rotation can fail and repairs on explicit retry', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-rotate-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const options = {
+        id: 'rotate',
+        documents: ['doc_one'],
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make('synthetic-original-token'),
+      };
+      yield* runSuperhumanSourceAdd(config, options);
+      yield* runSuperhumanSourceSync(config, {id: options.id, apply: true, clientOptions: {fetch: safeFetch}});
+      const uri = externalResourceUri({
+        sourceId: options.id,
+        documentId: 'doc_one',
+        pageId: 'page_one',
+        chunkId: `b-${sha256HexSync('line_one').slice(0, 24)}-0`,
+      });
+      const store = yield* ResourceStore;
+      expect(yield* store.read({home, account: 'local', user: 'tester'}, uri)).toContain('needle');
+      const credentials = `${home}/threadnote/credentials/superhuman`;
+      yield* fs.chmod(credentials, 0o755);
+      const rotation = yield* runSuperhumanSourceAdd(config, {
+        ...options,
+        apiToken: Redacted.make('synthetic-rotated-token'),
+      }).pipe(Effect.result);
+      expect(Result.isFailure(rotation)).toBe(true);
+      expect(
+        Result.isFailure(yield* store.read({home, account: 'local', user: 'tester'}, uri).pipe(Effect.result)),
+      ).toBe(true);
+      expect(
+        (yield* loadRecallIndexData(config, {
+          includeInactive: false,
+          query: 'needle',
+          requiredUris: [uri],
+          eligibility: {kind: 'pinned-hard-uri-bypass'},
+        })).candidates,
+      ).toEqual([]);
+      expect((yield* syncSuperhumanSourcesBeforeRecall(config, {fetch: safeFetch})).syncedSources).toEqual([]);
+      yield* fs.chmod(credentials, 0o700);
+      yield* runSuperhumanSourceAdd(config, {...options, apiToken: Redacted.make('synthetic-rotated-token')});
+      yield* runSuperhumanSourceSync(config, {id: options.id, apply: true, clientOptions: {fetch: safeFetch}});
+      expect(yield* store.read({home, account: 'local', user: 'tester'}, uri)).toContain('needle');
+      yield* runSuperhumanSourceAdd(config, {
+        ...options,
+        apiToken: undefined,
+        credentialStorage: undefined,
+        credentialEnv: 'SUPERHUMAN_DOCS_TEST_TOKEN',
+      });
+      expect(yield* fs.exists(`${credentials}/rotate`)).toBe(false);
+      expect(
+        requireSuperhumanSource(yield* readSourceConfiguration(config), options.id).credentialStorage,
+      ).toBeUndefined();
+      yield* runSuperhumanSourceSync(config, {id: options.id, apply: true, clientOptions: {fetch: safeFetch}});
+    }).pipe(TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('rejects reflected tokens and inconsistent document selections before persistence', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-reflection-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      const token = 'synthetic_private';
+      const options = {
+        id: 'managed',
+        documents: ['doc_one'],
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make(token),
+      };
+      for (const reflection of [
+        {id: token},
+        {project: token},
+        {documents: [token]},
+        {documentSelection: [{id: 'doc_one', pages: [token]}]},
+      ]) {
+        const rejected = yield* runSuperhumanSourceAdd(config, {...options, ...reflection}).pipe(Effect.result);
+        expect(Result.isFailure(rejected)).toBe(true);
+        expect(JSON.stringify(rejected)).not.toContain(token);
+      }
+      expect(
+        Result.isFailure(
+          yield* runSuperhumanSourceAdd(config, {...options, documentSelection: [{id: 'doc_two'}]}).pipe(Effect.result),
+        ),
+      ).toBe(true);
+      expect(
+        Result.isFailure(
+          yield* runSuperhumanSourceAdd(config, {...options, apiToken: undefined, credentialStorage: 'local'}).pipe(
+            Effect.result,
+          ),
+        ),
+      ).toBe(true);
+      expect((yield* readSourceConfiguration(config)).sources).toEqual([]);
+      expect(yield* fs.exists(`${home}/threadnote/credentials`)).toBe(false);
+    }).pipe(TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('keeps an interrupted credential removal disabled until explicit cleanup retry', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-source-credential-remove-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runSuperhumanSourceAdd(config, {
+        id: 'managed',
+        documents: ['doc_one'],
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make('synthetic-local-token'),
+      });
+      yield* runSuperhumanSourceSync(config, {id: 'managed', apply: true, clientOptions: {fetch: safeFetch}});
+      const tokenFile = `${home}/threadnote/credentials/superhuman/managed`;
+      yield* fs.chmod(tokenFile, 0o644);
+      const removed = yield* runSuperhumanSourceRemove(config, {id: 'managed', apply: true}).pipe(Effect.result);
+      expect(Result.isFailure(removed)).toBe(true);
+      expect(requireSuperhumanSource(yield* readSourceConfiguration(config), 'managed').enabled).toBe(false);
+      expect((yield* loadRecallIndexData(config, {includeInactive: false, query: 'needle'})).candidates).toEqual([]);
+      expect((yield* syncSuperhumanSourcesBeforeRecall(config, {fetch: safeFetch})).syncedSources).toEqual([]);
+      expect(yield* fs.exists(tokenFile)).toBe(true);
+      yield* fs.chmod(tokenFile, 0o600);
+      yield* runSuperhumanSourceRemove(config, {id: 'managed', apply: true});
+      expect(yield* fs.exists(tokenFile)).toBe(false);
+      expect((yield* readSourceConfiguration(config)).sources).toEqual([]);
+    }).pipe(TestClock.withLive, provideLayer),
+  );
+
   effectIt.effect('denies the entire source before an authentication purge can fail', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

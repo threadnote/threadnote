@@ -40,6 +40,7 @@ export interface SuperhumanSourceConfig {
   readonly id: string;
   readonly enabled: boolean;
   readonly credentialEnv: string;
+  readonly credentialStorage?: 'local';
   readonly project: string | null;
   readonly documents: readonly SuperhumanDocumentConfig[];
   readonly includeHidden: boolean;
@@ -230,6 +231,7 @@ export function renderObsidianConfiguration(value: ObsidianConfiguration): strin
             type: source.type,
             enabled: source.enabled,
             credential_env: source.credentialEnv,
+            ...(source.credentialStorage === undefined ? {} : {credential_storage: source.credentialStorage}),
             project: source.project,
             documents: source.documents.map(document => ({
               id: document.id,
@@ -382,6 +384,7 @@ export function validateSuperhumanSourceConfig(source: SuperhumanSourceConfig): 
       type: source.type,
       enabled: source.enabled,
       credential_env: source.credentialEnv,
+      credential_storage: source.credentialStorage,
       project: source.project,
       documents: source.documents.map(document => ({id: document.id, pages: document.pages})),
       include_hidden: source.includeHidden,
@@ -399,6 +402,7 @@ export function sourceConfigurationFingerprint(source: SuperhumanSourceConfig): 
       id: source.id,
       enabled: source.enabled,
       credentialEnv: source.credentialEnv,
+      ...(source.credentialStorage === undefined ? {} : {credentialStorage: source.credentialStorage}),
       project: source.project,
       documents: source.documents
         .map(document => ({id: document.id, pages: document.pages ? [...document.pages].sort() : null}))
@@ -452,6 +456,8 @@ function parseSuperhumanSource(value: Record<string, unknown>, label: string): S
   if (!CREDENTIAL_ENV_PATTERN.test(credentialEnv)) {
     throw ObsidianConfigurationError.make({message: `${label}.credential_env must be an environment variable name.`});
   }
+  if (value.credential_storage !== undefined && value.credential_storage !== 'local')
+    throw ObsidianConfigurationError.make({message: `${label}.credential_storage must be "local" when present.`});
   const project = value.project === null ? null : requiredIdentifier(value.project, `${label}.project`);
   if (!Array.isArray(value.documents) || value.documents.length === 0 || value.documents.length > 64) {
     throw ObsidianConfigurationError.make({message: `${label}.documents must contain 1 to 64 documents.`});
@@ -471,6 +477,7 @@ function parseSuperhumanSource(value: Record<string, unknown>, label: string): S
     id,
     enabled: optionalBoolean(value.enabled, true, `${label}.enabled`),
     credentialEnv,
+    ...(value.credential_storage === 'local' ? {credentialStorage: 'local' as const} : {}),
     project,
     documents,
     includeHidden: optionalBoolean(value.include_hidden, false, `${label}.include_hidden`),
