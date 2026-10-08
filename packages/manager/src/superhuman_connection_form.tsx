@@ -1,4 +1,10 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
+import {Files, FileText, X} from 'lucide-react';
+import {
+  MAX_SUPERHUMAN_MANAGER_LINKS,
+  mergeResolvedSuperhumanSelections,
+  retainedSuperhumanSelection,
+} from './superhuman_selection.js';
 import type {
   ResolvedSuperhumanSelection,
   SuperhumanDocumentSelection,
@@ -41,6 +47,9 @@ export function SuperhumanConnectionForm({
   const dialogs = useManagerDialogs();
   const [id, setId] = useState(source?.id ?? '');
   const [links, setLinks] = useState('');
+  const linkInput = useRef<HTMLTextAreaElement>(null);
+  const [needsCheck, setNeedsCheck] = useState(false);
+  const [titleStatus, setTitleStatus] = useState(source ? 'Loading saved selection titles…' : '');
   const [scopeChanged, setScopeChanged] = useState(false);
   const [token, setToken] = useState('');
   const [credentialMode, setCredentialMode] = useState<'local' | 'environment'>(
@@ -48,7 +57,7 @@ export function SuperhumanConnectionForm({
   );
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'SUPERHUMAN_DOCS_API_TOKEN');
   const [resolved, setResolved] = useState<ResolvedSuperhumanSelection | undefined>(
-    source ? {documents: source.documents, selections: []} : undefined,
+    source ? retainedSuperhumanSelection(source.documents) : undefined,
   );
   const [projectMode, setProjectMode] = useState(source ? (source.project === null ? 'projectless' : 'project') : '');
   const [project, setProject] = useState(source?.project ?? '');
@@ -62,6 +71,51 @@ export function SuperhumanConnectionForm({
     credentialMode === 'environment'
       ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
       : !!token || source?.credentialStorage === 'local';
+  const checkedLinks = [
+    ...new Set([
+      ...linksFrom(links),
+      ...(needsCheck ? (resolved?.selections.flatMap(item => (item.browserLink ? [item.browserLink] : [])) ?? []) : []),
+    ]),
+  ];
+
+  useEffect(() => {
+    if (!source) return;
+    const controller = new AbortController();
+    void api<ResolvedSuperhumanSelection>(
+      '/api/integrations/superhuman',
+      {action: 'describe-selection', id: source.id},
+      {signal: controller.signal},
+    ).then(
+      selection => {
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(selection.selections)) {
+          setTitleStatus('Titles could not be loaded. Your saved selection is still available.');
+          return;
+        }
+        // Hydrate labels only: an in-flight response must never restore a removed chip.
+        setResolved(current =>
+          current
+            ? {
+                ...current,
+                selections: current.selections.map(
+                  item =>
+                    selection.selections.find(
+                      fetched => fetched.documentId === item.documentId && fetched.pageId === item.pageId,
+                    ) ?? item,
+                ),
+              }
+            : current,
+        );
+        setTitleStatus('');
+      },
+      () => {
+        if (!controller.signal.aborted)
+          setTitleStatus('Titles could not be loaded. Your saved selection is still available.');
+      },
+    );
+    return () => controller.abort();
+  }, [source]);
+
   useEffect(() => {
     if (!dirty && !busy) return;
     const prevent = (event: BeforeUnloadEvent) => {
@@ -84,25 +138,37 @@ export function SuperhumanConnectionForm({
   }
 
   async function checkLinks(): Promise<void> {
-    if (busy || linksFrom(links).length === 0 || !credentialReady) return;
+    if (busy || checkedLinks.length === 0 || !credentialReady) return;
     setBusy(true);
     setError('');
-    setResolved(undefined);
     try {
       const selection = await api<ResolvedSuperhumanSelection>('/api/integrations/superhuman', {
         action: 'resolve-links',
-        links: linksFrom(links),
+        links: checkedLinks,
         ...(credentialMode === 'environment' ? {credentialEnv} : token ? {token} : {}),
         ...(source ? {id: source.id} : {}),
       });
       if (selection.documents.length === 0) throw new Error('No document or page was selected.');
-      setResolved({
-        documents: selection.documents.map(document => ({
-          id: document.id,
-          ...(document.pages === undefined ? {} : {pages: [...document.pages]}),
-        })),
-        selections: selection.selections.map(item => ({...item})),
-      });
+      if (
+        mergeResolvedSuperhumanSelections([...(resolved?.selections ?? []), ...selection.selections]).selections
+          .length > MAX_SUPERHUMAN_MANAGER_LINKS
+      )
+        throw new Error(`Choose up to ${MAX_SUPERHUMAN_MANAGER_LINKS} document or page links.`);
+      setResolved(current =>
+        mergeResolvedSuperhumanSelections([
+          ...(current?.selections.filter(item => !needsCheck || !item.browserLink) ?? []),
+          ...selection.selections.map(item => ({
+            ...item,
+            // Resolution responses associate titles with browser links. A single-link
+            // response from an older Manager can still be displayed as a linked chip.
+            ...(item.browserLink === undefined && checkedLinks.length === 1 ? {browserLink: checkedLinks[0]} : {}),
+          })),
+        ]),
+      );
+      setLinks('');
+      setNeedsCheck(false);
+      setScopeChanged(true);
+      setDirty(true);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
@@ -110,9 +176,30 @@ export function SuperhumanConnectionForm({
     }
   }
 
+  function removeSelection(documentId: string, pageId?: string): void {
+    setResolved(
+      current =>
+        current &&
+        mergeResolvedSuperhumanSelections(
+          current.selections.filter(item => item.documentId !== documentId || item.pageId !== pageId),
+        ),
+    );
+    setDirty(true);
+    linkInput.current?.focus();
+  }
+
   async function save(event: React.FormEvent): Promise<void> {
     event.preventDefault();
-    if (busy || !resolved || !credentialReady || !projectMode || (projectMode === 'project' && !project.trim())) return;
+    if (
+      busy ||
+      !resolved?.documents.length ||
+      needsCheck ||
+      linksFrom(links).length ||
+      !credentialReady ||
+      !projectMode ||
+      (projectMode === 'project' && !project.trim())
+    )
+      return;
     setBusy(true);
     setError('');
     try {
@@ -177,7 +264,7 @@ export function SuperhumanConnectionForm({
                 value={token}
                 onChange={event => {
                   setToken(event.target.value);
-                  if (!source || scopeChanged) setResolved(undefined);
+                  if (!source || scopeChanged) setNeedsCheck(true);
                 }}
               />
               <small>
@@ -198,56 +285,80 @@ export function SuperhumanConnectionForm({
                 value={credentialEnv}
                 onChange={event => {
                   setCredentialEnv(event.target.value);
-                  if (!source || scopeChanged) setResolved(undefined);
+                  if (!source || scopeChanged) setNeedsCheck(true);
                 }}
               />
               <small>The variable must be available to the Threadnote process. Its value is never shown here.</small>
             </label>
           )}
-          <label>
-            Document or page links
+          <div className="integration-link-picker">
+            <label htmlFor="superhuman-links">Document or page links</label>
+            {resolved?.selections.length ? (
+              <ul className="integration-link-chips" aria-label="Selected documents and pages">
+                {resolved.selections.map(item => (
+                  <li
+                    className="integration-link-chip"
+                    key={`${item.documentId}/${item.pageId ?? ''}`}
+                    data-kind={item.pageId ? 'page' : 'document'}
+                  >
+                    {item.pageId ? <FileText size={16} aria-hidden="true" /> : <Files size={16} aria-hidden="true" />}
+                    <span className="integration-link-chip-label">
+                      {item.browserLink ? (
+                        <a href={item.browserLink} target="_blank" rel="noreferrer" title={item.name}>
+                          {item.name}
+                        </a>
+                      ) : (
+                        <span title={item.name}>{item.name}</span>
+                      )}
+                      <small>{item.pageId ? 'Selected page' : 'Whole document'}</small>
+                    </span>
+                    <button
+                      type="button"
+                      className="integration-link-chip-remove"
+                      aria-label={`Remove ${item.name}`}
+                      onClick={() => removeSelection(item.documentId, item.pageId)}
+                    >
+                      <X size={14} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             <textarea
-              rows={3}
+              id="superhuman-links"
+              ref={linkInput}
+              rows={1}
               value={links}
-              onChange={event => {
-                setLinks(event.target.value);
-                setScopeChanged(true);
-                setResolved(undefined);
+              onChange={event => setLinks(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void checkLinks();
+                }
               }}
               placeholder="https://docs.superhuman.com/d/…"
+              aria-describedby="superhuman-links-help"
             />
-            <small>
-              One link per line. A document link selects its whole document; a page link selects that page. Hidden pages
-              are excluded by default.
+            <small id="superhuman-links-help">
+              Paste a link and press Enter to add it. You can paste several links, one per line. A document link selects
+              its whole document; a page link selects that page. Hidden pages are excluded by default.
             </small>
-          </label>
-          <button
-            type="button"
-            disabled={!linksFrom(links).length || !credentialReady || busy}
-            onClick={() => void checkLinks()}
-          >
-            {busy ? 'Checking…' : 'Check links'}
-          </button>
-          {resolved ? (
+            {titleStatus ? <small role="status">{titleStatus}</small> : null}
+            <button
+              type="button"
+              disabled={!checkedLinks.length || !credentialReady || busy}
+              onClick={() => void checkLinks()}
+            >
+              {busy ? 'Checking…' : needsCheck && !linksFrom(links).length ? 'Check links' : 'Add links'}
+            </button>
+          </div>
+          {resolved?.documents.length ? (
             <div className="integration-selection" role="status">
               <strong>{scopeSummary(resolved.documents)}</strong>
-              {resolved.selections.length ? (
-                <ul>
-                  {resolved.selections.map((item, index) => (
-                    <li key={index}>
-                      {item.name} · {item.pageId ? 'Selected page' : 'Whole document'}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p>
-                  Current selection is retained. You can change credentials without re-entering links. Enter links to
-                  change scope.
-                </p>
-              )}
+              {needsCheck ? <p>Check links with the updated credential before saving.</p> : null}
             </div>
           ) : (
-            <p className="muted">Check links to review the selected scope before saving.</p>
+            <p className="muted">Add links to choose the documents or pages to import.</p>
           )}
           <label>
             Project association
@@ -281,7 +392,7 @@ export function SuperhumanConnectionForm({
                   onChange={() => {
                     setCredentialMode('local');
                     setToken('');
-                    if (!source || scopeChanged) setResolved(undefined);
+                    if (!source || scopeChanged) setNeedsCheck(true);
                   }}
                 />{' '}
                 Save API token on this device
@@ -294,7 +405,7 @@ export function SuperhumanConnectionForm({
                   onChange={() => {
                     setCredentialMode('environment');
                     setToken('');
-                    if (!source || scopeChanged) setResolved(undefined);
+                    if (!source || scopeChanged) setNeedsCheck(true);
                   }}
                 />{' '}
                 Use environment variable
@@ -340,7 +451,13 @@ export function SuperhumanConnectionForm({
             type="submit"
             className="primary"
             disabled={
-              busy || !resolved || !credentialReady || !projectMode || (projectMode === 'project' && !project.trim())
+              busy ||
+              !resolved?.documents.length ||
+              needsCheck ||
+              !!linksFrom(links).length ||
+              !credentialReady ||
+              !projectMode ||
+              (projectMode === 'project' && !project.trim())
             }
           >
             {busy ? 'Saving…' : source ? 'Save settings' : 'Create connection'}

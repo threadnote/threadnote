@@ -1,11 +1,9 @@
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
-import {Cause, Clock, Data, Effect, Redacted, Schema} from 'effect';
-import {applyScrubber} from '@threadnote/platform/scrubber';
-import type {
-  IntegrationResult,
-  ResolvedSuperhumanSelection,
-  SuperhumanSource,
-} from '@threadnote/manager/integrations-contracts';
+import {describeSuperhumanSelection, resolveSuperhumanBrowserLinks, ManagerSuperhumanError} from './links.js';
+export {describeSuperhumanSelection, resolveSuperhumanBrowserLinks} from './links.js';
+export {mergeResolvedSuperhumanSelections} from '@threadnote/manager/superhuman-selection';
+import {Cause, Clock, Effect, Redacted, Schema} from 'effect';
+import type {IntegrationResult, SuperhumanSource} from '@threadnote/manager/integrations-contracts';
 import {readExternalDocumentManifest, readExternalSourceReceipt} from '@threadnote/store/external-resource';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -22,35 +20,15 @@ import {
 } from '../config.js';
 import {captureConsole} from '../../effect/console.js';
 import {withSourceLock} from '../lock.js';
-import {
-  createSuperhumanRestSession,
-  SuperhumanClientError,
-  SUPERHUMAN_API_ORIGIN,
-  type SuperhumanClientOptions,
-} from './client.js';
-import {normalizeSuperhumanTitle} from './render.js';
+import {SuperhumanClientError} from './client.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceRemove,
   runSuperhumanSourceSync,
   SuperhumanSourceConflictError,
 } from './source.js';
-import {
-  resolveSuperhumanCredential,
-  superhumanCredentialConfigured,
-  validSuperhumanApiToken,
-  SuperhumanCredentialError,
-} from './credentials.js';
+import {resolveSuperhumanCredential, superhumanCredentialConfigured, SuperhumanCredentialError} from './credentials.js';
 import type {ManagerProcessApiRequest} from '../../manager/processes.js';
-
-const API_ROOT = `${SUPERHUMAN_API_ORIGIN}/apis/v1`;
-const DOC_HREF = /^\/apis\/v1\/docs\/([A-Za-z0-9_-]{1,128})$/;
-const PAGE_HREF = /^\/apis\/v1\/docs\/([A-Za-z0-9_-]{1,128})\/pages\/([A-Za-z0-9_-]{1,128})$/;
-
-export class ManagerSuperhumanError extends Data.TaggedError('ManagerSuperhumanError')<{
-  readonly status: number;
-  readonly message: string;
-}> {}
 
 function invalid(message: string): never {
   throw new ManagerSuperhumanError({status: 400, message});
@@ -115,127 +93,6 @@ function selectedDocuments(value: unknown): readonly SuperhumanDocumentConfig[] 
     if (new Set(pages).size !== pages.length) invalid('Each Superhuman page must be selected once.');
     return {id, pages};
   });
-}
-
-function browserLink(value: unknown): string {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 2048)
-    invalid('Choose a valid Superhuman Docs link.');
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return invalid('Choose a valid Superhuman Docs link.');
-  }
-  if (
-    url.origin !== SUPERHUMAN_API_ORIGIN ||
-    url.protocol !== 'https:' ||
-    url.username ||
-    url.password ||
-    !/^\/d\/[^/]+/.test(url.pathname) ||
-    url.search
-  )
-    invalid('Choose a Superhuman Docs document link.');
-  return url.href;
-}
-
-function safeName(value: unknown, secret: string, fallback: string): string {
-  if (value === undefined || value === null) return fallback;
-  if (typeof value !== 'string' || value.length > 2048) invalid('Superhuman returned an invalid link.');
-  if (value.includes(secret) || normalizeSuperhumanTitle(value).includes(secret))
-    conflict('Superhuman returned sensitive link metadata.');
-  const cleaned = normalizeSuperhumanTitle(applyScrubber(value, {redact: true}).cleaned);
-  if (cleaned.includes(secret)) conflict('Superhuman returned sensitive link metadata.');
-  return cleaned.slice(0, 256) || fallback;
-}
-
-function resolvedResource(response: unknown, token: Redacted.Redacted<string>) {
-  if (!response || typeof response !== 'object' || Array.isArray(response))
-    invalid('Superhuman returned an invalid link.');
-  const wrapper = response as Record<string, unknown>;
-  if (
-    wrapper.type !== 'apiLink' ||
-    !wrapper.resource ||
-    typeof wrapper.resource !== 'object' ||
-    Array.isArray(wrapper.resource)
-  )
-    invalid('Superhuman returned an unsupported link.');
-  const resource = wrapper.resource as Record<string, unknown>;
-  if (resource.type !== 'doc' && resource.type !== 'page') invalid('Superhuman returned an unsupported link.');
-  if (typeof resource.href !== 'string' || resource.href.length > 2048) invalid('Superhuman returned an invalid link.');
-  let href: URL;
-  try {
-    href = new URL(resource.href);
-  } catch {
-    return invalid('Superhuman returned an invalid link.');
-  }
-  if (
-    href.origin !== SUPERHUMAN_API_ORIGIN ||
-    href.protocol !== 'https:' ||
-    href.username ||
-    href.password ||
-    href.search ||
-    href.hash ||
-    href.href !== `${href.origin}${href.pathname}`
-  )
-    invalid('Superhuman returned an out-of-scope link.');
-  const match = resource.type === 'doc' ? DOC_HREF.exec(href.pathname) : PAGE_HREF.exec(href.pathname);
-  if (!match || resource.id !== match[match.length - 1]) invalid('Superhuman returned an invalid link.');
-  const secret = Redacted.value(token);
-  if (match.some(part => part.includes(secret)) || String(resource.id).includes(secret))
-    conflict('Superhuman returned sensitive link metadata.');
-  return {
-    documentId: match[1],
-    ...(resource.type === 'page' ? {pageId: match[2]} : {}),
-    name: safeName(resource.name, secret, resource.type === 'doc' ? 'Document' : 'Selected page'),
-  };
-}
-
-/** Uses the fixed official GET client; URL IDs come only from validated API resources. */
-export async function resolveSuperhumanBrowserLinks(
-  links: readonly string[],
-  token: Redacted.Redacted<string>,
-  options: SuperhumanClientOptions = {},
-): Promise<ResolvedSuperhumanSelection> {
-  if (links.length < 1 || links.length > 16) invalid('Choose 1 to 16 Superhuman Docs links.');
-  if (!validSuperhumanApiToken(token)) invalid('Provide a valid Superhuman Docs API token.');
-  const urls = links.map(browserLink);
-  const session = createSuperhumanRestSession(token, {...options, maxRequests: 16});
-  try {
-    const selections: ResolvedSuperhumanSelection['selections'][number][] = [];
-    for (const url of urls) {
-      const resolve = new URL(`${API_ROOT}/resolveBrowserLink`);
-      resolve.searchParams.set('url', url);
-      selections.push(resolvedResource(await session.get(resolve.href), token));
-    }
-    return mergeResolvedSuperhumanSelections(selections);
-  } finally {
-    session.close();
-  }
-}
-
-export function mergeResolvedSuperhumanSelections(
-  selections: ResolvedSuperhumanSelection['selections'],
-): ResolvedSuperhumanSelection {
-  const byDocument = new Map<string, Set<string> | null>();
-  for (const selection of selections) {
-    const previous = byDocument.get(selection.documentId);
-    if (selection.pageId === undefined) byDocument.set(selection.documentId, null);
-    else if (previous !== null) byDocument.set(selection.documentId, (previous ?? new Set()).add(selection.pageId));
-  }
-  const documents = [...byDocument]
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([id, pages]) => (pages === null ? {id} : {id, pages: [...pages].sort()}));
-  const bySelection = new Map<string, ResolvedSuperhumanSelection['selections'][number]>();
-  for (const selection of selections) {
-    if (byDocument.get(selection.documentId) === null && selection.pageId !== undefined) continue;
-    const key = `${selection.documentId}\0${selection.pageId ?? ''}`;
-    const previous = bySelection.get(key);
-    if (!previous || selection.name.localeCompare(previous.name) < 0) bySelection.set(key, selection);
-  }
-  return {
-    documents,
-    selections: [...bySelection].sort(([left], [right]) => left.localeCompare(right)).map(([, selection]) => selection),
-  };
 }
 
 function safeErrorResponse(error: unknown) {
@@ -330,6 +187,18 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerPr
   const body = yield* request.body;
   if (typeof body.action !== 'string') invalid('Choose a Superhuman action.');
   const action = body.action;
+  if (action === 'describe-selection') {
+    const source = requireSuperhumanSource(yield* readSourceConfiguration(request.config), sourceId(body.id));
+    const token = yield* resolveSuperhumanCredential(request.config, source);
+    const selection = yield* fromPromiseInterruptible(
+      signal => describeSuperhumanSelection(source.documents, token, {signal}),
+      error =>
+        error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
+          ? error
+          : new ManagerSuperhumanError({status: 409, message: 'Superhuman could not load the saved selection titles.'}),
+    );
+    return {status: 200, body: selection};
+  }
   if (action === 'resolve-links') {
     if (!Array.isArray(body.links) || !body.links.every(link => typeof link === 'string'))
       invalid('Choose Superhuman Docs links.');

@@ -58,6 +58,17 @@ const source: SuperhumanSource = {
   status: 'needs-sync',
   chunks: 0,
 };
+const savedSelection = {
+  documents: source.documents,
+  selections: [
+    {
+      documentId: 'Doc_Inner_S',
+      pageId: 'Page_1',
+      name: 'Selected page',
+      browserLink: 'https://docs.superhuman.com/d/synthetic/page-one',
+    },
+  ],
+};
 const mixed = {
   obsidian: {
     sources: [{id: 'notes', vault: '/vault', include: ['**/*.md'], exclude: [], enabled: true, watch: false}],
@@ -166,7 +177,7 @@ describe('Integration catalog', () => {
       'https://docs.superhuman.com/d/synthetic/page',
     );
     await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
-    await act(async () => button('Check links').click());
+    await act(async () => button('Add links').click());
     await act(async () => button('Create connection').click());
     expect(
       document.querySelector<HTMLButtonElement>('#integration-connections-tab')?.getAttribute('aria-selected'),
@@ -202,7 +213,7 @@ describe('Superhuman Docs connection', () => {
     const links = document.querySelector<HTMLTextAreaElement>('textarea')!;
     await fill(links, 'https://docs.superhuman.com/d/synthetic/page-one');
     expect(button('Create connection').disabled).toBe(true);
-    await act(async () => button('Check links').click());
+    await act(async () => button('Add links').click());
     expect(calls[0]).toEqual({
       path: '/api/integrations/superhuman',
       body: {
@@ -214,7 +225,7 @@ describe('Superhuman Docs connection', () => {
     expect(document.body.textContent).toContain('1 selected page');
     await fill(links, 'https://docs.superhuman.com/d/synthetic/page-two');
     expect(button('Create connection').disabled).toBe(true);
-    await act(async () => button('Check links').click());
+    await act(async () => button('Add links').click());
     await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'replacement-token');
     expect(button('Create connection').disabled).toBe(true);
     await act(async () => button('Check links').click());
@@ -241,7 +252,9 @@ describe('Superhuman Docs connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        calls.push(JSON.parse(String(init.body)));
+        const body = JSON.parse(String(init.body));
+        if (body.action === 'describe-selection') return new Response(JSON.stringify(savedSelection));
+        calls.push(body);
         return new Response('{}');
       }),
     );
@@ -249,7 +262,7 @@ describe('Superhuman Docs connection', () => {
       <SuperhumanConnectionForm source={source} onClose={() => undefined} onSaved={async () => undefined} />,
     );
     expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
-    expect(document.body.textContent).toContain('Current selection is retained');
+    expect(document.querySelector('.integration-link-chip')?.textContent).toContain('Selected page');
     await act(async () => button('Save settings').click());
     expect(calls).toEqual([
       {
@@ -271,7 +284,9 @@ describe('Superhuman Docs connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        calls.push(JSON.parse(String(init.body)));
+        const body = JSON.parse(String(init.body));
+        if (body.action === 'describe-selection') return new Response(JSON.stringify(savedSelection));
+        calls.push(body);
         return new Response('{}');
       }),
     );
@@ -280,7 +295,7 @@ describe('Superhuman Docs connection', () => {
     );
     await fill(document.querySelector<HTMLInputElement>('input[type="password"]')!, 'replacement-token');
     expect(button('Save settings').disabled).toBe(false);
-    expect(document.body.textContent).toContain('without re-entering links');
+    expect(document.querySelector('.integration-link-chip')?.textContent).toContain('Selected page');
     await act(async () => button('Save settings').click());
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
@@ -323,7 +338,7 @@ describe('Superhuman Docs connection', () => {
     await fill(document.querySelector<HTMLTextAreaElement>('textarea')!, 'https://docs.superhuman.com/d/synthetic');
     await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
     expect(document.querySelector('input[type="password"]')).toBeNull();
-    await act(async () => button('Check links').click());
+    await act(async () => button('Add links').click());
     expect(calls[0]).toEqual({
       action: 'resolve-links',
       links: ['https://docs.superhuman.com/d/synthetic'],
@@ -352,7 +367,9 @@ describe('Superhuman Docs connection', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (_path: string, init: RequestInit) => {
-        calls.push(JSON.parse(String(init.body)));
+        const body = JSON.parse(String(init.body));
+        if (body.action === 'describe-selection') return new Response(JSON.stringify(savedSelection));
+        calls.push(body);
         return new Response('{}');
       }),
     );

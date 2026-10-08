@@ -8674,6 +8674,73 @@ h4 {
 .integration-selection ul {
   margin-bottom: 0;
 }
+.integration-link-picker {
+  display: grid;
+  gap: 10px;
+}
+.integration-link-picker > small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.integration-link-picker textarea {
+  min-height: 42px;
+}
+.integration-link-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.integration-link-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-alt);
+}
+.integration-link-chip > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.integration-link-chip-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.integration-link-chip-label > a,
+.integration-link-chip-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+  color: var(--text);
+  font-size: 13px;
+}
+.integration-link-chip-label small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.integration-link-chip .integration-link-chip-remove {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.integration-link-chip .integration-link-chip-remove:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
 .integration-advanced {
   display: grid;
   gap: 14px;

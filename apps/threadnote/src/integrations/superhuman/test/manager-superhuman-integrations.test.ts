@@ -6,6 +6,7 @@ import {Redacted} from 'effect';
 import fc from 'fast-check';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {
+  describeSuperhumanSelection,
   mergeResolvedSuperhumanSelections,
   resolveSuperhumanBrowserLinks,
 } from '@threadnote/threadnote/integrations/superhuman/manager';
@@ -23,6 +24,72 @@ const resolved = (type: 'doc' | 'page', documentId: string, pageId?: string, nam
     href: `https://docs.superhuman.com/apis/v1/docs/${documentId}${pageId ? `/pages/${pageId}` : ''}`,
     name,
   },
+});
+
+describe('Saved Superhuman selection metadata', () => {
+  it('reads only the selected document/page metadata and preserves the exact saved scope', async () => {
+    const calls: {url: URL; method?: string}[] = [];
+    const documents = [{id: 'doc_one', pages: ['page_a']}, {id: 'doc_two'}];
+    const result = await describeSuperhumanSelection(documents, credential, {
+      fetch: async (url, init) => {
+        calls.push({url, method: init.method});
+        return json(
+          url.pathname.endsWith('/page_a')
+            ? {
+                type: 'page',
+                id: 'page_a',
+                name: 'Checklist',
+                browserLink: 'https://docs.superhuman.com/d/_ddoc_one/Checklist_spage_a',
+              }
+            : {type: 'doc', id: 'doc_two', name: 'Handbook', browserLink: 'https://coda.io/d/_ddoc_two'},
+        );
+      },
+    });
+    expect(result.documents).toEqual(documents);
+    expect(result.selections).toEqual([
+      {
+        documentId: 'doc_one',
+        pageId: 'page_a',
+        name: 'Checklist',
+        browserLink: 'https://docs.superhuman.com/d/_ddoc_one/Checklist_spage_a',
+      },
+      {documentId: 'doc_two', name: 'Handbook', browserLink: 'https://docs.superhuman.com/d/_ddoc_two'},
+    ]);
+    expect(calls.map(item => [item.url.pathname, item.method])).toEqual([
+      ['/apis/v1/docs/doc_one/pages/page_a', 'GET'],
+      ['/apis/v1/docs/doc_two', 'GET'],
+    ]);
+  });
+
+  it('rejects mismatched resource identities, unsafe links and reflected credentials', async () => {
+    for (const resource of [
+      {type: 'page', id: 'other_page'},
+      {type: 'page', id: 'page_a', browserLink: 'https://other.example/d/doc'},
+      {type: 'page', id: 'page_a', name: 'synthetic-manager-token'},
+      {type: 'page', id: 'page_a', browserLink: 'https://docs.superhuman.com/d/synthetic-manager-token'},
+    ]) {
+      await expect(
+        describeSuperhumanSelection([{id: 'doc_one', pages: ['page_a']}], credential, {
+          fetch: async () => json(resource),
+        }),
+      ).rejects.toThrow(/invalid|Superhuman Docs|sensitive/);
+    }
+  });
+
+  it('bounds metadata lookups while retaining IDs for selections beyond the budget', async () => {
+    const pages = Array.from({length: 65}, (_, index) => `page_${index}`);
+    let requests = 0;
+    const result = await describeSuperhumanSelection([{id: 'doc_one', pages}], credential, {
+      fetch: async url => {
+        requests++;
+        return json({type: 'page', id: url.pathname.split('/').at(-1), name: 'Selected title'});
+      },
+    });
+    expect(requests).toBe(64);
+    expect(result.selections).toHaveLength(65);
+    expect(result.selections.at(-1)?.name).toBe('Page page_64');
+    expect(result.documents).toEqual([{id: 'doc_one', pages}]);
+  });
 });
 
 describe('Superhuman Docs link resolution', () => {
@@ -46,7 +113,9 @@ describe('Superhuman Docs link resolution', () => {
       },
     );
     expect(result.documents).toEqual([{id: 'doc_01'}]);
-    expect(result.selections).toEqual([{documentId: 'doc_01', name: 'Full document'}]);
+    expect(result.selections).toEqual([
+      {documentId: 'doc_01', name: 'Full document', browserLink: 'https://docs.superhuman.com/d/another-browser-slug'},
+    ]);
     expect(calls.map(url => url.pathname)).toEqual(['/apis/v1/resolveBrowserLink', '/apis/v1/resolveBrowserLink']);
     expect(calls[0]?.searchParams.get('url')).toBe('https://docs.superhuman.com/d/a-browser-slug_d_fake#heading');
   });
