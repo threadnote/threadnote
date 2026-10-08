@@ -33,6 +33,7 @@ import {
   runLocalAiUninstall,
 } from './local-ai.js';
 import {makeJevCommand} from './jev_cli.js';
+import {makeSlackCommand} from './slack_cli.js';
 import {makeImageProjectionCommand} from './image_projection_cli.js';
 import {
   runArchive,
@@ -101,10 +102,9 @@ import {
 } from './share.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {maybeNotifyUpdate, maybeRunPostUpdateAfterRepair, runPostUpdate} from '../release/index.js';
-import {errorMessage} from '@threadnote/platform/errors';
+import {applicationError, errorMessage} from '@threadnote/platform/errors';
 import {runVersion} from '../release/version/command.js';
 import {runManage} from '../manager/index.js';
-import {applicationError} from '@threadnote/platform/errors';
 import {runHomeMigration} from '../migration/home.js';
 import {
   runModelInstall,
@@ -1900,6 +1900,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('logs', logs),
   registerTopLevelCommand('telemetry', telemetry, {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('jev', makeJevCommand(), {productionLog: {mode: 'never'}}),
+  registerTopLevelCommand('slack', makeSlackCommand(), {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('image-projection', imageProjection, {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('report-issue', reportIssue, {productionLog: {mode: 'never'}}),
   registerTopLevelCommand('update', update),
@@ -1988,7 +1989,6 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('export-pack', exportPack),
   registerTopLevelCommand('import-pack', importPack),
 ] as const;
-
 const inspectRegisteredCliInvocation = makeCliInvocationInspector(topLevelCommandRegistrations);
 export const threadnoteCommand = root.pipe(
   Command.withDescription('Threadnote shared context workflow for development agents'),

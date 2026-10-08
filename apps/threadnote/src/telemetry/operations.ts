@@ -55,6 +55,7 @@ const CLI_SUBCOMMANDS = {
     'unpublish',
   ],
   source: ['add', 'inventory', 'list', 'remove', 'status', 'sync'],
+  slack: ['probe'],
   workset: ['list', 'prepare', 'show', 'status'],
 } as const;
 

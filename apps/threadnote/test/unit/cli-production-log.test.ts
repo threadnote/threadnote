@@ -206,6 +206,10 @@ describe('CLI production log policy', () => {
       writeAnonymousTelemetry: true,
       writeProductionLog: false,
     });
+    expect(inspectCliInvocation(['slack', 'probe', '--input', '/private/pilot.json'])).toMatchObject({
+      operation: 'slack',
+      writeProductionLog: false,
+    });
   });
 
   it('derives anonymous graph operations only from registered command words', () => {
