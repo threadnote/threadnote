@@ -264,7 +264,10 @@ export const installAgentIntegrationInTransaction = Effect.fn('agentIntegrations
   const receipt = hostReceipt(plan, installedVersion, mcp, 'pending');
   const previous = currentRegistry.hosts[agent];
   const previousPlan =
-    previous?.mcp.hostRoot !== undefined && previous.mcp.hostRoot !== plan.hostRoot
+    mcp.cwd === undefined &&
+    previous?.mcp.cwd === undefined &&
+    previous?.mcp.hostRoot !== undefined &&
+    previous.mcp.hostRoot !== plan.hostRoot
       ? yield* agentArtifacts(agent, previous.mcp.artifactProfile, previous.mcp.hostRoot)
       : undefined;
   if (dryRun) {

@@ -23,6 +23,7 @@ import {
 import {createSetupPlan, renderSetupPlan} from './planner.js';
 import {withSetupMutationLock} from './lock.js';
 import {productionSetupDependencies, resolveSetupRuntimeConfig, setupRepositorySourceHash} from './runtime.js';
+import {isPersonalThreadnoteHome} from '../mcp/install.js';
 
 export {SetupOperationError} from './contract.js';
 
@@ -145,6 +146,18 @@ export const runSetupWith = Effect.fn('setup.runWith')(function* <R>(
   if ('error' in scopeResolution) return yield* scopeResolution.error;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
+  if (
+    adapter.legacyClient === 'omp' &&
+    options.undo !== true &&
+    !isPersonalThreadnoteHome(config.agentContextHome, system.homeDirectory, (...parts) => path.resolve(...parts))
+  ) {
+    return yield* SetupOperationError.make({
+      message:
+        'OMP user-scope setup cannot target an isolated THREADNOTE_HOME. ' +
+        'Use threadnote mcp-install omp --project <path> --home <home> --apply for project configuration, ' +
+        'or run setup with the personal ~/.threadnote home.',
+    });
+  }
   const projectRoot = yield* resolveRepoRoot(options.cwd ?? system.currentDirectory());
   const scope = scopeResolution.scope;
   if (options.undo === true)

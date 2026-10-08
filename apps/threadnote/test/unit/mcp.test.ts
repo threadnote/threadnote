@@ -545,7 +545,7 @@ describe('JSON MCP host configuration', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('moves managed hooks when a project-scoped OMP install changes profile', () =>
+  effectIt.effect('preserves personal hooks when a project-scoped OMP install changes profile', () =>
     Effect.scoped(
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -579,8 +579,8 @@ describe('JSON MCP host configuration', () => {
         );
 
         expect(yield* fs.exists(path.join(project, '.omp', 'mcp.json'))).toBe(true);
-        expect(yield* fs.exists(path.join(profileRoot('first'), 'hooks', 'pre', 'threadnote.ts'))).toBe(false);
-        expect(yield* fs.exists(path.join(profileRoot('second'), 'hooks', 'pre', 'threadnote.ts'))).toBe(true);
+        expect(yield* fs.exists(path.join(profileRoot('first'), 'hooks', 'pre', 'threadnote.ts'))).toBe(true);
+        expect(yield* fs.exists(path.join(profileRoot('second'), 'hooks', 'pre', 'threadnote.ts'))).toBe(false);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );

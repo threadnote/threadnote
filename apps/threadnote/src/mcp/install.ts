@@ -145,7 +145,11 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
   const scope = agent === 'claude' ? (options.scope ?? 'user') : undefined;
   const cwd = options.cwd ?? (agent === 'claude' && scope !== 'user' ? yield* getInvocationCwd() : undefined);
   const legacyInferredClients =
-    apply && (yield* readAgentIntegrationRegistry(config)) === undefined
+    apply &&
+    personalHome &&
+    project === undefined &&
+    (scope === undefined || scope === 'user') &&
+    (yield* readAgentIntegrationRegistry(config)) === undefined
       ? yield* inferConfiguredMcpClients(config)
       : undefined;
 
@@ -197,17 +201,22 @@ const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(func
     return;
   }
   if (agent === 'omp') {
-    const hostRoot = (yield* resolveAgentHostPaths('omp', options.hostRoot))!.agentRoot;
+    const path = yield* Path.Path;
+    const projectDirectory = project === undefined ? undefined : yield* expandPath(project);
+    const hostRoot =
+      projectDirectory === undefined
+        ? (yield* resolveAgentHostPaths('omp', options.hostRoot))!.agentRoot
+        : path.join(projectDirectory, '.omp');
     yield* runOmpMcpInstall(config, name, {
       apply,
       dryRunApplyCommand: options.dryRunApplyCommand,
       hostRoot,
-      project,
+      project: projectDirectory,
       toolset,
     });
     yield* finishAgentIntegrationInstall(config, agent, {
       apply,
-      cwd: project,
+      cwd: projectDirectory,
       hostRoot,
       legacyInferredClients,
       name,
@@ -784,7 +793,11 @@ const runOmpMcpInstall = Effect.fn('mcp.runOmpInstall')(function* (
   const path = yield* ompMcpConfigPath(options.project, options.hostRoot);
   const previous = (yield* readAgentIntegrationRegistry(config))?.hosts.omp?.mcp;
   const previousHostRoot = previous?.hostRoot;
-  const relocatingHost = previousHostRoot !== undefined && previousHostRoot !== options.hostRoot;
+  const relocatingHost =
+    options.project === undefined &&
+    previous?.cwd === undefined &&
+    previousHostRoot !== undefined &&
+    previousHostRoot !== options.hostRoot;
   const relocatingPersonalMcp = relocatingHost && previous?.cwd === undefined;
   const serverConfig = yield* buildOmpMcpServerConfig(config, {
     toolset: options.toolset,

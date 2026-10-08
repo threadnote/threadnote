@@ -18559,6 +18559,7 @@ bun_workspace_test(
 bun_workspace_test(
     name = "test_standard_pooled_4_of_8",
     srcs = [
+        "//:AGENTS.md",
         "//:README.md",
         "//apps/threadnote:embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf",
         "//apps/threadnote:package.json",
@@ -18906,6 +18907,7 @@ bun_workspace_test(
         "//apps/threadnote:test/unit/knowledge-delta-git-materializer.test.ts",
         "//apps/threadnote:test/unit/knowledge-delta-git-proposal.test.ts",
         "//apps/threadnote:test/unit/omp-hooks.test.ts",
+        "//apps/threadnote:test/unit/omp-project-isolation.test.ts",
         "//apps/threadnote:test/unit/remote-memory-auth-cursor.test.ts",
         "//apps/threadnote:test/unit/remote-memory-git-bootstrap.test.ts",
         "//apps/threadnote:test/unit/remote-memory-http.test.ts",
@@ -19642,6 +19644,7 @@ bun_workspace_test(
         "apps/threadnote/test/unit/knowledge-delta-git-materializer.test.ts",
         "apps/threadnote/test/unit/knowledge-delta-git-proposal.test.ts",
         "apps/threadnote/test/unit/omp-hooks.test.ts",
+        "apps/threadnote/test/unit/omp-project-isolation.test.ts",
         "apps/threadnote/test/unit/remote-memory-auth-cursor.test.ts",
         "apps/threadnote/test/unit/remote-memory-git-bootstrap.test.ts",
         "apps/threadnote/test/unit/remote-memory-http.test.ts",

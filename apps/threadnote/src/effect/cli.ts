@@ -1862,7 +1862,7 @@ const registerTopLevelCommand = <const Name extends string, CommandType>(
 });
 
 const topLevelCommandRegistrations = [
-  registerTopLevelCommand('setup', makeSetupCommand(withScopedRuntime), setupCommandMetadata),
+  registerTopLevelCommand('setup', makeSetupCommand(withRuntimeEffect), setupCommandMetadata),
   registerTopLevelCommand('activate', makeActivationCommand(withScopedRuntime)),
   registerTopLevelCommand('guidance', makeGuidanceCommand(withScopedRuntime), guidanceCommandMetadata),
   registerTopLevelCommand('agents', makeAgentsCommand(withScopedRuntime), agentsCommandMetadata),
