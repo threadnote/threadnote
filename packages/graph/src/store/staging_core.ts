@@ -128,10 +128,9 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
 ) {
   const now = yield* Clock.currentTimeMillis;
   const snapshotPlaceholders = snapshotIds.map(() => '?').join(', ');
-  const compactTargets = yield* sql.unsafe<CompactLexicalSnapshotKeyRow & {readonly snapshot_id: string}>(
-    `SELECT compact.snapshot_key, compact.snapshot_id
-     FROM lexical_compact_snapshots AS compact
-     JOIN snapshots AS snapshot ON snapshot.id = compact.snapshot_id
+  const eligibleTargets = sql.unsafe<{readonly id: string}>(
+    `SELECT snapshot.id
+     FROM snapshots AS snapshot
      WHERE snapshot.id IN (${snapshotPlaceholders})
        AND snapshot.state = 'retired'
        AND snapshot.id NOT IN (SELECT snapshot_id FROM active_snapshots)
@@ -146,9 +145,17 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
              SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?
            )
        )
-     ORDER BY compact.snapshot_id
+     ORDER BY snapshot.id
      LIMIT 1`,
     [...snapshotIds, now, now],
+  );
+  // Select eligibility before reading payload so protected snapshots and
+  // multi-target sorts cannot turn a bounded deletion page into a full scan.
+  const target = (yield* eligibleTargets)[0];
+  if (target === undefined) return {complete: true, rowsDeleted: 0};
+  const compactTargets = yield* sql.unsafe<CompactLexicalSnapshotKeyRow>(
+    'SELECT snapshot_key FROM lexical_compact_snapshots WHERE snapshot_id = ? LIMIT 1',
+    [target.id],
   );
   const compactTarget = compactTargets[0];
   if (compactTarget !== undefined) {
@@ -167,11 +174,11 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
           maximumBatchRows: spec.maximumBatchRows,
         };
     }
-    yield* sql.unsafe('DELETE FROM lexical_storage_formats WHERE snapshot_id = ?', [compactTarget.snapshot_id]);
+    yield* sql.unsafe('DELETE FROM lexical_storage_formats WHERE snapshot_id = ?', [target.id]);
     const formatsDeleted = yield* lastStatementChangeCount(sql);
     yield* sql.unsafe('DELETE FROM lexical_compact_snapshots WHERE snapshot_key = ? AND snapshot_id = ?', [
       compactSnapshotKey,
-      compactTarget.snapshot_id,
+      target.id,
     ]);
     const snapshotsDeleted = yield* lastStatementChangeCount(sql);
     const metadataDeleted = formatsDeleted + snapshotsDeleted;
@@ -186,25 +193,11 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
        WHERE ${key} IN (
          SELECT ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
          FROM ${spec.table} AS candidate
-         JOIN snapshots AS snapshot ON snapshot.id = candidate.snapshot_id
-         WHERE candidate.snapshot_id IN (${snapshotPlaceholders})
-           AND snapshot.state = 'retired'
-           AND snapshot.id NOT IN (SELECT snapshot_id FROM active_snapshots)
-           AND snapshot.id NOT IN (SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?)
-           AND snapshot.id NOT IN (
-             SELECT base_snapshot_id
-             FROM snapshots
-             WHERE base_snapshot_id IS NOT NULL
-               AND id IN (
-                 SELECT snapshot_id FROM active_snapshots
-                 UNION
-                 SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?
-               )
-           )
+         WHERE candidate.snapshot_id = ?
          ORDER BY ${spec.keyColumns.map(column => `candidate.${column}`).join(', ')}
          LIMIT ?
        )`,
-      [...snapshotIds, now, now, batchRows],
+      [target.id, batchRows],
     );
     const changes = yield* sql.unsafe<{readonly count: number}>('SELECT changes() AS count');
     const deleted = Number(changes[0]?.count ?? 0);
@@ -220,58 +213,14 @@ const reclaimRetiredSnapshotPage = Effect.fn('codeGraph.reclaimRetiredSnapshotPa
         maximumBatchRows: spec.maximumBatchRows,
       };
   }
-  yield* sql.unsafe(
-    `DELETE FROM snapshots
-     WHERE id IN (
-       SELECT snapshot.id
-       FROM snapshots AS snapshot
-       WHERE snapshot.id IN (${snapshotPlaceholders})
-         AND snapshot.state = 'retired'
-         AND snapshot.id NOT IN (SELECT snapshot_id FROM active_snapshots)
-         AND snapshot.id NOT IN (SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?)
-         AND snapshot.id NOT IN (
-           SELECT base_snapshot_id
-           FROM snapshots
-           WHERE base_snapshot_id IS NOT NULL
-             AND id IN (
-               SELECT snapshot_id FROM active_snapshots
-               UNION
-               SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?
-             )
-         )
-       ORDER BY snapshot.id
-       LIMIT 100
-     )`,
-    [...snapshotIds, now, now],
-  );
+  yield* sql.unsafe('DELETE FROM snapshots WHERE id = ?', [target.id]);
   const removed = yield* sql.unsafe<{readonly count: number}>('SELECT changes() AS count');
   const removedCount = Number(removed[0]?.count ?? 0);
   if (!Number.isSafeInteger(removedCount) || removedCount < 0) {
     return yield* CodeGraphStoreError.of('Retired snapshot cleanup returned an invalid count.');
   }
-  const remaining = yield* sql.unsafe<{readonly present: number}>(
-    `SELECT EXISTS(
-       SELECT 1
-       FROM snapshots AS snapshot
-       WHERE snapshot.id IN (${snapshotPlaceholders})
-         AND snapshot.state = 'retired'
-         AND snapshot.id NOT IN (SELECT snapshot_id FROM active_snapshots)
-         AND snapshot.id NOT IN (SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?)
-         AND snapshot.id NOT IN (
-           SELECT base_snapshot_id
-           FROM snapshots
-           WHERE base_snapshot_id IS NOT NULL
-             AND id IN (
-               SELECT snapshot_id FROM active_snapshots
-               UNION
-               SELECT snapshot_id FROM snapshot_leases WHERE expires_at > ?
-             )
-         )
-       LIMIT 1
-     ) AS present`,
-    [...snapshotIds, now, now],
-  );
-  return {complete: Number(remaining[0]?.present ?? 0) === 0, rowsDeleted: removedCount};
+  const remaining = yield* eligibleTargets;
+  return {complete: remaining.length === 0, rowsDeleted: removedCount};
 });
 
 const prepareActivationTables = Effect.fn('codeGraph.prepareActivationTables')(function* (sql: SqlClient.SqlClient) {

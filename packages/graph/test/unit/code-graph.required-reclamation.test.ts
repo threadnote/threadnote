@@ -10,6 +10,89 @@ import {makeRetiredSnapshotReclamationPage} from '@threadnote/graph/store/stagin
 const TARGET = 'retired-target';
 
 describe('required snapshot reclamation pages', () => {
+  effectIt.effect('pages multiple large targets without sorting their remaining payload', () =>
+    withRows(0, sql =>
+      Effect.gen(function* () {
+        const targets = ['earlier-a', 'earlier-b', TARGET];
+        for (const id of targets) {
+          if (id !== TARGET) yield* cloneSnapshot(sql, id);
+          yield* insertCandidates(sql, id, 30_001);
+        }
+        const {observedSql, statements} = observeCandidateDeletes(sql);
+        const reclaim = makeRetiredSnapshotReclamationPage(observedSql, targets);
+        expect((yield* reclaim).rowsDeleted).toBe(5_000);
+        yield* assertIndexedPages(sql, statements);
+        expect(statements).toHaveLength(1);
+      }),
+    ),
+  );
+
+  effectIt.effect('keeps every snapshot-owned table page indexed across multiple targets', () =>
+    withRows(0, sql =>
+      Effect.gen(function* () {
+        yield* cloneSnapshot(sql, 'earlier-a');
+        yield* cloneSnapshot(sql, 'earlier-b');
+        const {observedSql, statements} = observeCandidateDeletes(sql);
+        yield* makeRetiredSnapshotReclamationPage(observedSql, [TARGET, 'earlier-a', 'earlier-b']);
+        expect(statements.length).toBeGreaterThan(20);
+        yield* assertIndexedPages(sql, statements);
+      }),
+    ),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'skips newly leased targets and drains the same finite debt after restart in any target order',
+    {
+      rows: fc.tuple(fc.integer({min: 5_001, max: 8_001}), fc.nat({max: 8_001}), fc.nat({max: 8_001})),
+      reverse: fc.boolean(),
+    },
+    ({rows, reverse}) =>
+      withRows(0, sql =>
+        Effect.gen(function* () {
+          const targets = ['earlier-a', 'earlier-b', TARGET];
+          for (const [index, id] of targets.entries()) {
+            if (id !== TARGET) yield* cloneSnapshot(sql, id);
+            yield* insertCandidates(sql, id, rows[index]);
+          }
+          const request = reverse ? [...targets].reverse() : targets;
+          const reclaim = makeRetiredSnapshotReclamationPage(sql, request);
+          expect((yield* reclaim).rowsDeleted).toBe(5_000);
+          yield* sql.unsafe('INSERT INTO snapshot_leases (token, snapshot_id, expires_at) VALUES (?, ?, ?)', [
+            'new-reader',
+            targets[0],
+            60_000,
+          ]);
+          const restarted = makeRetiredSnapshotReclamationPage(sql, [...request].reverse());
+          let deleted = 5_000;
+          for (;;) {
+            const page = yield* restarted;
+            deleted += page.rowsDeleted;
+            expect(page.rowsDeleted).toBeLessThanOrEqual(20_000);
+            const protectedRows = yield* sql.unsafe<{readonly count: number}>(
+              'SELECT COUNT(*) AS count FROM building_reference_candidates WHERE snapshot_id = ?',
+              [targets[0]],
+            );
+            expect(protectedRows[0].count).toBe(rows[0] - 5_000);
+            if (page.complete) break;
+          }
+          expect(yield* sql.unsafe('SELECT id FROM snapshots')).toEqual([{id: targets[0]}]);
+          yield* sql.unsafe('DELETE FROM snapshot_leases WHERE token = ?', ['new-reader']);
+          const final = makeRetiredSnapshotReclamationPage(sql, request);
+          for (;;) {
+            const page = yield* final;
+            deleted += page.rowsDeleted;
+            if (page.complete) break;
+          }
+          expect(deleted).toBe(rows.reduce((sum, count) => sum + count, 0) + targets.length);
+          expect(yield* final).toEqual({complete: true, rowsDeleted: 0});
+          expect(yield* sql.unsafe('SELECT id FROM snapshots')).toEqual([]);
+          expect(yield* sql.unsafe('PRAGMA foreign_key_check')).toEqual([]);
+        }),
+      ),
+    {fastCheck: {numRuns: 12}},
+  );
+
   effectIt.effect('grows fast pages up to the existing table limit', () =>
     withRows(35_001, sql =>
       Effect.gen(function* () {
@@ -62,23 +145,19 @@ describe('required snapshot reclamation pages', () => {
     withRows(0, sql =>
       Effect.gen(function* () {
         for (const id of ['other-a', 'other-b']) {
-          yield* sql.unsafe(
-            `INSERT INTO snapshots (
-            id, repository_id, worktree_id, commit_id, extractor_set, dirty, state,
-            file_count, symbol_count, edge_count, started_at
-          ) SELECT ?, repository_id, worktree_id, commit_id, extractor_set, dirty, state,
-            file_count, symbol_count, edge_count, started_at FROM snapshots WHERE id = ?`,
-            [id, TARGET],
-          );
+          yield* cloneSnapshot(sql, id);
         }
         yield* sql.unsafe(`INSERT INTO building_lexical_counters (
           snapshot_id, completed_batch_count, posting_count, symbol_count, term_count
         ) SELECT id, 0, 0, 0, 0 FROM snapshots`);
         const reclaim = makeRetiredSnapshotReclamationPage(sql, [TARGET, 'other-a', 'other-b']);
-        expect((yield* reclaim).rowsDeleted).toBe(1);
-        expect((yield* reclaim).rowsDeleted).toBe(1);
-        expect((yield* reclaim).rowsDeleted).toBe(1);
-        expect(yield* reclaim).toEqual({complete: true, rowsDeleted: 3});
+        const pages = [];
+        for (;;) {
+          const page = yield* reclaim;
+          pages.push(page.rowsDeleted);
+          if (page.complete) break;
+        }
+        expect(pages).toEqual([1, 1, 1, 1, 1, 1]);
       }),
     ),
   );
@@ -122,6 +201,62 @@ describe('required snapshot reclamation pages', () => {
     {fastCheck: {numRuns: 12}},
   );
 });
+
+type ObservedStatement = {readonly text: string; readonly parameters: readonly unknown[]};
+
+function observeCandidateDeletes(sql: SqlClient.SqlClient) {
+  const statements: ObservedStatement[] = [];
+  const observedSql = new Proxy(sql, {
+    get(target, key, receiver) {
+      if (key !== 'unsafe') return Reflect.get(target, key, receiver);
+      return (text: string, parameters: readonly unknown[] = []) => {
+        if (text.startsWith('DELETE FROM') && text.includes(' AS candidate')) statements.push({text, parameters});
+        return sql.unsafe(text, parameters);
+      };
+    },
+  });
+  return {observedSql, statements};
+}
+
+function assertIndexedPages(sql: SqlClient.SqlClient, statements: readonly ObservedStatement[]) {
+  return Effect.gen(function* () {
+    for (const statement of statements) {
+      const plan = yield* sql.unsafe<{readonly detail: string}>(
+        `EXPLAIN QUERY PLAN ${statement.text}`,
+        statement.parameters,
+      );
+      expect(
+        plan.some(row => row.detail.includes('TEMP B-TREE')),
+        statement.text,
+      ).toBe(false);
+      expect(
+        plan.some(row => row.detail.startsWith('SEARCH candidate ') && row.detail.includes('(snapshot_id=?)')),
+        statement.text,
+      ).toBe(true);
+    }
+  });
+}
+
+function cloneSnapshot(sql: SqlClient.SqlClient, id: string) {
+  return sql.unsafe(
+    `INSERT INTO snapshots (
+      id, repository_id, worktree_id, commit_id, extractor_set, dirty, state,
+      file_count, symbol_count, edge_count, started_at
+    ) SELECT ?, repository_id, worktree_id, commit_id, extractor_set, dirty, state,
+      file_count, symbol_count, edge_count, started_at FROM snapshots WHERE id = ?`,
+    [id, TARGET],
+  );
+}
+
+function insertCandidates(sql: SqlClient.SqlClient, id: string, rows: number) {
+  if (rows === 0) return Effect.void;
+  return sql.unsafe(
+    `WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM rows WHERE n < ?)
+    INSERT INTO building_reference_candidates (snapshot_id, edge_id, tier, lookup_key)
+    SELECT ?, printf('edge-%08d', n), 0, printf('lookup-%08d', n) FROM rows`,
+    [rows, id],
+  );
+}
 
 function withRows<A, E, R>(rows: number, use: (sql: SqlClient.SqlClient) => Effect.Effect<A, E, R>) {
   return useDatabaseDirect(
