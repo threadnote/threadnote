@@ -62,9 +62,10 @@ budget and requires a fresh complete prospective artifact.
 ## Reviewed fixture identity
 
 Release-scale evidence is bound to the reviewed semantic identity SHA-256
-`d325379ad9c717b38c28d58cedc712921128c2b9cfaf9923caf48853dc75cded`. The verifier derives that bounded identity
+`42ac0ef188ce362d5c14235d339d09c138d4b69bda65e42c85d327b16e23c4df`. The verifier derives that bounded identity
 from the canonical scale budget and the exact 100-sample, 5-warmup schedule: the three profiles are normalized into
-reviewed order, each run creates the profile's selected-memory count (24/16/24) of sentinel records, and the remaining
+reviewed order, each run creates the profile's selected-memory count (24/16/24) of sentinel records scoped to the
+profile's first repository, and those records retain round-robin citations across the selected repositories. The remaining
 86,880 of 100,000 indexed documents are legacy noise. The identity also binds the independent schedule dimensions,
 per-profile repository/citation/allocation shape, and versioned record, schema, path, fixed-instant, and extractor-set
 contracts. It rejects release artifacts whose indexed, requested, or legacy-memory counts differ from that identity.

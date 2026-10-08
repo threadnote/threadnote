@@ -39,7 +39,8 @@ export const CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2 = {
     citationAllocation: 'round-robin-citation-index-v1',
     extension: '.md',
     memoryOrdinalWidth: 2,
-    pathContract: '<profile>/<run-token>/<topic>.md',
+    pathContract: '<first-profile-repository>/<profile>/<run-token>/<topic>.md',
+    projectAssignment: 'first-profile-repository-v1',
     schemaVersion: 4,
     topicSeparator: '-',
     topicContract: '<profile>-<run-token>-<two-digit-memory-ordinal>',
@@ -49,7 +50,7 @@ export const CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2 = {
  * Changing this requires review of the complete fixture contract, not a benchmark rerun during verification.
  */
 export const CONTEXT_BRIEF_CITATION_SCALE_REVIEWED_FIXTURE_IDENTITY_HASH =
-  'd325379ad9c717b38c28d58cedc712921128c2b9cfaf9923caf48853dc75cded' as const;
+  '42ac0ef188ce362d5c14235d339d09c138d4b69bda65e42c85d327b16e23c4df' as const;
 const CANDIDATE_PACKAGE_VERSION =
   /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 export const CONTEXT_BRIEF_CITATION_RSS_SAMPLING_SCHEDULE = 'absolute-monotonic-deadline-v1' as const;

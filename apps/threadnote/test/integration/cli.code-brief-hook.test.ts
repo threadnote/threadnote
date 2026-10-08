@@ -28,7 +28,7 @@ it('delivers a cited action card for an existing Edit file and stays silent for 
       [
         'remember',
         '--project',
-        'hook-fixture',
+        'repository',
         '--topic',
         'stable-subject',
         '--code-ref',

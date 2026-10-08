@@ -667,8 +667,12 @@ function scaleGraphEvidence(prepared: ContextBriefCitationScalePreparedProfile):
 
 function profileScope(prepared: ContextBriefCitationScalePreparedProfile): ContextBriefScopeV1 {
   return prepared.profile.id === 'local-100k'
-    ? {callerCwd: prepared.repositories[0].root, kind: 'repository', project: contextBriefCitationScaleProject()}
-    : {kind: 'workset', name: prepared.workset!.name, project: contextBriefCitationScaleProject()};
+    ? {
+        callerCwd: prepared.repositories[0].root,
+        kind: 'repository',
+        project: contextBriefCitationScaleProject(prepared),
+      }
+    : {kind: 'workset', name: prepared.workset!.name, project: contextBriefCitationScaleProject(prepared)};
 }
 
 function fixtureBudgetTokens(_prepared: ContextBriefCitationScalePreparedProfile): number {

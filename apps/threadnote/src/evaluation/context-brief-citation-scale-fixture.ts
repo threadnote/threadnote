@@ -421,7 +421,8 @@ function selectedMemoryRecords(
 ): readonly {readonly content: string; readonly path: string}[] {
   const token = runToken(prepared.profile.id, ordinal);
   const citationsPerMemory = prepared.profile.citationCount / prepared.profile.selectedMemories;
-  const root = path.join(home, 'data', 'local', 'user', 'benchmark', 'memories', 'durable', 'projects', PROJECT);
+  const project = contextBriefCitationScaleProject(prepared);
+  const root = path.join(home, 'data', 'local', 'user', 'benchmark', 'memories', 'durable', 'projects', project);
   return Array.from({length: prepared.profile.selectedMemories}, (_, memoryOrdinal) => {
     const citations = Array.from({length: citationsPerMemory}, (_, citationOrdinal) => {
       const index = memoryOrdinal * citationsPerMemory + citationOrdinal;
@@ -456,7 +457,7 @@ function selectedMemoryRecords(
       'MEMORY',
       'kind: durable',
       'status: active',
-      `project: ${PROJECT}`,
+      `project: ${project}`,
       `topic: ${topic}`,
       'source_agent_client: benchmark',
       `timestamp: ${FIXED_INSTANT}`,
@@ -604,8 +605,10 @@ function citationRepositoryPath(profile: ContextBriefCitationScaleProfileId, tok
   return `${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.directory}/${profile}/${token}/${String(index).padStart(3, '0')}${CONTEXT_BRIEF_CITATION_SCALE_FIXTURE_CONTRACT_V2.repositorySource.extension}`;
 }
 
-export function contextBriefCitationScaleProject(): string {
-  return PROJECT;
+export function contextBriefCitationScaleProject(prepared: ContextBriefCitationScalePreparedProfile): string {
+  const project = prepared.repositories[0]?.name;
+  if (project === undefined) throw new Error(`Missing first repository for ${prepared.profile.id}.`);
+  return project;
 }
 
 export function contextBriefCitationScaleExtractorSet(): string {
