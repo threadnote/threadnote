@@ -13105,6 +13105,7 @@ bun_workspace_test(
         "//packages/manager:src/memory/contracts.ts",
         "//packages/manager:src/memory_editor.tsx",
         "//packages/manager:src/memory_editor_languages.ts",
+        "//packages/manager:src/memory_selection_bar.tsx",
         "//packages/manager:src/navigation.tsx",
         "//packages/manager:src/navigation_attention.ts",
         "//packages/manager:src/obsidian_connection_form.tsx",

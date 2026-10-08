@@ -128,7 +128,7 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
     `${rootUri}/durable/projects/project/one.md`,
     `${rootUri}/durable/projects/project/two.md`,
   ]);
-  expect(container.textContent).toContain('1 memories selected');
+  expect(container.textContent).toContain('1 memory selected');
   expect(container.textContent).toContain('synthetic failure');
   await act(async () => button('Home').click());
   await act(async () => button('New memory').click());

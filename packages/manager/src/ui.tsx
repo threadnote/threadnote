@@ -1,5 +1,10 @@
 import {ConsolidationPanel} from './consolidation_review.js';
-import type {ConsolidationReview, ConsolidationSource} from '@threadnote/memory/consolidation';
+import {
+  MAX_CONSOLIDATION_SOURCES,
+  type ConsolidationReview,
+  type ConsolidationSource,
+} from '@threadnote/memory/consolidation';
+import {MemorySelectionBar} from './memory_selection_bar.js';
 import {SharingPanel} from './sharing_view.js';
 import {IntegrationsPanel} from './integrations_view.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
@@ -18,7 +23,6 @@ import {
   RefreshCw,
   Search,
   Settings2,
-  Download,
   Users,
 } from 'lucide-react';
 import {DetailModal} from './detail_modal.js';
@@ -222,7 +226,7 @@ function App(): React.ReactElement {
   const [savingMemory, setSavingMemory] = useState(false);
   const [libraryActionBusy, setLibraryActionBusy] = useState(false);
   const [bulkCount, setBulkCount] = useState(0);
-  const [showLibraryDetails, setShowLibraryDetails] = useState(false);
+  const [libraryDialog, setLibraryDialog] = useState<'details' | 'consolidate'>();
   const [creatingMemory, setCreatingMemory] = useState(false);
   const [editorRevision, setEditorRevision] = useState(0);
   const scopedTree = useMemo(() => libraryScopeTree(tree, libraryScope), [tree, libraryScope]);
@@ -1050,6 +1054,28 @@ function App(): React.ReactElement {
     }
   }
 
+  function clearConsolidationDraft(uris: readonly string[] = []): void {
+    setJobId(undefined);
+    setDraft('');
+    setDraftError(undefined);
+    setConsolidationSources([]);
+    setConsolidationReviews([]);
+    setConsolidationSourceUris(uris);
+  }
+
+  function openConsolidation(): void {
+    if (consolidationBusy) return;
+    if (
+      consolidationSourceUris.length !== selectedList.length ||
+      consolidationSourceUris.some(uri => !visibleSelectedUris.has(uri))
+    ) {
+      clearConsolidationDraft(selectedList);
+      setConsolidationTopic('');
+      setConsolidationProject(workspaceProject);
+    }
+    setLibraryDialog('consolidate');
+  }
+
   async function draftConsolidation(): Promise<void> {
     if (draftingConsolidation || applyingConsolidation) {
       return;
@@ -1061,12 +1087,7 @@ function App(): React.ReactElement {
       return;
     }
     setDraftingConsolidation(true);
-    setJobId(undefined);
-    setDraft('');
-    setDraftError(undefined);
-    setConsolidationSources([]);
-    setConsolidationReviews([]);
-    setConsolidationSourceUris(uris);
+    clearConsolidationDraft(uris);
     try {
       const result = await api<{job: ConsolidationJob}>('/api/consolidations', {
         agent,
@@ -1146,11 +1167,7 @@ function App(): React.ReactElement {
       if (result.output) {
         setOutput(result.output);
       }
-      setDraft('');
-      setJobId(undefined);
-      setConsolidationSourceUris([]);
-      setConsolidationSources([]);
-      setConsolidationReviews([]);
+      clearConsolidationDraft();
       setSelectedUris(new Set());
       if (currentSelectedUri && sourceUris.includes(currentSelectedUri)) {
         setSelectedUri(undefined);
@@ -1193,7 +1210,7 @@ function App(): React.ReactElement {
     if (uri !== selectedUri && !(await confirmDiscardDraft())) return;
     if (uri !== selectedUri) draftRef.current = undefined;
     setCreatingMemory(false);
-    setShowLibraryDetails(false);
+    setLibraryDialog(undefined);
     setSelectedUri(uri);
     setPanel('memory');
     setNavTreeTab(isResourceUri(uri) ? 'resources' : 'memories');
@@ -1205,7 +1222,7 @@ function App(): React.ReactElement {
     if (!(await confirmDiscardDraft())) return;
     draftRef.current = undefined;
     setPendingCanonical(undefined);
-    setShowLibraryDetails(false);
+    setLibraryDialog(undefined);
     setCreatingMemory(false);
     setSelectedUri(undefined);
     setContent('');
@@ -1309,7 +1326,7 @@ function App(): React.ReactElement {
   const markdownPreview = markdownBodyForPreview(content);
   const canMutate = Boolean(selectedUri && selectedIsReadable && !selectedIsDir && !selectedIsResource);
   const consolidationBusy = draftingConsolidation || applyingConsolidation;
-  const canDraftConsolidation = selectedList.length >= 2;
+  const canDraftConsolidation = selectedList.length >= 2 && selectedList.length <= MAX_CONSOLIDATION_SOURCES;
   const doctorBusy = doctorAction !== undefined;
   const selectedHasPendingCanonical = pendingCanonical !== undefined && pendingCanonical.node.uri === selectedUri;
   const controlsBlocked =
@@ -1331,6 +1348,39 @@ function App(): React.ReactElement {
   const authoringMemory =
     creatingMemory ||
     (memoryViewMode === 'edit' && !!selectedUri && !selectedIsDir && !selectedIsResource && !selectedNode?.isSystem);
+  const libraryDialogTitle =
+    libraryDialog === 'consolidate' ? 'Consolidate memories' : selectedIsResource ? 'Source details' : 'Memory details';
+  const consolidationPanel = (standalone = false) => (
+    <ConsolidationPanel
+      standalone={standalone}
+      disabled={consolidationBusy || controlsBlocked}
+      busy={consolidationBusy}
+      canResume={!standalone && !!memory?.record?.metadata.consolidation}
+      error={standalone ? undefined : memory?.record?.metadata.consolidationError}
+      draftError={draftError}
+      topic={consolidationTopic}
+      project={consolidationProject ?? target.project}
+      onTopicChange={setConsolidationTopic}
+      onProjectChange={setConsolidationProject}
+      agents={state?.agents ?? []}
+      agent={agent}
+      onAgentChange={value => void (isAgentClient(value) && setAgent(value))}
+      openSelect={openSelect}
+      setOpenSelect={setOpenSelect}
+      canDraft={canDraftConsolidation}
+      drafting={draftingConsolidation}
+      applying={applyingConsolidation}
+      draft={draft}
+      sources={consolidationSources}
+      reviews={consolidationReviews}
+      onDraftChange={setDraft}
+      onReviewChange={setConsolidationReviews}
+      hasJob={!!jobId}
+      onDraft={() => void draftConsolidation()}
+      onApply={() => void applyConsolidation()}
+      onResume={() => void resumeConsolidationCleanup()}
+    />
+  );
   const libraryDetails = (
     <aside className="inspector">
       <h3>{selectedIsResource ? 'Source details' : memory ? 'Memory details' : 'Properties'}</h3>
@@ -1357,36 +1407,7 @@ function App(): React.ReactElement {
           <Metadata metadata={memory?.record?.metadata} node={memory?.node ?? selectedNode} />
         </>
       )}
-      {!selectedIsResource && !creatingMemory ? (
-        <ConsolidationPanel
-          disabled={consolidationBusy || controlsBlocked}
-          busy={consolidationBusy}
-          canResume={!!memory?.record?.metadata.consolidation}
-          error={memory?.record?.metadata.consolidationError}
-          draftError={draftError}
-          topic={consolidationTopic}
-          project={consolidationProject ?? target.project}
-          onTopicChange={setConsolidationTopic}
-          onProjectChange={setConsolidationProject}
-          agents={state?.agents ?? []}
-          agent={agent}
-          onAgentChange={value => void (isAgentClient(value) && setAgent(value))}
-          openSelect={openSelect}
-          setOpenSelect={setOpenSelect}
-          canDraft={canDraftConsolidation}
-          drafting={draftingConsolidation}
-          applying={applyingConsolidation}
-          draft={draft}
-          sources={consolidationSources}
-          reviews={consolidationReviews}
-          onDraftChange={setDraft}
-          onReviewChange={setConsolidationReviews}
-          hasJob={!!jobId}
-          onDraft={() => void draftConsolidation()}
-          onApply={() => void applyConsolidation()}
-          onResume={() => void resumeConsolidationCleanup()}
-        />
-      ) : null}
+      {!selectedIsResource && !creatingMemory ? consolidationPanel() : null}
     </aside>
   );
 
@@ -1682,44 +1703,22 @@ function App(): React.ReactElement {
                         {
                           label: 'Consolidate memories…',
                           icon: <ListChecks />,
-                          disabled: navTreeTab !== 'memories',
-                          onSelect: () => setShowLibraryDetails(true),
+                          disabled: navTreeTab !== 'memories' || consolidationBusy || controlsBlocked,
+                          onSelect: openConsolidation,
                         },
                       ]}
                     />
                   </div>
-                  {selectedList.length > 0 ? (
-                    <div className="selection-bar" aria-live="polite">
-                      <span>
-                        <strong>{selectedList.length}</strong> memories selected · includes hidden descendants
-                      </span>
-                      {libraryScope !== 'local' ? (
-                        <button disabled={controlsBlocked} onClick={() => void bulk('unpublish')}>
-                          <Download />
-                          Unpublish…
-                        </button>
-                      ) : (
-                        <>
-                          <button disabled={controlsBlocked} onClick={() => void bulk('archive')}>
-                            Archive
-                          </button>
-                          <button disabled={controlsBlocked || !canBulkPublish} onClick={() => void bulk('publish')}>
-                            Publish…
-                          </button>
-                          <button
-                            className="danger"
-                            disabled={controlsBlocked || libraryScope !== 'local'}
-                            onClick={() => void bulk('forget')}
-                          >
-                            Forget…
-                          </button>
-                        </>
-                      )}
-                      <button disabled={controlsBlocked} onClick={() => setSelectedUris(new Set())}>
-                        Clear
-                      </button>
-                    </div>
-                  ) : null}
+                  <MemorySelectionBar
+                    count={selectedList.length}
+                    disabled={controlsBlocked || consolidationBusy}
+                    canConsolidate={canDraftConsolidation && navTreeTab === 'memories'}
+                    canPublish={canBulkPublish}
+                    scope={libraryScope}
+                    onConsolidate={openConsolidation}
+                    onBulkAction={action => void bulk(action)}
+                    onClear={() => setSelectedUris(new Set())}
+                  />
                 </>
               ) : (
                 <div className="library-editor-navigation">
@@ -1805,7 +1804,7 @@ function App(): React.ReactElement {
                             className="quiet-icon"
                             aria-label="Memory details"
                             disabled={!selectedIsReadable && !selectedIsDir}
-                            onClick={() => setShowLibraryDetails(true)}
+                            onClick={() => setLibraryDialog('details')}
                           >
                             <Info aria-hidden="true" />
                           </button>
@@ -1919,13 +1918,16 @@ function App(): React.ReactElement {
                   </section>
 
                   {creatingMemory ? libraryDetails : null}
-                  {showLibraryDetails ? (
-                    <DetailModal
-                      title={selectedIsResource ? 'Source details' : 'Memory details'}
-                      onClose={() => setShowLibraryDetails(false)}
-                    >
-                      {libraryDetails}
-                      <p className="uri-line">{selectedUri}</p>
+                  {libraryDialog ? (
+                    <DetailModal title={libraryDialogTitle} onClose={() => setLibraryDialog(undefined)}>
+                      {libraryDialog === 'consolidate' ? (
+                        consolidationPanel(true)
+                      ) : (
+                        <>
+                          {libraryDetails}
+                          <p className="uri-line">{selectedUri}</p>
+                        </>
+                      )}
                     </DetailModal>
                   ) : null}
                 </div>

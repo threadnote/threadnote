@@ -2,6 +2,7 @@ import React from 'react';
 import {DropdownSelect} from './ui/controls.js';
 import type {SelectId} from './ui/contracts.js';
 import {
+  MAX_CONSOLIDATION_SOURCES,
   consolidationSections,
   reviewConsolidation,
   type ConsolidationReview,
@@ -238,6 +239,7 @@ export function ConsolidationDraftReview(props: {
 }
 
 export function ConsolidationPanel(props: {
+  readonly standalone?: boolean;
   readonly disabled: boolean;
   readonly busy: boolean;
   readonly canResume: boolean;
@@ -265,9 +267,10 @@ export function ConsolidationPanel(props: {
   readonly onApply: () => void;
   readonly onResume: () => void;
 }): React.ReactElement {
+  const Container = props.standalone ? 'section' : 'details';
   return (
-    <details className="consolidation-details">
-      <summary>Consolidate memories</summary>
+    <Container className="consolidation-details">
+      {props.standalone ? null : <summary>Consolidate memories</summary>}
       <p className="consolidation-intro">
         Create one new memory from the selected sources. Review it before saving. Personal sources are then archived
         unless the result still links to them. Shared memories stay available.
@@ -323,7 +326,9 @@ export function ConsolidationPanel(props: {
         </button>
       </div>
       {!props.canDraft ? (
-        <p className="consolidation-hint">Select at least two memories in Library using their checkboxes.</p>
+        <p className="consolidation-hint">
+          Select 2–{MAX_CONSOLIDATION_SOURCES} memories in Library using their checkboxes.
+        </p>
       ) : null}
       {props.draftError ? (
         <section className="consolidation-error" role="alert">
@@ -370,6 +375,6 @@ export function ConsolidationPanel(props: {
           </button>
         </>
       ) : null}
-    </details>
+    </Container>
   );
 }

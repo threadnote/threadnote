@@ -42,7 +42,8 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
       timestamp: '2026-10-08T00:00:00Z',
     },
   });
-  const leaves = [leaf('source-a'), leaf('source-b')];
+  const leaves = [leaf('source-a'), leaf('source-b'), leaf('source-c')];
+  let memoryReads = 0;
   const posts: {path: string; body: Record<string, unknown>}[] = [];
   let failDraft = true;
   const json = (value: unknown) => new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}});
@@ -77,6 +78,7 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
     if (url.pathname === '/api/home')
       return Promise.resolve(json({version: 1, project: 'project', lanes: [], handoffs: [], stats: {memories: 2}}));
     if (url.pathname === '/api/memory') {
+      memoryReads++;
       const node = leaves.find(l => l.uri === url.searchParams.get('uri'));
       return Promise.resolve(
         json({
@@ -102,14 +104,16 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
                   id: 'job',
                   status: 'completed',
                   draft: 'Final claim.',
-                  sourceUris: leaves.map(l => l.uri),
-                  sources: leaves.map(l => ({
-                    uri: l.uri,
-                    revision: 'a'.repeat(64),
-                    fragments: ['Claim.'],
-                    codeCitations: [],
-                    relations: [],
-                  })),
+                  sourceUris: body.uris,
+                  sources: leaves
+                    .filter(l => (body.uris as string[]).includes(l.uri))
+                    .map(l => ({
+                      uri: l.uri,
+                      revision: 'a'.repeat(64),
+                      fragments: ['Claim.'],
+                      codeCitations: [],
+                      relations: [],
+                    })),
                 },
               }),
         }),
@@ -131,13 +135,18 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
       b => b.textContent?.trim() === text || b.querySelector('strong')?.textContent === text,
     )!;
   await act(async () => button('Library').click());
-  await act(async () =>
-    container
-      .querySelector<HTMLInputElement>('[aria-label="Select folder project and all descendant memories"]')!
-      .click(),
-  );
-  await act(async () => container.querySelector<HTMLButtonElement>(`button[title="${leaves[0].uri}"]`)!.click());
-  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Memory details"]')!.click());
+  const selectSource = async (name: string) =>
+    act(async () => container.querySelector<HTMLInputElement>(`[aria-label="Select ${name}"]`)!.click());
+  await selectSource('source-a');
+  expect(button('Consolidate')).toBeDefined();
+  expect(button('Consolidate').disabled).toBe(true);
+  await selectSource('source-b');
+  expect(button('Consolidate').disabled).toBe(false);
+  await act(async () => button('Consolidate').click());
+  expect(container.querySelector('dialog[open] h2')?.textContent).toBe('Consolidate memories');
+  expect(container.querySelector('dialog[open] details.consolidation-details')).toBeNull();
+  expect(button('Generate draft')).toBeDefined();
+  expect(memoryReads).toBe(0);
   expect(container.querySelector<HTMLInputElement>('[aria-label="Consolidated memory topic"]')?.value).toBe('');
   await act(async () => button('Generate draft').click());
   expect(container.querySelector('[aria-label="Consolidation draft"]')).toBeNull();
@@ -147,6 +156,14 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   failDraft = false;
   await act(async () => button('Generate draft').click());
   expect(container.querySelector('[role="alert"]')).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+  await selectSource('source-b');
+  await selectSource('source-c');
+  await act(async () => button('Consolidate').click());
+  expect(container.querySelector('[aria-label="Consolidation draft"]')).toBeNull();
+  expect(button('Save memory')).toBeUndefined();
+  await act(async () => button('Generate draft').click());
+  expect(posts.filter(p => p.path === '/api/consolidations').at(-1)?.body.uris).toEqual([leaves[0].uri, leaves[2].uri]);
   const editDraft = async (value: string) =>
     act(async () => {
       const textarea = container.querySelector<HTMLTextAreaElement>('[aria-label="Consolidation draft"]')!;
