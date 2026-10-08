@@ -87,6 +87,17 @@ describe('generated Bazel test contracts', () => {
     });
   });
 
+  it('discovers every colocated integration test in Vitest and exactly one Bazel target', () => {
+    const pattern = 'apps/threadnote/src/integrations/**/test/**/*.test.ts';
+    const entries = [...new Bun.Glob(pattern).scanSync('.')];
+
+    expect(entries.length).toBeGreaterThan(0);
+    expect(createVitestConfig().test?.include).toContain(pattern);
+    for (const entry of entries) {
+      expect(applicationTargets().filter(candidate => candidate.entries.includes(entry))).toHaveLength(1);
+    }
+  });
+
   it('infers runtime and repository inputs without coupling every application target to them', () => {
     const runtime = applicationTargetForEntry('apps/threadnote/test/unit/command-shim.test.ts');
     const runtimeOwners = applicationTargets().filter(candidate =>

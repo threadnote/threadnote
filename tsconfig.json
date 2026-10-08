@@ -17,5 +17,6 @@
     "apps/threadnote/src/**/*.tsx",
     "packages/*/src/**/*.ts",
     "packages/*/src/**/*.tsx"
-  ]
+  ],
+  "exclude": ["apps/threadnote/src/**/test/**"]
 }

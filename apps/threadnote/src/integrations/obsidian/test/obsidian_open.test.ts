@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {obsidianOpenUri} from '@threadnote/threadnote/obsidian/open';
+import {obsidianOpenUri} from '@threadnote/threadnote/integrations/obsidian/open';
 
 describe('Obsidian navigation', () => {
   it('percent-encodes absolute note paths for the official URI contract', () => {

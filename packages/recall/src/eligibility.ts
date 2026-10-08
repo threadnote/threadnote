@@ -13,13 +13,14 @@ export type RecallProjectEligibility =
  * project and authority policy, while ordinary recall filters candidate
  * metadata through the candidate-policy branch.
  */
-export type RecallEligibilityPolicy =
+export type RecallEligibilityPolicy = {readonly externalResources?: Readonly<Record<string, string>>} & (
   | {readonly kind: 'pinned-hard-uri-bypass'}
   | {
       readonly authority: RecallAuthorityEligibility;
       readonly kind: 'candidate-policy';
       readonly projects: RecallProjectEligibility;
-    };
+    }
+);
 
 export interface DeriveRecallEligibilityPolicyInput {
   /** The user-authored query before expansion or rewriting. */
@@ -187,7 +188,10 @@ export function recallRankCandidateIsEligible(
 }
 
 export function recallEligibilityPolicyRestrictsCandidates(policy: RecallEligibilityPolicy | undefined): boolean {
-  return policy?.kind === 'candidate-policy' && (policy.authority !== 'any' || policy.projects.mode !== 'unrestricted');
+  return (
+    policy?.externalResources !== undefined ||
+    (policy?.kind === 'candidate-policy' && (policy.authority !== 'any' || policy.projects.mode !== 'unrestricted'))
+  );
 }
 
 function termIndexes(terms: readonly string[], accepted: ReadonlySet<string>): readonly number[] {

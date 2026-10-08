@@ -96,7 +96,7 @@ import {
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
 import {mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
-import {syncObsidianSourcesBeforeRecall} from '../../obsidian/source.js';
+import {syncSourcesBeforeRecall} from '../../integrations/source.js';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';
@@ -1005,7 +1005,7 @@ interface RecallToolParams {
 
 const RECALL_MCP_PROGRESS = {
   lexicalRanking: {message: 'Ranking recall candidates.', phase: 'recall.lexical-ranking'},
-  obsidianSync: {message: 'Refreshing Obsidian sources.', phase: 'recall.obsidian-sync'},
+  obsidianSync: {message: 'Refreshing configured sources.', phase: 'recall.obsidian-sync'},
   semanticRetrieval: {message: 'Searching memory indexes.', phase: 'recall.semantic-retrieval'},
   sharedSync: {message: 'Refreshing shared memories.', phase: 'recall.shared-sync'},
   workspaceContext: {message: 'Resolving recall scope.', phase: 'recall.workspace-context'},
@@ -1045,24 +1045,24 @@ function runRecallTool(
         return Effect.succeed([] as readonly string[]);
       }),
     );
-    const obsidianSyncWarnings: string[] = [];
-    const syncedObsidianSources = memoryScope
+    const sourceSyncWarnings: string[] = [];
+    const syncedSources = memoryScope
       ? []
       : yield* withMcpProgressHeartbeat(
           progress,
           RECALL_MCP_PROGRESS.obsidianSync,
           withAnonymousTelemetryPhase(
             'recall.obsidian-sync',
-            withProductionPhaseTiming('recall.obsidian-sync', syncObsidianSourcesBeforeRecall(config)),
+            withProductionPhaseTiming('recall.obsidian-sync', syncSourcesBeforeRecall(config)),
           ),
           progressTiming.heartbeatMilliseconds,
         ).pipe(
           Effect.map(syncResult => {
-            obsidianSyncWarnings.push(...syncResult.warnings);
+            sourceSyncWarnings.push(...syncResult.warnings);
             return syncResult.syncedSources;
           }),
           Effect.catch(error => {
-            obsidianSyncWarnings.push(`Obsidian source refresh failed: ${errorMessage(error)}`);
+            sourceSyncWarnings.push(`Source refresh failed: ${errorMessage(error)}`);
             return Effect.succeed([] as readonly string[]);
           }),
         );
@@ -1273,13 +1273,13 @@ function runRecallTool(
     if (syncedTeams.length > 0) {
       sections.push(`Auto-synced shared memories: ${syncedTeams.join(', ')}`);
     }
-    if (syncedObsidianSources.length > 0) {
-      sections.push(`Auto-synced Obsidian sources: ${syncedObsidianSources.join(', ')}`);
+    if (syncedSources.length > 0) {
+      sections.push(`Auto-synced sources: ${syncedSources.join(', ')}`);
     }
     for (const warning of syncWarnings) {
       sections.push(`Auto-sync warning: ${warning}`);
     }
-    for (const warning of obsidianSyncWarnings) {
+    for (const warning of sourceSyncWarnings) {
       sections.push(`Auto-sync warning: ${warning}`);
     }
     const rankedResultSections = new Set([semanticSection, exactTail].filter((value): value is string => !!value));

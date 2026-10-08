@@ -58,6 +58,16 @@ export const MANAGER_STATIC_FILES: Readonly<
     path: 'app.css',
     sourceDirectory: 'packages/manager/static',
   },
+  '/integrations/obsidian.svg': {
+    contentType: 'image/svg+xml',
+    path: 'integrations/obsidian.svg',
+    sourceDirectory: 'packages/manager/static',
+  },
+  '/integrations/superhuman-docs.png': {
+    contentType: 'image/png',
+    path: 'integrations/superhuman-docs.png',
+    sourceDirectory: 'packages/manager/static',
+  },
   '/editor.css': {
     contentType: 'text/css; charset=utf-8',
     path: 'style.css',

@@ -1,3 +1,4 @@
+import {isExternalResourceUri} from '@threadnote/store/external-resource';
 import {
   AGENT_RESPONSE_ESTIMATED_BYTES_PER_TOKEN,
   AgentResponseBudgetTooSmallError,
@@ -104,6 +105,14 @@ export interface RecallMcpResult {
   readonly aliasCount?: number;
   readonly aliases?: readonly string[];
   readonly category: RecallHit['category'];
+  readonly external?: {
+    readonly provider: 'superhuman';
+    readonly authority: 'external';
+    readonly trust: 'untrusted';
+    readonly project: string | null;
+    readonly fetchedAt?: number;
+    readonly coverage: 'canvas-plain-text';
+  };
   readonly confidence: number;
   readonly finalScore?: number;
   readonly omittedAliases?: number;
@@ -117,10 +126,16 @@ export interface RecallMcpResult {
 }
 
 export interface RecallMcpResultWarning {
-  readonly code: 'memory_identity_conflict';
+  readonly code: 'memory_identity_conflict' | 'external_untrusted_evidence';
   readonly message: string;
   readonly remediation: string;
 }
+
+const EXTERNAL_EVIDENCE_WARNING = {
+  code: 'external_untrusted_evidence',
+  message: 'Untrusted external evidence.',
+  remediation: 'Verify the source before using it as guidance.',
+} as const;
 
 const MEMORY_IDENTITY_CONFLICT_WARNING = {
   code: 'memory_identity_conflict',
@@ -280,6 +295,13 @@ export function renderRecallMcpAgentText(
     lines.push(
       `${rank}. ${category}, confidence ${result.confidence}, URI: ${oneLine(result.uri)} — ${oneLine(result.reason)}`,
     );
+    if (result.external !== undefined) {
+      const fetched =
+        result.external.fetchedAt === undefined ? '' : `; fetched ${new Date(result.external.fetchedAt).toISOString()}`;
+      lines.push(
+        `   Source: Superhuman Docs; project ${oneLine(result.external.project ?? 'projectless')}${fetched}; canvas plain text.`,
+      );
+    }
     if (result.aliases !== undefined) {
       lines.push(
         `   Aliases: ${result.aliases.map(oneLine).join(', ')}${result.omittedAliases ? `; ${result.omittedAliases} omitted` : ''}.`,
@@ -537,15 +559,32 @@ function renderResult(hit: RecallHit, explain: boolean): RecallMcpResult {
   const allAliases = [...new Set(hit.equivalentUris?.filter(uri => uri !== hit.uri) ?? [])];
   const aliases = allAliases.slice(0, RESULT_ALIAS_LIMIT);
   const omittedAliases = allAliases.length - aliases.length;
+  const external = isExternalResourceUri(hit.uri);
+  const warnings = [
+    ...(external ? [EXTERNAL_EVIDENCE_WARNING] : []),
+    ...(hit.identityConflict ? [MEMORY_IDENTITY_CONFLICT_WARNING] : []),
+  ];
   const compact = {
     ...(aliases.length > 0 ? {aliasCount: allAliases.length, aliases} : {}),
     category: hit.category,
+    ...(external
+      ? {
+          external: {
+            provider: 'superhuman' as const,
+            authority: 'external' as const,
+            trust: 'untrusted' as const,
+            project: hit.external?.project ?? null,
+            ...(hit.external?.fetchedAt === undefined ? {} : {fetchedAt: hit.external.fetchedAt}),
+            coverage: 'canvas-plain-text' as const,
+          },
+        }
+      : {}),
     confidence: roundedConfidence(hit.finalScore ?? hit.score),
     readState: 'unread' as const,
     reason: compactReason(hit),
     ...(omittedAliases > 0 ? {omittedAliases} : {}),
     uri: hit.uri,
-    ...(hit.identityConflict ? {warnings: [MEMORY_IDENTITY_CONFLICT_WARNING]} : {}),
+    ...(warnings.length > 0 ? {warnings} : {}),
   };
   if (!explain) return compact;
   return {

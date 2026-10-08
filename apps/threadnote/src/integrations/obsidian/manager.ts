@@ -10,26 +10,29 @@ import {
 import type {IntegrationResult} from '@threadnote/manager/integrations-contracts';
 import {
   readObsidianConfiguration,
-  writeObsidianConfiguration,
+  mutateSourceConfiguration,
+  isObsidianSource,
   requireObsidianSource,
   requireObsidianProjection,
   upsertObsidianSource,
   upsertObsidianProjection,
-} from '../obsidian/config.js';
-import {runObsidianSourceAdd, runObsidianSourceSync, runObsidianSourceRemove} from '../obsidian/source.js';
-import {
-  runObsidianProjectionAdd,
-  runObsidianProjectionSync,
-  runObsidianProjectionRemove,
-} from '../obsidian/projection.js';
-import {runObsidianInboxScan} from '../obsidian/inbox.js';
-import {captureConsole} from '../effect/console.js';
-import type {ManagerProcessApiRequest} from './processes.js';
-import {managerFeatureError} from './feature_errors.js';
+  type SourceConfiguration,
+} from '../config.js';
+import {runObsidianSourceAdd, runObsidianSourceSync, runObsidianSourceRemove} from './source.js';
+import {runObsidianProjectionAdd, runObsidianProjectionSync, runObsidianProjectionRemove} from './projection.js';
+import {runObsidianInboxScan} from './inbox.js';
+import {captureConsole} from '../../effect/console.js';
+import type {ManagerProcessApiRequest} from '../../manager/processes.js';
+import {managerFeatureError} from '../../manager/feature_errors.js';
 
-const routeManagerIntegration = Effect.fn('manager.integrations')(function* (request: ManagerProcessApiRequest) {
+const routeManagerObsidianIntegration = Effect.fn('manager.obsidianIntegration')(function* (
+  request: ManagerProcessApiRequest,
+) {
   if (request.url.pathname !== '/api/integrations/obsidian') return undefined;
-  if (request.method === 'GET') return {status: 200, body: yield* readObsidianConfiguration(request.config)};
+  if (request.method === 'GET') {
+    const configuration = yield* readObsidianConfiguration(request.config);
+    return {status: 200, body: {...configuration, sources: configuration.sources.filter(isObsidianSource)}};
+  }
   if (request.method !== 'POST') return {status: 405, body: {error: 'Method not allowed'}};
   const body = yield* request.body;
   const action = requireString(body.action, 'action');
@@ -42,7 +45,9 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
       switch (action) {
         case 'save-source': {
           const current = yield* readObsidianConfiguration(config);
-          const existing = current.sources.find(source => source.id === id);
+          const existing = current.sources.some(source => source.id === id)
+            ? requireObsidianSource(current, id)
+            : undefined;
           if (!!existing !== (body.editing === true))
             throw new Error(
               existing
@@ -93,12 +98,13 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
           if (typeof body.enabled !== 'boolean' || !['source', 'projection'].includes(String(body.kind))) {
             throw new Error('Choose a connection and whether it is enabled.');
           }
-          const current = yield* readObsidianConfiguration(config);
-          const next =
+          const enabled = body.enabled;
+          const update = (current: SourceConfiguration) =>
             body.kind === 'source'
-              ? upsertObsidianSource(current, {...requireObsidianSource(current, id), enabled: body.enabled})
-              : upsertObsidianProjection(current, {...requireObsidianProjection(current, id), enabled: body.enabled});
-          if (apply) yield* writeObsidianConfiguration(config, next);
+              ? upsertObsidianSource(current, {...requireObsidianSource(current, id), enabled})
+              : upsertObsidianProjection(current, {...requireObsidianProjection(current, id), enabled});
+          if (apply) yield* mutateSourceConfiguration(config, update);
+          else update(yield* readObsidianConfiguration(config));
           return {};
         }
         case 'sync-source': {
@@ -124,8 +130,8 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
   return {status: 200, body: response};
 });
 
-export const handleManagerIntegrationRequest = (request: ManagerProcessApiRequest) =>
-  routeManagerIntegration(request).pipe(Effect.catchCause(managerFeatureError));
+export const handleManagerObsidianIntegrationRequest = (request: ManagerProcessApiRequest) =>
+  routeManagerObsidianIntegration(request).pipe(Effect.catchCause(managerFeatureError));
 
 function stringList(value: unknown, name: string): readonly string[] {
   if (!Array.isArray(value) || !value.every(item => typeof item === 'string'))

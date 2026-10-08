@@ -1,0 +1,474 @@
+import {Clock, Context, Effect, FileSystem, Option, Path, Result} from 'effect';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {canonicalResourceUri, parseResourceId, validatePortableSegment} from './resource-id.js';
+import type {ResourceStoreLocation} from './resource-store.js';
+
+const SUPERHUMAN_ROOT = 'threadnote://resources/external/superhuman';
+const ENVELOPE = 'THREADNOTE EXTERNAL RESOURCE/1\n';
+const ID = /^[A-Za-z0-9_-]{1,128}$/;
+const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const HASH = /^[a-f0-9]{64}$/;
+const MAX_RECEIPT_BYTES = 1024 * 1024;
+
+export interface ExternalResourceIdentity {
+  readonly sourceId: string;
+  readonly documentId: string;
+  readonly pageId: string;
+  readonly chunkId: string;
+}
+
+export interface ExternalResourceMetadata extends ExternalResourceIdentity {
+  readonly version: 1;
+  readonly project: string | null;
+  readonly title: string;
+  readonly browserLink?: string;
+  readonly remoteRevision?: string;
+  readonly rendererVersion: string;
+  readonly scrubberVersion: string;
+  readonly coverage: 'canvas-plain-text';
+}
+
+export interface ExternalDocumentManifest {
+  readonly version: 1;
+  readonly sourceId: string;
+  readonly documentId: string;
+  readonly configFingerprint: string;
+  readonly status: 'active' | 'quarantined' | 'pending';
+  readonly fetchedAt: number;
+  readonly maxStaleMilliseconds: number;
+  readonly chunks: Readonly<Record<string, string>>;
+  readonly nextAttemptAt?: number;
+  readonly retryKind?: 'quota' | 'transient';
+  readonly accessEpoch?: string;
+}
+
+export interface ExternalSourceReceipt {
+  readonly version: 1;
+  readonly sourceId: string;
+  readonly accessEpoch: string;
+  readonly status: 'authentication-rejected' | 'cleanup';
+}
+
+export interface ExternalSourceAccessPolicy {
+  readonly enabled: boolean;
+  readonly configFingerprint: string;
+  readonly maxStaleMilliseconds?: number;
+  readonly project: string | null;
+}
+
+export class ExternalSourcePolicy extends Context.Service<
+  ExternalSourcePolicy,
+  {
+    readonly current: (
+      location: ResourceStoreLocation,
+      sourceId: string,
+    ) => Effect.Effect<ExternalSourceAccessPolicy | undefined>;
+  }
+>()('@threadnote/store/external-resource/ExternalSourcePolicy') {}
+
+export function isExternalResourceUri(uri: string): boolean {
+  const value = uri.split('#', 1)[0];
+  return value === SUPERHUMAN_ROOT || value.startsWith(`${SUPERHUMAN_ROOT}/`);
+}
+
+export function externalResourceUri(identity: ExternalResourceIdentity): string {
+  if (!validIdentity(identity)) throw new Error('Invalid external resource identity.');
+  return canonicalResourceUri('resources', [
+    'external',
+    'superhuman',
+    identity.sourceId,
+    'docs',
+    identity.documentId,
+    'pages',
+    identity.pageId,
+    `${identity.chunkId}.md`,
+  ]);
+}
+
+export function externalDocumentManifestUri(sourceId: string, documentId: string): string {
+  if (!SOURCE_ID.test(sourceId) || !ID.test(documentId)) throw new Error('Invalid external document identity.');
+  return canonicalResourceUri('resources', ['external', 'superhuman', sourceId, 'docs', documentId, '.manifest.json']);
+}
+
+export function externalSourceReceiptUri(sourceId: string): string {
+  if (!SOURCE_ID.test(sourceId)) throw new Error('Invalid external source identity.');
+  return canonicalResourceUri('resources', ['external', 'superhuman', sourceId, '.access.json']);
+}
+
+export function serializeExternalSourceReceipt(receipt: ExternalSourceReceipt): string {
+  if (!validSourceReceipt(receipt)) throw new Error('Invalid external source receipt.');
+  return JSON.stringify(receipt) + '\n';
+}
+
+export function parseExternalResourceIdentity(uri: string): ExternalResourceIdentity | undefined {
+  const value = uri.split('#', 1)[0];
+  const match =
+    /^threadnote:\/\/resources\/external\/superhuman\/([^/]+)\/docs\/([^/]+)\/pages\/([^/]+)\/([^/]+)\.md$/.exec(value);
+  if (!match) return undefined;
+  const identity = {sourceId: match[1], documentId: match[2], pageId: match[3], chunkId: match[4]};
+  return validIdentity(identity) && externalResourceUri(identity) === value ? identity : undefined;
+}
+
+export function renderExternalResource(metadata: ExternalResourceMetadata, body: string): string {
+  if (!validMetadata(metadata)) throw new Error('Invalid external resource metadata.');
+  return `${ENVELOPE}${JSON.stringify(metadata)}\n\n${body}`;
+}
+
+export function parseExternalResource(
+  uri: string,
+  content: string,
+): {readonly metadata: ExternalResourceMetadata; readonly body: string} | undefined {
+  const identity = parseExternalResourceIdentity(uri);
+  if (!identity || !content.startsWith(ENVELOPE)) return undefined;
+  const end = content.indexOf('\n\n', ENVELOPE.length);
+  if (end < 0 || end - ENVELOPE.length > 8192) return undefined;
+  try {
+    const metadata: unknown = JSON.parse(content.slice(ENVELOPE.length, end));
+    if (!validMetadata(metadata) || externalResourceUri(metadata) !== externalResourceUri(identity)) return undefined;
+    return {metadata, body: content.slice(end + 2)};
+  } catch {
+    return undefined;
+  }
+}
+
+export function serializeExternalDocumentManifest(manifest: ExternalDocumentManifest): string {
+  if (!validManifest(manifest)) throw new Error('Invalid external document manifest.');
+  const content =
+    JSON.stringify({
+      ...manifest,
+      chunks: Object.fromEntries(Object.entries(manifest.chunks).sort(([left], [right]) => left.localeCompare(right))),
+    }) + '\n';
+  if (new TextEncoder().encode(content).byteLength > MAX_RECEIPT_BYTES)
+    throw new Error('External document manifest exceeds its budget.');
+  return content;
+}
+
+export const readExternalDocumentManifest = Effect.fn('external.readManifest')(function* (
+  location: ResourceStoreLocation,
+  sourceId: string,
+  documentId: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const uri = yield* Effect.try(() => externalDocumentManifestUri(sourceId, documentId)).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+  if (uri === undefined) return undefined;
+  const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
+  if (realHome === undefined) return undefined;
+  const content = yield* safeRead(fs, path, resourcePath(path, {...location, home: realHome}, uri), MAX_RECEIPT_BYTES);
+  if (content === undefined) return undefined;
+  return yield* Effect.try(() => {
+    const manifest: unknown = JSON.parse(content);
+    return validManifest(manifest) && manifest.sourceId === sourceId && manifest.documentId === documentId
+      ? manifest
+      : undefined;
+  }).pipe(Effect.orElseSucceed(() => undefined));
+});
+
+export const readExternalSourceReceipt = Effect.fn('external.readSourceReceipt')(function* (
+  location: ResourceStoreLocation,
+  sourceId: string,
+): Effect.fn.Return<ExternalSourceReceipt | undefined | null, never, FileSystem.FileSystem | Path.Path> {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const uri = yield* Effect.try(() => externalSourceReceiptUri(sourceId)).pipe(Effect.orElseSucceed(() => undefined));
+  if (uri === undefined) return null;
+  const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
+  if (realHome === undefined) return null;
+  const filename = resourcePath(path, {...location, home: realHome}, uri);
+  const info = yield* fs.stat(filename).pipe(Effect.result);
+  if (Result.isFailure(info)) return info.failure.reason._tag === 'NotFound' ? undefined : null;
+  const content = yield* safeRead(fs, path, filename, 4096);
+  if (content === undefined) return null;
+  return yield* Effect.try(() => {
+    const receipt: unknown = JSON.parse(content);
+    return validSourceReceipt(receipt) && receipt.sourceId === sourceId ? receipt : null;
+  }).pipe(Effect.orElseSucceed(() => null));
+});
+
+export const externalResourceAccess = Effect.fn('external.resourceAccess')(function* (
+  location: ResourceStoreLocation,
+  uri: string,
+  content?: string,
+  expectedContentHash?: string,
+) {
+  if (!isExternalResourceUri(uri)) return true;
+  const identity = parseExternalResourceIdentity(uri);
+  if (!identity) return false;
+  const policyService = yield* Effect.serviceOption(ExternalSourcePolicy);
+  if (Option.isNone(policyService)) return false;
+  const policy = yield* policyService.value.current(location, identity.sourceId);
+  const sourceReceipt = yield* readExternalSourceReceipt(location, identity.sourceId);
+  const manifest = yield* readExternalDocumentManifest(location, identity.sourceId, identity.documentId);
+  const now = yield* Clock.currentTimeMillis;
+  if (!manifestPermits(manifest, policy, sourceReceipt, now)) return false;
+  const expectedHash = manifest!.chunks[externalResourceUri(identity)];
+  if (expectedHash === undefined || (expectedContentHash !== undefined && expectedContentHash !== expectedHash))
+    return false;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
+  if (realHome === undefined) return false;
+  const value =
+    content ??
+    (yield* safeRead(
+      fs,
+      path,
+      resourcePath(path, {...location, home: realHome}, externalResourceUri(identity)),
+      512 * 1024,
+    ));
+  if (value === undefined || sha256HexSync(value) !== expectedHash) return false;
+  const resource = parseExternalResource(uri, value);
+  return resource !== undefined && resource.metadata.project === policy!.project;
+});
+
+export const loadExternalResourceAccess = Effect.fn('external.loadAccess')(function* (location: ResourceStoreLocation) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const policyService = yield* Effect.serviceOption(ExternalSourcePolicy);
+  const allowed: Record<string, string> = {};
+  if (Option.isNone(policyService)) return allowed;
+  const realHome = yield* fs.realPath(location.home).pipe(Effect.orElseSucceed(() => undefined));
+  if (realHome === undefined) return allowed;
+  const canonicalLocation = {...location, home: realHome};
+  const root = resourcePath(path, canonicalLocation, SUPERHUMAN_ROOT);
+  const sources = yield* safeDirectories(fs, path, root);
+  const now = yield* Clock.currentTimeMillis;
+  for (const sourceId of sources.filter(value => SOURCE_ID.test(value))) {
+    const policy = yield* policyService.value.current(location, sourceId);
+    if (policy?.enabled !== true) continue;
+    const sourceReceipt = yield* readExternalSourceReceipt(location, sourceId);
+    for (const documentId of (yield* safeDirectories(fs, path, path.join(root, sourceId, 'docs'))).filter(value =>
+      ID.test(value),
+    )) {
+      const manifest = yield* readExternalDocumentManifest(location, sourceId, documentId);
+      if (!manifestPermits(manifest, policy, sourceReceipt, now)) continue;
+      for (const [uri, expectedHash] of Object.entries(manifest!.chunks)) allowed[uri] = expectedHash;
+    }
+  }
+  return allowed;
+});
+
+function manifestPermits(
+  manifest: ExternalDocumentManifest | undefined,
+  policy: ExternalSourceAccessPolicy | undefined,
+  sourceReceipt: ExternalSourceReceipt | undefined | null,
+  now: number,
+): boolean {
+  return (
+    policy?.enabled === true &&
+    manifest?.status === 'active' &&
+    sourceReceipt !== null &&
+    sourceReceipt?.status !== 'cleanup' &&
+    manifest.accessEpoch === sourceReceipt?.accessEpoch &&
+    policy.configFingerprint === manifest.configFingerprint &&
+    now >= manifest.fetchedAt &&
+    now - manifest.fetchedAt <=
+      Math.min(manifest.maxStaleMilliseconds, policy.maxStaleMilliseconds ?? manifest.maxStaleMilliseconds)
+  );
+}
+
+function resourcePath(path: Path.Path, location: ResourceStoreLocation, uri: string): string {
+  const id = parseResourceId(uri);
+  return path.join(location.home, 'data', location.account, 'resources', ...id.segments);
+}
+
+function safeRead(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  filename: string,
+  maximumBytes: number,
+): Effect.Effect<string | undefined> {
+  return Effect.gen(function* () {
+    const info = yield* fs.stat(filename);
+    if (
+      info.type !== 'File' ||
+      Number(info.size) > maximumBytes ||
+      (yield* fs.realPath(filename)) !== path.resolve(filename)
+    )
+      return undefined;
+    return yield* Effect.scoped(
+      Effect.gen(function* () {
+        const file = yield* fs.open(filename, {flag: 'r'});
+        const opened = yield* file.stat;
+        const inode = Option.getOrUndefined(opened.ino);
+        if (
+          inode === undefined ||
+          inode !== Option.getOrUndefined(info.ino) ||
+          opened.dev !== info.dev ||
+          opened.size > BigInt(maximumBytes)
+        )
+          return undefined;
+        const bytes = new Uint8Array(maximumBytes + 1);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const count = Number(yield* file.read(bytes.subarray(offset)));
+          if (count <= 0) break;
+          offset += count;
+        }
+        const after = yield* fs.stat(filename);
+        if (
+          offset > maximumBytes ||
+          offset !== Number(opened.size) ||
+          after.type !== 'File' ||
+          Option.getOrUndefined(after.ino) !== inode ||
+          after.dev !== opened.dev ||
+          after.size !== opened.size ||
+          (yield* fs.realPath(filename)) !== path.resolve(filename)
+        )
+          return undefined;
+        return yield* Effect.try(() => new TextDecoder('utf-8', {fatal: true}).decode(bytes.subarray(0, offset)));
+      }),
+    );
+  }).pipe(Effect.orElseSucceed(() => undefined));
+}
+
+function safeDirectories(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  directory: string,
+): Effect.Effect<readonly string[]> {
+  return Effect.gen(function* () {
+    if ((yield* fs.realPath(directory)) !== path.resolve(directory)) return [];
+    const names = yield* fs.readDirectory(directory);
+    const allowed = yield* Effect.filter(names, name =>
+      Effect.gen(function* () {
+        const filename = path.join(directory, name);
+        return (
+          (yield* fs.stat(filename)).type === 'Directory' && (yield* fs.realPath(filename)) === path.resolve(filename)
+        );
+      }).pipe(Effect.orElseSucceed(() => false)),
+    );
+    return allowed.sort();
+  }).pipe(Effect.orElseSucceed(() => []));
+}
+
+function validIdentity(value: ExternalResourceIdentity): boolean {
+  if (
+    !SOURCE_ID.test(value.sourceId) ||
+    !ID.test(value.documentId) ||
+    !ID.test(value.pageId) ||
+    !ID.test(value.chunkId)
+  )
+    return false;
+  try {
+    for (const segment of [value.sourceId, value.documentId, value.pageId, `${value.chunkId}.md`])
+      validatePortableSegment(segment);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function isExternalResourceMetadata(value: unknown): value is ExternalResourceMetadata {
+  return validMetadata(value);
+}
+
+function validMetadata(value: unknown): value is ExternalResourceMetadata {
+  if (
+    !record(value) ||
+    value.version !== 1 ||
+    value.coverage !== 'canvas-plain-text' ||
+    !['sourceId', 'documentId', 'pageId', 'chunkId', 'title', 'rendererVersion', 'scrubberVersion'].every(
+      key => typeof value[key] === 'string',
+    )
+  )
+    return false;
+  if (
+    !validIdentity(value as unknown as ExternalResourceIdentity) ||
+    (value.project !== null &&
+      (typeof value.project !== 'string' || value.project.length === 0 || value.project.length > 256)) ||
+    (value.title as string).length > 1024
+  )
+    return false;
+  if (
+    value.remoteRevision !== undefined &&
+    (typeof value.remoteRevision !== 'string' || value.remoteRevision.length > 256)
+  )
+    return false;
+  if (value.browserLink !== undefined) {
+    if (typeof value.browserLink !== 'string' || value.browserLink.length > 2048) return false;
+    try {
+      const url = new URL(value.browserLink);
+      if (
+        url.origin !== 'https://docs.superhuman.com' ||
+        !url.pathname.startsWith('/d/') ||
+        url.username ||
+        url.password ||
+        url.search
+      )
+        return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validManifest(value: unknown): value is ExternalDocumentManifest {
+  if (
+    !record(value) ||
+    value.version !== 1 ||
+    typeof value.sourceId !== 'string' ||
+    !SOURCE_ID.test(value.sourceId) ||
+    typeof value.documentId !== 'string' ||
+    !ID.test(value.documentId) ||
+    typeof value.configFingerprint !== 'string' ||
+    !HASH.test(value.configFingerprint) ||
+    !['active', 'quarantined', 'pending'].includes(value.status as string) ||
+    typeof value.fetchedAt !== 'number' ||
+    !Number.isFinite(value.fetchedAt) ||
+    value.fetchedAt < 0 ||
+    typeof value.maxStaleMilliseconds !== 'number' ||
+    !Number.isFinite(value.maxStaleMilliseconds) ||
+    value.maxStaleMilliseconds <= 0 ||
+    !record(value.chunks) ||
+    Object.keys(value.chunks).length > 2048
+  )
+    return false;
+  if (
+    value.nextAttemptAt !== undefined &&
+    (typeof value.nextAttemptAt !== 'number' ||
+      !Number.isFinite(value.nextAttemptAt) ||
+      value.nextAttemptAt < 0 ||
+      value.nextAttemptAt >= 8_640_000_000_000_000)
+  )
+    return false;
+  if (value.retryKind !== undefined && value.retryKind !== 'quota' && value.retryKind !== 'transient') return false;
+  if (value.accessEpoch !== undefined && (typeof value.accessEpoch !== 'string' || !HASH.test(value.accessEpoch)))
+    return false;
+  return Object.entries(value.chunks).every(([uri, hash]) => {
+    const identity = parseExternalResourceIdentity(uri);
+    return (
+      identity !== undefined &&
+      identity.sourceId === value.sourceId &&
+      identity.documentId === value.documentId &&
+      typeof hash === 'string' &&
+      HASH.test(hash)
+    );
+  });
+}
+
+function validSourceReceipt(value: unknown): value is ExternalSourceReceipt {
+  if (
+    !record(value) ||
+    value.version !== 1 ||
+    typeof value.sourceId !== 'string' ||
+    !SOURCE_ID.test(value.sourceId) ||
+    typeof value.accessEpoch !== 'string' ||
+    !HASH.test(value.accessEpoch) ||
+    (value.status !== 'authentication-rejected' && value.status !== 'cleanup')
+  )
+    return false;
+  try {
+    externalSourceReceiptUri(value.sourceId);
+    return true;
+  } catch {
+    return false;
+  }
+}

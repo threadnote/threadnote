@@ -2,6 +2,7 @@ import React, {useEffect, useState} from 'react';
 import type {ObsidianProjection, ObsidianSource} from './integrations_contracts.js';
 import {DetailModal} from './detail_modal.js';
 import {useManagerDialogs} from './dialog.js';
+import {integrationProduct, IntegrationLogo} from './integration_catalog.js';
 import {api, errorMessage} from './ui/support.js';
 
 export function ObsidianConnectionForm({
@@ -85,11 +86,14 @@ export function ObsidianConnectionForm({
       onClose={() => void close()}
     >
       <form className="integration-form" onSubmit={event => void save(event)} onChange={() => setDirty(true)}>
-        <p className="muted">
-          {importing
-            ? 'Choose which vault notes agents can use as reference material.'
-            : 'Choose which memories to copy into a dedicated folder in your vault.'}
-        </p>
+        <div className="integration-form-product">
+          <IntegrationLogo product={integrationProduct('obsidian')} decorative />
+          <p className="muted">
+            {importing
+              ? 'Choose which vault notes agents can use as reference material.'
+              : 'Choose which memories to copy into a dedicated folder in your vault.'}
+          </p>
+        </div>
         {error ? (
           <p role="alert" className="workspace-note danger-text">
             {error}

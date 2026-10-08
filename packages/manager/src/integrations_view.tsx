@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowUpFromLine,
-  BookOpen,
   Check,
   Inbox,
   Pause,
@@ -11,31 +10,43 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Search,
   Unplug,
 } from 'lucide-react';
 import {ActionMenu} from './action_menu.js';
 import {DetailModal} from './detail_modal.js';
-import {PageActions} from './workspace.js';
-import {api, errorMessage} from './ui/support.js';
+import {useManagerDialogs} from './dialog.js';
+import {
+  filteredIntegrationProducts,
+  integrationProduct,
+  integrationProducts,
+  IntegrationLogo,
+} from './integration_catalog.js';
 import type {
+  IntegrationProductId,
   IntegrationResult,
+  ManagerIntegrations,
   ObsidianAction,
-  ObsidianIntegration,
   ObsidianProjection,
   ObsidianSource,
+  SuperhumanSource,
 } from './integrations_contracts.js';
 import {ObsidianConnectionForm} from './obsidian_connection_form.js';
+import {SuperhumanConnectionForm} from './superhuman_connection_form.js';
+import {PageActions} from './workspace.js';
+import {api, errorMessage} from './ui/support.js';
 
 type Connection =
   | {readonly kind: 'source'; readonly value?: ObsidianSource}
-  | {readonly kind: 'projection'; readonly value?: ObsidianProjection};
+  | {readonly kind: 'projection'; readonly value?: ObsidianProjection}
+  | {readonly kind: 'superhuman'; readonly value?: SuperhumanSource};
 interface Operation {
   readonly id: string;
   readonly action: ObsidianAction;
   readonly title: string;
   readonly result: IntegrationResult;
 }
-const empty: ObsidianIntegration = {sources: [], projections: []};
+const empty: ManagerIntegrations = {obsidian: {sources: [], projections: []}, superhuman: {sources: []}};
 
 export function IntegrationsPanel({
   onChanged,
@@ -44,6 +55,7 @@ export function IntegrationsPanel({
   readonly onChanged: () => Promise<void>;
   readonly onReviews: () => void;
 }): React.ReactElement {
+  const dialogs = useManagerDialogs();
   const [data, setData] = useState(empty);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -51,12 +63,37 @@ export function IntegrationsPanel({
   const [notice, setNotice] = useState('');
   const [connection, setConnection] = useState<Connection>();
   const [operation, setOperation] = useState<Operation>();
+  const [superhumanResult, setSuperhumanResult] = useState<IntegrationResult>();
+  const [query, setQuery] = useState('');
+  const [productFilter, setProductFilter] = useState<IntegrationProductId | 'all'>('all');
+  const [activeTab, setActiveTab] = useState<'connections' | 'catalog'>('connections');
   const [generation, setGeneration] = useState(0);
+  function showTab(tab: 'connections' | 'catalog'): void {
+    setActiveTab(tab);
+    setQuery('');
+    setProductFilter('all');
+  }
+  function navigateTabs(event: React.KeyboardEvent<HTMLDivElement>): void {
+    const tab =
+      event.key === 'Home'
+        ? 'connections'
+        : event.key === 'End'
+          ? 'catalog'
+          : event.key === 'ArrowRight'
+            ? 'catalog'
+            : event.key === 'ArrowLeft'
+              ? 'connections'
+              : undefined;
+    if (!tab) return;
+    event.preventDefault();
+    showTab(tab);
+    document.getElementById(`integration-${tab}-tab`)?.focus();
+  }
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError('');
-    void api<ObsidianIntegration>('/api/integrations/obsidian', undefined, {signal: controller.signal})
+    void api<ManagerIntegrations>('/api/integrations', undefined, {signal: controller.signal})
       .then(value => {
         if (!controller.signal.aborted) setData(value);
       })
@@ -68,6 +105,7 @@ export function IntegrationsPanel({
       });
     return () => controller.abort();
   }, [generation]);
+
   async function changed(message: string): Promise<void> {
     setGeneration(value => value + 1);
     setNotice(message);
@@ -127,22 +165,110 @@ export function IntegrationsPanel({
       setBusy(false);
     }
   }
+  async function superhumanAction(
+    action: 'sync-source' | 'remove-source' | 'set-enabled',
+    source: SuperhumanSource,
+  ): Promise<void> {
+    if (busy) return;
+    if (
+      action === 'remove-source' &&
+      !(await dialogs.confirm({
+        title: 'Disconnect Superhuman Docs?',
+        message:
+          'This removes the local connection, cached content, and saved token. It does not change the original documents.',
+        confirmLabel: 'Disconnect',
+        tone: 'danger',
+      }))
+    )
+      return;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<IntegrationResult>('/api/integrations/superhuman', {
+        action,
+        id: source.id,
+        ...(action === 'set-enabled' ? {enabled: !source.enabled} : {}),
+        apply: true,
+        confirm: true,
+      });
+      if (action === 'sync-source') setSuperhumanResult(result);
+      if (!result.applied) {
+        if (action !== 'sync-source') throw new Error('Connection change was not applied.');
+        setNotice('Document import did not apply.');
+        return;
+      }
+      await changed(
+        action === 'sync-source'
+          ? result.warnings?.length
+            ? 'Some documents could not be imported. Review the sync result.'
+            : 'Document import completed.'
+          : action === 'remove-source'
+            ? 'Connection disconnected.'
+            : source.enabled
+              ? 'Connection paused.'
+              : 'Connection enabled.',
+      );
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const matches = (product: IntegrationProductId, ...values: string[]) =>
+    (productFilter === 'all' || productFilter === product) &&
+    (!query.trim() ||
+      [integrationProduct(product).name, ...values].some(value =>
+        value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+      ));
+  const sources = data.obsidian.sources.filter(source => matches('obsidian', source.id, source.vault));
+  const projections = data.obsidian.projections.filter(item => matches('obsidian', item.id, item.vault));
+  const documents = data.superhuman.sources.filter(source => matches('superhuman', source.id, source.project ?? ''));
+  const connectionCount =
+    data.obsidian.sources.length + data.obsidian.projections.length + data.superhuman.sources.length;
+  const products = filteredIntegrationProducts(query).filter(
+    product => productFilter === 'all' || product.id === productFilter,
+  );
+  const obsidian = integrationProduct('obsidian');
+  const superhuman = integrationProduct('superhuman');
+
   return (
     <section className="panel is-active integrations-workspace">
       <PageActions>
+        <button disabled={loading || busy} onClick={() => showTab('catalog')}>
+          <Plus /> Add integration
+        </button>
         <button disabled={loading || busy} onClick={() => setGeneration(value => value + 1)}>
           <RefreshCw /> Refresh
         </button>
       </PageActions>
-      <div className="integration-intro">
-        <span className="integration-mark">
-          <BookOpen aria-hidden="true" />
-        </span>
-        <div>
-          <h3>Obsidian</h3>
-          <p>Bring vault notes into context and read Threadnote memories in your vault. No Obsidian plugin required.</p>
-        </div>
-        <span className="memory-tag">{data.sources.length + data.projections.length} connections</span>
+      <div
+        className="integration-section-tabs"
+        role="tablist"
+        aria-label="Integration sections"
+        onKeyDown={navigateTabs}
+      >
+        <button
+          id="integration-connections-tab"
+          role="tab"
+          aria-selected={activeTab === 'connections'}
+          aria-controls="integration-connections-panel"
+          tabIndex={activeTab === 'connections' ? 0 : -1}
+          onClick={() => showTab('connections')}
+        >
+          Your connections <span>{connectionCount}</span>
+        </button>
+        <button
+          id="integration-catalog-tab"
+          role="tab"
+          aria-selected={activeTab === 'catalog'}
+          aria-controls="integration-catalog-panel"
+          tabIndex={activeTab === 'catalog' ? 0 : -1}
+          onClick={() => showTab('catalog')}
+        >
+          Available integrations <span>{integrationProducts.length}</span>
+        </button>
       </div>
       {error ? (
         <p role="alert" className="workspace-note danger-text">
@@ -158,39 +284,112 @@ export function IntegrationsPanel({
         <p role="status">Loading connections…</p>
       ) : (
         <div className="workspace-stack">
-          <section className="workspace-card">
-            <header>
-              <h3>
-                <ArrowDownToLine /> Vault sources
-              </h3>
-              <button disabled={busy} onClick={() => setConnection({kind: 'source'})}>
-                <Plus /> Add vault source
+          <div className="integration-filter-bar">
+            <label className="integration-search">
+              <Search aria-hidden="true" />
+              <span className="sr-only">
+                Search {activeTab === 'catalog' ? 'available integrations' : 'your connections'}
+              </span>
+              <input
+                aria-label={activeTab === 'catalog' ? 'Search available integrations' : 'Search your connections'}
+                value={query}
+                onChange={event => setQuery(event.target.value)}
+                placeholder={activeTab === 'catalog' ? 'Search available integrations' : 'Search your connections'}
+              />
+            </label>
+            <div className="integration-filter-tabs" role="group" aria-label="Filter products">
+              <button aria-pressed={productFilter === 'all'} onClick={() => setProductFilter('all')}>
+                All
               </button>
-            </header>
-            <p className="workspace-pad muted">
-              Import selected Markdown notes as resources for recall. Source notes stay in your vault; enabled sources
-              refresh when agents request context.
-            </p>
-            {data.sources.length === 0 ? (
-              <div className="integration-empty">
-                <BookOpen />
-                <h4>Bring your notes into context</h4>
-                <p>Choose a vault and the folders Threadnote may read.</p>
-                <button disabled={busy} onClick={() => setConnection({kind: 'source'})}>
-                  Connect a vault
+              {integrationProducts.map(product => (
+                <button
+                  key={product.id}
+                  aria-pressed={productFilter === product.id}
+                  onClick={() => setProductFilter(product.id)}
+                >
+                  {product.name}
                 </button>
+              ))}
+            </div>
+          </div>
+          {activeTab === 'catalog' ? (
+            <section
+              id="integration-catalog-panel"
+              className="workspace-card integration-catalog"
+              role="tabpanel"
+              aria-labelledby="integration-catalog-tab"
+            >
+              <header>
+                <p className="muted">Connect a product to choose its permitted data and actions.</p>
+              </header>
+              <div className="integration-product-grid">
+                {products.map(product => (
+                  <article className="integration-product" key={product.id}>
+                    <div className="integration-product-title">
+                      <IntegrationLogo product={product} decorative />
+                      <h4>{product.name}</h4>
+                    </div>
+                    <p>{product.description}</p>
+                    <div className="integration-capabilities">
+                      {product.capabilities.map(value => (
+                        <span key={value}>{value}</span>
+                      ))}
+                    </div>
+                    <div className="integration-product-actions">
+                      {product.id === 'obsidian' ? (
+                        <>
+                          <button disabled={busy} onClick={() => setConnection({kind: 'source'})}>
+                            <ArrowDownToLine /> Import notes
+                          </button>
+                          <button disabled={busy} onClick={() => setConnection({kind: 'projection'})}>
+                            <ArrowUpFromLine /> Export memories
+                          </button>
+                        </>
+                      ) : (
+                        <button disabled={busy} onClick={() => setConnection({kind: 'superhuman'})}>
+                          {product.setupLabel}
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {products.length === 0 ? (
+                  <p className="integration-no-match">No integrations match your search.</p>
+                ) : null}
               </div>
-            ) : (
-              data.sources.map(source => (
-                <div className="integration-row" key={source.id}>
+            </section>
+          ) : (
+            <section
+              id="integration-connections-panel"
+              className="workspace-card integration-connections"
+              role="tabpanel"
+              aria-labelledby="integration-connections-tab"
+            >
+              <header>
+                <p className="muted">Manage scope, sync, and access for each connection.</p>
+              </header>
+              {sources.length + projections.length + documents.length === 0 ? (
+                <div className="integration-empty">
+                  <h4>{connectionCount ? 'No matching connections' : 'No connections yet'}</h4>
+                  <p>
+                    {connectionCount
+                      ? 'Try another search or product filter.'
+                      : 'Choose an integration to get started.'}
+                  </p>
+                  {!connectionCount ? <button onClick={() => showTab('catalog')}>Browse integrations</button> : null}
+                </div>
+              ) : null}
+              {sources.map(source => (
+                <div className="integration-row" key={'obsidian-source-' + source.id}>
+                  <IntegrationLogo product={obsidian} decorative />
                   <div className="integration-row-main">
                     <h4>
-                      {source.id}{' '}
+                      {source.id}
                       <span className={'workspace-status ' + (source.enabled ? '' : 'neutral')}>
-                        {source.enabled ? 'Enabled' : 'Paused'}
+                        {source.enabled ? 'Ready to import' : 'Paused'}
                       </span>
                     </h4>
-                    <p className="integration-path">{source.vault}</p>
+                    <p className="integration-path">Obsidian · Import notes · {source.vault}</p>
                     <p className="muted">
                       Include: {source.include.join(', ')}
                       {source.inbox ? ' · Inbox: ' + source.inbox : ''}
@@ -235,43 +434,19 @@ export function IntegrationsPanel({
                     />
                   </div>
                 </div>
-              ))
-            )}
-          </section>
-          <section className="workspace-card">
-            <header>
-              <h3>
-                <ArrowUpFromLine /> Memory exports
-              </h3>
-              <button disabled={busy} onClick={() => setConnection({kind: 'projection'})}>
-                <Plus /> Add memory export
-              </button>
-            </header>
-            <p className="workspace-pad muted">
-              Write readable copies of selected memories to a managed vault folder. Edits made in Obsidian are protected
-              from being overwritten.
-            </p>
-            {data.projections.length === 0 ? (
-              <div className="integration-empty">
-                <ArrowUpFromLine />
-                <h4>Read your memories in Obsidian</h4>
-                <p>Choose the memories to keep available in your vault.</p>
-                <button disabled={busy} onClick={() => setConnection({kind: 'projection'})}>
-                  Set up memory export
-                </button>
-              </div>
-            ) : (
-              data.projections.map(projection => (
-                <div className="integration-row" key={projection.id}>
+              ))}
+              {projections.map(projection => (
+                <div className="integration-row" key={'obsidian-projection-' + projection.id}>
+                  <IntegrationLogo product={obsidian} decorative />
                   <div className="integration-row-main">
                     <h4>
-                      {projection.id}{' '}
+                      {projection.id}
                       <span className={'workspace-status ' + (projection.enabled ? '' : 'neutral')}>
-                        {projection.enabled ? 'Enabled' : 'Paused'}
+                        {projection.enabled ? 'Ready to export' : 'Paused'}
                       </span>
                     </h4>
                     <p className="integration-path">
-                      {projection.vault} / {projection.folder}
+                      Obsidian · Export memories · {projection.vault} / {projection.folder}
                     </p>
                     <p className="muted">
                       {projection.selectedUris === undefined
@@ -309,17 +484,85 @@ export function IntegrationsPanel({
                     />
                   </div>
                 </div>
-              ))
-            )}
-          </section>
+              ))}
+              {documents.map(source => (
+                <div className="integration-row" key={'superhuman-' + source.id}>
+                  <IntegrationLogo product={superhuman} decorative />
+                  <div className="integration-row-main">
+                    <h4>
+                      {source.id}
+                      <span
+                        className={
+                          'workspace-status ' +
+                          (source.enabled && source.credentialConfigured && source.status === 'active' ? '' : 'neutral')
+                        }
+                      >
+                        {superhumanStatus(source)}
+                      </span>
+                    </h4>
+                    <p className="integration-path">
+                      Superhuman Docs · Import canvas text · {source.project ?? 'Projectless'}
+                    </p>
+                    <p className="muted">
+                      {source.documents.length} {source.documents.length === 1 ? 'document' : 'documents'} ·{' '}
+                      {scopeSummary(source)}
+                      {source.lastSyncedAt ? ' · Last synced ' + new Date(source.lastSyncedAt).toLocaleString() : ''}
+                      {source.nextAttemptAt ? ' · Next attempt ' + new Date(source.nextAttemptAt).toLocaleString() : ''}
+                    </p>
+                  </div>
+                  <div className="integration-row-actions">
+                    <button
+                      disabled={busy || !source.enabled || !source.credentialConfigured}
+                      onClick={() => void superhumanAction('sync-source', source)}
+                    >
+                      <RefreshCw /> Sync now
+                    </button>
+                    <ActionMenu
+                      label={'Actions for Superhuman Docs ' + source.id}
+                      disabled={busy}
+                      actions={[
+                        {
+                          label: 'Connection settings…',
+                          icon: <Pencil />,
+                          onSelect: () => setConnection({kind: 'superhuman', value: source}),
+                        },
+                        {
+                          label: source.enabled ? 'Pause connection' : 'Enable connection',
+                          icon: source.enabled ? <Pause /> : <Play />,
+                          onSelect: () => void superhumanAction('set-enabled', source),
+                        },
+                        {
+                          label: 'Disconnect…',
+                          icon: <Unplug />,
+                          danger: true,
+                          onSelect: () => void superhumanAction('remove-source', source),
+                        },
+                      ]}
+                    />
+                  </div>
+                </div>
+              ))}
+            </section>
+          )}
         </div>
       )}
-      {connection ? (
+      {connection?.kind === 'superhuman' ? (
+        <SuperhumanConnectionForm
+          source={connection.value}
+          onClose={() => setConnection(undefined)}
+          onSaved={async () => {
+            setConnection(undefined);
+            showTab('connections');
+            await changed('Superhuman Docs connection saved.');
+          }}
+        />
+      ) : connection ? (
         <ObsidianConnectionForm
           connection={connection}
           onClose={() => setConnection(undefined)}
           onSaved={async () => {
             setConnection(undefined);
+            showTab('connections');
             await changed('Obsidian connection saved.');
           }}
         />
@@ -332,8 +575,51 @@ export function IntegrationsPanel({
           onReviews={onReviews}
         />
       ) : null}
+      {superhumanResult ? (
+        <DetailModal title="Document import results" onClose={() => setSuperhumanResult(undefined)}>
+          <p role="status" className="workspace-note">
+            {superhumanResult.applied ? <Check /> : <AlertTriangle />}{' '}
+            {superhumanResult.applied
+              ? superhumanResult.warnings?.length
+                ? 'Sync finished with warnings.'
+                : 'Sync completed.'
+              : 'Sync did not apply.'}
+          </p>
+          {superhumanResult.warnings?.length ? (
+            <ul className="integration-warnings">
+              {superhumanResult.warnings.map((warning, index) => (
+                <li key={index}>
+                  <AlertTriangle /> {warning}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <p>{superhumanResult.output}</p>
+          <footer className="conflict-footer">
+            <button onClick={() => setSuperhumanResult(undefined)}>Done</button>
+          </footer>
+        </DetailModal>
+      ) : null}
     </section>
   );
+}
+
+function superhumanStatus(source: SuperhumanSource): string {
+  if (!source.enabled) return 'Paused';
+  if (!source.credentialConfigured) return 'Token required';
+  if (source.status === 'needs-attention') return 'Needs attention';
+  return source.status === 'needs-sync' ? 'Ready to sync' : 'Up to date';
+}
+
+function scopeSummary(source: SuperhumanSource): string {
+  const whole = source.documents.filter(document => document.pages === undefined).length;
+  const pages = source.documents.reduce((sum, document) => sum + (document.pages?.length ?? 0), 0);
+  return [
+    whole ? `${whole} whole ${whole === 1 ? 'document' : 'documents'}` : '',
+    pages ? `${pages} selected ${pages === 1 ? 'page' : 'pages'}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 
 function IntegrationPreview({

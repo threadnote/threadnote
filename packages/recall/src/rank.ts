@@ -1,3 +1,4 @@
+import type {ExternalResourceMetadata} from '@threadnote/store/external-resource';
 import type {MemoryAuthority, MemoryRelation, MemoryTrust} from '@threadnote/memory/document';
 import {stripGeneratedMemoryHygieneSources} from '@threadnote/memory/hygiene/provenance';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -24,6 +25,7 @@ export interface RecallCandidate {
   /** Other authorized URIs that resolve to the same logical memory and canonical body. */
   readonly equivalentUris?: readonly string[];
   readonly exactTerms?: readonly string[];
+  readonly externalSource?: ExternalResourceMetadata & {readonly fetchedAt: number};
   readonly feedback?: number;
   readonly fields?: RecallFields;
   /** The same memory_id was observed with more than one body digest in the authorized candidate set. */

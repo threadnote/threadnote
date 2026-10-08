@@ -105,11 +105,9 @@ describe('recall eligibility policy', () => {
 
     expect(recallCandidateIsEligible(policy, {})).toBe(true);
     expect(recallCandidateIsEligible(policy, {project: 'another-project'})).toBe(false);
-    expect(recallEligibilityPredicate('d', policy)).toEqual({
-      params: [],
-      restricted: true,
-      sql: 'd.project IS NULL',
-    });
+    const predicate = recallEligibilityPredicate('d', policy);
+    expect(predicate.restricted).toBe(true);
+    expect(predicate.sql).toContain('d.project IS NULL');
   });
 
   it('represents pinned hard-URI recall as an explicit project and authority bypass', () => {

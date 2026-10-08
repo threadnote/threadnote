@@ -133,18 +133,23 @@ describe('Obsidian integrations', () => {
         if (!init.body)
           return new Response(
             JSON.stringify({
-              sources: [{id: 'notes', vault: '/vault', include: ['**/*.md'], exclude: [], enabled: true, watch: false}],
-              projections: [
-                {
-                  id: 'library',
-                  vault: '/vault',
-                  folder: 'Threadnote',
-                  enabled: true,
-                  kinds: ['durable'],
-                  statuses: ['active'],
-                  includeShared: false,
-                },
-              ],
+              obsidian: {
+                sources: [
+                  {id: 'notes', vault: '/vault', include: ['**/*.md'], exclude: [], enabled: true, watch: false},
+                ],
+                projections: [
+                  {
+                    id: 'library',
+                    vault: '/vault',
+                    folder: 'Threadnote',
+                    enabled: true,
+                    kinds: ['durable'],
+                    statuses: ['active'],
+                    includeShared: false,
+                  },
+                ],
+              },
+              superhuman: {sources: []},
             }),
           );
         const body = JSON.parse(init.body);
@@ -162,7 +167,13 @@ describe('Obsidian integrations', () => {
       }),
     );
     await render(<IntegrationsPanel onChanged={async () => undefined} onReviews={() => undefined} />);
-    await act(async () => button(label).click());
+    await act(async () => {
+      const action = [...document.querySelectorAll<HTMLButtonElement>('.integration-row-actions button')].find(item =>
+        item.textContent?.trim().startsWith(label),
+      );
+      if (!action) throw new Error('Connection action not found: ' + label);
+      action.click();
+    });
     expect(document.body.textContent).toContain(title);
     if (action === 'sync-source') {
       expect(calls).toEqual([{action, id, apply: false}]);

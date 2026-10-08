@@ -31,7 +31,9 @@ const sourceFiles = async () => {
       codeFiles(sourceRoot),
       ...packageDirectories.map(entry => codeFiles(join(packagesRoot, entry.name, 'src'))),
     ])
-  ).flat();
+  )
+    .flat()
+    .filter(path => !relative(repoRoot, path).split(/[\\/]/).includes('test'));
 };
 const nodeBuiltinModules = new Set(
   builtinModules.filter(module => !module.startsWith('bun:')).map(module => module.replace(/^node:/, '')),

@@ -91,7 +91,10 @@ describe('private workspace boundaries', () => {
     expect(
       validateWorkspaceBoundaries(
         [platform, pkg],
-        [{path: 'packages/memory/test/document.test.ts', imports: ['@threadnote/platform/hash']}],
+        [
+          {path: 'packages/memory/test/document.test.ts', imports: ['@threadnote/platform/hash']},
+          {path: 'packages/memory/src/test/document.test.ts', imports: ['@threadnote/platform/hash']},
+        ],
       ),
     ).toEqual([]);
     expect(

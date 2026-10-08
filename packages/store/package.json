@@ -9,7 +9,8 @@
     "./resource/recall-invalidation": "./src/resource/recall-invalidation.ts",
     "./resource-id": "./src/resource-id.ts",
     "./resource-segment": "./src/resource-segment.ts",
-    "./resource-store": "./src/resource-store.ts"
+    "./resource-store": "./src/resource-store.ts",
+    "./external-resource": "./src/external-resource.ts"
   },
   "dependencies": {
     "effect": "4.0.0",

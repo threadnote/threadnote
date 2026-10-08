@@ -56,6 +56,7 @@ export const createVitestConfig = (ciLongRunningGroupName = process.env.THREADNO
         ? [...ciLongRunningGroup]
         : [
             'apps/threadnote/test/**/*.test.ts',
+            'apps/threadnote/src/integrations/**/test/**/*.test.ts',
             'apps/website/test/**/*.test.ts',
             'infra/*/test/**/*.test.ts',
             'packages/*/test/**/*.test.{ts,tsx}',
@@ -77,6 +78,7 @@ export const createVitestConfig = (ciLongRunningGroupName = process.env.THREADNO
         reporter: ['text', 'html', 'lcov'],
         include: ['apps/threadnote/src/**/*.ts', 'packages/*/src/**/*.ts'],
         exclude: [
+          '**/test/**',
           'packages/testing/**',
           'apps/threadnote/src/types.ts',
           'apps/threadnote/src/threadnote.ts',

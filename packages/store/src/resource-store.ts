@@ -31,6 +31,7 @@ import {
 } from '@threadnote/store/resource-id';
 import {threadnoteStorageLayout} from '@threadnote/store/layout';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {ExternalSourcePolicy, externalResourceAccess} from './external-resource.js';
 
 export interface ResourceStoreLocation {
   readonly account: string;
@@ -216,12 +217,20 @@ export class ResourceStore extends Context.Service<ResourceStore, ResourceStoreS
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const recallInvalidation = yield* ResourceRecallInvalidation;
+        const externalPolicy = yield* Effect.serviceOption(ExternalSourcePolicy);
         const lockServices = yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>();
         const provideLockServices = <A, E, R>(
           effect: Effect.Effect<A, E, R>,
         ): Effect.Effect<A, E, Exclude<R, Crypto.Crypto | Path.Path | SystemInfo>> =>
           effect.pipe(Effect.provide(lockServices));
-        const operation = createResourceStoreOperations(fs, path, provideLockServices, recallInvalidation, options);
+        const operation = createResourceStoreOperations(
+          fs,
+          path,
+          provideLockServices,
+          recallInvalidation,
+          options,
+          externalPolicy,
+        );
         return ResourceStore.of(operation);
       }),
     );
@@ -238,7 +247,27 @@ function createResourceStoreOperations(
   ) => Effect.Effect<A, E, Exclude<R, Crypto.Crypto | Path.Path | SystemInfo>>,
   recallInvalidation: ResourceRecallInvalidationShape,
   layerOptions: ResourceStoreLayerOptions,
+  externalPolicy: Option.Option<Context.Service.Shape<typeof ExternalSourcePolicy>>,
 ): ResourceStoreShape {
+  const externalAllowed = (location: ResourceStoreLocation, uri: string, content?: string) => {
+    const access = externalResourceAccess(location, uri, content).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+    );
+    return Option.isSome(externalPolicy)
+      ? access.pipe(Effect.provideService(ExternalSourcePolicy, externalPolicy.value))
+      : access;
+  };
+  const assertExternalAccess = (location: ResourceStoreLocation, uri: string, content?: string) =>
+    externalAllowed(location, uri, content).pipe(
+      Effect.flatMap(allowed =>
+        allowed
+          ? Effect.void
+          : Effect.fail(ResourceAccessDenied.make({message: 'External resource access is unavailable.', uri})),
+      ),
+    );
+  const visibleEntries = (location: ResourceStoreLocation, entries: readonly ResourceStoreEntry[]) =>
+    Effect.filter(entries, entry => externalAllowed(location, entry.uri));
   const resolve = (location: ResourceStoreLocation, uri: string) =>
     resolveResourcePath(fs, path, location, uri).pipe(mapIoError('resolve', uri));
   const invalidateRecall = (
@@ -482,7 +511,7 @@ function createResourceStoreOperations(
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);
         const matcher = globToRegExp(pattern.replaceAll('\\', '/'));
-        const entries = yield* listEntries(fs, path, resolved, true);
+        const entries = yield* visibleEntries(location, yield* listEntries(fs, path, resolved, true));
         return entries.filter(entry => {
           const relative = entry.uri.slice(resolved.id.canonicalUri.replace(/#.*$/, '').length).replace(/^\/+/, '');
           return matcher.test(relative);
@@ -492,7 +521,9 @@ function createResourceStoreOperations(
       Effect.gen(function* () {
         if (!term) return [];
         const resolved = yield* resolve(location, uri);
-        return (yield* grepManyInTree(fs, path, resolved, [term], limit)).map(({line, text, uri}) => ({
+        return (yield* grepManyInTree(fs, path, resolved, [term], limit, (entry, content) =>
+          externalAllowed(location, entry.uri, content),
+        )).map(({line, text, uri}) => ({
           line,
           text,
           uri,
@@ -503,11 +534,14 @@ function createResourceStoreOperations(
         const normalizedTerms = [...new Set(terms.map(term => term.trim()).filter(Boolean))];
         if (normalizedTerms.length === 0 || limitPerTerm <= 0) return [];
         const resolved = yield* resolve(location, uri);
-        return yield* grepManyInTree(fs, path, resolved, normalizedTerms, limitPerTerm);
+        return yield* grepManyInTree(fs, path, resolved, normalizedTerms, limitPerTerm, (entry, content) =>
+          externalAllowed(location, entry.uri, content),
+        );
       }).pipe(mapIoError('grep', uri)),
     list: (location, uri, options) =>
       resolve(location, uri).pipe(
         Effect.flatMap(resolved => listEntries(fs, path, resolved, options?.recursive === true)),
+        Effect.flatMap(entries => visibleEntries(location, entries)),
         mapIoError('list', uri),
       ),
     makeDirectory: (location, uri) =>
@@ -532,18 +566,25 @@ function createResourceStoreOperations(
     read: (location, uri) =>
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);
+        yield* assertExternalAccess(location, resolved.id.canonicalUri);
         yield* verifyExistingPath(fs, path, resolved, 'File');
-        return yield* fs.readFileString(resolved.path);
+        const content = yield* fs.readFileString(resolved.path);
+        yield* assertExternalAccess(location, resolved.id.canonicalUri, content);
+        return content;
       }).pipe(mapIoError('read', uri)),
     readBounded: (location, uri, maximumBytes) =>
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);
-        return yield* readResourceBounded(fs, path, resolved, maximumBytes);
+        yield* assertExternalAccess(location, resolved.id.canonicalUri);
+        const result = yield* readResourceBounded(fs, path, resolved, maximumBytes);
+        yield* assertExternalAccess(location, resolved.id.canonicalUri, result.truncated ? undefined : result.content);
+        return result;
       }).pipe(mapIoError('read', uri)),
     remove: (location, uri, options) => removeResource(location, uri, options),
     stat: (location, uri) =>
       Effect.gen(function* () {
         const resolved = yield* resolve(location, uri);
+        yield* assertExternalAccess(location, resolved.id.canonicalUri);
         const info = yield* verifyExistingPath(fs, path, resolved);
         return entryForInfo(resolved.id.canonicalUri, info);
       }).pipe(mapIoError('stat', uri)),
@@ -855,6 +896,7 @@ function grepManyInTree(
   resolved: ResolvedResourcePath,
   terms: readonly string[],
   limitPerTerm: number,
+  allowed: (entry: ResourceStoreEntry, content?: string) => Effect.Effect<boolean>,
 ) {
   return Effect.gen(function* () {
     const normalized = terms.map(term => ({lower: term.toLocaleLowerCase(), term}));
@@ -862,12 +904,13 @@ function grepManyInTree(
     const matches: ResourceStoreMultiGrepMatch[] = [];
     const entries = yield* listEntries(fs, path, resolved, true);
     for (const entry of entries) {
-      if (entry.type !== 'file') continue;
+      if (entry.type !== 'file' || !(yield* allowed(entry))) continue;
       const entryId = resourceIdWithoutAnchor(parseResourceId(entry.uri));
       const relativeSegments = entryId.segments.slice(resolved.id.segments.length);
       const fileResolved = {...resolved, id: entryId, path: path.join(resolved.path, ...relativeSegments)};
       yield* verifyExistingPath(fs, path, fileResolved, 'File');
       const content = yield* fs.readFileString(fileResolved.path);
+      if (!(yield* allowed(entry, content))) continue;
       for (const [index, line] of content.split(/\r?\n/).entries()) {
         const lowerLine = line.toLocaleLowerCase();
         for (const {lower, term} of normalized) {

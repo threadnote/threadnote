@@ -157,7 +157,10 @@ export function validateWorkspaceBoundaries(
   for (const source of sources) {
     const owner = ownerOf(source.path);
     const declared = owner
-      ? {...(source.path.includes('/src/') ? {} : owner.devDependencies), ...owner.dependencies}
+      ? {
+          ...(source.path.includes('/src/') && !source.path.includes('/test/') ? {} : owner.devDependencies),
+          ...owner.dependencies,
+        }
       : {};
     for (const specifier of source.imports) {
       if (specifier.startsWith('.')) {

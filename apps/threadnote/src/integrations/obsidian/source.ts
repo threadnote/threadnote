@@ -1,5 +1,5 @@
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
-import {MAX_SECRET_MATCHES_TO_PRINT} from '../constants.js';
+import {MAX_SECRET_MATCHES_TO_PRINT} from '../../constants.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
@@ -7,19 +7,22 @@ import {scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
 import {
   DEFAULT_OBSIDIAN_EXCLUDES,
   type ObsidianSourceConfig,
+  type SourceConfig,
+  isObsidianSource,
+  mutateSourceConfiguration,
   readObsidianConfiguration,
   removeObsidianSource,
   requireObsidianSource,
   upsertObsidianSource,
   validateObsidianIdentifier,
-  writeObsidianConfiguration,
-} from './config.js';
+} from '../config.js';
+import {withSourceLock} from '../lock.js';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {globToRegExp} from '@threadnote/platform/glob';
-import {isDirectory, toPosixPath} from '../utils.js';
+import {isDirectory, toPosixPath} from '../../utils.js';
 
 export interface ObsidianSourceAddOptions {
   readonly apply?: boolean;
@@ -123,46 +126,55 @@ export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
   const vault = yield* canonicalDirectory(options.vault, 'Obsidian vault');
   const inbox = options.inbox ? normalizeRelativePath(options.inbox, 'Inbox folder') : undefined;
   const current = yield* readObsidianConfiguration(config);
-  const existing = current.sources.find(source => source.id === id);
-  const managedProjectionExcludes = current.projections
-    .filter(projection => projection.vault === vault)
-    .map(projection => `${projection.folder}/**`);
-  const source: ObsidianSourceConfig = {
-    enabled: existing?.enabled ?? true,
-    exclude: safePatterns(
-      [
-        ...DEFAULT_OBSIDIAN_EXCLUDES,
-        ...(options.exclude ?? []),
-        ...(inbox ? [`${inbox}/**`] : []),
-        ...managedProjectionExcludes,
-      ],
-      'Source exclude',
-    ),
-    id,
-    inbox,
-    include: safePatterns(options.include, 'Source include'),
-    type: 'obsidian',
-    vault,
-    watch: existing?.watch ?? false,
+  const makeSource = (configuration: typeof current): ObsidianSourceConfig => {
+    const existing = configuration.sources.some(source => source.id === id)
+      ? requireObsidianSource(configuration, id)
+      : undefined;
+    return {
+      enabled: existing?.enabled ?? true,
+      exclude: safePatterns(
+        [
+          ...DEFAULT_OBSIDIAN_EXCLUDES,
+          ...(options.exclude ?? []),
+          ...(inbox ? [`${inbox}/**`] : []),
+          ...configuration.projections
+            .filter(projection => projection.vault === vault)
+            .map(projection => `${projection.folder}/**`),
+        ],
+        'Source exclude',
+      ),
+      id,
+      inbox,
+      include: safePatterns(options.include, 'Source include'),
+      type: 'obsidian',
+      vault,
+      watch: existing?.watch ?? false,
+    };
   };
-  const next = upsertObsidianSource(current, source);
+  const source = makeSource(current);
   if (options.apply !== true) {
     yield* Console.log(`Would configure Obsidian source "${id}":`);
     yield* Console.log(sourceSummary(source));
     yield* Console.log('Re-run with --apply to write the configuration.');
     return;
   }
-  const path = yield* writeObsidianConfiguration(config, next);
+  const path = yield* withSourceLock(
+    config,
+    id,
+    mutateSourceConfiguration(config, latest => upsertObsidianSource(latest, makeSource(latest))),
+  );
   yield* Console.log(`Configured Obsidian source "${id}" in ${path}.`);
 });
 
 export const runObsidianSourceList = Effect.fn('obsidian.sourceList')(function* (config: RuntimeConfig) {
   const configuration = yield* readObsidianConfiguration(config);
-  if (configuration.sources.length === 0) {
+  const allSources: readonly SourceConfig[] = configuration.sources;
+  const sources = allSources.filter(isObsidianSource);
+  if (sources.length === 0) {
     yield* Console.log('No Obsidian sources configured.');
     return;
   }
-  for (const source of configuration.sources) {
+  for (const source of sources) {
     yield* Console.log(sourceSummary(source));
   }
 });
@@ -210,9 +222,10 @@ export const syncObsidianSourcesBeforeRecall = Effect.fn('obsidian.syncBeforeRec
   config: RuntimeConfig,
 ) {
   const configuration = yield* readObsidianConfiguration(config);
+  const allSources: readonly SourceConfig[] = configuration.sources;
   const syncedSources: string[] = [];
   const warnings: string[] = [];
-  for (const source of configuration.sources.filter(candidate => candidate.enabled)) {
+  for (const source of allSources.filter(isObsidianSource).filter(candidate => candidate.enabled)) {
     const result = yield* Effect.result(
       syncObsidianSource(config, source, {
         apply: true,
@@ -249,73 +262,81 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
 ) {
   const fs = yield* FileSystem.FileSystem;
   const statePath = yield* sourceStatePath(config, source.id);
-  return yield* withExclusiveFileLock(
-    fs,
-    `${statePath}.lock`,
-    SOURCE_LOCK_OPTIONS,
-    Effect.gen(function* () {
-      const plan = yield* buildObsidianInventory(config, source);
-      if (behavior.log) {
-        yield* printInventory(plan);
-      }
-      if (!behavior.apply) {
+  return yield* withSourceLock(
+    config,
+    source.id,
+    withExclusiveFileLock(
+      fs,
+      `${statePath}.lock`,
+      SOURCE_LOCK_OPTIONS,
+      Effect.gen(function* () {
+        const currentSource = requireObsidianSource(yield* readObsidianConfiguration(config), source.id);
+        if (!currentSource.enabled) {
+          return yield* ObsidianSourceError.make({message: `Obsidian source "${source.id}" is disabled.`});
+        }
+        const plan = yield* buildObsidianInventory(config, currentSource);
         if (behavior.log) {
-          yield* Console.log('Dry run complete. Re-run with --apply to update the external index.');
+          yield* printInventory(plan);
+        }
+        if (!behavior.apply) {
+          if (behavior.log) {
+            yield* Console.log('Dry run complete. Re-run with --apply to update the external index.');
+          }
+          return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+        }
+        const changedPaths = new Set(
+          plan.entries
+            .filter(entry => entry.action === 'add' || entry.action === 'update')
+            .map(entry => entry.relativePath),
+        );
+        const changedNotes = plan.safeNotes.filter(note => changedPaths.has(note.relativePath));
+        const removals = plan.entries.filter(entry => entry.action === 'remove' && entry.uri);
+        const mutations: ResourceStoreMutation[] = [
+          ...changedNotes.map(note => ({
+            content: note.sanitizedContent,
+            options: {mode: 'upsert' as const},
+            type: 'write' as const,
+            uri: note.uri,
+          })),
+          ...removals.flatMap(entry =>
+            typeof entry.uri === 'string' ? [{ignoreMissing: true, type: 'remove' as const, uri: entry.uri}] : [],
+          ),
+        ];
+        if (mutations.length > 0) {
+          const store = yield* ResourceStore;
+          yield* store.mutate(resourceStoreLocation(config), mutations);
+        }
+        if (mutations.length === 0 && !behavior.writeUnchangedState) {
+          return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+        }
+        const currentTimeMillis = yield* Clock.currentTimeMillis;
+        const nextState: ObsidianSourceState = {
+          files: Object.fromEntries(
+            plan.safeNotes.map(note => [
+              note.relativePath,
+              {
+                contentHash: note.contentHash,
+                modifiedAt: note.modifiedAt,
+                size: note.size,
+                uri: note.uri,
+              },
+            ]),
+          ),
+          sourceId: source.id,
+          syncedAt: DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)),
+          version: SOURCE_STATE_VERSION,
+        };
+        yield* writeSourceState(statePath, nextState);
+        if (behavior.log) {
+          const counts = inventoryCounts(plan.entries);
+          yield* Console.log(
+            `Obsidian source sync complete: ${counts.add} added, ${counts.update} updated, ${counts.remove} removed, ` +
+              `${counts.unchanged} unchanged, ${counts.skip} skipped.`,
+          );
         }
         return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
-      }
-      const changedPaths = new Set(
-        plan.entries
-          .filter(entry => entry.action === 'add' || entry.action === 'update')
-          .map(entry => entry.relativePath),
-      );
-      const changedNotes = plan.safeNotes.filter(note => changedPaths.has(note.relativePath));
-      const removals = plan.entries.filter(entry => entry.action === 'remove' && entry.uri);
-      const mutations: ResourceStoreMutation[] = [
-        ...changedNotes.map(note => ({
-          content: note.sanitizedContent,
-          options: {mode: 'upsert' as const},
-          type: 'write' as const,
-          uri: note.uri,
-        })),
-        ...removals.flatMap(entry =>
-          typeof entry.uri === 'string' ? [{ignoreMissing: true, type: 'remove' as const, uri: entry.uri}] : [],
-        ),
-      ];
-      if (mutations.length > 0) {
-        const store = yield* ResourceStore;
-        yield* store.mutate(resourceStoreLocation(config), mutations);
-      }
-      if (mutations.length === 0 && !behavior.writeUnchangedState) {
-        return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
-      }
-      const currentTimeMillis = yield* Clock.currentTimeMillis;
-      const nextState: ObsidianSourceState = {
-        files: Object.fromEntries(
-          plan.safeNotes.map(note => [
-            note.relativePath,
-            {
-              contentHash: note.contentHash,
-              modifiedAt: note.modifiedAt,
-              size: note.size,
-              uri: note.uri,
-            },
-          ]),
-        ),
-        sourceId: source.id,
-        syncedAt: DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)),
-        version: SOURCE_STATE_VERSION,
-      };
-      yield* writeSourceState(statePath, nextState);
-      if (behavior.log) {
-        const counts = inventoryCounts(plan.entries);
-        yield* Console.log(
-          `Obsidian source sync complete: ${counts.add} added, ${counts.update} updated, ${counts.remove} removed, ` +
-            `${counts.unchanged} unchanged, ${counts.skip} skipped.`,
-        );
-      }
-      return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
-    }),
+      }),
+    ),
   );
 });
 
@@ -335,19 +356,24 @@ export const runObsidianSourceRemove = Effect.fn('obsidian.sourceRemove')(functi
   }
   const fs = yield* FileSystem.FileSystem;
   const statePath = yield* sourceStatePath(config, source.id);
-  yield* withExclusiveFileLock(
-    fs,
-    `${statePath}.lock`,
-    SOURCE_LOCK_OPTIONS,
-    Effect.gen(function* () {
-      const store = yield* ResourceStore;
-      yield* store
-        .remove(resourceStoreLocation(config), rootUri, {recursive: true})
-        .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));
-      yield* writeObsidianConfiguration(config, removeObsidianSource(configuration, source.id));
-      const pathService = yield* Path.Path;
-      yield* fs.remove(pathService.dirname(statePath), {force: true, recursive: true});
-    }),
+  yield* withSourceLock(
+    config,
+    source.id,
+    withExclusiveFileLock(
+      fs,
+      `${statePath}.lock`,
+      SOURCE_LOCK_OPTIONS,
+      Effect.gen(function* () {
+        requireObsidianSource(yield* readObsidianConfiguration(config), source.id);
+        const store = yield* ResourceStore;
+        yield* store
+          .remove(resourceStoreLocation(config), rootUri, {recursive: true})
+          .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));
+        yield* mutateSourceConfiguration(config, latest => removeObsidianSource(latest, source.id));
+        const pathService = yield* Path.Path;
+        yield* fs.remove(pathService.dirname(statePath), {force: true, recursive: true});
+      }),
+    ),
   );
   yield* Console.log(`Removed Obsidian source "${source.id}". The vault and memories were preserved.`);
 });

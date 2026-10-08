@@ -4,10 +4,11 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join, dirname} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
+import {startManagerTestServer, type ManagerTestServer} from '../../../test/helpers/manager-test-server.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {SharingConflict, SharingConflictDetail} from '@threadnote/manager/sharing-contracts';
 import type {ObsidianIntegration, IntegrationResult} from '@threadnote/manager/integrations-contracts';
+import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
 type TestResponse = SharingConflictDetail &
   ObsidianIntegration &
   IntegrationResult & {readonly conflicts: readonly SharingConflict[]; readonly error: string};
@@ -57,6 +58,60 @@ function git(cwd: string, ...args: string[]) {
 }
 
 describe('Manager Obsidian HTTP workflow', () => {
+  it('keeps Superhuman sources outside Obsidian connections and preserves them during edits', async () => {
+    const vault = join(home, 'vault');
+    await mkdir(vault, {recursive: true});
+    const configPath = join(home, 'threadnote', 'sources.yaml');
+    await write(
+      configPath,
+      JSON.stringify({
+        version: 2,
+        sources: [
+          {type: 'obsidian', id: 'notes', vault, include: ['**/*.md'], exclude: [], enabled: false, watch: true},
+          {
+            type: 'superhuman',
+            id: 'remote-notes',
+            credential_env: 'SUPERHUMAN_DOCS_API_TOKEN',
+            project: 'demo',
+            documents: [{id: 'doc_test', pages: ['page_test']}],
+          },
+        ],
+        projections: [],
+      }),
+    );
+    const before = parseSourceConfiguration(await readFile(configPath, 'utf8'));
+    expect((await request('/api/integrations/obsidian')).body.sources.map(source => source.id)).toEqual(['notes']);
+    expect(
+      (
+        await request('/api/integrations/obsidian', {
+          action: 'save-source',
+          id: 'notes',
+          editing: true,
+          include: ['**/*.md'],
+          exclude: [],
+          apply: true,
+          confirm: true,
+        })
+      ).status,
+    ).toBe(200);
+    const edited = parseSourceConfiguration(await readFile(configPath, 'utf8'));
+    expect(edited.sources.find(source => source.id === 'notes')).toMatchObject({enabled: false, watch: true});
+    expect(edited.sources.find(source => source.id === 'remote-notes')).toEqual(before.sources[1]);
+    expect(
+      (
+        await request('/api/integrations/obsidian', {
+          action: 'set-enabled',
+          id: 'notes',
+          kind: 'source',
+          enabled: true,
+          apply: true,
+          confirm: true,
+        })
+      ).status,
+    ).toBe(200);
+    expect(parseSourceConfiguration(await readFile(configPath, 'utf8')).sources[1]).toEqual(before.sources[1]);
+  });
+
   it('requires authorization and explicit apply confirmation', async () => {
     const response = await testHttpFetch(server.url + '/api/integrations/obsidian');
     expect(response.status).toBe(401);

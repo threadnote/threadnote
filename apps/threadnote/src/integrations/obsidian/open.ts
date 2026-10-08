@@ -1,10 +1,10 @@
 import {Console, Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
-import {maybeRunEffect} from '../effect/command-presentation.js';
+import {maybeRunEffect} from '../../effect/command-presentation.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {resolveProjectedMemoryPath} from './projection.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {findExecutable, toPosixPath} from '../utils.js';
+import {findExecutable, toPosixPath} from '../../utils.js';
 
 export interface ObsidianOpenOptions {
   readonly dryRun?: boolean;

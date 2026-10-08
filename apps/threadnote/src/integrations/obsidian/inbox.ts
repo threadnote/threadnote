@@ -11,11 +11,11 @@ import {
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
-import {readObsidianConfiguration, requireObsidianSource} from './config.js';
+import {readObsidianConfiguration, requireObsidianSource} from '../config.js';
 import {scrubberBlocker} from '@threadnote/platform/scrubber';
 import type {MemoryKind} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {isJsonObject, toPosixPath} from '../utils.js';
+import {isJsonObject, toPosixPath} from '../../utils.js';
 
 class ObsidianInboxError extends Schema.TaggedError<ObsidianInboxError>()('ObsidianInboxError', {
   cause: Schema.optionalKey(Schema.Defect()),
