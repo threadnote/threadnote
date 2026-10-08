@@ -1485,6 +1485,11 @@ const handoff = Command.make(
     ),
     dryRun: boolean('dry-run', 'Print handoff without storing'),
     issue: optionalString('issue', 'Related issue reference'),
+    keyword: repeatedString(
+      'keyword',
+      'Explicit search keyword; repeat for multiple. Handoffs never generate keywords.',
+      32,
+    ),
     nextStep: optionalString('next-step', 'Suggested next step'),
     pr: optionalString('pr', 'Related pull request reference'),
     project: optionalString('project', 'Project/repo namespace; defaults to current repo'),
@@ -1504,7 +1509,14 @@ const handoff = Command.make(
     timestamped: boolean('timestamped', 'Store a historical timestamped handoff'),
     topic: optionalString('topic', 'Stable topic name'),
   },
-  options => withMutationRuntimeEffect(config => runHandoff(config, {...options, references: options.reference})),
+  ({keyword, ...options}) =>
+    withMutationRuntimeEffect(config =>
+      runHandoff(config, {
+        ...options,
+        ...(keyword.length > 0 ? {keywords: [...keyword]} : {}),
+        references: options.reference,
+      }),
+    ),
 ).pipe(Command.withDescription('Capture current repo state as a durable cross-agent handoff memory'));
 
 const archive = Command.make(

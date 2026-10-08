@@ -250,6 +250,37 @@ describe('remember keywords on replace', () => {
     }),
   );
 
+  effectIt.effect('authors, preserves, and clears explicit handoff keywords without enrichment', () =>
+    Effect.gen(function* () {
+      const config = yield* Effect.promise(makePersonalRuntime);
+      homes.push(config.agentContextHome);
+      const uri = 'threadnote://user/test-user/memories/handoffs/active/threadnote/keyword-handoff.md';
+      const options = {
+        project: PROJECT,
+        sourceAgentClient: 'vitest',
+        task: 'No PR has merged to main.',
+        topic: 'keyword-handoff',
+      };
+      yield* runHandoff(config, {...options, keywords: [' review pending ', 'review pending']}).pipe(
+        provideTestLayer(ApplicationLayer),
+      );
+      const [authored] = yield* readMemoryRecordsByUri(config, [uri]).pipe(provideTestLayer(ApplicationLayer));
+      expect(authored?.metadata.keywords).toEqual(['review pending']);
+      expect(authored?.body).toContain('No PR has merged to main.');
+
+      yield* runHandoff(config, {...options, replace: uri}).pipe(provideTestLayer(ApplicationLayer));
+      const [preserved] = yield* readMemoryRecordsByUri(config, [uri]).pipe(provideTestLayer(ApplicationLayer));
+      expect(preserved?.metadata.keywords).toEqual(['review pending']);
+
+      yield* runHandoff(config, {...options, clearKeywords: true, replace: uri}).pipe(
+        provideTestLayer(ApplicationLayer),
+      );
+      const [cleared] = yield* readMemoryRecordsByUri(config, [uri]).pipe(provideTestLayer(ApplicationLayer));
+      expect(cleared?.metadata.keywords).toBeUndefined();
+      expect(aiEnrichment.enrichMemoryMetadataWithConfiguredLocalAi).not.toHaveBeenCalled();
+    }),
+  );
+
   effectIt.effect('regenerates keywords when requested, discarding preserved ones', () =>
     Effect.gen(function* () {
       const config = yield* Effect.promise(makePersonalRuntime);

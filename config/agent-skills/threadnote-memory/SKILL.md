@@ -17,8 +17,8 @@ Close out in order:
    Prefer labeled `task`, `decisions`/`invariants`, `verification`, `blockers`/`risks`, and `next_step` fields so a fresh
    agent can resume without rereading the full record.
    Only add `observed`, `anchors`, `attempted`, `unresolved`, and `avoid_repeat` fields from direct evidence.
-   Use stable project/topic + `replaceUri`; omit `keywords` and `regenerateKeywords` for handoff writes. On replacement,
-   `clearKeywords` is the only keyword control and removes preserved legacy keywords.
+   Use stable project/topic + `replaceUri`. Handoffs accept explicit `keywords` and preserve them on replacement;
+   `clearKeywords` removes them. Omit `regenerateKeywords`: handoffs never generate keywords.
 2. Only when the session produced reusable durable knowledge, preview a five-field Knowledge Delta (`decisions` +
    `rationale`, `constraints`, `verificationPerformed`, `knowledgeInvalidated`, `unresolvedRisks`) with a complete
    `review_session_context` call containing task, outcome, project, `callerCwd`, `sourceCommit`, and those fields. Candidates

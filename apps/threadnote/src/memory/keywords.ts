@@ -39,11 +39,13 @@ export function resolveMemoryKeywordPlan(input: MemoryKeywordPlanInput): MemoryK
     throw MemoryOperationError.make({message: `Choose only one of ${names}.`});
   }
   const hasPriorKeywords = (input.replacedKeywords?.length ?? 0) > 0;
-  if (explicit || regenerate) {
-    const action = explicit ? 'Keyword authoring' : 'Keyword regeneration';
-    if (input.kind !== undefined && !isMemoryKeywordEnrichmentEligible(input.kind)) {
-      throw MemoryOperationError.make({message: `${action} is not supported for ${input.kind} memories.`});
-    }
+  if (explicit && input.kind === 'smoke') {
+    throw MemoryOperationError.make({message: 'Keyword authoring is not supported for smoke memories.'});
+  }
+  // Explicit handoff keywords are caller-authored retrieval evidence. Generated
+  // phrases can invert precise continuation status, so generation stays gated.
+  if (regenerate && input.kind !== undefined && !isMemoryKeywordEnrichmentEligible(input.kind)) {
+    throw MemoryOperationError.make({message: `Keyword regeneration is not supported for ${input.kind} memories.`});
   }
   if (explicit) {
     const normalized = normalizeManualMemoryKeywords(input.keywords ?? []);

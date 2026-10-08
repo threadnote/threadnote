@@ -247,7 +247,7 @@ export interface ListOptions {
 export interface HandoffOptions {
   readonly blockers?: string;
   readonly ci?: string;
-  /** Drop keywords preserved from the replaced memory. Handoffs preserve prior keywords by default; explicit authoring and regeneration are not supported for handoffs. */
+  /** Drop keywords preserved from the replaced memory. Mutually exclusive with explicit keywords. */
   readonly clearKeywords?: boolean;
   /** Graph-indexed repository-relative paths or stable code-graph refs captured as immutable code citations. */
   readonly codeRefs?: readonly string[];
@@ -255,6 +255,8 @@ export interface HandoffOptions {
   readonly deferCodeRefs?: boolean;
   readonly dryRun?: boolean;
   readonly issue?: string;
+  /** Explicit search keywords. Handoffs preserve prior keywords by default and never generate keywords. */
+  readonly keywords?: readonly string[];
   readonly nextStep?: string;
   readonly pr?: string;
   readonly project?: string;

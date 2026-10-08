@@ -719,7 +719,7 @@ describe('Threadnote MCP toolsets', () => {
               type: 'boolean',
             },
             keywords: {
-              description: expect.stringContaining('no handoff/smoke'),
+              description: expect.stringContaining('Explicit search keywords; no smoke'),
             },
             regenerateKeywords: {
               description: expect.stringContaining('no handoff/smoke'),
@@ -784,12 +784,29 @@ describe('Threadnote MCP toolsets', () => {
           text: 'Inactive memories cannot own pending anchors.',
         });
         expect(inactiveDeferred).toContain('citationPolicy=defer requires status=active');
-        const handoffKeywords = await callErrorText(client, 'remember_context', {
-          keywords: ['invalid handoff keyword'],
-          kind: 'handoff',
-          text: 'Handoff keyword schema guidance regression.',
+        const handoffKeywords = await client.callTool({
+          name: 'remember_context',
+          arguments: {
+            keywords: [' review pending ', 'review pending'],
+            kind: 'handoff',
+            project: 'threadnote',
+            text: 'task: No PR has merged to main.\nnext_step: Review the pending PR.',
+            topic: 'explicit-keyword-handoff',
+          },
         });
-        expect(handoffKeywords).toContain('Keyword authoring is not supported for handoff memories');
+        expect(handoffKeywords.isError, JSON.stringify(handoffKeywords)).not.toBe(true);
+        const handoffUri = (handoffKeywords.structuredContent as {readonly memoryUri: string}).memoryUri;
+        const handoffRead = await callText(client, 'read_context', {responseFormat: 'text', uri: handoffUri});
+        const handoffRecord = parseMemoryDocument(handoffUri, handoffRead);
+        expect(handoffRecord?.metadata.keywords).toEqual(['review pending']);
+        expect(handoffRecord?.body).toContain('No PR has merged to main.');
+        const handoffRegeneration = await callErrorText(client, 'remember_context', {
+          kind: 'handoff',
+          regenerateKeywords: true,
+          replaceUri: handoffUri,
+          text: 'task: No PR has merged to main.',
+        });
+        expect(handoffRegeneration).toContain('Keyword regeneration is not supported for handoff memories');
 
         const unanchoredHandoff = await client.callTool(
           {

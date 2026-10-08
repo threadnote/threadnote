@@ -73,7 +73,7 @@ export function registerStoreTool(
         citationPolicy: McpInput.literals(['require-current', 'defer'], 'codeRefs policy'),
         clearKeywords: McpInput.boolean('Clear keywords (handoff/smoke allowed)'),
         kind: McpInput.literals(['durable', 'handoff', 'incident', 'preference', 'smoke']),
-        keywords: McpInput.stringOrStrings('Search keywords; no handoff/smoke', {
+        keywords: McpInput.stringOrStrings('Explicit search keywords; no smoke', {
           maximumItems: 32,
         }),
         project: McpInput.string(),
