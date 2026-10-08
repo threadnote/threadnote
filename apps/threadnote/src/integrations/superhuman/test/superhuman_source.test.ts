@@ -26,15 +26,15 @@ import {
   upsertSuperhumanSource,
   requireSuperhumanSource,
   sourceConfigurationFingerprint,
-} from '../../src/obsidian/config.js';
-import {resolveSuperhumanCredential, superhumanCredentialConfigured} from '../../src/superhuman/credentials.js';
+} from '../../config.js';
+import {resolveSuperhumanCredential, superhumanCredentialConfigured} from '../credentials.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceRemove,
   runSuperhumanSourceSync,
   syncSuperhumanSourcesBeforeRecall,
-} from '../../src/superhuman/source.js';
-import {superhumanExternalSourcePolicyLayer} from '../../src/superhuman/access-policy.js';
+} from '../source.js';
+import {superhumanExternalSourcePolicyLayer} from '../access-policy.js';
 
 const dependencies = Layer.mergeAll(
   BunServices.layer,

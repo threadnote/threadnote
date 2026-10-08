@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {parseObsidianInboxNote} from '@threadnote/threadnote/obsidian/inbox';
+import {parseObsidianInboxNote} from '@threadnote/threadnote/integrations/obsidian/inbox';
 
 describe('Obsidian Inbox contract', () => {
   it('parses explicitly marked durable candidates', () => {

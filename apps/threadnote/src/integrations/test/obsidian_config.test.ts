@@ -4,8 +4,8 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import fc from 'fast-check';
 import {Effect, FileSystem, Layer} from 'effect';
 import {TestClock} from 'effect/testing';
-import {provideTestLayer} from '../helpers/effect-layer.js';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {provideTestLayer} from '../../../test/helpers/effect-layer.js';
+import {TestSystemInfoLayer} from '../../../test/helpers/system-layer.js';
 import {
   emptyObsidianConfiguration,
   mutateSourceConfiguration,
@@ -20,7 +20,7 @@ import {
   upsertObsidianSource,
   upsertSuperhumanSource,
   validateSuperhumanDocumentId,
-} from '@threadnote/threadnote/obsidian/config';
+} from '@threadnote/threadnote/integrations/config';
 
 describe('Obsidian source configuration', () => {
   it('does not include configuration bytes in malformed YAML errors', () => {

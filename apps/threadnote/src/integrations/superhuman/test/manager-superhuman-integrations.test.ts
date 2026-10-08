@@ -8,9 +8,9 @@ import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {
   mergeResolvedSuperhumanSelections,
   resolveSuperhumanBrowserLinks,
-} from '@threadnote/threadnote/manager/superhuman-integrations';
-import {parseSourceConfiguration} from '@threadnote/threadnote/obsidian/config';
-import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
+} from '@threadnote/threadnote/integrations/superhuman/manager';
+import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
+import {startManagerTestServer, type ManagerTestServer} from '../../../../test/helpers/manager-test-server.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const credential = Redacted.make('synthetic-manager-token');

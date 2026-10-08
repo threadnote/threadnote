@@ -3,15 +3,15 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Redacted, Result, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
-import type {SuperhumanSourceConfig} from '../../src/obsidian/config.js';
+import type {SuperhumanSourceConfig} from '../../config.js';
 import {
   removeSuperhumanCredential,
   resolveSuperhumanCredential,
   storeSuperhumanCredential,
   superhumanCredentialConfigured,
-} from '../../src/superhuman/credentials.js';
-import {provideTestLayer} from '../helpers/effect-layer.js';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+} from '../credentials.js';
+import {provideTestLayer} from '../../../../test/helpers/effect-layer.js';
+import {TestSystemInfoLayer} from '../../../../test/helpers/system-layer.js';
 
 const provide = provideTestLayer(Layer.merge(BunServices.layer, TestSystemInfoLayer));
 const source: SuperhumanSourceConfig = {

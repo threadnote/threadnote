@@ -18,29 +18,29 @@ import {
   validateSuperhumanPageId,
   type SuperhumanDocumentConfig,
   type SuperhumanSourceConfig,
-} from '../obsidian/config.js';
-import {captureConsole} from '../effect/console.js';
-import {withSourceLock} from '../sources/lock.js';
+} from '../config.js';
+import {captureConsole} from '../../effect/console.js';
+import {withSourceLock} from '../lock.js';
 import {
   createSuperhumanRestSession,
   SuperhumanClientError,
   SUPERHUMAN_API_ORIGIN,
   type SuperhumanClientOptions,
-} from '../superhuman/client.js';
-import {normalizeSuperhumanTitle} from '../superhuman/render.js';
+} from './client.js';
+import {normalizeSuperhumanTitle} from './render.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceRemove,
   runSuperhumanSourceSync,
   SuperhumanSourceConflictError,
-} from '../superhuman/source.js';
+} from './source.js';
 import {
   resolveSuperhumanCredential,
   superhumanCredentialConfigured,
   validSuperhumanApiToken,
   SuperhumanCredentialError,
-} from '../superhuman/credentials.js';
-import type {ManagerProcessApiRequest} from './processes.js';
+} from './credentials.js';
+import type {ManagerProcessApiRequest} from '../../manager/processes.js';
 
 const API_ROOT = `${SUPERHUMAN_API_ORIGIN}/apis/v1`;
 const DOC_HREF = /^\/apis\/v1\/docs\/([A-Za-z0-9_-]{1,128})$/;

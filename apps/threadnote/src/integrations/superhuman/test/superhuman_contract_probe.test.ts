@@ -2,8 +2,8 @@ import {describe, expect, it} from 'vitest';
 import type {FetchLike} from '@modelcontextprotocol/sdk/shared/transport.js';
 import {Redacted} from 'effect';
 import fc from 'fast-check';
-import {summarizeContractObservation} from '@threadnote/threadnote/superhuman/contract-probe';
-import {probeSelectedPageContractRaw, ProbeError} from '@threadnote/threadnote/superhuman/probe';
+import {summarizeContractObservation} from '@threadnote/threadnote/integrations/superhuman/contract-probe';
+import {probeSelectedPageContractRaw, ProbeError} from '@threadnote/threadnote/integrations/superhuman/probe';
 
 const selectedUrl = 'https://docs.superhuman.com/d/Synthetic_do1/Page_pa1';
 const token = Redacted.make('synthetic-contract-token');

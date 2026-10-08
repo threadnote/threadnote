@@ -1,5 +1,9 @@
 import {describe, expect, it} from 'vitest';
-import {obsidianSourceRootUri, obsidianSourceUri, sourcePathMatches} from '@threadnote/threadnote/obsidian/source';
+import {
+  obsidianSourceRootUri,
+  obsidianSourceUri,
+  sourcePathMatches,
+} from '@threadnote/threadnote/integrations/obsidian/source';
 
 describe('Obsidian source mapping', () => {
   it('requires an include match and applies exclusions', () => {

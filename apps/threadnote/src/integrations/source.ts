@@ -1,6 +1,6 @@
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {readSourceConfiguration} from '../obsidian/config.js';
+import {readSourceConfiguration} from './config.js';
 import {
   runObsidianSourceAdd,
   runObsidianSourceInventory,
@@ -8,7 +8,7 @@ import {
   runObsidianSourceStatus,
   runObsidianSourceSync,
   syncObsidianSourcesBeforeRecall,
-} from '../obsidian/source.js';
+} from './obsidian/source.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceInventory,
@@ -16,7 +16,7 @@ import {
   runSuperhumanSourceStatus,
   runSuperhumanSourceSync,
   syncSuperhumanSourcesBeforeRecall,
-} from '../superhuman/source.js';
+} from './superhuman/source.js';
 
 export interface SourceAddOptions {
   readonly type: 'obsidian' | 'superhuman';

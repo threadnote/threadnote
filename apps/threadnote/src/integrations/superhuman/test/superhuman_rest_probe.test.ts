@@ -5,7 +5,7 @@ import {
   probeSuperhumanRestPage,
   RestProbeError,
   SUPERHUMAN_REST_URL,
-} from '@threadnote/threadnote/superhuman/rest-probe';
+} from '@threadnote/threadnote/integrations/superhuman/rest-probe';
 
 const token = Redacted.make('synthetic-secret-token');
 const selected = 'https://docs.superhuman.com/d/_dDoc/Selected_sPage#_selected';

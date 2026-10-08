@@ -1,7 +1,7 @@
 import {Effect, FileSystem, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {validateObsidianIdentifier} from '../obsidian/config.js';
+import {validateObsidianIdentifier} from './config.js';
 
 export function withSourceLock<A, E, R>(
   config: Pick<RuntimeConfig, 'agentContextHome'>,

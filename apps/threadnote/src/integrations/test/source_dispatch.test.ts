@@ -4,10 +4,10 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
-import {readSourceConfiguration} from '@threadnote/threadnote/obsidian/config';
-import {runSourceAdd, runSourceList, runSourceRemove} from '@threadnote/threadnote/sources/source';
+import {readSourceConfiguration} from '@threadnote/threadnote/integrations/config';
+import {runSourceAdd, runSourceList, runSourceRemove} from '@threadnote/threadnote/integrations/source';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {provideTestLayer} from '../helpers/effect-layer.js';
+import {provideTestLayer} from '../../../test/helpers/effect-layer.js';
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;

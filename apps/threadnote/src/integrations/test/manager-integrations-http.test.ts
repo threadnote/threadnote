@@ -4,11 +4,11 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join, dirname} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
-import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
+import {startManagerTestServer, type ManagerTestServer} from '../../../test/helpers/manager-test-server.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {SharingConflict, SharingConflictDetail} from '@threadnote/manager/sharing-contracts';
 import type {ObsidianIntegration, IntegrationResult} from '@threadnote/manager/integrations-contracts';
-import {parseSourceConfiguration} from '@threadnote/threadnote/obsidian/config';
+import {parseSourceConfiguration} from '@threadnote/threadnote/integrations/config';
 type TestResponse = SharingConflictDetail &
   ObsidianIntegration &
   IntegrationResult & {readonly conflicts: readonly SharingConflict[]; readonly error: string};

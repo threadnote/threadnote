@@ -27,8 +27,8 @@ import {
   type SuperhumanDocumentConfig,
   type SourceConfig,
   type SuperhumanSourceConfig,
-} from '../obsidian/config.js';
-import {withSourceLock} from '../sources/lock.js';
+} from '../config.js';
+import {withSourceLock} from '../lock.js';
 import {
   makeSuperhumanClientBudget,
   readSuperhumanDocument,

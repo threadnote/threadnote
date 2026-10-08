@@ -1,12 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Redacted} from 'effect';
-import {
-  makeSuperhumanClientBudget,
-  readSuperhumanDocument,
-  SuperhumanClientError,
-} from '../../src/superhuman/client.js';
-import {renderSuperhumanDocument, splitUtf8, SuperhumanSecretBlocked} from '../../src/superhuman/render.js';
+import {makeSuperhumanClientBudget, readSuperhumanDocument, SuperhumanClientError} from '../client.js';
+import {renderSuperhumanDocument, splitUtf8, SuperhumanSecretBlocked} from '../render.js';
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json', ...headers}});

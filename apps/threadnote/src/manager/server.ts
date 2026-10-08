@@ -101,7 +101,7 @@ import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
 import {handleManagerProcessRequest} from './processes.js';
 import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
-import {handleManagerIntegrationRequest} from './integrations.js';
+import {handleManagerIntegrationRequest} from '../integrations/manager.js';
 import {handleManagerWorkspaceRequest} from './value.js';
 import {emptyManagerTree, readManagerTreeRoot} from '@threadnote/manager/tree';
 import {

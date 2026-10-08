@@ -20,13 +20,13 @@ import {
   removeObsidianProjection,
   requireObsidianProjection,
   upsertObsidianProjection,
-} from './config.js';
+} from '../config.js';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {parseResourceId, resourceIdWithoutAnchor} from '@threadnote/store/resource-id';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
-import {isDirectory, toPosixPath} from '../utils.js';
+import {isDirectory, toPosixPath} from '../../utils.js';
 
 class ObsidianProjectionError extends Schema.TaggedError<ObsidianProjectionError>()('ObsidianProjectionError', {
   cause: Schema.optionalKey(Schema.Defect()),

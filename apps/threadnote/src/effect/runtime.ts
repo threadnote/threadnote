@@ -6,7 +6,7 @@ import {threadnoteCliFormatterLayer} from './cli/help.js';
 import {CliOutput} from './cli/output.js';
 import {HttpService} from '@threadnote/platform/http';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {superhumanExternalSourcePolicyLayer} from '../superhuman/access-policy.js';
+import {superhumanExternalSourcePolicyLayer} from '../integrations/superhuman/access-policy.js';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';

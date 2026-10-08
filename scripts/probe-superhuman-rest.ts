@@ -1,5 +1,5 @@
 import {Redacted} from 'effect';
-import {probeSuperhumanRestPage, RestProbeError} from '@threadnote/threadnote/superhuman/rest-probe';
+import {probeSuperhumanRestPage, RestProbeError} from '@threadnote/threadnote/integrations/superhuman/rest-probe';
 
 const tokenFile = process.env.SUPERHUMAN_DOCS_TOKEN_FILE;
 const selectedUrl = process.env.SUPERHUMAN_DOCS_SELECTED_URL;

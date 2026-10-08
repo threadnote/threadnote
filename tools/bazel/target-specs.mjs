@@ -22,7 +22,10 @@ const packageDirectories = readdirSync(join(root, 'packages'))
   .sort()
   .map(name => `packages/${name}`);
 const longRunningTests = new Set(Object.values(ciLongRunningTestGroups).flat());
-const applicationTests = testFilesBelow('apps/threadnote/test');
+const applicationTests = [
+  ...testFilesBelow('apps/threadnote/test'),
+  ...testFilesBelow('apps/threadnote/src/integrations'),
+].sort();
 const postgresTests = new Set(
   applicationTests.filter(path => readFileSync(join(root, path), 'utf8').includes('THREADNOTE_TEST_POSTGRES_URL')),
 );
@@ -278,6 +281,7 @@ export const targetSpecs = [
     kind: 'test',
     entries: toolingTests,
     data: [
+      ...testFilesBelow('apps/threadnote/src/integrations'),
       'tools/bazel/runner.mjs',
       'tools/bazel/targets.json',
       'tools/ci/bazel-run-selected.mjs',

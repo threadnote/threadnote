@@ -46,6 +46,17 @@ Avoid creating a new package until it has a clear owner and dependency direction
 
 The repository has no root `src/` or `test/` tree. Production code belongs to an app or package. Tests are colocated under the same owner: `packages/graph/test` tests graph code, `packages/manager/test` tests Manager code, and cross-domain application tests live under `apps/threadnote/test`.
 
+Product integrations live in `apps/threadnote/src/integrations`. Shared source
+configuration, locking, CLI dispatch, and Manager routing sit at that directory's
+root; provider adapters and their Manager API handlers live in `obsidian/` and
+`superhuman/`. These adapters compose application services. Manager presentation
+stays in `packages/manager`, and `packages/integrations` owns the separate agent
+catalog and identity domain. Add a private provider package only when a reusable
+capability has a clear dependency boundary independent of application composition.
+Integration tests live in the shared or provider `test/` folders beside these
+modules. Vitest and Bazel discover them there, while production typechecking and
+coverage exclude test code.
+
 ### Adding or changing a workspace
 
 1. Keep the package private and expose explicit source entrypoints from its

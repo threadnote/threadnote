@@ -4,14 +4,14 @@ import type {FetchLike} from '@modelcontextprotocol/sdk/shared/transport.js';
 import fc from 'fast-check';
 import {Effect, Redacted} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
-import {provideTestLayer} from '../helpers/effect-layer.js';
-import {TestSystemInfoLayer} from '../helpers/system-layer.js';
+import {provideTestLayer} from '../../../../test/helpers/effect-layer.js';
+import {TestSystemInfoLayer} from '../../../../test/helpers/system-layer.js';
 import {
   discoverSuperhumanTools,
   ProbeError,
   probeSuperhumanTools,
   SUPERHUMAN_MCP_URL,
-} from '@threadnote/threadnote/superhuman/probe';
+} from '@threadnote/threadnote/integrations/superhuman/probe';
 
 const token = Redacted.make('synthetic-private-token-123456');
 

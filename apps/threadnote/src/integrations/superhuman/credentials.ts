@@ -7,7 +7,7 @@ import {
 } from '@threadnote/platform/system';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {SuperhumanSourceConfig} from '../obsidian/config.js';
+import type {SuperhumanSourceConfig} from '../config.js';
 
 export class SuperhumanCredentialError extends Schema.TaggedError<SuperhumanCredentialError>()(
   'SuperhumanCredentialError',

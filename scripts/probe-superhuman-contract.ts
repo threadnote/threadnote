@@ -1,6 +1,6 @@
 import {Redacted} from 'effect';
-import {summarizeContractObservation} from '@threadnote/threadnote/superhuman/contract-probe';
-import {probeSelectedPageContractRaw, ProbeError} from '@threadnote/threadnote/superhuman/probe';
+import {summarizeContractObservation} from '@threadnote/threadnote/integrations/superhuman/contract-probe';
+import {probeSelectedPageContractRaw, ProbeError} from '@threadnote/threadnote/integrations/superhuman/probe';
 
 const selectedUrl = process.env.SUPERHUMAN_DOCS_SELECTED_URL;
 const tokenFile = process.env.SUPERHUMAN_DOCS_TOKEN_FILE;

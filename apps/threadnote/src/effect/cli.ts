@@ -58,8 +58,8 @@ import {makeCloseoutCommand} from './closeout_cli.js';
 import {wakeContextMaintenance} from '../memory/context/maintenance.js';
 import {runProcedurePublish, runProcedureStatus, runProcedureVerify} from '../procedure/commands.js';
 import {runMcpInstall} from '../mcp/index.js';
-import {runObsidianInboxScan} from '../obsidian/inbox.js';
-import {runObsidianOpen} from '../obsidian/open.js';
+import {runObsidianInboxScan} from '../integrations/obsidian/inbox.js';
+import {runObsidianOpen} from '../integrations/obsidian/open.js';
 import {
   runObsidianProjectionAdd,
   runObsidianProjectionList,
@@ -67,7 +67,7 @@ import {
   runObsidianProjectionRemove,
   runObsidianProjectionStatus,
   runObsidianProjectionSync,
-} from '../obsidian/projection.js';
+} from '../integrations/obsidian/projection.js';
 import {
   runSourceAdd,
   runSourceInventory,
@@ -75,7 +75,7 @@ import {
   runSourceRemove,
   runSourceStatus,
   runSourceSync,
-} from '../sources/source.js';
+} from '../integrations/source.js';
 import {ensureUserManifestRuntimeConfig, getRuntimeConfig} from '../runtime.js';
 import {runInitManifest, runSeed, runSeedSkills} from '../seeding.js';
 import {makeWorksetCommand} from './workset_cli.js';

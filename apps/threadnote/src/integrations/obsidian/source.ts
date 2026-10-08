@@ -1,5 +1,5 @@
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
-import {MAX_SECRET_MATCHES_TO_PRINT} from '../constants.js';
+import {MAX_SECRET_MATCHES_TO_PRINT} from '../../constants.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
@@ -15,14 +15,14 @@ import {
   requireObsidianSource,
   upsertObsidianSource,
   validateObsidianIdentifier,
-} from './config.js';
-import {withSourceLock} from '../sources/lock.js';
+} from '../config.js';
+import {withSourceLock} from '../lock.js';
 import {applyScrubber} from '@threadnote/platform/scrubber';
 import {canonicalResourceUri} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {globToRegExp} from '@threadnote/platform/glob';
-import {isDirectory, toPosixPath} from '../utils.js';
+import {isDirectory, toPosixPath} from '../../utils.js';
 
 export interface ObsidianSourceAddOptions {
   readonly apply?: boolean;

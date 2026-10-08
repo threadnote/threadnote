@@ -1,6 +1,6 @@
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import {ExternalSourcePolicy} from '@threadnote/store/external-resource';
-import {readSourceConfiguration, sourceConfigurationFingerprint} from '../obsidian/config.js';
+import {readSourceConfiguration, sourceConfigurationFingerprint} from '../config.js';
 
 export const superhumanExternalSourcePolicyLayer = Layer.effect(
   ExternalSourcePolicy,

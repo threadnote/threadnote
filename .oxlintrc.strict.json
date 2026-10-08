@@ -209,6 +209,14 @@
       "rules": {
         "threadnote/no-effect-runtime-in-tests": "error"
       }
+    },
+    {
+      "files": ["apps/threadnote/src/integrations/**/test/**/*.ts"],
+      "rules": {
+        "threadnote/no-effect-runtime": "off",
+        "threadnote/no-node-runtime": "off",
+        "effecttsgo/new-promise": "off"
+      }
     }
   ]
 }

@@ -19,7 +19,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {withAnonymousTelemetryPhase} from '../effect/telemetry.js';
 import {withCodeAnchorFinalizationAnonymousTelemetry} from '../telemetry/code_anchor_finalization.js';
-import {syncSourcesBeforeRecall} from '../sources/source.js';
+import {syncSourcesBeforeRecall} from '../integrations/source.js';
 import {
   canonicalResourceUri,
   parseResourceId,
