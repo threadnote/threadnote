@@ -88,7 +88,11 @@ it('shows project inspection destinations in All Health without issuing scans or
   );
   expect(document.body.textContent).toContain('Context health across projects');
   expect(document.body.textContent).toContain('Health checks and repairs are scoped to one project.');
-  const inspect = [...document.querySelectorAll('button')].find(button => button.textContent === 'Inspect beta')!;
+  const tiles = document.querySelectorAll<HTMLButtonElement>('.health-project-grid > button');
+  expect([...tiles].map(tile => tile.getAttribute('aria-label'))).toEqual(['Inspect alpha', 'Inspect beta']);
+  expect(tiles[1].querySelector('strong')?.textContent).toBe('beta');
+  expect(tiles[1].querySelector('button')).toBeNull();
+  const inspect = tiles[1];
   await act(async () => inspect.click());
   expect(onProjectChange).toHaveBeenCalledWith('beta');
   expect(fetch).not.toHaveBeenCalled();

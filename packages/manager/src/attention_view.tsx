@@ -395,16 +395,20 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         {props.projects.length === 0 ? (
           <AttentionEmpty text="No projects are available yet. Save a project memory or configure a repository to get started." />
         ) : (
-          <div className="attention-list">
+          <div className="health-project-grid">
             {props.projects.map(project => (
-              <article className="attention-card" key={project}>
-                <header>
-                  <h3>{project}</h3>
-                </header>
-                <button onClick={() => props.onProjectChange(project)} type="button">
-                  Inspect {project}
-                </button>
-              </article>
+              <button
+                aria-label={`Inspect ${project}`}
+                className="health-project-tile"
+                key={project}
+                onClick={() => props.onProjectChange(project)}
+                type="button"
+              >
+                <strong>{project}</strong>
+                <span>
+                  View context health <span aria-hidden="true">→</span>
+                </span>
+              </button>
             ))}
           </div>
         )}
