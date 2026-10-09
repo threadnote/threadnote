@@ -385,6 +385,11 @@ describe('all-code-graph diagnostics', () => {
       const status = yield* managerGraphBuildCatalog(home);
       expect(status.catalogRevision).not.toBe(beforeRevision);
       expect(status.lifecyclePending).toBe(false);
+      expect(status.reconciliation).toMatchObject({
+        blockedRepositories: 0,
+        pendingRepositories: 0,
+        state: 'observed',
+      });
 
       const refreshed = yield* inspectAllCodeGraphsLocal(home);
       expect(refreshed.summary.viewCount).toBe(1);

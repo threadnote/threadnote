@@ -47,6 +47,9 @@ import {
   type GraphWorktreeAdministrationAction,
 } from './model.js';
 import {type ManagerDialogOptions, useOptionalManagerDialogs} from '@threadnote/manager/dialog';
+import {GraphReconciliationProgress} from './reconciliation.js';
+import type {ManagerGraphReconciliationStatus} from '@threadnote/graph/manager/status';
+export {GraphReconciliationProgress};
 
 export function GraphSummary(props: {
   readonly analysis?: GraphAnalysis;
@@ -469,6 +472,7 @@ export function GraphAdministration(props: {
   readonly onDiagnostics: (options: {readonly analyze: boolean; readonly deep: boolean}) => void;
   readonly output?: string;
   readonly report?: CodeGraphLocalDiagnosticsReport;
+  readonly reconciliation?: ManagerGraphReconciliationStatus;
 }): React.ReactElement {
   const dialogs = useOptionalManagerDialogs();
   const [analyze, setAnalyze] = useState(false);
@@ -532,6 +536,7 @@ export function GraphAdministration(props: {
         </span>
       </summary>
       <div className="graph-administration-body">
+        {props.reconciliation ? <GraphReconciliationProgress status={props.reconciliation} /> : null}
         {props.configuredProjects === undefined ? null : (
           <section className="graph-configured-project-index">
             <header>
@@ -817,6 +822,12 @@ export function GraphAdministration(props: {
                             Folder: {graphLocalAssociationText(candidate.localAssociation)} ·{' '}
                             {candidate.localAssociation.state}
                           </small>
+                          {candidate.localAssociation.state === 'missing' ? (
+                            <small className="graph-build-attention">
+                              Retained snapshot · recorded folder is missing. This does not establish a ready graph for
+                              another checkout.
+                            </small>
+                          ) : null}
                           {candidate.analysis ? (
                             <small>
                               {candidate.analysis.coverage.complete ? 'Complete' : 'Partial'} analysis ·{' '}

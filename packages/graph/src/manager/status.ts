@@ -1,4 +1,4 @@
-import {Effect, Option} from 'effect';
+import {DateTime, Effect, Option} from 'effect';
 import type {CodeGraphAutomaticCompactionStatus} from '../automatic/compaction.js';
 import {
   readAllCodeGraphBuildStatuses,
@@ -11,6 +11,10 @@ import {CodeGraphMaintenanceCoordinator} from '../maintenance/coordinator.js';
 import {observeCodeGraphMaintenanceStatus, type CodeGraphMaintenanceStatus} from '../maintenance/gate.js';
 import {compareCodeUnits} from '../ordering.js';
 import {codeGraphCompactionRequiredFreeBytes, inspectCodeGraphStorage, type CodeGraphStorage} from '../storage.js';
+import {projectManagerGraphReconciliationStatus, type ManagerGraphReconciliationStatus} from './reconciliation.js';
+import type {CodeGraphLifecycleOpportunityResult} from '../lifecycle/opportunity.js';
+
+export type {ManagerGraphReconciliationStatus} from './reconciliation.js';
 
 export const MANAGER_GRAPH_STORAGE_STATUS_LIMIT = 8;
 
@@ -81,6 +85,7 @@ export interface ManagerGraphBuildCatalog {
   readonly catalogRevision?: string;
   readonly lifecyclePending: boolean;
   readonly maintenance?: CodeGraphMaintenanceStatus;
+  readonly reconciliation?: ManagerGraphReconciliationStatus;
   readonly queuedWorktreeIds: readonly string[];
   readonly storage: Readonly<Record<string, ManagerGraphStorageSummary>>;
   readonly waiterCount: number;
@@ -104,23 +109,32 @@ export const managerGraphBuildCatalog = Effect.fn('codeGraph.managerBuildCatalog
       ? undefined
       : yield* observeManagerGraphCatalogStatus(threadnoteHome).pipe(Effect.orElseSucceed(() => undefined));
   const lifecycleMaintenance = yield* Effect.serviceOption(CodeGraphMaintenanceCoordinator);
+  let lifecycleResult: CodeGraphLifecycleOpportunityResult | undefined;
   if (statusObservation?.lifecyclePending === true && Option.isSome(lifecycleMaintenance)) {
-    const lifecycle = yield* runCodeGraphLifecycleOpportunity({
+    lifecycleResult = yield* runCodeGraphLifecycleOpportunity({
       maintenance: lifecycleMaintenance.value,
       opportunity: 'status',
       targets: statusObservation.lifecycleTargets,
       threadnoteHome,
-    }).pipe(Effect.catch(() => Effect.void));
+    }).pipe(Effect.orElseSucceed(() => undefined));
     if (
-      lifecycle?.state === 'completed' &&
-      lifecycle.result.state === 'completed' &&
-      lifecycle.result.cleanup === 'removed-worktree-view'
+      lifecycleResult?.state === 'completed' &&
+      lifecycleResult.result.state === 'completed' &&
+      lifecycleResult.result.cleanup === 'removed-worktree-view'
     ) {
       statusObservation = yield* observeManagerGraphCatalogStatus(threadnoteHome).pipe(
         Effect.orElseSucceed(() => undefined),
       );
     }
   }
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const reconciliation = projectManagerGraphReconciliationStatus({
+    activeBuild: active,
+    checkedAt,
+    ...(lifecycleResult === undefined ? {} : {lifecycleResult}),
+    maintenance: maintenance !== undefined,
+    ...(statusObservation === undefined ? {} : {observation: statusObservation}),
+  });
   const catalogRevision = statusObservation?.catalogRevision;
   const checkoutIds = managerGraphStorageStatusCheckoutIds([...selection.builds, ...selection.waiters]);
   const storage = Object.fromEntries(
@@ -140,6 +154,7 @@ export const managerGraphBuildCatalog = Effect.fn('codeGraph.managerBuildCatalog
     ...(catalogRevision === undefined ? {} : {catalogRevision}),
     lifecyclePending: statusObservation?.lifecyclePending === true,
     ...(maintenance === undefined ? {} : {maintenance}),
+    reconciliation,
     queuedWorktreeIds: [...new Set(selection.waiters.map(status => status.identity.worktreeId))],
     storage,
     waiterCount: selection.waiters.length,

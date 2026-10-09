@@ -21,6 +21,9 @@ export interface ManagerGraphCatalogStatusObservation {
   readonly catalogRevision: string;
   readonly lifecyclePending: boolean;
   readonly lifecycleTargets: readonly CodeGraphLifecycleOpportunityTarget[];
+  readonly repositoryCount: number;
+  readonly unavailableRepositories: number;
+  readonly viewsTruncated: boolean;
 }
 
 /** Stable, path-free and order-independent revision for visible active pointers. */
@@ -109,6 +112,9 @@ export const observeManagerGraphCatalogStatus = Effect.fn('codeGraph.observeMana
     catalogRevision: managerGraphCatalogRevision(observations.map(observation => observation.database)),
     lifecyclePending: lifecycleTargets.some(target => target.reconciliationPending === true),
     lifecycleTargets,
+    repositoryCount: databases.length,
+    unavailableRepositories: observations.filter(observation => observation.database.state === 'unavailable').length,
+    viewsTruncated: observations.some(observation => observation.database.viewsTruncated),
   } satisfies ManagerGraphCatalogStatusObservation;
 });
 

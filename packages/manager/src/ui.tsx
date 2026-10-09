@@ -75,7 +75,7 @@ import {
   graphCatalogRequiresAuthoritativeRefresh,
   graphCompletedBuildResultIdentity,
   graphDiagnosticsRequiresCatalogRefresh,
-  graphMaintenanceStatusLabel,
+  graphAdministrationBusyLabel,
   graphStatusPollDelay,
   graphStatusRequiresCatalogRefresh,
   mergeGraphCatalogStatus,
@@ -1519,14 +1519,7 @@ function App(): React.ReactElement {
             <section className="panel graph-panel is-active">
               <GraphWorkspace
                 administration={graphDiagnostics}
-                administrationBusy={
-                  graphAdministrationBusy ??
-                  (graphCatalog?.maintenance
-                    ? graphMaintenanceStatusLabel(graphCatalog.maintenance)
-                    : graphCatalog?.lifecyclePending
-                      ? 'Reconciling indexed views'
-                      : undefined)
-                }
+                administrationBusy={graphAdministrationBusyLabel(graphAdministrationBusy, graphCatalog)}
                 administrationOutput={graphAdministrationOutput}
                 catalog={graphCatalog}
                 catalogError={graphCatalogError}

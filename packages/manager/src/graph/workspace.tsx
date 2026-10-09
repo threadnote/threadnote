@@ -734,6 +734,9 @@ export function GraphWorkspace(props: {
             onDiagnostics={props.onDiagnostics ?? (() => undefined)}
             output={props.administrationOutput}
             report={props.administration}
+            reconciliation={
+              props.catalog?.reconciliation ?? (props.catalog?.lifecyclePending ? {state: 'unavailable'} : undefined)
+            }
           />
           {props.catalog?.automaticCompaction ? (
             <GraphAutomaticCompactionProgress repositories={repositories} status={props.catalog.automaticCompaction} />

@@ -3,7 +3,7 @@ import type {CodeGraphAutomaticCompactionStatus} from '@threadnote/graph/automat
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import type {CodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import type {CodeGraphMaintenanceStatus} from '@threadnote/graph/maintenance/gate';
-import type {ManagerGraphStorageSummary} from '@threadnote/graph/manager/status';
+import type {ManagerGraphReconciliationStatus, ManagerGraphStorageSummary} from '@threadnote/graph/manager/status';
 import {codeGraphFailedBuildStatusCurrent} from '@threadnote/graph/build_status/validation';
 import {compareCodeUnits} from '@threadnote/graph/ordering';
 import {
@@ -100,6 +100,7 @@ export interface GraphCatalog {
   readonly configuredProjects?: readonly GraphConfiguredProject[];
   readonly diagnostics: readonly GraphCatalogDiagnostic[];
   readonly lifecyclePending?: boolean;
+  readonly reconciliation?: ManagerGraphReconciliationStatus;
   readonly maintenance?: CodeGraphMaintenanceStatus;
   readonly manifestRevision?: string;
   readonly repositories: readonly GraphRepositoryGroup[];
@@ -696,6 +697,7 @@ export function mergeGraphCatalogStatus(
     | 'builds'
     | 'catalogRevision'
     | 'lifecyclePending'
+    | 'reconciliation'
     | 'maintenance'
     | 'storage'
     | 'waiterCount'
@@ -709,7 +711,11 @@ export function mergeGraphCatalogStatus(
     waiterCount: 0,
     waiters: [],
   };
-  const {maintenance: _previousMaintenance, ...catalogWithoutMaintenance} = base;
+  const {
+    maintenance: _previousMaintenance,
+    reconciliation: _previousReconciliation,
+    ...catalogWithoutMaintenance
+  } = base;
   return {
     ...catalogWithoutMaintenance,
     ...status,
@@ -724,6 +730,13 @@ export function mergeGraphCatalogStatus(
 }
 
 export type GraphStorageSummary = ManagerGraphStorageSummary;
+
+export function graphAdministrationBusyLabel(
+  busy: string | undefined,
+  catalog: GraphCatalog | undefined,
+): string | undefined {
+  return busy ?? (catalog?.maintenance ? graphMaintenanceStatusLabel(catalog.maintenance) : undefined);
+}
 
 export function graphMaintenanceStatusLabel(status: CodeGraphMaintenanceStatus): string {
   const operation = status.operation === 'selected-snapshot-purge' ? 'Selected snapshot purge' : 'Graph maintenance';
