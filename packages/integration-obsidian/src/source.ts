@@ -5,6 +5,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 const MAX_SECRET_MATCHES_TO_PRINT = 5;
 import {sha256Hex} from '@threadnote/platform/digest';
+import {fromPromise} from '@threadnote/platform/errors';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
 import {scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
@@ -1123,7 +1124,7 @@ function emptySourceState(sourceId: string): ObsidianSourceState {
 }
 
 const sourceFileIdentity = Effect.fn('obsidian.sourceFileIdentity')(function* (path: string) {
-  const stat = yield* Effect.tryPromise({try: () => Bun.file(path).stat(), catch: () => undefined}).pipe(
+  const stat = yield* fromPromise('obsidian.sourceFileIdentity.stat', () => Bun.file(path).stat()).pipe(
     Effect.orElseSucceed(() => undefined),
   );
   if (!stat?.isFile() || !stat.ino || !stat.birthtimeMs) return undefined;

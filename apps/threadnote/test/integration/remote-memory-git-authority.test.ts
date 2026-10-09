@@ -144,7 +144,7 @@ postgresDescribe('Git ingest system authority', () => {
     }
   });
 
-  it.each(['x_extension: retained', 'code_citation: invalid', 'memory_id: tn_one\nmemory_id: tn_two'])(
+  it.each(['x_extension: retained', 'memory_id: tn_one\nmemory_id: tn_two'])(
     'leaves Git and the revision unchanged when metadata cannot be preserved: %s',
     async field => {
       const f = await fixture();
@@ -186,6 +186,33 @@ postgresDescribe('Git ingest system authority', () => {
       }
     },
   );
+
+  it('rejects malformed code citations at ingestion without changing Git or creating revisions', async () => {
+    const f = await fixture();
+    try {
+      const path = 'durable/projects/restricted/invalid-citation.md';
+      const content = 'MEMORY\nkind: durable\ncode_citation: invalid\n\nOriginal body';
+      const committed = await f.store.commit({path, content, message: 'Invalid citation fixture'});
+      await expect(f.repository.ingestActiveGitShares('invalid-citation-ingest')).rejects.toMatchObject({
+        code: 'service_unavailable',
+        details: {reason: 'git_ingest_metadata'},
+      });
+      expect((await f.store.listCanonicalPaths()).find(entry => entry.gitPath === path)?.gitCommit).toBe(
+        committed.gitCommit,
+      );
+      expect(await git(['show', `HEAD:${path}`], f.git.remote)).toBe(content);
+      const projected = await f.database.migratorSql.begin(async tx => {
+        await tx`SELECT set_config('threadnote.tenant_id', ${f.input.tenantId}, true)`;
+        return {
+          heads: await tx`SELECT id FROM remote_memory.memory_heads`,
+          revisions: await tx`SELECT id FROM remote_memory.memory_revisions`,
+        };
+      });
+      expect(projected).toEqual({heads: [], revisions: []});
+    } finally {
+      await f.dispose();
+    }
+  });
 
   it('projects canonical Git independently of member order, scopes, and revocation', async () => {
     const f = await fixture();

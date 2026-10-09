@@ -90,6 +90,11 @@ const CORE_TOOL_NAMES = [
   'list_context',
   'remember_context',
   'finalize_code_refs',
+  'inspect_obsidian_note',
+  'derive_from_obsidian',
+  'read_source_evidence',
+  'inspect_source_evidence',
+  'derive_from_source',
   'review_session_context',
   'apply_memory_candidates',
   'obsidian_publish',
@@ -464,8 +469,8 @@ describe('Threadnote MCP toolsets', () => {
           expect(tools.tools.map(tool => tool.name)).not.toContain(fullOnlyTool);
         }
         const serializedToolsBytes = Buffer.byteLength(JSON.stringify(tools.tools));
-        // Ratchet the eager-host fallback catalog; search-capable hosts can defer these definitions.
-        expect(serializedToolsBytes).toBeLessThanOrEqual(31_000);
+        // Includes the five revisioned source-evidence tools; search-capable hosts can defer definitions.
+        expect(serializedToolsBytes).toBeLessThanOrEqual(36_000);
         expect(tools.tools.find(tool => tool.name === 'recall_context')?.description).toContain(
           'unread threadnote:// pointers, not evidence',
         );
