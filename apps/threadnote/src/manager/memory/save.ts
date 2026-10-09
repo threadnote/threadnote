@@ -23,6 +23,7 @@ export function assertManagerRawSharedMemorySave(
   assertMemoryDocumentSchemaWritable(existingContent);
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
+  assertManagerObsidianEvidenceUnchanged(existingContent, content);
   assertManagerMemoryIdentityUnchanged(uri, existingContent, content);
   const record = parseMemoryDocument(uri, content);
   if (!record) throw new Error('Raw shared memory content must be a valid Threadnote memory document.');
@@ -56,11 +57,27 @@ export function assertManagerRawPersonalMemorySave(
   assertMemoryDocumentSchemaWritable(existingContent);
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
+  assertManagerObsidianEvidenceUnchanged(existingContent, content);
   assertManagerMemoryIdentityUnchanged(uri, existingContent, content);
   const record = parseMemoryDocument(uri, content);
   if (!record) throw new Error('Raw personal memory content must be a valid Threadnote memory document.');
   if ((record.metadata.citationErrors?.length ?? 0) > 0) {
     throw new Error('Malformed code citation metadata must be repaired or recaptured before saving.');
+  }
+}
+
+function assertManagerObsidianEvidenceUnchanged(existingContent: string, content: string): void {
+  const header = (value: string) =>
+    value
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n\n', 1)[0]
+      ?.split('\n')
+      .filter(line => /^\s*obsidian_evidence\s*:/u.test(line)) ?? [];
+  if (JSON.stringify(header(existingContent)) !== JSON.stringify(header(content))) {
+    throw new Error(
+      'Raw Manager saves cannot change Obsidian evidence identity. Derive a new memory from the exact synced note revision.',
+    );
   }
 }
 

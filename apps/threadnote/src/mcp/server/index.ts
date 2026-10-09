@@ -62,6 +62,7 @@ import {
 } from './recall.js';
 import {registerListTool} from './list.js';
 import {registerFinalizeCodeRefsTool, registerStoreTool} from './store.js';
+import {registerObsidianEvidenceTools} from './obsidian_evidence.js';
 import {
   registerCompactTool,
   runNativeAddResourceTool,
@@ -332,6 +333,7 @@ function registerTools(
     registerStoreTool(server, config, 'remember_context', 'Store memory.', memoryScope);
     registerFinalizeCodeRefsTool(server, config);
   }
+  if (toolset === 'core' || toolset === 'full') registerObsidianEvidenceTools(server, config);
   if (toolset === 'full') {
     registerStoreTool(server, config, 'store', 'Compatibility alias for remember_context.');
   }

@@ -40,6 +40,60 @@ describe('Git ingestion metadata boundary', () => {
     });
   });
 
+  it('rejects private imported-note evidence from Git share ingestion', () => {
+    const citation = {
+      version: 1,
+      sourceId: 'notes',
+      sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
+      vaultHash: 'a'.repeat(64),
+      accessHash: 'a'.repeat(64),
+      noteId: '12345678-1234-1234-1234-123456789abc',
+      relativePath: 'Decision.md',
+      revisionHash: 'a'.repeat(64),
+      sanitizerVersion: 'scrubber-redact-v1',
+      fragmentHash: 'a'.repeat(64),
+      fragmentStart: 0,
+      fragmentEnd: 4,
+      pinId: '12345678-1234-1234-1234-123456789abc',
+      expiresAt: '2026-12-01T00:00:00.000Z',
+    } as const;
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'threadnote',
+        topic: 'contract',
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-09T00:00:00.000Z',
+        schemaVersion: 7,
+        obsidianEvidence: citation,
+      },
+      'Private derived prose.',
+    );
+    expect(classifyGitIngestDocument(content, path)).toEqual({accepted: false, reason: 'metadata'});
+    expect(
+      classifyGitIngestDocument(`${header}\nobsidian_evidence: {bad-json}\n\nPrivate derived prose.`, path),
+    ).toEqual({accepted: false, reason: 'metadata'});
+  });
+
+  it.each([
+    ['NOT MEMORY', `schema_version: 7\nobsidian_evidence: ${JSON.stringify(privateEvidence())}`],
+    ['NOT MEMORY', 'obsidian_evidence: {bad-json}'],
+    ['NOT MEMORY', `schema_version: 7\n obsidian_evidence : ${JSON.stringify(privateEvidence())}`],
+    ['NOT MEMORY', ' obsidian_evidence : {bad-json}'],
+    ['HANDOFF', `kind: handoff\nschema_version: 7\nobsidian_evidence: ${JSON.stringify(privateEvidence())}`],
+    ['HANDOFF', 'obsidian_evidence: {bad-json}'],
+    ['HANDOFF', `kind: handoff\nschema_version: 7\n obsidian_evidence : ${JSON.stringify(privateEvidence())}`],
+    ['HANDOFF', ' obsidian_evidence : {bad-json}'],
+  ])('rejects private evidence before legacy or mismatched marker acceptance: %s / %s', (marker, fields) => {
+    const targetPath = marker === 'HANDOFF' ? {...path, kind: 'handoff' as const} : path;
+    expect(classifyGitIngestDocument(`${marker}\n${fields}\n\nPrivate derived prose.`, targetPath)).toEqual({
+      accepted: false,
+      reason: 'metadata',
+    });
+  });
+
   it('preserves lifecycle classification across supported kinds, statuses, and portable identities', () => {
     FC.assert(
       FC.property(
@@ -70,3 +124,22 @@ describe('Git ingestion metadata boundary', () => {
     );
   });
 });
+
+function privateEvidence() {
+  return {
+    version: 1,
+    sourceId: 'notes',
+    sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
+    vaultHash: 'a'.repeat(64),
+    accessHash: 'a'.repeat(64),
+    noteId: '12345678-1234-1234-1234-123456789abc',
+    relativePath: 'Decision.md',
+    revisionHash: 'a'.repeat(64),
+    sanitizerVersion: 'scrubber-redact-v1',
+    fragmentHash: 'a'.repeat(64),
+    fragmentStart: 0,
+    fragmentEnd: 4,
+    pinId: '12345678-1234-1234-1234-123456789abc',
+    expiresAt: '2026-12-01T00:00:00.000Z',
+  } as const;
+}

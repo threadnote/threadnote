@@ -1005,7 +1005,7 @@ export const writeMemoryFile = Effect.fn('share.writeMemoryFile')(function* (
   content: string,
   initialMode: 'create' | 'replace',
   dryRun: boolean,
-  options: {readonly quiet?: boolean} = {},
+  options: {readonly quiet?: boolean; readonly onWriteStarted?: () => void} = {},
 ) {
   if (dryRun) {
     if (options.quiet !== true) {
@@ -1014,6 +1014,7 @@ export const writeMemoryFile = Effect.fn('share.writeMemoryFile')(function* (
     return;
   }
   const store = yield* ResourceStore;
+  options.onWriteStarted?.();
   yield* store.write(resourceStoreLocation(config), uri, content, {
     mode: initialMode === 'replace' ? 'upsert' : 'create',
   });
@@ -1035,7 +1036,7 @@ export function writeMemoryFileChecked<E, R>(
   initialMode: 'create' | 'replace',
   dryRun: boolean,
   check: Effect.Effect<void, E, R>,
-  options: {readonly quiet?: boolean} = {},
+  options: {readonly quiet?: boolean; readonly onWriteStarted?: () => void} = {},
 ) {
   return Effect.gen(function* () {
     if (dryRun) {
@@ -1045,6 +1046,7 @@ export function writeMemoryFileChecked<E, R>(
       return;
     }
     const store = yield* ResourceStore;
+    options.onWriteStarted?.();
     yield* store.writeChecked(
       resourceStoreLocation(config),
       uri,

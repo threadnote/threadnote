@@ -28,6 +28,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {isDirectory, toPosixPath} from '@threadnote/integration-core/utils';
+import {validMemoryObsidianEvidence, type MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
 
 export interface ObsidianSourceAddOptions {
   readonly apply?: boolean;
@@ -66,7 +67,11 @@ export interface ObsidianSourceAutoSyncResult {
 
 interface ObsidianSourceFileState {
   readonly contentHash: string;
+  readonly fileIdentity?: string;
   readonly modifiedAt?: string;
+  readonly noteId?: string;
+  readonly sanitizedHash?: string;
+  readonly sanitizerVersion?: string;
   readonly size: number;
   readonly uri: string;
 }
@@ -82,17 +87,20 @@ interface ObsidianSourceState {
   readonly scan?: ObsidianScanCheckpoint;
   readonly files: Readonly<Record<string, ObsidianSourceFileState>>;
   readonly sourceId: string;
+  readonly sourceInstanceId?: string;
   readonly syncedAt?: string;
-  readonly version: 1;
+  readonly version: 1 | 2;
 }
 
 interface ScannedObsidianNote {
   readonly contentHash: string;
+  readonly fileIdentity?: string;
   readonly modifiedAt?: string;
   readonly path: string;
   readonly redactions: readonly string[];
   readonly relativePath: string;
   readonly sanitizedContent: string;
+  readonly sanitizedHash: string;
   readonly size: number;
   readonly uri: string;
 }
@@ -115,8 +123,9 @@ class ObsidianSourceError extends Schema.TaggedError<ObsidianSourceError>()('Obs
   message: Schema.String,
 }) {}
 
-const SOURCE_STATE_VERSION = 1;
+const SOURCE_STATE_VERSION = 2;
 const SOURCE_STATE_FILENAME = 'state-v1.json';
+export const OBSIDIAN_SANITIZER_VERSION = 'scrubber-redact-v1';
 const SOURCE_MAX_NOTE_BYTES = 512 * 1_024;
 const SOURCE_LOCK_RETRY_MILLISECONDS = 25;
 const SOURCE_LOCK_STALE_MILLISECONDS = 5 * 60 * 1_000;
@@ -128,6 +137,381 @@ const SOURCE_LOCK_OPTIONS = {
 } as const;
 const PRIVATE_FILE_MODE = 0o600;
 const MARKDOWN_EXTENSION = '.md';
+const EVIDENCE_MAX_PINS = 256;
+const EVIDENCE_MAX_BYTES = 64 * 1_024 * 1_024;
+const EVIDENCE_MAX_FRAGMENT_BYTES = 8_192;
+
+interface PinnedObsidianEvidence {
+  readonly citation: MemoryObsidianEvidenceV1;
+  readonly sanitizedContent: string;
+}
+
+export interface ObsidianEvidenceRead {
+  readonly citation: MemoryObsidianEvidenceV1;
+  readonly historical: 'available' | 'expired' | 'revoked' | 'missing' | 'corrupt';
+  readonly fragment?: string;
+  /** Revision equality is a mechanical signal, not validation of the derived claim. */
+  readonly currentRevision: 'same' | 'changed' | 'removed' | 'unknown';
+}
+
+export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
+  config: RuntimeConfig,
+  sourceId: string,
+  relativePath: string,
+) {
+  assertSafeSourceRelativePath(relativePath);
+  const fs = yield* FileSystem.FileSystem;
+  const statePath = yield* sourceStatePath(config, sourceId);
+  return yield* withSourceLock(
+    config,
+    sourceId,
+    withExclusiveFileLock(
+      fs,
+      `${statePath}.lock`,
+      SOURCE_LOCK_OPTIONS,
+      Effect.gen(function* () {
+        const source = requireObsidianSource(yield* readObsidianConfiguration(config), sourceId);
+        if (!source.enabled || !sourcePathMatches(relativePath, source.include, source.exclude)) {
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note is outside the current source access policy.',
+          });
+        }
+        const state = yield* readSourceState(statePath, sourceId);
+        const entry = state.files[relativePath];
+        if (
+          !state.sourceInstanceId ||
+          !entry?.noteId ||
+          !entry.fileIdentity ||
+          !entry.sanitizedHash ||
+          entry.sanitizerVersion !== OBSIDIAN_SANITIZER_VERSION
+        ) {
+          return yield* ObsidianSourceError.make({message: 'Apply source sync before reviewing this Obsidian note.'});
+        }
+        const store = yield* ResourceStore;
+        const sanitizedContent = yield* store.read(resourceStoreLocation(config), entry.uri);
+        const live = (yield* buildObsidianInventory(config, source)).safeNotes.find(
+          note => note.relativePath === relativePath,
+        );
+        if (
+          (yield* sha256Hex(sanitizedContent)) !== entry.sanitizedHash ||
+          !live ||
+          live.fileIdentity !== entry.fileIdentity ||
+          live.sanitizedHash !== entry.sanitizedHash
+        ) {
+          return yield* ObsidianSourceError.make({
+            message: 'Live note differs from the synced sanitized revision; apply source sync and review it again.',
+          });
+        }
+        return {
+          sourceId,
+          sourceInstanceId: state.sourceInstanceId,
+          noteId: entry.noteId,
+          relativePath,
+          revisionHash: entry.sanitizedHash,
+          sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
+          sanitizedContent,
+        };
+      }),
+    ),
+  );
+});
+
+export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(function* (
+  config: RuntimeConfig,
+  input: {
+    readonly sourceId: string;
+    readonly relativePath: string;
+    readonly fragment: string;
+    readonly expectedSourceInstanceId: string;
+    readonly expectedNoteId: string;
+    readonly expectedRevisionHash: string;
+    readonly expectedSanitizerVersion: string;
+    readonly retentionDays?: number;
+  },
+) {
+  const source = requireObsidianSource(yield* readObsidianConfiguration(config), input.sourceId);
+  if (!source.enabled) return yield* ObsidianSourceError.make({message: 'Obsidian source access is disabled.'});
+  assertSafeSourceRelativePath(input.relativePath);
+  const retentionDays = input.retentionDays ?? 90;
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || retentionDays > 365) {
+    return yield* ObsidianSourceError.make({message: 'Obsidian evidence retentionDays must be 1–365.'});
+  }
+  if (!input.fragment || new TextEncoder().encode(input.fragment).byteLength > EVIDENCE_MAX_FRAGMENT_BYTES) {
+    return yield* ObsidianSourceError.make({message: 'Obsidian evidence fragment must be 1–8192 UTF-8 bytes.'});
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const statePath = yield* sourceStatePath(config, source.id);
+  return yield* withSourceLock(
+    config,
+    source.id,
+    withExclusiveFileLock(
+      fs,
+      `${statePath}.lock`,
+      SOURCE_LOCK_OPTIONS,
+      Effect.gen(function* () {
+        const currentSource = requireObsidianSource(yield* readObsidianConfiguration(config), source.id);
+        if (
+          !currentSource.enabled ||
+          !sourcePathMatches(input.relativePath, currentSource.include, currentSource.exclude)
+        ) {
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note is outside the current source access policy.',
+          });
+        }
+        const state = yield* readSourceState(statePath, source.id);
+        const entry = state.files[input.relativePath];
+        if (
+          !state.sourceInstanceId ||
+          !entry?.noteId ||
+          !entry.fileIdentity ||
+          !entry.sanitizedHash ||
+          entry.sanitizerVersion !== OBSIDIAN_SANITIZER_VERSION
+        ) {
+          return yield* ObsidianSourceError.make({message: 'Apply source sync before citing this Obsidian note.'});
+        }
+        if (
+          input.expectedSourceInstanceId !== state.sourceInstanceId ||
+          input.expectedNoteId !== entry.noteId ||
+          input.expectedRevisionHash !== entry.sanitizedHash ||
+          input.expectedSanitizerVersion !== entry.sanitizerVersion
+        ) {
+          return yield* ObsidianSourceError.make({
+            message: 'Reviewed Obsidian note identity or sanitized revision changed; inspect and review it again.',
+          });
+        }
+        const store = yield* ResourceStore;
+        const sanitizedContent = yield* store.read(resourceStoreLocation(config), entry.uri);
+        if ((yield* sha256Hex(sanitizedContent)) !== entry.sanitizedHash) {
+          return yield* ObsidianSourceError.make({
+            message: 'Synced note revision changed during evidence capture; sync again.',
+          });
+        }
+        const live = (yield* buildObsidianInventory(config, currentSource)).safeNotes.find(
+          note => note.relativePath === input.relativePath,
+        );
+        if (!live || live.fileIdentity !== entry.fileIdentity || live.sanitizedHash !== entry.sanitizedHash) {
+          return yield* ObsidianSourceError.make({
+            message: 'Live note differs from the synced sanitized revision; apply source sync and review it again.',
+          });
+        }
+        const fragmentStart = sanitizedContent.indexOf(input.fragment);
+        if (fragmentStart < 0) {
+          return yield* ObsidianSourceError.make({
+            message: 'Evidence fragment is absent from the exact sanitized imported revision.',
+          });
+        }
+        const crypto = yield* Crypto.Crypto;
+        const now = yield* Clock.currentTimeMillis;
+        const pinId = yield* crypto.randomUUIDv4;
+        const citation: MemoryObsidianEvidenceV1 = {
+          version: 1,
+          sourceId: source.id,
+          sourceInstanceId: state.sourceInstanceId,
+          vaultHash: yield* sha256Hex(yield* canonicalDirectory(currentSource.vault, 'Obsidian vault')),
+          accessHash: yield* sourceAccessHash(currentSource),
+          noteId: entry.noteId,
+          relativePath: input.relativePath,
+          revisionHash: entry.sanitizedHash,
+          sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
+          fragmentHash: yield* sha256Hex(input.fragment),
+          fragmentStart,
+          fragmentEnd: fragmentStart + input.fragment.length,
+          pinId,
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + retentionDays * 86_400_000)),
+        };
+        const dir = yield* evidenceDirectory(config, source.id);
+        yield* fs.makeDirectory(dir, {recursive: true});
+        const path = yield* Path.Path;
+        const names = (yield* fs.readDirectory(dir)).filter(name => /^[a-f0-9-]{36}\.json$/u.test(name));
+        let retainedBytes = 0;
+        let retainedCount = 0;
+        for (const name of names) {
+          const candidatePath = path.join(dir, name);
+          const raw = yield* fs.readFileString(candidatePath);
+          const parsed = parseJsonOrUndefined(raw);
+          const candidate = parsed as Partial<PinnedObsidianEvidence> | undefined;
+          if (candidate?.citation?.expiresAt && Date.parse(candidate.citation.expiresAt) <= now) {
+            yield* fs.remove(candidatePath, {force: true});
+          } else {
+            retainedBytes += new TextEncoder().encode(raw).byteLength;
+            retainedCount += 1;
+          }
+        }
+        const pin: PinnedObsidianEvidence = {citation, sanitizedContent};
+        const serialized = `${JSON.stringify(pin)}\n`;
+        if (
+          retainedCount >= EVIDENCE_MAX_PINS ||
+          retainedBytes + new TextEncoder().encode(serialized).byteLength > EVIDENCE_MAX_BYTES
+        ) {
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian evidence retention capacity reached; existing unexpired pins remain available.',
+          });
+        }
+        const destination = path.join(dir, `${pinId}.json`);
+        const temporary = `${destination}.tmp`;
+        yield* fs.writeFileString(temporary, serialized, {mode: PRIVATE_FILE_MODE});
+        yield* fs
+          .rename(temporary, destination)
+          .pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
+        yield* fs.chmod(destination, PRIVATE_FILE_MODE);
+        return citation;
+      }),
+    ),
+  );
+});
+
+export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function* (
+  config: RuntimeConfig,
+  citation: MemoryObsidianEvidenceV1,
+) {
+  const candidate: unknown = citation;
+  if (!validMemoryObsidianEvidence(candidate)) {
+    return {citation, historical: 'corrupt' as const, currentRevision: 'unknown' as const};
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const statePath = yield* sourceStatePath(config, citation.sourceId);
+  return yield* withSourceLock(
+    config,
+    citation.sourceId,
+    withExclusiveFileLock(
+      fs,
+      `${statePath}.lock`,
+      SOURCE_LOCK_OPTIONS,
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const path = yield* Path.Path;
+        const pinPath = path.join(yield* evidenceDirectory(config, citation.sourceId), `${citation.pinId}.json`);
+        if (Date.parse(citation.expiresAt) <= now) {
+          yield* fs.remove(pinPath, {force: true});
+          return {citation, historical: 'expired' as const, currentRevision: 'unknown' as const};
+        }
+        const configuration = yield* readObsidianConfiguration(config);
+        const source = configuration.sources.find(item => item.id === citation.sourceId);
+        if (!source || !isObsidianSource(source)) {
+          return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
+        }
+        const vault = yield* Effect.result(canonicalDirectory(source.vault, 'Obsidian vault'));
+        if (
+          !source.enabled ||
+          Result.isFailure(vault) ||
+          (yield* sha256Hex(vault.success)) !== citation.vaultHash ||
+          (yield* sourceAccessHash(source)) !== citation.accessHash
+        ) {
+          return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
+        }
+        const state = yield* readSourceState(statePath, citation.sourceId);
+        if (state.sourceInstanceId !== citation.sourceInstanceId) {
+          return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
+        }
+        const recordedPaths = Object.entries(state.files)
+          .filter(([, file]) => file.noteId === citation.noteId)
+          .map(([relativePath]) => relativePath);
+        for (const relativePath of recordedPaths.length > 0 ? recordedPaths : [citation.relativePath]) {
+          if (!(yield* sourceEvidenceReadable(vault.success, relativePath))) {
+            return {citation, historical: 'revoked' as const, currentRevision: 'unknown' as const};
+          }
+        }
+        if (!(yield* fs.exists(pinPath)))
+          return {citation, historical: 'missing' as const, currentRevision: 'unknown' as const};
+        const raw = yield* fs.readFileString(pinPath);
+        const pin = parseJsonOrUndefined(raw);
+        if (
+          !pin ||
+          typeof pin !== 'object' ||
+          !('citation' in pin) ||
+          !('sanitizedContent' in pin) ||
+          typeof pin.sanitizedContent !== 'string' ||
+          JSON.stringify(pin.citation) !== JSON.stringify(citation) ||
+          (yield* sha256Hex(pin.sanitizedContent)) !== citation.revisionHash ||
+          citation.fragmentEnd > pin.sanitizedContent.length
+        ) {
+          return {citation, historical: 'corrupt' as const, currentRevision: 'unknown' as const};
+        }
+        const fragment = pin.sanitizedContent.slice(citation.fragmentStart, citation.fragmentEnd);
+        if ((yield* sha256Hex(fragment)) !== citation.fragmentHash) {
+          return {citation, historical: 'corrupt' as const, currentRevision: 'unknown' as const};
+        }
+        const recorded = Object.values(state.files).find(file => file.noteId === citation.noteId);
+        const liveInventory = yield* Effect.result(buildObsidianInventory(config, source));
+        const live =
+          Result.isSuccess(liveInventory) && recorded?.fileIdentity
+            ? liveInventory.success.safeNotes.find(note => note.fileIdentity === recorded.fileIdentity)
+            : undefined;
+        const currentRevision =
+          Result.isFailure(liveInventory) || !recorded?.fileIdentity
+            ? ('unknown' as const)
+            : live === undefined &&
+                liveInventory.success.entries.some(
+                  entry => entry.action === 'skip' && entry.relativePath === citation.relativePath,
+                )
+              ? ('unknown' as const)
+              : live === undefined
+                ? ('removed' as const)
+                : live.sanitizedHash === citation.revisionHash &&
+                    OBSIDIAN_SANITIZER_VERSION === citation.sanitizerVersion
+                  ? ('same' as const)
+                  : ('changed' as const);
+        return {citation, historical: 'available' as const, currentRevision, fragment};
+      }),
+    ),
+  );
+});
+
+const sourceEvidenceReadable = Effect.fn('obsidian.sourceEvidenceReadable')(function* (
+  vault: string,
+  relativePath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const segments = relativePath.split('/');
+  const directories = [
+    vault,
+    ...segments.slice(0, -1).map((_, index) => path.join(vault, ...segments.slice(0, index + 1))),
+  ];
+  for (const [index, directory] of directories.entries()) {
+    const resolved = yield* Effect.result(fs.realPath(directory));
+    if (Result.isFailure(resolved)) return index > 0 && resolved.failure.reason._tag === 'NotFound';
+    if (resolved.success !== directory) return false;
+    const listed = yield* Effect.result(fs.readDirectory(directory));
+    if (Result.isFailure(listed)) return index > 0 && listed.failure.reason._tag === 'NotFound';
+    const searchable = yield* Effect.result(fs.stat(`${directory}/.`));
+    if (Result.isFailure(searchable)) return index > 0 && searchable.failure.reason._tag === 'NotFound';
+  }
+  const notePath = path.join(vault, ...segments);
+  const resolvedNote = yield* Effect.result(fs.realPath(notePath));
+  if (Result.isFailure(resolvedNote)) return resolvedNote.failure.reason._tag === 'NotFound';
+  if (resolvedNote.success !== notePath) return false;
+  const note = yield* Effect.result(fs.stat(notePath));
+  if (Result.isFailure(note)) return note.failure.reason._tag === 'NotFound';
+  if (note.success.type !== 'File') return false;
+  const access = yield* Effect.result(fs.access(notePath, {readable: true}));
+  return Result.isSuccess(access) || access.failure.reason._tag === 'NotFound';
+});
+
+export const discardObsidianEvidence = Effect.fn('obsidian.discardEvidence')(function* (
+  config: RuntimeConfig,
+  citation: MemoryObsidianEvidenceV1,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.remove(path.join(yield* evidenceDirectory(config, citation.sourceId), `${citation.pinId}.json`), {
+    force: true,
+  });
+});
+
+const evidenceDirectory = Effect.fn('obsidian.evidenceDirectory')(function* (
+  config: Pick<RuntimeConfig, 'agentContextHome' | 'account'>,
+  sourceId: string,
+) {
+  const path = yield* Path.Path;
+  return path.join(yield* sourceStateDirectory(config, sourceId), 'evidence');
+});
+
+const sourceAccessHash = Effect.fn('obsidian.sourceAccessHash')(function* (source: ObsidianSourceConfig) {
+  return yield* sha256Hex(
+    JSON.stringify({vault: source.vault, include: source.include, exclude: source.exclude, inbox: source.inbox}),
+  );
+});
 
 export const runObsidianSourceAdd = Effect.fn('obsidian.sourceAdd')(function* (
   config: RuntimeConfig,
@@ -353,29 +737,42 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           } satisfies ObsidianInventory;
         }
         const currentTimeMillis = yield* Clock.currentTimeMillis;
+        const crypto = yield* Crypto.Crypto;
+        const identities = new Map<string, ObsidianSourceFileState[]>();
+        for (const previous of Object.values(plan.state.files)) {
+          if (!previous.fileIdentity) continue;
+          identities.set(previous.fileIdentity, [...(identities.get(previous.fileIdentity) ?? []), previous]);
+        }
+        const nextFiles: Record<string, ObsidianSourceFileState> = Object.fromEntries(
+          behavior.quantum
+            ? Object.entries(plan.state.files).filter(
+                ([relative]) =>
+                  !plan.entries.some(entry => entry.relativePath === relative && entry.action === 'remove'),
+              )
+            : [],
+        );
+        for (const note of plan.safeNotes) {
+          const matching = note.fileIdentity ? identities.get(note.fileIdentity) : undefined;
+          const previousNoteId = matching?.[0]?.noteId;
+          nextFiles[note.relativePath] = {
+            contentHash: note.contentHash,
+            fileIdentity: note.fileIdentity,
+            modifiedAt: note.modifiedAt,
+            noteId:
+              previousNoteId && matching?.every(previous => previous.noteId === previousNoteId)
+                ? previousNoteId
+                : yield* crypto.randomUUIDv4,
+            sanitizedHash: note.sanitizedHash,
+            sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
+            size: note.size,
+            uri: note.uri,
+          };
+        }
         const nextState: ObsidianSourceState = {
-          files: Object.fromEntries([
-            ...(behavior.quantum
-              ? Object.entries(plan.state.files).filter(
-                  ([relative]) =>
-                    !plan.entries.some(entry => entry.relativePath === relative && entry.action === 'remove'),
-                )
-              : []),
-            ...plan.safeNotes.map(
-              note =>
-                [
-                  note.relativePath,
-                  {
-                    contentHash: note.contentHash,
-                    modifiedAt: note.modifiedAt,
-                    size: note.size,
-                    uri: note.uri,
-                  },
-                ] as const,
-            ),
-          ]),
+          files: nextFiles,
           ...(plan.scan === undefined ? {} : {scan: plan.scan}),
           sourceId: source.id,
+          sourceInstanceId: plan.state.sourceInstanceId ?? (yield* crypto.randomUUIDv4),
           syncedAt:
             plan.scan === undefined ? DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)) : plan.state.syncedAt,
           version: SOURCE_STATE_VERSION,
@@ -527,13 +924,17 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
       continue;
     }
     const contentHash = yield* sha256Hex(content);
+    const sanitizedHash = yield* sha256Hex(scrubbed.cleaned);
+    const fileIdentity = yield* sourceFileIdentity(file.path);
     const note: ScannedObsidianNote = {
       contentHash,
+      fileIdentity,
       modifiedAt: file.modifiedAt?.toISOString(),
       path: file.path,
       redactions: scrubbed.redactions.map(item => item.name),
       relativePath,
       sanitizedContent: scrubbed.cleaned,
+      sanitizedHash,
       size: file.size,
       uri: obsidianSourceUri(source.id, relativePath),
     };
@@ -543,7 +944,11 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
     entries.push({
       action: !recorded
         ? 'add'
-        : recorded.contentHash === contentHash && recorded.uri === note.uri
+        : recorded.contentHash === contentHash &&
+            recorded.uri === note.uri &&
+            recorded.fileIdentity === fileIdentity &&
+            recorded.sanitizedHash === sanitizedHash &&
+            recorded.sanitizerVersion === OBSIDIAN_SANITIZER_VERSION
           ? 'unchanged'
           : 'update',
       detail:
@@ -644,7 +1049,7 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
     typeof value !== 'object' ||
     value === null ||
     !('version' in value) ||
-    value.version !== SOURCE_STATE_VERSION ||
+    (value.version !== 1 && value.version !== SOURCE_STATE_VERSION) ||
     !('sourceId' in value) ||
     value.sourceId !== sourceId ||
     !('files' in value) ||
@@ -673,7 +1078,13 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
     }
     files[relativePath] = {
       contentHash: entry.contentHash,
+      fileIdentity: 'fileIdentity' in entry && typeof entry.fileIdentity === 'string' ? entry.fileIdentity : undefined,
       modifiedAt: 'modifiedAt' in entry && typeof entry.modifiedAt === 'string' ? entry.modifiedAt : undefined,
+      noteId: 'noteId' in entry && typeof entry.noteId === 'string' ? entry.noteId : undefined,
+      sanitizedHash:
+        'sanitizedHash' in entry && typeof entry.sanitizedHash === 'string' ? entry.sanitizedHash : undefined,
+      sanitizerVersion:
+        'sanitizerVersion' in entry && typeof entry.sanitizerVersion === 'string' ? entry.sanitizerVersion : undefined,
       size: entry.size,
       uri: entry.uri,
     };
@@ -700,13 +1111,31 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
     files,
     ...(scan === undefined ? {} : {scan}),
     sourceId,
+    sourceInstanceId:
+      'sourceInstanceId' in value && typeof value.sourceInstanceId === 'string' ? value.sourceInstanceId : undefined,
     syncedAt: 'syncedAt' in value && typeof value.syncedAt === 'string' ? value.syncedAt : undefined,
-    version: SOURCE_STATE_VERSION,
+    version: value.version,
   };
 }
 
 function emptySourceState(sourceId: string): ObsidianSourceState {
   return {files: {}, sourceId, version: SOURCE_STATE_VERSION};
+}
+
+const sourceFileIdentity = Effect.fn('obsidian.sourceFileIdentity')(function* (path: string) {
+  const stat = yield* Effect.tryPromise({try: () => Bun.file(path).stat(), catch: () => undefined}).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+  if (!stat?.isFile() || !stat.ino || !stat.birthtimeMs) return undefined;
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+});
+
+function parseJsonOrUndefined(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
 }
 
 const canonicalDirectory = Effect.fn('obsidian.canonicalDirectory')(function* (value: string, label: string) {

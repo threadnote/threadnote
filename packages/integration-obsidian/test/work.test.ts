@@ -48,9 +48,16 @@ const setup = Effect.fn(function* () {
   yield* fs.makeDirectory(vault);
   yield* runObsidianSourceAdd(config, {id: 'vault', vault, include: ['**/*.md'], apply: true});
   const statePath = path.join(home, 'threadnote', 'sources', 'obsidian', 'vault', 'state-v1.json');
-  const readState = fs
-    .readFileString(statePath)
-    .pipe(Effect.map(raw => JSON.parse(raw) as {files: Record<string, unknown>; scan?: unknown}));
+  const readState = fs.readFileString(statePath).pipe(
+    Effect.map(
+      raw =>
+        JSON.parse(raw) as {
+          files: Record<string, {noteId?: string}>;
+          scan?: unknown;
+          sourceInstanceId?: string;
+        },
+    ),
+  );
   return {fs, path, config, vault, readState};
 });
 
@@ -71,12 +78,19 @@ describe('Obsidian bounded source work', () => {
         expect(first.syncedDocuments).toHaveLength(64);
         expect(first.more).toBe(true);
         expect(Object.keys((yield* readState).files)).toHaveLength(64);
+        const firstState = yield* readState;
+        const firstNoteId = firstState.files[names[0]]?.noteId;
+        expect(firstNoteId).toBeDefined();
+        expect(firstState.sourceInstanceId).toBeDefined();
         const second = yield* obsidianSourceWork.run(config, 'vault', options);
         expect(second.more).toBe(false);
         expect(Object.keys((yield* readState).files).sort()).toEqual(names);
+        expect((yield* readState).files[names[0]]?.noteId).toBe(firstNoteId);
+        expect((yield* readState).sourceInstanceId).toBe(firstState.sourceInstanceId);
         const repeated = yield* obsidianSourceWork.run(config, 'vault', options);
         expect(repeated.syncedDocuments).toEqual([]);
         expect(Object.keys((yield* readState).files)).toHaveLength(count);
+        expect((yield* readState).files[names[0]]?.noteId).toBe(firstNoteId);
         if (repeated.more) yield* obsidianSourceWork.run(config, 'vault', options);
         yield* fs.remove(path.join(vault, names[0]));
         yield* obsidianSourceWork.run(config, 'vault', options);

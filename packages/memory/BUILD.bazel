@@ -45,6 +45,7 @@ bun_test(
         "//packages/memory:test/unit/memory_document.test.ts",
         "//packages/memory:test/unit/memory_hygiene.linear-parsing.test.ts",
         "//packages/memory:test/unit/memory_hygiene.test.ts",
+        "//packages/memory:test/unit/memory_obsidian_evidence.test.ts",
         "//packages/platform:package.json",
         "//packages/platform:src/glob.ts",
         "//packages/platform:src/json.ts",
@@ -87,6 +88,7 @@ bun_test(
         "packages/memory/test/unit/memory_document.test.ts",
         "packages/memory/test/unit/memory_hygiene.linear-parsing.test.ts",
         "packages/memory/test/unit/memory_hygiene.test.ts",
+        "packages/memory/test/unit/memory_obsidian_evidence.test.ts",
     ],
 )
 
@@ -293,6 +295,7 @@ bun_test(
         "//apps/threadnote:src/mcp/server/maintenance_metadata.ts",
         "//apps/threadnote:src/mcp/server/memory.ts",
         "//apps/threadnote:src/mcp/server/memory_read_recovery.ts",
+        "//apps/threadnote:src/mcp/server/obsidian_evidence.ts",
         "//apps/threadnote:src/mcp/server/procedure.ts",
         "//apps/threadnote:src/mcp/server/recall.ts",
         "//apps/threadnote:src/mcp/server/recall_selection.ts",

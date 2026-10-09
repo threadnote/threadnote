@@ -1,5 +1,6 @@
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
+import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {inspectRemoteMemoryContent} from '@threadnote/memory/remote/content';
 import type {GitCanonicalListedPath} from './canonical_store.js';
 
@@ -17,6 +18,9 @@ export function classifyGitIngestDocument(
   path: Pick<GitCanonicalListedPath, 'kind' | 'project' | 'topic'>,
 ): GitIngestDocument {
   if (!inspectRemoteMemoryContent(content).allowed) return {accepted: false, reason: 'content_policy'};
+  if (memoryCodeCitationContentSharingBlocker('threadnote://share/ingest/memories/durable/project/topic.md', content)) {
+    return {accepted: false, reason: 'metadata'};
+  }
   const header = content.trim().replace(/\r\n?/gu, '\n').split('\n\n', 1)[0];
   const lines = header.split('\n');
   const marker = lines[0]?.trim();

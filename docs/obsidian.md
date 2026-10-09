@@ -75,6 +75,73 @@ After a background refresh or an explicit applied sync, normal CLI and MCP recal
 searches include matching vault notes. Results retain their external/untrusted
 warnings and canonical `threadnote://resources/external/obsidian/...` URI.
 
+## Cite a note when accepting a derived memory
+
+The local MCP `derive_from_obsidian` tool accepts a **private durable memory** and
+pins the exact sanitized imported revision that supported it. First apply a
+source sync, then call `inspect_obsidian_note` with the source ID and
+vault-relative path. It returns the sanitized text plus source instance, note
+ID, sanitizer version, and sanitized revision SHA-256 from one locked read.
+Review that text and pass its exact identity and a supporting fragment to
+`derive_from_obsidian`. The tool rejects a fragment that is absent, a changed
+reviewed revision or note identity, a stale sync, an excluded note, or an
+unsafe note.
+For example:
+
+```text
+inspect_obsidian_note({sourceId: "engineering", relativePath: "Engineering/Decision.md"})
+
+derive_from_obsidian({
+  sourceId: "engineering",
+  relativePath: "Engineering/Decision.md",
+  expectedSourceInstanceId: "<instance from inspect>",
+  expectedNoteId: "<note ID from inspect>",
+  expectedRevisionHash: "<sanitized SHA-256 from inspect>",
+  expectedSanitizerVersion: "<sanitizer contract from inspect>",
+  fragment: "Use the token mediator.",
+  text: "The architecture decision uses the token mediator.",
+  project: "threadnote",
+  topic: "token-mediator"
+})
+```
+
+`read_context` exposes the resulting `obsidian_evidence` citation identity in
+the memory header. Call `read_source_evidence({memoryUri: "<returned memory URI>"})`
+to inspect its historical supporting fragment and a **freshly observed**
+current sanitized revision comparison. `same` means the current note has the
+same sanitized bytes; it does not establish that the derived claim is still
+applicable. `changed`, `removed`, and `unknown` likewise do not automatically
+supersede a memory. An unsynced edit or deletion is observed by this reader.
+After a later sync drops a deleted note's identity from current state, the
+comparison may become `unknown`; historical support remains inspectable until
+expiry while Threadnote avoids inferring a current match from a reused path.
+
+Each citation records a source instance, stable note ID, path at capture,
+sanitizer contract (`scrubber-redact-v1`), sanitized revision hash, fragment
+hash/offsets, and expiry. The cited bytes are pinned privately under
+Threadnote's Obsidian source state, separate from the changing external index.
+These memories use schema version 7 so older writers refuse to rewrite and
+silently lose this citation.
+Only cited notes are pinned. The default retention is 90 days; callers may set
+`retentionDays` from 1 to 365. A source accepts at most 256 unexpired pins and
+64 MiB of pinned data; capture fails at capacity rather than evicting a promised
+pin. Expiry makes evidence unavailable immediately. Expired files are removed
+when that source is read or captured; an idle installation may retain the file
+past logical expiry until the next such operation. The memory citation identity
+remains after expiry or missing storage, with an explicit unavailable state.
+
+Note identity survives a rename when the filesystem supplies an unambiguous
+file identity. A different file reusing an old path receives a new note ID.
+Where filesystem identity is unavailable or ambiguous, the importer assigns a
+new ID rather than guessing. An applied sync upgrades older source state before
+capture. The reader never re-sanitizes raw vault text as a fallback for missing
+historical evidence. Disabling/removing a source, changing its access selection
+or vault, or replacing a removed source ID revokes historical content access;
+removing a source also deletes its pins. Private cited memories cannot be
+published to a shared memory repository until a separate approved evidence
+publication path exists. Derived prose remains private unless deliberately
+published through a supported policy.
+
 ## Publish selected Threadnote memories into Obsidian
 
 ```bash

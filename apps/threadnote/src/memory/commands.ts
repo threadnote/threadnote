@@ -1449,6 +1449,18 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   }
   const options = yield* resolveStoreMemoryReplacementOptions(config, input);
   const replaceUri = options.replaceUri;
+  if (replaceUri) {
+    const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri);
+    if (
+      current.record?.metadata.obsidianEvidence &&
+      JSON.stringify(current.record.metadata.obsidianEvidence) !== JSON.stringify(options.metadata.obsidianEvidence)
+    ) {
+      return yield* MemoryOperationError.make({
+        message:
+          'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
+      });
+    }
+  }
   const ov = NATIVE_RESOURCE_BACKEND;
   if (replaceUri && isInSharedNamespace(config, replaceUri)) {
     if (options.deferredCodeAnchor) {

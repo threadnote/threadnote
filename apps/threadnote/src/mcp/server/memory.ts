@@ -499,6 +499,8 @@ export interface WriteDurableMemoryParams {
     readonly uri: string;
   }[];
   readonly metadata: MemoryMetadata;
+  /** The canonical store write has begun; callers must treat its outcome as potentially committed. */
+  readonly onCanonicalWriteStarted?: () => void;
   readonly operation?: 'create' | 'replace' | 'upsert';
   readonly prepared?: PreparedPersonalMemoryWrite;
   readonly replaceUri?: string;
@@ -570,6 +572,15 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
       if (params.replaceUri) {
         if (!currentReplaceTarget) {
           return argumentError(`Memory ${params.replaceUri} no longer exists.`);
+        }
+        if (
+          currentReplaceTarget.metadata.obsidianEvidence &&
+          JSON.stringify(currentReplaceTarget.metadata.obsidianEvidence) !==
+            JSON.stringify(params.metadata.obsidianEvidence)
+        ) {
+          return argumentError(
+            'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
+          );
         }
         const schemaRewriteError = memorySchemaRewriteError(currentReplaceTarget.content);
         if (schemaRewriteError) return argumentError(schemaRewriteError.message);
@@ -661,9 +672,12 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
             writeMode,
             false,
             verifyAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent),
-            {quiet: true},
+            {quiet: true, onWriteStarted: params.onCanonicalWriteStarted},
           )
-        : writeMemoryFile(config, ov, memoryUri, memory, writeMode, false, {quiet: true});
+        : writeMemoryFile(config, ov, memoryUri, memory, writeMode, false, {
+            quiet: true,
+            onWriteStarted: params.onCanonicalWriteStarted,
+          });
       if (params.replaceUri && !isInPlaceUpdate && currentReplaceTarget) {
         yield* recordMemoryRelocation(config, {
           fromContent: currentReplaceTarget.content,
