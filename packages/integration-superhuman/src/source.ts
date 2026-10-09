@@ -13,6 +13,7 @@ import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Clock, Console, DateTime, Effect, Random, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceStore, type ResourceStoreMutation} from '@threadnote/store/resource-store';
+import {removeSourceEvidencePins} from '@threadnote/store/source-evidence';
 import {
   externalDocumentManifestUri,
   externalResourceUri,
@@ -846,6 +847,7 @@ export const runSuperhumanSourceRemove = Effect.fn('superhuman.remove')(function
           sources: configuration.sources.filter(item => item.id !== source.id),
         };
       });
+      yield* removeSourceEvidencePins(location(config), 'superhuman', source.id);
     }),
   );
   yield* Console.log(`Removed Superhuman source "${source.id}" and local external resources.`);

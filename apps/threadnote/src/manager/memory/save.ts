@@ -24,6 +24,7 @@ export function assertManagerRawSharedMemorySave(
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
   assertManagerObsidianEvidenceUnchanged(existingContent, content);
+  assertManagerSourceEvidenceUnchanged(existingContent, content);
   assertManagerMemoryIdentityUnchanged(uri, existingContent, content);
   const record = parseMemoryDocument(uri, content);
   if (!record) throw new Error('Raw shared memory content must be a valid Threadnote memory document.');
@@ -58,6 +59,7 @@ export function assertManagerRawPersonalMemorySave(
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
   assertManagerObsidianEvidenceUnchanged(existingContent, content);
+  assertManagerSourceEvidenceUnchanged(existingContent, content);
   assertManagerMemoryIdentityUnchanged(uri, existingContent, content);
   const record = parseMemoryDocument(uri, content);
   if (!record) throw new Error('Raw personal memory content must be a valid Threadnote memory document.');
@@ -77,6 +79,21 @@ function assertManagerObsidianEvidenceUnchanged(existingContent: string, content
   if (JSON.stringify(header(existingContent)) !== JSON.stringify(header(content))) {
     throw new Error(
       'Raw Manager saves cannot change Obsidian evidence identity. Derive a new memory from the exact synced note revision.',
+    );
+  }
+}
+
+function assertManagerSourceEvidenceUnchanged(existingContent: string, content: string): void {
+  const header = (value: string) =>
+    value
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      .split('\n\n', 1)[0]
+      ?.split('\n')
+      .filter(line => /^\s*source_evidence\s*:/u.test(line)) ?? [];
+  if (JSON.stringify(header(existingContent)) !== JSON.stringify(header(content))) {
+    throw new Error(
+      'Raw Manager saves cannot change source evidence identity. Derive a new memory from the exact synced source revision.',
     );
   }
 }

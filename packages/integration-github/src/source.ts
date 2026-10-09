@@ -10,6 +10,7 @@ import {isGitHubSource} from './config.js';
 import {Clock, Console, DateTime, Effect, FileSystem, Path, Random, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {removeSourceEvidencePins} from '@threadnote/store/source-evidence';
 import {
   externalSourceReceiptUri,
   readExternalDocumentManifest,
@@ -457,6 +458,7 @@ export const runGitHubSourceRemove = Effect.fn('github.remove')(function* (
         projections: configuration.projections,
         sources: configuration.sources.filter(item => item.id !== source.id),
       }));
+      yield* removeSourceEvidencePins(loc(config), 'github', source.id);
     }),
   );
   yield* Console.log(`Removed GitHub source "${source.id}".`);

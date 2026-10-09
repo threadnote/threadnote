@@ -5,6 +5,11 @@ import type {ConfigurationHome, SourceConfig} from './config.js';
 
 export interface ExternalSourcePolicyRegistration {
   readonly provider: ExternalProvider;
+  /** Invoked only for retained evidence access, never during ordinary cached reads. */
+  readonly evidenceFingerprint?: (
+    source: SourceConfig,
+    config: ConfigurationHome,
+  ) => Effect.Effect<string | undefined, never, FileSystem.FileSystem | Path.Path | SystemInfo>;
   readonly resolve: (
     source: SourceConfig,
     config: ConfigurationHome,

@@ -139,8 +139,13 @@ export function captureConsolidationSource(source: {
   assertMemoryDocumentSchemaWritable(source.content);
   const record = parseMemoryDocument(source.uri, source.content);
   if (!record || record.metadata.citationErrors?.length) fail(`source ${source.uri} has invalid evidence metadata.`);
-  if (record.metadata.obsidianEvidence || record.metadata.obsidianEvidenceError) {
-    fail(`source ${source.uri} has Obsidian evidence that consolidation cannot preserve yet.`);
+  if (
+    record.metadata.obsidianEvidence ||
+    record.metadata.obsidianEvidenceError ||
+    record.metadata.sourceEvidence ||
+    record.metadata.sourceEvidenceError
+  ) {
+    fail(`source ${source.uri} has private evidence that consolidation cannot preserve yet.`);
   }
   const relationHeaders = source.content
     .split(/\r?\n\r?\n/, 1)[0]

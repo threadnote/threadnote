@@ -3,11 +3,13 @@ import {Clock, Effect, FileSystem, Redacted, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   externalResourceAccess,
   loadExternalResourceAccess,
   readExternalDocumentManifest,
   readExternalSourceReceipt,
+  ExternalSourcePolicy,
 } from '@threadnote/store/external-resource';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -42,6 +44,31 @@ const fixture = Effect.gen(function* () {
 });
 const doc = linearDocumentId(source.organizationId, 'issue', issue.id);
 describe('Linear read-only source lifecycle', () => {
+  effectIt.effect('uses current credential only for evidence fingerprints', () =>
+    Effect.gen(function* () {
+      const {config, location, fs, home} = yield* fixture;
+      yield* runLinearSourceAdd(config, options);
+      const policy = yield* ExternalSourcePolicy;
+      expect(yield* policy.evidenceFingerprint!(location, source.id, 'linear')).toBe(
+        sha256HexSync('synthetic-linear-private-key'),
+      );
+      yield* storeLinearCredential(config, source.id, Redacted.make('synthetic-linear-rotated-key'));
+      expect(yield* policy.evidenceFingerprint!(location, source.id, 'linear')).toBe(
+        sha256HexSync('synthetic-linear-rotated-key'),
+      );
+      yield* fs.remove(`${home}/threadnote/credentials/linear/${source.id}`);
+      expect(yield* policy.evidenceFingerprint!(location, source.id, 'linear')).toBeUndefined();
+      expect(yield* policy.current(location, source.id, 'linear')).toBeUndefined();
+      yield* mutateSourceConfiguration(config, configuration => ({
+        ...configuration,
+        sources: configuration.sources.map(candidate =>
+          candidate.id === source.id ? {...candidate, enabled: false} : candidate,
+        ),
+      }));
+      expect(yield* policy.evidenceFingerprint!(location, source.id, 'linear')).toBeUndefined();
+      yield* runLinearSourceRemove(config, {id: source.id, apply: true});
+    }).pipe(TestClock.withLive, provideLayer),
+  );
   effectIt.effect('protects local credentials and denies all provider cache after disable/remove', () =>
     Effect.gen(function* () {
       const {config, fs, home, location} = yield* fixture;

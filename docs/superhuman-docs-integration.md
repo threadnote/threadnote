@@ -58,3 +58,7 @@ Output contains structural counts, equality checks, and coverage flags, omitting
 Authenticated testing verified a complete three-page inventory and identical ordered content for a selected two-line canvas across full and one-line batches. This validates the plain-text pagination contract only; it does not establish rich-canvas or table fidelity.
 
 The earlier MCP diagnostics remain available as `scripts/probe-superhuman-docs.ts` and `scripts/probe-superhuman-contract.ts`. Catalog discovery uses only initialize, initialized, and paginated tools/list at the fixed official MCP endpoint. It bounds catalog pages, tools, response bytes, and time, and omits provider descriptions. The selected-page diagnostic uses reviewed read tools and always reports the complete Markdown read contract as unverified. MCP resource URI context fragments and redirect locations are transient provider data, never local identities. The production source uses the verified REST contract.
+
+## Retained support for derived memories
+
+Use the [retained source evidence flow](source-evidence.md) to accept a private memory with the exact reviewed sanitized fragment and retrieve it after the imported source changes. Current access checks still apply.

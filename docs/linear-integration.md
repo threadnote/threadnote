@@ -54,3 +54,7 @@ Public schema introspection verified the existence of issue and comment fields, 
 OAuth onboarding, hosted webhook invalidation, native agent delegation, and writeback are later work. The official [read-only MCP server](https://linear.app/docs/mcp) remains an alternative for interactive access; the native source uses a separate scoped persistence and access contract.
 
 Sources: [GraphQL](https://linear.app/developers/graphql), [pagination](https://linear.app/developers/pagination), [rate limits](https://linear.app/developers/rate-limiting), [private-team access](https://linear.app/docs/private-teams), and [comments](https://linear.app/docs/comment-on-issues).
+
+## Retained support for derived memories
+
+Use the [retained source evidence flow](source-evidence.md) to accept a private memory with the exact reviewed sanitized fragment and retrieve it after the imported source changes. Current access checks still apply.

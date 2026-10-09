@@ -10,7 +10,8 @@
     "./resource-id": "./src/resource-id.ts",
     "./resource-segment": "./src/resource-segment.ts",
     "./resource-store": "./src/resource-store.ts",
-    "./external-resource": "./src/external-resource.ts"
+    "./external-resource": "./src/external-resource.ts",
+    "./source-evidence": "./src/source-evidence.ts"
   },
   "dependencies": {
     "effect": "4.0.0",

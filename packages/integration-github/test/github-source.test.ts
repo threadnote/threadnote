@@ -6,8 +6,10 @@ import {describe, expect} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {serializeSourceEvidenceCitation} from '@threadnote/store/source-evidence';
 import {
   externalResourceUri,
   readExternalDocumentManifest,
@@ -15,11 +17,13 @@ import {
   externalSourceReceiptUri,
   serializeExternalSourceReceipt,
   loadExternalResourceAccess,
+  ExternalSourcePolicy,
 } from '@threadnote/store/external-resource';
+import {removeGitHubCredential, storeGitHubCredential} from '../src/credentials.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {makeSourceConfigurationRegistry, sourceConfigurationStoreLayer} from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
-import {githubSourceCodec} from '../src/config.js';
+import {githubSourceCodec, mutateSourceConfiguration} from '../src/config.js';
 import {githubExternalSourcePolicy} from '../src/access-policy.js';
 import {
   runGitHubSourceAdd,
@@ -111,6 +115,57 @@ const selectedFetch = (url: URL) => {
   return fixtureFetch([1, 2])(url);
 };
 describe('GitHub source', () => {
+  effectIt.effect('resolves evidence credentials lazily and rejects rotation or loss', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'github-evidence-policy-'});
+      const config = yield* setup(home);
+      const policy = yield* ExternalSourcePolicy;
+      expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBe(
+        sha256HexSync('ghp_synthetic_test_only_key'),
+      );
+      yield* storeGitHubCredential(config, 'github', Redacted.make('ghp_synthetic_rotated_key'));
+      expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBe(
+        sha256HexSync('ghp_synthetic_rotated_key'),
+      );
+      yield* removeGitHubCredential(config, 'github');
+      expect((yield* policy.current(location(config), 'github', 'github'))?.enabled).toBe(true);
+      expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBeUndefined();
+      yield* mutateSourceConfiguration(config, configuration => ({
+        ...configuration,
+        sources: configuration.sources.map(source => (source.id === 'github' ? {...source, enabled: false} : source)),
+      }));
+      expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBeUndefined();
+      const pinId = '12345678-1234-4234-8234-123456789abc';
+      const pinDirectory = `${home}/threadnote/source-evidence/local/github/github`;
+      yield* fs.makeDirectory(pinDirectory, {recursive: true, mode: 0o700});
+      const citation = {
+        version: 1 as const,
+        provider: 'github' as const,
+        sourceId: 'github',
+        sourceInstanceId: 'a'.repeat(64),
+        resourceUri: uri(),
+        accessHash: 'a'.repeat(64),
+        revisionHash: sha256HexSync('abcd'),
+        contentHash: 'a'.repeat(64),
+        rendererVersion: 'github-v1',
+        sanitizerVersion: 'scrubber-redact-v1',
+        fragmentHash: sha256HexSync('abcd'),
+        fragmentStart: 0,
+        fragmentEnd: 4,
+        pinId,
+        expiresAt: '2099-01-01T00:00:00.000Z',
+      };
+      yield* fs.writeFileString(
+        `${pinDirectory}/${pinId}.json`,
+        `THREADNOTE SOURCE EVIDENCE/1\n${serializeSourceEvidenceCitation(citation)}\nabcd`,
+        {mode: 0o600},
+      );
+      yield* runGitHubSourceRemove(config, {id: 'github', apply: true});
+      expect(yield* policy.evidenceFingerprint!(location(config), 'github', 'github')).toBeUndefined();
+      expect(yield* fs.exists(`${pinDirectory}/${pinId}.json`)).toBe(false);
+    }).pipe(TestClock.withLive, provide),
+  );
   effectIt.effect('publishes complete stable snapshots idempotently and denies direct reads on removal', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

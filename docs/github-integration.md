@@ -54,3 +54,7 @@ GITHUB_PROBE_REPOSITORY=owner/repository bun scripts/probe-github-source.ts
 The probe prints structural counts and a snapshot hash, without conversation text, authors, or credentials. Its inventory result is explicitly a first-page sample. It does not modify GitHub or verify mutation and revocation behavior.
 
 GitHub documents the [issue and conversation APIs](https://docs.github.com/en/rest/issues), [submitted reviews](https://docs.github.com/en/rest/pulls/reviews), [GraphQL review threads](https://docs.github.com/en/graphql/reference/pulls), and [pagination and rate-limit handling](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api).
+
+## Retained support for derived memories
+
+Use the [retained source evidence flow](source-evidence.md) to accept a private memory with the exact reviewed sanitized fragment and retrieve it after the imported source changes. Current access checks still apply.

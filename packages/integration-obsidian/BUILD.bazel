@@ -487,6 +487,7 @@ bun_test(
         "//packages/store:src/resource/lock.ts",
         "//packages/store:src/resource/mutation_generation.ts",
         "//packages/store:src/resource/recall-invalidation.ts",
+        "//packages/store:src/source-evidence.ts",
         "//packages/workspace:package.json",
         "//packages/workspace:src/config.ts",
         "//packages/workspace:src/constants.ts",

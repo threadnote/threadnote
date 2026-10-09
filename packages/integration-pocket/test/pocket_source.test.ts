@@ -9,12 +9,13 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {readExternalDocumentManifest} from '@threadnote/store/external-resource';
+import {ExternalSourcePolicy, readExternalDocumentManifest} from '@threadnote/store/external-resource';
+import {removePocketCredential, storePocketCredential} from '../src/credentials.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {makeSourceConfigurationRegistry, sourceConfigurationStoreLayer} from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
-import {pocketSourceCodec} from '../src/config.js';
+import {mutateSourceConfiguration, pocketSourceCodec} from '../src/config.js';
 import {pocketExternalSourcePolicy} from '../src/access-policy.js';
 import {
   runPocketSourceAdd,
@@ -78,6 +79,37 @@ afterAll(() => {
 });
 
 describe('Pocket source', () => {
+  effectIt.effect('resolves evidence credentials lazily and rejects rotation or loss', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-evidence-policy-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runPocketSourceAdd(config, {
+        id: 'evidence',
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make('pk_synthetic_evidence'),
+      });
+      const location = {home, account: 'local', user: 'tester'};
+      const policy = yield* ExternalSourcePolicy;
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBe(
+        sha256HexSync('pk_synthetic_evidence'),
+      );
+      yield* storePocketCredential(config, 'evidence', Redacted.make('pk_synthetic_rotated'));
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBe(
+        sha256HexSync('pk_synthetic_rotated'),
+      );
+      yield* removePocketCredential(config, 'evidence');
+      expect((yield* policy.current(location, 'evidence', 'pocket'))?.enabled).toBe(true);
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBeUndefined();
+      yield* mutateSourceConfiguration(config, configuration => ({
+        ...configuration,
+        sources: configuration.sources.map(source => (source.id === 'evidence' ? {...source, enabled: false} : source)),
+      }));
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'pocket')).toBeUndefined();
+      yield* runPocketSourceRemove(config, {id: 'evidence', apply: true});
+    }).pipe(TestClock.withLive, provide),
+  );
   effectIt.effect('prints inventory and status through the provider source functions', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

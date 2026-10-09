@@ -6,6 +6,13 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resolveLinearCredential} from './credentials.js';
 export const linearExternalSourcePolicy: ExternalSourcePolicyRegistration = {
   provider: 'linear',
+  evidenceFingerprint: (source, config) =>
+    isLinearSource(source) && source.enabled
+      ? resolveLinearCredential(config, source).pipe(
+          Effect.map(token => sha256HexSync(Redacted.value(token))),
+          Effect.orElseSucceed(() => undefined),
+        )
+      : succeedUndefined,
   resolve: (source, config) => {
     if (!isLinearSource(source)) return succeedUndefined;
     return resolveLinearCredential(config, source).pipe(

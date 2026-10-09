@@ -38,3 +38,7 @@ Pocket's pagination can change while sync runs. After a complete successful list
 Imported text remains untrusted external evidence. Local configuration controls its project and access policy; remote text cannot create durable memories or approved guidance. Threadnote scans before publishing chunks and rejects credential-bearing content. Authentication loss denies the source cache immediately; per-record access loss denies that record. Transient failures can retain previously complete content only within the configured stale-age limit. Incomplete publication stays inaccessible until repaired by sync.
 
 These local external sources are excluded from Cursor Cloud memory scopes and from Context Brief synthesis. They remain recallable through the normal local recall and resource-read paths after a successful sync.
+
+## Retained support for derived memories
+
+Use the [retained source evidence flow](source-evidence.md) to accept a private memory with the exact reviewed sanitized fragment and retrieve it after the imported source changes. Current access checks still apply.

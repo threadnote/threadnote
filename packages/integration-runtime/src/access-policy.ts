@@ -27,6 +27,20 @@ export function externalSourcePolicyLayer(registrations: readonly ExternalSource
             Effect.orElseSucceed(() => undefined),
             Effect.provide(services),
           ),
+        evidenceFingerprint: (location, sourceId, provider) =>
+          readSourceConfiguration({agentContextHome: location.home}).pipe(
+            Effect.flatMap(configuration => {
+              const source = configuration.sources.find(
+                candidate => candidate.id === sourceId && candidate.type === provider && candidate.enabled,
+              );
+              const policy = policies.get(provider);
+              return source && policy?.evidenceFingerprint
+                ? policy.evidenceFingerprint(source, {agentContextHome: location.home})
+                : succeedUndefined;
+            }),
+            Effect.orElseSucceed(() => undefined),
+            Effect.provide(services),
+          ),
       });
     }),
   );

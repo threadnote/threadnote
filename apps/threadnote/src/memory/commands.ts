@@ -1,3 +1,4 @@
+import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
 import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
 import {
@@ -1295,6 +1296,12 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
     }
     destinations.add(collisionKey);
   }
+  const managed = planned.filter(resource => resourceIdIsManagedMemoryNamespace(resource.uri));
+  const incoming = new Map(
+    yield* Effect.forEach(managed, resource =>
+      attemptSync(() => [resource.uri, validateImportedMemory(resource.uri, resource.content)] as const),
+    ),
+  );
   const store = yield* ResourceStore;
   const mutations: ResourceStoreMutation[] = [];
   for (const resource of planned) {
@@ -1311,7 +1318,7 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
   }
   if (options.dryRun !== true) {
     const mutation = store.mutate(resourceStoreLocation(config), mutations);
-    const managedMemoryUris = planned.map(resource => resource.uri).filter(resourceIdIsManagedMemoryNamespace);
+    const managedMemoryUris = managed.map(resource => resource.uri);
     if (managedMemoryUris.length === 0) {
       yield* mutation;
     } else {
@@ -1319,7 +1326,19 @@ export const runImportPack = Effect.fn('runImportPack')(function* (config: Runti
         fs,
         config.agentContextHome,
         managedMemoryUris,
-        mutation.pipe(
+        Effect.forEach(managed, resource =>
+          store.read(resourceStoreLocation(config), resource.uri).pipe(
+            Effect.catchTag('ResourceNotFound', () => Effect.void),
+            Effect.flatMap(existing =>
+              existing === undefined
+                ? Effect.void
+                : attemptSync(() =>
+                    assertImportedMemoryAssociation(resource.uri, existing, incoming.get(resource.uri)),
+                  ),
+            ),
+          ),
+        ).pipe(
+          Effect.andThen(mutation),
           Effect.andThen(
             Effect.forEach(
               managedMemoryUris,
@@ -1458,6 +1477,15 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
       return yield* MemoryOperationError.make({
         message:
           'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
+      });
+    }
+    if (
+      current.record?.metadata.sourceEvidence &&
+      JSON.stringify(current.record.metadata.sourceEvidence) !== JSON.stringify(options.metadata.sourceEvidence)
+    ) {
+      return yield* MemoryOperationError.make({
+        message:
+          'Replacement would discard or change pinned source evidence. Derive a new memory from the exact synced source revision.',
       });
     }
   }

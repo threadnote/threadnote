@@ -582,6 +582,15 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
             'Replacement would discard or change pinned Obsidian evidence. Derive a new memory from the exact synced note revision.',
           );
         }
+        if (
+          currentReplaceTarget.metadata.sourceEvidence &&
+          JSON.stringify(currentReplaceTarget.metadata.sourceEvidence) !==
+            JSON.stringify(params.metadata.sourceEvidence)
+        ) {
+          return argumentError(
+            'Replacement would discard or change pinned source evidence. Derive a new memory from the exact synced source revision.',
+          );
+        }
         const schemaRewriteError = memorySchemaRewriteError(currentReplaceTarget.content);
         if (schemaRewriteError) return argumentError(schemaRewriteError.message);
         if (expectedReplaceContent !== undefined && currentReplaceTarget.content !== expectedReplaceContent) {

@@ -17,6 +17,7 @@ import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-
 import {makeSourceConfigurationStore} from '@threadnote/integration-runtime/config';
 import {SourceConfigurationStore, type ConfigurationServices} from '@threadnote/integration-core/config';
 import {
+  ExternalSourcePolicy,
   externalDocumentManifestUri,
   externalResourceUri,
   readExternalDocumentManifest,
@@ -34,7 +35,12 @@ import {
   sourceConfigurationFingerprint,
   superhumanSourceCodec,
 } from '../src/config.js';
-import {resolveSuperhumanCredential, superhumanCredentialConfigured} from '../src/credentials.js';
+import {
+  removeSuperhumanCredential,
+  resolveSuperhumanCredential,
+  storeSuperhumanCredential,
+  superhumanCredentialConfigured,
+} from '../src/credentials.js';
 import {
   runSuperhumanSourceAdd,
   runSuperhumanSourceRemove,
@@ -105,6 +111,38 @@ afterAll(() => {
 });
 
 describe('Superhuman source sync', () => {
+  effectIt.effect('resolves evidence credentials lazily and rejects rotation or loss', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-evidence-policy-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runSuperhumanSourceAdd(config, {
+        id: 'evidence',
+        documents: ['doc_one'],
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make('synthetic-evidence-token'),
+      });
+      const location = {home, account: 'local', user: 'tester'};
+      const policy = yield* ExternalSourcePolicy;
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBe(
+        sha256HexSync('synthetic-evidence-token'),
+      );
+      yield* storeSuperhumanCredential(config, 'evidence', Redacted.make('synthetic-rotated-token'));
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBe(
+        sha256HexSync('synthetic-rotated-token'),
+      );
+      yield* removeSuperhumanCredential(config, 'evidence');
+      expect((yield* policy.current(location, 'evidence', 'superhuman'))?.enabled).toBe(true);
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBeUndefined();
+      yield* mutateSourceConfiguration(config, configuration => ({
+        ...configuration,
+        sources: configuration.sources.map(source => (source.id === 'evidence' ? {...source, enabled: false} : source)),
+      }));
+      expect(yield* policy.evidenceFingerprint!(location, 'evidence', 'superhuman')).toBeUndefined();
+      yield* runSuperhumanSourceRemove(config, {id: 'evidence', apply: true});
+    }).pipe(TestClock.withLive, provideLayer),
+  );
   effectIt.effect('checks Manager create and edit preconditions before changing credentials or scope', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

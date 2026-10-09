@@ -82,6 +82,11 @@ export class ExternalSourcePolicy extends Context.Service<
       sourceId: string,
       provider?: ExternalProvider,
     ) => Effect.Effect<ExternalSourceAccessPolicy | undefined>;
+    readonly evidenceFingerprint?: (
+      location: ResourceStoreLocation,
+      sourceId: string,
+      provider: ExternalProvider,
+    ) => Effect.Effect<string | undefined>;
   }
 >()('@threadnote/store/external-resource/ExternalSourcePolicy') {}
 

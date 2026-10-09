@@ -1,5 +1,7 @@
 import {DateTime, Effect} from 'effect';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
+import {readSourceEvidence, serializeSourceEvidenceCitation} from '@threadnote/store/source-evidence';
+import {resourceStoreLocation} from '../../memory/migrations.js';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {
   captureObsidianEvidence,
@@ -190,8 +192,10 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
     {
       annotations: {readOnlyHint: true, destructiveHint: false},
       description:
-        'Read historical supporting fragment for a private memory with Obsidian evidence. Availability follows current source access; same current revision does not validate the derived claim.',
-      inputSchema: {memoryUri: McpInput.string('Private memory URI returned by derive_from_obsidian')},
+        'Read the exact retained supporting fragment for a private memory derived from a configured integration. Availability follows current local source access and synced permission receipts, not live remote permission checks. A matching current revision does not validate the derived claim.',
+      inputSchema: {
+        memoryUri: McpInput.string('Private memory URI returned by derive_from_source or derive_from_obsidian'),
+      },
     },
     ({memoryUri}) => {
       const checked = requiredText(memoryUri, 'read_source_evidence', 'memoryUri', {
@@ -212,17 +216,34 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
         }
         const [record] = yield* readMemoryRecordsByUri(config, [canonical]);
         if (!record) return argumentError('Memory is unavailable.');
+        if (record.metadata.sourceEvidenceError)
+          return argumentError('Memory has malformed source evidence citation metadata.');
         if (record.metadata.obsidianEvidenceError)
           return argumentError('Memory has malformed Obsidian evidence citation metadata.');
-        if (!record.metadata.obsidianEvidence) return argumentError('Memory has no Obsidian evidence citation.');
-        const evidence = yield* readObsidianEvidence(config, record.metadata.obsidianEvidence);
+        if (!record.metadata.sourceEvidence && !record.metadata.obsidianEvidence)
+          return argumentError('Memory has no source evidence citation.');
+        const evidence = yield* record.metadata.sourceEvidence
+          ? readSourceEvidence(resourceStoreLocation(config), record.metadata.sourceEvidence)
+          : readObsidianEvidence(config, record.metadata.obsidianEvidence!);
         const description =
           evidence.historical === 'available'
             ? `Historical supporting fragment (${evidence.currentRevision} current sanitized revision; claim applicability unverified):\n\n${evidence.fragment}`
             : `Historical evidence ${evidence.historical}; current revision unknown; claim applicability unverified.`;
         return {
-          content: [{type: 'text' as const, text: description}],
-          structuredContent: {type: 'threadnote-obsidian-evidence', version: 1, memoryUri: canonical, ...evidence},
+          content: [
+            {
+              type: 'text' as const,
+              text: record.metadata.sourceEvidence
+                ? `${description}\n\nSOURCE EVIDENCE CITATION\n${serializeSourceEvidenceCitation(record.metadata.sourceEvidence)}`
+                : description,
+            },
+          ],
+          structuredContent: {
+            type: record.metadata.sourceEvidence ? 'threadnote-source-evidence' : 'threadnote-obsidian-evidence',
+            version: 1,
+            memoryUri: canonical,
+            ...evidence,
+          },
         };
       }).pipe(
         Effect.catch(error => Effect.succeed(mcpErrorResult(error))),

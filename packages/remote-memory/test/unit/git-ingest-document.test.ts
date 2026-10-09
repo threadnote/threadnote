@@ -77,6 +77,47 @@ describe('Git ingestion metadata boundary', () => {
     ).toEqual({accepted: false, reason: 'metadata'});
   });
 
+  it('rejects private source evidence before canonical or legacy Markdown ingestion', () => {
+    const sourceEvidence = {
+      version: 1,
+      provider: 'github',
+      sourceId: 'issues',
+      sourceInstanceId: 'a'.repeat(64),
+      resourceUri: 'threadnote://resources/external/github/issues/docs/r-1-issue-1/pages/main/chunk-1.md',
+      accessHash: 'a'.repeat(64),
+      revisionHash: 'a'.repeat(64),
+      contentHash: 'a'.repeat(64),
+      rendererVersion: 'github-v1',
+      sanitizerVersion: 'scrubber-redact-v1',
+      fragmentHash: 'a'.repeat(64),
+      fragmentStart: 0,
+      fragmentEnd: 4,
+      pinId: '12345678-1234-4234-8234-123456789abc',
+      expiresAt: '2026-12-01T00:00:00.000Z',
+    } as const;
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'threadnote',
+        topic: 'contract',
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-09T00:00:00.000Z',
+        schemaVersion: 8,
+        sourceEvidence,
+      },
+      'Private derived prose.',
+    );
+    expect(classifyGitIngestDocument(content, path)).toEqual({accepted: false, reason: 'metadata'});
+    for (const marker of ['MEMORY', 'NOT MEMORY']) {
+      expect(classifyGitIngestDocument(`${marker}\nsource_evidence: {bad-json}\n\nText`, path)).toEqual({
+        accepted: false,
+        reason: 'metadata',
+      });
+    }
+  });
+
   it.each([
     ['NOT MEMORY', `schema_version: 7\nobsidian_evidence: ${JSON.stringify(privateEvidence())}`],
     ['NOT MEMORY', 'obsidian_evidence: {bad-json}'],

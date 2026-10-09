@@ -1272,6 +1272,171 @@ describe('native memory workflow', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  it.effect('validates every managed pack memory before writing and preserves pinned evidence', () =>
+    TestClock.withLive(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-native-pack-evidence-'});
+          const packPath = path.join(home, 'memories.threadnote-pack.json');
+          const config: RuntimeConfig = {
+            account: 'local',
+            agentContextHome: home,
+            agentId: 'threadnote',
+            manifestPath: path.join(home, 'seed-manifest.yaml'),
+            user: 'tester',
+          };
+          const root = 'threadnote://user/tester/memories/durable/projects/threadnote';
+          const sourceRoot = 'threadnote://user/source/memories/durable/projects/threadnote';
+          const citedUri = `${root}/cited.md`;
+          const otherUri = `${root}/other.md`;
+          const location = {account: config.account, home, user: config.user};
+          const store = yield* ResourceStore;
+          const citation = {
+            version: 1 as const,
+            provider: 'github' as const,
+            sourceId: 'issues',
+            sourceInstanceId: 'a'.repeat(64),
+            resourceUri: 'threadnote://resources/external/github/issues/docs/r-1-issue-1/pages/main/chunk-1.md',
+            accessHash: 'a'.repeat(64),
+            revisionHash: 'a'.repeat(64),
+            contentHash: 'a'.repeat(64),
+            rendererVersion: 'github-v1',
+            sanitizerVersion: 'scrubber-redact-v1',
+            fragmentHash: 'a'.repeat(64),
+            fragmentStart: 0,
+            fragmentEnd: 4,
+            pinId: '12345678-1234-4234-8234-123456789abc',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+          };
+          const memory = (body: string, sourceEvidence?: typeof citation) =>
+            formatMemoryDocument(
+              'MEMORY',
+              {
+                kind: 'durable',
+                status: 'active',
+                project: 'threadnote',
+                topic: 'cited',
+                schemaVersion: sourceEvidence ? 8 : 7,
+                sourceAgentClient: 'test',
+                timestamp: '2026-10-09T00:00:00.000Z',
+                sourceEvidence,
+              },
+              body,
+            );
+          const original = memory('Original supported claim.', citation);
+          yield* store.write(location, citedUri, original, {mode: 'create'});
+          const writePack = (resources: readonly {relativeUri: string; content: string}[], sourceUri = sourceRoot) =>
+            fs.writeFileString(packPath, JSON.stringify({version: 1, sourceUri, resources}));
+          const assertRejectedWithoutWrites = (expected: string) =>
+            Effect.gen(function* () {
+              const outcome = yield* runImportPack(config, {path: packPath}).pipe(Effect.exit);
+              expect(Exit.isFailure(outcome)).toBe(true);
+              expect(String(outcome)).toContain(expected);
+              expect(yield* store.read(location, citedUri)).toBe(original);
+              expect(Option.isNone(yield* store.stat(location, otherUri).pipe(Effect.option))).toBe(true);
+            });
+
+          yield* writePack([
+            {relativeUri: 'other.md', content: memory('Other memory.')},
+            {relativeUri: 'cited.md', content: memory('Legacy overwrite.')},
+          ]);
+          yield* assertRejectedWithoutWrites('pinned source evidence');
+
+          yield* writePack([
+            {relativeUri: 'other.md', content: memory('Other memory.')},
+            {
+              relativeUri: 'cited.md',
+              content: `${memory('Changed.', citation).replace(/source_evidence: .*\n/u, 'source_evidence: {bad-json}\n')}`,
+            },
+          ]);
+          yield* assertRejectedWithoutWrites('source evidence');
+
+          yield* writePack([
+            {relativeUri: 'other.md', content: memory('Other memory.')},
+            {
+              relativeUri: 'cited.md',
+              content: memory('Future writer.').replace('schema_version: 7', 'schema_version: 9'),
+            },
+          ]);
+          yield* assertRejectedWithoutWrites('newer than supported');
+
+          const sharedSource = 'threadnote://user/source/memories/shared/default/durable/projects/threadnote';
+          yield* writePack(
+            [
+              {relativeUri: 'other.md', content: memory('Other memory.')},
+              {relativeUri: 'cited.md', content: memory('Private claim.', citation)},
+            ],
+            sharedSource,
+          );
+          const sharedOutcome = yield* runImportPack(config, {path: packPath}).pipe(Effect.exit);
+          expect(Exit.isFailure(sharedOutcome)).toBe(true);
+          expect(String(sharedOutcome)).toContain('private source evidence');
+          expect(yield* store.read(location, citedUri)).toBe(original);
+          expect(
+            Option.isNone(
+              yield* store
+                .stat(location, 'threadnote://user/tester/memories/shared/default/durable/projects/threadnote/other.md')
+                .pipe(Effect.option),
+            ),
+          ).toBe(true);
+
+          yield* writePack([
+            {relativeUri: 'other.md', content: memory('Other memory.')},
+            {relativeUri: 'cited.md', content: memory('Edited supported claim.', citation)},
+          ]);
+          yield* runImportPack(config, {path: packPath});
+          const imported = yield* store.read(location, citedUri);
+          expect(parseMemoryDocument(citedUri, imported)?.metadata.sourceEvidence).toEqual(citation);
+          expect(imported).toContain('Edited supported claim.');
+          expect(yield* store.read(location, otherUri)).toContain('Other memory.');
+
+          const legacyUri = `${root}/legacy.md`;
+          const legacyCitation = {
+            version: 1 as const,
+            sourceId: 'notes',
+            sourceInstanceId: '12345678-1234-1234-1234-123456789abc',
+            vaultHash: 'a'.repeat(64),
+            accessHash: 'a'.repeat(64),
+            noteId: '12345678-1234-1234-1234-123456789abc',
+            relativePath: 'Decision.md',
+            revisionHash: 'a'.repeat(64),
+            sanitizerVersion: 'scrubber-redact-v1',
+            fragmentHash: 'a'.repeat(64),
+            fragmentStart: 0,
+            fragmentEnd: 4,
+            pinId: '12345678-1234-1234-1234-123456789abc',
+            expiresAt: '2099-01-01T00:00:00.000Z',
+          };
+          const legacy = formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              project: 'threadnote',
+              topic: 'legacy',
+              schemaVersion: 7,
+              sourceAgentClient: 'test',
+              timestamp: '2026-10-09T00:00:00.000Z',
+              obsidianEvidence: legacyCitation,
+            },
+            'Legacy supported claim.',
+          );
+          yield* store.write(location, legacyUri, legacy, {mode: 'create'});
+          const previousOther = yield* store.read(location, otherUri);
+          yield* writePack([
+            {relativeUri: 'other.md', content: memory('Would mutate before failure.')},
+            {relativeUri: 'legacy.md', content: memory('Would erase old pin.')},
+          ]);
+          expect(Exit.isFailure(yield* runImportPack(config, {path: packPath}).pipe(Effect.exit))).toBe(true);
+          expect(yield* store.read(location, legacyUri)).toBe(legacy);
+          expect(yield* store.read(location, otherUri)).toBe(previousOther);
+        }),
+      ),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it.effect('retains preferred project-scope candidates alongside the global fallback', () =>
     Effect.scoped(
       Effect.gen(function* () {

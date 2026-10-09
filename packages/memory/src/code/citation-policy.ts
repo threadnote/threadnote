@@ -2,16 +2,29 @@ import {MEMORY_CODE_CITATION_HEADER} from './citation.js';
 import {parseMemoryDocument, type MemoryMetadata} from '../document.js';
 
 export type MemoryCodeCitationSharingBlocker =
-  'dirty-source' | 'local-repository-identity' | 'malformed-citation' | 'private-obsidian-evidence';
+  | 'dirty-source'
+  | 'local-repository-identity'
+  | 'malformed-citation'
+  | 'private-obsidian-evidence'
+  | 'private-source-evidence';
 
 /**
  * Only clean citations backed by a portable remote repository identity may
  * cross a sharing boundary. The immutable citation itself is preserved.
  */
 export function memoryCodeCitationSharingBlocker(
-  metadata: Pick<MemoryMetadata, 'citationErrors' | 'codeCitations' | 'obsidianEvidence' | 'obsidianEvidenceError'>,
+  metadata: Pick<
+    MemoryMetadata,
+    | 'citationErrors'
+    | 'codeCitations'
+    | 'obsidianEvidence'
+    | 'obsidianEvidenceError'
+    | 'sourceEvidence'
+    | 'sourceEvidenceError'
+  >,
 ): MemoryCodeCitationSharingBlocker | undefined {
-  if (metadata.obsidianEvidenceError) return 'malformed-citation';
+  if (metadata.obsidianEvidenceError || metadata.sourceEvidenceError) return 'malformed-citation';
+  if (metadata.sourceEvidence) return 'private-source-evidence';
   if (metadata.obsidianEvidence) return 'private-obsidian-evidence';
   if ((metadata.citationErrors?.length ?? 0) > 0) return 'malformed-citation';
   if (metadata.codeCitations?.some(citation => citation.sourceDirty)) return 'dirty-source';
@@ -28,17 +41,22 @@ export function memoryCodeCitationContentSharingBlocker(
 ): MemoryCodeCitationSharingBlocker | undefined {
   const shapedHeader = inspectCodeCitationHeaderShape(content);
   const evidenceHeader = inspectObsidianEvidenceHeaderShape(content);
+  const sourceEvidenceHeader = inspectEvidenceHeaderShape(content, 'source_evidence');
   const parsed = parseMemoryDocument(uri, content);
   if (parsed) {
     const blocker = memoryCodeCitationSharingBlocker(parsed.metadata);
     if (blocker) return blocker;
-    return shapedHeader.hasNonCanonical || evidenceHeader.hasNonCanonical
+    return shapedHeader.hasNonCanonical || evidenceHeader.hasNonCanonical || sourceEvidenceHeader.hasNonCanonical
       ? 'malformed-citation'
-      : evidenceHeader.hasCitationShape
-        ? 'private-obsidian-evidence'
-        : undefined;
+      : sourceEvidenceHeader.hasCitationShape
+        ? 'private-source-evidence'
+        : evidenceHeader.hasCitationShape
+          ? 'private-obsidian-evidence'
+          : undefined;
   }
-  return shapedHeader.hasCitationShape || evidenceHeader.hasCitationShape ? 'malformed-citation' : undefined;
+  return shapedHeader.hasCitationShape || evidenceHeader.hasCitationShape || sourceEvidenceHeader.hasCitationShape
+    ? 'malformed-citation'
+    : undefined;
 }
 
 export function memoryCodeCitationSharingBlockerMessage(blocker: MemoryCodeCitationSharingBlocker): string {
@@ -51,6 +69,8 @@ export function memoryCodeCitationSharingBlockerMessage(blocker: MemoryCodeCitat
       return 'malformed code citation metadata must be repaired or recaptured before sharing';
     case 'private-obsidian-evidence':
       return 'memories with private Obsidian evidence cannot be shared without an approved evidence publication path';
+    case 'private-source-evidence':
+      return 'memories with private source evidence cannot be shared without an approved evidence publication path';
   }
 }
 
@@ -58,13 +78,23 @@ function inspectObsidianEvidenceHeaderShape(content: string): {
   readonly hasCitationShape: boolean;
   readonly hasNonCanonical: boolean;
 } {
+  return inspectEvidenceHeaderShape(content, 'obsidian_evidence');
+}
+
+function inspectEvidenceHeaderShape(
+  content: string,
+  name: 'obsidian_evidence' | 'source_evidence',
+): {
+  readonly hasCitationShape: boolean;
+  readonly hasNonCanonical: boolean;
+} {
   const canonical = content.trim().replace(/\r\n?/gu, '\n');
   const separatorIndex = canonical.indexOf('\n\n');
   const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  const lines = header.split('\n').filter(line => /^\s*obsidian_evidence\s*:/u.test(line));
+  const lines = header.split('\n').filter(line => new RegExp(`^\\s*${name}\\s*:`, 'u').test(line));
   return {
     hasCitationShape: lines.length > 0,
-    hasNonCanonical: lines.length > 1 || lines.some(line => !line.startsWith('obsidian_evidence: ')),
+    hasNonCanonical: lines.length > 1 || lines.some(line => !line.startsWith(`${name}: `)),
   };
 }
 
