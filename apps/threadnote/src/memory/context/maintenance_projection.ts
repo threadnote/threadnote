@@ -1,5 +1,6 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {ContextHealthCaseDispositionV2} from '@threadnote/context/health_maintenance';
+import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import type {
   ContextMaintenanceCaseV2,
   ContextMaintenanceStatusV2,
@@ -127,6 +128,25 @@ export function publicStatus(
     semanticCoverage: Object.entries(state.semanticProgress ?? {})
       .filter(([name]) => project === undefined || name === project)
       .map(([name, progress]) => {
+        if (progress.version !== 2 || progress.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION)
+          return {
+            project: name,
+            state: 'partial' as const,
+            eligibleRecords: progress.eligibleRecords,
+            checkedBatches: 0,
+            totalBatches: progress.totalBatches,
+            extractedRecords: 0,
+            totalRecords: progress.eligibleRecords,
+            extractionComplete: false,
+            comparisonComplete: false,
+            comparedClaimPairs: 0,
+            unsupportedRecords: 0,
+            unsupportedClaims: 0,
+            bodyLimitedRecords: 0,
+            outputOmittedFindings: 0,
+            churnCount: 0,
+            dirtyRecordPairsRemaining: 0,
+          };
         const records = progress.records?.filter(record => !record.removed) ?? [];
         const extracted = records.filter(record => record.claims !== undefined);
         const unsupported = extracted.filter(record => (record.reasons?.length ?? 0) > 0);
