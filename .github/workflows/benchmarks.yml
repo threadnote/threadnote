@@ -572,7 +572,7 @@ jobs:
         run: |
           for delay in 0 5 15 30; do
             if [ "$delay" -gt 0 ]; then sleep "$delay"; fi
-            if bun src/standalone.ts --home artifacts/code-graph-model-home models install "${CODE_GRAPH_EMBEDDING_MODEL_ID}"; then
+            if bun apps/threadnote/src/standalone.ts --home artifacts/code-graph-model-home models install "${CODE_GRAPH_EMBEDDING_MODEL_ID}"; then
               exit 0
             fi
           done
