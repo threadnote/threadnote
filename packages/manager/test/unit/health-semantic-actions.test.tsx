@@ -94,8 +94,16 @@ it('previews the exact chosen pair, requires whole-memory acknowledgement and co
   expect(JSON.parse(fetch.mock.calls[0][1]!.body as string)).toEqual({
     project: 'threadnote',
     contradictionId: evidence.contradictionId,
-    left: {recordUri: evidence.left.recordUri, recordContentFingerprint: evidence.left.recordContentFingerprint},
-    right: {recordUri: evidence.right.recordUri, recordContentFingerprint: evidence.right.recordContentFingerprint},
+    left: {
+      recordUri: evidence.left.recordUri,
+      recordContentFingerprint: evidence.left.recordContentFingerprint,
+      claimFingerprint: evidence.left.claimFingerprint,
+    },
+    right: {
+      recordUri: evidence.right.recordUri,
+      recordContentFingerprint: evidence.right.recordContentFingerprint,
+      claimFingerprint: evidence.right.claimFingerprint,
+    },
     choice: 'left',
   });
   expect(host.textContent).toContain('whole memory');

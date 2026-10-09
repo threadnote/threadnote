@@ -754,6 +754,152 @@ describe('context maintenance view', () => {
     expect(document.body.textContent).not.toContain('Repair all');
     expect(document.body.textContent).not.toContain('2,013 issues');
   });
+  it.each(['extraction', 'comparison'] as const)(
+    'keeps the scan in progress while semantic %s work remains',
+    async phase => {
+      const current = {
+        ...status(),
+        projects: [{...status().projects[0], checked: 1_712}],
+        semanticCoverage: [
+          {
+            project: 'threadnote',
+            state: 'partial',
+            eligibleRecords: 18,
+            checkedBatches: 2,
+            totalBatches: 3,
+            extractedRecords: phase === 'extraction' ? 16 : 18,
+            totalRecords: 18,
+            extractionComplete: phase !== 'extraction',
+            comparisonComplete: false,
+            comparedClaimPairs: 256,
+            ...(phase === 'comparison' ? {totalClaimPairs: 1_024} : {}),
+            unsupportedRecords: 0,
+            unsupportedClaims: 0,
+            bodyLimitedRecords: 0,
+            outputOmittedFindings: 0,
+            churnCount: 0,
+          },
+        ],
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          async () =>
+            new Response(JSON.stringify(current), {
+              headers: {'content-type': 'application/json'},
+            }),
+        ),
+      );
+      await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+      expect(document.querySelector('[aria-label="Background scan"]')?.textContent).toContain('Scanning');
+      expect(document.querySelector('[aria-label="Semantic scan progress"]')?.textContent).toContain(
+        phase === 'extraction' ? '16 of 18 durable memories read' : '256 of 1,024 claim comparisons checked',
+      );
+      expect(document.querySelector('[aria-label="Claim comparison progress"]') === null).toBe(phase === 'extraction');
+    },
+  );
+  it('uses completed maintenance coverage while preserving unsupported and omitted evidence warnings', async () => {
+    const current = {
+      ...status(),
+      projects: [{...status().projects[0], checked: 1_712}],
+      semanticCoverage: [
+        {
+          project: 'threadnote',
+          state: 'partial',
+          eligibleRecords: 18,
+          checkedBatches: 3,
+          totalBatches: 3,
+          extractedRecords: 18,
+          totalRecords: 18,
+          extractionComplete: true,
+          comparisonComplete: true,
+          comparedClaimPairs: 1_024,
+          totalClaimPairs: 1_024,
+          unsupportedRecords: 2,
+          unsupportedClaims: 3,
+          bodyLimitedRecords: 1,
+          outputOmittedFindings: 4,
+          churnCount: 2,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(current), {
+            headers: {'content-type': 'application/json'},
+          }),
+      ),
+    );
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    expect(document.querySelector('[aria-label="Background scan"]')?.textContent).toContain('Caught up');
+    const scan = document.querySelector('[aria-label="Semantic scan progress"]')?.textContent;
+    expect(scan).toContain('18 of 18 durable memories read');
+    expect(scan).toContain('1,024 comparison checks performed across source revisions');
+    expect(scan).toContain('Current comparisons finished.');
+    expect(scan).toContain('3 claims in 2 memories could not be interpreted');
+    expect(scan).toContain('1 memory exceeded the supported text limit');
+    expect(scan).toContain('4 findings are outside the retained output limit');
+    expect(scan).toContain('2 source changes invalidated affected work');
+    expect(scan).toContain('Completed checks do not prove that memories agree');
+    expect(document.querySelector('[aria-label="Evidence coverage"] > header')?.textContent).toContain('partial');
+  });
+  it('reports completed heuristic traversal even when the direct report is limited to a prefix', async () => {
+    const current = {
+      ...status(),
+      projects: [{...status().projects[0], checked: 1_712}],
+      semanticCoverage: [
+        {
+          project: 'threadnote',
+          state: 'complete',
+          eligibleRecords: 18,
+          checkedBatches: 3,
+          totalBatches: 3,
+          extractedRecords: 18,
+          totalRecords: 18,
+          extractionComplete: true,
+          comparisonComplete: true,
+          comparedClaimPairs: 1_024,
+          totalClaimPairs: 1_024,
+          unsupportedRecords: 0,
+          unsupportedClaims: 0,
+          bodyLimitedRecords: 0,
+          outputOmittedFindings: 0,
+          churnCount: 0,
+        },
+      ],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify(current), {
+            headers: {'content-type': 'application/json'},
+          }),
+      ),
+    );
+    const health = report();
+    await render(
+      <ContextMaintenanceView
+        {...props}
+        project="threadnote"
+        report={{
+          ...health,
+          maintenance: {
+            ...health.maintenance!,
+            citationCoverage: {...health.maintenance!.citationCoverage, state: 'complete'},
+          },
+        }}
+      />,
+    );
+    expect(document.querySelector('[aria-label="Evidence coverage"] > header')?.textContent).toContain('complete');
+    expect(document.querySelector('[aria-label="Semantic scan progress"]')?.textContent).toContain('Checked');
+    expect(document.querySelector('[aria-label="Semantic scan progress"]')?.textContent).not.toContain(
+      'Checked with gaps',
+    );
+    expect(document.querySelector('[aria-label="Background scan"]')?.textContent).toContain('Caught up');
+  });
   it.each([false, true])('only marks an empty project caught up after inventory completes (%s)', async complete => {
     vi.stubGlobal(
       'fetch',

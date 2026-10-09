@@ -59,6 +59,7 @@ import {
   type ContextMaintenanceSnapshotDiagnosticV1,
 } from '@threadnote/context/health_maintenance';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
 import {expandPath} from '@threadnote/platform/paths';
 import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
@@ -79,6 +80,9 @@ import {
   prepareMaintenanceSemanticProgress,
   readMaintenanceCandidateDecisions,
   runMaintenanceSemanticWindow,
+  type MaintenanceSemanticProgress,
+  maintenanceSemanticProgressPending,
+  maintenanceSemanticProgressUnsupported,
   selectMaintenanceWorkAndRequestCursor,
   type MaintenanceWorkSchedule,
 } from './maintenance_decisions.js';
@@ -114,7 +118,6 @@ import {
 const MAX_RECEIPTS = 100;
 const MAX_STATE_BYTES = 16 * 1024 * 1024;
 const LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000, waitTimeoutMilliseconds: 50};
-
 export class ContextMaintenanceError extends Schema.TaggedError<ContextMaintenanceError>()('ContextMaintenanceError', {
   message: Schema.String,
 }) {}
@@ -198,13 +201,7 @@ export interface ContextMaintenanceStatusV2 {
   readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
   readonly generation: string;
   readonly preparation?: ContextMaintenanceInventoryPreparationV2;
-  readonly semanticCoverage?: readonly {
-    readonly project: string;
-    readonly state: 'partial' | 'complete';
-    readonly eligibleRecords: number;
-    readonly checkedBatches: number;
-    readonly totalBatches: number;
-  }[];
+  readonly semanticCoverage?: readonly import('@threadnote/context/health_semantic').ContextHealthSemanticProgressCoverage[];
   readonly projects: readonly {
     readonly project: string;
     readonly generation: string;
@@ -242,18 +239,7 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly lastWakeAt?: string;
   readonly policyOverrides?: Readonly<Record<string, string>>;
   readonly decisionCheckpoints?: Readonly<Record<string, string>>;
-  readonly semanticProgress?: Readonly<
-    Record<
-      string,
-      {
-        readonly generation: string;
-        readonly cursor: number;
-        readonly totalBatches: number;
-        readonly eligibleRecords: number;
-        readonly partial?: boolean;
-      }
-    >
-  >;
+  readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress>>;
   readonly workSchedule?: MaintenanceWorkSchedule;
 }
 
@@ -467,7 +453,31 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         generations: semanticGenerations,
         progress: semanticProgress,
         pending: pendingSemanticProjects,
-      } = prepareMaintenanceSemanticProgress(active, snapshot.success.hashes, state.semanticProgress, options.project);
+      } = prepareMaintenanceSemanticProgress(
+        active,
+        snapshot.success.hashes,
+        state.semanticProgress,
+        options.project,
+        snapshot.success.complete,
+      );
+      for (const item of caseMap.values()) {
+        if (
+          (options.project === undefined || item.project === options.project) &&
+          item.family === 'semantic-contradiction' &&
+          item.disposition === 'needs-decision' &&
+          (state.semanticProgress?.[item.project]?.analyzerVersion !== CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION ||
+            item.subjectContentHashes?.some(subject => {
+              const current = logicalHashes.get(subject.uri);
+              return current === undefined ? snapshot.success.complete : current !== subject.hash;
+            }))
+        ) {
+          upsertCase(
+            caseMap,
+            {...item, disposition: 'historical', reason: 'semantic-analyzer-v2-evidence-superseded'},
+            now,
+          );
+        }
+      }
       const {work, requestDiscovery} = yield* selectMaintenanceWorkAndRequestCursor(
         state.workSchedule,
         pendingSemanticProjects,
@@ -489,21 +499,17 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         const project = work.project!;
         const revision = semanticGenerations.get(project)!;
         const progress = semanticProgress[project];
+        const headroom =
+          MAX_STATE_BYTES -
+          new TextEncoder().encode(JSON.stringify({...state, cases: [...caseMap.values()]})).length -
+          512 * 1_024;
+        const next = yield* runMaintenanceSemanticWindow(config, project, progress, caseMap, now, headroom);
         state = {
           ...state,
           decisionCheckpoints: {...state.decisionCheckpoints, [project]: revision},
           semanticProgress: {
             ...state.semanticProgress,
-            [project]: yield* runMaintenanceSemanticWindow(
-              config,
-              project,
-              active,
-              revision,
-              progress.cursor,
-              progress.partial === true,
-              caseMap,
-              now,
-            ),
+            [project]: next,
           },
         };
       }
@@ -1068,7 +1074,8 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         (item.family === 'semantic-contradiction' &&
           ((item.subjectContentHashes?.length ?? 0) < 2 ||
             item.subjectContentHashes?.every(subject => active.some(record => record.uri === subject.uri)))) ||
-        item.disposition === 'retired'
+        item.disposition === 'retired' ||
+        item.disposition === 'historical'
           ? item
           : {...item, disposition: 'resolved' as const, reason: 'subject-inactive'},
       );
@@ -1103,11 +1110,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       }
       const semanticStillPending = semanticProjects.some(project => {
         const progress = state.semanticProgress?.[project];
-        return progress === undefined || progress.cursor < progress.totalBatches;
+        return progress === undefined || maintenanceSemanticProgressPending(progress);
       });
-      const semanticEvidencePartial = semanticProjects.some(
-        project => state.semanticProgress?.[project]?.partial === true,
-      );
+      const semanticEvidencePartial = semanticProjects.some(project => {
+        const progress = state.semanticProgress?.[project];
+        return progress !== undefined && maintenanceSemanticProgressUnsupported(progress);
+      });
       const requestedStillPending = yield* contextMaintenanceEvidenceDiscoveryPending(
         config,
         requestDiscovery,

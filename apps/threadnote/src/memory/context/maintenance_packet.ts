@@ -2,7 +2,7 @@ import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {canonicalMemoryDocumentContent, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {memoryCodeCitationAnchorId} from '@threadnote/memory/code/citation';
-import {analyzeContextHealthSemantics} from '@threadnote/context/health_semantic';
+import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
 import {resolveContextHealthRelationTargetV2} from '@threadnote/context/health_maintenance';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -178,13 +178,14 @@ export function buildContextMaintenancePacket<E, R>(
           reason: item.reason,
           ...(item.family === 'semantic-contradiction'
             ? {
-                semanticEvidence: analyzeContextHealthSemantics({
-                  project: item.project,
-                  records: scopedRecords,
-                }).contradictions.find(
-                  finding =>
-                    [finding.left.claimFingerprint, finding.right.claimFingerprint].sort().join(':') === item.slot,
-                ),
+                semanticEvidence:
+                  scopedRecords.length === 2
+                    ? findContextHealthSemanticContradiction(
+                        scopedRecords,
+                        undefined,
+                        item.slot.split(':') as [string, string],
+                      )
+                    : undefined,
               }
             : {}),
           disposition: item.disposition,

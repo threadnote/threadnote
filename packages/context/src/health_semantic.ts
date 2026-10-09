@@ -106,14 +106,36 @@ export interface ContextHealthSemanticAnalysisInputV2 {
   readonly records: readonly MemoryRecord[];
 }
 
-interface SemanticClaim extends ContextHealthSemanticClaimReferenceV2 {
+/** Persistent maintenance coverage; direct one-shot reports retain their own bounded completeness. */
+export interface ContextHealthSemanticProgressCoverage {
+  readonly project: string;
+  readonly state: 'partial' | 'complete';
+  readonly eligibleRecords: number;
+  readonly checkedBatches: number;
+  readonly totalBatches: number;
+  readonly extractedRecords: number;
+  readonly totalRecords: number;
+  readonly extractionComplete: boolean;
+  readonly comparisonComplete: boolean;
+  /** Comparisons attempted, including invalidated work replayed after source edits. */
+  readonly comparedClaimPairs: number;
+  readonly totalClaimPairs?: number;
+  readonly unsupportedRecords: number;
+  readonly unsupportedClaims: number;
+  readonly bodyLimitedRecords: number;
+  readonly outputOmittedFindings: number;
+  readonly churnCount: number;
+  readonly dirtyRecordPairsRemaining: number;
+}
+
+export interface ContextHealthSemanticExtractedClaimV2 extends ContextHealthSemanticClaimReferenceV2 {
   readonly basisTokens: readonly string[];
   readonly denied: boolean;
   readonly scopeUncertain: boolean;
 }
 
 interface ExtractedClaims {
-  readonly claims: readonly SemanticClaim[];
+  readonly claims: readonly ContextHealthSemanticExtractedClaimV2[];
   readonly reasons: readonly ContextHealthSemanticUnknownReasonV2[];
 }
 
@@ -135,7 +157,7 @@ export function analyzeContextHealthSemantics(
     addUnknown(unknownByRecord, record.uri, 'record-limit');
   }
 
-  const claims: SemanticClaim[] = [];
+  const claims: ContextHealthSemanticExtractedClaimV2[] = [];
   let analyzedRecords = 0;
   for (const record of selected) {
     const extracted = extractClaims(record);
@@ -195,11 +217,14 @@ export function analyzeContextHealthSemantics(
   };
 }
 
-function extractClaims(record: MemoryRecord): ExtractedClaims {
+function extractClaims(
+  record: MemoryRecord,
+  limit: number = MAXIMUM_CONTEXT_HEALTH_SEMANTIC_CLAIMS_PER_RECORD,
+): ExtractedClaims {
   const reasons = new Set<ContextHealthSemanticUnknownReasonV2>();
   if (record.body.length > MAXIMUM_BODY_CODE_UNITS) reasons.add('body-limit');
   const body = record.body.slice(0, MAXIMUM_BODY_CODE_UNITS);
-  const claims: SemanticClaim[] = [];
+  const claims: ContextHealthSemanticExtractedClaimV2[] = [];
   const headings: {text: string; span: {start: number; end: number}; truncated: boolean}[] = [];
   let fenced = false;
   let offset = 0;
@@ -272,11 +297,67 @@ function extractClaims(record: MemoryRecord): ExtractedClaims {
   }
   claims.sort(compareClaims);
   if (claims.length === 0) reasons.add('no-claims');
-  if (claims.length > MAXIMUM_CONTEXT_HEALTH_SEMANTIC_CLAIMS_PER_RECORD) reasons.add('claim-limit');
+  if (claims.length > limit) reasons.add('claim-limit');
   return {
-    claims: claims.slice(0, MAXIMUM_CONTEXT_HEALTH_SEMANTIC_CLAIMS_PER_RECORD),
+    claims: claims.slice(0, limit),
     reasons: [...reasons].sort(compareText),
   };
+}
+
+/** Full bounded-body extraction for resumable maintenance. Admission limits apply to the direct report only. */
+export function extractContextHealthSemanticClaims(record: MemoryRecord): ExtractedClaims {
+  return extractClaims(record, Number.POSITIVE_INFINITY);
+}
+
+/** Recheck one exact claim pair without the direct report's record, claim, or output limits. */
+export function compareContextHealthSemanticClaims(
+  left: ContextHealthSemanticExtractedClaimV2,
+  right: ContextHealthSemanticExtractedClaimV2,
+): ContextHealthSemanticContradictionV2 | undefined {
+  if (left.recordUri === right.recordUri) return undefined;
+  const comparison = compareMeaning(left, right);
+  return comparison === undefined ? undefined : contradiction(left, right, comparison);
+}
+
+/** One claim-pair page; the ordinal cursor is stable for unchanged source revisions. */
+export function compareContextHealthSemanticClaimWindow(
+  left: readonly ContextHealthSemanticExtractedClaimV2[],
+  right: readonly ContextHealthSemanticExtractedClaimV2[],
+  cursor: number,
+  limit: number,
+): {readonly nextCursor: number; readonly contradictions: readonly ContextHealthSemanticContradictionV2[]} {
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1)
+    throw new Error('Semantic comparison cursor and limit must be positive bounded integers.');
+  const end = Math.min(left.length * right.length, cursor + limit);
+  const contradictions: ContextHealthSemanticContradictionV2[] = [];
+  for (let ordinal = cursor; ordinal < end; ordinal += 1) {
+    const evidence = compareContextHealthSemanticClaims(
+      left[Math.floor(ordinal / right.length)],
+      right[ordinal % right.length],
+    );
+    if (evidence !== undefined) contradictions.push(evidence);
+  }
+  return {nextCursor: end, contradictions};
+}
+
+export function findContextHealthSemanticContradiction(
+  records: readonly MemoryRecord[],
+  contradictionId?: string,
+  fingerprints?: readonly [string, string],
+): ContextHealthSemanticContradictionV2 | undefined {
+  if (records.length !== 2) return undefined;
+  const [left, right] = records.map(record =>
+    extractContextHealthSemanticClaims(record).claims.filter(
+      claim => fingerprints === undefined || fingerprints.includes(claim.claimFingerprint),
+    ),
+  );
+  for (const a of left)
+    for (const b of right) {
+      const evidence = compareContextHealthSemanticClaims(a, b);
+      if (evidence !== undefined && (contradictionId === undefined || evidence.contradictionId === contradictionId))
+        return evidence;
+    }
+  return undefined;
 }
 
 interface ParsedClaim {
@@ -443,7 +524,10 @@ interface Comparison {
   readonly similarityMilli: number;
 }
 
-function compareMeaning(left: SemanticClaim, right: SemanticClaim): Comparison | undefined {
+function compareMeaning(
+  left: ContextHealthSemanticExtractedClaimV2,
+  right: ContextHealthSemanticExtractedClaimV2,
+): Comparison | undefined {
   if (left.role === 'historical' || right.role === 'historical') return undefined;
   const uncertainty: string[] = [];
   const a = left.context,
@@ -537,8 +621,8 @@ function constraintsIncompatible(left: SemanticConstraint, right: SemanticConstr
 }
 
 function contradiction(
-  first: SemanticClaim,
-  second: SemanticClaim,
+  first: ContextHealthSemanticExtractedClaimV2,
+  second: ContextHealthSemanticExtractedClaimV2,
   comparison: Comparison,
 ): ContextHealthSemanticContradictionV2 {
   const [left, right] = compareClaims(first, second) <= 0 ? [first, second] : [second, first];
@@ -558,7 +642,7 @@ function contradiction(
   };
 }
 
-function claimReference(claim: SemanticClaim): ContextHealthSemanticClaimReferenceV2 {
+function claimReference(claim: ContextHealthSemanticExtractedClaimV2): ContextHealthSemanticClaimReferenceV2 {
   const {basisTokens: _basisTokens, denied: _denied, scopeUncertain: _scopeUncertain, ...reference} = claim;
   return reference;
 }
@@ -609,7 +693,10 @@ function compareRecords(left: MemoryRecord, right: MemoryRecord): number {
   return compareText(left.uri, right.uri);
 }
 
-function compareClaims(left: SemanticClaim, right: SemanticClaim): number {
+function compareClaims(
+  left: ContextHealthSemanticExtractedClaimV2,
+  right: ContextHealthSemanticExtractedClaimV2,
+): number {
   return compareText(`${left.recordUri}\u0000${left.claimId}`, `${right.recordUri}\u0000${right.claimId}`);
 }
 

@@ -1,4 +1,7 @@
-import type {ContextHealthSemanticContradictionV2} from '@threadnote/context/health_semantic';
+import type {
+  ContextHealthSemanticContradictionV2,
+  ContextHealthSemanticProgressCoverage,
+} from '@threadnote/context/health_semantic';
 import type {
   CandidateCategory,
   CandidateComparison,
@@ -12,8 +15,16 @@ import type {MemoryKind} from '@threadnote/memory/types';
 export interface ManagerSemanticReviewInputV1 {
   readonly project: string;
   readonly contradictionId: string;
-  readonly left: {readonly recordUri: string; readonly recordContentFingerprint: string};
-  readonly right: {readonly recordUri: string; readonly recordContentFingerprint: string};
+  readonly left: {
+    readonly recordUri: string;
+    readonly recordContentFingerprint: string;
+    readonly claimFingerprint?: string;
+  };
+  readonly right: {
+    readonly recordUri: string;
+    readonly recordContentFingerprint: string;
+    readonly claimFingerprint?: string;
+  };
   readonly choice: 'left' | 'right' | 'both';
 }
 export interface ManagerSemanticReviewPreviewV1 {
@@ -182,6 +193,7 @@ export interface ManagerContextMaintenanceStatusV2 {
   readonly paused: boolean;
   readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
   readonly generation: string;
+  readonly semanticCoverage?: readonly ContextHealthSemanticProgressCoverage[];
   readonly preparation?: {
     readonly complete: boolean;
     readonly admittedRecords: number;

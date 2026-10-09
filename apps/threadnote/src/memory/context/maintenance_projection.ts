@@ -126,14 +126,49 @@ export function publicStatus(
     ...status,
     semanticCoverage: Object.entries(state.semanticProgress ?? {})
       .filter(([name]) => project === undefined || name === project)
-      .map(([name, progress]) => ({
-        project: name,
-        state:
-          progress.cursor >= progress.totalBatches && !progress.partial ? ('complete' as const) : ('partial' as const),
-        eligibleRecords: progress.eligibleRecords,
-        checkedBatches: progress.cursor,
-        totalBatches: progress.totalBatches,
-      })),
+      .map(([name, progress]) => {
+        const records = progress.records?.filter(record => !record.removed) ?? [];
+        const extracted = records.filter(record => record.claims !== undefined);
+        const unsupported = extracted.filter(record => (record.reasons?.length ?? 0) > 0);
+        const allClaims = extracted.reduce((sum, record) => sum + (record.claims ?? 0), 0);
+        const sameRecordPairs = extracted.reduce((sum, record) => sum + (record.claims ?? 0) ** 2, 0);
+        const totalClaimPairs =
+          extracted.length === records.length ? (allClaims ** 2 - sameRecordPairs) / 2 : undefined;
+        const dirtyRecordPairsRemaining =
+          progress.dirty?.reduce((sum, entry) => {
+            const ownIndex = progress.records.findIndex(record => record.uri === entry.uri);
+            return (
+              sum + Math.max(0, progress.records.length - entry.otherCursor - Number(ownIndex >= entry.otherCursor))
+            );
+          }, 0) ?? 0;
+        const comparisonFinished =
+          progress.comparison?.pairCursor >=
+            Math.max(0, (progress.records.length * (progress.records.length - 1)) / 2) &&
+          (progress.dirty?.length ?? 0) === 0;
+        const extractionComplete = extracted.length === records.length;
+        return {
+          project: name,
+          state:
+            comparisonFinished && extractionComplete && unsupported.length === 0 && progress.outputOmittedFindings === 0
+              ? ('complete' as const)
+              : ('partial' as const),
+          eligibleRecords: progress.eligibleRecords,
+          checkedBatches: progress.records.length <= 1 ? Number(extractionComplete) : progress.comparison.pairCursor,
+          totalBatches: progress.totalBatches,
+          extractedRecords: extracted.length,
+          totalRecords: records.length,
+          extractionComplete,
+          comparisonComplete: comparisonFinished,
+          comparedClaimPairs: progress.comparedClaimPairs ?? 0,
+          ...(totalClaimPairs === undefined ? {} : {totalClaimPairs}),
+          unsupportedRecords: unsupported.length,
+          unsupportedClaims: extracted.reduce((sum, record) => sum + (record.unsupportedClaims ?? 0), 0),
+          bodyLimitedRecords: extracted.filter(record => record.reasons?.includes('body-limit')).length,
+          outputOmittedFindings: progress.outputOmittedFindings ?? 0,
+          churnCount: progress.churnCount ?? 0,
+          dirtyRecordPairsRemaining,
+        };
+      }),
     cases,
     receipts: receiptPage.items,
     omittedReceipts: state.receipts.length - receiptPage.items.length,

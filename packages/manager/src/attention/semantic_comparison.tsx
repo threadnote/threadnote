@@ -257,6 +257,7 @@ export function SemanticResolutionReview(props: {
       const source = (claim: typeof evidence.left) => ({
         recordUri: claim.recordUri,
         recordContentFingerprint: claim.recordContentFingerprint,
+        claimFingerprint: claim.claimFingerprint,
       });
       const result = await api<{preview: ManagerSemanticReviewPreviewV1}>(
         '/api/context-health/semantic/preview',

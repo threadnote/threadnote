@@ -1,5 +1,5 @@
 import {DateTime, Effect, FileSystem, Schema} from 'effect';
-import {analyzeContextHealthSemantics} from '@threadnote/context/health_semantic';
+import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
 import {
   assertMemoryDocumentSchemaWritable,
   formatMemoryDocument,
@@ -49,6 +49,14 @@ function validateInput(input: ManagerSemanticReviewInputV1) {
       'Retiring a memory requires two different source memories. Edit this memory to resolve its internal claims.',
     );
 }
+function selectedClaimFingerprints(input: ManagerSemanticReviewInputV1): readonly [string, string] | undefined {
+  const left = input.left.claimFingerprint;
+  const right = input.right.claimFingerprint;
+  if (left === undefined && right === undefined) return undefined;
+  if (!left || !right || !/^[a-f0-9]{64}$/u.test(left) || !/^[a-f0-9]{64}$/u.test(right))
+    throw new Error('Select both exact source claims.');
+  return [left, right];
+}
 export function buildSemanticReviewPreview(
   input: ManagerSemanticReviewInputV1,
   records: readonly MemoryRecord[],
@@ -66,11 +74,10 @@ export function buildSemanticReviewPreview(
       throw semanticReviewError('Either source changed or is no longer active. Refresh the comparison.', 'stale');
     return record;
   });
-  const evidence = analyzeContextHealthSemantics({project: input.project, records: pair}).contradictions.find(
-    item =>
-      item.contradictionId === input.contradictionId &&
-      [item.left.recordUri, item.right.recordUri].includes(input.left.recordUri) &&
-      [item.left.recordUri, item.right.recordUri].includes(input.right.recordUri),
+  const evidence = findContextHealthSemanticContradiction(
+    pair,
+    input.contradictionId,
+    selectedClaimFingerprints(input),
   );
   if (!evidence) throw semanticReviewError('The semantic comparison changed. Refresh both source claims.', 'stale');
   const personal = `threadnote://user/${uriSegment(user)}/memories/durable/projects/${uriSegment(input.project)}/`;
@@ -230,8 +237,10 @@ export const previewSemanticReview = Effect.fn('semanticReview.preview')(functio
                 memoryArchiveBody(source.body),
               )
             : undefined;
-        const comparison = analyzeContextHealthSemantics({project: input.project, records}).contradictions.find(
-          item => item.contradictionId === input.contradictionId,
+        const comparison = findContextHealthSemanticContradiction(
+          records,
+          input.contradictionId,
+          selectedClaimFingerprints(input),
         )!;
         const entry: SemanticReviewEntry = {
           input,

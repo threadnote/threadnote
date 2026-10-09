@@ -51,13 +51,32 @@ describe('semantic evidence application boundaries', () => {
     const old = {
       threadnote: {generation: legacyGeneration, cursor: 1, totalBatches: 1, eligibleRecords: 2, partial: false},
     };
-    const upgraded = prepareMaintenanceSemanticProgress(records, hashes, old);
+    const upgraded = prepareMaintenanceSemanticProgress(records, hashes, old as never);
     expect(upgraded.pending).toEqual(['threadnote']);
     expect(upgraded.progress.threadnote.cursor).toBe(0);
     expect(upgraded.generations.get('threadnote')).not.toBe(legacyGeneration);
-    const completed = {threadnote: {...upgraded.progress.threadnote, cursor: 1}};
+    const completed = {
+      threadnote: {
+        ...upgraded.progress.threadnote,
+        cursor: 1,
+        records: upgraded.progress.threadnote.records.map(record => ({
+          ...record,
+          claims: 1,
+          unsupportedClaims: 0,
+          reasons: [],
+        })),
+        comparison: {pairCursor: 1, claimCursor: 0, seenCaseIds: []},
+      },
+    };
     expect(prepareMaintenanceSemanticProgress(records, hashes, completed).pending).toEqual([]);
     expect(prepareMaintenanceSemanticProgress([...records].reverse(), hashes, completed).pending).toEqual([]);
+    const priorAnalyzer = {
+      threadnote: {...completed.threadnote, analyzerVersion: 1},
+    };
+    const rebuilt = prepareMaintenanceSemanticProgress(records, hashes, priorAnalyzer);
+    expect(rebuilt.pending).toEqual(['threadnote']);
+    expect(rebuilt.progress.threadnote.records.every(record => record.claims === undefined)).toBe(true);
+    expect(rebuilt.progress.threadnote.comparison).toMatchObject({pairCursor: 0, claimCursor: 0});
   });
   effectIt.effect('carries both exact source claims and policy reason into a revision-checked review-only packet', () =>
     Effect.gen(function* () {

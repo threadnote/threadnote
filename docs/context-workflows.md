@@ -210,7 +210,7 @@ reported as a policy conflict rather than an automatic replacement decision.
 Each semantic finding and its maintenance review packet exposes both claim texts, inherited headings and metadata,
 UTF-16 body/heading spans, normalized constraints, claim roles, extraction method, and the record-content SHA-256
 revision. IDs bind these revisions and context, so edits reopen the corresponding evidence case. The analyzer remains
-bounded to 128 records, 256 claims, 16 claims per record, and 100 surfaced comparisons. It skips code fences and
+bounded for one-shot reports to 128 records, 256 claims, 16 claims per record, and 100 surfaced comparisons. It skips code fences and
 compares claims across records. Unsupported prose, hedging/conditional grammar, synonyms, general enum semantics,
 non-English claims, and uncited code/dependency/configuration changes are outside this extractor's guarantee.
 `complete` means supported extraction coverage within these bounds; it does not establish universal semantic
@@ -239,7 +239,25 @@ compares the claim with current source and historical evidence, applies an exact
 concrete choice. Repeated runs with unchanged evidence leave one waiting outcome instead of another failure record.
 
 Automatic maintenance resumes from local checkpoints during normal CLI, MCP, and Manager use. It processes bounded
-batches fairly across projects. Inspect progress or control the same worker with:
+batches fairly across projects. Its semantic scan continues past the one-shot report's record and claim admission
+limits. It persists record extraction and claim-pair comparison cursors instead of rebuilding a quadratic pair
+schedule. Each semantic tick checks at most 8,192 claim pairs across at most 32 record pairs. Restarts retain progress;
+source edits revisit affected comparisons, while an analyzer upgrade starts a fresh extraction and comparison scan.
+
+Semantic coverage distinguishes extraction and comparison completion from unsupported prose, body limits, omitted
+findings, and source churn. The existing extractor limits of 65,536 UTF-16 code units per memory body and 512 per
+statement still apply. A completed comparison scan certifies only that the supported heuristic checks ran; it does
+not establish that every engineering claim is correct. Manager shows these stages separately, and a partial or
+unsupported result stays visible even after background work catches up.
+
+Maintenance retains up to 512 current semantic findings per project and 2,048 semantic ledger entries overall,
+subject to available checkpoint space. Further comparisons still run; omitted findings are counted and keep coverage
+partial. Omission accounting retains at most 1,024 source pairs within 256 KiB. If that accounting limit is reached,
+coverage remains partial. Overlapping rechecks trigger one bounded comparison recount; later source edits also
+recount rather than reuse uncertain omission counts. Within that limit, edits preserve comparison progress and
+omission counts for unaffected sources.
+
+Inspect progress or control the same worker with:
 
 ```sh
 threadnote context maintain --action status --json

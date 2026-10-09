@@ -31,6 +31,7 @@ import {currentPackageVersion, safeTimestamp, sha256} from '../../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {syncSharedReposBeforeAgentRead} from '../../effect/share.js';
 import {withSharedRepositoryLock} from '../../effect/share/lock.js';
@@ -407,20 +408,27 @@ export const readMemoryRecordsByUri = Effect.fn('mcpServer.readMemoryRecordsByUr
   config: RuntimeConfig,
   uris: readonly string[],
 ) {
-  const records = yield* Effect.forEach(
-    uris,
-    uri =>
-      Effect.gen(function* () {
-        const localPath = yield* localMemoryPathForUri(config, uri);
-        if (!localPath) return undefined;
-        const content = yield* readTextIfExists(localPath);
-        if (!content) return undefined;
-        return parseMemoryDocument(uri, content);
-      }),
-    {concurrency: 16},
-  );
-  return records.filter((record): record is MemoryRecord => record !== undefined);
+  return (yield* readMemoryRecordsByUriWithSourceHash(config, uris)).map(item => item.record);
 });
+
+export const readMemoryRecordsByUriWithSourceHash = Effect.fn('mcpServer.readMemoryRecordsByUriWithSourceHash')(
+  function* (config: RuntimeConfig, uris: readonly string[]) {
+    const records = yield* Effect.forEach(
+      uris,
+      uri =>
+        Effect.gen(function* () {
+          const localPath = yield* localMemoryPathForUri(config, uri);
+          if (!localPath) return undefined;
+          const content = yield* readTextIfExists(localPath);
+          if (!content) return undefined;
+          const record = parseMemoryDocument(uri, content);
+          return record === undefined ? undefined : {record, sourceHash: sha256HexSync(content)};
+        }),
+      {concurrency: 16},
+    );
+    return records.filter((item): item is {record: MemoryRecord; sourceHash: string} => item !== undefined);
+  },
+);
 
 const localMemoryDirectoryForCompact = Effect.fn('mcpServer.localMemoryDirectoryForCompact')(function* (
   config: RuntimeConfig,

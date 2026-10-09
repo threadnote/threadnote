@@ -11,6 +11,13 @@ import {
 import type {ContextBriefCitationValidationReceiptV2} from '@threadnote/context/types';
 import {createMemoryCodeCitation, preserveMemoryCodeCitationAnchor} from '@threadnote/memory/code/citation';
 import {buildContextHealthReport} from '@threadnote/context/health';
+import {
+  analyzeContextHealthSemantics,
+  compareContextHealthSemanticClaims,
+  compareContextHealthSemanticClaimWindow,
+  extractContextHealthSemanticClaims,
+  findContextHealthSemanticContradiction,
+} from '@threadnote/context/health_semantic';
 
 const now = new Date('2026-09-17T12:00:00.000Z');
 
@@ -44,6 +51,75 @@ function record(uri: string, body: string, metadata: Partial<MemoryMetadata> = {
 }
 
 describe('buildContextHealthReport', () => {
+  it('reaches a contradiction after the direct per-record claim limit and rechecks its exact source pair', () => {
+    const filler = Array.from(
+      {length: 17},
+      (_, index) => `Worker ${String.fromCharCode(97 + index)} must retain verified context.`,
+    );
+    const candidates = Array.from(
+      {length: 100},
+      (_, index) =>
+        `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+    );
+    const subject = candidates.find(candidate => {
+      const source = record('threadnote://memory/a', [...filler, `${candidate} must use signed artifacts.`].join('\n'));
+      return (
+        extractContextHealthSemanticClaims(source).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16
+      );
+    })!;
+    const left = record('threadnote://memory/a', [...filler, `${subject} must use signed artifacts.`].join('\n'));
+    const right = record('threadnote://memory/z', `${subject} must not use signed artifacts.`);
+    const before = [left.content, right.content];
+    expect(analyzeContextHealthSemantics({project: 'threadnote', records: [left, right]}).contradictions).toHaveLength(
+      0,
+    );
+    const extracted = extractContextHealthSemanticClaims(left);
+    expect(extracted.claims).toHaveLength(18);
+    expect(extracted.reasons).not.toContain('claim-limit');
+    const evidence = compareContextHealthSemanticClaims(
+      extracted.claims.find(claim => claim.text.startsWith(subject))!,
+      extractContextHealthSemanticClaims(right).claims[0],
+    )!;
+    expect(
+      findContextHealthSemanticContradiction([left, right], evidence.contradictionId, [
+        evidence.left.claimFingerprint,
+        evidence.right.claimFingerprint,
+      ]),
+    ).toEqual(evidence);
+    expect([left.content, right.content]).toEqual(before);
+  });
+
+  it('compares the exhaustive claim domain across bounded pages and serialized restarts', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.boolean(), {minLength: 1, maxLength: 8}),
+        fc.array(fc.boolean(), {minLength: 1, maxLength: 8}),
+        fc.integer({min: 1, max: 7}),
+        (leftPolarity, rightPolarity, limit) => {
+          const make = (uri: string, denied: readonly boolean[]) =>
+            record(uri, denied.map(value => `Agents must ${value ? 'not ' : ''}load verified context.`).join('\n'));
+          const left = make('threadnote://memory/a', leftPolarity);
+          const right = make('threadnote://memory/b', rightPolarity);
+          const before = [left.content, right.content];
+          const a = extractContextHealthSemanticClaims(left).claims;
+          const b = extractContextHealthSemanticClaims(right).claims;
+          const expected =
+            leftPolarity.filter(Boolean).length * rightPolarity.filter(value => !value).length +
+            leftPolarity.filter(value => !value).length * rightPolarity.filter(Boolean).length;
+          const found = new Set<string>();
+          let cursor = 0;
+          while (cursor < a.length * b.length) {
+            const page = compareContextHealthSemanticClaimWindow(a, b, cursor, limit);
+            for (const evidence of page.contradictions) found.add(evidence.contradictionId);
+            cursor = JSON.parse(JSON.stringify(page.nextCursor)) as number;
+          }
+          expect(found.size).toBe(expected);
+          expect([left.content, right.content]).toEqual(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
   it('excludes reserved artifact targets without hiding ordinary missing-memory evidence', () => {
     fc.assert(
       fc.property(fc.boolean(), fc.constantFrom('missing', 'inactive', 'conflicted'), (shared, status) => {

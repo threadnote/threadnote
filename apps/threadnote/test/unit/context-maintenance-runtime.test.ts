@@ -49,11 +49,17 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
   maintenanceSemanticWindowCount,
+  maintenanceSemanticRecordPairAt,
   selectMaintenanceSemanticPairBatch,
   selectMaintenanceWorkPhase,
 } from '@threadnote/threadnote/memory/context/maintenance_decisions';
 import {captureCitationReplacements} from '@threadnote/threadnote/memory/context/health_repair_commands';
 import {buildContextHealthReport} from '@threadnote/context/health';
+import {
+  compareContextHealthSemanticClaims,
+  extractContextHealthSemanticClaims,
+  findContextHealthSemanticContradiction,
+} from '@threadnote/context/health_semantic';
 import {
   advanceContextMaintenanceEvidenceRequestDiscovery,
   advanceContextMaintenanceEvidenceRequestExecution,
@@ -1798,6 +1804,51 @@ describe('persistent context maintenance', () => {
     );
   });
 
+  it('enumerates each record comparison once with a lazy stable pair cursor', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 2, max: 80}), size => {
+        const pairs = Array.from({length: (size * (size - 1)) / 2}, (_, cursor) =>
+          maintenanceSemanticRecordPairAt(cursor, size),
+        );
+        expect(new Set(pairs.map(([left, right]) => `${left}:${right}`)).size).toBe(pairs.length);
+        expect(pairs.every(([left, right]) => left >= 0 && left < right && right < size)).toBe(true);
+        expect(pairs[0]).toEqual([0, size - 1]);
+      }),
+      {numRuns: 30},
+    );
+  });
+
+  it('finds the exhaustive polarity conflicts independent of comparison subdivision and restart cursor', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.boolean(), {minLength: 2, maxLength: 12}),
+        fc.integer({min: 1, max: 7}),
+        (denied, batchSize) => {
+          const subjects = denied.map((value, index) =>
+            record(`polarity-${index}`, {}, `Agents must ${value ? 'not ' : ''}load verified context.`),
+          );
+          const original = subjects.map(subject => subject.content);
+          const claims = subjects.map(subject => extractContextHealthSemanticClaims(subject).claims[0]);
+          const expected = new Set<string>();
+          for (let left = 0; left < denied.length; left++)
+            for (let right = left + 1; right < denied.length; right++)
+              if (denied[left] !== denied[right]) expected.add(`${left}:${right}`);
+          const actual = new Set<string>();
+          const total = (denied.length * (denied.length - 1)) / 2;
+          for (let restartCursor = 0; restartCursor < total; restartCursor += batchSize) {
+            for (let cursor = restartCursor; cursor < Math.min(total, restartCursor + batchSize); cursor++) {
+              const [left, right] = maintenanceSemanticRecordPairAt(cursor, denied.length);
+              if (compareContextHealthSemanticClaims(claims[left], claims[right])) actual.add(`${left}:${right}`);
+            }
+          }
+          expect(actual).toEqual(expected);
+          expect(subjects.map(subject => subject.content)).toEqual(original);
+        },
+      ),
+      {numRuns: 35},
+    );
+  });
+
   it('alternates record and semantic phases and visits every pending project without mutating inputs', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 7}), {minLength: 1, maxLength: 8}), ids => {
@@ -3155,8 +3206,11 @@ describe('persistent context maintenance', () => {
       expect(
         (yield* runContextMaintenance(fixture.config, {cwd: fixture.home})).cases.find(
           item => item.caseId === semantic.caseId,
-        )?.disposition,
-      ).toBe('resolved');
+        ),
+      ).toMatchObject({
+        disposition: 'historical',
+        reason: 'semantic-analyzer-v2-evidence-superseded',
+      });
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
@@ -3320,6 +3374,436 @@ describe('persistent context maintenance', () => {
       expect(status.cases.find(item => item.caseId === caseId)?.disposition).toBe('needs-decision');
       const packet = yield* readContextMaintenancePacket(fixture.config, caseId);
       expect('relatedMemories' in packet && packet.relatedMemories).toHaveLength(2);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'resumes full claim comparisons across persisted ticks and retains unaffected progress after an edit',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const filler = Array.from(
+          {length: 16},
+          (_, index) => `Worker token${String.fromCharCode(97 + index)} must retain verified context.`,
+        ).join('\n');
+        const subject = Array.from(
+          {length: 100},
+          (_, index) =>
+            `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+        ).find(
+          candidate =>
+            extractContextHealthSemanticClaims(
+              record('a-source', {}, `${filler}\n${candidate} must use signed artifacts.`),
+            ).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16,
+        )!;
+        const subjects = [
+          record('a-source', {}, `${filler}\n${subject} must use signed artifacts.`),
+          ...Array.from({length: 16}, (_, index) => record(`m-${String(index).padStart(2, '0')}`, {}, filler)),
+          record('z-target', {}, `${filler}\n${subject} must not use signed artifacts.`),
+        ];
+        for (const subject of subjects)
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+            subject.content,
+          );
+        const contradiction = findContextHealthSemanticContradiction([subjects[0], subjects.at(-1)!])!;
+        expect(contradiction).toBeDefined();
+        for (let page = 0; page < 3; page++) yield* prepareContextMaintenanceInventory(fixture.config, undefined, 256);
+        let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+        for (let tick = 0; tick < 32 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+        expect(status.semanticCoverage?.[0]).toMatchObject({
+          extractionComplete: true,
+          comparisonComplete: true,
+          totalRecords: 18,
+          unsupportedClaims: 0,
+          outputOmittedFindings: 0,
+        });
+        const retained = status.cases.find(
+          item =>
+            item.family === 'semantic-contradiction' &&
+            item.slot ===
+              [contradiction.left.claimFingerprint, contradiction.right.claimFingerprint].sort().join(':') &&
+            item.disposition === 'needs-decision',
+        );
+        expect(retained).toBeDefined();
+        const packet = yield* readContextMaintenancePacket(fixture.config, retained!.caseId);
+        expect('semanticEvidence' in packet && packet.semanticEvidence?.contradictionId).toBe(
+          contradiction.contradictionId,
+        );
+        const completed = status.semanticCoverage![0].checkedBatches;
+        const edited = {
+          ...subjects[1],
+          content: `${subjects[1].content}\nWorker tokensafe must retain verified context.`,
+        };
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subjects[1].metadata.topic}.md`),
+          edited.content,
+        );
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+        expect(status.semanticCoverage?.[0].checkedBatches).toBe(completed);
+        expect(status.semanticCoverage?.[0].state).toBe('partial');
+        for (let tick = 0; tick < 32 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+        expect(status.semanticCoverage?.[0].comparisonComplete).toBe(true);
+        expect(
+          status.cases.filter(
+            item =>
+              item.family === 'semantic-contradiction' &&
+              item.disposition === 'needs-decision' &&
+              item.slot === retained!.slot,
+          ),
+        ).toHaveLength(1);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('retains findings beyond the direct output cap across maintenance pages', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const subjects = Array.from({length: 22}, (_, index) =>
+        record(
+          `output-${String(index).padStart(2, '0')}`,
+          {},
+          `Agents must ${index >= 11 ? 'not ' : ''}load verified context.`,
+        ),
+      );
+      for (const subject of subjects)
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      for (let page = 0; page < 3; page++) yield* prepareContextMaintenanceInventory(fixture.config, undefined, 256);
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+      for (let tick = 0; tick < 40 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, maxRecords: 4});
+      expect(status.semanticCoverage?.[0]).toMatchObject({comparisonComplete: true, outputOmittedFindings: 0});
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const persisted = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      expect(
+        persisted.cases.filter(
+          item => item.family === 'semantic-contradiction' && item.disposition === 'needs-decision',
+        ),
+      ).toHaveLength(121);
+      expect(status.omittedCases).toBeGreaterThan(0);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('keeps another project semantic decision current during a scoped scan', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const subjects = [
+        record('a', {project: 'project-a'}, 'Agents must retain verified context.'),
+        record('b-positive', {project: 'project-b'}, 'Deployments must use signed artifacts.'),
+        record('b-negative', {project: 'project-b'}, 'Deployments must not use signed artifacts.'),
+      ];
+      for (const subject of subjects) {
+        const directory = fixture.path.join(fixture.path.dirname(fixture.directory), subject.metadata.project!);
+        yield* fixture.fs.makeDirectory(directory, {recursive: true});
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      }
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 12 && !status.cases.some(item => item.project === 'project-b'); tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const decision = status.cases.find(
+        item => item.project === 'project-b' && item.family === 'semantic-contradiction',
+      )!;
+      expect(decision?.disposition).toBe('needs-decision');
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'project-a'});
+      const retained = yield* runContextMaintenance(fixture.config, {cwd: fixture.home, project: 'project-b'});
+      expect(retained.cases.find(item => item.caseId === decision.caseId)?.disposition).toBe('needs-decision');
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('supersedes prior analyzer cases and restarts completed extraction on unchanged sources', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      for (const subject of [
+        record('version-positive', {}, 'Agents must load verified context.'),
+        record('version-negative', {}, 'Agents must not load verified context.'),
+      ])
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 8 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const decision = status.cases.find(item => item.family === 'semantic-contradiction')!;
+      expect(decision.disposition).toBe('needs-decision');
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({
+          ...saved,
+          semanticProgress: {
+            ...saved.semanticProgress,
+            threadnote: {...saved.semanticProgress!.threadnote, analyzerVersion: 1},
+          },
+          workSchedule: {nextPhase: 'records'},
+        }),
+      );
+      status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(status.cases.find(item => item.caseId === decision.caseId)).toMatchObject({
+        disposition: 'historical',
+        reason: 'semantic-analyzer-v2-evidence-superseded',
+      });
+      expect(status.semanticCoverage?.[0]).toMatchObject({comparisonComplete: false, extractionComplete: false});
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'finishes dense supported comparisons with explicit output omissions and recovers after an edit',
+    () =>
+      Effect.gen(function* () {
+        const fixture = yield* makeFixture();
+        const sentence = 'Agents must load verified context.';
+        const opposite = 'Agents must not load verified context.';
+        const positive = record('dense-positive', {}, Array(512).fill(sentence).join('\n'));
+        const negative = record('dense-negative', {}, Array(512).fill(opposite).join('\n'));
+        const neutral = record('dense-neutral', {}, 'Worker tokenneutral must retain verified context.');
+        const handoff = record('dense-handoff', {kind: 'handoff'}, 'A temporary task handoff.');
+        for (const subject of [positive, negative, neutral, handoff])
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+            subject.content,
+          );
+        let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        for (let tick = 0; tick < 80 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({
+          comparisonComplete: true,
+          outputOmittedFindings: 512 * 512 - 512,
+          state: 'partial',
+        });
+        const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+        const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+        expect(saved.cases.filter(item => item.family === 'semantic-contradiction')).toHaveLength(512);
+        expect((yield* fixture.fs.stat(stateFile)).size).toBeLessThan(16 * 1_024 * 1_024);
+        const completedPairs = status.semanticCoverage![0].checkedBatches;
+        const churn = status.semanticCoverage![0].churnCount;
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, 'dense-handoff.md'),
+          record('dense-handoff', {kind: 'handoff'}, 'An updated temporary task handoff.').content,
+        );
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({
+          checkedBatches: completedPairs,
+          churnCount: churn,
+          outputOmittedFindings: 512 * 512 - 512,
+        });
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, 'dense-neutral.md'),
+          record('dense-neutral', {}, 'Worker tokenupdated must retain verified context.').content,
+        );
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({
+          checkedBatches: completedPairs,
+          outputOmittedFindings: 512 * 512 - 512,
+        });
+        for (let tick = 0; tick < 8 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0].outputOmittedFindings).toBe(512 * 512 - 512);
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, 'dense-negative.md'),
+          record('dense-negative', {}, 'Agents must not load verified context.').content,
+        );
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        for (let tick = 0; tick < 8 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({comparisonComplete: true, outputOmittedFindings: 0});
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('keeps cumulative comparisons monotonic when an edited pair shrinks below its cursor', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      for (const [name, negated] of [
+        ['many-positive', false],
+        ['many-negative', true],
+      ] as const)
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${name}.md`),
+          record(
+            name,
+            {},
+            Array(128)
+              .fill(`Agents must ${negated ? 'not ' : ''}load verified context.`)
+              .join('\n'),
+          ).content,
+        );
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 8 && (status.semanticCoverage?.[0]?.comparedClaimPairs ?? 0) < 8_192; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const before = status.semanticCoverage![0].comparedClaimPairs;
+      expect(before).toBeGreaterThanOrEqual(8_192);
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, 'many-negative.md'),
+        record('many-negative', {}, 'Agents must not load verified context.').content,
+      );
+      for (let tick = 0; tick < 5; tick++) {
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage![0].comparedClaimPairs).toBeGreaterThanOrEqual(before);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('bounds output ledgers across projects when UTF-8 state headroom is exhausted', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      for (const project of ['project-a', 'project-b']) {
+        const directory = fixture.path.join(fixture.path.dirname(fixture.directory), project);
+        yield* fixture.fs.makeDirectory(directory, {recursive: true});
+        for (const [name, negated] of [
+          ['positive', false],
+          ['negative', true],
+        ] as const)
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(directory, `${project}-${name}.md`),
+            record(`${project}-${name}`, {project}, `Agents must ${negated ? 'not ' : ''}load verified context.`)
+              .content,
+          );
+      }
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      const base = new TextEncoder().encode(JSON.stringify(saved)).length;
+      const padding = '🚀'.repeat(Math.floor((16 * 1_024 * 1_024 - 128 * 1_024 - base) / 4));
+      yield* fixture.fs.writeFileString(
+        stateFile,
+        JSON.stringify({...saved, policyOverrides: {padding}, workSchedule: {nextPhase: 'semantic'}}),
+      );
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 12 && status.semanticCoverage?.some(item => !item.comparisonComplete); tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(status.semanticCoverage).toHaveLength(2);
+      for (const coverage of status.semanticCoverage!)
+        expect(coverage).toMatchObject({comparisonComplete: true, outputOmittedFindings: 1, state: 'partial'});
+      const persisted = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      for (const progress of Object.values(persisted.semanticProgress ?? {})) {
+        expect(progress.omissionPairsOverflow).toBe(true);
+        expect(progress.omissionPairs).toEqual([]);
+      }
+      expect(Number((yield* fixture.fs.stat(stateFile)).size)).toBeLessThan(16 * 1_024 * 1_024);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('recounts an overflowing pair once across overlapping dirty and main passes', () =>
+    Effect.gen(function* () {
+      for (const completedMainScan of [true, false]) {
+        const fixture = yield* makeFixture();
+        for (const subject of [
+          record('overlap-a', {}, 'Workers must retain verified context.'),
+          record('overlap-b', {}, 'Deployments must use signed artifacts.'),
+        ])
+          yield* fixture.fs.writeFileString(
+            fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+            subject.content,
+          );
+        let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        if (completedMainScan)
+          for (let tick = 0; tick < 8 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+            status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+        const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+        const base = new TextEncoder().encode(JSON.stringify(saved)).length;
+        const padding = '🚀'.repeat(Math.floor((16 * 1_024 * 1_024 - 128 * 1_024 - base) / 4));
+        yield* fixture.fs.writeFileString(
+          stateFile,
+          JSON.stringify({...saved, policyOverrides: {padding}, workSchedule: {nextPhase: 'semantic'}}),
+        );
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, 'overlap-a.md'),
+          record('overlap-a', {}, 'Agents must load verified context.').content,
+        );
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, 'overlap-b.md'),
+          record('overlap-b', {}, 'Agents must not load verified context.').content,
+        );
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]?.comparisonComplete).toBe(false);
+        for (let tick = 0; tick < 12 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+          status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({
+          comparisonComplete: true,
+          outputOmittedFindings: 1,
+          state: 'partial',
+        });
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+        expect(status.semanticCoverage?.[0]).toMatchObject({comparisonComplete: true, outputOmittedFindings: 1});
+        expect(Number((yield* fixture.fs.stat(stateFile)).size)).toBeLessThan(16 * 1_024 * 1_024);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('preserves the project output cap when historical findings reappear', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const positive = record('a-positive', {}, 'Agents must load verified context.');
+      const negative = record('b-negative', {}, Array(512).fill('Agents must not load verified context.').join('\n'));
+      for (const subject of [positive, negative])
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 10 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const first = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      expect(first.cases.filter(item => item.family === 'semantic-contradiction')).toHaveLength(512);
+      yield* fixture.fs.writeFileString(
+        fixture.path.join(fixture.directory, 'a-positive.md'),
+        record('a-positive', {}, 'Worker tokenneutral must retain verified context.').content,
+      );
+      status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 8 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const third = record('c-positive', {}, 'Agents must load verified context.');
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'c-positive.md'), third.content);
+      status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 40 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'a-positive.md'), positive.content);
+      status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 40 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const saved = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      const semantic = saved.cases.filter(item => item.family === 'semantic-contradiction');
+      expect(semantic.filter(item => item.disposition === 'needs-decision')).toHaveLength(512);
+      expect(semantic.filter(item => item.disposition === 'historical')).toHaveLength(512);
+      expect(status.semanticCoverage?.[0]).toMatchObject({comparisonComplete: true, outputOmittedFindings: 512});
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('retires removed source evidence while finishing surviving extraction', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const source = record('a-source', {}, 'Agents must load verified context.');
+      const target = record('z-target', {}, 'Agents must not load verified context.');
+      for (const subject of [source, target])
+        yield* fixture.fs.writeFileString(
+          fixture.path.join(fixture.directory, `${subject.metadata.topic}.md`),
+          subject.content,
+        );
+      let status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      for (let tick = 0; tick < 6 && !status.semanticCoverage?.[0]?.comparisonComplete; tick++)
+        status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      const decision = status.cases.find(
+        item => item.family === 'semantic-contradiction' && item.disposition === 'needs-decision',
+      )!;
+      expect(decision).toBeDefined();
+      yield* fixture.fs.remove(fixture.path.join(fixture.directory, 'z-target.md'));
+      for (let tick = 0; tick < 8; tick++) status = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
+      expect(status.cases.find(item => item.caseId === decision.caseId)?.disposition).toBe('historical');
+      expect(status.semanticCoverage?.[0]).toMatchObject({
+        extractionComplete: true,
+        comparisonComplete: true,
+        totalRecords: 1,
+      });
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 

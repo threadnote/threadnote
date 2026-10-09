@@ -12,7 +12,11 @@ import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {resourceStoreLocation} from '../../mcp/server/memory.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 
-const Source = Schema.Struct({recordUri: Schema.String, recordContentFingerprint: Schema.String});
+const Source = Schema.Struct({
+  recordUri: Schema.String,
+  recordContentFingerprint: Schema.String,
+  claimFingerprint: Schema.optional(Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u))),
+});
 const Input = Schema.Struct({
   project: Schema.String,
   contradictionId: Schema.String,

@@ -239,20 +239,25 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   );
   const citation = summary?.citationCoverage;
   const semantic = summary?.semanticCoverage ?? props.report.semanticCompleteness;
+  const semanticProgress = status?.semanticCoverage?.find(item => item.project === props.project);
+  const semanticState = semanticProgress?.state ?? semantic.state;
+  const semanticScanComplete =
+    semanticProgress === undefined || (semanticProgress.extractionComplete && semanticProgress.comparisonComplete);
   const coverage =
-    citation?.state === 'complete' && semantic.state === 'complete'
+    citation?.state === 'complete' && semanticState === 'complete'
       ? 'complete'
-      : citation?.state === 'unavailable' && semantic.state === 'unavailable'
+      : citation?.state === 'unavailable' && semanticState === 'unavailable'
         ? 'unavailable'
         : 'partial';
   const projectProgress = status?.projects.find(item => item.project === props.project);
   const emptyProject =
     projectProgress === undefined && status?.preparation?.complete === true && props.report.recordsScanned === 0;
   const scanComplete =
-    emptyProject ||
-    (projectProgress !== undefined &&
-      projectProgress.checked === projectProgress.eligible &&
-      status?.preparation?.complete !== false);
+    semanticScanComplete &&
+    (emptyProject ||
+      (projectProgress !== undefined &&
+        projectProgress.checked === projectProgress.eligible &&
+        status?.preparation?.complete !== false));
   const scanTone =
     status?.state === 'failed' ? 'danger' : status?.paused ? 'warning' : scanComplete ? 'success' : 'info';
   const scanLabel =
@@ -509,12 +514,94 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           Historical evidence preserves an earlier source; it does not verify today’s code. Missing source evidence is
           retried automatically when sources change.
         </p>
-        <p>
-          The bounded English extractor assessed supported claims in {semantic.analyzedRecords?.toLocaleString() ?? '0'}{' '}
-          of {semantic.eligibleRecords?.toLocaleString() ?? '0'} durable memories. Extraction coverage can remain
-          partial after scanning finishes and does not establish semantic correctness. Comparisons with missing context
-          require review.
-        </p>
+        {semanticProgress ? (
+          <div className="health-scan-progress" aria-label="Semantic scan progress">
+            <header>
+              <strong>Memory comparisons</strong>
+              <span
+                className="health-status-badge"
+                data-tone={semanticProgress.state === 'complete' ? 'success' : 'info'}
+              >
+                {semanticScanComplete
+                  ? semanticProgress.state === 'complete'
+                    ? 'Checked'
+                    : 'Checked with gaps'
+                  : 'In progress'}
+              </span>
+            </header>
+            <p>
+              {semanticProgress.extractedRecords.toLocaleString()} of {semanticProgress.totalRecords.toLocaleString()}{' '}
+              durable memories read
+            </p>
+            <progress
+              aria-label="Claim extraction progress"
+              value={semanticProgress.extractedRecords}
+              max={Math.max(1, semanticProgress.totalRecords)}
+            />
+            {semanticProgress.churnCount > 0 ? (
+              <p>
+                {semanticProgress.comparedClaimPairs.toLocaleString()} comparison checks performed across source
+                revisions.{' '}
+                {semanticProgress.comparisonComplete
+                  ? 'Current comparisons finished.'
+                  : 'Changed claims are being checked again.'}
+              </p>
+            ) : semanticProgress.totalClaimPairs === undefined ? (
+              <p>
+                {semanticProgress.comparedClaimPairs.toLocaleString()} claim comparisons checked. The total grows as
+                remaining memories are read.
+              </p>
+            ) : (
+              <>
+                <p>
+                  {semanticProgress.comparedClaimPairs.toLocaleString()} of{' '}
+                  {semanticProgress.totalClaimPairs.toLocaleString()} claim comparisons checked
+                </p>
+                <progress
+                  aria-label="Claim comparison progress"
+                  value={semanticProgress.comparedClaimPairs}
+                  max={Math.max(1, semanticProgress.totalClaimPairs)}
+                />
+              </>
+            )}
+            {semanticProgress.unsupportedClaims > 0 ? (
+              <p>
+                {semanticProgress.unsupportedClaims.toLocaleString()} claims in{' '}
+                {semanticProgress.unsupportedRecords.toLocaleString()} memories could not be interpreted.
+              </p>
+            ) : null}
+            {semanticProgress.bodyLimitedRecords > 0 ? (
+              <p>
+                {semanticProgress.bodyLimitedRecords.toLocaleString()}{' '}
+                {semanticProgress.bodyLimitedRecords === 1 ? 'memory exceeded' : 'memories exceeded'} the supported text
+                limit.
+              </p>
+            ) : null}
+            {semanticProgress.outputOmittedFindings > 0 ? (
+              <p>
+                {semanticProgress.outputOmittedFindings.toLocaleString()} findings are outside the retained output
+                limit. Coverage remains partial.
+              </p>
+            ) : null}
+            {semanticProgress.churnCount > 0 ? (
+              <p>
+                {semanticProgress.churnCount.toLocaleString()} source changes invalidated affected work; unaffected
+                progress is preserved.
+              </p>
+            ) : null}
+            <p>
+              Completed checks do not prove that memories agree. Unsupported text and comparisons with missing context
+              still need review.
+            </p>
+          </div>
+        ) : (
+          <p>
+            The bounded English extractor assessed supported claims in{' '}
+            {semantic.analyzedRecords?.toLocaleString() ?? '0'} of {semantic.eligibleRecords?.toLocaleString() ?? '0'}{' '}
+            durable memories. Extraction coverage can remain partial after scanning finishes and does not establish
+            semantic correctness. Comparisons with missing context require review.
+          </p>
+        )}
         {props.report.repositoryEvidence.state === 'unavailable' ? (
           <p>
             Current repository evidence is unavailable. Memory and relation checks remain useful; local evidence

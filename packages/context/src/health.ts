@@ -247,7 +247,7 @@ function contextHealthCursorDigest(
   );
 }
 
-function semanticFindings(
+export function semanticFindings(
   contradictions: readonly ContextHealthSemanticContradictionV2[],
 ): readonly ContextHealthFindingV1[] {
   return contradictions.map(semanticEvidence => ({

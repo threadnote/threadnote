@@ -3,7 +3,11 @@ import {Effect, FileSystem, Path, Result, Layer} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
-import {analyzeContextHealthSemantics} from '@threadnote/context/health_semantic';
+import {
+  analyzeContextHealthSemantics,
+  extractContextHealthSemanticClaims,
+  findContextHealthSemanticContradiction,
+} from '@threadnote/context/health_semantic';
 import {StandaloneBrokerLayer} from '../../src/effect/runtime-bootstrap.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
@@ -99,6 +103,73 @@ function fixture(corpus = records) {
 }
 
 describe('explicit semantic review', () => {
+  effectIt.effect('persists selected claim fingerprints through preview and apply', () =>
+    Effect.gen(function* () {
+      const evidence = findContextHealthSemanticContradiction(records)!;
+      const selected = {
+        ...input('both'),
+        left: {
+          ...input('both').left,
+          claimFingerprint: evidence.left.claimFingerprint,
+        },
+        right: {
+          ...input('both').right,
+          claimFingerprint: evidence.right.claimFingerprint,
+        },
+      };
+      const {config} = yield* fixture();
+      const preview = yield* previewSemanticReview(config, selected);
+      const saved = yield* readSemanticReviewState(config);
+      expect(saved.entries[0].input.left.claimFingerprint).toBe(evidence.left.claimFingerprint);
+      expect(saved.entries[0].input.right.claimFingerprint).toBe(evidence.right.claimFingerprint);
+      expect(
+        yield* applySemanticReview(config, {
+          project: 'threadnote',
+          previewId: preview.previewId,
+          revision: preview.revision,
+          approved: true,
+        }),
+      ).toMatchObject({status: 'applied'});
+    }).pipe(provideTestLayer(reviewLayer)),
+  );
+  it('previews an exact comparison whose claim was beyond the direct analyzer limit', () => {
+    const filler = Array.from(
+      {length: 17},
+      (_, index) => `Worker token${String.fromCharCode(97 + index)} must retain verified context.`,
+    ).join('\n');
+    const subject = Array.from(
+      {length: 100},
+      (_, index) =>
+        `Deployment policy${String.fromCharCode(97 + Math.floor(index / 26))}${String.fromCharCode(97 + (index % 26))}`,
+    ).find(
+      candidate =>
+        extractContextHealthSemanticClaims(
+          memory('a-late', `${filler}\n${candidate} must use signed artifacts.`),
+        ).claims.findIndex(claim => claim.text.startsWith(candidate)) >= 16,
+    )!;
+    const corpus = [
+      memory('a-late', `${filler}\n${subject} must use signed artifacts.`),
+      memory('z-late', `${subject} must not use signed artifacts.`),
+    ];
+    expect(analyzeContextHealthSemantics({project: 'threadnote', records: corpus}).contradictions).toHaveLength(0);
+    const evidence = findContextHealthSemanticContradiction(corpus)!;
+    const selected = {
+      project: 'threadnote',
+      contradictionId: evidence.contradictionId,
+      left: {
+        recordUri: evidence.left.recordUri,
+        recordContentFingerprint: evidence.left.recordContentFingerprint,
+        claimFingerprint: evidence.left.claimFingerprint,
+      },
+      right: {
+        recordUri: evidence.right.recordUri,
+        recordContentFingerprint: evidence.right.recordContentFingerprint,
+        claimFingerprint: evidence.right.claimFingerprint,
+      },
+      choice: 'both' as const,
+    };
+    expect(buildSemanticReviewPreview(selected, corpus, 'tester').mode).toBe('keep-both');
+  });
   it('returns plain safe recovery messages and reserves stale status for changed evidence', () => {
     const native = ResourceConflict.make({
       actualFingerprint: 'a'.repeat(64),
