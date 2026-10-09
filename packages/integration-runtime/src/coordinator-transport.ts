@@ -32,6 +32,22 @@ import {
 
 const unavailable = () =>
   SourceCoordinatorError.make({message: 'Integration coordinator is unavailable. Retry the operation.'});
+type ClientStage =
+  | 'local queue validation'
+  | 'source inventory'
+  | 'credential handoff'
+  | 'queue initialization'
+  | 'demand publication'
+  | 'worker launch'
+  | 'result delivery';
+const atClientStage =
+  (stage: ClientStage) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.mapError(() =>
+        SourceCoordinatorError.make({message: `Integration coordinator failed during ${stage}. Retry the operation.`}),
+      ),
+    );
 const BODY_LIMIT = 1_048_576;
 interface Endpoint {
   readonly protocol: 1;
@@ -204,26 +220,32 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
         Effect.gen(function* () {
           const started = yield* Clock.currentTimeMillis;
           let launched = false;
+          let discovered = false;
           do {
             const target = yield* endpoint(config).pipe(Effect.orElseSucceed(() => undefined));
+            if (target) discovered = true;
             if (target && (yield* wake(target, config).pipe(Effect.result))._tag === 'Success') return target;
             if (!launched) {
-              yield* options.spawnWorker(config).pipe(Effect.mapError(unavailable));
+              yield* options.spawnWorker(config).pipe(atClientStage('worker launch'));
               launched = true;
             }
             yield* Effect.sleep(25);
           } while ((yield* Clock.currentTimeMillis) - started < (options.startupTimeoutMs ?? 10_000));
-          return yield* unavailable();
+          return yield* SourceCoordinatorError.make({
+            message: discovered
+              ? 'Integration coordinator did not accept requests before its startup deadline. Retry the operation.'
+              : 'Integration coordinator did not publish a valid endpoint before its startup deadline. Retry the operation.',
+          });
         });
       const request = (config: RuntimeConfig, sourceId: string | undefined) =>
         Effect.scoped(
           Effect.gen(function* () {
-            const normalized = yield* canonical(config);
+            const normalized = yield* canonical(config).pipe(atClientStage('local queue validation'));
             const descriptors = (yield* Effect.forEach(
               options.registrations,
               registration => registration.list(normalized),
               {concurrency: 1},
-            )).flat();
+            ).pipe(atClientStage('source inventory'))).flat();
             const selected =
               sourceId === undefined ? descriptors : descriptors.filter(value => value.sourceId === sourceId);
             if (sourceId !== undefined && selected.length !== 1)
@@ -238,21 +260,19 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
                 return {descriptor, values: value !== undefined && value.length <= 4_096 ? {[name]: value} : {}};
               });
             const handoff = (target: Endpoint, timeoutMs: number) =>
-              handoffBindings(target, normalized, bindings, timeoutMs);
+              handoffBindings(target, normalized, bindings, timeoutMs).pipe(atClientStage('credential handoff'));
             // Hand off rotations before making durable work visible to a live worker.
             // A cold worker inherits this caller's environment from the launch adapter.
             const existing = yield* endpoint(normalized).pipe(Effect.orElseSucceed(() => undefined));
             if (existing && bindings.length) {
               if (sourceId === undefined)
-                yield* handoff(existing, 150).pipe(Effect.timeout(150), Effect.mapError(unavailable));
+                yield* handoff(existing, 150).pipe(Effect.timeout(150), atClientStage('credential handoff'));
               else yield* handoff(existing, 5_000);
             }
-            const store = yield* openCoordinatorStore(normalized);
-            const tickets = yield* store.enqueue(
-              normalized,
-              selected,
-              sourceId === undefined ? 'automatic' : 'explicit',
-            );
+            const store = yield* openCoordinatorStore(normalized).pipe(atClientStage('queue initialization'));
+            const tickets = yield* store
+              .enqueue(normalized, selected, sourceId === undefined ? 'automatic' : 'explicit')
+              .pipe(atClientStage('demand publication'));
             if (tickets.length === 0) return {config: normalized, tickets};
             if (sourceId === undefined) {
               // Wake follows the durable write. A retiring worker rejects it;
@@ -260,13 +280,13 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
               // promptly to a different authenticated accepting worker.
               // Cold callers still launch to transfer their inherited bindings.
               if (!existing || (yield* wake(existing, normalized).pipe(Effect.result))._tag === 'Failure')
-                yield* options.spawnWorker(normalized).pipe(Effect.mapError(unavailable));
+                yield* options.spawnWorker(normalized).pipe(atClientStage('worker launch'));
             } else {
               const target = yield* ensureWorker(normalized);
               if (!existing && bindings.length) yield* handoff(target, 5_000);
             }
             return {config: normalized, tickets};
-          }).pipe(Effect.mapError(unavailable)),
+          }).pipe(Effect.mapError(error => (Schema.is(SourceCoordinatorError)(error) ? error : unavailable()))),
         );
       const coordinator = SourceCoordinator.of({
         requestRefresh: config => request(config, undefined).pipe(Effect.asVoid, Effect.provide(context)),
@@ -277,7 +297,9 @@ export function makeCoordinatorClientLayer<R, LaunchR>(options: CoordinatorClien
             if (!ticket) return yield* unavailable();
             for (;;) {
               const target = yield* ensureWorker(requested.config);
-              const result = (yield* post(target, 'result', {config: requested.config, ticket}, 5_000)) as {
+              const result = (yield* post(target, 'result', {config: requested.config, ticket}, 5_000).pipe(
+                atClientStage('result delivery'),
+              )) as {
                 ready: boolean;
                 failed?: boolean;
                 result?: SourceWorkResult;

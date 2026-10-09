@@ -121,6 +121,43 @@ async function withProcesses<A>(
 }
 
 describe('integration coordinator process composition', () => {
+  it('distinguishes safe inventory, worker-launch, and startup-deadline failures', async () => {
+    await withProcesses(async ({client, events}) => {
+      for (const [action, message] of [
+        ['inventory-failure-sync', 'failed during source inventory'],
+        ['failed-launch-sync', 'failed during worker launch'],
+        ['silent-launch-sync', 'did not publish a valid endpoint before its startup deadline'],
+      ]) {
+        const failure = await client(action).then(
+          () => undefined,
+          error => error as Error,
+        );
+        expect(failure?.message).toContain(message);
+        expect(failure?.message).not.toContain('synthetic-private');
+      }
+      expect(await events()).toEqual([]);
+    });
+  });
+
+  it('distinguishes a discoverable worker that rejects requests from a missing endpoint', async () => {
+    await withProcesses(async ({home, client, events}) => {
+      await client('refresh');
+      await until(async () => (await events()).find(event => event.kind === 'start'), 'Provider did not start');
+      const endpointPath = join(home, 'threadnote', 'integration-coordinator', 'endpoint.json');
+      const original = JSON.parse(await readFile(endpointPath, 'utf8')) as {port: number; pid: number};
+      const proxy = Bun.serve({hostname: '127.0.0.1', port: 0, fetch: () => new Response(null, {status: 409})});
+      try {
+        await writeFile(endpointPath, JSON.stringify({...original, port: proxy.port}));
+        await expect(client('silent-launch-sync')).rejects.toThrow(
+          'did not accept requests before its startup deadline',
+        );
+      } finally {
+        await writeFile(endpointPath, JSON.stringify(original));
+        await proxy.stop(true);
+      }
+    });
+  });
+
   it('shares one canonical-home worker across CLI clients and returns recall demand before provider IO', async () => {
     await withProcesses(async ({home, alias, events, client}) => {
       await Promise.all([client('refresh'), client('refresh', alias)]);

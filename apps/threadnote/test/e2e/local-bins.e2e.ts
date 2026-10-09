@@ -19,7 +19,7 @@ import {promisify} from '@threadnote/testing/node-util';
 import {Database} from 'bun:sqlite';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
-import {afterAll, beforeAll, describe, expect, it} from 'vitest';
+import {afterAll, beforeAll, describe, expect, it, vi} from 'vitest';
 import {windowsCommandLauncherInvocation} from '@threadnote/testing/windows-command-launcher';
 import {BUILTIN_MODEL_MANIFESTS, CORE_EMBEDDING_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
@@ -107,15 +107,28 @@ afterAll(async () => {
   const endpoint = await readFile(join(home, 'threadnote', 'integration-coordinator', 'endpoint.json'), 'utf8')
     .then(text => JSON.parse(text) as {readonly home: string; readonly pid: number})
     .catch(() => undefined);
-  if (endpoint?.home === (await realpath(home))) {
+  if (endpoint) {
+    expect(await realpath(endpoint.home)).toBe(await realpath(home));
+    expect(Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && endpoint.pid !== process.pid).toBe(true);
     try {
       process.kill(endpoint.pid, 'SIGKILL');
-    } catch {
-      // The fixture worker can exit before cleanup.
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'ESRCH') throw cause;
     }
+    await vi.waitFor(() => expect(isProcessRunning(endpoint.pid)).toBe(false), {interval: 25, timeout: 10_000});
   }
   await rm(temporaryRoot, {force: true, recursive: true, maxRetries: 10, retryDelay: 50});
 });
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === 'ESRCH') return false;
+    throw cause;
+  }
+}
 
 describe('built self-contained distribution', () => {
   it('initializes core lexical and vector recall without server or interpreter artifacts', async () => {
@@ -1335,16 +1348,7 @@ async function runCliOutput(
   try {
     const result = await execute(cli, ['--home', targetHome, ...args], {
       cwd: root,
-      env: {
-        ...process.env,
-        HOME: userHome,
-        LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
-        NVM_DIR: '',
-        NVM_HOME: '',
-        THREADNOTE_USER: 'e2e-user',
-        USERPROFILE: userHome,
-        ...environment,
-      },
+      env: cliEnvironment(environment),
       maxBuffer: cliOutputMaxBytes,
       timeout: realModelTimeoutMs,
     });
@@ -1362,9 +1366,54 @@ async function runCliOutput(
         `${cli} --home ${targetHome} ${args.join(' ')}`,
         `stdout:\n${boundedFailureOutput(failure.stdout)}`,
         `stderr:\n${boundedFailureOutput(failure.stderr)}`,
+        ...(args[0] === 'source' && args[1] === 'sync'
+          ? [await coordinatorFailureEvidence(targetHome, environment)]
+          : []),
       ].join('\n'),
     });
   }
+}
+
+async function coordinatorFailureEvidence(targetHome: string, environment: NodeJS.ProcessEnv): Promise<string> {
+  const directory = join(targetHome, 'threadnote', 'integration-coordinator');
+  const endpoint = await readFile(join(directory, 'endpoint.json'), 'utf8')
+    .then(text => JSON.parse(text) as {readonly pid: number; readonly home: string})
+    .catch(() => undefined);
+  const alive =
+    endpoint !== undefined && Number.isSafeInteger(endpoint.pid) && endpoint.pid > 0 && isProcessRunning(endpoint.pid);
+  const evidence = JSON.stringify({
+    endpoint: endpoint ? {pid: endpoint.pid, alive, homeMatches: endpoint.home === (await realpath(targetHome))} : null,
+    files: (await readdir(directory).catch(() => [])).filter(file =>
+      ['endpoint.json', 'worker.lock', 'jobs.sqlite', 'jobs.sqlite-wal', 'jobs.sqlite-shm'].includes(file),
+    ),
+  });
+  if (alive) return `Coordinator fixture state: ${evidence}`;
+  const probe = await execute(cli, ['--threadnote-integration-sync-worker', '--home', targetHome], {
+    cwd: root,
+    env: cliEnvironment(environment),
+    timeout: 2_000,
+    killSignal: 'SIGKILL',
+    maxBuffer: cliOutputMaxBytes,
+  }).catch(cause => cause as {readonly stdout?: unknown; readonly stderr?: unknown; readonly code?: unknown});
+  return [
+    `Coordinator fixture state: ${evidence}`,
+    `Foreground fixture worker probe: ${'code' in probe ? String(probe.code) : 'exited successfully'}`,
+    `stdout:\n${boundedFailureOutput(probe.stdout)}`,
+    `stderr:\n${boundedFailureOutput(probe.stderr)}`,
+  ].join('\n');
+}
+
+function cliEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    HOME: userHome,
+    LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
+    NVM_DIR: '',
+    NVM_HOME: '',
+    THREADNOTE_USER: 'e2e-user',
+    USERPROFILE: userHome,
+    ...environment,
+  };
 }
 
 function boundedFailureOutput(value: unknown): string {

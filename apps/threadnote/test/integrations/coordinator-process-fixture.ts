@@ -38,6 +38,8 @@ const registration: SourceWorkRegistration<FileSystem.FileSystem> = {
   provider: 'synthetic',
   list: () =>
     Effect.gen(function* () {
+      if (action === 'inventory-failure-sync')
+        return yield* SourceCoordinatorError.make({message: 'synthetic-private-inventory-detail'});
       const fs = yield* FileSystem.FileSystem;
       const fingerprint = yield* fs
         .readFileString(join(home, 'source-version'))
@@ -141,22 +143,27 @@ if (action?.startsWith('worker')) {
   const client = makeCoordinatorClientLayer({
     registrations,
     syncTimeoutMs: action === 'deadline' ? 300 : 8_000,
+    startupTimeoutMs: action === 'silent-launch-sync' ? 150 : undefined,
     spawnWorker: workerConfig =>
-      Effect.sync(() => {
-        const child = Bun.spawn({
-          cmd: [
-            process.execPath,
-            'apps/threadnote/test/integrations/coordinator-process-fixture.ts',
-            credentialMode ? 'worker-credential' : raceMode ? 'worker-race' : 'worker',
-            workerConfig.agentContextHome,
-          ],
-          env: process.env,
-          stdin: 'ignore',
-          stdout: 'ignore',
-          stderr: 'ignore',
-        });
-        child.unref();
-      }),
+      action === 'failed-launch-sync'
+        ? SourceCoordinatorError.make({message: 'synthetic-private-launch-detail'})
+        : action === 'silent-launch-sync'
+          ? Effect.void
+          : Effect.sync(() => {
+              const child = Bun.spawn({
+                cmd: [
+                  process.execPath,
+                  'apps/threadnote/test/integrations/coordinator-process-fixture.ts',
+                  credentialMode ? 'worker-credential' : raceMode ? 'worker-race' : 'worker',
+                  workerConfig.agentContextHome,
+                ],
+                env: process.env,
+                stdin: 'ignore',
+                stdout: 'ignore',
+                stderr: 'ignore',
+              });
+              child.unref();
+            }),
   }).pipe(Layer.provideMerge(base));
   await Effect.runPromise(
     Effect.scoped(
