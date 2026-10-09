@@ -120,8 +120,8 @@ Each citation records a source instance, stable note ID, path at capture,
 sanitizer contract (`scrubber-redact-v1`), sanitized revision hash, fragment
 hash/offsets, and expiry. The cited bytes are pinned privately under
 Threadnote's Obsidian source state, separate from the changing external index.
-These memories use schema version 7 so older writers refuse to rewrite and
-silently lose this citation.
+These citations are part of the versioned memory schema. Older writers refuse
+newer schemas rather than silently lose the citation.
 Only cited notes are pinned. The default retention is 90 days; callers may set
 `retentionDays` from 1 to 365. A source accepts at most 256 unexpired pins and
 64 MiB of pinned data; capture fails at capacity rather than evicting a promised
