@@ -26,12 +26,35 @@ const target = (label: string) => {
   return found;
 };
 const applicationTargets = () =>
-  inventory.targets.filter(candidate => candidate.label.startsWith('//apps/threadnote:test_standard_'));
+  inventory.targets.filter(
+    candidate =>
+      candidate.label.startsWith('//apps/threadnote:test_standard_') ||
+      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+  );
 const applicationTargetForEntry = (entry: string) => {
   const found = applicationTargets().find(candidate => candidate.entries.includes(entry));
   if (!found) throw new Error(`Missing generated application target for ${entry}`);
   return found;
 };
+const integrationPackageTargets = () =>
+  inventory.targets
+    .filter(candidate => /^\/\/packages\/integration-[^:]+:test$/u.test(candidate.label))
+    .sort((left, right) => left.label.localeCompare(right.label));
+const integrationPackageTarget = (name: string) =>
+  integrationPackageTargets().find(candidate => candidate.label === `//packages/${name}:test`)!;
+const selectForChangedInput = (changedFile: string) =>
+  selectTargets({
+    inventory: inventory.targets.map(candidate => candidate.label),
+    impacted: [],
+    changedFiles: [changedFile],
+    knownInputs: inventory.targets.flatMap(candidate => candidate.inputs),
+    targetDependencies: Object.fromEntries(
+      inventory.targets.map(candidate => [candidate.label, candidate.dependsOn ?? []]),
+    ),
+    targetInputs: Object.fromEntries(inventory.targets.map(candidate => [candidate.label, candidate.inputs])),
+  });
+const selectedIntegrationPackageTests = (changedFile: string) =>
+  selectForChangedInput(changedFile).targets.filter(label => /^\/\/packages\/integration-[^:]+:test$/u.test(label));
 
 describe('generated Bazel test contracts', () => {
   it('keeps the inventory byte-stable across filesystem enumeration orders', () => {
@@ -76,7 +99,7 @@ describe('generated Bazel test contracts', () => {
     const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
 
     expect(targets.length).toBeGreaterThan(8);
-    expect(targets.length).toBeLessThan(40);
+    expect(targets.length).toBeLessThan(50);
     expect(targets.every(candidate => candidate.workspace)).toBe(true);
     expect(targets.every(candidate => candidate.entries.length > 0 && candidate.entries.length <= 40)).toBe(true);
     expect(new Set(entries).size).toBe(entries.length);
@@ -87,15 +110,147 @@ describe('generated Bazel test contracts', () => {
     });
   });
 
-  it('discovers every colocated integration test in Vitest and exactly one Bazel target', () => {
-    const pattern = 'apps/threadnote/src/integrations/**/test/**/*.test.ts';
-    const entries = [...new Bun.Glob(pattern).scanSync('.')];
+  it('discovers provider package tests in Vitest and exactly one Bazel target', () => {
+    const expectedPackages = [
+      'integration-core',
+      'integration-runtime',
+      'integration-obsidian',
+      'integration-superhuman',
+      'integration-pocket',
+      'integration-github',
+      'integration-linear',
+    ];
+    const providerTargets = integrationPackageTargets();
+    const entries = providerTargets.flatMap(candidate => candidate.entries);
+
+    expect(providerTargets.map(candidate => candidate.label)).toEqual(
+      expectedPackages.map(name => `//packages/${name}:test`).sort(),
+    );
+    expect(providerTargets.every(candidate => candidate.entries.length > 0)).toBe(true);
+    expect(new Set(entries).size).toBe(entries.length);
+    expect(createVitestConfig().test?.include).toContain('packages/*/test/**/*.test.{ts,tsx}');
+    for (const entry of entries) {
+      expect(inventory.targets.filter(candidate => candidate.entries?.includes(entry))).toHaveLength(1);
+    }
+  });
+
+  it('keeps application integration composition tests in separate Bazel targets', () => {
+    const targets = inventory.targets.filter(candidate =>
+      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+    );
+    const entries = targets.flatMap(candidate => candidate.entries);
+    const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
 
     expect(entries.length).toBeGreaterThan(0);
-    expect(createVitestConfig().test?.include).toContain(pattern);
-    for (const entry of entries) {
-      expect(applicationTargets().filter(candidate => candidate.entries.includes(entry))).toHaveLength(1);
+    expect(entries.every(entry => entry.startsWith('apps/threadnote/test/integrations/'))).toBe(true);
+    expect(new Set(entries).size).toBe(entries.length);
+    expect(createVitestConfig().test?.include).toContain('apps/threadnote/test/**/*.test.{ts,tsx}');
+    expect(suite?.tests).toEqual(expect.arrayContaining(targets.map(candidate => `:${candidate.label.split(':')[1]}`)));
+  });
+
+  it.each([
+    'integration-obsidian',
+    'integration-superhuman',
+    'integration-pocket',
+    'integration-github',
+    'integration-linear',
+  ])('selects only the owning provider suite for %s source, test, and manifest edits', packageName => {
+    const provider = integrationPackageTarget(packageName);
+    const source = provider.inputs.find(path => path.startsWith(`packages/${packageName}/src/`));
+    const test = provider.entries[0];
+    const manifest = `packages/${packageName}/package.json`;
+
+    expect(source).toBeDefined();
+    expect(provider.inputs).toContain(manifest);
+    for (const changedFile of [source!, test, manifest]) {
+      const result = selectForChangedInput(changedFile);
+
+      expect(result.mode).toBe('selective');
+      expect(result.targets).not.toEqual(inventory.targets.map(candidate => candidate.label));
+      expect(selectedIntegrationPackageTests(changedFile)).toEqual([provider.label]);
+      if (changedFile === source || changedFile === manifest) {
+        const standardApplicationTargets = result.targets.filter(label =>
+          label.startsWith('//apps/threadnote:test_standard_'),
+        );
+        const providerName = packageName.slice('integration-'.length);
+
+        expect(
+          standardApplicationTargets.every(
+            label => label.includes(`test_standard_integration_${providerName}_`) || label.includes('integration_all_'),
+          ),
+        ).toBe(true);
+      }
     }
+  });
+
+  it.each([
+    [
+      'packages/integration-core/src/config.ts',
+      [
+        '//packages/integration-github:test',
+        '//packages/integration-linear:test',
+        '//packages/integration-obsidian:test',
+        '//packages/integration-pocket:test',
+        '//packages/integration-runtime:test',
+        '//packages/integration-superhuman:test',
+      ],
+    ],
+    [
+      'packages/integration-runtime/src/config.ts',
+      [
+        '//packages/integration-github:test',
+        '//packages/integration-linear:test',
+        '//packages/integration-obsidian:test',
+        '//packages/integration-pocket:test',
+        '//packages/integration-runtime:test',
+        '//packages/integration-superhuman:test',
+      ],
+    ],
+    [
+      'packages/integration-runtime/src/access-policy.ts',
+      [
+        '//packages/integration-github:test',
+        '//packages/integration-linear:test',
+        '//packages/integration-pocket:test',
+        '//packages/integration-superhuman:test',
+      ],
+    ],
+  ])('fans shared integration source %s out to its declared package-test dependents', (changedFile, expected) => {
+    const result = selectForChangedInput(changedFile);
+
+    expect(result.mode).toBe('selective');
+    expect(selectedIntegrationPackageTests(changedFile)).toEqual(expected);
+  });
+
+  it.each([
+    [
+      'packages/integration-core/package.json',
+      [
+        '//packages/integration-core:test',
+        '//packages/integration-github:test',
+        '//packages/integration-linear:test',
+        '//packages/integration-obsidian:test',
+        '//packages/integration-pocket:test',
+        '//packages/integration-runtime:test',
+        '//packages/integration-superhuman:test',
+      ],
+    ],
+    [
+      'packages/integration-runtime/package.json',
+      [
+        '//packages/integration-github:test',
+        '//packages/integration-linear:test',
+        '//packages/integration-obsidian:test',
+        '//packages/integration-pocket:test',
+        '//packages/integration-runtime:test',
+        '//packages/integration-superhuman:test',
+      ],
+    ],
+  ])('selects package tests from shared workspace manifest %s without falling back', (changedFile, expected) => {
+    const result = selectForChangedInput(changedFile);
+
+    expect(result.mode).toBe('selective');
+    expect(selectedIntegrationPackageTests(changedFile)).toEqual(expected);
   });
 
   it('infers runtime and repository inputs without coupling every application target to them', () => {
@@ -174,6 +329,25 @@ describe('generated Bazel test contracts', () => {
     expect(target('//:release_matrix').dependsOn).toEqual(['//:release_check', '//:threadnote_build']);
     expect(target('//:recall_quality').dependsOn).toEqual(['//:recall_quality_inputs']);
     expect(target('//:windows_smoke').dependsOn).toEqual(['//:windows_smoke_inputs']);
+  });
+
+  it.each([
+    'packages/integration-obsidian/static/integrations/obsidian.svg',
+    'packages/integration-superhuman/static/integrations/superhuman-docs.png',
+    'packages/integration-pocket/static/integrations/pocket.png',
+    'packages/integration-github/static/integrations/github.svg',
+    'packages/integration-linear/static/integrations/linear.svg',
+  ])('packages %s and selects release validation for asset-only changes', asset => {
+    expect(target('//:threadnote_build').inputs).toContain(asset);
+    expect(target('//:release_check').inputs).toContain(asset);
+
+    const selection = selectForChangedInput(asset);
+
+    expect(selection.mode).toBe('selective');
+    expect(selection.targets).toEqual(
+      expect.arrayContaining(['//:threadnote_build', '//:release_check', '//:release_matrix']),
+    );
+    expect(selectedIntegrationPackageTests(asset)).toEqual([]);
   });
 
   it('declares the benchmark correctness preflight without treating it as measured execution', () => {

@@ -1,0 +1,42 @@
+{
+  "name": "@threadnote/integration-pocket",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./access-policy": "./src/access-policy.ts",
+    "./client": "./src/client.ts",
+    "./config": "./src/config.ts",
+    "./credentials": "./src/credentials.ts",
+    "./manager": "./src/manager.ts",
+    "./manager-assets": "./src/manager-assets.ts",
+    "./manager-contracts": "./src/manager-contracts.ts",
+    "./manager-ui": "./src/manager-ui/index.tsx",
+    "./manager-ui/catalog": "./src/manager-ui/catalog.tsx",
+    "./manager-ui/connection-form": "./src/manager-ui/connection-form.tsx",
+    "./render": "./src/render.ts",
+    "./source": "./src/source.ts",
+    "./state": "./src/state.ts",
+    "./sync": "./src/sync.ts"
+  },
+  "dependencies": {
+    "@threadnote/integration-core": "workspace:*",
+    "@threadnote/manager": "workspace:*",
+    "@threadnote/platform": "workspace:*",
+    "@threadnote/store": "workspace:*",
+    "@threadnote/workspace": "workspace:*",
+    "effect": "4.0.0",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "@threadnote/integration-runtime": "workspace:*",
+    "@threadnote/recall": "workspace:*",
+    "@threadnote/testing": "workspace:*",
+    "fast-check": "4.10.1",
+    "happy-dom": "20.14.5",
+    "react-dom": "^19.3.0",
+    "vitest": "5.0.1"
+  }
+}

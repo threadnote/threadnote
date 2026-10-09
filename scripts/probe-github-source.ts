@@ -6,7 +6,7 @@ import {
   GITHUB_API_VERSION,
   githubSnapshotHash,
   type GitHubClientOptions,
-} from '@threadnote/threadnote/integrations/github/client';
+} from '@threadnote/integration-github/client';
 
 export async function probeGitHubSource(
   token: Redacted.Redacted<string>,

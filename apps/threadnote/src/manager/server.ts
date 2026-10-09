@@ -1,3 +1,4 @@
+import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {
   Cause,
@@ -18,11 +19,7 @@ import {
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
-import {
-  createManagerHttpServer,
-  MANAGER_STATIC_FILES as STATIC_FILES,
-  type ManagerHttpRequest,
-} from '@threadnote/manager/server';
+import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
   ensureEffectAiReady,

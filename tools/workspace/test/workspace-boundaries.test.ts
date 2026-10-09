@@ -21,6 +21,13 @@ const memory: WorkspacePackage = {
   exports: {'./document': './src/document.ts'},
   dependencies: {'@threadnote/platform': 'workspace:*'},
 };
+const integrationPackage = (suffix: string, dependencies: WorkspacePackage['dependencies'] = {}): WorkspacePackage => ({
+  name: `@threadnote/integration-${suffix}`,
+  directory: `packages/integration-${suffix}`,
+  private: true,
+  exports: {'./index': `./src/index.ts`},
+  dependencies,
+});
 
 describe('private workspace boundaries', () => {
   it('rejects parent segments corrupted while relocating the legacy test root', () => {
@@ -132,5 +139,83 @@ describe('private workspace boundaries', () => {
         [],
       ).join('\n'),
     ).toContain('forbidden dependency');
+  });
+
+  it('allows provider packages to depend on core and runtime contracts', () => {
+    const core = integrationPackage('core', {'@threadnote/platform': 'workspace:*'});
+    const runtime = integrationPackage('runtime', {'@threadnote/integration-core': 'workspace:*'});
+    const provider = integrationPackage('pocket', {
+      '@threadnote/integration-core': 'workspace:*',
+      '@threadnote/integration-runtime': 'workspace:*',
+      '@threadnote/platform': 'workspace:*',
+    });
+
+    expect(
+      validateWorkspaceBoundaries(
+        [platform, core, runtime, provider],
+        [
+          {path: 'packages/integration-runtime/src/index.ts', imports: ['@threadnote/integration-core/index']},
+          {
+            path: 'packages/integration-pocket/src/index.ts',
+            imports: ['@threadnote/integration-core/index', '@threadnote/integration-runtime/index'],
+          },
+        ],
+      ),
+    ).toEqual([]);
+  });
+
+  it('forbids provider dependencies on the application and on another provider', () => {
+    const core = integrationPackage('core');
+    const runtime = integrationPackage('runtime', {'@threadnote/integration-core': 'workspace:*'});
+    const obsidian = integrationPackage('obsidian');
+    const pocket = integrationPackage('pocket', {
+      '@threadnote/integration-core': 'workspace:*',
+      '@threadnote/integration-runtime': 'workspace:*',
+      '@threadnote/integration-obsidian': 'workspace:*',
+      '@threadnote/threadnote': 'workspace:*',
+    });
+    const app: WorkspacePackage = {
+      name: '@threadnote/threadnote',
+      directory: 'apps/threadnote',
+      private: true,
+      exports: {'./index': './src/threadnote.ts'},
+      dependencies: {},
+    };
+    const errors = validateWorkspaceBoundaries([core, runtime, obsidian, pocket, app], []);
+
+    expect(errors).toContain(
+      '@threadnote/integration-pocket: forbidden dependency on @threadnote/integration-obsidian',
+    );
+    expect(errors).toContain('@threadnote/integration-pocket: forbidden dependency on @threadnote/threadnote');
+  });
+
+  it('keeps core and runtime independent of concrete providers', () => {
+    const obsidian = integrationPackage('obsidian');
+    for (const owner of ['core', 'runtime']) {
+      const dependent = integrationPackage(owner, {'@threadnote/integration-obsidian': 'workspace:*'});
+      expect(validateWorkspaceBoundaries([dependent, obsidian], [])).toContain(
+        `@threadnote/integration-${owner}: forbidden dependency on @threadnote/integration-obsidian`,
+      );
+    }
+  });
+
+  it('lets providers use the generic Manager without reversing that dependency', () => {
+    const core = integrationPackage('core');
+    const manager: WorkspacePackage = {
+      name: '@threadnote/manager',
+      directory: 'packages/manager',
+      private: true,
+      exports: {'./dialog': './src/dialog.tsx'},
+      dependencies: {'@threadnote/integration-core': 'workspace:*'},
+    };
+    const provider = integrationPackage('pocket', {'@threadnote/manager': 'workspace:*'});
+    expect(validateWorkspaceBoundaries([core, manager, provider], [])).toEqual([]);
+    for (const name of ['obsidian', 'superhuman', 'pocket', 'github', 'linear']) {
+      const concrete = integrationPackage(name);
+      const dependent = {...manager, dependencies: {[concrete.name]: 'workspace:*'}};
+      expect(validateWorkspaceBoundaries([dependent, concrete], [])).toContain(
+        `@threadnote/manager: forbidden dependency on ${concrete.name}`,
+      );
+    }
   });
 });

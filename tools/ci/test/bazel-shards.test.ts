@@ -76,6 +76,19 @@ describe('Bazel CI sharding', () => {
     ).toBe(4);
   });
 
+  it('plans selected integration package tests without adding unrelated provider targets', () => {
+    const packages = ['core', 'runtime', 'obsidian', 'superhuman', 'pocket', 'github', 'linear'];
+    const inventory = packages.map(name => target(`//packages/integration-${name}:test`, 8));
+    const selected = packages.filter(name => name !== 'core').map(name => `//packages/integration-${name}:test`);
+    const shards = planBazelShards({inventory, selected, maxShards: 8});
+    const planned = shards.flatMap(shard => shard.targets);
+
+    expect(shards).toHaveLength(selected.length);
+    expect(planned.sort()).toEqual(selected.sort());
+    expect(new Set(planned).size).toBe(selected.length);
+    expect(shards.every(shard => shard.targets.length === 1)).toBe(true);
+  });
+
   it('accounts for the process startup cost of generated test targets', () => {
     const inventory = [target('//apps/threadnote:test_standard_pooled_1_of_8', 1)];
 

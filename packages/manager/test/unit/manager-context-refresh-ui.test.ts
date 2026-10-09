@@ -118,7 +118,7 @@ it('refreshes Context choices through the Manager button while preserving a vali
   container.id = 'root';
   document.body.append(container);
   await act(async () => {
-    await import('@threadnote/manager/ui');
+    (await import('@threadnote/manager/ui')).mountManager({integrations: []});
   });
   await click('Context');
   expect(repositoryPaths()).toEqual(['']);

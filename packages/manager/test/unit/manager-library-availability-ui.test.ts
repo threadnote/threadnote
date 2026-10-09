@@ -46,7 +46,7 @@ it('keeps navigation available while the library is pending or failed and recove
   container.id = 'root';
   document.body.append(container);
   await act(async () => {
-    await import('@threadnote/manager/ui');
+    (await import('@threadnote/manager/ui')).mountManager({integrations: []});
   });
 
   const navigation = () => [

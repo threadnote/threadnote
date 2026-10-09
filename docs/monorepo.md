@@ -31,37 +31,56 @@ reusable domain or infrastructure capability, `tools` for repository automation,
 `infra` for deployed operations sources, and `training` for offline model work.
 Avoid creating a new package until it has a clear owner and dependency direction.
 
-| Workspace                | Ownership                                                                                  |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| `apps/threadnote`        | CLI, MCP server, runtime composition, provider adapters, telemetry, and release entrypoint |
-| `apps/website`           | Website, public assets, content generators, prepared metadata, and website tests           |
-| `packages/platform`      | Filesystem, processes, operating system access, locks, hashing, and sanitization           |
-| `packages/store`         | Resource identities, persistence, mutation generations, and invalidation contract          |
-| `packages/workspace`     | Configuration, manifests, installation paths, and runtime version                          |
-| `packages/memory`        | Memory documents, lifecycle contracts, hygiene, relocation, and read projection            |
-| `packages/recall`        | Ranking, eligibility, lexical and vector indexes, and memory connections                   |
-| `packages/inference`     | Model catalog, selection, local inference engines, and vector search                       |
-| `packages/graph`         | Graph parsing, indexing, querying, schema, workers, and maintenance                        |
-| `packages/context`       | Context Brief compiler, evidence projection, citation validation, and procedure contracts  |
-| `packages/manager`       | Manager UI, presentation, HTTP protocol, static files, and response contracts              |
-| `packages/remote-memory` | Remote memory storage, transactions, migrations, and service contracts                     |
-| `packages/protocol`      | Shared response, authorization, and diagnostic contracts                                   |
-| `packages/integrations`  | Agent catalog and agent identities                                                         |
-| `packages/evidence`      | Benchmark and public performance evidence contracts                                        |
-| `packages/testing`       | Reusable test helpers                                                                      |
+| Workspace                         | Ownership                                                                                  |
+| --------------------------------- | ------------------------------------------------------------------------------------------ |
+| `apps/threadnote`                 | CLI, MCP server, runtime composition, provider adapters, telemetry, and release entrypoint |
+| `apps/website`                    | Website, public assets, content generators, prepared metadata, and website tests           |
+| `packages/platform`               | Filesystem, processes, operating system access, locks, hashing, and sanitization           |
+| `packages/store`                  | Resource identities, persistence, mutation generations, and invalidation contract          |
+| `packages/workspace`              | Configuration, manifests, installation paths, and runtime version                          |
+| `packages/memory`                 | Memory documents, lifecycle contracts, hygiene, relocation, and read projection            |
+| `packages/recall`                 | Ranking, eligibility, lexical and vector indexes, and memory connections                   |
+| `packages/inference`              | Model catalog, selection, local inference engines, and vector search                       |
+| `packages/graph`                  | Graph parsing, indexing, querying, schema, workers, and maintenance                        |
+| `packages/context`                | Context Brief compiler, evidence projection, citation validation, and procedure contracts  |
+| `packages/manager`                | Manager UI, presentation, HTTP protocol, static files, and response contracts              |
+| `packages/remote-memory`          | Remote memory storage, transactions, migrations, and service contracts                     |
+| `packages/protocol`               | Shared response, authorization, and diagnostic contracts                                   |
+| `packages/integrations`           | Agent catalog and agent identities                                                         |
+| `packages/evidence`               | Benchmark and public performance evidence contracts                                        |
+| `packages/testing`                | Reusable test helpers                                                                      |
+| `packages/integration-core`       | Shared source configuration and store contracts                                            |
+| `packages/integration-runtime`    | Provider-neutral registry, store layer, and policy                                         |
+| `packages/integration-obsidian`   | Obsidian provider domain code and provider-owned tests                                     |
+| `packages/integration-superhuman` | Superhuman provider domain code and provider-owned tests                                   |
+| `packages/integration-pocket`     | Pocket provider domain code and provider-owned tests                                       |
+| `packages/integration-github`     | GitHub provider domain code and provider-owned tests                                       |
+| `packages/integration-linear`     | Linear provider domain code and provider-owned tests                                       |
 
 The repository has no root `src/` or `test/` tree. Production code belongs to an app or package. Tests are colocated under the same owner: `packages/graph/test` tests graph code, `packages/manager/test` tests Manager code, and cross-domain application tests live under `apps/threadnote/test`.
 
-Product integrations live in `apps/threadnote/src/integrations`. Shared source
-configuration, locking, CLI dispatch, and Manager routing sit at that directory's
-root; provider adapters and their Manager API handlers live in `obsidian/` and
-`superhuman/`. These adapters compose application services. Manager presentation
-stays in `packages/manager`, and `packages/integrations` owns the separate agent
-catalog and identity domain. Add a private provider package only when a reusable
-capability has a clear dependency boundary independent of application composition.
-Integration tests live in the shared or provider `test/` folders beside these
-modules. Vitest and Bazel discover them there, while production typechecking and
-coverage exclude test code.
+`apps/threadnote` owns product integration composition: the source configuration
+facade, provider selection and dispatch, application layers, CLI adapters, and
+Manager route, browser, and static asset registration. `packages/integration-core`
+owns shared source configuration, store, sync, and Manager request contracts.
+`packages/integration-runtime` owns the provider-neutral registry, store layer,
+policy registration, and sequential sync composition. Each provider package owns
+its domain code, HTTP handlers, Manager forms and actions, logos, and tests.
+Providers depend on the shared integration contracts, lower-level packages, and
+generic Manager components; they do not depend on the application or on another
+provider. `packages/manager` owns the generic shell and accepts typed integration
+descriptors at mount time. It has no concrete provider dependency.
+`packages/integrations` remains the separate agent catalog and identity domain.
+
+Integration sync currently runs inline as part of the requested application
+flow. A future shared coordinator may own scheduling and concurrency, but that
+coordinator is not present today. Recall consumes the neutral `SourceSync`
+service; the application supplies the provider composition through an Effect
+Layer. Provider loops retain their existing order, budgets, and persistence.
+Keep cross-domain composition tests in
+`apps/threadnote/test`; package-specific tests belong under the owning
+`packages/<name>/test` directory. Vitest and Bazel discover package tests from
+those locations, while production typechecking and coverage exclude test code.
 
 ### Adding or changing a workspace
 
@@ -115,6 +134,14 @@ Pull-request CI compares base and head target hashes with pinned open-source `ba
 Website builds consume prepared metadata produced before the sandbox. Cached actions do not discover Git history or call release APIs. Article, release, performance, public, and prepared metadata are explicit website inputs. A website-only change selects website checks without selecting graph package tests; shared dependency changes select every dependent target.
 
 Run focused tests locally. Pull-request CI owns the complete selected suite and platform matrix.
+
+Each integration package has its own test target, and each application integration
+composition test has a separate target. A provider-only change selects its owning
+package suite without selecting unrelated provider package suites. Shared core or
+runtime changes select their dependent suites. Application tests that compose the
+full runtime still depend on every registered provider and must remain selected;
+ordinary domain tests use narrow layers instead. Selector and shard-planner
+regressions verify these dependency boundaries against the generated inventory.
 
 Platform performance workflows keep measurement execution outside Bazel. The
 `//:platform_benchmark_preflight` target declares and validates deterministic

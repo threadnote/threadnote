@@ -23,9 +23,9 @@ const nextPowerOfTwo = value => {
   return result;
 };
 
-const emitBucketed = (result, key, entries, maxEntries, targetEntries) => {
+const emitBucketed = (result, key, entries, maxEntries, targetEntries, prefix) => {
   if (entries.length <= maxEntries) {
-    result.push({name: `test_standard_${key}`, entries});
+    result.push({name: `test_standard_${prefix}${key}`, entries});
     return;
   }
   let bucketCount = nextPowerOfTwo(Math.ceil(entries.length / targetEntries));
@@ -42,17 +42,17 @@ const emitBucketed = (result, key, entries, maxEntries, targetEntries) => {
   buckets.forEach((bucket, index) => {
     if (bucket.length === 0) return;
     result.push({
-      name: `test_standard_${key}_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
+      name: `test_standard_${prefix}${key}_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
       entries: bucket,
     });
   });
 };
 
-const emitPooledFamilies = (result, families, maxEntries, targetEntries) => {
+const emitPooledFamilies = (result, families, maxEntries, targetEntries, prefix) => {
   const entries = families.flatMap(([, familyEntries]) => familyEntries);
   if (entries.length === 0) return;
   if (entries.length <= maxEntries) {
-    result.push({name: 'test_standard_pooled', entries: entries.sort()});
+    result.push({name: `test_standard_${prefix}pooled`, entries: entries.sort()});
     return;
   }
   let bucketCount = nextPowerOfTwo(Math.ceil(entries.length / targetEntries));
@@ -69,7 +69,7 @@ const emitPooledFamilies = (result, families, maxEntries, targetEntries) => {
   buckets.forEach((bucket, index) => {
     if (bucket.length === 0) return;
     result.push({
-      name: `test_standard_pooled_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
+      name: `test_standard_${prefix}pooled_${String(index + 1).padStart(width, '0')}_of_${bucketCount}`,
       entries: bucket.sort(),
     });
   });
@@ -79,7 +79,10 @@ const emitPooledFamilies = (result, families, maxEntries, targetEntries) => {
  * Builds deterministic, readable application-test groups without maintaining a
  * target list by hand. Large feature families split into stable hash buckets.
  */
-export function groupApplicationTests(paths, {maxEntries = 40, minFeatureEntries = 12, targetEntries = 24} = {}) {
+export function groupApplicationTests(
+  paths,
+  {maxEntries = 40, minFeatureEntries = 12, targetEntries = 24, affinities = {}} = {},
+) {
   if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) throw new Error('maxEntries must be positive');
   if (!Number.isSafeInteger(targetEntries) || targetEntries < 1 || targetEntries > maxEntries)
     throw new Error('targetEntries must be between one and maxEntries');
@@ -87,32 +90,41 @@ export function groupApplicationTests(paths, {maxEntries = 40, minFeatureEntries
     throw new Error('minFeatureEntries must be between one and maxEntries');
   const entries = [...new Set(paths)].sort();
   if (entries.length !== paths.length) throw new Error('Application test paths must be unique');
-  const primary = new Map();
+  const byAffinity = new Map();
   for (const entry of entries) {
-    const [first = 'misc'] = tokens(entry);
-    if (!primary.has(first)) primary.set(first, []);
-    primary.get(first).push(entry);
+    const affinity = affinities[entry] ?? '';
+    if (!byAffinity.has(affinity)) byAffinity.set(affinity, []);
+    byAffinity.get(affinity).push(entry);
   }
   const result = [];
-  const pooled = [];
-  for (const [first, firstEntries] of [...primary].sort(([left], [right]) => left.localeCompare(right))) {
-    if (firstEntries.length <= maxEntries) {
-      if (firstEntries.length < minFeatureEntries) pooled.push([first, firstEntries]);
-      else emitBucketed(result, first, firstEntries, maxEntries, targetEntries);
-      continue;
+  for (const [affinity, affinityEntries] of [...byAffinity].sort(([left], [right]) => left.localeCompare(right))) {
+    const prefix = affinity ? `${affinity}_` : '';
+    const primary = new Map();
+    for (const entry of affinityEntries) {
+      const [first = 'misc'] = tokens(entry);
+      if (!primary.has(first)) primary.set(first, []);
+      primary.get(first).push(entry);
     }
-    const secondary = new Map();
-    for (const entry of firstEntries) {
-      const [, second = 'misc'] = tokens(entry);
-      if (!secondary.has(second)) secondary.set(second, []);
-      secondary.get(second).push(entry);
+    const pooled = [];
+    for (const [first, firstEntries] of [...primary].sort(([left], [right]) => left.localeCompare(right))) {
+      if (firstEntries.length <= maxEntries) {
+        if (firstEntries.length < minFeatureEntries) pooled.push([first, firstEntries]);
+        else emitBucketed(result, first, firstEntries, maxEntries, targetEntries, prefix);
+        continue;
+      }
+      const secondary = new Map();
+      for (const entry of firstEntries) {
+        const [, second = 'misc'] = tokens(entry);
+        if (!secondary.has(second)) secondary.set(second, []);
+        secondary.get(second).push(entry);
+      }
+      for (const [second, secondEntries] of [...secondary].sort(([left], [right]) => left.localeCompare(right))) {
+        const key = `${first}_${second}`;
+        if (secondEntries.length < minFeatureEntries) pooled.push([key, secondEntries]);
+        else emitBucketed(result, key, secondEntries, maxEntries, targetEntries, prefix);
+      }
     }
-    for (const [second, secondEntries] of [...secondary].sort(([left], [right]) => left.localeCompare(right))) {
-      const key = `${first}_${second}`;
-      if (secondEntries.length < minFeatureEntries) pooled.push([key, secondEntries]);
-      else emitBucketed(result, key, secondEntries, maxEntries, targetEntries);
-    }
+    emitPooledFamilies(result, pooled, maxEntries, targetEntries, prefix);
   }
-  emitPooledFamilies(result, pooled, maxEntries, targetEntries);
   return result.sort((left, right) => left.name.localeCompare(right.name));
 }

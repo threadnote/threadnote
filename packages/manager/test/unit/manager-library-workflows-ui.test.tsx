@@ -105,7 +105,7 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   container.id = 'root';
   document.body.append(container);
   await act(async () => {
-    await import('../../src/ui.js');
+    (await import('../../src/ui.js')).mountManager({integrations: []});
   });
   const button = (label: string) =>
     [...document.querySelectorAll<HTMLButtonElement>('button')].find(

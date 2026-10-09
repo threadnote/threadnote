@@ -2,7 +2,7 @@ import {Console, Effect} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {maybeRunEffect} from '../../effect/command-presentation.js';
 import {SystemInfo} from '@threadnote/platform/system';
-import {resolveProjectedMemoryPath} from './projection.js';
+import {resolveProjectedMemoryPath} from '@threadnote/integration-obsidian/projection';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {findExecutable, toPosixPath} from '../../utils.js';
 
@@ -44,9 +44,8 @@ export const runObsidianOpen = Effect.fn('obsidian.open')(function* (
   }
 });
 
-export function obsidianOpenUri(absolutePath: string): string {
-  return `obsidian://open?path=${encodeURIComponent(absolutePath)}`;
-}
+export {obsidianOpenUri} from '@threadnote/integration-obsidian/open';
+import {obsidianOpenUri} from '@threadnote/integration-obsidian/open';
 
 const platformUriOpener = Effect.fn('obsidian.platformUriOpener')(function* (uri: string) {
   const system = yield* SystemInfo;

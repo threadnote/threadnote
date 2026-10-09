@@ -217,7 +217,7 @@
     "//tools/bazel:repositories.bzl%bun": {
       "os:osx,arch:aarch64": {
         "bzlTransitiveDigest": "tZ8aX22NhvYtjfnUIoK17Bld1ZOWWaxkND5VoWIl5S4=",
-        "usagesDigest": "xiJYDpGdIekJfMT79WHtA3TVu6lHi7p9Mou+WSgcGVk=",
+        "usagesDigest": "YXk25frM2C7kUImkJv9yPE3d1UFRewdHNXrARywv5rI=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "bun_toolchain": {
@@ -237,6 +237,13 @@
                 "@@//packages/evidence:package.json",
                 "@@//packages/graph:package.json",
                 "@@//packages/inference:package.json",
+                "@@//packages/integration-core:package.json",
+                "@@//packages/integration-github:package.json",
+                "@@//packages/integration-linear:package.json",
+                "@@//packages/integration-obsidian:package.json",
+                "@@//packages/integration-pocket:package.json",
+                "@@//packages/integration-runtime:package.json",
+                "@@//packages/integration-superhuman:package.json",
                 "@@//packages/integrations:package.json",
                 "@@//packages/manager:package.json",
                 "@@//packages/memory:package.json",

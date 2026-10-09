@@ -6,7 +6,10 @@ import {threadnoteCliFormatterLayer} from './cli/help.js';
 import {CliOutput} from './cli/output.js';
 import {HttpService} from '@threadnote/platform/http';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {superhumanExternalSourcePolicyLayer} from '../integrations/superhuman/access-policy.js';
+import {integrationExternalSourcePolicyLayer} from '../integrations/access-policy.js';
+import {sourceConfigurationLayer} from '../integrations/config.js';
+import {syncSourcesBeforeRecall} from '../integrations/source.js';
+import {SourceSync} from '@threadnote/integration-core/source-sync';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
@@ -36,12 +39,23 @@ import {
 } from './runtime-bootstrap.js';
 
 const cliOutputLayer = CliOutput.layer.pipe(Layer.provide(systemLayer));
-const externalSourcePolicyLayer = superhumanExternalSourcePolicyLayer.pipe(Layer.provide(systemLayer));
+const integrationConfigurationLayer = sourceConfigurationLayer.pipe(Layer.provide(systemLayer));
+const externalSourcePolicyLayer = integrationExternalSourcePolicyLayer.pipe(
+  Layer.provide(integrationConfigurationLayer),
+  Layer.provide(systemLayer),
+);
 const resourceStoreLayer = ResourceStore.layer.pipe(
   Layer.provide(externalSourcePolicyLayer),
   Layer.provide(recallResourceInvalidationLayer),
   Layer.provide(systemLayer),
 );
+const sourceSyncLayer = Layer.effect(
+  SourceSync,
+  Effect.gen(function* () {
+    const services = yield* Effect.context<Effect.Services<ReturnType<typeof syncSourcesBeforeRecall>>>();
+    return SourceSync.of({beforeRecall: config => syncSourcesBeforeRecall(config).pipe(Effect.provide(services))});
+  }),
+).pipe(Layer.provide(Layer.mergeAll(resourceStoreLayer, integrationConfigurationLayer, systemLayer)));
 const localModelStoreLayer = LocalModelStore.layer.pipe(
   Layer.provideMerge(HttpService.layer),
   Layer.provide(systemLayer),
@@ -105,6 +119,8 @@ const ApplicationServicesLayer = Layer.mergeAll(
   localModelStoreLayer,
   resourceStoreLayer,
   externalSourcePolicyLayer,
+  integrationConfigurationLayer,
+  sourceSyncLayer,
   systemLayer,
 );
 

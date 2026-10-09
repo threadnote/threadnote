@@ -37,7 +37,7 @@ it('checks Manager health on connected heartbeat ticks without repeating runtime
 
   try {
     await act(async () => {
-      await import('@threadnote/manager/ui');
+      (await import('@threadnote/manager/ui')).mountManager({integrations: []});
     });
     expect(heartbeat).toBeDefined();
     const initialStateRequests = requests.filter(path => path === '/api/state').length;

@@ -43,7 +43,7 @@ export const MANAGER_STATIC_FILES: Readonly<
       readonly contentType: string;
       readonly directory?: 'assets/brand' | 'manager';
       readonly path: string;
-      readonly sourceDirectory?: 'dist/manager' | 'packages/manager/static' | 'node_modules/@mdxeditor/editor/dist';
+      readonly sourceDirectory?: string;
     }
   >
 > = {
@@ -56,31 +56,6 @@ export const MANAGER_STATIC_FILES: Readonly<
   '/app.css': {
     contentType: 'text/css; charset=utf-8',
     path: 'app.css',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/integrations/obsidian.svg': {
-    contentType: 'image/svg+xml',
-    path: 'integrations/obsidian.svg',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/integrations/superhuman-docs.png': {
-    contentType: 'image/png',
-    path: 'integrations/superhuman-docs.png',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/integrations/pocket.png': {
-    contentType: 'image/png',
-    path: 'integrations/pocket.png',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/integrations/linear.svg': {
-    contentType: 'image/svg+xml',
-    path: 'integrations/linear.svg',
-    sourceDirectory: 'packages/manager/static',
-  },
-  '/integrations/github.svg': {
-    contentType: 'image/svg+xml',
-    path: 'integrations/github.svg',
     sourceDirectory: 'packages/manager/static',
   },
   '/editor.css': {

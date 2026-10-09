@@ -9,6 +9,7 @@
   "include": [
     "apps/threadnote/src/**/*.ts",
     "apps/threadnote/test/**/*.ts",
+    "apps/threadnote/test/**/*.tsx",
     "infra/*/test/**/*.ts",
     "packages/*/src/**/*.ts",
     "packages/*/test/**/*.ts",

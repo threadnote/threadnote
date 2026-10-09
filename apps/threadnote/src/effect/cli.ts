@@ -59,7 +59,7 @@ import {makeCloseoutCommand} from './closeout_cli.js';
 import {wakeContextMaintenance} from '../memory/context/maintenance.js';
 import {runProcedurePublish, runProcedureStatus, runProcedureVerify} from '../procedure/commands.js';
 import {runMcpInstall} from '../mcp/index.js';
-import {runObsidianInboxScan} from '../integrations/obsidian/inbox.js';
+import {runObsidianInboxScan} from '@threadnote/integration-obsidian/inbox';
 import {runObsidianOpen} from '../integrations/obsidian/open.js';
 import {
   runObsidianProjectionAdd,
@@ -68,7 +68,7 @@ import {
   runObsidianProjectionRemove,
   runObsidianProjectionStatus,
   runObsidianProjectionSync,
-} from '../integrations/obsidian/projection.js';
+} from '@threadnote/integration-obsidian/projection';
 import {
   runSourceAdd,
   runSourceInventory,

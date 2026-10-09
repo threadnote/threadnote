@@ -154,6 +154,7 @@ const SAFE_TELEMETRY_ERROR_TYPES = new Set([
   'SearchCommandError',
   'SeedingOperationError',
   'ShareOperationError',
+  'SourceConfigurationError',
   'StandaloneProcessLeaseError',
   'StorageLayoutMigrationConflict',
   'SyntaxError',

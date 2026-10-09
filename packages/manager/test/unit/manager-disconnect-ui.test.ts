@@ -141,7 +141,7 @@ describe('Manager disconnect recovery', () => {
     });
     try {
       await act(async () => {
-        await import('@threadnote/manager/ui');
+        (await import('@threadnote/manager/ui')).mountManager({integrations: []});
       });
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await flush();

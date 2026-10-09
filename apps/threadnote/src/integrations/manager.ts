@@ -1,14 +1,19 @@
 import {Effect} from 'effect';
-import {handleManagerLinearIntegrationRequest, listLinearIntegrations} from './linear/manager.js';
-import type {ManagerProcessApiRequest} from '../manager/processes.js';
-import {managerFeatureError} from '../manager/feature_errors.js';
-import {isObsidianSource, readSourceConfiguration} from './config.js';
-import {handleManagerObsidianIntegrationRequest} from './obsidian/manager.js';
-import {handleManagerPocketIntegrationRequest, listPocketIntegrations} from './pocket/manager.js';
-import {handleManagerSuperhumanIntegrationRequest, listSuperhumanIntegrations} from './superhuman/manager.js';
-import {handleManagerGitHubIntegrationRequest, listGitHubIntegrations} from './github/manager.js';
+import {handleManagerLinearIntegrationRequest, listLinearIntegrations} from '@threadnote/integration-linear/manager';
+import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
+import {integrationFeatureError} from '@threadnote/integration-core/manager-http';
+import {
+  handleManagerObsidianIntegrationRequest,
+  listObsidianIntegrations,
+} from '@threadnote/integration-obsidian/manager';
+import {handleManagerPocketIntegrationRequest, listPocketIntegrations} from '@threadnote/integration-pocket/manager';
+import {
+  handleManagerSuperhumanIntegrationRequest,
+  listSuperhumanIntegrations,
+} from '@threadnote/integration-superhuman/manager';
+import {handleManagerGitHubIntegrationRequest, listGitHubIntegrations} from '@threadnote/integration-github/manager';
 
-const routeManagerIntegration = Effect.fn('manager.integrations')(function* (request: ManagerProcessApiRequest) {
+const routeManagerIntegration = Effect.fn('manager.integrations')(function* (request: ManagerIntegrationApiRequest) {
   if (request.url.pathname === '/api/integrations/linear') return yield* handleManagerLinearIntegrationRequest(request);
   if (request.url.pathname === '/api/integrations/superhuman')
     return yield* handleManagerSuperhumanIntegrationRequest(request);
@@ -17,7 +22,7 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
   if (request.url.pathname !== '/api/integrations') return yield* handleManagerObsidianIntegrationRequest(request);
   if (request.method !== 'GET') return {status: 405, body: {error: 'Method not allowed'}};
   return yield* Effect.gen(function* () {
-    const configuration = yield* readSourceConfiguration(request.config);
+    const obsidian = yield* listObsidianIntegrations(request.config);
     const superhuman = yield* listSuperhumanIntegrations(request.config);
     const pocket = yield* listPocketIntegrations(request.config);
     const linear = yield* listLinearIntegrations(request.config);
@@ -25,7 +30,7 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
     return {
       status: 200,
       body: {
-        obsidian: {sources: configuration.sources.filter(isObsidianSource), projections: configuration.projections},
+        obsidian,
         superhuman,
         pocket,
         linear,
@@ -35,5 +40,5 @@ const routeManagerIntegration = Effect.fn('manager.integrations')(function* (req
   }).pipe(Effect.catchCause(() => Effect.succeed({status: 409, body: {error: 'Connections could not be loaded.'}})));
 });
 
-export const handleManagerIntegrationRequest = (request: ManagerProcessApiRequest) =>
-  routeManagerIntegration(request).pipe(Effect.catchCause(managerFeatureError));
+export const handleManagerIntegrationRequest = (request: ManagerIntegrationApiRequest) =>
+  routeManagerIntegration(request).pipe(Effect.catchCause(integrationFeatureError));

@@ -6,6 +6,7 @@ import {HomeMigrationInsufficientSpace} from '@threadnote/threadnote/migration/h
 import {StorageLayoutMigrationConflict} from '@threadnote/threadnote/migration/layout';
 import {ReportIssueCreateFailed} from '@threadnote/threadnote/report_issue';
 import {CursorAttestationError} from '@threadnote/threadnote/cursor/cloud_attestation';
+import {SourceConfigurationError} from '@threadnote/integration-core/config';
 import {
   anonymousTelemetryDiagnosticFromCodeGraphRefreshFailure,
   anonymousTelemetryDiagnosticFromError,
@@ -31,6 +32,10 @@ describe('anonymous telemetry diagnostics', () => {
   });
 
   it.each([
+    {
+      error: SourceConfigurationError.make({message: 'private source configuration content'}),
+      errorType: 'SourceConfigurationError',
+    },
     {
       error: HomeMigrationInsufficientSpace.make({
         availableBytes: 1,

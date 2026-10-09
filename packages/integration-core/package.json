@@ -1,0 +1,29 @@
+{
+  "name": "@threadnote/integration-core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./access-policy": "./src/access-policy.ts",
+    "./config": "./src/config.ts",
+    "./external-credentials": "./src/external-credentials.ts",
+    "./lock": "./src/lock.ts",
+    "./manager-contracts": "./src/manager-contracts.ts",
+    "./manager-http": "./src/manager-http.ts",
+    "./manager-inputs": "./src/manager-inputs.ts",
+    "./render": "./src/render.ts",
+    "./source-sync": "./src/source-sync.ts",
+    "./utils": "./src/utils.ts"
+  },
+  "dependencies": {
+    "@threadnote/platform": "workspace:*",
+    "@threadnote/store": "workspace:*",
+    "@threadnote/workspace": "workspace:*",
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@effect/platform-bun": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "fast-check": "4.10.1",
+    "vitest": "5.0.1"
+  }
+}

@@ -26,7 +26,7 @@ import {
 } from '@threadnote/graph/sharing/contribution/retry';
 import {runCodeGraphAutomaticCompactionScheduler} from '@threadnote/graph/automatic/compaction';
 import {refreshPendingDeferredCodeAnchorWorkspaces} from '../../memory/deferred/code_anchor_refresh.js';
-import {runObsidianProjectionPublish} from '../../integrations/obsidian/projection.js';
+import {runObsidianProjectionPublish} from '@threadnote/integration-obsidian/projection';
 import {withProductionLogging} from '../../effect/production_log.js';
 import {withAnonymousTelemetry} from '../../effect/telemetry.js';
 import {

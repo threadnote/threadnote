@@ -1,3 +1,4 @@
+import {integrationStaticFiles} from '@threadnote/threadnote/manager/static-files';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {runBunBuild} from './effect/bun-build.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
@@ -65,6 +66,11 @@ const build = Effect.gen(function* () {
   yield* fs.copy(path.join(root, 'packages', 'manager', 'static'), path.join(outputRoot, 'manager'), {
     overwrite: true,
   });
+  for (const file of Object.values(integrationStaticFiles)) {
+    const destination = path.join(outputRoot, 'manager', file.path);
+    yield* fs.makeDirectory(path.dirname(destination), {recursive: true});
+    yield* fs.copyFile(path.join(root, file.sourceDirectory, file.path), destination);
+  }
   yield* fs.copy(
     path.join(root, 'packages', 'remote-memory', 'src', 'migrations'),
     path.join(outputRoot, REMOTE_MEMORY_MIGRATION_DIRECTORY),
@@ -101,7 +107,7 @@ const build = Effect.gen(function* () {
   }
 
   yield* runBunBuild({
-    entrypoints: [path.join(root, 'packages', 'manager', 'src', 'ui.tsx')],
+    entrypoints: [path.join(root, 'apps', 'threadnote', 'src', 'manager', 'browser.tsx')],
     format: 'iife',
     minify: true,
     naming: 'app.[ext]',

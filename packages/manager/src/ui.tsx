@@ -7,6 +7,7 @@ import {
 import {MemorySelectionBar} from './memory_selection_bar.js';
 import {SharingPanel} from './sharing_view.js';
 import {IntegrationsPanel} from './integrations_view.js';
+import type {IntegrationRegistration} from './integration_registration.js';
 import {RuntimeHealthPanel} from './runtime_health_view.js';
 import '@mdxeditor/editor/style.css';
 import {
@@ -183,7 +184,7 @@ interface StateResponse {
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
 
-function App(): React.ReactElement {
+function App({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [panel, setPanel] = useState<PanelName>('home');
   const [state, setState] = useState<StateResponse | undefined>();
@@ -1927,7 +1928,11 @@ function App(): React.ReactElement {
           ) : null}
 
           {panel === 'integrations' ? (
-            <IntegrationsPanel onChanged={refreshAll} onReviews={() => setPanel('reviews')} />
+            <IntegrationsPanel
+              integrations={integrations}
+              onChanged={refreshAll}
+              onReviews={() => setPanel('reviews')}
+            />
           ) : null}
           {panel === 'shares' ? (
             <SharingPanel
@@ -1972,14 +1977,14 @@ function App(): React.ReactElement {
   );
 }
 
-if (typeof document !== 'undefined') {
+export function mountManager({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): void {
   const root = document.getElementById('root');
   if (!root) {
     throw new Error('Missing #root');
   }
   createRoot(root).render(
     <ManagerDialogProvider>
-      <App />
+      <App integrations={integrations} />
     </ManagerDialogProvider>,
   );
 }

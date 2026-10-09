@@ -1,11 +1,13 @@
-import {Option, Schema} from 'effect';
+import {Option} from 'effect';
+import {ManagerRequestInputError, requireString} from '@threadnote/integration-core/manager-inputs';
+export {
+  requireString,
+  optionalString,
+  requireStringArray,
+  requireConfirm,
+} from '@threadnote/integration-core/manager-inputs';
 import type {ConsolidationAgent} from '@threadnote/integrations/agents';
 import type {MemoryKind, MemoryStatus} from '@threadnote/memory/types';
-
-class ManagerRequestInputError extends Schema.TaggedError<ManagerRequestInputError>()('ManagerRequestInputError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
 
 export function requiredQuery(url: URL, name: string): string {
   const value = url.searchParams.get(name);
@@ -34,17 +36,6 @@ export function optionalNonEmptyQuery(url: URL, name: string): Option.Option<str
   );
 }
 
-export function requireString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw ManagerRequestInputError.make({message: `Provide ${name}.`});
-  }
-  return value;
-}
-
-export function optionalString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
-}
-
 export function optionalGraphScopeIdentity(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   const identity = requireString(value, 'scopeId');
@@ -52,17 +43,6 @@ export function optionalGraphScopeIdentity(value: unknown): string | undefined {
     throw ManagerRequestInputError.make({message: 'Provide scopeId as an exact graph scope identity.'});
   }
   return identity;
-}
-
-export function requireStringArray(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.length === 0 || !value.every(item => typeof item === 'string')) {
-    throw ManagerRequestInputError.make({message: `Provide ${name} as a non-empty string array.`});
-  }
-  return value;
-}
-
-export function requireConfirm(body: Record<string, unknown>): void {
-  if (body.confirm !== true) throw ManagerRequestInputError.make({message: 'Set confirm=true for this action.'});
 }
 
 export function memoryKind(value: unknown): MemoryKind | undefined {

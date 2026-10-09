@@ -1,8 +1,10 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- Target discovery runs before the declared Bazel graph exists. */
-import {existsSync, readFileSync, readdirSync} from 'node:fs';
+import {existsSync, readFileSync, readdirSync, statSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {ciLongRunningTestGroups, ciRequiredLongRunningTestGroupNames} from '../ci/vitest-plan.ts';
 import {groupApplicationTests} from './application-test-groups.mjs';
+import {allowedRepositoryPath, sourceRepositoryPathCandidates} from './repository-inputs.mjs';
+import {collectSourceClosure, sourceImports} from './source-closure.mjs';
 
 const root = resolve(import.meta.dir, '../..');
 const filesBelow = directory => {
@@ -21,11 +23,33 @@ const testFilesBelow = directory =>
 const packageDirectories = readdirSync(join(root, 'packages'))
   .sort()
   .map(name => `packages/${name}`);
+const applicationWorkspaceDirectories = [
+  ...readdirSync(join(root, 'apps'))
+    .sort()
+    .map(name => `apps/${name}`),
+  ...packageDirectories,
+].filter(path => existsSync(join(root, path, 'package.json')));
+const applicationWorkspaces = new Map(
+  applicationWorkspaceDirectories.map(path => {
+    const manifest = JSON.parse(readFileSync(join(root, path, 'package.json'), 'utf8'));
+    return [manifest.name, {path, manifest}];
+  }),
+);
+const sourceImportCache = new Map();
+const readSource = path => readFileSync(join(root, path), 'utf8');
+const applicationSourceImports = path => {
+  if (!sourceImportCache.has(path)) sourceImportCache.set(path, sourceImports(path, readSource(path)));
+  return sourceImportCache.get(path);
+};
+const applicationSourceExists = path => {
+  const absolute = join(root, path);
+  return existsSync(absolute) && statSync(absolute).isFile();
+};
 const longRunningTests = new Set(Object.values(ciLongRunningTestGroups).flat());
-const applicationTests = [
-  ...testFilesBelow('apps/threadnote/test'),
-  ...testFilesBelow('apps/threadnote/src/integrations'),
-].sort();
+const applicationTests = [...testFilesBelow('apps/threadnote/test')].sort();
+const applicationIntegrationTests = applicationTests.filter(path =>
+  path.startsWith('apps/threadnote/test/integrations/'),
+);
 const postgresTests = new Set(
   applicationTests.filter(path => readFileSync(join(root, path), 'utf8').includes('THREADNOTE_TEST_POSTGRES_URL')),
 );
@@ -138,6 +162,65 @@ const applicationReferencedInputRoots = [
   'THIRD_PARTY.md',
 ];
 const applicationTestData = ['bun.lock', 'package.json', 'tsconfig.json', 'tsconfig.test.json', 'vitest.config.ts'];
+const applicationSourceExtensions = /\.(?:[cm]?[jt]sx?)$/u;
+const applicationTestSourceClosure = path => {
+  const entries = [path, 'package.json', 'tools/bazel/project-vitest.config.ts'];
+  const discoveryEntries = new Set([path]);
+  const discoveredSources = new Set();
+  const scanned = new Set();
+  let closure;
+  while (true) {
+    closure = collectSourceClosure([...entries, ...discoveredSources], {
+      read: readSource,
+      exists: applicationSourceExists,
+      workspaces: applicationWorkspaces,
+      imports: applicationSourceImports,
+    });
+    const closureFiles = new Set(closure.files);
+    let expanded = false;
+    for (const source of closure.files) {
+      const testSupport = source.includes('/test/') || source.startsWith('packages/testing/');
+      if (
+        !applicationSourceExtensions.test(source) ||
+        scanned.has(source) ||
+        (!discoveryEntries.has(source) && !testSupport)
+      )
+        continue;
+      scanned.add(source);
+      for (const candidate of sourceRepositoryPathCandidates(source, readSource(source))) {
+        if (!allowedRepositoryPath(candidate, applicationReferencedInputRoots)) continue;
+        const candidates = [candidate];
+        if (/\.[cm]?jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.[cm]?jsx?$/u, '.ts'));
+        if (/\.jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.jsx?$/u, '.tsx'));
+        const referencedSource = candidates.find(applicationSourceExists);
+        if (referencedSource) {
+          if (
+            applicationSourceExtensions.test(referencedSource) &&
+            !closureFiles.has(referencedSource) &&
+            !discoveredSources.has(referencedSource)
+          ) {
+            discoveredSources.add(referencedSource);
+            expanded = true;
+          }
+          continue;
+        }
+        if (existsSync(join(root, candidate)) && statSync(join(root, candidate)).isDirectory()) {
+          for (const referencedFile of filesBelow(candidate)) {
+            if (
+              applicationSourceExtensions.test(referencedFile) &&
+              !closureFiles.has(referencedFile) &&
+              !discoveredSources.has(referencedFile)
+            ) {
+              discoveredSources.add(referencedFile);
+              expanded = true;
+            }
+          }
+        }
+      }
+    }
+    if (!expanded) return closure;
+  }
+};
 const packageTestClosureEntries = {
   'packages/graph': [
     'apps/threadnote/test/fixtures/code-graph-lazy-extractor.ts',
@@ -190,7 +273,7 @@ const packageTests = packageDirectories.flatMap(directory => {
   const shared = {
     package: directory,
     kind: 'test',
-    data: packageData[directory] ?? [],
+    data: [...new Set([`${directory}/package.json`, ...(packageData[directory] ?? [])])],
     dataRoots: packageDataRoots[directory] ?? [],
     npm: packageTestNpm[directory] ?? [],
   };
@@ -241,9 +324,56 @@ const longRunningTargets = ciRequiredLongRunningTestGroupNames.map(group => ({
   workspace: true,
 }));
 const applicationStandardTests = applicationTests.filter(
-  path => !longRunningTests.has(path) && !postgresTests.has(path),
+  path => !longRunningTests.has(path) && !postgresTests.has(path) && !applicationIntegrationTests.includes(path),
 );
-const applicationTestGroups = groupApplicationTests(applicationStandardTests);
+const integrationPackages = [
+  'integration-core',
+  'integration-runtime',
+  'integration-obsidian',
+  'integration-superhuman',
+  'integration-pocket',
+  'integration-github',
+  'integration-linear',
+];
+const providerPackages = integrationPackages.filter(
+  name => !['integration-core', 'integration-runtime'].includes(name),
+);
+const applicationTestAffinities = Object.fromEntries(
+  applicationStandardTests.map(path => {
+    const closure = applicationTestSourceClosure(path);
+    const dependencies = new Set(
+      closure.files
+        .map(file => file.match(/^packages\/(integration-[^/]+)\//u)?.[1])
+        .filter(name => integrationPackages.includes(name)),
+    );
+    const providers = providerPackages.filter(name => dependencies.has(name));
+    const dependencyNames =
+      providers.length === providerPackages.length
+        ? ['all']
+        : providers.length > 0
+          ? providers.map(name => name.slice('integration-'.length))
+          : integrationPackages.filter(name => dependencies.has(name)).map(name => name.slice('integration-'.length));
+    return [path, dependencyNames.length === 0 ? '' : `integration_${dependencyNames.join('_')}`];
+  }),
+);
+const applicationTestGroups = groupApplicationTests(applicationStandardTests, {
+  affinities: applicationTestAffinities,
+});
+const applicationIntegrationTargets = applicationIntegrationTests.map(path => ({
+  package: 'apps/threadnote',
+  name: `test_integration_${path
+    .split('/')
+    .at(-1)
+    .replace(/\.test\.tsx?$/u, '')
+    .replaceAll(/[^a-zA-Z0-9_]+/gu, '_')}`,
+  kind: 'test',
+  entries: [path],
+  data: applicationTestData,
+  referencedInputRoots: applicationReferencedInputRoots,
+  npm: packageTestNpm['packages/graph'],
+  timeout: 'long',
+  workspace: true,
+}));
 
 const threadnoteBuild = {
   entries: [
@@ -255,7 +385,14 @@ const threadnoteBuild = {
     'scripts/generate-code-graph-language-catalog.ts',
   ],
   sourceRoots: ['apps/threadnote/src', ...packageDirectories.map(path => `${path}/src`)],
-  dataRoots: ['assets', 'config', 'cursor-plugin', 'packages/manager/static', 'packages/remote-memory/src/migrations'],
+  dataRoots: [
+    'assets',
+    'config',
+    'cursor-plugin',
+    'packages/manager/static',
+    ...providerPackages.map(name => `packages/${name}/static`),
+    'packages/remote-memory/src/migrations',
+  ],
   data: ['.threadnoteignore', 'LICENSE', 'THIRD_PARTY.md', 'package.json', 'scripts/native/graph-keychain.m'],
   npm: allNpm,
 };
@@ -282,7 +419,6 @@ export const targetSpecs = [
     kind: 'test',
     entries: toolingTests,
     data: [
-      ...testFilesBelow('apps/threadnote/src/integrations'),
       'tools/bazel/runner.mjs',
       'tools/bazel/targets.json',
       'tools/ci/bazel-run-selected.mjs',
@@ -524,6 +660,7 @@ export const targetSpecs = [
     timeout: 'long',
     workspace: true,
   })),
+  ...applicationIntegrationTargets,
   {
     package: 'apps/threadnote',
     name: 'test_postgres',
@@ -564,7 +701,10 @@ export const testSuites = [
   {
     package: 'apps/threadnote',
     name: 'test',
-    tests: applicationTestGroups.map(({name}) => `:${name}`),
+    tests: [
+      ...applicationTestGroups.map(({name}) => `:${name}`),
+      ...applicationIntegrationTargets.map(({name}) => `:${name}`),
+    ].sort(),
   },
 ];
 

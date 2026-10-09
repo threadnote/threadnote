@@ -33,6 +33,32 @@ describe('generated application test groups', () => {
     }
   });
 
+  it('keeps tests with different integration source closures in separate targets', () => {
+    const paths = [
+      'apps/threadnote/test/unit/github-connect.test.ts',
+      'apps/threadnote/test/unit/github-refresh.test.ts',
+      'apps/threadnote/test/unit/pocket-connect.test.ts',
+      'apps/threadnote/test/unit/neutral-config.test.ts',
+    ];
+    const groups = groupApplicationTests(paths, {
+      maxEntries: 4,
+      minFeatureEntries: 2,
+      targetEntries: 3,
+      affinities: {
+        [paths[0]]: 'integration_github',
+        [paths[1]]: 'integration_github',
+        [paths[2]]: 'integration_pocket',
+      },
+    });
+
+    expect(groups.find(group => group.name === 'test_standard_integration_github_github')?.entries).toEqual([
+      paths[0],
+      paths[1],
+    ]);
+    expect(groups.find(group => group.name === 'test_standard_integration_pocket_pooled')?.entries).toEqual([paths[2]]);
+    expect(groups.find(group => group.name === 'test_standard_pooled')?.entries).toEqual([paths[3]]);
+  });
+
   it('is deterministic, complete, bounded, and duplicate-free', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({min: 0, max: 400}), {maxLength: 150}), values => {

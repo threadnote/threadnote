@@ -96,7 +96,7 @@ import {
   RECALL_MCP_RESPONSE_MINIMUM_ESTIMATED_TOKENS,
 } from '@threadnote/recall/mcp/response';
 import {mergeRecallOperationalWarnings} from '@threadnote/recall/warning';
-import {syncSourcesBeforeRecall} from '../../integrations/source.js';
+import {syncSourcesBeforeRecall} from '@threadnote/integration-core/source-sync';
 import {withProductionPhaseTiming} from '../../effect/production_log.js';
 import {withAnonymousTelemetryPhase} from '../../effect/telemetry.js';
 import type {ApplyMemoryCandidateInput} from '../../memory/candidate_apply_contract.js';

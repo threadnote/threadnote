@@ -140,7 +140,7 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   container.id = 'root';
   document.body.append(container);
   await act(async () => {
-    await import('../../src/ui.js');
+    (await import('../../src/ui.js')).mountManager({integrations: []});
   });
   const button = (text: string) =>
     [...document.querySelectorAll<HTMLButtonElement>('button')].find(

@@ -1,4 +1,4 @@
-import {probeSuperhumanTools, ProbeError} from '@threadnote/threadnote/integrations/superhuman/probe';
+import {probeSuperhumanTools, ProbeError} from '@threadnote/integration-superhuman/probe';
 import {ScriptSystemInfoLayer} from './effect/system-layer.ts';
 import {runtimeEntrypointLayer} from '@threadnote/threadnote/effect/runtime-entrypoint';
 import {Effect, Layer} from 'effect';
