@@ -85,6 +85,17 @@ it('never prints arbitrary startup errors through the worker console projection'
 });
 
 effectLayer(base)('durable integration coordinator', effectIt => {
+  effectIt.effect('runs startup cleanup repeatedly without removing pending work', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const store = yield* openCoordinatorStore(current);
+      const [ticket] = yield* store.enqueue(current, [descriptor('retained')], 'automatic');
+      yield* store.cleanup;
+      yield* store.cleanup;
+      expect((yield* store.pending).map(({key, generation}) => ({key, generation}))).toEqual([ticket]);
+    }),
+  );
+
   effectIt.effect('yields and retries a locked cold WAL setup, then retains durable demand', () =>
     Effect.gen(function* () {
       const current = yield* config;

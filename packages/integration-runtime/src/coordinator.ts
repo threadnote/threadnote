@@ -353,14 +353,14 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
     cleanup: Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       yield* sql`DELETE FROM source_receipts WHERE completed_at < ${now - RECEIPT_RETENTION_MS}`;
-      yield* sql`DELETE FROM source_receipts WHERE rowid NOT IN (SELECT rowid FROM source_receipts ORDER BY completed_at DESC LIMIT 2_048)`;
+      yield* sql`DELETE FROM source_receipts WHERE rowid NOT IN (SELECT rowid FROM source_receipts ORDER BY completed_at DESC LIMIT ${2_048})`;
       yield* sql`DELETE FROM source_admission WHERE updated_at < ${now - 86_400_000} AND cooldown_until < ${now}`;
-      yield* sql`DELETE FROM source_admission WHERE key NOT LIKE 'provider:%' AND key NOT IN (SELECT key FROM source_admission WHERE key NOT LIKE 'provider:%' ORDER BY updated_at DESC LIMIT 8_192)`;
-      yield* sql`DELETE FROM source_account_turns WHERE key NOT IN (SELECT key FROM source_account_turns ORDER BY last_turn DESC LIMIT 2_048)`;
+      yield* sql`DELETE FROM source_admission WHERE key NOT LIKE 'provider:%' AND key NOT IN (SELECT key FROM source_admission WHERE key NOT LIKE 'provider:%' ORDER BY updated_at DESC LIMIT ${8_192})`;
+      yield* sql`DELETE FROM source_account_turns WHERE key NOT IN (SELECT key FROM source_account_turns ORDER BY last_turn DESC LIMIT ${2_048})`;
       yield* sql`DELETE FROM source_jobs WHERE state='idle' AND requested_at < ${now - 7 * 86_400_000}`;
       yield* sql`DELETE FROM source_jobs WHERE state='pending' AND requested_at < ${now - 86_400_000}`;
       yield* queueStore.cleanup({timeToLive: Duration.hours(1), failedTimeToLive: Duration.hours(1)});
-      yield* sql`DELETE FROM source_queue WHERE state IN ('completed','failed') AND sequence NOT IN (SELECT sequence FROM source_queue WHERE state IN ('completed','failed') ORDER BY sequence DESC LIMIT 4_096)`;
+      yield* sql`DELETE FROM source_queue WHERE state IN ('completed','failed') AND sequence NOT IN (SELECT sequence FROM source_queue WHERE state IN ('completed','failed') ORDER BY sequence DESC LIMIT ${4_096})`;
     }).pipe(Effect.asVoid, Effect.mapError(fail)),
   } satisfies CoordinatorStore;
 });
