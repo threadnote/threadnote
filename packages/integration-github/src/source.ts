@@ -1,3 +1,11 @@
+import {
+  SourceCoordinator,
+  SourceCoordinatorError,
+  sourceAccountKey,
+  withSourceCredentialEnvironment,
+  type SourceWorkOptions,
+} from '@threadnote/integration-core/source-coordinator';
+import {Option} from 'effect';
 import {isGitHubSource} from './config.js';
 import {Clock, Console, DateTime, Effect, FileSystem, Path, Random, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -302,7 +310,15 @@ export const runGitHubSourceSync = Effect.fn('github.sync')(function* (
     );
     return syncResult({sourceId: source.id, syncedDocuments: [], warnings: []});
   }
-  const result = yield* syncGitHubSource(config, source.id, options.clientOptions);
+  const coordinator = yield* Effect.serviceOption(SourceCoordinator);
+  let coordinatedResult: GitHubSyncResult | undefined;
+  if (Option.isSome(coordinator)) {
+    const reply = yield* coordinator.value.sync(config, source.id);
+    if (reply.value === undefined)
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
+    coordinatedResult = reply.value as GitHubSyncResult;
+  }
+  const result = coordinatedResult ?? (yield* syncGitHubSource(config, source.id, options.clientOptions));
   yield* Console.log(`GitHub source "${source.id}": ${result.syncedDocuments.length} conversation(s) refreshed.`);
   for (const warning of result.warnings) yield* Console.warn(warning);
   if (result.progress)
@@ -487,3 +503,63 @@ export const syncGitHubSourcesBeforeRecall = Effect.fn('github.beforeRecall')(fu
   return {syncedSources, warnings};
 });
 let beforeRecallStart = 0;
+
+export const githubSourceWork = {
+  provider: 'github',
+  admission: {limit: 16, windowMs: 20000},
+  list: Effect.fn('github.workDescriptors')(function* (config: RuntimeConfig) {
+    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+      (source): source is GitHubSourceConfig => isGitHubSource(source) && source.enabled,
+    );
+    return yield* Effect.forEach(sources, source =>
+      Effect.gen(function* () {
+        const token = yield* resolveGitHubCredential(config, source).pipe(Effect.orElseSucceed(() => undefined));
+        return {
+          sourceId: source.id,
+          provider: 'github',
+          accountKey:
+            token === undefined ? sha256HexSync('github:missing:' + source.id) : sourceAccountKey('github', token),
+          fingerprint: sourceConfigurationFingerprint(source),
+          refreshIntervalMs: source.refreshIntervalMinutes * 60_000,
+          ...(source.credentialStorage === 'local' ? {} : {credentialEnv: source.credentialEnv}),
+        };
+      }),
+    );
+  }),
+  run: Effect.fn('github.workQuantum')(function* (config: RuntimeConfig, sourceId: string, options: SourceWorkOptions) {
+    const source = requireGitHubSource(yield* readSourceConfiguration(config), sourceId);
+    return yield* withSourceCredentialEnvironment(
+      Effect.gen(function* () {
+        const result = yield* syncGitHubSource(
+          config,
+          sourceId,
+          {
+            totalTimeoutMilliseconds: 10000,
+            maxRequests: 16,
+            budget: makeGitHubClientBudget(10000, 16),
+          },
+          options.mode === 'automatic',
+        );
+        const inventory = yield* runGitHubSourceInventory(config, sourceId);
+        const now = yield* Clock.currentTimeMillis;
+        const retryTimes = inventory.entries.flatMap(entry =>
+          entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
+        );
+        const nextAttemptAt =
+          inventory.nextAttemptAt ??
+          (result.syncedDocuments.length === 0 && retryTimes.length > 0 ? Math.min(...retryTimes) : undefined);
+        const more = result.progress !== undefined;
+        return {
+          sourceId,
+          syncedDocuments: result.syncedDocuments,
+          warnings: result.warnings,
+          value: result,
+          ...(nextAttemptAt === undefined ? {} : {nextAttemptAt}),
+          more,
+        };
+      }),
+      source.credentialEnv,
+      options.credentialEnvironment,
+    );
+  }),
+};

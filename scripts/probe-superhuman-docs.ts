@@ -1,13 +1,18 @@
 import {probeSuperhumanTools, ProbeError} from '@threadnote/integration-superhuman/probe';
-import {ScriptSystemInfoLayer} from './effect/system-layer.ts';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {getRuntimeConfig} from '@threadnote/threadnote/runtime';
+import {telemetryChildEnvironmentPolicyLayer} from '@threadnote/threadnote/telemetry/session';
 import {runtimeEntrypointLayer} from '@threadnote/threadnote/effect/runtime-entrypoint';
 import {Effect, Layer} from 'effect';
 
 const outcome = await Effect.runPromise(
-  probeSuperhumanTools().pipe(
+  getRuntimeConfig().pipe(
+    Effect.flatMap(config => probeSuperhumanTools(undefined, {admissionConfig: config})),
     Effect.match({onFailure: error => ({error}), onSuccess: catalog => ({catalog})}),
     // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This script is the application entry point.
-    Effect.provide(ScriptSystemInfoLayer.pipe(Layer.provide(runtimeEntrypointLayer))),
+    Effect.provide(
+      ApplicationLayer.pipe(Layer.provide(Layer.merge(runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer))),
+    ),
   ),
 );
 if ('catalog' in outcome) {

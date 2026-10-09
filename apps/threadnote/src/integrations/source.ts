@@ -1,4 +1,4 @@
-import {syncRegisteredSources} from '@threadnote/integration-runtime/source';
+import {SourceCoordinator} from '@threadnote/integration-core/source-coordinator';
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readSourceConfiguration} from './config.js';
@@ -8,7 +8,6 @@ import {
   runObsidianSourceRemove,
   runObsidianSourceStatus,
   runObsidianSourceSync,
-  syncObsidianSourcesBeforeRecall,
 } from '@threadnote/integration-obsidian/source';
 import {
   runSuperhumanSourceAdd,
@@ -16,7 +15,6 @@ import {
   runSuperhumanSourceRemove,
   runSuperhumanSourceStatus,
   runSuperhumanSourceSync,
-  syncSuperhumanSourcesBeforeRecall,
 } from '@threadnote/integration-superhuman/source';
 import {
   runPocketSourceAdd,
@@ -24,14 +22,12 @@ import {
   runPocketSourceRemove,
   runPocketSourceStatus,
   runPocketSourceSync,
-  syncPocketSourcesBeforeRecall,
 } from '@threadnote/integration-pocket/source';
 import {
   runGitHubSourceAdd,
   runGitHubSourceRemove,
   runGitHubSourceStatus,
   runGitHubSourceSync,
-  syncGitHubSourcesBeforeRecall,
 } from '@threadnote/integration-github/source';
 
 import {
@@ -39,7 +35,6 @@ import {
   runLinearSourceRemove,
   runLinearSourceStatus,
   runLinearSourceSync,
-  syncLinearSourcesBeforeRecall,
 } from '@threadnote/integration-linear/source';
 
 export interface SourceAddOptions {
@@ -171,11 +166,11 @@ export const runSourceRemove = Effect.fn('source.remove')(function* (
 });
 
 export const syncSourcesBeforeRecall = Effect.fn('source.syncBeforeRecall')(function* (config: RuntimeConfig) {
-  return yield* syncRegisteredSources([
-    syncObsidianSourcesBeforeRecall(config),
-    syncSuperhumanSourcesBeforeRecall(config),
-    syncPocketSourcesBeforeRecall(config),
-    syncLinearSourcesBeforeRecall(config),
-    syncGitHubSourcesBeforeRecall(config),
-  ]);
+  const coordinator = yield* SourceCoordinator;
+  return yield* coordinator.requestRefresh(config).pipe(
+    Effect.match({
+      onSuccess: () => ({syncedSources: [], warnings: []}),
+      onFailure: error => ({syncedSources: [], warnings: [error.message]}),
+    }),
+  );
 });

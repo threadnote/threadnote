@@ -244,6 +244,8 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
       return 'Graph query worker';
     case 'graph-waiter':
       return 'Graph waiter';
+    case 'integration-sync-worker':
+      return 'Integration sync worker';
     case 'legacy':
       return 'Legacy runtime';
     case 'local-model-worker':

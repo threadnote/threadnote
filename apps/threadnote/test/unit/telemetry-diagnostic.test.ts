@@ -7,6 +7,7 @@ import {StorageLayoutMigrationConflict} from '@threadnote/threadnote/migration/l
 import {ReportIssueCreateFailed} from '@threadnote/threadnote/report_issue';
 import {CursorAttestationError} from '@threadnote/threadnote/cursor/cloud_attestation';
 import {SourceConfigurationError} from '@threadnote/integration-core/config';
+import {SourceCoordinatorError} from '@threadnote/integration-core/source-coordinator';
 import {
   anonymousTelemetryDiagnosticFromCodeGraphRefreshFailure,
   anonymousTelemetryDiagnosticFromError,
@@ -32,6 +33,10 @@ describe('anonymous telemetry diagnostics', () => {
   });
 
   it.each([
+    {
+      error: SourceCoordinatorError.make({message: 'private coordinator configuration content'}),
+      errorType: 'SourceCoordinatorError',
+    },
     {
       error: SourceConfigurationError.make({message: 'private source configuration content'}),
       errorType: 'SourceConfigurationError',

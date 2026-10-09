@@ -64,7 +64,7 @@ facade, provider selection and dispatch, application layers, CLI adapters, and
 Manager route, browser, and static asset registration. `packages/integration-core`
 owns shared source configuration, store, sync, and Manager request contracts.
 `packages/integration-runtime` owns the provider-neutral registry, store layer,
-policy registration, and sequential sync composition. Each provider package owns
+policy registration, and durable sync coordination. Each provider package owns
 its domain code, HTTP handlers, Manager forms and actions, logos, and tests.
 Providers depend on the shared integration contracts, lower-level packages, and
 generic Manager components; they do not depend on the application or on another
@@ -72,11 +72,15 @@ provider. `packages/manager` owns the generic shell and accepts typed integratio
 descriptors at mount time. It has no concrete provider dependency.
 `packages/integrations` remains the separate agent catalog and identity domain.
 
-Integration sync currently runs inline as part of the requested application
-flow. A future shared coordinator may own scheduling and concurrency, but that
-coordinator is not present today. Recall consumes the neutral `SourceSync`
-service; the application supplies the provider composition through an Effect
-Layer. Provider loops retain their existing order, budgets, and persistence.
+Integration sync runs in one coordinator per canonical data home, started on
+request and stopped when idle. `packages/integration-runtime` owns the SQLite
+PersistedQueue, scheduling and HTTP admission; provider packages supply bounded
+per-source work through neutral contracts. The application owns detached process
+launch and registration. Recall requests background refresh and searches eligible
+snapshots without waiting for provider network calls. Applied explicit sync waits
+for a coordinator result with a finite deadline. Provider checkpoint, access-epoch
+and publication-fence checks remain authoritative. See
+[Integration sync](integration-sync.md) for scheduling and recovery behavior.
 Keep cross-domain composition tests in
 `apps/threadnote/test`; package-specific tests belong under the owning
 `packages/<name>/test` directory. Vitest and Bazel discover package tests from

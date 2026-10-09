@@ -1,3 +1,5 @@
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -59,6 +61,7 @@ export interface ProbeCatalog {
 }
 
 export interface ProbeOptions {
+  readonly admissionConfig?: RuntimeConfig;
   readonly fetch?: FetchLike;
   readonly signal?: AbortSignal;
   readonly requestTimeoutMs?: number;
@@ -594,8 +597,12 @@ export function probeSuperhumanTools(credentialEnvironmentName = SUPERHUMAN_TOKE
       return yield* new ProbeError({code: 'missing-credential'});
     }
     const token = Redacted.make(value);
+    const fetch = yield* admittedSourceFetch('superhuman', token, options.fetch, options.admissionConfig).pipe(
+      Effect.mapError(() => new ProbeError({code: 'transport-rejected'})),
+    );
     return yield* fromPromiseInterruptible(
-      signal => discoverSuperhumanTools(token, {...options, signal}),
+      signal =>
+        discoverSuperhumanTools(token, {...options, fetch: (input, init) => fetch(new URL(input), init ?? {}), signal}),
       error => (error instanceof ProbeError ? error : new ProbeError({code: 'transport-rejected'})),
     );
   });

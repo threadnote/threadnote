@@ -26,7 +26,7 @@ Initial sync walks the selected repositories' issue and pull request history, in
 
 Subsequent sync reads incremental issue and comment changes and reconciles previously imported conversations. Reconciliation also detects review and thread changes that may not update the parent issue timestamp. Manager displays the latest sync and reconciliation times separately. Sources default to a 15-minute refresh interval and a maximum cache age of 24 hours; the CLI accepts `--refresh-interval-minutes` and `--max-stale-hours`.
 
-Recall refreshes due sources within a shared foreground budget. **Sync now**, or `source sync --apply`, allows more work per run. An incomplete or oversized conversation remains visibly pending or needs attention; partially read pages never become a complete imported conversation.
+Recall requests background refresh of due sources and searches the eligible local cache immediately. **Sync now**, or `source sync --apply`, allows more work per run. An incomplete or oversized conversation remains visibly pending or needs attention; partially read pages never become a complete imported conversation.
 
 Review threads retain replies, resolution and outdated status, and a bounded diff excerpt. Discussion comments, submitted reviews, and inline comments remain distinct. GitHub Discussions, commit comments, attachments, full repository code, GitHub Enterprise hosts, and private pending reviews are outside this integration's coverage.
 

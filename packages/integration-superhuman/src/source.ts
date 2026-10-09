@@ -1,3 +1,13 @@
+import {readDocumentCursor, writeDocumentCursor} from './work-state.js';
+import {
+  SourceCoordinator,
+  SourceCoordinatorError,
+  sourceAccountKey,
+  withSourceCredentialEnvironment,
+  type SourceWorkOptions,
+} from '@threadnote/integration-core/source-coordinator';
+import {Option} from 'effect';
+import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {isSuperhumanSource} from './config.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {Clock, Console, DateTime, Effect, Random, Redacted, Result, Schema} from 'effect';
@@ -89,6 +99,7 @@ export interface SuperhumanInventory {
 }
 
 export interface SuperhumanSyncResult {
+  readonly progress?: {readonly completed: number; readonly total: number};
   readonly sourceId: string;
   readonly syncedDocuments: readonly string[];
   readonly warnings: readonly string[];
@@ -139,8 +150,10 @@ const fetchDocument = Effect.fn('superhuman.fetchDocument')(function* (
   options: SuperhumanClientOptions,
 ) {
   const token = yield* resolveSuperhumanCredential(config, source);
+  const fetch = yield* admittedSourceFetch('superhuman', token, options.fetch, config);
   return yield* fromPromiseInterruptible(
-    signal => readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, signal}),
+    signal =>
+      readSuperhumanDocument(token, document.id, document.pages, source.includeHidden, {...options, fetch, signal}),
     error => (error instanceof SuperhumanClientError ? error : safeError('Superhuman provider refresh failed.')),
   );
 });
@@ -398,14 +411,26 @@ export const runSuperhumanSourceSync = Effect.fn('superhuman.sync')(function* (
     );
     return {sourceId: source.id, syncedDocuments: [], warnings: []} satisfies SuperhumanSyncResult;
   }
-  const result = yield* syncSource(config, source.id, {
-    totalTimeoutMilliseconds: 30_000,
-    maxRequests: 64,
-    budget: makeSuperhumanClientBudget(30_000, 64),
-    ...options.clientOptions,
-  });
+  const coordinator = yield* Effect.serviceOption(SourceCoordinator);
+  let coordinatedResult: SuperhumanSyncResult | undefined;
+  if (Option.isSome(coordinator)) {
+    const reply = yield* coordinator.value.sync(config, source.id);
+    if (reply.value === undefined)
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
+    coordinatedResult = reply.value as SuperhumanSyncResult;
+  }
+  const result: SuperhumanSyncResult =
+    coordinatedResult ??
+    (yield* syncSource(config, source.id, {
+      totalTimeoutMilliseconds: 30_000,
+      maxRequests: 64,
+      budget: makeSuperhumanClientBudget(30_000, 64),
+      ...options.clientOptions,
+    }));
   yield* Console.log(`Superhuman source "${source.id}": ${result.syncedDocuments.length} document(s) refreshed.`);
   for (const warning of result.warnings) yield* Console.log(warning);
+  if (result.progress && result.progress.completed < result.progress.total)
+    yield* Console.log(`Import progress: ${result.progress.completed}/${result.progress.total} selected documents.`);
   return result;
 });
 
@@ -414,6 +439,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
   sourceId: string,
   options: SuperhumanClientOptions,
   onlyIfDue = false,
+  documentId?: string,
 ) {
   return yield* withSourceLock(
     config,
@@ -430,7 +456,9 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
       const warnings: string[] = [];
       const now = yield* Clock.currentTimeMillis;
       let attempted = 0;
-      for (const document of source.documents) {
+      for (const document of source.documents.filter(
+        document => documentId === undefined || document.id === documentId,
+      )) {
         attempted++;
         const previous = yield* readExternalDocumentManifest(location(config), source.id, document.id);
         if (
@@ -644,7 +672,7 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
         yield* store.mutateChecked(location(config), mutations, fence);
         syncedDocuments.push(document.id);
       }
-      if (attempted < source.documents.length)
+      if (documentId === undefined && attempted < source.documents.length)
         warnings.push(
           `${source.documents.length - attempted} Superhuman document(s) deferred by refresh budget or quota.`,
         );
@@ -878,3 +906,87 @@ export const syncSuperhumanSourcesBeforeRecall = Effect.fn('superhuman.syncBefor
   }
   return {syncedSources, warnings};
 });
+
+export const superhumanSourceWork = {
+  provider: 'superhuman',
+  admission: {limit: 16, windowMs: 20000},
+  list: Effect.fn('superhuman.workDescriptors')(function* (config: RuntimeConfig) {
+    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+      (source): source is SuperhumanSourceConfig => isSuperhumanSource(source) && source.enabled,
+    );
+    return yield* Effect.forEach(sources, source =>
+      Effect.gen(function* () {
+        const token = yield* resolveSuperhumanCredential(config, source).pipe(Effect.orElseSucceed(() => undefined));
+        return {
+          sourceId: source.id,
+          provider: 'superhuman',
+          accountKey:
+            token === undefined
+              ? sha256HexSync('superhuman:missing:' + source.id)
+              : sourceAccountKey('superhuman', token),
+          fingerprint: sourceConfigurationFingerprint(source),
+          refreshIntervalMs: source.refreshIntervalMinutes * 60_000,
+          ...(source.credentialStorage === 'local' ? {} : {credentialEnv: source.credentialEnv}),
+        };
+      }),
+    );
+  }),
+  run: Effect.fn('superhuman.workQuantum')(function* (
+    config: RuntimeConfig,
+    sourceId: string,
+    options: SourceWorkOptions,
+  ) {
+    const source = requireSuperhumanSource(yield* readSourceConfiguration(config), sourceId);
+    return yield* withSourceCredentialEnvironment(
+      Effect.gen(function* () {
+        const fingerprint = sourceConfigurationFingerprint(source);
+        const offset = yield* readDocumentCursor(config, sourceId, fingerprint, options.requestId, false);
+        const index = offset < source.documents.length ? offset : 0;
+        const document = source.documents[index];
+        const timeout = options.mode === 'explicit' ? 30_000 : 10_000;
+        const requests = options.mode === 'explicit' ? 64 : 16;
+        const result =
+          document === undefined
+            ? {sourceId, syncedDocuments: [], warnings: []}
+            : yield* syncSource(
+                config,
+                sourceId,
+                {
+                  totalTimeoutMilliseconds: timeout,
+                  maxRequests: requests,
+                  budget: makeSuperhumanClientBudget(timeout, requests),
+                },
+                options.mode === 'automatic',
+                document.id,
+              );
+        yield* writeDocumentCursor(
+          config,
+          sourceId,
+          fingerprint,
+          options.requestId,
+          index + 1 < source.documents.length ? index + 1 : 0,
+        );
+        const inventory = yield* runSuperhumanSourceInventory(config, sourceId);
+        const more = index + 1 < source.documents.length;
+        const now = yield* Clock.currentTimeMillis;
+        const retryTimes = inventory.entries.flatMap(entry =>
+          entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
+        );
+        const nextAttemptAt =
+          retryTimes.length > 0 && (!more || retryTimes.length === inventory.entries.length)
+            ? Math.min(...retryTimes)
+            : undefined;
+        return {
+          sourceId,
+          syncedDocuments: result.syncedDocuments,
+          warnings: result.warnings,
+          value: {...result, progress: {completed: index + 1, total: source.documents.length}},
+          ...(nextAttemptAt === undefined ? {} : {nextAttemptAt}),
+          more,
+        };
+      }),
+      source.credentialEnv,
+      options.credentialEnvironment,
+    );
+  }),
+};

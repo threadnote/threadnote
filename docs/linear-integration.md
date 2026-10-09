@@ -29,7 +29,7 @@ threadnote source add --type linear --id linear-work \
 
 This prints a preview. Repeat with `--apply` to save. Use `--issue-id ISSUE_UUID` for explicit issues, or repeat either selection flag to choose several. At least one team and one project or issue are required. A wrong organization or user binding prevents import.
 
-Run `threadnote source sync linear-work` to report the local cache without calling Linear, then add `--apply` to import. `source list`, `source inventory linear-work`, and `source status linear-work` show configuration, local cache eligibility, and progress. `source remove linear-work --apply` disconnects. Freshness defaults are 60 minutes between foreground refresh attempts and a maximum cache age of 24 hours; set `--refresh-interval-minutes` and `--max-stale-hours` when adding a source.
+Run `threadnote source sync linear-work` to report the local cache without calling Linear, then add `--apply` to import. `source list`, `source inventory linear-work`, and `source status linear-work` show configuration, local cache eligibility, and progress. `source remove linear-work --apply` disconnects. Freshness defaults are 60 minutes between automatic refresh attempts and a maximum cache age of 24 hours; set `--refresh-interval-minutes` and `--max-stale-hours` when adding a source.
 
 ## Coverage
 
@@ -43,7 +43,7 @@ A budget, failed page, inaccessible object, or unsupported content type is a cov
 
 ## Freshness and failures
 
-Read-only requests go to the fixed official GraphQL endpoint. Linear can return partial data with HTTP 200, or a GraphQL `RATELIMITED` error with HTTP 400. Both request and query-complexity quotas apply. Threadnote bounds calls, response bytes, and time; retries must respect provider quota signals. Linear discourages broad polling, so the local connector uses bounded user-requested or foreground refresh rather than a continuous workspace poller.
+Read-only requests go to the fixed official GraphQL endpoint. Linear can return partial data with HTTP 200, or a GraphQL `RATELIMITED` error with HTTP 400. Both request and query-complexity quotas apply. Threadnote bounds calls, response bytes, and time; retries must respect provider quota signals. Linear discourages broad polling, so the local connector uses bounded user-requested or demand-driven background refresh rather than a continuous workspace poller.
 
 Cached content remains subject to source selection, authentication and maximum-age policy. Pause, disconnect, configuration changes, changed credentials, or detected access loss deny both recall and pinned/direct reads. A transient outage cannot make a partially published snapshot readable. Offline caches cannot guarantee immediate detection of remote permission changes.
 

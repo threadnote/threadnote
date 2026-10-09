@@ -1,3 +1,4 @@
+import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {isLinearSource} from './config.js';
 import {Cause, Data, Effect, Redacted, Schema} from 'effect';
 import type {LinearSource, ResolvedLinearSelection} from './manager-contracts.js';
@@ -13,7 +14,7 @@ import {
   validateSourceIdentifier,
 } from './config.js';
 import {withSourceLock} from '@threadnote/integration-core/lock';
-import {createLinearClient, linearIssueInScope, type LinearClientOptions} from './client.js';
+import {createLinearClient, LinearClientError, linearIssueInScope, type LinearClientOptions} from './client.js';
 import {linearUuid, validateLinearSourceConfig, type LinearSourceConfig} from './config.js';
 import {linearCredentialConfigured, resolveLinearCredential, validLinearApiToken} from './credentials.js';
 import {LINEAR_COVERAGE} from './render.js';
@@ -92,7 +93,8 @@ export const resolveLinearSelection = Effect.fn('manager.linearResolve')(functio
   const issueIds = ids(body.issueIds ?? [], 256);
   if (teamIds.length === 0 || projectIds.length + issueIds.length === 0)
     invalid('Select allowed teams and at least one project or issue.');
-  const client = createLinearClient(token, options);
+  const fetch = yield* admittedSourceFetch('linear', token, options.fetch, config);
+  const client = createLinearClient(token, {...options, fetch});
   return yield* Effect.gen(function* () {
     const identity = yield* call(() => client.identity());
     if (
@@ -140,7 +142,14 @@ export const resolveLinearSelection = Effect.fn('manager.linearResolve')(functio
       });
     }
     return {...identity, teams, projects, issues} satisfies ResolvedLinearSelection;
-  }).pipe(Effect.ensuring(Effect.sync(() => client.close())));
+  }).pipe(
+    Effect.tapError(failure =>
+      failure instanceof LinearClientError && failure.code === 'quota-rejected'
+        ? cooldownSourceAccount(config, 'linear', token, failure.retryAfterMilliseconds ?? 60_000, 'POST')
+        : Effect.void,
+    ),
+    Effect.ensuring(Effect.sync(() => client.close())),
+  );
 });
 export const listLinearIntegrations = Effect.fn('manager.linearList')(function* (config: RuntimeConfig) {
   const sources: LinearSource[] = [];

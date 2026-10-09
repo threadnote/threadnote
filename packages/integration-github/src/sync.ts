@@ -1,3 +1,4 @@
+import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {isGitHubSource} from './config.js';
 import {Clock, DateTime, Effect, Random, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -369,7 +370,8 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
       });
       const tokenResult = yield* resolveGitHubCredential(config, source).pipe(Effect.result);
       if (Result.isFailure(tokenResult)) return yield* denyGlobal();
-      const client = createGitHubClient(tokenResult.success, options);
+      const fetch = yield* admittedSourceFetch('github', tokenResult.success, options.fetch, config);
+      const client = createGitHubClient(tokenResult.success, {...options, fetch});
       const call = <A>(run: () => Promise<A>) =>
         fromPromiseInterruptible(run, f =>
           f instanceof GitHubClientError ? f : new GitHubClientError({code: 'transport-rejected'}),
@@ -382,6 +384,20 @@ export const syncGitHubSource = Effect.fn('github.syncSource')(function* (
             options.budget.responseBytes < options.budget.maxResponseBytes &&
             Date.now() < options.budget.deadlineAt));
       const quota = Effect.fn('github.quota')(function* (failure: GitHubClientError) {
+        yield* cooldownSourceAccount(
+          config,
+          'github',
+          tokenResult.success,
+          failure.retryAfterMilliseconds ?? 60_000,
+          'POST',
+        );
+        yield* cooldownSourceAccount(
+          config,
+          'github',
+          tokenResult.success,
+          failure.retryAfterMilliseconds ?? 60_000,
+          'GET',
+        );
         retryAt = Math.min(
           8_640_000_000_000_000 - 1,
           (yield* Clock.currentTimeMillis) + Math.max(60_000, failure.retryAfterMilliseconds ?? 0),

@@ -1,3 +1,4 @@
+import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {isPocketSource} from './config.js';
 import {Clock, Effect, Random, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -289,7 +290,8 @@ export const syncPocketSource = Effect.fn('pocket.syncSource')(function* (
       };
       const fence = configFence(config, id, fingerprint);
       const token = yield* resolvePocketCredential(config, source);
-      const client = createPocketClient(token, options);
+      const fetch = yield* admittedSourceFetch('pocket', token, options.fetch, config);
+      const client = createPocketClient(token, {...options, fetch});
       const syncedDocuments: string[] = [];
       const warnings: string[] = [];
       let globalRetryAt: number | undefined;

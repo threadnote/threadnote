@@ -1,3 +1,4 @@
+import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
 import {isSuperhumanSource} from './config.js';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {describeSuperhumanSelection, resolveSuperhumanBrowserLinks, ManagerSuperhumanError} from './links.js';
@@ -192,8 +193,9 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
   if (action === 'describe-selection') {
     const source = requireSuperhumanSource(yield* readSourceConfiguration(request.config), sourceId(body.id));
     const token = yield* resolveSuperhumanCredential(request.config, source);
+    const fetch = yield* admittedSourceFetch('superhuman', token, undefined, request.config);
     const selection = yield* fromPromiseInterruptible(
-      signal => describeSuperhumanSelection(source.documents, token, {signal}),
+      signal => describeSuperhumanSelection(source.documents, token, {signal, fetch}),
       error =>
         error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
           ? error
@@ -216,8 +218,9 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
             request.config,
             requireSuperhumanSource(yield* readSourceConfiguration(request.config), sourceId(body.id)),
           ));
+    const fetch = yield* admittedSourceFetch('superhuman', token, undefined, request.config);
     const resolved = yield* fromPromiseInterruptible(
-      signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal}),
+      signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal, fetch}),
       error =>
         error instanceof ManagerSuperhumanError || error instanceof SuperhumanClientError
           ? error

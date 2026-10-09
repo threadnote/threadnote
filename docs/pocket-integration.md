@@ -23,7 +23,7 @@ threadnote source status pocket-notes
 threadnote source remove pocket-notes --apply
 ```
 
-Use `--projectless` instead of `--project` for a source deliberately available across projects. `--credential-env NAME` selects a different credential variable. Refresh and maximum stale-age settings bound automatic refresh and use of cached content. Recall refreshes due connections; it does not run a background webhook listener.
+Use `--projectless` instead of `--project` for a source deliberately available across projects. `--credential-env NAME` selects a different credential variable. Refresh and maximum stale-age settings bound automatic refresh and use of cached content. Recall requests background refresh of due connections and searches the eligible local cache immediately. Refresh is demand-driven; no webhook listener is required.
 
 ## Coverage and sync
 
@@ -31,7 +31,7 @@ Threadnote uses the fixed, official Pocket API origin with read-only GET request
 
 The public schema leaves summarizations open-ended. Threadnote preserves their structured text rather than assuming one template. Action items or mind maps are available when Pocket includes them in the returned data. Audio files, downloads, attachments, administrative organization settings, and data inaccessible to the API key are outside this text integration.
 
-Sync has request, time, and response-size budgets. Automatic recall refresh shares one budget across Pocket connections and rotates which connection starts first. Discovery saves each page's recording IDs before processing them and continues across bounded runs. A failed recording or optional catalog does not prevent later recordings from importing. Failed items remain eligible for retry.
+Sync has request, time, and response-size budgets. The shared coordinator schedules bounded work across connections and coalesces repeated refresh requests. Discovery saves each page's recording IDs before processing them and continues across bounded runs. A failed recording or optional catalog does not prevent later recordings from importing. Failed items remain eligible for retry.
 
 Pocket's pagination can change while sync runs. After a complete successful listing, Threadnote confirms missing cached recordings through their detail endpoint before removing them. A successful detail response preserves and refreshes the recording; transient failures preserve the cache within its stale-age limit. Partial or failed discovery does not authorize cleanup. Stable recording identities keep renames and updates on the same resources.
 

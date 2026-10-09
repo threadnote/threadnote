@@ -68,7 +68,7 @@ const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
   context: ['platform', 'store', 'memory', 'inference', 'recall', 'graph', 'workspace', 'protocol', 'integrations'],
   'remote-memory': ['platform', 'store', 'memory', 'protocol', 'recall', 'workspace', 'context', 'graph'],
   'integration-core': ['platform', 'store', 'workspace'],
-  'integration-runtime': ['integration-core', 'platform', 'store'],
+  'integration-runtime': ['integration-core', 'platform', 'store', 'workspace'],
   'integration-obsidian': [
     'integration-core',
     'integration-runtime',

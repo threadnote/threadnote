@@ -11,6 +11,7 @@
     "./manager-http": "./src/manager-http.ts",
     "./manager-inputs": "./src/manager-inputs.ts",
     "./render": "./src/render.ts",
+    "./source-coordinator": "./src/source-coordinator.ts",
     "./source-sync": "./src/source-sync.ts",
     "./utils": "./src/utils.ts"
   },

@@ -1005,7 +1005,7 @@ interface RecallToolParams {
 
 const RECALL_MCP_PROGRESS = {
   lexicalRanking: {message: 'Ranking recall candidates.', phase: 'recall.lexical-ranking'},
-  obsidianSync: {message: 'Refreshing configured sources.', phase: 'recall.obsidian-sync'},
+  obsidianSync: {message: 'Requesting source refresh.', phase: 'recall.obsidian-sync'},
   semanticRetrieval: {message: 'Searching memory indexes.', phase: 'recall.semantic-retrieval'},
   sharedSync: {message: 'Refreshing shared memories.', phase: 'recall.shared-sync'},
   workspaceContext: {message: 'Resolving recall scope.', phase: 'recall.workspace-context'},

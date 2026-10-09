@@ -1,3 +1,7 @@
+import {inspectObsidianFile, scanObsidianDirectoryPage} from './scan.js';
+import {SourceCoordinator, type SourceWorkOptions} from '@threadnote/integration-core/source-coordinator';
+import {Option} from 'effect';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {Clock, Console, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 const MAX_SECRET_MATCHES_TO_PRINT = 5;
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -52,6 +56,7 @@ export interface ObsidianInventoryEntry {
 export interface ObsidianInventory {
   readonly entries: readonly ObsidianInventoryEntry[];
   readonly source: ObsidianSourceConfig;
+  readonly more?: boolean;
 }
 
 export interface ObsidianSourceAutoSyncResult {
@@ -66,7 +71,15 @@ interface ObsidianSourceFileState {
   readonly uri: string;
 }
 
+interface ObsidianScanCheckpoint {
+  readonly fingerprint: string;
+  readonly directories: readonly string[];
+  readonly offset: number;
+  readonly seen: readonly string[];
+}
+
 interface ObsidianSourceState {
+  readonly scan?: ObsidianScanCheckpoint;
   readonly files: Readonly<Record<string, ObsidianSourceFileState>>;
   readonly sourceId: string;
   readonly syncedAt?: string;
@@ -87,9 +100,11 @@ interface ScannedObsidianNote {
 interface ObsidianInventoryPlan extends ObsidianInventory {
   readonly safeNotes: readonly ScannedObsidianNote[];
   readonly state: ObsidianSourceState;
+  readonly scan?: ObsidianScanCheckpoint;
 }
 
 interface ObsidianSourceSyncBehavior {
+  readonly quantum?: boolean;
   readonly apply: boolean;
   readonly log: boolean;
   readonly writeUnchangedState: boolean;
@@ -188,7 +203,11 @@ export const runObsidianSourceInventory = Effect.fn('obsidian.sourceInventory')(
   const source = requireObsidianSource(yield* readObsidianConfiguration(config), id);
   const plan = yield* buildObsidianInventory(config, source);
   yield* printInventory(plan);
-  return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+  return {
+    entries: plan.entries,
+    source: plan.source,
+    ...(plan.scan === undefined ? {} : {more: true}),
+  } satisfies ObsidianInventory;
 });
 
 export const runObsidianSourceStatus = Effect.fn('obsidian.sourceStatus')(function* (
@@ -212,6 +231,20 @@ export const runObsidianSourceSync = Effect.fn('obsidian.sourceSync')(function* 
   const source = requireObsidianSource(yield* readObsidianConfiguration(config), options.id);
   if (!source.enabled) {
     return yield* ObsidianSourceError.make({message: `Obsidian source "${source.id}" is disabled.`});
+  }
+  const coordinator = yield* Effect.serviceOption(SourceCoordinator);
+  if (apply && Option.isSome(coordinator)) {
+    const result = yield* coordinator.value.sync(config, source.id);
+    if (result.value === undefined)
+      return yield* ObsidianSourceError.make({message: 'Source sync reply expired. Retry the source sync.'});
+    const inventory = result.value as ObsidianInventory;
+    yield* printInventory(inventory);
+    const counts = inventoryCounts(inventory.entries);
+    yield* Console.log(
+      `Obsidian source sync ${inventory.more ? 'progress' : 'complete'}: ${counts.add} added, ${counts.update} updated, ${counts.remove} removed, ${counts.unchanged} unchanged, ${counts.skip} skipped.`,
+    );
+    if (inventory.more) yield* Console.log('Import continues in the background.');
+    return inventory;
   }
   return yield* syncObsidianSource(config, source, {
     apply,
@@ -276,7 +309,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
         if (!currentSource.enabled) {
           return yield* ObsidianSourceError.make({message: `Obsidian source "${source.id}" is disabled.`});
         }
-        const plan = yield* buildObsidianInventory(config, currentSource);
+        const plan = yield* buildObsidianInventory(config, currentSource, behavior.quantum);
         if (behavior.log) {
           yield* printInventory(plan);
         }
@@ -284,7 +317,11 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           if (behavior.log) {
             yield* Console.log('Dry run complete. Re-run with --apply to update the external index.');
           }
-          return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+          return {
+            entries: plan.entries,
+            source: plan.source,
+            ...(plan.scan === undefined ? {} : {more: true}),
+          } satisfies ObsidianInventory;
         }
         const changedPaths = new Set(
           plan.entries
@@ -308,24 +345,39 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           const store = yield* ResourceStore;
           yield* store.mutate(resourceStoreLocation(config), mutations);
         }
-        if (mutations.length === 0 && !behavior.writeUnchangedState) {
-          return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+        if (mutations.length === 0 && !behavior.writeUnchangedState && !behavior.quantum) {
+          return {
+            entries: plan.entries,
+            source: plan.source,
+            ...(plan.scan === undefined ? {} : {more: true}),
+          } satisfies ObsidianInventory;
         }
         const currentTimeMillis = yield* Clock.currentTimeMillis;
         const nextState: ObsidianSourceState = {
-          files: Object.fromEntries(
-            plan.safeNotes.map(note => [
-              note.relativePath,
-              {
-                contentHash: note.contentHash,
-                modifiedAt: note.modifiedAt,
-                size: note.size,
-                uri: note.uri,
-              },
-            ]),
-          ),
+          files: Object.fromEntries([
+            ...(behavior.quantum
+              ? Object.entries(plan.state.files).filter(
+                  ([relative]) =>
+                    !plan.entries.some(entry => entry.relativePath === relative && entry.action === 'remove'),
+                )
+              : []),
+            ...plan.safeNotes.map(
+              note =>
+                [
+                  note.relativePath,
+                  {
+                    contentHash: note.contentHash,
+                    modifiedAt: note.modifiedAt,
+                    size: note.size,
+                    uri: note.uri,
+                  },
+                ] as const,
+            ),
+          ]),
+          ...(plan.scan === undefined ? {} : {scan: plan.scan}),
           sourceId: source.id,
-          syncedAt: DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)),
+          syncedAt:
+            plan.scan === undefined ? DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)) : plan.state.syncedAt,
           version: SOURCE_STATE_VERSION,
         };
         yield* writeSourceState(statePath, nextState);
@@ -336,7 +388,11 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
               `${counts.unchanged} unchanged, ${counts.skip} skipped.`,
           );
         }
-        return {entries: plan.entries, source: plan.source} satisfies ObsidianInventory;
+        return {
+          entries: plan.entries,
+          source: plan.source,
+          ...(plan.scan === undefined ? {} : {more: true}),
+        } satisfies ObsidianInventory;
       }),
     ),
   );
@@ -411,6 +467,7 @@ export function sourcePathMatches(
 const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
   config: RuntimeConfig,
   source: ObsidianSourceConfig,
+  quantum = false,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
@@ -421,19 +478,36 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
     ...source.exclude,
     ...(source.inbox ? [`${source.inbox}/**`] : []),
   ]);
-  const scannedFiles = yield* scanFilesWithinBoundary(fs, vault, vault, {
-    includeDirectory: path => {
-      const relative = toPosixPath(pathService.relative(vault, path));
-      return !directoryIsExcluded(relative, effectiveExcludes);
-    },
-    includeFile: path => {
-      const relative = toPosixPath(pathService.relative(vault, path));
-      return (
-        pathService.extname(path).toLowerCase() === MARKDOWN_EXTENSION &&
-        sourcePathMatches(relative, source.include, effectiveExcludes)
-      );
-    },
-  });
+  const fingerprint = sha256HexSync(JSON.stringify(source));
+  const previousScan = quantum && state.scan?.fingerprint === fingerprint ? state.scan : undefined;
+  const directories = [...(previousScan?.directories ?? [''])];
+  const directory = directories[0] ?? '';
+  const offset = previousScan?.offset ?? 0;
+  const seen = new Set(previousScan?.seen ?? []);
+  const scanRoot = quantum ? pathService.join(vault, directory) : vault;
+  const page =
+    quantum && directories.length > 0 ? yield* scanObsidianDirectoryPage(fs, vault, directory, offset) : undefined;
+  if (page) {
+    for (const child of page.directories) {
+      const relative = toPosixPath(pathService.relative(vault, child));
+      if (!directoryIsExcluded(relative, effectiveExcludes)) directories.push(relative);
+    }
+    if (page.nextOffset === undefined) directories.shift();
+  }
+  const scannedFiles = quantum
+    ? (page?.files ?? []).filter(
+        file =>
+          pathService.extname(file.path).toLowerCase() === MARKDOWN_EXTENSION &&
+          sourcePathMatches(toPosixPath(pathService.relative(vault, file.path)), source.include, effectiveExcludes),
+      )
+    : yield* scanFilesWithinBoundary(fs, scanRoot, vault, {
+        includeDirectory: path =>
+          !directoryIsExcluded(toPosixPath(pathService.relative(vault, path)), effectiveExcludes),
+        includeFile: path =>
+          pathService.extname(path).toLowerCase() === MARKDOWN_EXTENSION &&
+          sourcePathMatches(toPosixPath(pathService.relative(vault, path)), source.include, effectiveExcludes),
+      });
+  const nextOffset = page?.nextOffset ?? 0;
   const safeNotes: ScannedObsidianNote[] = [];
   const entries: ObsidianInventoryEntry[] = [];
   for (const file of scannedFiles) {
@@ -464,6 +538,7 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
       uri: obsidianSourceUri(source.id, relativePath),
     };
     safeNotes.push(note);
+    seen.add(relativePath);
     const recorded = state.files[relativePath];
     entries.push({
       action: !recorded
@@ -479,30 +554,57 @@ const buildObsidianInventory = Effect.fn('obsidian.buildInventory')(function* (
       uri: note.uri,
     });
   }
-  const currentPaths = new Set(safeNotes.map(note => note.relativePath));
+  let scan =
+    quantum && directories.length > 0 ? {fingerprint, directories, offset: nextOffset, seen: [...seen]} : undefined;
+  const currentPaths = quantum ? seen : new Set(safeNotes.map(note => note.relativePath));
+  let removalChecks = 0;
+  let pendingRemovals = false;
   for (const [relativePath, recorded] of Object.entries(state.files)) {
-    if (!currentPaths.has(relativePath)) {
+    const rejected = entries.some(entry => entry.action === 'skip' && entry.relativePath === relativePath);
+    if (((!quantum || scan === undefined) && !currentPaths.has(relativePath)) || rejected) {
+      if (quantum && removalChecks >= 64) {
+        pendingRemovals = true;
+        continue;
+      }
+      removalChecks++;
+      if (
+        quantum &&
+        !rejected &&
+        sourcePathMatches(relativePath, source.include, effectiveExcludes) &&
+        pathService.extname(relativePath).toLowerCase() === MARKDOWN_EXTENSION
+      ) {
+        const current = yield* inspectObsidianFile(fs, vault, relativePath);
+        if (current !== undefined && Number(current.size) <= SOURCE_MAX_NOTE_BYTES) {
+          seen.add(relativePath);
+          continue;
+        }
+      }
       entries.push({action: 'remove', relativePath, uri: recorded.uri});
     }
   }
+  if (quantum && pendingRemovals && scan === undefined)
+    scan = {fingerprint, directories: [], offset: 0, seen: [...seen]};
   entries.sort(
     (left, right) =>
       inventoryActionRank(left.action) - inventoryActionRank(right.action) ||
       left.relativePath.localeCompare(right.relativePath),
   );
-  return {entries, safeNotes, source, state} satisfies ObsidianInventoryPlan;
+  return {entries, safeNotes, source, state, ...(scan === undefined ? {} : {scan})} satisfies ObsidianInventoryPlan;
 });
 
 const sourceStateDirectory = Effect.fn('obsidian.sourceStateDirectory')(function* (
-  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  config: Pick<RuntimeConfig, 'agentContextHome' | 'account'>,
   sourceId: string,
 ) {
   const pathService = yield* Path.Path;
-  return pathService.join(config.agentContextHome, 'threadnote', 'sources', 'obsidian', sourceId);
+  const directory = pathService.join(config.agentContextHome, 'threadnote', 'sources', 'obsidian', sourceId);
+  return config.account === 'local'
+    ? directory
+    : pathService.join(directory, 'accounts', sha256HexSync(config.account));
 });
 
 const sourceStatePath = Effect.fn('obsidian.sourceStatePath')(function* (
-  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  config: Pick<RuntimeConfig, 'agentContextHome' | 'account'>,
   sourceId: string,
 ) {
   const pathService = yield* Path.Path;
@@ -576,8 +678,27 @@ function parseSourceState(value: unknown, sourceId: string): ObsidianSourceState
       uri: entry.uri,
     };
   }
+  let scan: ObsidianScanCheckpoint | undefined;
+  if ('scan' in value && value.scan !== undefined) {
+    const checkpoint = value.scan as ObsidianScanCheckpoint;
+    if (
+      !checkpoint ||
+      typeof checkpoint.fingerprint !== 'string' ||
+      !Array.isArray(checkpoint.directories) ||
+      !Array.isArray(checkpoint.seen) ||
+      !Number.isSafeInteger(checkpoint.offset) ||
+      checkpoint.offset < 0
+    )
+      throw ObsidianSourceError.make({message: 'Invalid Obsidian scan checkpoint.'});
+    for (const relative of [...checkpoint.directories, ...checkpoint.seen]) {
+      if (typeof relative !== 'string') throw ObsidianSourceError.make({message: 'Invalid Obsidian scan checkpoint.'});
+      if (relative !== '') assertSafeSourceRelativePath(relative);
+    }
+    scan = checkpoint;
+  }
   return {
     files,
+    ...(scan === undefined ? {} : {scan}),
     sourceId,
     syncedAt: 'syncedAt' in value && typeof value.syncedAt === 'string' ? value.syncedAt : undefined,
     version: SOURCE_STATE_VERSION,
@@ -713,3 +834,39 @@ function resourceStoreLocation(config: Pick<RuntimeConfig, 'account' | 'agentCon
     user: config.user,
   } as const;
 }
+
+export const obsidianSourceWork = {
+  provider: 'obsidian',
+  list: Effect.fn('obsidian.workDescriptors')(function* (config: RuntimeConfig) {
+    return (yield* readObsidianConfiguration(config)).sources
+      .filter(isObsidianSource)
+      .filter(source => source.enabled)
+      .map(source => ({
+        sourceId: source.id,
+        provider: 'obsidian',
+        accountKey: sha256HexSync(`obsidian:${source.vault}`),
+        fingerprint: sha256HexSync(JSON.stringify(source)),
+        refreshIntervalMs: 60_000,
+      }));
+  }),
+  run: Effect.fn('obsidian.workQuantum')(function* (
+    config: RuntimeConfig,
+    sourceId: string,
+    _options: SourceWorkOptions,
+  ) {
+    const source = requireObsidianSource(yield* readObsidianConfiguration(config), sourceId);
+    const result = yield* syncObsidianSource(config, source, {
+      apply: true,
+      log: false,
+      writeUnchangedState: false,
+      quantum: true,
+    });
+    return {
+      sourceId,
+      syncedDocuments: result.entries.filter(entry => isSourceMutation(entry.action)).map(entry => entry.relativePath),
+      warnings: [],
+      value: result,
+      more: result.more === true,
+    };
+  }),
+};

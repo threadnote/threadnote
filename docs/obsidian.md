@@ -46,11 +46,12 @@ threadnote source status engineering
 threadnote recall --query "mobile authentication token mediator"
 ```
 
-Every non-dry-run CLI recall and MCP `recall_context` first refreshes all enabled
-Obsidian sources. It applies only detected additions, updates, and removals; an
-unchanged source causes no state write. A source failure becomes an auto-sync
-warning and recall continues against the last successful snapshot, matching
-Threadnote's shared-memory auto-sync behavior.
+Every non-dry-run CLI recall and MCP `recall_context` requests a background
+refresh of enabled sources, then searches the eligible local snapshot immediately.
+The shared coordinator coalesces requests and applies only detected additions,
+updates, and removals. A refresh may finish after the recall that requested it.
+Use `source sync --apply` to wait for an explicit sync result. See
+[Integration sync](integration-sync.md) for work limits and restart behavior.
 
 The explicit `source sync` command is a dry run unless `--apply` is passed.
 Automatic and explicit sync use the same boundary checks: they read Markdown
@@ -67,10 +68,10 @@ The vault itself is never modified. Recall derives `authority: external` and
 warns that the result is not authoritative guidance.
 
 Background filesystem watching is intentionally not part of the bridge.
-Recall-time refresh keeps the indexed snapshot current while ensuring every
-refresh goes through the same inventory and safety boundary.
+Demand-driven background refresh keeps the indexed snapshot current while
+ensuring every refresh goes through the same inventory and safety boundary.
 
-After recall-time refresh or an explicit applied sync, normal CLI and MCP recall
+After a background refresh or an explicit applied sync, normal CLI and MCP recall
 searches include matching vault notes. Results retain their external/untrusted
 warnings and canonical `threadnote://resources/external/obsidian/...` URI.
 

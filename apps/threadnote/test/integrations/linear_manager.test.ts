@@ -5,7 +5,8 @@ import {describe, expect} from 'vitest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {handleManagerIntegrationRequest} from '@threadnote/threadnote/integrations/manager';
 import {handleManagerLinearIntegrationRequest} from '@threadnote/integration-linear/manager';
-import {runLinearSourceSync} from '@threadnote/integration-linear/source';
+import {syncLinearSource} from '@threadnote/integration-linear/sync';
+import {SourceHttpAdmission} from '@threadnote/integration-core/source-coordinator';
 import {loadExternalResourceAccess} from '@threadnote/store/external-resource';
 import {readSourceConfiguration} from '@threadnote/threadnote/integrations/config';
 import {provideLayer} from './linear-layer.js';
@@ -13,7 +14,14 @@ import {safeFetch, source} from './linear-fixtures.js';
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const home = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'linear-manager-'}));
-  return {config: {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig};
+  const config: RuntimeConfig = {
+    agentContextHome: home,
+    account: 'local',
+    agentId: 'threadnote',
+    manifestPath: `${home}/seed-manifest.yaml`,
+    user: 'tester',
+  };
+  return {config};
 });
 const body = {
   ...source,
@@ -45,7 +53,12 @@ describe('Linear Manager backend composition', () => {
       const aggregate = yield* handleManagerIntegrationRequest(request(config, {}, 'GET', '/api/integrations'));
       expect(aggregate?.status).toBe(200);
       expect(JSON.stringify(aggregate?.body)).toContain('linear');
-      yield* runLinearSourceSync(config, {id: source.id, apply: true, clientOptions: {fetch: safeFetch}});
+      yield* syncLinearSource(config, source.id, {fetch: safeFetch}).pipe(
+        Effect.provideService(SourceHttpAdmission, {
+          admit: () => Effect.void,
+          cooldown: () => Effect.void,
+        }),
+      );
       const location = {home: config.agentContextHome, account: config.account, user: config.user};
       expect(Object.keys(yield* loadExternalResourceAccess(location))).not.toEqual([]);
       const paused = yield* handleManagerLinearIntegrationRequest(

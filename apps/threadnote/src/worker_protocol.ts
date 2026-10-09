@@ -11,3 +11,4 @@ export {
   WINDOWS_DISK_CAPACITY_WORKER_PROTOCOL_VERSION,
 } from '@threadnote/platform/windows-disk-worker-contract';
 export const LOCAL_MODEL_WORKER_ARGUMENT = '--threadnote-local-model-worker';
+export const INTEGRATION_SYNC_WORKER_ARGUMENT = '--threadnote-integration-sync-worker';

@@ -26,6 +26,7 @@ export type ThreadnoteProcessRole =
   | 'graph-parser-worker'
   | 'graph-query-worker'
   | 'graph-waiter'
+  | 'integration-sync-worker'
   | 'legacy'
   | 'local-model-worker'
   | 'manager'
@@ -826,6 +827,7 @@ function isRegisteredThreadnoteProcessRole(value: unknown): value is RegisteredT
     value === 'graph-parser-worker' ||
     value === 'graph-query-worker' ||
     value === 'graph-waiter' ||
+    value === 'integration-sync-worker' ||
     value === 'local-model-worker' ||
     value === 'manager' ||
     value === 'mcp' ||

@@ -1,3 +1,11 @@
+import {
+  SourceCoordinator,
+  SourceCoordinatorError,
+  sourceAccountKey,
+  withSourceCredentialEnvironment,
+  type SourceWorkOptions,
+} from '@threadnote/integration-core/source-coordinator';
+import {Option} from 'effect';
 import {isPocketSource} from './config.js';
 import {Clock, Console, DateTime, Effect, FileSystem, Path, Random, Redacted, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -284,7 +292,15 @@ export const runPocketSourceSync = Effect.fn('pocket.sync')(function* (
     );
     return {sourceId: source.id, syncedDocuments: [], warnings: []} satisfies PocketSyncResult;
   }
-  const result = yield* syncPocketSource(config, source.id, options.clientOptions);
+  const coordinator = yield* Effect.serviceOption(SourceCoordinator);
+  let coordinatedResult: PocketSyncResult | undefined;
+  if (Option.isSome(coordinator)) {
+    const reply = yield* coordinator.value.sync(config, source.id);
+    if (reply.value === undefined)
+      return yield* SourceCoordinatorError.make({message: 'Source sync reply expired. Retry the source sync.'});
+    coordinatedResult = reply.value as PocketSyncResult;
+  }
+  const result = coordinatedResult ?? (yield* syncPocketSource(config, source.id, options.clientOptions));
   yield* Console.log(`Pocket source "${source.id}": ${result.syncedDocuments.length} recording(s) refreshed.`);
   return result;
 });
@@ -434,3 +450,63 @@ export const syncPocketSourcesBeforeRecall = Effect.fn('pocket.beforeRecall')(fu
   return {syncedSources, warnings};
 });
 let beforeRecallStart = 0;
+
+export const pocketSourceWork = {
+  provider: 'pocket',
+  admission: {limit: 16, windowMs: 20000},
+  list: Effect.fn('pocket.workDescriptors')(function* (config: RuntimeConfig) {
+    const sources = (yield* readSourceConfiguration(config)).sources.filter(
+      (source): source is PocketSourceConfig => isPocketSource(source) && source.enabled,
+    );
+    return yield* Effect.forEach(sources, source =>
+      Effect.gen(function* () {
+        const token = yield* resolvePocketCredential(config, source).pipe(Effect.orElseSucceed(() => undefined));
+        return {
+          sourceId: source.id,
+          provider: 'pocket',
+          accountKey:
+            token === undefined ? sha256HexSync('pocket:missing:' + source.id) : sourceAccountKey('pocket', token),
+          fingerprint: sourceConfigurationFingerprint(source),
+          refreshIntervalMs: source.refreshIntervalMinutes * 60_000,
+          ...(source.credentialStorage === 'local' ? {} : {credentialEnv: source.credentialEnv}),
+        };
+      }),
+    );
+  }),
+  run: Effect.fn('pocket.workQuantum')(function* (config: RuntimeConfig, sourceId: string, options: SourceWorkOptions) {
+    const source = requirePocketSource(yield* readSourceConfiguration(config), sourceId);
+    return yield* withSourceCredentialEnvironment(
+      Effect.gen(function* () {
+        const result = yield* syncPocketSource(
+          config,
+          sourceId,
+          {
+            totalTimeoutMilliseconds: 10000,
+            maxRequests: 4,
+            budget: makePocketClientBudget(10000, 4),
+          },
+          options.mode === 'automatic',
+        );
+        const inventory = yield* runPocketSourceInventory(config, sourceId);
+        const now = yield* Clock.currentTimeMillis;
+        const retryTimes = inventory.entries.flatMap(entry =>
+          entry.nextAttemptAt !== undefined && entry.nextAttemptAt > now ? [entry.nextAttemptAt] : [],
+        );
+        const nextAttemptAt =
+          inventory.nextAttemptAt ??
+          (result.syncedDocuments.length === 0 && retryTimes.length > 0 ? Math.min(...retryTimes) : undefined);
+        const more = inventory.progress !== undefined;
+        return {
+          sourceId,
+          syncedDocuments: result.syncedDocuments,
+          warnings: result.warnings,
+          value: result,
+          ...(nextAttemptAt === undefined ? {} : {nextAttemptAt}),
+          more,
+        };
+      }),
+      source.credentialEnv,
+      options.credentialEnvironment,
+    );
+  }),
+};

@@ -16,12 +16,14 @@ import {
   CODE_GRAPH_IMPACT_QUERY_WORKER_ARGUMENT,
   CODE_GRAPH_PARSER_WORKER_ARGUMENT,
   LOCAL_MODEL_WORKER_ARGUMENT,
+  INTEGRATION_SYNC_WORKER_ARGUMENT,
   WINDOWS_DISK_CAPACITY_WORKER_ARGUMENT,
 } from './worker_protocol.js';
 
 const executableName = process.execPath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
 const arguments_ = process.argv.slice(2);
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
+const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
 const isCodeGraphCompactionWorker = arguments_[0] === CODE_GRAPH_COMPACTION_WORKER_ARGUMENT;
 const isCodeGraphDeepDiagnosticsWorker = arguments_[0] === CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT;
@@ -87,27 +89,29 @@ if (
   runSignalTransparentMain(nativeWorkerProgram, {disableErrorReporting: true});
 } else {
   const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> =
-    isRemoteMemoryService
-      ? await remoteMemoryServiceProgram()
-      : isOAuthM2MGraphCredentialHelper
-        ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
-        : isOAuthM2MRegistryCredentialHelper
-          ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
-          : isOAuthM2MPublisherRegistryCredentialHelper
-            ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
-            : isOAuthUserRegistryCredentialHelper
-              ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
-              : isGraphOAuthUserHelper
-                ? await graphOAuthHelperProgram(arguments_.slice(1))
-                : isRemoteMemoryOperator
-                  ? await remoteMemoryOperatorProgram(arguments_.slice(1))
-                  : isLocalModelWorker
-                    ? await localModelWorkerProgram(arguments_)
-                    : isCodeGraphParserWorker
-                      ? await codeGraphParserWorkerProgram(arguments_)
-                      : isGitWorktreeRegistrationWorker
-                        ? await gitWorktreeRegistrationWorkerProgram()
-                        : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
+    isIntegrationSyncWorker
+      ? await integrationSyncWorkerProgram(arguments_.slice(1))
+      : isRemoteMemoryService
+        ? await remoteMemoryServiceProgram()
+        : isOAuthM2MGraphCredentialHelper
+          ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
+          : isOAuthM2MRegistryCredentialHelper
+            ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
+            : isOAuthM2MPublisherRegistryCredentialHelper
+              ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
+              : isOAuthUserRegistryCredentialHelper
+                ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
+                : isGraphOAuthUserHelper
+                  ? await graphOAuthHelperProgram(arguments_.slice(1))
+                  : isRemoteMemoryOperator
+                    ? await remoteMemoryOperatorProgram(arguments_.slice(1))
+                    : isLocalModelWorker
+                      ? await localModelWorkerProgram(arguments_)
+                      : isCodeGraphParserWorker
+                        ? await codeGraphParserWorkerProgram(arguments_)
+                        : isGitWorktreeRegistrationWorker
+                          ? await gitWorktreeRegistrationWorkerProgram()
+                          : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
   );
@@ -115,6 +119,7 @@ if (
   BunRuntime.runMain(program, {
     disableErrorReporting:
       isLocalModelWorker ||
+      isIntegrationSyncWorker ||
       isCodeGraphParserWorker ||
       isGitWorktreeRegistrationWorker ||
       isGraphOAuthUserHelper ||
@@ -462,6 +467,30 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
         Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
       ),
     ),
+  );
+}
+
+async function integrationSyncWorkerProgram(arguments_: readonly string[]) {
+  const [runtime, coordinator, runtimeConfig, processDiagnostics, processLease] = await Promise.all([
+    import('./effect/runtime.js'),
+    import('./integrations/coordinator.js'),
+    import('./runtime.js'),
+    import('./process/diagnostics.js'),
+    import('./process/standalone_lease.js'),
+  ]);
+  return normalizedProcessHome(arguments_, processDiagnostics.threadnoteHomeForProcess).pipe(
+    Effect.flatMap(home =>
+      processLease.withStandaloneProcessLease(
+        processDiagnostics.withThreadnoteProcessRegistration(
+          home,
+          'integration-sync-worker',
+          runtimeConfig.getRuntimeConfig({home}).pipe(Effect.flatMap(coordinator.runIntegrationSyncWorker)),
+          'integration-sync',
+        ),
+      ),
+    ),
+    Effect.provide(runtime.ApplicationLayer),
+    Effect.tapError(() => Console.error('Integration sync coordinator stopped. Retry source sync to restart it.')),
   );
 }
 

@@ -411,6 +411,7 @@ bun_test(
         "//packages/integration-core:src/lock.ts",
         "//packages/integration-core:src/manager-contracts.ts",
         "//packages/integration-core:src/manager-http.ts",
+        "//packages/integration-core:src/source-coordinator.ts",
         "//packages/integration-linear:package.json",
         "//packages/integration-linear:src/access-policy.ts",
         "//packages/integration-linear:src/client.ts",
@@ -437,6 +438,7 @@ bun_test(
         "//packages/integration-linear:test/linear_state.property.test.ts",
         "//packages/integration-linear:test/manager-ui.test.tsx",
         "//packages/integration-linear:test/manager.test.ts",
+        "//packages/integration-linear:test/work.test.ts",
         "//packages/integration-runtime:package.json",
         "//packages/integration-runtime:src/access-policy.ts",
         "//packages/integration-runtime:src/config.ts",
@@ -537,5 +539,6 @@ bun_test(
         "packages/integration-linear/test/linear_state.property.test.ts",
         "packages/integration-linear/test/manager-ui.test.tsx",
         "packages/integration-linear/test/manager.test.ts",
+        "packages/integration-linear/test/work.test.ts",
     ],
 )

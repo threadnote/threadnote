@@ -126,7 +126,7 @@ function executeOxlint(request: OxlintFileLengthRequest): number {
       '--no-error-on-unmatched-pattern',
       '--threads=1',
       '--deny-warnings',
-      '--report-unused-disable-directives-severity=error',
+      // The full lint pass checks directives against their enabled rules.
       ...request.files,
     ],
     cwd: request.repositoryRoot,

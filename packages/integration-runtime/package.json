@@ -5,17 +5,20 @@
   "exports": {
     "./access-policy": "./src/access-policy.ts",
     "./config": "./src/config.ts",
-    "./source": "./src/source.ts"
+    "./coordinator": "./src/coordinator.ts",
+    "./coordinator-transport": "./src/coordinator-transport.ts"
   },
   "dependencies": {
+    "@effect/platform-bun": "4.0.0",
+    "@effect/sql-sqlite-bun": "4.0.0",
     "@threadnote/integration-core": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/store": "workspace:*",
+    "@threadnote/workspace": "workspace:*",
     "effect": "4.0.0",
     "js-yaml": "^5.4.2"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0",
     "@effect/vitest": "4.0.0",
     "fast-check": "4.10.1",
     "vitest": "5.0.1"

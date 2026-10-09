@@ -209,6 +209,7 @@
     "./image_projection/render_profile": "./src/image_projection/render_profile.ts",
     "./installations": "./src/installations.ts",
     "./integrations/config": "./src/integrations/config.ts",
+    "./integrations/coordinator": "./src/integrations/coordinator.ts",
     "./integrations/manager": "./src/integrations/manager.ts",
     "./integrations/obsidian/open": "./src/integrations/obsidian/open.ts",
     "./integrations/source": "./src/integrations/source.ts",

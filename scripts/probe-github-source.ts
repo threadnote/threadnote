@@ -1,4 +1,9 @@
-import {Redacted} from 'effect';
+import {Effect, Layer, Redacted} from 'effect';
+import {admittedSourceFetch} from '@threadnote/integration-core/source-coordinator';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {getRuntimeConfig} from '@threadnote/threadnote/runtime';
+import {runtimeEntrypointLayer} from '@threadnote/threadnote/effect/runtime-entrypoint';
+import {telemetryChildEnvironmentPolicyLayer} from '@threadnote/threadnote/telemetry/session';
 import {
   createGitHubClient,
   GitHubClientError,
@@ -60,9 +65,26 @@ if (import.meta.main) {
     const numberText = process.env.GITHUB_PROBE_NUMBER;
     if (!token || !repository || (numberText !== undefined && !/^[1-9][0-9]*$/.test(numberText)))
       throw new GitHubClientError({code: 'contract-invalid'});
-    const result = await probeGitHubSource(Redacted.make(token), repository, {
-      ...(numberText === undefined ? {} : {number: Number(numberText)}),
-    });
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const config = yield* getRuntimeConfig();
+        const credential = Redacted.make(token);
+        const fetch = yield* admittedSourceFetch('github', credential, undefined, config);
+        return yield* Effect.tryPromise(() =>
+          probeGitHubSource(credential, repository, {
+            fetch,
+            ...(numberText === undefined ? {} : {number: Number(numberText)}),
+          }),
+        );
+      }).pipe(
+        // oxlint-disable-next-line effecttsgo/strict-effect-provide -- This script is the application entry point.
+        Effect.provide(
+          ApplicationLayer.pipe(
+            Layer.provide(Layer.merge(runtimeEntrypointLayer, telemetryChildEnvironmentPolicyLayer)),
+          ),
+        ),
+      ),
+    );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } catch (error) {
     const code = error instanceof GitHubClientError ? error.code : 'transport-rejected';

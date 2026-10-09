@@ -1,3 +1,4 @@
+import {admittedSourceFetch, cooldownSourceAccount} from '@threadnote/integration-core/source-coordinator';
 import {Clock, Effect, Random, Redacted, Result} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
@@ -99,7 +100,8 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
           accessEpoch: sha256HexSync(`${now}:${yield* Random.next}`),
         };
       }
-      const client = createLinearClient(token.success, options);
+      const fetch = yield* admittedSourceFetch('linear', token.success, options.fetch, config);
+      const client = createLinearClient(token.success, {...options, fetch});
       const syncedDocuments: string[] = [];
       const warnings: string[] = [];
       const fence = configFence(config, id, fingerprint);
@@ -145,7 +147,8 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
           ].includes(error.code)
         )
           return yield* reject();
-        if (error.code === 'quota-rejected')
+        if (error.code === 'quota-rejected') {
+          yield* cooldownSourceAccount(config, 'linear', token.success, error.retryAfterMilliseconds ?? 60_000, 'POST');
           yield* saveReceipt(config, source, {
             ...access,
             nextAttemptAt: Math.min(
@@ -153,6 +156,7 @@ export const syncLinearSource = Effect.fn('linear.syncSource')(function* (
               (yield* Clock.currentTimeMillis) + Math.max(60000, error.retryAfterMilliseconds ?? 60000),
             ),
           });
+        }
         return yield* checkpoint();
       });
       return yield* Effect.gen(function* () {

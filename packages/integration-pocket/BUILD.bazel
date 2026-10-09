@@ -411,6 +411,7 @@ bun_test(
         "//packages/integration-core:src/lock.ts",
         "//packages/integration-core:src/manager-contracts.ts",
         "//packages/integration-core:src/render.ts",
+        "//packages/integration-core:src/source-coordinator.ts",
         "//packages/integration-pocket:package.json",
         "//packages/integration-pocket:src/access-policy.ts",
         "//packages/integration-pocket:src/client.ts",
@@ -426,6 +427,7 @@ bun_test(
         "//packages/integration-pocket:src/sync.ts",
         "//packages/integration-pocket:test/manager-ui.test.tsx",
         "//packages/integration-pocket:test/pocket_source.test.ts",
+        "//packages/integration-pocket:test/work.test.ts",
         "//packages/integration-runtime:package.json",
         "//packages/integration-runtime:src/access-policy.ts",
         "//packages/integration-runtime:src/config.ts",
@@ -545,5 +547,6 @@ bun_test(
         "tools/bazel/project-vitest.config.ts",
         "packages/integration-pocket/test/manager-ui.test.tsx",
         "packages/integration-pocket/test/pocket_source.test.ts",
+        "packages/integration-pocket/test/work.test.ts",
     ],
 )

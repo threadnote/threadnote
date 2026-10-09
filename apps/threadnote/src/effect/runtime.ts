@@ -10,6 +10,7 @@ import {integrationExternalSourcePolicyLayer} from '../integrations/access-polic
 import {sourceConfigurationLayer} from '../integrations/config.js';
 import {syncSourcesBeforeRecall} from '../integrations/source.js';
 import {SourceSync} from '@threadnote/integration-core/source-sync';
+import {integrationCoordinatorClientLayer} from '../integrations/coordinator.js';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
@@ -49,13 +50,16 @@ const resourceStoreLayer = ResourceStore.layer.pipe(
   Layer.provide(recallResourceInvalidationLayer),
   Layer.provide(systemLayer),
 );
+const sourceCoordinatorLayer = integrationCoordinatorClientLayer.pipe(
+  Layer.provide(Layer.mergeAll(resourceStoreLayer, integrationConfigurationLayer, systemLayer, commandLayer)),
+);
 const sourceSyncLayer = Layer.effect(
   SourceSync,
   Effect.gen(function* () {
     const services = yield* Effect.context<Effect.Services<ReturnType<typeof syncSourcesBeforeRecall>>>();
     return SourceSync.of({beforeRecall: config => syncSourcesBeforeRecall(config).pipe(Effect.provide(services))});
   }),
-).pipe(Layer.provide(Layer.mergeAll(resourceStoreLayer, integrationConfigurationLayer, systemLayer)));
+).pipe(Layer.provide(sourceCoordinatorLayer));
 const localModelStoreLayer = LocalModelStore.layer.pipe(
   Layer.provideMerge(HttpService.layer),
   Layer.provide(systemLayer),
@@ -121,6 +125,7 @@ const ApplicationServicesLayer = Layer.mergeAll(
   externalSourcePolicyLayer,
   integrationConfigurationLayer,
   sourceSyncLayer,
+  sourceCoordinatorLayer,
   systemLayer,
 );
 

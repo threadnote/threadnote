@@ -410,6 +410,7 @@ bun_test(
         "//packages/integration-core:src/external-credentials.ts",
         "//packages/integration-core:src/lock.ts",
         "//packages/integration-core:src/render.ts",
+        "//packages/integration-core:src/source-coordinator.ts",
         "//packages/integration-github:package.json",
         "//packages/integration-github:src/access-policy.ts",
         "//packages/integration-github:src/client.ts",
@@ -427,6 +428,7 @@ bun_test(
         "//packages/integration-github:test/github-client.test.ts",
         "//packages/integration-github:test/github-source.test.ts",
         "//packages/integration-github:test/manager-ui.test.tsx",
+        "//packages/integration-github:test/work.test.ts",
         "//packages/integration-runtime:package.json",
         "//packages/integration-runtime:src/access-policy.ts",
         "//packages/integration-runtime:src/config.ts",
@@ -521,5 +523,6 @@ bun_test(
         "packages/integration-github/test/github-client.test.ts",
         "packages/integration-github/test/github-source.test.ts",
         "packages/integration-github/test/manager-ui.test.tsx",
+        "packages/integration-github/test/work.test.ts",
     ],
 )

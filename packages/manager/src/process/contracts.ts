@@ -6,6 +6,7 @@ export type ManagerProcessRole =
   | 'graph-parser-worker'
   | 'graph-query-worker'
   | 'graph-waiter'
+  | 'integration-sync-worker'
   | 'legacy'
   | 'local-model-worker'
   | 'manager'
