@@ -1,5 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {layer as effectLayer} from '@effect/vitest';
+import {Database} from 'bun:sqlite';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Ref, Schema} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
 import {expect} from 'vitest';
@@ -8,7 +9,13 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {SourceWorkDescriptor, SourceWorkRegistration} from '@threadnote/integration-core/source-coordinator';
-import {makeCoordinatorEngine, makeSourceAdmission, openCoordinatorStore, sourceWorkKey} from '../src/coordinator.js';
+import {
+  coordinatorPaths,
+  makeCoordinatorEngine,
+  makeSourceAdmission,
+  openCoordinatorStore,
+  sourceWorkKey,
+} from '../src/coordinator.js';
 
 const base = Layer.merge(
   BunServices.layer,
@@ -40,6 +47,17 @@ const descriptor = (sourceId: string, accountKey = sourceId, provider = 'synthet
   fingerprint: 'fingerprint-one',
   refreshIntervalMs: 60_000,
 });
+const observedOpen = (current: RuntimeConfig, ready: Deferred.Deferred<void>) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* openCoordinatorStore(current).pipe(
+      Effect.provideService(FileSystem.FileSystem, {
+        ...fs,
+        // This is the final asynchronous filesystem call before SQLite opens.
+        exists: path => fs.exists(path).pipe(Effect.tap(() => Deferred.succeed(ready, undefined))),
+      }),
+    );
+  });
 const registration = (
   descriptors: readonly SourceWorkDescriptor[],
   run: SourceWorkRegistration<SystemInfo>['run'] = (_config, sourceId) =>
@@ -47,6 +65,67 @@ const registration = (
 ): SourceWorkRegistration<SystemInfo> => ({provider: 'synthetic', list: () => Effect.succeed(descriptors), run});
 
 effectLayer(base)('durable integration coordinator', effectIt => {
+  effectIt.effect('yields and retries a locked cold WAL setup, then retains durable demand', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const paths = yield* coordinatorPaths(current);
+      yield* (yield* FileSystem.FileSystem).writeFile(paths.database, new Uint8Array(), {mode: 0o600});
+      const blocker = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const database = new Database(paths.database);
+          database.run('BEGIN EXCLUSIVE');
+          return database;
+        }),
+        database => Effect.sync(() => database.close()),
+      );
+      const ready = yield* Deferred.make<void>();
+      const opening = yield* observedOpen(current, ready).pipe(Effect.forkScoped);
+      // The held rollback-journal lock deterministically rejects WAL setup.
+      // Advancing this clock requires startup to yield between native waits.
+      yield* Deferred.await(ready);
+      yield* TestClock.adjust(75);
+      expect(opening.pollUnsafe()).toBeUndefined();
+      yield* Effect.sync(() => blocker.run('COMMIT'));
+      yield* TestClock.adjust(25);
+      const store = yield* Fiber.join(opening);
+      expect(yield* store.sql`PRAGMA journal_mode`).toEqual([{journal_mode: 'wal'}]);
+      const tickets = yield* store.enqueue(current, [descriptor('one')], 'automatic');
+      expect(tickets).toHaveLength(1);
+      expect((yield* store.pending).map(row => row.generation)).toEqual([1]);
+    }),
+  );
+
+  effectIt.effect('bounds locked startup retries and permits a clean reopen after failure', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const paths = yield* coordinatorPaths(current);
+      yield* (yield* FileSystem.FileSystem).writeFile(paths.database, new Uint8Array(), {mode: 0o600});
+      const blocker = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const database = new Database(paths.database);
+          database.run('BEGIN EXCLUSIVE');
+          return database;
+        }),
+        database => Effect.sync(() => database.close()),
+      );
+      const ready = yield* Deferred.make<void>();
+      const opening = yield* Effect.scoped(observedOpen(current, ready)).pipe(Effect.result, Effect.forkScoped);
+      yield* Deferred.await(ready);
+      yield* TestClock.adjust(500);
+      const result = yield* Fiber.join(opening);
+      expect(result).toMatchObject({
+        _tag: 'Failure',
+        failure: {
+          _tag: 'SourceCoordinatorError',
+          message: 'Integration coordinator is unavailable. Retry the operation.',
+        },
+      });
+      yield* Effect.sync(() => blocker.run('COMMIT'));
+      const store = yield* openCoordinatorStore(current);
+      expect(yield* store.pending).toEqual([]);
+    }),
+  );
+
   effectIt.effect.prop(
     'coalesces repeated pending demand into one generation per source',
     {count: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 30}))},

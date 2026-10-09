@@ -1,8 +1,10 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Duration, Effect, FileSystem, Layer, Option, PartitionedSemaphore, Path, Schema} from 'effect';
+import {Clock, Duration, Effect, FileSystem, Layer, Option, PartitionedSemaphore, Path, Schedule, Schema} from 'effect';
 import * as PersistedQueue from 'effect/persistence/PersistedQueue';
 import * as RateLimiter from 'effect/persistence/RateLimiter';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {MigrationError} from 'effect/sql/Migrator';
+import {isSqlError, type SqlError} from 'effect/sql/SqlError';
 import * as Reactivity from 'effect/reactivity/Reactivity';
 import {
   SourceCoordinatorError,
@@ -13,6 +15,7 @@ import {
   type SourceWorkResult,
 } from '@threadnote/integration-core/source-coordinator';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {runtimeLstat, SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
@@ -92,7 +95,7 @@ export const coordinatorPaths = Effect.fn('source.coordinatorPaths')(function* (
   const directory = path.join(root, 'integration-coordinator');
   for (const target of [root, directory]) {
     yield* fs.makeDirectory(target, {recursive: true, mode: 0o700}).pipe(Effect.mapError(fail));
-    const stat = yield* Effect.tryPromise({try: () => runtimeLstat(target), catch: fail});
+    const stat = yield* fromPromiseInterruptible(() => runtimeLstat(target), fail);
     const info = yield* fs.stat(target);
     if (
       !stat.isDirectory() ||
@@ -118,7 +121,7 @@ export const coordinatorPaths = Effect.fn('source.coordinatorPaths')(function* (
 export const assertCoordinatorFile = Effect.fn('source.assertCoordinatorFile')(function* (filename: string) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
-  const stat = yield* Effect.tryPromise({try: () => optionalStat(filename), catch: fail});
+  const stat = yield* fromPromiseInterruptible(() => optionalStat(filename), fail);
   if (!stat) return;
   const info = yield* fs.stat(filename);
   if (
@@ -204,6 +207,19 @@ export interface CoordinatorStore {
   readonly cleanup: Effect.Effect<void, SourceCoordinatorError>;
 }
 
+function retrySqliteStartup<A, R>(effect: Effect.Effect<A, SqlError, R>) {
+  return effect.pipe(
+    // PersistedQueue's migrator promotes SQL failures to defects. Recover only
+    // lock contention; its failed migration transaction has already rolled back.
+    Effect.catchDefect(defect => {
+      const error = defect instanceof MigrationError ? defect.cause : defect;
+      return isSqlError(error) && error.reason._tag === 'LockTimeoutError' ? Effect.fail(error) : Effect.die(defect);
+    }),
+    Effect.retry({times: 20, schedule: Schedule.spaced(25), while: error => error.reason._tag === 'LockTimeoutError'}),
+    Effect.mapError(fail),
+  );
+}
+
 /** Open lazily per caller; the worker retains one scoped connection. */
 export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(function* (config: RuntimeConfig) {
   const fs = yield* FileSystem.FileSystem;
@@ -215,35 +231,40 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
       .writeFile(paths.database, new Uint8Array(), {flag: 'wx', mode: 0o600})
       .pipe(Effect.catch(() => assertCoordinatorFile(paths.database)));
   const reactivity = yield* Reactivity.make;
-  const sqlite = yield* SqliteClient.make({filename: paths.database, busyTimeout: 25}).pipe(
+  // The adapter's implicit WAL pragma throws defects during acquisition. Run it
+  // through the SQL error channel so cold callers can yield between short waits.
+  const sqlite = yield* SqliteClient.make({filename: paths.database, busyTimeout: 25, disableWAL: true}).pipe(
     Effect.provideService(Reactivity.Reactivity, reactivity),
     Effect.mapError(fail),
   );
   const sql = sqlite.withoutTransforms();
-  yield* sql`CREATE TABLE IF NOT EXISTS source_jobs (
+  const queueStore = yield* retrySqliteStartup(
+    Effect.gen(function* () {
+      yield* sql`PRAGMA journal_mode = WAL`;
+      yield* sql`CREATE TABLE IF NOT EXISTS source_jobs (
     key TEXT PRIMARY KEY, config_json TEXT NOT NULL, descriptor_json TEXT NOT NULL,
     generation INTEGER NOT NULL, mode TEXT NOT NULL, state TEXT NOT NULL,
     not_before INTEGER NOT NULL, requested_at INTEGER NOT NULL, last_run INTEGER NOT NULL DEFAULT 0,
     failures INTEGER NOT NULL DEFAULT 0
-  )`.pipe(Effect.mapError(fail));
-  yield* sql`CREATE TABLE IF NOT EXISTS source_receipts (
+  )`;
+      yield* sql`CREATE TABLE IF NOT EXISTS source_receipts (
     key TEXT NOT NULL, generation INTEGER NOT NULL, result_json TEXT NOT NULL,
     failed INTEGER NOT NULL, completed_at INTEGER NOT NULL, PRIMARY KEY(key,generation)
-  )`.pipe(Effect.mapError(fail));
-  yield* sql`CREATE TABLE IF NOT EXISTS source_admission (
+  )`;
+      yield* sql`CREATE TABLE IF NOT EXISTS source_admission (
     key TEXT PRIMARY KEY, window_start INTEGER NOT NULL DEFAULT 0,
     used INTEGER NOT NULL DEFAULT 0, cooldown_until INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
-  )`.pipe(Effect.mapError(fail));
-  yield* sql`CREATE TABLE IF NOT EXISTS source_account_turns (key TEXT PRIMARY KEY, last_turn INTEGER NOT NULL)`.pipe(
-    Effect.mapError(fail),
+  )`;
+      yield* sql`CREATE TABLE IF NOT EXISTS source_account_turns (key TEXT PRIMARY KEY, last_turn INTEGER NOT NULL)`;
+      return yield* PersistedQueue.makeStoreSql({
+        tableName: 'source_queue',
+        pollInterval: 50,
+        lockRefreshInterval: 1_000,
+        lockExpiration: 5_000,
+      }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+    }),
   );
-  const queueStore = yield* PersistedQueue.makeStoreSql({
-    tableName: 'source_queue',
-    pollInterval: 50,
-    lockRefreshInterval: 1_000,
-    lockExpiration: 5_000,
-  }).pipe(Effect.provideService(SqlClient.SqlClient, sql), Effect.mapError(fail));
   const factory = yield* PersistedQueue.makeFactory.pipe(
     Effect.provideService(PersistedQueue.PersistedQueueStore, queueStore),
   );

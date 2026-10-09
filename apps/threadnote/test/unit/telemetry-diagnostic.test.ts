@@ -33,13 +33,14 @@ describe('anonymous telemetry diagnostics', () => {
   });
 
   it.each([
+    // New source tags retain compatibility with the deployed gateway's closed registry.
     {
       error: SourceCoordinatorError.make({message: 'private coordinator configuration content'}),
-      errorType: 'SourceCoordinatorError',
+      errorType: 'UnknownError',
     },
     {
       error: SourceConfigurationError.make({message: 'private source configuration content'}),
-      errorType: 'SourceConfigurationError',
+      errorType: 'UnknownError',
     },
     {
       error: HomeMigrationInsufficientSpace.make({

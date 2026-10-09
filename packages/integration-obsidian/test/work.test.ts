@@ -136,12 +136,16 @@ describe('Obsidian bounded source work', () => {
       const {fs, path, config, vault, readState} = yield* setup();
       const names = Array.from({length: 130}, (_, index) => `note-${String(index).padStart(3, '0')}.md`);
       yield* Effect.forEach(names, name => fs.writeFileString(path.join(vault, name), '# Public'), {concurrency: 8});
-      for (let run = 0; run < 3; run++) yield* obsidianSourceWork.run(config, 'vault', options);
-      yield* fs.writeFileString(path.join(vault, names[0]), 'x'.repeat(512 * 1024 + 1));
+      const firstPage = yield* obsidianSourceWork.run(config, 'vault', options);
+      expect(firstPage.syncedDocuments).toHaveLength(64);
+      const rejectedName = firstPage.syncedDocuments[0];
+      for (let run = 0; run < 2; run++) yield* obsidianSourceWork.run(config, 'vault', options);
+      // Directory entry order is filesystem-specific; reject a file observed on the first page.
+      yield* fs.writeFileString(path.join(vault, rejectedName), 'x'.repeat(512 * 1024 + 1));
       const rejected = yield* obsidianSourceWork.run(config, 'vault', options);
       expect(rejected.more).toBe(true);
-      expect(rejected.syncedDocuments).toContain(names[0]);
-      expect((yield* readState).files[names[0]]).toBeUndefined();
+      expect(rejected.syncedDocuments).toContain(rejectedName);
+      expect((yield* readState).files[rejectedName]).toBeUndefined();
       for (let run = 0; run < 3; run++) {
         if (!(yield* obsidianSourceWork.run(config, 'vault', options)).more) break;
       }

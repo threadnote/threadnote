@@ -15,6 +15,7 @@ import {
   type SourceWorkResult,
 } from '@threadnote/integration-core/source-coordinator';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {runtimeReadBoundedStableRegularFile, SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -51,10 +52,10 @@ const endpoint = Effect.fn('source.readCoordinatorEndpoint')(function* (config: 
   const system = yield* SystemInfo;
   if (!(yield* fs.exists(paths.endpoint))) return undefined;
   yield* assertCoordinatorFile(paths.endpoint);
-  const raw = yield* Effect.tryPromise({
-    try: () => runtimeReadBoundedStableRegularFile(paths.endpoint, 8_192),
-    catch: unavailable,
-  });
+  const raw = yield* fromPromiseInterruptible(
+    () => runtimeReadBoundedStableRegularFile(paths.endpoint, 8_192),
+    unavailable,
+  );
   const data = yield* Effect.try({
     try: () => {
       const value = JSON.parse(new TextDecoder().decode(raw)) as unknown;
@@ -421,7 +422,7 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
             web.headers.get('content-type') !== 'application/json'
           )
             return HttpServerResponse.fromWeb(new Response(null, {status: 403}));
-          const raw = yield* Effect.tryPromise({try: () => boundedBody(web), catch: unavailable});
+          const raw = yield* fromPromiseInterruptible(() => boundedBody(web), unavailable);
           if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return yield* unavailable();
           const data = raw as Record<string, unknown>;
           const requestConfig = yield* Effect.try({
