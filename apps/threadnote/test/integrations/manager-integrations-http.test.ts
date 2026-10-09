@@ -140,7 +140,16 @@ describe('Manager Obsidian HTTP workflow', () => {
       (await request('/api/integrations/obsidian', {action: 'sync-source', id: 'notes', apply: true, confirm: true}))
         .status,
     ).toBe(200);
-    expect(await readFile(imported, 'utf8')).toContain('Keep services focused.');
+    await expect
+      .poll(
+        () =>
+          readFile(imported, 'utf8').catch(cause => {
+            if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return '';
+            throw cause;
+          }),
+        {interval: 25, timeout: 10_000},
+      )
+      .toContain('Keep services focused.');
     await request('/api/integrations/obsidian', {
       action: 'set-enabled',
       id: 'notes',

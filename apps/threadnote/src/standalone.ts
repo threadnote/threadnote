@@ -2,7 +2,7 @@ import type {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
-import {Console, Effect, Layer, Runtime} from 'effect';
+import {Cause, Console, Effect, Layer, Option, Runtime} from 'effect';
 import {withCliOutputConsole} from './effect/cli/output.js';
 import {inspectMcpServerInvocation, mcpServerHelp} from './mcp/launcher.js';
 import type {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -490,7 +490,13 @@ async function integrationSyncWorkerProgram(arguments_: readonly string[]) {
       ),
     ),
     Effect.provide(runtime.ApplicationLayer),
-    Effect.tapError(() => Console.error('Integration sync coordinator stopped. Retry source sync to restart it.')),
+    Effect.tapCause(cause =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.void
+        : Console.error(
+            coordinator.coordinatorWorkerFailureMessage(Option.getOrUndefined(Cause.findErrorOption(cause))),
+          ),
+    ),
   );
 }
 

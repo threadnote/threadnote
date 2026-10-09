@@ -4,6 +4,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SourceCoordinatorError} from '@threadnote/integration-core/source-coordinator';
 import {makeCoordinatorClientLayer, runCoordinatorWorker} from '@threadnote/integration-runtime/coordinator-transport';
+export {coordinatorWorkerFailureMessage} from '@threadnote/integration-runtime/coordinator-transport';
 import {obsidianSourceWork} from '@threadnote/integration-obsidian/source';
 import {superhumanSourceWork} from '@threadnote/integration-superhuman/source';
 import {pocketSourceWork} from '@threadnote/integration-pocket/source';

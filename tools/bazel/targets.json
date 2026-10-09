@@ -79247,6 +79247,7 @@
         "packages/integration-core/src/source-coordinator.ts",
         "packages/integration-runtime/package.json",
         "packages/integration-runtime/src/config.ts",
+        "packages/integration-runtime/src/coordinator-transport.ts",
         "packages/integration-runtime/src/coordinator.ts",
         "packages/integration-runtime/test/configuration.test.ts",
         "packages/integration-runtime/test/coordinator.test.ts",

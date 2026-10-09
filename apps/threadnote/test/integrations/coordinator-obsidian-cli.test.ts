@@ -4,10 +4,51 @@ import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {Database} from 'bun:sqlite';
 import {describe, expect, it} from 'vitest';
+import {INTEGRATION_SYNC_WORKER_ARGUMENT} from '../../src/worker_protocol.js';
 
 const entrypoint = 'apps/threadnote/src/standalone.ts';
 
 describe('integration coordinator standalone Obsidian composition', () => {
+  it('projects forced worker startup failures as safe queue and engine phases', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadnote-coordinator-startup-failure-'));
+    try {
+      for (const stage of ['queue', 'engine']) {
+        const home = join(root, stage);
+        const directory = join(home, 'threadnote', 'integration-coordinator');
+        const databasePath = join(directory, 'jobs.sqlite');
+        await mkdir(directory, {recursive: true, mode: 0o700});
+        await writeFile(databasePath, stage === 'queue' ? 'synthetic-private-database-detail' : '', {mode: 0o600});
+        if (stage === 'engine') {
+          const database = new Database(databasePath);
+          try {
+            database.run('CREATE TABLE source_jobs (key TEXT PRIMARY KEY)');
+          } finally {
+            database.close();
+          }
+        }
+        const result = await new Promise<{readonly code: string | number | undefined; readonly stderr: string}>(
+          resolve => {
+            execFile(
+              process.execPath,
+              [entrypoint, INTEGRATION_SYNC_WORKER_ARGUMENT, '--home', home],
+              {env: {...process.env, HOME: root, THREADNOTE_TELEMETRY: 'off'}, timeout: 15_000, maxBuffer: 64 * 1024},
+              (error, _stdout, stderr) => resolve({code: error?.code, stderr}),
+            );
+          },
+        );
+        expect(result.code).toBe(1);
+        expect(result.stderr.trim()).toBe(
+          `Integration sync coordinator stopped during ${stage} initialization. Retry source sync to restart it.`,
+        );
+        expect(result.stderr).not.toContain('synthetic-private');
+        expect(await readFile(join(directory, 'endpoint.json'), 'utf8').catch(() => undefined)).toBeUndefined();
+        expect(await readFile(join(directory, 'worker.lock'), 'utf8').catch(() => undefined)).toBeUndefined();
+      }
+    } finally {
+      await rm(root, {force: true, recursive: true});
+    }
+  });
+
   it('cold-starts the worker from a real CLI client and publishes usable snapshots for concurrent clients', async () => {
     const root = await mkdtemp(join(tmpdir(), 'threadnote-coordinator-obsidian-'));
     const home = join(root, 'home');

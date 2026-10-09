@@ -3,12 +3,18 @@ import {layer as effectLayer} from '@effect/vitest';
 import {Database} from 'bun:sqlite';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Ref, Schema} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
-import {expect} from 'vitest';
+import * as fc from 'fast-check';
+import {expect, it} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {SourceWorkDescriptor, SourceWorkRegistration} from '@threadnote/integration-core/source-coordinator';
+import {
+  SourceCoordinatorError,
+  type SourceWorkDescriptor,
+  type SourceWorkRegistration,
+} from '@threadnote/integration-core/source-coordinator';
+import {coordinatorWorkerFailureMessage} from '../src/coordinator-transport.js';
 import {
   coordinatorPaths,
   makeCoordinatorEngine,
@@ -63,6 +69,20 @@ const registration = (
   run: SourceWorkRegistration<SystemInfo>['run'] = (_config, sourceId) =>
     Effect.succeed({sourceId, syncedDocuments: [sourceId], warnings: [], value: {sourceId}}),
 ): SourceWorkRegistration<SystemInfo> => ({provider: 'synthetic', list: () => Effect.succeed(descriptors), run});
+
+it('never prints arbitrary startup errors through the worker console projection', () => {
+  fc.assert(
+    fc.property(fc.string(), detail => {
+      const privateMessage = `synthetic-private-${detail}`;
+      for (const error of [new Error(privateMessage), SourceCoordinatorError.make({message: privateMessage})]) {
+        expect(coordinatorWorkerFailureMessage(error)).toBe(
+          'Integration sync coordinator stopped during runtime bootstrap. Retry source sync to restart it.',
+        );
+      }
+    }),
+    {numRuns: 30},
+  );
+});
 
 effectLayer(base)('durable integration coordinator', effectIt => {
   effectIt.effect('yields and retries a locked cold WAL setup, then retains durable demand', () =>

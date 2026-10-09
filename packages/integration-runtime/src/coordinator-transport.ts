@@ -1,5 +1,5 @@
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
-import {Clock, Context, Crypto, Effect, FileSystem, Layer, Path, Schema, Stream} from 'effect';
+import {Cause, Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema, Stream} from 'effect';
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientRequest from 'effect/http/HttpClientRequest';
@@ -32,6 +32,45 @@ import {
 
 const unavailable = () =>
   SourceCoordinatorError.make({message: 'Integration coordinator is unavailable. Retry the operation.'});
+const workerStages = [
+  'configuration',
+  'HTTP client initialization',
+  'singleton acquisition',
+  'queue initialization',
+  'engine initialization',
+  'token generation',
+  'listener initialization',
+  'process identity',
+  'listener activation',
+  'endpoint publication',
+  'initial queue cleanup',
+  'work scheduling',
+] as const;
+type WorkerStage = (typeof workerStages)[number];
+const workerMessage = (stage: WorkerStage) =>
+  `Integration sync coordinator stopped during ${stage}. Retry source sync to restart it.`;
+const workerFailure = (stage: WorkerStage) => SourceCoordinatorError.make({message: workerMessage(stage)});
+const workerMessages = new Set<string>(workerStages.map(workerMessage));
+
+/** Only fixed runtime-owned messages may be printed by the standalone worker. */
+export function coordinatorWorkerFailureMessage(error: unknown): string {
+  return Schema.is(SourceCoordinatorError)(error) && workerMessages.has(error.message)
+    ? error.message
+    : 'Integration sync coordinator stopped during runtime bootstrap. Retry source sync to restart it.';
+}
+
+const atWorkerStage =
+  (stage: WorkerStage) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.catchCause(cause => {
+        if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause as Cause.Cause<never>);
+        const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+        return Effect.fail(
+          Schema.is(SourceCoordinatorError)(error) && workerMessages.has(error.message) ? error : workerFailure(stage),
+        );
+      }),
+    );
 type ClientStage =
   | 'local queue validation'
   | 'source inventory'
@@ -376,15 +415,18 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const crypto = yield* Crypto.Crypto;
-  const paths = yield* coordinatorPaths(options.config);
-  const config = decodeCoordinatorConfig({...options.config, agentContextHome: paths.home}, paths.home);
+  const paths = yield* coordinatorPaths(options.config).pipe(atWorkerStage('configuration'));
+  const config = yield* Effect.try({
+    try: () => decodeCoordinatorConfig({...options.config, agentContextHome: paths.home}, paths.home),
+    catch: unavailable,
+  }).pipe(atWorkerStage('configuration'));
   const concurrency = yield* Effect.try({
     try: () => coordinatorConcurrency(options.maxConcurrentSources),
     catch: unavailable,
-  });
+  }).pipe(atWorkerStage('configuration'));
   if (options.idleTimeoutMs !== undefined && (!Number.isFinite(options.idleTimeoutMs) || options.idleTimeoutMs <= 0))
-    return yield* unavailable();
-  const httpContext = yield* Layer.build(FetchHttpClient.layer);
+    return yield* workerFailure('configuration');
+  const httpContext = yield* Layer.build(FetchHttpClient.layer).pipe(atWorkerStage('HTTP client initialization'));
   let acquired = false;
   const ownership = withExclusiveFileLock(
     fs,
@@ -403,23 +445,25 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
     },
     Effect.scoped(
       Effect.gen(function* () {
-        const store = yield* openCoordinatorStore(config);
+        const store = yield* openCoordinatorStore(config).pipe(atWorkerStage('queue initialization'));
         const engine = yield* makeCoordinatorEngine({
           store,
           registrations: options.registrations,
           quantumTimeoutMs: options.quantumTimeoutMs,
           maxConcurrentSources: options.maxConcurrentSources,
-        });
-        const token = Array.from(yield* crypto.randomBytes(32), byte => byte.toString(16).padStart(2, '0')).join('');
+        }).pipe(atWorkerStage('engine initialization'));
+        const token = Array.from(yield* crypto.randomBytes(32).pipe(atWorkerStage('token generation')), byte =>
+          byte.toString(16).padStart(2, '0'),
+        ).join('');
         const server = yield* BunHttpServer.make({
           hostname: '127.0.0.1',
           port: 0,
           maxRequestBodySize: BODY_LIMIT,
           idleTimeout: 35,
-        });
+        }).pipe(atWorkerStage('listener initialization'));
         const port =
           server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6' ? server.address.port : 0;
-        if (!port) return yield* unavailable();
+        if (!port) return yield* workerFailure('listener initialization');
         const state: Endpoint = {
           protocol: 1,
           home: paths.home,
@@ -428,7 +472,7 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
           pid: system.processId,
           processStartIdentity: yield* (system.canonicalProcessStartIdentity ?? system.processStartIdentity)(
             system.processId,
-          ),
+          ).pipe(atWorkerStage('process identity')),
         };
         let lastActivity = yield* Clock.currentTimeMillis;
         let accepting = true;
@@ -547,11 +591,13 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
             HttpServerResponse.fromWeb(Response.json({error: 'Coordinator request failed.'}, {status: 409})),
           ),
         );
-        yield* server.serve(handler);
-        yield* assertCoordinatorFile(paths.endpoint);
-        const temporary = `${paths.endpoint}.${token}.tmp`;
-        yield* fs.writeFileString(temporary, JSON.stringify(state), {mode: 0o600, flag: 'wx'});
-        yield* fs.rename(temporary, paths.endpoint);
+        yield* server.serve(handler).pipe(atWorkerStage('listener activation'));
+        yield* Effect.gen(function* () {
+          yield* assertCoordinatorFile(paths.endpoint);
+          const temporary = `${paths.endpoint}.${token}.tmp`;
+          yield* fs.writeFileString(temporary, JSON.stringify(state), {mode: 0o600, flag: 'wx'});
+          yield* fs.rename(temporary, paths.endpoint);
+        }).pipe(atWorkerStage('endpoint publication'));
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             const current = yield* endpoint(config).pipe(Effect.orElseSucceed(() => undefined));
@@ -560,17 +606,17 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
         );
         for (let index = 0; index < concurrency; index++)
           yield* Effect.forkScoped(Effect.forever(engine.consume.pipe(Effect.catchCause(() => Effect.sleep(100)))));
-        yield* store.cleanup;
+        yield* store.cleanup.pipe(atWorkerStage('initial queue cleanup'));
         let lastCleanup = yield* Clock.currentTimeMillis;
         for (;;) {
-          yield* engine.dispatch;
+          yield* engine.dispatch.pipe(atWorkerStage('work scheduling'));
           const now = yield* Clock.currentTimeMillis;
           if (engine.activeCount() > 0) lastActivity = now;
           if (now - lastCleanup > 60_000) {
-            yield* store.cleanup;
+            yield* store.cleanup.pipe(atWorkerStage('work scheduling'));
             lastCleanup = now;
           }
-          const due = (yield* store.pending).some(row => row.not_before <= now);
+          const due = (yield* store.pending.pipe(atWorkerStage('work scheduling'))).some(row => row.not_before <= now);
           if (!due && engine.activeCount() === 0 && now - lastActivity >= (options.idleTimeoutMs ?? 60_000)) {
             // This decision and accepting=false are synchronous: a wake either
             // extends activity before retirement or observes a retiring worker.
@@ -642,6 +688,6 @@ export const runCoordinatorWorker = Effect.fn('source.runCoordinatorWorker')(fun
   );
   return yield* Effect.raceFirst(ownership, anotherWorkerAccepted).pipe(
     Effect.provide(httpContext),
-    Effect.mapError(unavailable),
+    atWorkerStage('singleton acquisition'),
   );
 });
