@@ -14,12 +14,23 @@ import {
 } from './external-resource.js';
 import {parseResourceId, validatePortableSegment} from './resource-id.js';
 import {ResourceStore, type ResourceStoreLocation} from './resource-store.js';
+import {
+  MAX_SOURCE_EVIDENCE_BYTES as MAX_ENVELOPE,
+  MAX_SOURCE_CITATION_BYTES as MAX_CITATION,
+  serializeSourceEvidenceCitation,
+  validSourceEvidenceCitation,
+  validSourceEvidenceVersion,
+  type SourceEvidenceCitationV1,
+} from './source-evidence-citation.js';
+export {
+  serializeSourceEvidenceCitation,
+  validSourceEvidenceCitation,
+  type SourceEvidenceCitationV1,
+} from './source-evidence-citation.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const MAX_ENVELOPE = 512 * 1024;
 const MAX_FRAGMENT = 8192;
-const MAX_CITATION = 4096;
 const MAX_PINS = 256;
 const MAX_BYTES = 64 * 1024 * 1024;
 const PIN_HEADER = 'THREADNOTE SOURCE EVIDENCE/1\n';
@@ -30,24 +41,6 @@ const LOCK_OPTIONS = {
   waitTimeoutMilliseconds: 30_000,
 } as const;
 const encoder = new TextEncoder();
-
-export interface SourceEvidenceCitationV1 {
-  readonly version: 1;
-  readonly provider: ExternalProvider;
-  readonly sourceId: string;
-  readonly sourceInstanceId: string;
-  readonly resourceUri: string;
-  readonly accessHash: string;
-  readonly revisionHash: string;
-  readonly contentHash: string;
-  readonly rendererVersion: string;
-  readonly sanitizerVersion: string;
-  readonly fragmentHash: string;
-  readonly fragmentStart: number;
-  readonly fragmentEnd: number;
-  readonly pinId: string;
-  readonly expiresAt: string;
-}
 
 export interface SourceEvidenceInspection {
   readonly resourceUri: string;
@@ -89,91 +82,12 @@ function invalid(message: string): SourceEvidenceError {
   return SourceEvidenceError.make({message});
 }
 
-function object(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function bytes(value: string): number {
   return encoder.encode(value).byteLength;
 }
 
-function validVersion(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    value.length >= 1 &&
-    value.length <= 128 &&
-    [...value].every(character => {
-      const code = character.codePointAt(0)!;
-      return (code > 31 && code < 127) || code > 159;
-    })
-  );
-}
-
 function privateMode(mode: number, expected: number): boolean {
   return runtimePlatform === 'win32' || (mode & 0o777) === expected;
-}
-
-function citationRecord(value: unknown): value is SourceEvidenceCitationV1 {
-  if (!object(value)) return false;
-  const identity = typeof value.resourceUri === 'string' ? parseExternalResourceIdentity(value.resourceUri) : undefined;
-  if (
-    Object.keys(value).length !== 15 ||
-    value.version !== 1 ||
-    !identity ||
-    value.resourceUri !==
-      `threadnote://resources/external/${identity.provider}/${identity.sourceId}/docs/${identity.documentId}/pages/${identity.pageId}/${identity.chunkId}.md` ||
-    value.provider !== identity.provider ||
-    value.sourceId !== identity.sourceId ||
-    typeof value.sourceInstanceId !== 'string' ||
-    !HASH.test(value.sourceInstanceId) ||
-    typeof value.accessHash !== 'string' ||
-    !HASH.test(value.accessHash) ||
-    typeof value.revisionHash !== 'string' ||
-    !HASH.test(value.revisionHash) ||
-    typeof value.contentHash !== 'string' ||
-    !HASH.test(value.contentHash) ||
-    typeof value.fragmentHash !== 'string' ||
-    !HASH.test(value.fragmentHash) ||
-    !validVersion(value.rendererVersion) ||
-    !validVersion(value.sanitizerVersion) ||
-    typeof value.pinId !== 'string' ||
-    !UUID.test(value.pinId) ||
-    !Number.isSafeInteger(value.fragmentStart) ||
-    (value.fragmentStart as number) < 0 ||
-    !Number.isSafeInteger(value.fragmentEnd) ||
-    (value.fragmentEnd as number) <= (value.fragmentStart as number) ||
-    (value.fragmentEnd as number) > MAX_ENVELOPE ||
-    typeof value.expiresAt !== 'string' ||
-    !Number.isFinite(Date.parse(value.expiresAt)) ||
-    new Date(value.expiresAt).toISOString() !== value.expiresAt
-  )
-    return false;
-  return true;
-}
-
-export function validSourceEvidenceCitation(value: unknown): value is SourceEvidenceCitationV1 {
-  return citationRecord(value) && bytes(JSON.stringify(value)) <= MAX_CITATION;
-}
-
-export function serializeSourceEvidenceCitation(citation: SourceEvidenceCitationV1): string {
-  if (!validSourceEvidenceCitation(citation)) throw new Error('Invalid source evidence citation.');
-  return JSON.stringify({
-    version: citation.version,
-    provider: citation.provider,
-    sourceId: citation.sourceId,
-    sourceInstanceId: citation.sourceInstanceId,
-    resourceUri: citation.resourceUri,
-    accessHash: citation.accessHash,
-    revisionHash: citation.revisionHash,
-    contentHash: citation.contentHash,
-    rendererVersion: citation.rendererVersion,
-    sanitizerVersion: citation.sanitizerVersion,
-    fragmentHash: citation.fragmentHash,
-    fragmentStart: citation.fragmentStart,
-    fragmentEnd: citation.fragmentEnd,
-    pinId: citation.pinId,
-    expiresAt: citation.expiresAt,
-  });
 }
 
 function githubRepositoryId(documentId: string): string | undefined {
@@ -231,8 +145,8 @@ export const inspectSourceEvidence = Effect.fn('sourceEvidence.inspect')(functio
     !resource ||
     bytes(read.content) > MAX_ENVELOPE ||
     bytes(resource.body) > MAX_ENVELOPE ||
-    !validVersion(resource.metadata.rendererVersion) ||
-    !validVersion(resource.metadata.scrubberVersion)
+    !validSourceEvidenceVersion(resource.metadata.rendererVersion) ||
+    !validSourceEvidenceVersion(resource.metadata.scrubberVersion)
   )
     return yield* invalid('Current sanitized source snapshot is invalid.');
   const contentHash = sha256HexSync(read.content);

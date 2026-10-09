@@ -35,6 +35,7 @@ bun_test(
         "//packages/store:src/resource/lock.ts",
         "//packages/store:src/resource/mutation_generation.ts",
         "//packages/store:src/resource/recall-invalidation.ts",
+        "//packages/store:src/source-evidence-citation.ts",
         "//packages/store:src/source-evidence.ts",
         "//packages/store:test/external-resource-access.test.ts",
         "//packages/store:test/external-resource.test.ts",

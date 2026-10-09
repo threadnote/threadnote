@@ -5,7 +5,10 @@ import {
   type ConsolidationProvenance,
 } from './consolidation.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
-import {serializeSourceEvidenceCitation, type SourceEvidenceCitationV1} from '@threadnote/store/source-evidence';
+import {
+  serializeSourceEvidenceCitation,
+  type SourceEvidenceCitationV1,
+} from '@threadnote/store/source-evidence-citation';
 import {
   assertMemorySchemaWritable,
   formatMemoryCodeCitationLines,

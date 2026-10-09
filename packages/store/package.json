@@ -11,7 +11,8 @@
     "./resource-segment": "./src/resource-segment.ts",
     "./resource-store": "./src/resource-store.ts",
     "./external-resource": "./src/external-resource.ts",
-    "./source-evidence": "./src/source-evidence.ts"
+    "./source-evidence": "./src/source-evidence.ts",
+    "./source-evidence-citation": "./src/source-evidence-citation.ts"
   },
   "dependencies": {
     "effect": "4.0.0",

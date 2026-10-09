@@ -47,6 +47,7 @@ bun_test(
         "//packages/memory:test/unit/memory_hygiene.test.ts",
         "//packages/memory:test/unit/memory_obsidian_evidence.test.ts",
         "//packages/memory:test/unit/memory_source_evidence.test.ts",
+        "//packages/memory:test/unit/memory_source_evidence_browser.test.ts",
         "//packages/platform:package.json",
         "//packages/platform:src/child-environment-policy.ts",
         "//packages/platform:src/digest.ts",
@@ -72,6 +73,7 @@ bun_test(
         "//packages/store:src/resource/lock.ts",
         "//packages/store:src/resource/mutation_generation.ts",
         "//packages/store:src/resource/recall-invalidation.ts",
+        "//packages/store:src/source-evidence-citation.ts",
         "//packages/store:src/source-evidence.ts",
         "//packages/testing:package.json",
         "//packages/testing:src/fast-check-property.ts",
@@ -108,6 +110,7 @@ bun_test(
         "packages/memory/test/unit/memory_hygiene.test.ts",
         "packages/memory/test/unit/memory_obsidian_evidence.test.ts",
         "packages/memory/test/unit/memory_source_evidence.test.ts",
+        "packages/memory/test/unit/memory_source_evidence_browser.test.ts",
     ],
 )
 
@@ -1188,6 +1191,7 @@ bun_test(
         "//packages/store:src/resource/lock.ts",
         "//packages/store:src/resource/mutation_generation.ts",
         "//packages/store:src/resource/recall-invalidation.ts",
+        "//packages/store:src/source-evidence-citation.ts",
         "//packages/store:src/source-evidence.ts",
         "//packages/testing:package.json",
         "//packages/testing:src/node-child-process.ts",
