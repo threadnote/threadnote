@@ -71,9 +71,19 @@ describe('publisher contribution evidence with an independent clean control', ()
             yield* commit(repo, 'enroll');
             yield* indexer.index({cwd: repo, ensureVectors: false, threadnoteHome: home});
             const baseline = yield* runGraphPublisherBootstrap(config(home), {cas, cwd: repo});
-            // Copy the same baseline before any contributor receipt or target-commit facts exist.
-            yield* fs.copy(home, controlHome);
+            // Share the published baseline and signing identity, but build the control graph independently.
+            // Copying a live home races transient locks and SQLite maintenance.
+            const publisherKey = graphSharingLayout(path, home).publisherKeyPath;
+            const controlKey = graphSharingLayout(path, controlHome).publisherKeyPath;
+            yield* fs.makeDirectory(path.dirname(controlKey), {recursive: true, mode: 0o700});
+            yield* fs.copyFile(publisherKey, controlKey);
             yield* fs.copy(cas, controlCas);
+            yield* indexer.index({cwd: repo, ensureVectors: false, threadnoteHome: controlHome});
+            const controlBaseline = yield* runGraphPublisherBootstrap(config(controlHome), {
+              cas: controlCas,
+              cwd: repo,
+            });
+            expect(controlBaseline.checkpointDigest).toBe(baseline.checkpointDigest);
             yield* git(root, ['clone', '-q', repo, contributor]);
             yield* git(contributor, ['remote', 'set-url', 'origin', origin]);
             const ready = yield* Deferred.make<string>();
