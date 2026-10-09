@@ -23301,6 +23301,7 @@
         "packages/graph/src/maintenance/coordinator.ts",
         "packages/graph/src/maintenance/gate.ts",
         "packages/graph/src/manager/catalog_revision.ts",
+        "packages/graph/src/manager/reconciliation.ts",
         "packages/graph/src/manager/status.ts",
         "packages/graph/src/materialization/rows.ts",
         "packages/graph/src/materialization/spool.ts",
