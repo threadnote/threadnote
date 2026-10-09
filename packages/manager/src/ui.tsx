@@ -454,8 +454,8 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     [graphCatalog?.configuredProjects, tree],
   );
   useEffect(() => {
-    if (projectOptions.includes(workspaceProject)) return;
-    setWorkspaceProject(projectOptions[0] ?? '');
+    if (!workspaceProject || projectOptions.includes(workspaceProject)) return;
+    setWorkspaceProject('');
   }, [projectOptions, workspaceProject]);
   const teamOptions = useMemo(
     () => uniqueSelectorValues(['default', ...shares.map(share => share.name), target.team]),
@@ -1435,7 +1435,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
                 value={workspaceProject}
                 onChange={event => setWorkspaceProject(event.target.value)}
               >
-                {projectOptions.length === 0 ? <option value="">Select project</option> : null}
+                <option value="">All</option>
                 {projectOptions.map(project => (
                   <option key={project} value={project}>
                     {project}

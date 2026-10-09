@@ -10,6 +10,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 export interface ManagerHomeHandoffV1 {
   readonly timestamp: string;
+  readonly project?: string;
   readonly topic?: string;
   readonly uri: string;
 }
@@ -67,11 +68,11 @@ export const handleManagerHomeRequest = Effect.fn('managerHome.handleRequest')(f
 export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse')(function* <R>(
   request: ManagerHomeApiRequest,
   sources: ManagerHomeSources<R>,
-) {
+): Effect.fn.Return<ManagerHomeApiResponse | undefined, never, R> {
   if (request.url.pathname !== '/api/home') return undefined;
   if (request.method !== 'GET') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if (!isProject(project)) {
+  if (project && !isProject(project)) {
     return {
       body: {code: 'invalid-project', error: 'Select a project with letters, numbers, dots, underscores, or hyphens.'},
       status: 400,
@@ -79,6 +80,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
   }
 
   const deadline = (yield* Clock.currentTimeMillis) + HOME_FOREGROUND_BUDGET_MILLISECONDS;
+  if (!project) return yield* collectAllProjectsHome(request, sources, deadline);
   const observe = <A, E, R>(operation: Effect.Effect<A, E, R>) => observeHomeSource(operation, deadline);
   const corpusFiber = yield* observe(sources.records(request.config)).pipe(Effect.forkChild);
   const rootFiber = yield* observe(sources.root(request.config, project)).pipe(Effect.forkChild);
@@ -178,6 +180,56 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
             }),
       }),
       project,
+      version: 1,
+    },
+    status: 200,
+  } satisfies ManagerHomeApiResponse;
+});
+
+const collectAllProjectsHome = Effect.fn('managerHome.collectAllProjects')(function* <R>(
+  request: ManagerHomeApiRequest,
+  sources: ManagerHomeSources<R>,
+  deadline: number,
+) {
+  const [corpus, reviews] = yield* Effect.all(
+    [
+      observeHomeSource(sources.records(request.config), deadline),
+      observeHomeSource(sources.reviews(request.config.agentContextHome), deadline),
+    ],
+    {concurrency: 2},
+  );
+  const records = Result.isSuccess(corpus)
+    ? corpus.success.filter(record => record.metadata.status === 'active')
+    : undefined;
+  const pendingCount = Result.isSuccess(reviews)
+    ? reviews.success
+        .flatMap(review => review.candidates)
+        .filter(
+          candidate =>
+            candidate.state === 'pending' || candidate.state === 'deferred' || candidate.state === 'applying',
+        ).length
+    : undefined;
+  return {
+    body: {
+      handoffs: (records ?? [])
+        .filter(record => record.metadata.kind === 'handoff')
+        .sort(
+          (left, right) =>
+            right.metadata.timestamp.localeCompare(left.metadata.timestamp) || left.uri.localeCompare(right.uri),
+        )
+        .slice(0, 5)
+        .map(record => ({
+          timestamp: record.metadata.timestamp,
+          ...(record.metadata.project ? {project: record.metadata.project} : {}),
+          ...(record.metadata.topic ? {topic: record.metadata.topic} : {}),
+          uri: record.uri,
+        })),
+      stats: {
+        ...(records === undefined ? {} : {memories: records.length}),
+        ...(pendingCount === undefined ? {} : {pending: pendingCount}),
+      },
+      lanes: managerHomeLanes(pendingCount === undefined ? {} : {reviews: {pendingCount}}),
+      project: '',
       version: 1,
     },
     status: 200,

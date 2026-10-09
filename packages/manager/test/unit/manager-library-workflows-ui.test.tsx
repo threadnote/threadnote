@@ -79,7 +79,13 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
     if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
     if (url.pathname === '/api/shares') return json({shares: []});
     if (url.pathname === '/api/home')
-      return json({version: 1, project: 'project', lanes: [], handoffs: [], stats: {memories: leaves.length}});
+      return json({
+        version: 1,
+        project: url.searchParams.get('project') ?? '',
+        lanes: [],
+        handoffs: [],
+        stats: {memories: leaves.length},
+      });
     if (url.pathname === '/api/bulk') {
       const before = leaves;
       leaves = leaves.slice(1);
@@ -106,6 +112,15 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   document.body.append(container);
   await act(async () => {
     (await import('../../src/ui.js')).mountManager({integrations: []});
+  });
+  const projectSelector = container.querySelector<HTMLSelectElement>('[aria-label="Workspace project"]')!;
+  expect(projectSelector.value).toBe('');
+  expect(projectSelector.selectedOptions[0]?.textContent).toBe('All');
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Refresh manager"]')!.click());
+  expect(projectSelector.value).toBe('');
+  await act(async () => {
+    projectSelector.value = 'project';
+    projectSelector.dispatchEvent(new Event('change', {bubbles: true}));
   });
   const button = (label: string) =>
     [...document.querySelectorAll<HTMLButtonElement>('button')].find(

@@ -142,6 +142,11 @@ it('keeps failed agent output out of the draft, then retries and saves to a sepa
   await act(async () => {
     (await import('../../src/ui.js')).mountManager({integrations: []});
   });
+  const project = container.querySelector<HTMLSelectElement>('[aria-label="Workspace project"]')!;
+  await act(async () => {
+    project.value = 'project';
+    project.dispatchEvent(new Event('change', {bubbles: true}));
+  });
   const button = (text: string) =>
     [...document.querySelectorAll<HTMLButtonElement>('button')].find(
       b => b.textContent?.trim() === text || b.querySelector('strong')?.textContent === text,

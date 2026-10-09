@@ -260,7 +260,7 @@ describe('manager graph focus', () => {
     ).not.toThrow();
   });
 
-  it('separates the scrollable graph view from status and administration', async () => {
+  it('keeps Explore bounded while administration owns its scrolling', async () => {
     const neverResolves = () => new Promise<never>(() => undefined);
     const markup = renderToStaticMarkup(
       createElement(GraphWorkspace, {
@@ -281,8 +281,9 @@ describe('manager graph focus', () => {
     expect(markup).toContain('aria-controls="graph-administration-panel"');
     expect(markup).toMatch(/class="graph-tab-panel graph-administration-tab" hidden=""[^>]*role="tabpanel"/);
     expect(markup).toContain('id="graph-explore-panel" role="tabpanel" tabindex="0"');
-    expect(css).toMatch(/\.graph-tab-panel\s*{[^}]*overflow: auto;/s);
-    expect(css).toMatch(/\.graph-explorer-tab\s*{[^}]*minmax\(440px, 1fr\)/s);
+    expect(css).toMatch(/\.graph-tab-panel\s*{[^}]*overflow: hidden;/s);
+    expect(css).toMatch(/\.graph-administration-tab\s*{[^}]*overflow: auto;/s);
+    expect(css).toMatch(/\.graph-explorer-tab \.graph-body\s*{[^}]*min-height: 0;[^}]*flex: 1 1 0;/s);
     expect(css).toMatch(/\.graph-administration-caret\s*{[^}]*transform: rotate\(-90deg\)/s);
     expect(css).toMatch(/\.graph-administration\[open\] \.graph-administration-caret\s*{[^}]*rotate\(0deg\)/s);
   });

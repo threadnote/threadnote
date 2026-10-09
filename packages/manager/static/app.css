@@ -1974,7 +1974,7 @@ dd {
   grid-row: 3;
   min-height: 0;
   min-width: 0;
-  overflow: auto;
+  overflow: hidden;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
 }
@@ -1986,7 +1986,7 @@ dd {
 .graph-explorer-tab {
   display: grid;
   gap: 14px;
-  grid-template-rows: auto auto minmax(440px, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100%;
 }
 
@@ -2007,7 +2007,8 @@ dd {
 }
 
 .graph-administration-tab {
-  padding-right: 4px;
+  overflow: auto;
+  padding: 0 4px 16px 0;
 }
 
 .graph-notices {
@@ -8159,12 +8160,41 @@ h4 {
   overflow-wrap: anywhere;
 }
 .context-workspace,
-.graph-workspace,
-.worksets-management,
-.attention-panel.panel.is-active {
+.worksets-management {
   padding: 0;
   gap: 0;
   height: auto;
+}
+.attention-panel.panel.is-active {
+  gap: 20px;
+}
+.attention-panel > .workspace-note,
+.attention-panel > .workspace-tabs,
+.context-health > section:not([hidden]),
+.context-health > .attention-list,
+.context-health .attention-metrics {
+  margin: 0;
+}
+.manager-content:has(> .graph-panel) {
+  display: flex;
+  overflow: hidden;
+}
+.main:has(.graph-workspace) {
+  min-height: 0;
+  overflow: hidden;
+}
+.manager-content > .graph-panel.panel.is-active {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+.graph-workspace {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  padding: 0;
 }
 .context-compose {
   display: grid;
@@ -8316,13 +8346,13 @@ h4 {
   font-size: 12px;
 }
 .context-health .workspace-note {
-  margin: 0 0 20px;
+  margin: 0;
 }
 .context-health > .attention-list {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 18px;
-  margin-bottom: 20px;
+  margin-bottom: 0;
 }
 .context-health > .attention-list > h3 {
   font-size: 14px;
@@ -8335,7 +8365,7 @@ h4 {
   line-height: 1.8;
 }
 .context-health .attention-metrics {
-  margin-bottom: 20px;
+  margin-bottom: 0;
 }
 .worksets-management-tabs button[aria-selected='true'],
 .graph-page-tabs button[aria-selected='true'] {
@@ -8538,10 +8568,6 @@ h4 {
   font-size: 11px;
   letter-spacing: 0;
 }
-.graph-explorer-tab {
-  height: auto;
-  grid-template-rows: auto auto minmax(400px, 1fr) auto;
-}
 .graph-empty h3 {
   font-size: 17px;
   font-weight: 500;
@@ -8562,12 +8588,20 @@ h4 {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
+  position: relative;
 }
 .graph-explorer-tab .graph-body {
-  height: clamp(420px, 60dvh, 720px);
-  min-height: 420px;
-  flex: 0 0 auto;
+  min-height: 0;
+  flex: 1 1 0;
   grid-template-rows: minmax(0, 1fr);
+}
+.graph-explorer-tab .graph-stage,
+.graph-explorer-tab .graph-inspector {
+  min-height: 0;
+}
+.graph-explorer-tab > :not(.graph-body) {
+  flex-shrink: 0;
 }
 .graph-toolbar {
   grid-template-areas: 'scope node stats';
@@ -8577,22 +8611,44 @@ h4 {
 .graph-toolbar-scope {
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }
+.graph-advanced-slot {
+  flex-shrink: 0;
+  height: 26px;
+}
 .graph-advanced {
   color: var(--muted);
   font-size: 12px;
 }
+.graph-advanced[open] {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  inset: 0;
+  overflow: hidden;
+  padding: 16px;
+  position: absolute;
+  z-index: 4;
+}
 .graph-advanced summary {
   cursor: pointer;
+  flex-shrink: 0;
   padding: 0 2px;
 }
 .graph-advanced-content {
+  align-content: start;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  margin-top: 14px;
+  inset: 52px 16px 16px;
+  margin: 0;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
+  min-height: 0;
+  overflow: auto;
+  position: absolute;
 }
 .graph-advanced-content > .graph-control {
   grid-area: auto;
@@ -8633,12 +8689,25 @@ h4 {
 }
 @media (max-width: 900px) {
   .graph-explorer-tab .graph-body {
-    height: 720px;
-    grid-template-rows: 380px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 0.6fr);
   }
   .graph-explorer-tab .graph-body.is-empty {
-    height: 420px;
     grid-template-rows: minmax(0, 1fr);
+  }
+}
+@media (max-width: 800px) {
+  .app:has(.graph-workspace) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .main:has(.graph-workspace) {
+    grid-column: 1;
+    min-height: 0;
+    overflow: hidden;
   }
 }
 @media (max-width: 600px) {
@@ -8656,9 +8725,6 @@ h4 {
 }
 :root[data-theme='light'] .context-health {
   --health-info: #365fa5;
-}
-.context-health > section:not([hidden]) {
-  margin-bottom: 20px;
 }
 .context-health .attention-bulk-repair {
   background: var(--sidebar-bg);

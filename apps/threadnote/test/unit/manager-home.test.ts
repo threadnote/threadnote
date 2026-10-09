@@ -25,6 +25,92 @@ const config: RuntimeConfig = {
 };
 
 describe('Manager home API', () => {
+  effectIt.effect.prop(
+    'aggregates All without project scans, preserves provenance, and orders bounded handoffs independently of corpus order',
+    {
+      inputs: Schema.Array(
+        Schema.Struct({
+          active: Schema.Boolean,
+          handoff: Schema.Boolean,
+          project: Schema.UndefinedOr(Schema.Literals(['alpha', 'beta'])),
+          day: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 28})),
+        }),
+      ).check(Schema.isMaxLength(16)),
+    },
+    ({inputs}) =>
+      Effect.gen(function* () {
+        const defaults = testSources();
+        const [template] = yield* defaults.records(config);
+        if (!template) throw new Error('Expected synthetic template');
+        const records = inputs.map((item, index) => ({
+          ...template,
+          uri: `threadnote://user/tester/memories/item-${index}.md`,
+          metadata: {
+            ...template.metadata,
+            project: item.project,
+            kind: item.handoff ? ('handoff' as const) : ('durable' as const),
+            status: item.active ? ('active' as const) : ('archived' as const),
+            timestamp: `2026-10-${String(item.day).padStart(2, '0')}T00:00:00.000Z`,
+          },
+        }));
+        const before = JSON.stringify(records);
+        let projectReads = 0;
+        const observeProjectRead = () => {
+          projectReads += 1;
+        };
+        const sources = testSources({
+          records: () => Effect.succeed(records),
+          root: (...args) => Effect.sync(observeProjectRead).pipe(Effect.andThen(defaults.root(...args))),
+          health: (...args) => Effect.sync(observeProjectRead).pipe(Effect.andThen(defaults.health(...args))),
+          maintenance: (...args) => Effect.sync(observeProjectRead).pipe(Effect.andThen(defaults.maintenance(...args))),
+          value: (...args) => Effect.sync(observeProjectRead).pipe(Effect.andThen(defaults.value(...args))),
+        });
+        const request = {config, method: 'GET', url: new URL('http://manager.test/api/home?project=')};
+        const response = yield* collectManagerHomeResponse(request, sources);
+        const reversed = yield* collectManagerHomeResponse(request, {
+          ...sources,
+          records: () => Effect.succeed([...records].reverse()),
+        });
+        expect(response).toEqual(reversed);
+        expect(response).toMatchObject({
+          status: 200,
+          body: {project: '', stats: {memories: inputs.filter(item => item.active).length, pending: 0}},
+        });
+        expect(response?.body).not.toHaveProperty('stats.coverage');
+        if (!response || !('handoffs' in response.body)) throw new Error('Expected All home');
+        const handoffs = response.body.handoffs;
+        const eligible = records.filter(
+          record => record.metadata.status === 'active' && record.metadata.kind === 'handoff',
+        );
+        expect(handoffs).toHaveLength(Math.min(5, eligible.length));
+        for (const handoff of handoffs) {
+          expect(handoff.project).toBe(records.find(record => record.uri === handoff.uri)?.metadata.project);
+          expect(
+            eligible.every(
+              record =>
+                handoffs.some(item => item.uri === record.uri) || record.metadata.timestamp <= handoff.timestamp,
+            ),
+          ).toBe(true);
+        }
+        expect(projectReads).toBe(0);
+        expect(JSON.stringify(records)).toBe(before);
+      }),
+    {arbitrary: {runs: 32}},
+  );
+
+  effectIt.effect('keeps All review evidence available when corpus discovery stalls', () =>
+    Effect.gen(function* () {
+      const fiber = yield* collectManagerHomeResponse(
+        {config, method: 'GET', url: new URL('http://manager.test/api/home')},
+        testSources({records: () => Effect.never}),
+      ).pipe(Effect.forkChild);
+      yield* TestClock.adjust(5_100);
+      const response = yield* Fiber.join(fiber);
+      expect(response).toMatchObject({status: 200, body: {project: '', handoffs: [], stats: {pending: 0}}});
+      expect(response?.body).not.toHaveProperty('stats.memories');
+    }),
+  );
+
   effectIt.effect('includes retained decisions that the foreground diagnostic report omits', () =>
     Effect.gen(function* () {
       const defaults = testSources();

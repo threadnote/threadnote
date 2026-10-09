@@ -151,6 +151,11 @@ describe('Manager disconnect recovery', () => {
         document.querySelector<HTMLButtonElement>('.primary-nav button:nth-child(4)')?.disabled,
         root.textContent ?? '',
       ).toBe(false);
+      const project = root.querySelector<HTMLSelectElement>('[aria-label="Workspace project"]')!;
+      await act(async () => {
+        project.value = 'threadnote';
+        project.dispatchEvent(new Event('change', {bubbles: true}));
+      });
       await clickButton('Reviews');
       for (let attempt = 0; attempt < 20; attempt += 1) {
         await flush();

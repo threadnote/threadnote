@@ -31,7 +31,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   if (request.method !== 'GET') return undefined;
   if (request.url.pathname !== '/api/reviews' && request.url.pathname !== '/api/context-health') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if (!isProject(project)) {
+  if ((!project && request.url.pathname !== '/api/reviews') || (project && !isProject(project))) {
     return {
       body: {code: 'invalid-project', error: 'Select a valid project to inspect its attention queue.'},
       status: 400,
@@ -47,7 +47,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
       } satisfies ManagerAttentionResponse;
     }
     const reviews = (yield* listCandidateReviews(request.config.agentContextHome)).filter(
-      review => review.project === project,
+      review => !project || review.project === project,
     );
     const pendingCount = reviews.reduce(
       (count, review) => count + review.candidates.filter(candidate => isPending(candidate.state)).length,

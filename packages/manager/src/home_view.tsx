@@ -14,7 +14,12 @@ interface HomeResponse {
     readonly decisionMemories?: number;
     readonly healthCoverage?: string;
   };
-  readonly handoffs: readonly {readonly timestamp: string; readonly topic?: string; readonly uri: string}[];
+  readonly handoffs: readonly {
+    readonly timestamp: string;
+    readonly topic?: string;
+    readonly project?: string;
+    readonly uri: string;
+  }[];
   readonly lanes: readonly ManagerHomeLane[];
   readonly project: string;
   readonly version: 1;
@@ -52,12 +57,9 @@ export function ManagerHomePanel({
   const healthFindingCount = home?.lanes.find(lane => lane.id === 'health')?.count;
 
   useEffect(() => {
-    if (!project) {
-      setHome(undefined);
-      return;
-    }
     let cancelled = false;
     const controller = new AbortController();
+    setHome(undefined);
     setLoading(true);
     setError('');
     void api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
@@ -86,12 +88,16 @@ export function ManagerHomePanel({
           <div>
             <p className="eyebrow">Project home</p>
             <h2>Your workspace, in context.</h2>
-            <p className="muted">Your project’s living context, recent outcomes, and next decisions.</p>
+            <p className="muted">
+              {project
+                ? 'Your project’s living context, recent outcomes, and next decisions.'
+                : 'Saved context and proposed knowledge across all projects.'}
+            </p>
           </div>
           <label>
             Project
             <select aria-label="Home project" onChange={event => onProjectChange(event.target.value)} value={project}>
-              <option value="">Select project</option>
+              <option value="">All</option>
               {projects.map(item => (
                 <option key={item} value={item}>
                   {item}
@@ -101,7 +107,7 @@ export function ManagerHomePanel({
           </label>
         </div>
       ) : null}
-      {projects.length === 0 ? (
+      {projects.length === 0 && home?.stats?.memories === 0 && home?.stats?.pending === 0 && !loading && !error ? (
         <div className="home-empty">
           <h3>No project records yet</h3>
           <p>Open Context to create a scoped brief, or Library to save the first project memory.</p>
@@ -117,11 +123,11 @@ export function ManagerHomePanel({
         </div>
       ) : home ? (
         <>
-          <div className="home-overview" aria-label="Project overview">
+          <div className="home-overview" aria-label={project ? 'Project overview' : 'All projects overview'}>
             <button onClick={() => onOpen('memory')}>
               <span>Memories</span>
               <strong>{home.stats?.memories ?? '—'}</strong>
-              <small>Your project’s saved context</small>
+              <small>{project ? 'Your project’s saved context' : 'Saved context across all projects'}</small>
             </button>
             <button onClick={() => onOpen('reviews')}>
               <span>Awaiting review</span>
@@ -130,8 +136,8 @@ export function ManagerHomePanel({
             </button>
             <button onClick={() => onOpen('context-health')}>
               <span>Health findings</span>
-              <strong>{healthFindingCount ?? '—'}</strong>
-              <small>Context that needs attention</small>
+              <strong>{project ? (healthFindingCount ?? '—') : 'By project'}</strong>
+              <small>{project ? 'Context that needs attention' : 'Choose a project to inspect its evidence'}</small>
             </button>
           </div>
           <section className="workspace-card home-next-actions">
@@ -147,7 +153,11 @@ export function ManagerHomePanel({
                     <strong>
                       {lane.id === 'reviews' ? 'Review proposed knowledge' : 'Check context that needs a decision'}
                     </strong>
-                    <p>{lane.detail}</p>
+                    <p>
+                      {!project && lane.id === 'health'
+                        ? 'Inspect each project with its own repository evidence.'
+                        : lane.detail}
+                    </p>
                   </div>
                   {lane.count !== undefined ? (
                     <span className={`workspace-status ${lane.status === 'attention' ? 'warn' : 'neutral'}`}>
@@ -174,7 +184,9 @@ export function ManagerHomePanel({
             {home.stats?.memories === undefined && home.handoffs.length === 0 ? (
               <p className="workspace-empty">Handoffs are unavailable. Refresh to retry.</p>
             ) : home.handoffs.length === 0 ? (
-              <p className="workspace-empty">No active handoffs for {home.project}.</p>
+              <p className="workspace-empty">
+                No active handoffs {project ? `for ${project}` : 'across all projects'}.
+              </p>
             ) : (
               <ul>
                 {home.handoffs.map(handoff => (
@@ -182,7 +194,10 @@ export function ManagerHomePanel({
                     <FileText aria-hidden="true" />
                     <button className="home-handoff-button" onClick={() => setHandoff(handoff)} type="button">
                       <strong>{handoff.topic ?? 'Untitled handoff'}</strong>
-                      <span>{new Date(handoff.timestamp).toLocaleString()}</span>
+                      <span>
+                        {!project ? `${handoff.project ?? 'Unassigned'} · ` : ''}
+                        {new Date(handoff.timestamp).toLocaleString()}
+                      </span>
                     </button>
                   </li>
                 ))}

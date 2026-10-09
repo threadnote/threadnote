@@ -62,7 +62,7 @@ it('owns at most one active request across project changes and refresh ticks', a
       requests = [];
       await mount();
       for (const project of projects) {
-        await render(`synthetic-${project}`);
+        await render(project === 0 ? '' : `synthetic-${project}`);
         expect(requests.filter(signal => !signal?.aborted)).toHaveLength(1);
         await act(async () => vi.advanceTimersByTimeAsync(30_000));
         expect(requests.filter(signal => !signal?.aborted).length).toBeLessThanOrEqual(1);

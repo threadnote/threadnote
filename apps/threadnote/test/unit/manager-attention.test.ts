@@ -156,6 +156,24 @@ describe('Manager attention API', () => {
         );
         expect(response.body.pendingCount).toBe(3);
       }
+      for (const view of ['pending', 'deferred', 'history']) {
+        const response = yield* handleManagerAttentionRequest({
+          config,
+          method: 'GET',
+          url: new URL(`http://manager.test/api/reviews?project=&view=${view}`),
+        });
+        if (response?.status !== 200 || !('items' in response.body) || !response.body.items)
+          throw new Error('Expected All review inbox');
+        expect(response.body.project).toBe('');
+        expect(response.body.pendingCount).toBe(6);
+        expect(response.body.items.map(item => item.project).sort()).toEqual(['threadnote', 'unrelated']);
+      }
+      const allHealth = yield* handleManagerAttentionRequest({
+        config,
+        method: 'GET',
+        url: new URL('http://manager.test/api/context-health?project='),
+      });
+      expect(allHealth?.status).toBe(400);
       const invalid = yield* handleManagerAttentionRequest({
         config,
         method: 'GET',
