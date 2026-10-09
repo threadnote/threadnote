@@ -406,9 +406,8 @@ describe('GitHub source', () => {
             if (!changed && namePath(url).endsWith('/issues/1')) {
               changed = true;
               const file = `${config.agentContextHome}/threadnote/sources.yaml`;
-              const data = await import('node:fs/promises');
-              const text = await data.readFile(file, 'utf8');
-              await data.writeFile(file, text.replace('enabled: true', 'enabled: false'));
+              const text = await Bun.file(file).text();
+              await Bun.write(file, text.replace('enabled: true', 'enabled: false'));
             }
             return mock(url);
           },
