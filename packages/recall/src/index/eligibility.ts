@@ -23,6 +23,7 @@ export function recallEligibilityPredicate(
     'threadnote://resources/external/superhuman',
     'threadnote://resources/external/pocket',
     'threadnote://resources/external/github',
+    'threadnote://resources/external/linear',
   ];
   const outside = roots.map(() => `(${alias}.uri <> ? AND (${alias}.uri < ? OR ${alias}.uri >= ?))`).join(' AND ');
   const access = policy?.externalResources ?? {};
