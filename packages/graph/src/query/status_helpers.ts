@@ -1,10 +1,13 @@
 import {Effect, Option} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {worktreeOverlayState} from '../inventory.js';
+import {resolveAndRecordCodeGraphLocalAssociation} from '../local_provenance.js';
+import {withCodeGraphQueryTelemetryStage, type CodeGraphStatusOptions} from './contract.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {
   resolveRepositoryIdentityForExpectation,
   resolveRepositoryIdentityForExpectationAndWorktree,
+  startRepositoryWorktreeObservation,
 } from '../repository.js';
 import type {CodeGraphLanguagePackStatus, RepositoryIdentity, RepositoryIdentityExpectation} from '../types.js';
 
@@ -85,3 +88,37 @@ export function codeGraphLanguagePackStatuses(
     workspaceDetection: Option.isSome(pack.workspaceDetector),
   }));
 }
+
+/** Keep the initial worktree read alive through the caller's scoped status session. */
+export const observeCodeGraphStatusSessionIdentity = Effect.fn('codeGraph.observeStatusSessionIdentity')(function* (
+  threadnoteHome: string,
+  cwd: string,
+  expected: RepositoryIdentityExpectation | undefined,
+  options: CodeGraphStatusOptions,
+) {
+  const pendingWorktree =
+    expected === undefined && options.observeWorktree !== false && options.afterIdentityObserved === undefined
+      ? yield* startRepositoryWorktreeObservation(cwd)
+      : undefined;
+  const observation = yield* expected === undefined
+    ? withCodeGraphQueryTelemetryStage(
+        options.telemetry,
+        'graph.query.status',
+        'query-repository-identity',
+        resolveAndRecordCodeGraphLocalAssociation(threadnoteHome, cwd),
+      ).pipe(Effect.map(local => repositoryIdentityObservation(local.identity)))
+    : withCodeGraphQueryTelemetryStage(
+        options.telemetry,
+        'graph.query.status',
+        'query-repository-identity',
+        resolvePublishedRepositoryIdentityObservation(cwd, expected, options.observeWorktree !== false),
+      );
+  const identity = observation.identity;
+  const changed =
+    options.afterIdentityObserved === undefined
+      ? pendingWorktree === undefined
+        ? observation.worktreeChanged
+        : pendingWorktree(identity)
+      : undefined;
+  return {identity, worktreeChanged: changed};
+});
