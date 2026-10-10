@@ -5,7 +5,7 @@
     "": {
       "name": "threadnote",
       "dependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/sql-sqlite-bun": "4.0.0",
         "@modelcontextprotocol/sdk": "1.30.0",
         "@threadnote/context": "workspace:*",
@@ -84,7 +84,7 @@
       "name": "@threadnote/threadnote",
       "dependencies": {
         "@effect/ai-openai-compat": "4.0.0",
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@modelcontextprotocol/sdk": "1.30.0",
         "@threadnote/context": "workspace:*",
         "@threadnote/evidence": "workspace:*",
@@ -130,7 +130,7 @@
     "apps/website": {
       "name": "@threadnote/website",
       "dependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@fontsource-variable/jetbrains-mono": "5.3.0",
         "@fontsource-variable/spline-sans": "5.3.0",
         "@threadnote/evidence": "workspace:*",
@@ -171,7 +171,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/testing": "workspace:*",
         "fast-check": "4.10.1",
@@ -194,7 +194,7 @@
     "packages/graph": {
       "name": "@threadnote/graph",
       "dependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/sql-sqlite-bun": "4.0.0",
         "@threadnote/inference": "workspace:*",
         "@threadnote/platform": "workspace:*",
@@ -239,7 +239,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "fast-check": "4.10.1",
         "vitest": "5.0.1",
@@ -258,7 +258,7 @@
         "react": "^19.3.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
@@ -281,7 +281,7 @@
         "react": "^19.3.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
@@ -306,7 +306,7 @@
         "react": "^19.3.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/testing": "workspace:*",
@@ -329,7 +329,7 @@
         "react": "^19.3.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/recall": "workspace:*",
@@ -343,7 +343,7 @@
     "packages/integration-runtime": {
       "name": "@threadnote/integration-runtime",
       "dependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/sql-sqlite-bun": "4.0.0",
         "@threadnote/integration-core": "workspace:*",
         "@threadnote/platform": "workspace:*",
@@ -372,7 +372,7 @@
         "react": "^19.3.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/integration-runtime": "workspace:*",
         "@threadnote/recall": "workspace:*",
@@ -434,7 +434,7 @@
     "packages/platform": {
       "name": "@threadnote/platform",
       "dependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "effect": "4.0.0",
       },
       "devDependencies": {
@@ -468,7 +468,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/testing": "workspace:*",
         "fast-check": "4.10.1",
@@ -503,7 +503,7 @@
         "effect": "4.0.0",
       },
       "devDependencies": {
-        "@effect/platform-bun": "4.0.0",
+        "@effect/platform-bun": "4.0.1",
         "@effect/vitest": "4.0.0",
         "@threadnote/testing": "workspace:*",
         "fast-check": "4.10.1",
@@ -641,7 +641,7 @@
 
     "@effect/ai-openai-compat": ["@effect/ai-openai-compat@4.0.0", "", { "peerDependencies": { "effect": "^4.0.0" } }, "sha512-zoFwI5M7pUEj4UMHMbPsQGaVRxirIAIqzfVZAtpjJPXWwd/acwxN4kI1nS9gfn/lCHvFIc9xPEMstforcODesw=="],
 
-    "@effect/platform-bun": ["@effect/platform-bun@4.0.0", "", { "dependencies": { "@effect/platform-node-shared": "^4.0.0" }, "peerDependencies": { "effect": "^4.0.0" } }, "sha512-g9O41Sub/+JKfLjvBNEoqR1Pg6wtc2bbYzv7Kw8YsMihbt/ypCn7ZoydEXaHvTTUvbVrXOQbVFlfplyo84Clug=="],
+    "@effect/platform-bun": ["@effect/platform-bun@4.0.1", "", { "dependencies": { "@effect/platform-node-shared": "^4.0.1" }, "peerDependencies": { "effect": "^4.0.1" } }, "sha512-m+QR4bp39ZWujCuEsUhZADIYIOFZcUHHlmrixENZqZRbEYgaPLMUWiPrRJ69CM4BuuHW8oCOxfMGUU7oSw/o5g=="],
 
     "@effect/platform-node-shared": ["@effect/platform-node-shared@4.0.0", "", { "dependencies": { "@types/ws": "^8.18.1", "ws": "^8.22.0" }, "peerDependencies": { "effect": "^4.0.0" } }, "sha512-VBXHJU9UXVZPdQGGDRjGXpo+TpOzRwZuMrdKAtIxi1qwcRftmacZ1zTgIrzBa0Z2RA2KVkoOecQUsTlt/nJZhw=="],
 

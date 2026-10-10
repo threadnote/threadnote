@@ -9,7 +9,7 @@
     "./coordinator-transport": "./src/coordinator-transport.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@effect/sql-sqlite-bun": "4.0.0",
     "@threadnote/integration-core": "workspace:*",
     "@threadnote/platform": "workspace:*",
