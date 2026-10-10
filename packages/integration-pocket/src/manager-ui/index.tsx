@@ -155,6 +155,7 @@ export function PocketIntegrationView({
       {connection ? (
         <PocketConnectionForm
           source={connection.value}
+          reusableCredential={!connection.value && (data?.sources.some(source => source.credentialConfigured) ?? false)}
           onClose={closeConnection}
           onSaved={async () => {
             closeConnection();

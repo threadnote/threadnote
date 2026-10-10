@@ -31,6 +31,7 @@ import {
   type SourceConfig,
 } from './config.js';
 import {withSourceLock} from '@threadnote/integration-core/lock';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {makePocketClientBudget, type PocketClientOptions} from './client.js';
 import {syncPocketSource} from './sync.js';
 import {listPocketIdMarkers} from './state.js';
@@ -48,6 +49,7 @@ export interface PocketSourceAddOptions {
   readonly expectedFingerprint?: string | null;
   readonly apiToken?: Redacted.Redacted<string>;
   readonly credentialStorage?: 'local';
+  readonly requireAvailableCredential?: boolean;
   readonly credentialEnv?: string;
   readonly project?: string;
   readonly projectless?: boolean;
@@ -120,13 +122,18 @@ const checkCredentialSafety = Effect.fn('pocket.checkCredentialSafety')(function
   source: PocketSourceConfig,
   existing: PocketSourceConfig | undefined,
   options: PocketSourceAddOptions,
+  reused?: {readonly token: Redacted.Redacted<string>},
 ) {
   const effective =
-    options.apiToken ?? (yield* resolvePocketCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
+    options.apiToken ??
+    reused?.token ??
+    (yield* resolvePocketCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
   const previous =
     existing === undefined
       ? undefined
       : yield* resolvePocketCredential(config, existing).pipe(Effect.orElseSucceed(() => undefined));
+  if (existing === undefined && effective === undefined && options.requireAvailableCredential)
+    return yield* error('An available API key is required for this Pocket source.');
   if (source.credentialStorage === 'local' && effective === undefined)
     return yield* error('A protected API key is required for this Pocket source.');
   for (const token of [effective, previous]) {
@@ -136,16 +143,22 @@ const checkCredentialSafety = Effect.fn('pocket.checkCredentialSafety')(function
       return yield* error('Pocket source configuration contains credential material.');
   }
 });
-function sourceFor(options: PocketSourceAddOptions, id: string, existing?: PocketSourceConfig): PocketSourceConfig {
+function sourceFor(
+  options: PocketSourceAddOptions,
+  id: string,
+  existing?: PocketSourceConfig,
+  reused?: {readonly source: {readonly credentialEnv: string; readonly credentialStorage?: 'local'}},
+): PocketSourceConfig {
   if (options.projectless === true && options.project) throw error('Choose either --project or --projectless.');
   if (options.projectless !== true && !options.project) throw error('Choose --project or --projectless.');
   return validatePocketSourceConfig({
     type: 'pocket',
     id,
     enabled: options.enabled ?? true,
-    credentialEnv: options.credentialEnv ?? existing?.credentialEnv ?? 'POCKET_API_KEY',
+    credentialEnv: options.credentialEnv ?? existing?.credentialEnv ?? reused?.source.credentialEnv ?? 'POCKET_API_KEY',
     ...(options.apiToken !== undefined ||
     options.credentialStorage === 'local' ||
+    reused?.source.credentialStorage === 'local' ||
     (options.credentialEnv === undefined && existing?.credentialStorage === 'local')
       ? {credentialStorage: 'local' as const}
       : {}),
@@ -162,7 +175,12 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
   const id = validateSourceIdentifier(options.id, 'source id');
   if (options.apiToken !== undefined && !validPocketApiToken(options.apiToken))
     return yield* error('Invalid Pocket API key.');
-  const initial = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const initialConfiguration = yield* readSourceConfiguration(config);
+  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const previewReuse =
+    initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+      ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'pocket', id, validPocketApiToken)
+      : undefined;
   const expected = (item: SourceConfig | undefined) => {
     if (
       options.expectedFingerprint !== undefined &&
@@ -172,12 +190,18 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
       throw PocketSourceConflictError.make({});
   };
   expected(initial);
-  const preview = sourceFor(options, id, initial !== undefined && isPocketSource(initial) ? initial : undefined);
+  const preview = sourceFor(
+    options,
+    id,
+    initial !== undefined && isPocketSource(initial) ? initial : undefined,
+    previewReuse,
+  );
   yield* checkCredentialSafety(
     config,
     preview,
     initial !== undefined && isPocketSource(initial) ? initial : undefined,
     options,
+    previewReuse,
   );
   if (options.apply !== true) {
     yield* Console.log(`Would configure Pocket source "${id}" for all accessible recordings. Re-run with --apply.`);
@@ -187,11 +211,16 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
     config,
     id,
     Effect.gen(function* () {
-      const existing = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+      const currentConfiguration = yield* readSourceConfiguration(config);
+      const existing = currentConfiguration.sources.find(item => item.id === id);
       expected(existing);
       if (existing && !isPocketSource(existing)) return yield* error(`Source "${id}" already has another type.`);
-      const source = sourceFor(options, id, existing);
-      yield* checkCredentialSafety(config, source, existing, options);
+      const reuse =
+        existing === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+          ? yield* reusableExternalCredential(config, currentConfiguration.sources, 'pocket', id, validPocketApiToken)
+          : undefined;
+      const source = sourceFor(options, id, existing, reuse);
+      yield* checkCredentialSafety(config, source, existing, options, reuse);
       const previousFingerprint = existing ? sourceConfigurationFingerprint(existing) : undefined;
       const prior = yield* receipt(config, id);
       const cleanup =
@@ -223,6 +252,8 @@ export const runPocketSourceAdd = Effect.fn('pocket.add')(function* (
         );
       }
       if (options.apiToken !== undefined) yield* storePocketCredential(config, id, options.apiToken);
+      else if (reuse !== undefined && source.credentialStorage === 'local')
+        yield* storePocketCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removePocketCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
         const latest = current.sources.find(item => item.id === id);

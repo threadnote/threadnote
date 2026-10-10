@@ -44,6 +44,17 @@ const fixture = Effect.gen(function* () {
 });
 const doc = linearDocumentId(source.organizationId, 'issue', issue.id);
 describe('Linear read-only source lifecycle', () => {
+  effectIt.effect('preserves a copied API key after disconnecting its original connection', () =>
+    Effect.gen(function* () {
+      const {config} = yield* fixture;
+      yield* runLinearSourceAdd(config, options);
+      yield* runLinearSourceAdd(config, {...options, id: 'second', apiToken: undefined, credentialEnv: undefined});
+      const second = requireLinearSource(yield* readSourceConfiguration(config), 'second');
+      expect(second.credentialStorage).toBe('local');
+      yield* runLinearSourceRemove(config, {id: source.id, apply: true});
+      expect(Redacted.value(yield* resolveLinearCredential(config, second))).toBe('synthetic-linear-private-key');
+    }).pipe(TestClock.withLive, provideLayer),
+  );
   effectIt.effect('uses current credential only for evidence fingerprints', () =>
     Effect.gen(function* () {
       const {config, location, fs, home} = yield* fixture;

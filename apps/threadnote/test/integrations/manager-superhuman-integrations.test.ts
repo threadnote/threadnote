@@ -39,6 +39,50 @@ async function request(path: string, body?: Record<string, unknown>, authorized 
 }
 
 describe('Manager Superhuman integration HTTP boundary', () => {
+  it('reuses a protected token even when its source is named manager-resolver', async () => {
+    const base = {
+      action: 'save-source',
+      editing: false,
+      documents: [{id: 'doc_one'}],
+      project: null,
+      includeHidden: false,
+      refreshIntervalMinutes: 15,
+      maxStaleHours: 24,
+      apply: true,
+      confirm: true,
+    };
+    expect(
+      (
+        await request('/api/integrations/superhuman', {
+          ...base,
+          id: 'manager-resolver',
+          token: 'synthetic-manager-token',
+        })
+      ).status,
+    ).toBe(200);
+    const resolved = await request('/api/integrations/superhuman', {
+      action: 'resolve-links',
+      links: ['https://other.example/d/a'],
+    });
+    expect(resolved.body).toEqual({error: 'Choose a Superhuman Docs document link.'});
+    const saved = await request('/api/integrations/superhuman', {...base, id: 'second'});
+    expect(saved.status).toBe(200);
+    expect(JSON.stringify(saved.body)).not.toContain('synthetic-manager-token');
+    expect(
+      (
+        await request('/api/integrations/superhuman', {
+          action: 'remove-source',
+          id: 'manager-resolver',
+          apply: true,
+          confirm: true,
+        })
+      ).status,
+    ).toBe(200);
+    expect(await readFile(join(home, 'threadnote', 'credentials', 'superhuman', 'second'), 'utf8')).toBe(
+      'synthetic-manager-token',
+    );
+    expect(await readFile(join(home, 'threadnote', 'sources.yaml'), 'utf8')).not.toContain('synthetic-manager-token');
+  });
   it('rejects unsafe resolver input with a static response that omits the submitted credential', async () => {
     const response = await request('/api/integrations/superhuman', {
       action: 'resolve-links',

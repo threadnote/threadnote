@@ -42,6 +42,7 @@ import {
   type SuperhumanSourceConfig,
 } from './config.js';
 import {withSourceLock} from '@threadnote/integration-core/lock';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {
   makeSuperhumanClientBudget,
   readSuperhumanDocument,
@@ -51,6 +52,7 @@ import {
 } from './client.js';
 import {
   renderSuperhumanDocument,
+  SuperhumanPageTooLarge,
   SuperhumanSecretBlocked,
   SUPERHUMAN_RENDERER_VERSION,
   SUPERHUMAN_SCRUBBER_VERSION,
@@ -69,6 +71,7 @@ export interface SuperhumanSourceAddOptions {
   readonly documentSelection?: readonly SuperhumanDocumentConfig[];
   readonly apiToken?: Redacted.Redacted<string>;
   readonly credentialStorage?: 'local';
+  readonly requireAvailableCredential?: boolean;
   readonly enabled?: boolean;
   readonly expectedFingerprint?: string | null;
   readonly pages?: readonly string[];
@@ -185,6 +188,7 @@ function isDenied(error: unknown): boolean {
 function warningCode(error: unknown): string {
   if (error instanceof SuperhumanClientError) return error.code;
   if (error instanceof SuperhumanSecretBlocked) return 'credential-like content';
+  if (error instanceof SuperhumanPageTooLarge) return 'page too large';
   return 'refresh unavailable';
 }
 
@@ -215,8 +219,7 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     selection.some(document => !documents.includes(document.id))
   )
     return yield* safeError('Document selections must match the selected document IDs.');
-  const credentialEnv = options.credentialEnv ?? 'SUPERHUMAN_DOCS_API_TOKEN';
-  if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv))
+  if (options.credentialEnv !== undefined && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(options.credentialEnv))
     return yield* safeError('Invalid credential environment variable name.');
   if (options.projectless === true && options.project)
     return yield* safeError('Choose either --project or --projectless.');
@@ -242,14 +245,19 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     )
       throw SuperhumanSourceConflictError.make({});
   };
-  const sourceFor = (existing?: SuperhumanSourceConfig): SuperhumanSourceConfig =>
+  const sourceFor = (
+    existing?: SuperhumanSourceConfig,
+    reused?: {readonly source: {readonly credentialEnv: string; readonly credentialStorage?: 'local'}},
+  ): SuperhumanSourceConfig =>
     validateSuperhumanSourceConfig({
       type: 'superhuman',
       id,
       enabled: options.enabled ?? true,
-      credentialEnv,
+      credentialEnv:
+        options.credentialEnv ?? existing?.credentialEnv ?? reused?.source.credentialEnv ?? 'SUPERHUMAN_DOCS_API_TOKEN',
       ...(options.apiToken !== undefined ||
       options.credentialStorage === 'local' ||
+      reused?.source.credentialStorage === 'local' ||
       (options.credentialEnv === undefined && existing?.credentialStorage === 'local')
         ? {credentialStorage: 'local' as const}
         : {}),
@@ -259,24 +267,36 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
       refreshIntervalMinutes: options.refreshIntervalMinutes ?? 15,
       maxStaleHours: options.maxStaleHours ?? 24,
     });
-  const credentialFor = Effect.fn('superhuman.sourceAddCredential')(function* (source: SuperhumanSourceConfig) {
+  const credentialFor = Effect.fn('superhuman.sourceAddCredential')(function* (
+    source: SuperhumanSourceConfig,
+    newSource: boolean,
+    reused?: {readonly token: Redacted.Redacted<string>},
+  ) {
     const token =
       options.apiToken ??
+      reused?.token ??
       (yield* resolveSuperhumanCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
+    if (token === undefined && newSource && options.requireAvailableCredential)
+      return yield* safeError('An available API token is required for this Superhuman source.');
     if (source.credentialStorage === 'local' && token === undefined)
       return yield* safeError('A protected API token is required for this Superhuman source.');
     if (token !== undefined) yield* checkCredentialReflection(source, token);
   });
-  const initial = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const initialConfiguration = yield* readSourceConfiguration(config);
+  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const previewReuse =
+    initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+      ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'superhuman', id)
+      : undefined;
   yield* Effect.try({
     try: () => checkExpectedConfiguration(initial),
     catch: () => SuperhumanSourceConflictError.make({}),
   });
   const previewSource = yield* Effect.try({
-    try: () => sourceFor(initial !== undefined && isSuperhumanSource(initial) ? initial : undefined),
+    try: () => sourceFor(initial !== undefined && isSuperhumanSource(initial) ? initial : undefined, previewReuse),
     catch: () => safeError('Invalid Superhuman source configuration.'),
   });
-  yield* credentialFor(previewSource);
+  yield* credentialFor(previewSource, initial === undefined, previewReuse);
   if (initial !== undefined && isSuperhumanSource(initial) && initial.credentialStorage === 'local') {
     const previousToken = yield* resolveSuperhumanCredential(config, initial).pipe(
       Effect.orElseSucceed(() => undefined),
@@ -292,18 +312,23 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
     config,
     id,
     Effect.gen(function* () {
-      const existing = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+      const currentConfiguration = yield* readSourceConfiguration(config);
+      const existing = currentConfiguration.sources.find(item => item.id === id);
       yield* Effect.try({
         try: () => checkExpectedConfiguration(existing),
         catch: () => SuperhumanSourceConflictError.make({}),
       });
       if (existing && !isSuperhumanSource(existing))
         return yield* safeError(`Source "${id}" already has another type.`);
+      const reuse =
+        existing === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+          ? yield* reusableExternalCredential(config, currentConfiguration.sources, 'superhuman', id)
+          : undefined;
       const source = yield* Effect.try({
-        try: () => sourceFor(existing),
+        try: () => sourceFor(existing, reuse),
         catch: () => safeError('Invalid Superhuman source configuration.'),
       });
-      yield* credentialFor(source);
+      yield* credentialFor(source, existing === undefined, reuse);
       if (existing?.credentialStorage === 'local') {
         const previousToken = yield* resolveSuperhumanCredential(config, existing).pipe(
           Effect.orElseSucceed(() => undefined),
@@ -320,6 +345,8 @@ export const runSuperhumanSourceAdd = Effect.fn('superhuman.sourceAdd')(function
         previousFingerprint !== sourceConfigurationFingerprint(source);
       if (cleanup) yield* denySource(config, source, 'cleanup', previousFingerprint);
       if (options.apiToken !== undefined) yield* storeSuperhumanCredential(config, id, options.apiToken);
+      else if (reuse !== undefined && source.credentialStorage === 'local')
+        yield* storeSuperhumanCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removeSuperhumanCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
         const latest = current.sources.find(item => item.id === id);
@@ -523,12 +550,14 @@ const syncSource = Effect.fn('superhuman.syncSource')(function* (
           Effect.try({
             try: () => renderSuperhumanDocument(result.success),
             catch: error =>
-              error instanceof SuperhumanSecretBlocked ? error : safeError('Superhuman rendering failed.'),
+              error instanceof SuperhumanSecretBlocked || error instanceof SuperhumanPageTooLarge
+                ? error
+                : safeError('Superhuman rendering failed.'),
           }),
         );
         if (Result.isFailure(rendered)) {
           const error = rendered.failure;
-          if (error instanceof SuperhumanSecretBlocked)
+          if (error instanceof SuperhumanSecretBlocked || error instanceof SuperhumanPageTooLarge)
             yield* quarantineDocument(config, source, document.id, fingerprint);
           warnings.push(`Superhuman document ${document.id}: ${warningCode(error)}.`);
           continue;

@@ -7,6 +7,7 @@ import {existsSync} from '@threadnote/testing/node-fs';
 import {mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
+import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Console, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -566,6 +567,41 @@ describe('manager catalog', () => {
     expect(skill?.uri).toBe('threadnote://resources/agent-skills/codex-global/threadnote-abc123.md');
     expect(skill?.metadata).toBeUndefined();
   });
+
+  effectIt.effect('shows external content resources without sync receipts or empty state folders', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-external-tree-'});
+        const config = {agentContextHome: home, account: 'local', user: 'denys'} as RuntimeConfig;
+        const resources = path.join(home, 'data', 'local', 'resources');
+        const source = path.join(resources, 'external', 'superhuman', 'selected');
+        const page = path.join(source, 'docs', 'document', 'pages', 'canvas');
+        const empty = path.join(source, 'docs', 'empty');
+        const pocket = path.join(resources, 'external', 'pocket', 'saved', 'docs', 'article', 'pages', 'main');
+        const local = path.join(resources, 'agent-skills', 'codex-global');
+        yield* fs.makeDirectory(page, {recursive: true});
+        yield* fs.makeDirectory(empty, {recursive: true});
+        yield* fs.makeDirectory(pocket, {recursive: true});
+        yield* fs.makeDirectory(local, {recursive: true});
+        yield* fs.writeFileString(path.join(page, 'page.md'), 'Imported page');
+        yield* fs.writeFileString(path.join(pocket, 'article.md'), 'Imported article');
+        yield* fs.writeFileString(path.join(local, 'settings.json'), '{}');
+        yield* fs.writeFileString(path.join(source, '.access.json'), '{}');
+        yield* fs.writeFileString(path.join(source, 'docs', 'document', '.manifest.json'), '{}');
+        yield* fs.writeFileString(path.join(empty, '.manifest.json'), '{}');
+        const tree = yield* resourcesTree(config);
+        const names = (node: typeof tree): readonly string[] => [node.name, ...(node.children ?? []).flatMap(names)];
+        expect(names(tree)).toContain('page.md');
+        expect(names(tree)).toContain('article.md');
+        expect(names(tree)).toContain('settings.json');
+        expect(names(tree)).not.toContain('.access.json');
+        expect(names(tree)).not.toContain('.manifest.json');
+        expect(names(tree)).not.toContain('empty');
+      }),
+    ).pipe(provideTestLayer(BunServices.layer)),
+  );
 
   it('reads a memory document and returns content plus metadata', async () => {
     const config = await makeRuntime();

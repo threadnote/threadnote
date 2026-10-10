@@ -31,6 +31,7 @@ import {
   SuperhumanSourceConflictError,
 } from './source.js';
 import {resolveSuperhumanCredential, superhumanCredentialConfigured, SuperhumanCredentialError} from './credentials.js';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import type {ManagerIntegrationApiRequest} from '@threadnote/integration-core/manager-http';
 
 function invalid(message: string): never {
@@ -210,14 +211,21 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
     const suppliedToken =
       typeof body.token === 'string' && body.token.length > 0 ? Redacted.make(body.token) : undefined;
     if (suppliedToken && env) invalid('Choose a token or an environment credential.');
+    const configuration = yield* readSourceConfiguration(request.config);
+    const existing =
+      body.id === undefined ? undefined : configuration.sources.find(item => item.id === sourceId(body.id));
+    const reuse =
+      !existing && !suppliedToken && !env
+        ? yield* reusableExternalCredential(request.config, configuration.sources, 'superhuman', '')
+        : undefined;
     const token =
       suppliedToken ??
       (env
         ? yield* environmentToken(request.config, env)
-        : yield* resolveSuperhumanCredential(
-            request.config,
-            requireSuperhumanSource(yield* readSourceConfiguration(request.config), sourceId(body.id)),
-          ));
+        : existing && isSuperhumanSource(existing)
+          ? yield* resolveSuperhumanCredential(request.config, existing)
+          : reuse?.token);
+    if (token === undefined) invalid('Provide a Superhuman Docs API token or environment credential.');
     const fetch = yield* admittedSourceFetch('superhuman', token, undefined, request.config);
     const resolved = yield* fromPromiseInterruptible(
       signal => resolveSuperhumanBrowserLinks(body.links as string[], token, {signal, fetch}),
@@ -244,7 +252,13 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
           const token = typeof body.token === 'string' && body.token.length > 0 ? Redacted.make(body.token) : undefined;
           const env = credentialEnv(body.credentialEnv);
           if (token && env) invalid('Choose a token or an environment credential.');
-          if (!existing && !token && !env) invalid('Provide a Superhuman Docs API token or environment credential.');
+          if (
+            !existing &&
+            !token &&
+            !env &&
+            !(yield* reusableExternalCredential(request.config, configuration.sources, 'superhuman', id))
+          )
+            invalid('Provide a Superhuman Docs API token or environment credential.');
           if (env) yield* environmentToken(request.config, env);
           if (body.project !== null && typeof body.project !== 'string')
             invalid('Choose a project or projectless source.');
@@ -275,6 +289,7 @@ const route = Effect.fn('manager.superhumanRoute')(function* (request: ManagerIn
                 ? 'local'
                 : undefined,
             apiToken: token,
+            requireAvailableCredential: !existing && !token && !env,
             enabled: existing !== undefined && isSuperhumanSource(existing) ? existing.enabled : true,
             expectedFingerprint:
               existing !== undefined && isSuperhumanSource(existing) ? sourceConfigurationFingerprint(existing) : null,

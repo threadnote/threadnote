@@ -21,18 +21,20 @@ export function parseLinearIds(value: string): readonly string[] {
 
 export function LinearConnectionForm({
   source,
+  reusableCredential = false,
   onClose,
   onSaved,
 }: {
   readonly source?: LinearSource;
+  readonly reusableCredential?: boolean;
   readonly onClose: () => void;
   readonly onSaved: () => Promise<void>;
 }): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [id, setId] = useState(source?.id ?? '');
   const [token, setToken] = useState('');
-  const [credentialMode, setCredentialMode] = useState<'local' | 'environment'>(
-    source && source.credentialStorage !== 'local' ? 'environment' : 'local',
+  const [credentialMode, setCredentialMode] = useState<'reuse' | 'local' | 'environment'>(
+    source ? (source.credentialStorage !== 'local' ? 'environment' : 'local') : reusableCredential ? 'reuse' : 'local',
   );
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'THREADNOTE_LINEAR_API_KEY');
   const [organizationId, setOrganizationId] = useState(source?.organizationId ?? '');
@@ -57,9 +59,11 @@ export function LinearConnectionForm({
     (!organizationId || uuid.test(organizationId)) &&
     (!principalId || uuid.test(principalId));
   const credentialReady =
-    credentialMode === 'environment'
-      ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
-      : !!token || (source?.credentialStorage === 'local' && source.credentialConfigured);
+    credentialMode === 'reuse'
+      ? reusableCredential
+      : credentialMode === 'environment'
+        ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
+        : !!token || (source?.credentialStorage === 'local' && source.credentialConfigured);
   const ready = validIds && credentialReady && /^[a-z0-9][a-z0-9._-]*$/.test(project.trim());
 
   useEffect(() => {
@@ -178,7 +182,9 @@ export function LinearConnectionForm({
               placeholder="my-linear"
             />
           </label>
-          {credentialMode === 'local' ? (
+          {credentialMode === 'reuse' ? (
+            <p className="muted">An available Linear credential will be reused for this connection.</p>
+          ) : credentialMode === 'local' ? (
             <label>
               Linear API key{' '}
               {source?.credentialStorage === 'local' ? (
@@ -249,6 +255,20 @@ export function LinearConnectionForm({
             <summary>Advanced settings</summary>
             <fieldset className="integration-credential-choice">
               <legend>Credential method</legend>
+              {!source && reusableCredential ? (
+                <label className="integration-checkbox">
+                  <input
+                    type="radio"
+                    name="linear-credential-mode"
+                    checked={credentialMode === 'reuse'}
+                    onChange={() => {
+                      setCredentialMode('reuse');
+                      setToken('');
+                    }}
+                  />{' '}
+                  Reuse an available Linear credential
+                </label>
+              ) : null}
               <label className="integration-checkbox">
                 <input
                   type="radio"

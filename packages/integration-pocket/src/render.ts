@@ -4,8 +4,9 @@ import {applyScrubber, credentialScrubberBlocker} from '@threadnote/platform/scr
 import {splitUtf8} from '@threadnote/integration-core/render';
 import type {PocketRecording} from './client.js';
 
-export const POCKET_RENDERER_VERSION = 'pocket-text-v1';
+export const POCKET_RENDERER_VERSION = 'pocket-readable-v2';
 export const POCKET_SCRUBBER_VERSION = 'credential-scrubber-v1';
+export const POCKET_RECORD_LIMIT_BYTES = 480 * 1024;
 export class PocketSecretBlocked extends Data.TaggedError('PocketSecretBlocked')<{readonly message: string}> {}
 export interface PocketChunk {
   readonly pageId: string;
@@ -58,28 +59,203 @@ export function renderPocketRecord(record: PocketRecording): readonly PocketChun
   const title =
     splitUtf8(scrub(typeof record.title === 'string' ? record.title : record.id).replaceAll('\n', ' '), 512)[0] ??
     record.id;
-  const lines: string[] = [];
-  flatten(record, 'recording', lines);
-  const text = scrub(lines.join('\n'));
-  const fragments = splitUtf8(text, 16 * 1024);
-  return fragments.map((body, ordinal) => ({
-    pageId: 'recording',
-    chunkId: `part-${ordinal}`,
-    title,
-    body,
-    contentHash: sha256HexSync(`${POCKET_RENDERER_VERSION}\n${POCKET_SCRUBBER_VERSION}\n${body}`),
-    ...(typeof record.updated_at === 'string' ? {remoteRevision: record.updated_at} : {}),
-  }));
+  validateStructuredContent(record);
+  const sections = [`# ${title}`];
+  const metadata = [
+    text(record.recording_at) ? `Recorded: ${text(record.recording_at)}` : '',
+    typeof record.duration === 'number' && Number.isFinite(record.duration) && record.duration >= 0
+      ? `Duration: ${timestamp(record.duration)}`
+      : '',
+  ].filter(Boolean);
+  if (metadata.length) sections.push(metadata.join(' · '));
+  const tags = values(record.tags)
+    .map(tag => text(object(tag)?.name) || text(tag))
+    .filter(Boolean);
+  if (tags.length) sections.push(`Tags: ${[...new Set(tags)].join(', ')}`);
+  const rendered = new Set<string>();
+  let unsupported = false;
+  for (const summary of summaries(record.summarizations)) {
+    const value = object(summary);
+    const content = object(value?.v2) ?? value;
+    const markdown = contentText(content?.summary) || text(content?.markdown) || text(summary);
+    const actions = renderActions(content?.actionItems ?? content?.action_items);
+    const mindMap = renderMindMap(content?.mindMap ?? content?.mind_map);
+    if (!markdown && !actions && !mindMap && summary !== null && summary !== undefined) unsupported = true;
+    for (const [heading, body] of [
+      ['Summary', markdown],
+      ['Action items', actions],
+      ['Mind map', mindMap],
+    ]) {
+      if (body && !rendered.has(`${heading}\n${body}`)) {
+        rendered.add(`${heading}\n${body}`);
+        sections.push(`## ${heading}\n\n${body}`);
+      }
+    }
+  }
+  if (unsupported) sections.push('Some summary content uses an unsupported format and could not be imported.');
+  const transcript = renderTranscript(record.transcript, record.speakers);
+  if (transcript) sections.push(`## Transcript\n\n${transcript}`);
+  return [chunk('recording', title, sections.join('\n\n'), record.updated_at)];
 }
 
 export function renderPocketCatalog(kind: 'folders' | 'tags', value: unknown): readonly PocketChunk[] {
+  validateStructuredContent(value);
+  const title = `Pocket ${kind}`;
   const lines: string[] = [];
-  flatten(value, kind, lines);
-  return splitUtf8(scrub(lines.join('\n')), 16 * 1024).map((body, ordinal) => ({
-    pageId: kind,
-    chunkId: `part-${ordinal}`,
-    title: `Pocket ${kind}`,
+  function visit(entry: unknown): void {
+    if (Array.isArray(entry)) {
+      entry.forEach(visit);
+      return;
+    }
+    const item = object(entry);
+    if (!item) return;
+    const name = text(item.name);
+    if (name) lines.push(`- ${name}${text(item.description) ? `: ${text(item.description)}` : ''}`);
+    for (const [key, child] of Object.entries(item)) {
+      if (Array.isArray(child) || (object(child) && !['metadata', 'settings'].includes(key))) visit(child);
+    }
+  }
+  visit(value);
+  return [chunk(kind, title, [`# ${title}`, [...new Set(lines)].join('\n')].filter(Boolean).join('\n\n'))];
+}
+
+function validateStructuredContent(value: unknown): void {
+  const lines: string[] = [];
+  flatten(value, 'recording', lines);
+  scrub(lines.join('\n'));
+}
+
+function chunk(pageId: string, title: string, content: string, revision?: unknown): PocketChunk {
+  const body = scrub(content);
+  if (Buffer.byteLength(body) > POCKET_RECORD_LIMIT_BYTES)
+    throw new PocketSecretBlocked({message: 'Pocket content exceeds the complete record byte budget.'});
+  return {
+    pageId,
+    chunkId: 'content',
+    title,
     body,
     contentHash: sha256HexSync(`${POCKET_RENDERER_VERSION}\n${POCKET_SCRUBBER_VERSION}\n${body}`),
-  }));
+    ...(typeof revision === 'string' ? {remoteRevision: revision} : {}),
+  };
+}
+
+function object(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function contentText(value: unknown): string {
+  const item = object(value);
+  return text(value) || text(item?.markdown) || text(item?.text) || text(item?.content);
+}
+
+function values(value: unknown): readonly unknown[] {
+  if (Array.isArray(value)) return value;
+  const item = object(value);
+  return item
+    ? Object.keys(item)
+        .sort()
+        .map(key => item[key])
+    : [];
+}
+
+function summaries(value: unknown): readonly unknown[] {
+  const item = object(value);
+  if (
+    typeof value === 'string' ||
+    (item &&
+      ['v2', 'summary', 'markdown', 'actionItems', 'action_items', 'mindMap', 'mind_map'].some(key => key in item))
+  )
+    return [value];
+  return values(value);
+}
+
+function renderActions(value: unknown, depth = 0): string {
+  if (depth > 24) return '';
+  const item = object(value);
+  const entries = Array.isArray(value)
+    ? value
+    : typeof value === 'string' || (item && ['label', 'title', 'text', 'description'].some(key => key in item))
+      ? [value]
+      : values(item?.actions ?? item?.actionItems ?? item?.items);
+  return entries
+    .map(entry => {
+      const action = object(entry);
+      const label =
+        text(entry) || text(action?.label) || text(action?.title) || text(action?.text) || text(action?.description);
+      if (!label) return '';
+      const complete = action?.isCompleted === true || action?.is_completed === true || action?.status === 'COMPLETED';
+      const assignee = text(action?.assignee);
+      const description = text(action?.description);
+      const context = text(action?.context);
+      const details = [...new Set([description, context].filter(detail => detail && detail !== label))];
+      const indent = '  '.repeat(depth);
+      return [
+        `${indent}- [${complete ? 'x' : ' '}] ${label}${assignee ? ` — ${assignee}` : ''}${text(action?.dueDate) ? ` (due ${text(action?.dueDate)})` : ''}`,
+        ...details.map(detail => `${indent}  ${detail}`),
+        renderActions(action?.subtasks, depth + 1),
+      ]
+        .filter(Boolean)
+        .join('\n');
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function renderMindMap(value: unknown): string {
+  const nodes = values(object(value)?.nodes ?? value)
+    .map(object)
+    .filter(node => node !== undefined);
+  const id = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? String(value) : text(value));
+  const byId = new Map(nodes.map(node => [id(node.node_id), node]));
+  return nodes
+    .map(node => {
+      const title = text(node.title);
+      if (!title) return '';
+      let parent = id(node.parent_node_id);
+      const seen = new Set([id(node.node_id)]);
+      let depth = 0;
+      while (byId.has(parent) && !seen.has(parent) && depth < 24) {
+        seen.add(parent);
+        depth++;
+        parent = id(byId.get(parent)?.parent_node_id);
+      }
+      return `${'  '.repeat(depth)}- ${title}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function timestamp(seconds: number): string {
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor(total / 60) % 60;
+  return `${hours ? `${hours}:` : ''}${String(minutes).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function renderTranscript(value: unknown, speakers: unknown): string {
+  const transcript = object(value);
+  const segments = Array.isArray(value) ? value : values(transcript?.segments);
+  const names = object(speakers);
+  const lines = segments
+    .map(segment => {
+      const item = object(segment);
+      const content = text(segment) || text(item?.text) || text(item?.originalText);
+      if (!content) return '';
+      const speaker =
+        text(item?.speakerName) || text(object(names?.[text(item?.speaker)])?.name) || text(item?.speaker);
+      const time =
+        typeof item?.start === 'number' && Number.isFinite(item.start) && item.start >= 0
+          ? `[${timestamp(item.start)}] `
+          : '';
+      const original = text(item?.originalText);
+      return `${time}${speaker ? `${speaker}: ` : ''}${content}${original && original !== content ? `\nOriginal: ${original}` : ''}`;
+    })
+    .filter(Boolean);
+  return lines.length ? lines.join('\n\n') : contentText(value);
 }

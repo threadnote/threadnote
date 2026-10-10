@@ -9,13 +9,22 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {ExternalSourcePolicy, readExternalDocumentManifest} from '@threadnote/store/external-resource';
-import {removePocketCredential, storePocketCredential} from '../src/credentials.js';
+import {
+  ExternalSourcePolicy,
+  readExternalDocumentManifest,
+  serializeExternalDocumentManifest,
+} from '@threadnote/store/external-resource';
+import {removePocketCredential, resolvePocketCredential, storePocketCredential} from '../src/credentials.js';
 import {loadRecallIndexData} from '@threadnote/recall/index';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {makeSourceConfigurationRegistry, sourceConfigurationStoreLayer} from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
-import {mutateSourceConfiguration, pocketSourceCodec} from '../src/config.js';
+import {
+  mutateSourceConfiguration,
+  pocketSourceCodec,
+  readSourceConfiguration,
+  requirePocketSource,
+} from '../src/config.js';
 import {pocketExternalSourcePolicy} from '../src/access-policy.js';
 import {
   runPocketSourceAdd,
@@ -79,6 +88,24 @@ afterAll(() => {
 });
 
 describe('Pocket source', () => {
+  effectIt.effect('copies a reusable key to a second connection independently', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-credential-reuse-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runPocketSourceAdd(config, {
+        id: 'first',
+        project: 'test',
+        apply: true,
+        apiToken: Redacted.make('pk_synthetic_shared'),
+      });
+      yield* runPocketSourceAdd(config, {id: 'second', project: 'test', apply: true});
+      const second = requirePocketSource(yield* readSourceConfiguration(config), 'second');
+      expect(second.credentialStorage).toBe('local');
+      yield* runPocketSourceRemove(config, {id: 'first', apply: true});
+      expect(Redacted.value(yield* resolvePocketCredential(config, second))).toBe('pk_synthetic_shared');
+    }).pipe(TestClock.withLive, provide),
+  );
   effectIt.effect('resolves evidence credentials lazily and rejects rotation or loss', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -187,7 +214,7 @@ describe('Pocket source', () => {
     }
   });
 
-  it('renders opaque transcript and summary shapes deterministically', () => {
+  it('renders complete transcript and summary resources deterministically', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 200}), text => {
         const record = {
@@ -198,7 +225,8 @@ describe('Pocket source', () => {
         };
         const first = renderPocketRecord(record);
         expect(renderPocketRecord({...record})).toEqual(first);
-        expect(first.every(chunk => Buffer.byteLength(chunk.body) <= 16 * 1024)).toBe(true);
+        expect(first).toHaveLength(1);
+        expect(first.every(chunk => Buffer.byteLength(chunk.body) <= 480 * 1024)).toBe(true);
       }),
       {numRuns: 80},
     );
@@ -292,6 +320,67 @@ describe('Pocket source', () => {
           eligibility: {kind: 'pinned-hard-uri-bypass'},
         })).candidates,
       ).toEqual([]);
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('replaces legacy Part records with one complete readable recording on resync', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'pocket-readable-migration-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runPocketSourceAdd(config, {
+        id: 'migration',
+        projectless: true,
+        apply: true,
+        apiToken: Redacted.make('pk_synthetic_migration'),
+      });
+      const transcript = 'Full meeting transcript. '.repeat(1000);
+      const fetch = async (url: URL) => {
+        if (url.pathname.endsWith('/folders') || url.pathname.endsWith('/tags')) return json({success: true, data: []});
+        if (url.pathname.endsWith('/recordings'))
+          return json({
+            success: true,
+            data: [{id: 'record_1'}],
+            pagination: {page: 1, limit: 100, total: 1, total_pages: 1, has_more: false},
+          });
+        return json({success: true, data: {id: 'record_1', title: 'Meeting', transcript: {text: transcript}}});
+      };
+      yield* runPocketSourceSync(config, {id: 'migration', apply: true, clientOptions: {fetch}});
+      const location = {home, account: 'local', user: 'tester'};
+      const doc = `r-${sha256HexSync('record_1').slice(0, 40)}`;
+      const manifest = (yield* readExternalDocumentManifest(location, 'migration', doc, 'pocket'))!;
+      const [uri] = Object.keys(manifest.chunks);
+      const legacy = uri.replace('/content.md', '/part-0.md');
+      const legacy2 = uri.replace('/content.md', '/part-1.md');
+      const store = yield* ResourceStore;
+      yield* store.mutate(location, [
+        {type: 'write', uri: legacy, content: 'old metadata part', options: {mode: 'upsert'}},
+        {type: 'write', uri: legacy2, content: 'old transcript part', options: {mode: 'upsert'}},
+        {type: 'remove', uri},
+        {
+          type: 'write',
+          uri: `threadnote://resources/external/pocket/migration/docs/${doc}/.manifest.json`,
+          content: serializeExternalDocumentManifest({
+            ...manifest,
+            chunks: {[legacy]: sha256HexSync('old metadata part'), [legacy2]: sha256HexSync('old transcript part')},
+          }),
+          options: {mode: 'upsert'},
+        },
+      ]);
+      yield* runPocketSourceSync(config, {id: 'migration', apply: true, clientOptions: {fetch}});
+      const current = (yield* readExternalDocumentManifest(location, 'migration', doc, 'pocket'))!;
+      expect(Object.keys(current.chunks)).toEqual([uri]);
+      expect((yield* store.read(location, uri)).includes(transcript.trim())).toBe(true);
+      expect(
+        yield* fs.exists(
+          `${home}/data/local/resources/external/pocket/migration/docs/${doc}/pages/recording/part-0.md`,
+        ),
+      ).toBe(false);
+      expect(
+        yield* fs.exists(
+          `${home}/data/local/resources/external/pocket/migration/docs/${doc}/pages/recording/part-1.md`,
+        ),
+      ).toBe(false);
     }).pipe(TestClock.withLive, provide),
   );
 

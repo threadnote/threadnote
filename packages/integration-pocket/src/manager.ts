@@ -16,6 +16,7 @@ import {
 import {captureIntegrationConsole as captureConsole} from '@threadnote/integration-core/manager-http';
 import {withSourceLock} from '@threadnote/integration-core/lock';
 import {PocketCredentialError, pocketCredentialConfigured, resolvePocketCredential} from './credentials.js';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {
   runPocketSourceAdd,
   runPocketSourceInventory,
@@ -144,7 +145,13 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
           const token = typeof body.token === 'string' && body.token.length > 0 ? Redacted.make(body.token) : undefined;
           const env = credentialEnv(body.credentialEnv);
           if (token && env) invalid('Choose a key or an environment credential.');
-          if (!existing && !token && !env) invalid('Provide a Pocket API key or environment credential.');
+          if (
+            !existing &&
+            !token &&
+            !env &&
+            !(yield* reusableExternalCredential(request.config, configuration.sources, 'pocket', id))
+          )
+            invalid('Provide a Pocket API key or environment credential.');
           if (env) yield* environmentToken(request.config, env);
           if (body.project !== null && typeof body.project !== 'string')
             invalid('Choose a project or projectless source.');
@@ -168,6 +175,7 @@ const route = Effect.fn('manager.pocketRoute')(function* (request: ManagerIntegr
                 ? 'local'
                 : undefined,
             apiToken: token,
+            requireAvailableCredential: !existing && !token && !env,
             enabled: existing !== undefined && isPocketSource(existing) ? existing.enabled : true,
             expectedFingerprint:
               existing !== undefined && isPocketSource(existing) ? sourceConfigurationFingerprint(existing) : null,

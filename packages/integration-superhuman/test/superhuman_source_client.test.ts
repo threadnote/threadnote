@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {Redacted} from 'effect';
 import {makeSuperhumanClientBudget, readSuperhumanDocument, SuperhumanClientError} from '../src/client.js';
-import {renderSuperhumanDocument, splitUtf8, SuperhumanSecretBlocked} from '../src/render.js';
+import {renderSuperhumanDocument, splitUtf8, SuperhumanPageTooLarge, SuperhumanSecretBlocked} from '../src/render.js';
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {status, headers: {'content-type': 'application/json', ...headers}});
@@ -217,6 +217,16 @@ describe('Superhuman deterministic rendering', () => {
     expect(() => renderSuperhumanDocument(selected)).toThrow(SuperhumanSecretBlocked);
   });
 
+  it('keeps an empty canvas page as one title-bearing record', () => {
+    const selected = snapshot('');
+    expect(renderSuperhumanDocument(selected)).toMatchObject([{chunkId: 'page', body: '# Notes'}]);
+  });
+
+  it('rejects a page too large for external-resource access', () => {
+    const selected = snapshot('a'.repeat(481 * 1024));
+    expect(() => renderSuperhumanDocument(selected)).toThrow(SuperhumanPageTooLarge);
+  });
+
   it('keeps byte-bounded split parts exact across Unicode input', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 300}), text => {
@@ -235,6 +245,35 @@ describe('Superhuman deterministic rendering', () => {
     expect(renderSuperhumanDocument(renamed)[0]?.chunkId).toBe(original[0]?.chunkId);
   });
 
+  it('renders one complete page from ordered lines, including content beyond the old 16 KiB split', () => {
+    const selected = snapshot('a'.repeat(20 * 1024));
+    selected.pages[0].lines.push({id: 'line_two', style: 'h2', content: 'Section'});
+    selected.pages[0].lines.push({id: 'line_three', style: 'p', content: 'Last paragraph'});
+    const chunks = renderSuperhumanDocument(selected);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.chunkId).toBe('page');
+    expect(chunks[0]?.body).toBe(`# Notes\n\n${'a'.repeat(20 * 1024)}\n\n## Section\n\nLast paragraph`);
+  });
+
+  it('preserves ordered paragraph text in a single stable page resource', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer({min: 0, max: 9999}), {minLength: 1, maxLength: 30}), numbers => {
+        const selected = snapshot(`line-${numbers[0]}`);
+        selected.pages[0].lines.push(
+          ...numbers.slice(1).map((number, index) => ({
+            id: `line_${index + 2}`,
+            style: 'p',
+            content: `line-${number}`,
+          })),
+        );
+        const result = renderSuperhumanDocument(selected);
+        expect(result).toHaveLength(1);
+        expect(result[0]?.body).toBe(`# Notes\n\n${numbers.map(number => `line-${number}`).join('\n\n')}`);
+      }),
+      {numRuns: 60},
+    );
+  });
+
   it('strips terminal controls from plaintext while preserving Unicode, newlines and tabs', () => {
     const chunks = renderSuperhumanDocument(snapshot('é\r\n\tworld\u001b]52;c;injected\u0007'));
     expect(chunks[0]?.body).toContain('é\n\tworld');
@@ -242,13 +281,13 @@ describe('Superhuman deterministic rendering', () => {
     expect(chunks[0]?.body).not.toContain('\u0007');
   });
 
-  it('renders identical safe snapshots deterministically and respects the byte budget', () => {
+  it('renders identical safe snapshots deterministically', () => {
     fc.assert(
       fc.property(fc.string({maxLength: 500}), content => {
         const input = snapshot(content);
         const first = renderSuperhumanDocument(input);
         expect(renderSuperhumanDocument(input)).toEqual(first);
-        expect(first.every(chunk => Buffer.byteLength(chunk.body) < 17 * 1024)).toBe(true);
+        expect(first).toHaveLength(1);
         expect(
           first.every(chunk =>
             [...chunk.body].every(character => {

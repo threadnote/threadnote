@@ -162,6 +162,7 @@ export function LinearIntegrationView({
       {connection ? (
         <LinearConnectionForm
           source={connection.value}
+          reusableCredential={!connection.value && (data?.sources.some(source => source.credentialConfigured) ?? false)}
           onClose={closeConnection}
           onSaved={async () => {
             closeConnection();

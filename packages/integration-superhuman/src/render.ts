@@ -3,9 +3,9 @@ import {applyScrubber, credentialScrubberBlocker} from '@threadnote/platform/scr
 import {Data} from 'effect';
 import type {SuperhumanDocumentSnapshot, SuperhumanLine, SuperhumanPage} from './client.js';
 
-export const SUPERHUMAN_RENDERER_VERSION = 'canvas-plain-text-v1';
+export const SUPERHUMAN_RENDERER_VERSION = 'canvas-page-text-v2';
 export const SUPERHUMAN_SCRUBBER_VERSION = 'credential-scrubber-v1';
-export const SUPERHUMAN_CHUNK_LIMIT_BYTES = 16 * 1024;
+export const SUPERHUMAN_PAGE_LIMIT_BYTES = 480 * 1024;
 
 export interface SuperhumanChunk {
   readonly pageId: string;
@@ -17,6 +17,10 @@ export interface SuperhumanChunk {
 }
 
 export class SuperhumanSecretBlocked extends Data.TaggedError('SuperhumanSecretBlocked')<{
+  readonly message: string;
+}> {}
+
+export class SuperhumanPageTooLarge extends Data.TaggedError('SuperhumanPageTooLarge')<{
   readonly message: string;
 }> {}
 
@@ -36,35 +40,33 @@ export function normalizeSuperhumanTitle(value: string): string {
 }
 
 export function renderSuperhumanDocument(snapshot: SuperhumanDocumentSnapshot): readonly SuperhumanChunk[] {
+  const selectedText = snapshot.pages.flatMap(({lines}) => lines.map(line => line.content ?? '')).join('');
   if (
     snapshot.pages.some(
       ({page, lines}) =>
         credentialScrubberBlocker(page.name) || lines.some(line => credentialScrubberBlocker(line.style ?? '')),
     ) ||
-    credentialScrubberBlocker(snapshot.pages.flatMap(({lines}) => lines.map(line => line.content ?? '')).join(''))
+    credentialScrubberBlocker(selectedText) ||
+    credentialScrubberBlocker(normalizeSuperhumanDisplayText(selectedText))
   )
     throw new SuperhumanSecretBlocked({message: 'Selected Superhuman document contains credential-like content.'});
-  const chunks: SuperhumanChunk[] = [];
-  for (const {page, lines} of snapshot.pages) {
+  return snapshot.pages.map(({page, lines}) => {
     const title = splitUtf8(normalizeSuperhumanTitle(scrub(page.name)), 512)[0] ?? '';
-    for (const line of lines) {
-      if (line.content === undefined || line.content === '') continue;
-      const content = scrub(line.content);
-      const fragments = splitUtf8(content, SUPERHUMAN_CHUNK_LIMIT_BYTES);
-      for (let ordinal = 0; ordinal < fragments.length; ordinal++) {
-        const body = formatLine(line, fragments[ordinal]);
-        chunks.push({
-          pageId: page.id,
-          chunkId: `b-${sha256HexSync(line.id).slice(0, 24)}-${ordinal}`,
-          title,
-          body,
-          ...(page.updatedAt === undefined ? {} : {remoteRevision: page.updatedAt}),
-          contentHash: sha256HexSync(`${SUPERHUMAN_RENDERER_VERSION}\n${SUPERHUMAN_SCRUBBER_VERSION}\n${body}`),
-        });
-      }
-    }
-  }
-  return chunks;
+    const paragraphs = lines.flatMap(line =>
+      line.content === undefined || line.content === '' ? [] : [formatLine(line, scrub(line.content))],
+    );
+    const body = [`# ${title}`, ...paragraphs].join('\n\n');
+    if (Buffer.byteLength(body) > SUPERHUMAN_PAGE_LIMIT_BYTES)
+      throw new SuperhumanPageTooLarge({message: 'Selected Superhuman page exceeds the resource size limit.'});
+    return {
+      pageId: page.id,
+      chunkId: 'page',
+      title,
+      body,
+      ...(page.updatedAt === undefined ? {} : {remoteRevision: page.updatedAt}),
+      contentHash: sha256HexSync(`${SUPERHUMAN_RENDERER_VERSION}\n${SUPERHUMAN_SCRUBBER_VERSION}\n${body}`),
+    };
+  });
 }
 
 function scrub(value: string): string {
@@ -75,10 +77,10 @@ function scrub(value: string): string {
 }
 
 function formatLine(line: SuperhumanLine, content: string): string {
-  const level = line.lineLevel === undefined ? '' : `level ${line.lineLevel}; `;
-  const style = splitUtf8(scrub(line.style ?? 'plain'), 64)[0] ?? 'plain';
-  return `[Superhuman Docs line: ${level}style ${JSON.stringify(style)}]
-${content}`;
+  const style = scrub(line.style ?? 'plain').toLowerCase();
+  const heading = /^h([1-6])$/.exec(style);
+  if (heading) return `${'#'.repeat(Number(heading[1]))} ${content}`;
+  return content;
 }
 
 export function superhumanPageFingerprint(page: SuperhumanPage): string {

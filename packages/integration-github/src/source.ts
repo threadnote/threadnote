@@ -31,6 +31,7 @@ import {
   type SourceConfig,
 } from './config.js';
 import {withSourceLock} from '@threadnote/integration-core/lock';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {makeGitHubClientBudget, type GitHubClientOptions} from './client.js';
 import {syncGitHubSource} from './sync.js';
 import {listGitHubIdMarkers, readGitHubSyncState, readGitHubRepositoryStates} from './state.js';
@@ -49,6 +50,7 @@ export interface GitHubSourceAddOptions {
   readonly expectedFingerprint?: string | null;
   readonly apiToken?: Redacted.Redacted<string>;
   readonly credentialStorage?: 'local';
+  readonly requireAvailableCredential?: boolean;
   readonly credentialEnv?: string;
   readonly project?: string;
   readonly projectless?: boolean;
@@ -137,13 +139,18 @@ const checkCredentialSafety = Effect.fn('github.checkCredentialSafety')(function
   source: GitHubSourceConfig,
   existing: GitHubSourceConfig | undefined,
   options: GitHubSourceAddOptions,
+  reused?: {readonly token: Redacted.Redacted<string>},
 ) {
   const effective =
-    options.apiToken ?? (yield* resolveGitHubCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
+    options.apiToken ??
+    reused?.token ??
+    (yield* resolveGitHubCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
   const previous =
     existing === undefined
       ? undefined
       : yield* resolveGitHubCredential(config, existing).pipe(Effect.orElseSucceed(() => undefined));
+  if (existing === undefined && effective === undefined && options.requireAvailableCredential)
+    return yield* error('An available API key is required for this GitHub source.');
   if (source.credentialStorage === 'local' && effective === undefined)
     return yield* error('A protected API key is required for this GitHub source.');
   for (const token of [effective, previous]) {
@@ -153,7 +160,12 @@ const checkCredentialSafety = Effect.fn('github.checkCredentialSafety')(function
       return yield* error('GitHub source configuration contains credential material.');
   }
 });
-function sourceFor(options: GitHubSourceAddOptions, id: string, existing?: GitHubSourceConfig): GitHubSourceConfig {
+function sourceFor(
+  options: GitHubSourceAddOptions,
+  id: string,
+  existing?: GitHubSourceConfig,
+  reused?: {readonly source: {readonly credentialEnv: string; readonly credentialStorage?: 'local'}},
+): GitHubSourceConfig {
   if (options.projectless === true && options.project) throw error('Choose either --project or --projectless.');
   if (options.projectless !== true && !options.project) throw error('Choose --project or --projectless.');
   return validateGitHubSourceConfig({
@@ -161,9 +173,11 @@ function sourceFor(options: GitHubSourceAddOptions, id: string, existing?: GitHu
     id,
     repositories: options.repositories,
     enabled: options.enabled ?? true,
-    credentialEnv: options.credentialEnv ?? existing?.credentialEnv ?? 'THREADNOTE_GITHUB_TOKEN',
+    credentialEnv:
+      options.credentialEnv ?? existing?.credentialEnv ?? reused?.source.credentialEnv ?? 'THREADNOTE_GITHUB_TOKEN',
     ...(options.apiToken !== undefined ||
     options.credentialStorage === 'local' ||
+    reused?.source.credentialStorage === 'local' ||
     (options.credentialEnv === undefined && existing?.credentialStorage === 'local')
       ? {credentialStorage: 'local' as const}
       : {}),
@@ -180,7 +194,12 @@ export const runGitHubSourceAdd = Effect.fn('github.add')(function* (
   const id = validateSourceIdentifier(options.id, 'source id');
   if (options.apiToken !== undefined && !validGitHubApiToken(options.apiToken))
     return yield* error('Invalid GitHub API key.');
-  const initial = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const initialConfiguration = yield* readSourceConfiguration(config);
+  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const previewReuse =
+    initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+      ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'github', id, validGitHubApiToken)
+      : undefined;
   const expected = (item: SourceConfig | undefined) => {
     if (
       options.expectedFingerprint !== undefined &&
@@ -190,12 +209,18 @@ export const runGitHubSourceAdd = Effect.fn('github.add')(function* (
       throw GitHubSourceConflictError.make({});
   };
   expected(initial);
-  const preview = sourceFor(options, id, initial !== undefined && isGitHubSource(initial) ? initial : undefined);
+  const preview = sourceFor(
+    options,
+    id,
+    initial !== undefined && isGitHubSource(initial) ? initial : undefined,
+    previewReuse,
+  );
   yield* checkCredentialSafety(
     config,
     preview,
     initial !== undefined && isGitHubSource(initial) ? initial : undefined,
     options,
+    previewReuse,
   );
   if (options.apply !== true) {
     yield* Console.log(`Would configure GitHub source "${id}" for selected repositories. Re-run with --apply.`);
@@ -205,11 +230,16 @@ export const runGitHubSourceAdd = Effect.fn('github.add')(function* (
     config,
     id,
     Effect.gen(function* () {
-      const existing = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+      const currentConfiguration = yield* readSourceConfiguration(config);
+      const existing = currentConfiguration.sources.find(item => item.id === id);
       expected(existing);
       if (existing && !isGitHubSource(existing)) return yield* error(`Source "${id}" already has another type.`);
-      const source = sourceFor(options, id, existing);
-      yield* checkCredentialSafety(config, source, existing, options);
+      const reuse =
+        existing === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+          ? yield* reusableExternalCredential(config, currentConfiguration.sources, 'github', id, validGitHubApiToken)
+          : undefined;
+      const source = sourceFor(options, id, existing, reuse);
+      yield* checkCredentialSafety(config, source, existing, options, reuse);
       const previousFingerprint = existing ? sourceConfigurationFingerprint(existing) : undefined;
       const prior = yield* receipt(config, id);
       const cleanup =
@@ -241,6 +271,8 @@ export const runGitHubSourceAdd = Effect.fn('github.add')(function* (
         );
       }
       if (options.apiToken !== undefined) yield* storeGitHubCredential(config, id, options.apiToken);
+      else if (reuse !== undefined && source.credentialStorage === 'local')
+        yield* storeGitHubCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removeGitHubCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
         const latest = current.sources.find(item => item.id === id);

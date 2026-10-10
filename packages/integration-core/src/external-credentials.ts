@@ -20,7 +20,7 @@ const invalid = () =>
   });
 type CredentialConfig = Pick<RuntimeConfig, 'agentContextHome'>;
 type CredentialSource = {readonly id: string; readonly credentialEnv: string; readonly credentialStorage?: 'local'};
-type CredentialProvider = 'github' | 'pocket' | 'superhuman' | 'linear';
+export type CredentialProvider = 'github' | 'pocket' | 'superhuman' | 'linear';
 type Validator = (token: Redacted.Redacted<string>) => boolean;
 
 export function validExternalApiToken(token: Redacted.Redacted<string>): boolean {
@@ -180,6 +180,33 @@ export const resolveExternalCredential = Effect.fn('external.resolveCredential')
   const token = Redacted.make(value);
   if (!valid(token)) return yield* unavailable();
   return token;
+});
+
+export const reusableExternalCredential = Effect.fn('external.reusableCredential')(function* (
+  config: CredentialConfig,
+  sources: readonly {
+    readonly id: string;
+    readonly type: string;
+    readonly credentialEnv?: string;
+    readonly credentialStorage?: 'local';
+  }[],
+  provider: CredentialProvider,
+  targetId: string,
+  valid: Validator = validExternalApiToken,
+) {
+  const candidates = sources
+    .filter(
+      (source): source is CredentialSource & {readonly type: string} =>
+        source.type === provider && source.id !== targetId && typeof source.credentialEnv === 'string',
+    )
+    .sort((left, right) => left.id.localeCompare(right.id));
+  for (const source of candidates) {
+    const token = yield* resolveExternalCredential(config, source, provider, valid).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    if (token !== undefined) return {source, token};
+  }
+  return undefined;
 });
 
 export const externalCredentialConfigured = (

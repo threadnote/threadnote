@@ -19,10 +19,12 @@ function repositoryList(value: string): readonly string[] {
 
 export function GitHubConnectionForm({
   source,
+  reusableCredential = false,
   onClose,
   onSaved,
 }: {
   readonly source?: GitHubSource;
+  readonly reusableCredential?: boolean;
   readonly onClose: () => void;
   readonly onSaved: () => Promise<void>;
 }): React.ReactElement {
@@ -30,8 +32,8 @@ export function GitHubConnectionForm({
   const [id, setId] = useState(source?.id ?? '');
   const [repositories, setRepositories] = useState(source?.repositories.join('\n') ?? '');
   const [token, setToken] = useState('');
-  const [credentialMode, setCredentialMode] = useState<'local' | 'environment'>(
-    source && source.credentialStorage !== 'local' ? 'environment' : 'local',
+  const [credentialMode, setCredentialMode] = useState<'reuse' | 'local' | 'environment'>(
+    source ? (source.credentialStorage !== 'local' ? 'environment' : 'local') : reusableCredential ? 'reuse' : 'local',
   );
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'THREADNOTE_GITHUB_TOKEN');
   const [projectMode, setProjectMode] = useState(source ? (source.project === null ? 'projectless' : 'project') : '');
@@ -43,9 +45,11 @@ export function GitHubConnectionForm({
   const [error, setError] = useState('');
   const repos = repositoryList(repositories);
   const credentialReady =
-    credentialMode === 'environment'
-      ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
-      : !!token || source?.credentialStorage === 'local';
+    credentialMode === 'reuse'
+      ? reusableCredential
+      : credentialMode === 'environment'
+        ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
+        : !!token || source?.credentialStorage === 'local';
 
   useEffect(() => {
     if (!dirty && !busy) return;
@@ -128,7 +132,9 @@ export function GitHubConnectionForm({
               placeholder="engineering"
             />
           </label>
-          {credentialMode === 'local' ? (
+          {credentialMode === 'reuse' ? (
+            <p className="muted">An available GitHub credential will be reused for this connection.</p>
+          ) : credentialMode === 'local' ? (
             <label>
               Fine grained personal access token{' '}
               {source?.credentialStorage === 'local' ? (
@@ -191,6 +197,20 @@ export function GitHubConnectionForm({
             <summary>Advanced settings</summary>
             <fieldset className="integration-credential-choice">
               <legend>Credential method</legend>
+              {!source && reusableCredential ? (
+                <label className="integration-checkbox">
+                  <input
+                    type="radio"
+                    name="github-credential-mode"
+                    checked={credentialMode === 'reuse'}
+                    onChange={() => {
+                      setCredentialMode('reuse');
+                      setToken('');
+                    }}
+                  />{' '}
+                  Reuse an available GitHub credential
+                </label>
+              ) : null}
               <label className="integration-checkbox">
                 <input
                   type="radio"
