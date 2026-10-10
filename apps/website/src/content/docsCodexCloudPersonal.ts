@@ -26,7 +26,7 @@ export const codexCloudPersonalDocsArticle: DocsArticle = {
     },
     {
       type: 'paragraph',
-      text: 'Allow network access to the installer and release downloads (raw.githubusercontent.com and github.com, including download redirects), and to your memory Git host during installation and task execution. Configure the environment’s network permissions and credential provider according to [Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments). Bootstrap, startup refresh, and durable pushes need working authentication in their respective phases. A “Repository not found” error usually means a wrong URL, missing repository, or insufficient Git access.',
+      text: 'Allow network access to raw.githubusercontent.com for the installer, api.github.com for release lookup, and github.com plus release-assets.githubusercontent.com for release downloads. Add any missing hosts to a restricted domain allowlist; a package-manager preset may not include all four. Allow your memory Git host during installation and task execution. Configure the environment’s network permissions and credential provider according to [Cloud environments](https://learn.chatgpt.com/docs/environments/cloud-environments). Bootstrap, startup refresh, and durable pushes need working authentication in their respective phases. A “Repository not found” error usually means a wrong URL, missing repository, or insufficient Git access.',
     },
     {type: 'heading', text: '2. Add the Install script'},
     {
