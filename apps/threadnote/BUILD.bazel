@@ -14726,6 +14726,7 @@ bun_workspace_test(
 bun_workspace_test(
     name = "test_standard_integration_all_pooled_5_of_8",
     srcs = [
+        "//:AGENTS.md",
         "//:README.md",
         "//apps/threadnote:embedded/models/bge-small-en-v1.5-q8/f046db1dc724cf4f6f0a0c5917e922823b73eb1d27b8f9a9c2797f7866974804.gguf",
         "//apps/threadnote:package.json",
