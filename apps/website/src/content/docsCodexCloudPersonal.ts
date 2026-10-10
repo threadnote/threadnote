@@ -17,7 +17,7 @@ export const codexCloudPersonalDocsArticle: DocsArticle = {
   body: [
     {
       type: 'note',
-      text: 'This guide targets the current [Codex Cloud published-environment workflow](https://learn.chatgpt.com/docs/environments/cloud-environments): prepare the filesystem with an Install script and run startup guidance through a Start skill. Threadnote uses CLI commands and explicitly loaded skill files. This profile does not register an MCP server. That is a Threadnote integration choice, not a claim that Codex cannot run stdio MCP. Legacy cloud environments, inference setup, background daemons, and organization remote-memory services are outside this profile.',
+      text: 'Set up Threadnote 5.2.0 in a [Codex Cloud published environment](https://learn.chatgpt.com/docs/environments/cloud-environments): prepare the filesystem with an Install script and run startup guidance through a Start skill. This profile provides scoped Context Briefs, structural code graphs, and private Git memory through CLI commands and three explicitly loaded skills.',
     },
     {type: 'heading', text: '1. Prepare private Git memory access'},
     {
@@ -31,7 +31,7 @@ export const codexCloudPersonalDocsArticle: DocsArticle = {
     {type: 'heading', text: '2. Add the Install script'},
     {
       type: 'paragraph',
-      text: 'Create a Codex Cloud environment for your source repository. Paste this into its Install script, replacing the example private repository URL. The installer version must include the Codex Cloud commands; verify this before publishing. During contribution testing, pin the published beta with THREADNOTE_VERSION and pass --beta to the installer before running bootstrap.',
+      text: 'Create a Codex Cloud environment for your source repository. Paste this into its Install script, replacing the example private repository URL. The installer selects Threadnote 5.2.0; bootstrap configures memory, installs the skills, and prepares the source graph before verification.',
     },
     {
       type: 'code',
@@ -39,7 +39,7 @@ export const codexCloudPersonalDocsArticle: DocsArticle = {
       code: `set -eu
 
 curl -fsSL https://raw.githubusercontent.com/threadnote/threadnote/main/scripts/install.sh | \\
-  sh -s -- --no-start
+  THREADNOTE_VERSION=5.2.0 sh -s -- --no-start
 
 "$HOME/.local/bin/threadnote" cloud codex bootstrap \\
   --remote https://github.com/you/threadnote-memory.git \\
@@ -84,10 +84,6 @@ Explicitly read \`$HOME/.agents/skills/threadnote-context/SKILL.md\`,
       type: 'paragraph',
       text: 'Run the Install script successfully, save the Start skill, and publish the environment. New tasks start from the prepared published filesystem, but runtime-scoped files under `$CODEX_HOME` can be absent. At every new task, the Start skill must run `cloud codex start --cwd "$PWD"`: it restores managed guidance and skills from the saved identity and share set, pulls and ingests the configured shares without committing or pushing local changes, refreshes the structural graph, and verifies readiness. Keep `HOME` and `CODEX_HOME` unchanged. Unowned file conflicts still fail without overwriting user content. Refreshing a repository is not evidence that installation or startup ran again. After changing the install script, identity, share set, or skills, rerun preparation and republish.',
     },
-    {
-      type: 'note',
-      text: 'Compatibility: v5.2.0-beta.3 requires an explicit bootstrap when managed runtime files disappear. With that release, rerun the original `cloud codex bootstrap` command with the same remote, team, user, and agent ID, omitting `--cwd`, then run startup with `--cwd`. The omission avoids preparing the graph twice. Use a release containing startup restoration to rely on the single startup command above.',
-    },
     {type: 'heading', text: '4. Verify in a fresh task'},
     {
       type: 'code',
@@ -102,14 +98,10 @@ Explicitly read \`$HOME/.agents/skills/threadnote-context/SKILL.md\`,
       type: 'paragraph',
       text: 'Verification reports runtime version and platform, identity, CLI installation, managed artifacts, each selected share’s readiness, and graph snapshot identity, freshness, and coverage when `--cwd` is supplied. Omitting `--cwd` preserves memory-only operation; verification does not index. Failed checks exit nonzero. It checks local readiness; it does not prove a published environment ran its Start skill or that a future task can authenticate. For live verification, confirm startup actually loads all three skill files, write a harmless authorized durable smoke record, then open a second fresh task and recall/read it there. Inspect the commit in the intended private Git repository. Until that cross-task smoke passes, describe verification as local or fixture-based.',
     },
-    {type: 'heading', text: 'MCP support and verification'},
+    {type: 'heading', text: 'CLI transport'},
     {
       type: 'paragraph',
-      text: 'Codex supports [stdio MCP and remote execution settings](https://learn.chatgpt.com/docs/extend/mcp), but configuration support in a local CLI does not prove that a managed Cloud chat consumes that configuration. The Codex Cloud profile currently provides the brief, graph, recall, read, and Knowledge Delta workflow through CLI commands. Its verification receipt reports `transport: cli` and does not assert native MCP discovery.',
-    },
-    {
-      type: 'paragraph',
-      text: 'To validate a native Cloud MCP integration, register a harmless sentinel tool through a supported environment mechanism, start or reload the native agent as required, and invoke that tool from its native catalog. `codex mcp list` or a shell-level stdio handshake proves configuration or transport only. A running chat with no registration or reload capability cannot establish fresh-agent discovery. Keep CLI startup available until that native invocation succeeds; do not infer a platform-wide stdio limitation from an absent Threadnote registration.',
+      text: 'This Codex Cloud profile uses CLI commands for briefs, graphs, recall, reads, and the Knowledge Delta workflow. The installed skills invoke these commands directly, and verification reports `transport: cli`. The profile does not register an MCP server; no MCP configuration is required for this setup.',
     },
     {type: 'heading', text: 'Context Brief and Knowledge Delta'},
     {
