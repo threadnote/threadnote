@@ -427,7 +427,7 @@
     "@effect/tsgo": "0.48.0",
     "@effect/vitest": "4.0.0",
     "@threadnote/testing": "workspace:*",
-    "fast-check": "4.10.1",
+    "fast-check": "4.10.2",
     "fflate": "0.8.3",
     "postgres": "3.4.9",
     "react": "^19.3.0",

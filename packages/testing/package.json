@@ -26,6 +26,6 @@
   "dependencies": {
     "@effect/vitest": "4.0.0",
     "effect": "4.0.0",
-    "fast-check": "4.10.1"
+    "fast-check": "4.10.2"
   }
 }
