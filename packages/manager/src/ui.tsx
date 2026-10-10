@@ -1,3 +1,4 @@
+import {requestGraphAdministrationAction} from './graph/index_action.js';
 import {ConsolidationPanel} from './consolidation_review.js';
 import {
   MAX_CONSOLIDATION_SOURCES,
@@ -596,10 +597,9 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
         removedViewConfirmed = graphViewRemovalTargetIsAbsent(removal);
         if (removedViewConfirmed) projectRemovedGraphView(action);
       } else {
-        result = await api<{readonly output: string}>('/api/graphs/action', {
-          ...action,
-          confirm: !('dryRun' in action) || action.dryRun !== true,
-        });
+        const response = await requestGraphAdministrationAction(action, api, dialogs);
+        if (!response) return;
+        result = response;
       }
       await refreshGraphCatalog(false);
       await refreshGraphDiagnostics({analyze: false, deep: false}, false);

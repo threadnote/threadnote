@@ -1,9 +1,12 @@
 import {Effect, FileSystem, Option, Path, Schema} from 'effect';
-import {readSeedManifest} from '@threadnote/workspace/manifest';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {parseSeedManifest} from '@threadnote/workspace/manifest';
 import type {ProjectManifest} from '@threadnote/workspace/config';
 import {expandPath} from '@threadnote/platform/paths';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {resolveRepositoryIdentity} from '../repository.js';
+
+export const CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV = 'THREADNOTE_CODE_GRAPH_EXPECTED_MANIFEST_REVISION';
 
 const WORKTREE_LIST_OUTPUT_BYTES_MAXIMUM = 1_048_576;
 const WORKTREE_LIST_TIMEOUT_MS = 10_000;
@@ -11,7 +14,12 @@ const WORKTREE_ROOT_OUTPUT_BYTES_MAXIMUM = 4_096;
 
 export class CodeGraphScopeRoutingError extends Schema.TaggedError<CodeGraphScopeRoutingError>()(
   'CodeGraphScopeRoutingError',
-  {message: Schema.String},
+  {
+    message: Schema.String,
+    projects: Schema.optionalKey(
+      Schema.Array(Schema.Struct({name: Schema.String, roots: Schema.Array(Schema.String)})),
+    ),
+  },
 ) {}
 
 export type CodeGraphScopeRoute =
@@ -27,12 +35,25 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
   manifestPath: string,
   cwd: string,
   explicitProject?: string,
+  expectedManifestRevision?: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  if (!(yield* fs.exists(manifestPath))) return {state: 'full'} as const satisfies CodeGraphScopeRoute;
-  const manifest = yield* readSeedManifest(manifestPath).pipe(
-    Effect.mapError(() => CodeGraphScopeRoutingError.make({message: 'Configured graph manifest could not be read.'})),
-  );
+  if (!(yield* fs.exists(manifestPath))) {
+    if (expectedManifestRevision !== undefined) return yield* manifestRevisionChanged();
+    return {state: 'full'} as const satisfies CodeGraphScopeRoute;
+  }
+  const raw = yield* fs
+    .readFileString(manifestPath)
+    .pipe(
+      Effect.mapError(() => CodeGraphScopeRoutingError.make({message: 'Configured graph manifest could not be read.'})),
+    );
+  if (expectedManifestRevision !== undefined && sha256HexSync(raw) !== expectedManifestRevision) {
+    return yield* manifestRevisionChanged();
+  }
+  const manifest = yield* Effect.try({
+    try: () => parseSeedManifest(raw, manifestPath),
+    catch: () => CodeGraphScopeRoutingError.make({message: 'Configured graph manifest could not be read.'}),
+  });
   const path = yield* Path.Path;
   const caller = path.resolve(cwd);
   if (explicitProject !== undefined) {
@@ -136,17 +157,24 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
   if (matches.length === 0) return {state: 'full'} as const satisfies CodeGraphScopeRoute;
   const [project] = matches;
   if (matches.length === 1 && project !== undefined) return selectedRoute(project);
-  const scopeChoices = [...matches]
-    .sort((left, right) => left.name.localeCompare(right.name))
+  const projects = [...matches].sort((left, right) => left.name.localeCompare(right.name));
+  const scopeChoices = projects
     .map(project => {
       const roots = project.graph?.roots.length ? project.graph.roots.join(', ') : '.';
       return `- ${project.name}: ${roots}`;
     })
     .join('\n');
   return yield* CodeGraphScopeRoutingError.make({
+    projects: projects.map(project => ({name: project.name, roots: project.graph?.roots ?? []})),
     message: `Graph scope is ambiguous for this cwd: ${matches.length} configured scopes match. Set project (or CLI --project) to one of:\n${scopeChoices}`,
   });
 });
+
+function manifestRevisionChanged(): CodeGraphScopeRoutingError {
+  return CodeGraphScopeRoutingError.make({
+    message: 'Configured graph manifest changed. Refresh Manager before indexing.',
+  });
+}
 
 function projectsInCallerRepository(projects: readonly ProjectManifest[], caller: string) {
   return Effect.gen(function* () {

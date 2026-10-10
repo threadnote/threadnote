@@ -1741,13 +1741,18 @@ const runManagerGraphAction = Effect.fn('manager.runGraphAction')(function* (
           ),
         runEffect,
       );
-    case 'index':
+    case 'index': {
+      const scope = yield* graphProjects.prepareManagerGraphIndexScope(config, cwd, body);
+      if (scope.state === 'selection-required') return {scopeSelection: scope.scopeSelection};
       return yield* runCaptured(
         () =>
           runIsolatedCodeGraphIndexSnapshot({
             cwd,
             expectedIdentity,
             force: body.full === true,
+            manifestPath: config.manifestPath,
+            ...(scope.manifestRevision === undefined ? {} : {manifestRevision: scope.manifestRevision}),
+            ...(scope.project === undefined ? {} : {project: scope.project}),
             threadnoteHome: config.agentContextHome,
           }).pipe(
             Effect.flatMap(summary =>
@@ -1760,6 +1765,7 @@ const runManagerGraphAction = Effect.fn('manager.runGraphAction')(function* (
           ),
         runEffect,
       );
+    }
     default:
       return yield* ManagerOperationError.make({message: `Unsupported graph Manager action: ${action}`});
   }

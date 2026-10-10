@@ -112,6 +112,8 @@ export interface GraphCatalog {
 export type GraphAdministrationAction =
   | {
       readonly action: 'compact' | 'index';
+      readonly project?: string;
+      readonly expectedRevision?: string;
       readonly checkoutId: string;
       readonly cwd?: string;
       readonly dryRun?: boolean;
@@ -146,6 +148,15 @@ export type GraphAdministrationAction =
     }
   | {readonly action: 'purge-all'; readonly dryRun?: boolean}
   | {readonly action: 'repair'; readonly deep?: boolean; readonly dryRun?: boolean};
+
+export type GraphIndexActionResponse =
+  | {readonly output: string}
+  | {
+      readonly scopeSelection: {
+        readonly expectedRevision: string;
+        readonly projects: readonly {readonly name: string; readonly roots: readonly string[]}[];
+      };
+    };
 
 export type GraphWorktreeAdministrationAction = Extract<
   GraphAdministrationAction,
