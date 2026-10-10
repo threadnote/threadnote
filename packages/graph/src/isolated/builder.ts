@@ -1,3 +1,4 @@
+import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV} from '../scope/routing.js';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Ref, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -72,6 +73,9 @@ export interface CodeGraphIsolatedBuilderOptions {
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
   /** Forward an explicit clean rebuild to the child CLI. */
   readonly full?: boolean;
+  /** Bind Manager's selected manifest and reject configuration drift in the child. */
+  readonly manifestPath?: string;
+  readonly manifestRevision?: string;
   /** Preserve MCP/workset structural-only indexing unless the caller explicitly enables vectors. */
   readonly noVectors?: boolean;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
@@ -94,6 +98,8 @@ export interface CodeGraphIsolatedBuilderOptions {
       readonly admissionClass?: CodeGraphBuilderAdmissionClass;
       readonly cwd: string;
       readonly full?: boolean;
+      readonly manifestPath?: string;
+      readonly manifestRevision?: string;
       readonly noVectors?: boolean;
       readonly project?: string;
       readonly refreshDemandToken?: string;
@@ -138,6 +144,8 @@ export function codeGraphIsolatedBuilderSpawnPlan(
     readonly admissionClass?: CodeGraphBuilderAdmissionClass;
     readonly cwd: string;
     readonly full?: boolean;
+    readonly manifestPath?: string;
+    readonly manifestRevision?: string;
     readonly noVectors?: boolean;
     readonly project?: string;
     readonly refreshDemandToken?: string;
@@ -150,6 +158,7 @@ export function codeGraphIsolatedBuilderSpawnPlan(
       ...Option.toArray(script),
       '--home',
       options.threadnoteHome,
+      ...(options.manifestPath === undefined ? [] : ['--manifest', options.manifestPath]),
       'graph',
       'index',
       ...(options.full === true ? ['--full'] : []),
@@ -164,6 +173,7 @@ export function codeGraphIsolatedBuilderSpawnPlan(
       ...(options.refreshDemandToken === undefined
         ? {}
         : {THREADNOTE_CODE_GRAPH_REFRESH_DEMAND_TOKEN: options.refreshDemandToken}),
+      [CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]: options.manifestRevision,
       THREADNOTE_HOME: options.threadnoteHome,
     },
     executable: system.executablePath,
@@ -333,6 +343,8 @@ export const runIsolatedCodeGraphIndex: (
     admissionClass: options.admissionClass,
     cwd: options.cwd,
     full: options.full,
+    ...(options.manifestPath === undefined ? {} : {manifestPath: options.manifestPath}),
+    ...(options.manifestRevision === undefined ? {} : {manifestRevision: options.manifestRevision}),
     noVectors: options.noVectors,
     project: options.project?.name,
     refreshDemandToken: options.refreshDemandToken,

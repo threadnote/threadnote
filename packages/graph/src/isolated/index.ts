@@ -74,7 +74,11 @@ export function recoverIsolatedCodeGraphIndexSnapshot<E, R>(
  * instead of owning repository-sized SQLite work in their event loop.
  */
 export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIndex.snapshot')(function* (
-  options: CodeGraphIndexOptions,
+  options: CodeGraphIndexOptions & {
+    readonly manifestPath?: string;
+    readonly manifestRevision?: string;
+    readonly project?: NonNullable<CodeGraphIndexOptions['project']> & {readonly name?: string};
+  },
 ) {
   const path = yield* Path.Path;
   const store = yield* CodeGraphStore;
@@ -115,6 +119,8 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
     cwd: options.cwd,
     full: options.force === true,
+    ...(options.manifestPath === undefined ? {} : {manifestPath: options.manifestPath}),
+    ...(options.manifestRevision === undefined ? {} : {manifestRevision: options.manifestRevision}),
     noVectors: !ensureVectors,
     onProgress: options.onProgress,
     ...(options.project === undefined ? {} : {project: options.project}),

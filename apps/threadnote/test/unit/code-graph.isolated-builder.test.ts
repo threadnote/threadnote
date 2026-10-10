@@ -1,3 +1,4 @@
+import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV} from '@threadnote/graph/scope/routing';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -245,6 +246,41 @@ describe('isolated code-graph builder spawn plan', () => {
     });
     expect(plan.environment.THREADNOTE_CODE_GRAPH_BUILDER_ADMISSION_CLASS).toBe('background');
     expect(() => assertIsolatedBuilderPlan(plan)).not.toThrow();
+  });
+
+  it('forwards the exact Manager manifest and project together to the isolated child', () => {
+    const plan = codeGraphIsolatedBuilderSpawnPlan(systemInfoStub({}), {
+      cwd: '/repo/worktree',
+      project: 'docs',
+      manifestPath: '/synthetic/selected manifest.yaml',
+      manifestRevision: 'a'.repeat(64),
+      full: true,
+      threadnoteHome: '/home/.threadnote',
+    });
+    expect(plan.environment[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]).toBe('a'.repeat(64));
+    expect(plan.arguments).toEqual([
+      '--home',
+      '/home/.threadnote',
+      '--manifest',
+      '/synthetic/selected manifest.yaml',
+      'graph',
+      'index',
+      '--full',
+      '--no-vectors',
+      '--project',
+      'docs',
+      '--cwd',
+      '/repo/worktree',
+    ]);
+    expect(() => assertIsolatedBuilderPlan(plan)).not.toThrow();
+  });
+
+  it('clears inherited Manager manifest revision fencing for an unrelated isolated child', () => {
+    const plan = codeGraphIsolatedBuilderSpawnPlan(
+      systemInfoStub({environment: () => ({[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]: 'stale-revision'})}),
+      {cwd: '/repo/worktree', threadnoteHome: '/home/.threadnote'},
+    );
+    expect(plan.environment[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]).toBeUndefined();
   });
 
   it('forwards the selected project to isolated graph-index children', () => {

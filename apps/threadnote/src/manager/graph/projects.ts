@@ -1,4 +1,5 @@
 import {Console, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
 import {resolveAndRecordCodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import type {RepositoryIdentityExpectation} from '@threadnote/graph/types';
@@ -166,6 +167,9 @@ export const runManagerManifestProjectGraphIndex = Effect.fn('managerGraphProjec
         cwd: identity.repoRoot,
         expectedIdentity,
         force: body.full === true,
+        manifestPath: config.manifestPath,
+        manifestRevision: catalog.revision,
+        project: {name: project.manifest.name, uri: project.manifest.uri, graph: project.manifest.graph},
         threadnoteHome: config.agentContextHome,
       }).pipe(
         Effect.flatMap(summary =>
@@ -180,6 +184,55 @@ export const runManagerManifestProjectGraphIndex = Effect.fn('managerGraphProjec
     return {output: captured.output};
   },
 );
+
+/** Resolve scope before a child starts; ambiguity is an explicit selection response. */
+export const prepareManagerGraphIndexScope = Effect.fn('managerGraphProjects.prepareIndexScope')(function* (
+  config: RuntimeConfig,
+  cwd: string,
+  body: Record<string, unknown>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (!(yield* fs.exists(config.manifestPath))) {
+    if (body.project !== undefined) {
+      return yield* ManagerGraphProjectActionError.of(
+        'graph-project-stale',
+        'Configured projects changed. Refresh Manager and choose again.',
+      );
+    }
+    return {state: 'resolved', project: undefined, manifestRevision: undefined} as const;
+  }
+  const catalog = yield* readManagerGraphManifestCatalog(config);
+  const projectName = yield* Effect.try({
+    try: () => (body.project === undefined ? undefined : requireString(body.project, 'project')),
+    catch: () => ManagerGraphProjectActionError.of('graph-project-unavailable', 'Choose a configured graph project.'),
+  });
+  if (projectName !== undefined && body.expectedRevision !== catalog.revision) {
+    return yield* ManagerGraphProjectActionError.of(
+      'graph-project-stale',
+      'Configured projects changed. Refresh Manager before choosing a scope to index.',
+    );
+  }
+  return yield* resolveCodeGraphScopeRoute(config.manifestPath, cwd, projectName, catalog.revision).pipe(
+    Effect.map(
+      route =>
+        ({
+          state: 'resolved',
+          manifestRevision: catalog.revision,
+          project:
+            route.state === 'selected'
+              ? {name: route.project.name, uri: route.project.uri, graph: route.project.graph}
+              : undefined,
+        }) as const,
+    ),
+    Effect.catchTag('CodeGraphScopeRoutingError', error => {
+      if (!error.projects?.length) return Effect.fail(error);
+      return Effect.succeed({
+        state: 'selection-required',
+        scopeSelection: {expectedRevision: catalog.revision, projects: error.projects},
+      } as const);
+    }),
+  );
+});
 
 const readManagerGraphManifestCatalog = Effect.fn('managerGraphProjects.readManifestCatalog')(function* (
   config: RuntimeConfig,

@@ -2248,6 +2248,128 @@ describe('manager http API', () => {
     }
   });
 
+  it('chooses a configured scope before repository Index or Reindex starts and rejects stale or foreign choices', async () => {
+    const config = await makeRuntime();
+    homes.push(config.agentContextHome);
+    const repositoryRoot = join(config.agentContextHome, 'scoped-repository');
+    const foreignRoot = join(config.agentContextHome, 'foreign-repository');
+    initializeGitRepository(repositoryRoot);
+    initializeGitRepository(foreignRoot);
+    const identity = await runEffect(resolveRepositoryIdentity(repositoryRoot));
+    const projects = [
+      {
+        name: 'docs',
+        path: repositoryRoot,
+        uri: 'threadnote://resources/repos/docs',
+        seed: [],
+        graph: {roots: ['apps/docs'], closure: 'dependencies'},
+      },
+      {
+        name: 'docs-mobile',
+        path: repositoryRoot,
+        uri: 'threadnote://resources/repos/docs-mobile',
+        seed: [],
+        graph: {roots: ['apps/docs-mobile'], closure: 'dependencies'},
+      },
+      {
+        name: 'foreign',
+        path: foreignRoot,
+        uri: 'threadnote://resources/repos/foreign',
+        seed: [],
+        graph: {roots: ['src'], closure: 'dependencies'},
+      },
+    ];
+    const manifest = JSON.stringify({version: 1, projects});
+    await writeFile(config.manifestPath, manifest);
+    const server = await startServer(config, 'secret');
+    const headers = {authorization: 'Bearer secret', 'content-type': 'application/json'};
+    const target = {
+      action: 'index',
+      checkoutId: identity.checkoutId,
+      repositoryId: identity.repositoryId,
+      worktreeId: identity.worktreeId,
+      cwd: repositoryRoot,
+    };
+    const post = (body: object, authenticated = true) =>
+      testHttpFetch(`${server.url}/api/graphs/action`, {
+        method: 'POST',
+        headers: authenticated ? headers : {'content-type': 'application/json'},
+        body: JSON.stringify(body),
+      });
+    try {
+      expect((await post(target, false)).status).toBe(401);
+      for (const action of [target, {...target, full: true}]) {
+        const response = await post(action);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          scopeSelection: {
+            expectedRevision: sha256HexSync(manifest),
+            projects: [
+              {name: 'docs', roots: ['apps/docs']},
+              {name: 'docs-mobile', roots: ['apps/docs-mobile']},
+            ],
+          },
+        });
+      }
+      expect(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).not.toHaveBeenCalled();
+      const stale = await post({...target, project: 'docs', expectedRevision: '0'.repeat(64)});
+      expect(stale.status).toBe(409);
+      const foreign = await post({...target, project: 'foreign', expectedRevision: sha256HexSync(manifest)});
+      expect(foreign.status).not.toBe(200);
+      expect(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).not.toHaveBeenCalled();
+      const snapshot = {
+        commit: identity.headCommit,
+        dirty: false,
+        fileCount: 1,
+        symbolCount: 2,
+        edgeCount: 0,
+        id: `cgsn_${'3'.repeat(40)}`,
+        repositoryId: identity.repositoryId,
+        worktreeId: identity.worktreeId,
+        state: 'ready',
+        extractorSet: CODE_GRAPH_EXTRACTOR_SET_VERSION,
+      } as const;
+      vi.mocked(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).mockReturnValue(
+        Effect.succeed({durationMs: 1, identity, snapshot}),
+      );
+      for (const [index, project] of projects.slice(0, 2).entries()) {
+        const selected = await post({
+          ...target,
+          full: true,
+          project: project.name,
+          expectedRevision: sha256HexSync(manifest),
+        });
+        expect(selected.status).toBe(200);
+        expect(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).toHaveBeenNthCalledWith(index + 1, {
+          cwd: identity.repoRoot,
+          expectedIdentity: {
+            checkoutId: identity.checkoutId,
+            repositoryId: identity.repositoryId,
+            worktreeId: identity.worktreeId,
+          },
+          force: true,
+          manifestPath: config.manifestPath,
+          manifestRevision: sha256HexSync(manifest),
+          project: {name: project.name, uri: project.uri, graph: project.graph},
+          threadnoteHome: config.agentContextHome,
+        });
+      }
+      const configured = await post({
+        action: 'index-project',
+        project: 'docs',
+        expectedRevision: sha256HexSync(manifest),
+      });
+      expect(configured.status).toBe(200);
+      expect(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).toHaveBeenLastCalledWith(
+        expect.objectContaining({project: {name: 'docs', uri: projects[0].uri, graph: projects[0].graph}}),
+      );
+      expect(await readFile(config.manifestPath, 'utf8')).toBe(manifest);
+    } finally {
+      await server.close();
+      vi.mocked(isolatedIndex.runIsolatedCodeGraphIndexSnapshot).mockReset();
+    }
+  });
+
   it('exposes and isolated-indexes a configured project before any graph database exists', async () => {
     const config = await makeRuntime();
     homes.push(config.agentContextHome);
@@ -2343,6 +2465,13 @@ describe('manager http API', () => {
           worktreeId: identity.worktreeId,
         },
         force: false,
+        manifestPath: config.manifestPath,
+        manifestRevision: catalog.manifestRevision,
+        project: {
+          name: 'configured-project',
+          uri: 'threadnote://resources/repos/configured-project',
+          graph: {roots: ['src'], closure: 'dependencies'},
+        },
         threadnoteHome: config.agentContextHome,
       });
       expect(await runEffect(readCodeGraphLocalAssociation(config.agentContextHome, identity))).toMatchObject({
@@ -2421,6 +2550,13 @@ describe('manager http API', () => {
           worktreeId: secondIdentity.worktreeId,
         },
         force: false,
+        manifestPath: config.manifestPath,
+        manifestRevision: symlinkCatalog.manifestRevision,
+        project: {
+          name: 'configured-project',
+          uri: 'threadnote://resources/repos/configured-project',
+          graph: {roots: ['src'], closure: 'dependencies'},
+        },
         threadnoteHome: config.agentContextHome,
       });
 
@@ -2461,6 +2597,8 @@ describe('manager http API', () => {
           worktreeId: identity.worktreeId,
         },
         force: true,
+        manifestPath: config.manifestPath,
+        manifestRevision: symlinkCatalog.manifestRevision,
         threadnoteHome: config.agentContextHome,
       });
 
