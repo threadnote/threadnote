@@ -8,6 +8,7 @@ import {describe, expect, it} from 'vitest';
 import {
   commandLauncherPath,
   commandShimCheck,
+  configuredLauncherModes,
   installCommandShim,
   managedCommandLauncherKinds,
   primaryCommandLauncherKind,
@@ -109,14 +110,6 @@ describe('Windows Git Bash command launchers', () => {
           cliPosix: yield* readLauncher(testSystem, 'cli', 'posix'),
           mcpCmd: yield* readLauncher(testSystem, 'mcp', 'cmd'),
           mcpPosix: yield* readLauncher(testSystem, 'mcp', 'posix'),
-          auth0Cmd: yield* readLauncher(testSystem, 'credential-auth0-m2m', 'cmd'),
-          auth0Posix: yield* readLauncher(testSystem, 'credential-auth0-m2m', 'posix'),
-          registryCmd: yield* readLauncher(testSystem, 'credential-registry-auth0-m2m', 'cmd'),
-          registryPosix: yield* readLauncher(testSystem, 'credential-registry-auth0-m2m', 'posix'),
-          publisherRegistryCmd: yield* readLauncher(testSystem, 'credential-registry-auth0-publisher-m2m', 'cmd'),
-          publisherRegistryPosix: yield* readLauncher(testSystem, 'credential-registry-auth0-publisher-m2m', 'posix'),
-          userRegistryCmd: yield* readLauncher(testSystem, 'credential-registry-auth0-user', 'cmd'),
-          userRegistryPosix: yield* readLauncher(testSystem, 'credential-registry-auth0-user', 'posix'),
         };
         expect(installed.output).toContain(`Wrote command launcher: ${files.cliCmd.path}`);
         expect(installed.output).toContain(`Wrote command launcher: ${files.cliPosix.path}`);
@@ -133,18 +126,21 @@ describe('Windows Git Bash command launchers', () => {
         expect(files.cliPosix.content).toContain('export THREADNOTE_CALLER_CWD');
         expect(files.cliPosix.content).toContain('exec "$THREADNOTE_ENTRY" "$@"');
         expect(files.mcpPosix.content).toContain('exec "$THREADNOTE_ENTRY" mcp-broker "$@"');
-        expect(files.auth0Posix.content).toContain('exec "$THREADNOTE_ENTRY" __credential-auth0-m2m "$@"');
-        expect(files.auth0Cmd.content).toContain('__credential-auth0-m2m %*');
-        expect(files.registryPosix.content).toContain('exec "$THREADNOTE_ENTRY" __credential-registry-auth0-m2m "$@"');
-        expect(files.registryCmd.content).toContain('__credential-registry-auth0-m2m %*');
-        expect(files.publisherRegistryPosix.content).toContain(
-          'exec "$THREADNOTE_ENTRY" __credential-registry-auth0-publisher-m2m "$@"',
-        );
-        expect(files.publisherRegistryCmd.content).toContain('__credential-registry-auth0-publisher-m2m %*');
-        expect(files.userRegistryPosix.content).toContain(
-          'exec "$THREADNOTE_ENTRY" __credential-registry-auth0-user "$@"',
-        );
-        expect(files.userRegistryCmd.content).toContain('__credential-registry-auth0-user %*');
+        for (const mode of [
+          'credential-oauth-m2m',
+          'credential-registry-oauth-m2m',
+          'credential-registry-oauth-publisher-m2m',
+          'credential-registry-oauth-user',
+          'credential-auth0-m2m',
+          'credential-registry-auth0-m2m',
+          'credential-registry-auth0-publisher-m2m',
+          'credential-registry-auth0-user',
+        ] as const) {
+          for (const kind of managedCommandLauncherKinds('win32')) {
+            const launcher = yield* commandLauncherPath(mode, kind).pipe(Effect.provideService(SystemInfo, testSystem));
+            expect(yield* FileSystem.FileSystem.pipe(Effect.flatMap(fs => fs.exists(launcher)))).toBe(false);
+          }
+        }
         expect(files.cliCmd.content.startsWith('@echo off\r\n')).toBe(true);
         expect(files.cliCmd.content).toContain('%*');
 
@@ -247,51 +243,198 @@ describe('Windows Git Bash command launchers', () => {
         const mcpPosix = yield* commandLauncherPath('mcp', 'posix').pipe(Effect.provideService(SystemInfo, testSystem));
         const check = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem));
         expect(check.status).toBe('ok');
-        const auth0Cmd = yield* commandLauncherPath('credential-auth0-m2m', 'cmd').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const auth0Posix = yield* commandLauncherPath('credential-auth0-m2m', 'posix').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const registryCmd = yield* commandLauncherPath('credential-registry-auth0-m2m', 'cmd').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const registryPosix = yield* commandLauncherPath('credential-registry-auth0-m2m', 'posix').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const publisherRegistryCmd = yield* commandLauncherPath('credential-registry-auth0-publisher-m2m', 'cmd').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const publisherRegistryPosix = yield* commandLauncherPath(
-          'credential-registry-auth0-publisher-m2m',
-          'posix',
-        ).pipe(Effect.provideService(SystemInfo, testSystem));
-        const userRegistryCmd = yield* commandLauncherPath('credential-registry-auth0-user', 'cmd').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const userRegistryPosix = yield* commandLauncherPath('credential-registry-auth0-user', 'posix').pipe(
-          Effect.provideService(SystemInfo, testSystem),
-        );
-        const oauthPaths: string[] = [];
-        for (const mode of [
-          'credential-oauth-m2m',
-          'credential-registry-oauth-m2m',
-          'credential-registry-oauth-publisher-m2m',
-          'credential-registry-oauth-user',
-        ] as const) {
-          for (const kind of managedCommandLauncherKinds('win32')) {
-            const launcher = yield* commandLauncherPath(mode, kind).pipe(Effect.provideService(SystemInfo, testSystem));
-            oauthPaths.push(launcher);
-            const content = yield* FileSystem.FileSystem.pipe(Effect.flatMap(fs => fs.readFileString(launcher)));
-            expect(content).toContain(`__${mode}`);
-          }
-        }
-        expect(check.detail).toBe(
-          `${cliCmd}; ${cliPosix}; ${mcpCmd}; ${mcpPosix}; ${oauthPaths.join('; ')}; ${auth0Cmd}; ${auth0Posix}; ${registryCmd}; ${registryPosix}; ${publisherRegistryCmd}; ${publisherRegistryPosix}; ${userRegistryCmd}; ${userRegistryPosix}`,
-        );
+        expect(check.detail).toBe(`${cliCmd}; ${cliPosix}; ${mcpCmd}; ${mcpPosix}`);
       }),
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
+
+  effectIt.effect('repairs configured legacy helpers and removes obsolete managed helpers on Windows', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-win-configured-shims-'});
+        const {testSystem} = yield* windowsShimFixture(root);
+        const home = testSystem.environment().THREADNOTE_HOME!;
+        const dockerDirectory = testSystem.environment().DOCKER_CONFIG!;
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        yield* fs.makeDirectory(path.join(home, 'graph-sharing'), {recursive: true});
+        yield* fs.makeDirectory(dockerDirectory, {recursive: true});
+        yield* fs.writeFileString(
+          path.join(home, 'graph-sharing', 'control-credentials.json'),
+          JSON.stringify({schemaVersion: 1, bindings: [{helper: 'auth0-m2m'}]}),
+        );
+        yield* fs.writeFileString(
+          path.join(dockerDirectory, 'config.json'),
+          JSON.stringify({credHelpers: {'registry.example.test': 'threadnote-auth0-user'}}),
+        );
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        for (const mode of ['credential-auth0-m2m', 'credential-registry-auth0-user'] as const) {
+          for (const kind of managedCommandLauncherKinds('win32')) {
+            const launcher = yield* commandLauncherPath(mode, kind).pipe(Effect.provideService(SystemInfo, testSystem));
+            expect(yield* fs.readFileString(launcher)).toContain(`__${mode}`);
+          }
+        }
+        expect((yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem))).status).toBe('ok');
+        const missingRequired = yield* commandLauncherPath('credential-registry-auth0-user', 'cmd').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        yield* fs.remove(missingRequired);
+        expect((yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem))).detail).toBe(
+          `${missingRequired} missing; repair will create it`,
+        );
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        expect(yield* fs.exists(missingRequired)).toBe(true);
+
+        yield* fs.remove(path.join(home, 'graph-sharing', 'control-credentials.json'));
+        yield* fs.remove(path.join(dockerDirectory, 'config.json'));
+        const foreign = yield* commandLauncherPath('credential-registry-oauth-user', 'posix').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        yield* fs.writeFileString(foreign, '#!/bin/sh\necho user-owned\n');
+        const linked = yield* commandLauncherPath('credential-registry-oauth-m2m', 'posix').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        const managedTarget = yield* commandLauncherPath('cli', 'posix').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        yield* fs.symlink(managedTarget, linked);
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        for (const mode of ['credential-auth0-m2m', 'credential-registry-auth0-user'] as const) {
+          for (const kind of managedCommandLauncherKinds('win32')) {
+            const launcher = yield* commandLauncherPath(mode, kind).pipe(Effect.provideService(SystemInfo, testSystem));
+            expect(yield* fs.exists(launcher)).toBe(false);
+          }
+        }
+        expect(yield* fs.readFileString(foreign)).toBe('#!/bin/sh\necho user-owned\n');
+        expect(yield* fs.readLink(linked)).toBe(managedTarget);
+        expect((yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem))).status).toBe('ok');
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('keeps configured helpers when Docker requirements cannot be read safely', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-unknown-helper-config-'});
+        const {testSystem} = yield* windowsShimFixture(root);
+        const dockerDirectory = testSystem.environment().DOCKER_CONFIG!;
+        const dockerConfig = path.join(dockerDirectory, 'config.json');
+        yield* fs.makeDirectory(dockerDirectory, {recursive: true});
+        yield* fs.writeFileString(
+          dockerConfig,
+          JSON.stringify({credHelpers: {'registry.example.test': 'threadnote-auth0-user'}}),
+        );
+        yield* installCommandShim(false).pipe(Effect.provideService(SystemInfo, testSystem));
+        const helper = yield* commandLauncherPath('credential-registry-auth0-user', 'cmd').pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
+        const original = yield* fs.readFileString(helper);
+
+        yield* fs.writeFileString(dockerConfig, JSON.stringify({padding: 'x'.repeat(65_536)}));
+        const oversized = yield* installCommandShim(false).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.flip,
+        );
+        expect(String(oversized)).toContain('exceeds 64 KiB');
+        expect(yield* fs.readFileString(helper)).toBe(original);
+        const doctor = yield* commandShimCheck().pipe(Effect.provideService(SystemInfo, testSystem), Effect.flip);
+        expect(String(doctor)).toContain('exceeds 64 KiB');
+
+        yield* fs.writeFileString(dockerConfig, '{');
+        const malformed = yield* installCommandShim(false).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.flip,
+        );
+        expect(String(malformed)).toContain('configuration is invalid');
+        expect(yield* fs.readFileString(helper)).toBe(original);
+
+        yield* fs.writeFileString(
+          dockerConfig,
+          JSON.stringify({credHelpers: {'registry.example.test': 'threadnote-auth0-user'}}),
+        );
+        const failingFs = FileSystem.FileSystem.of({
+          ...fs,
+          readFileString: file =>
+            file === dockerConfig ? fs.readFileString(path.join(root, 'missing-config')) : fs.readFileString(file),
+        });
+        const unreadable = yield* installCommandShim(false).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+          Effect.provideService(FileSystem.FileSystem, failingFs),
+          Effect.flip,
+        );
+        expect(String(unreadable)).toContain('configuration is unavailable');
+        expect(yield* fs.readFileString(helper)).toBe(original);
+
+        const relativeDockerSystem = SystemInfo.of({
+          ...testSystem,
+          environment: () => ({...testSystem.environment(), DOCKER_CONFIG: 'relative-docker-config'}),
+        });
+        const relative = yield* installCommandShim(false).pipe(
+          Effect.provideService(SystemInfo, relativeDockerSystem),
+          Effect.flip,
+        );
+        expect(String(relative)).toContain('must be absolute');
+        expect(yield* fs.readFileString(helper)).toBe(original);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  it('launcher selection is stable under duplicate and reordered configuration', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('oauth-m2m', 'auth0-m2m', 'custom'), {maxLength: 10}),
+        fc.array(
+          fc.constantFrom(
+            'threadnote-oauth-m2m',
+            'threadnote-oauth-publisher-m2m',
+            'threadnote-auth0-m2m',
+            'threadnote-auth0-publisher-m2m',
+            'threadnote-oauth-user',
+            'threadnote-auth0-user',
+            'other',
+          ),
+          {maxLength: 10},
+        ),
+        (control, docker) => {
+          const selected = configuredLauncherModes(
+            {schemaVersion: 1, bindings: control.map(helper => ({helper}))},
+            {credHelpers: Object.fromEntries(docker.map((helper, index) => [String(index), helper]))},
+          );
+          const reversed = configuredLauncherModes(
+            {schemaVersion: 1, bindings: [...control, ...control].reverse().map(helper => ({helper}))},
+            {
+              credHelpers: Object.fromEntries(
+                [...docker, ...docker].reverse().map((helper, index) => [String(index), helper]),
+              ),
+            },
+          );
+          expect(selected).toEqual(reversed);
+          expect(selected.slice(0, 2)).toEqual(['cli', 'mcp']);
+          expect(new Set(selected).size).toBe(selected.length);
+          for (const [helper, mode] of [
+            ['oauth-m2m', 'credential-oauth-m2m'],
+            ['auth0-m2m', 'credential-auth0-m2m'],
+          ] as const) {
+            expect(selected.includes(mode)).toBe(control.includes(helper));
+          }
+          for (const [helper, mode] of [
+            ['threadnote-oauth-m2m', 'credential-registry-oauth-m2m'],
+            ['threadnote-oauth-publisher-m2m', 'credential-registry-oauth-publisher-m2m'],
+            ['threadnote-oauth-user', 'credential-registry-oauth-user'],
+            ['threadnote-auth0-m2m', 'credential-registry-auth0-m2m'],
+            ['threadnote-auth0-publisher-m2m', 'credential-registry-auth0-publisher-m2m'],
+            ['threadnote-auth0-user', 'credential-registry-auth0-user'],
+          ] as const) {
+            expect(selected.includes(mode)).toBe(docker.includes(helper));
+          }
+        },
+      ),
+      {numRuns: 80},
+    );
+  });
 
   effectIt.effect('doctor warns when the Git Bash MCP launcher is missing beside current CLI launchers', () =>
     Effect.scoped(
@@ -475,7 +618,13 @@ const windowsShimFixture = Effect.fn('test.windowsShimFixture')(function* (root:
   yield* fs.makeDirectory(binDirectory, {recursive: true});
   const testSystem = SystemInfo.of({
     ...baseSystem,
-    environment: () => ({...baseSystem.environment(), THREADNOTE_BIN_DIR: binDirectory}),
+    environment: () => ({
+      ...baseSystem.environment(),
+      DOCKER_CONFIG: path.join(root, 'docker'),
+      THREADNOTE_BIN_DIR: binDirectory,
+      THREADNOTE_HOME: path.join(root, 'home'),
+    }),
+    homeDirectory: root,
     platform: 'win32',
   });
   return {binDirectory, releaseRoot, testSystem};

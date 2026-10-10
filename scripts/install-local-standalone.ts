@@ -9,6 +9,8 @@ import {
   installCommandShim,
   managedCommandLauncherKinds,
   primaryCommandLauncherKind,
+  plannedCommandLauncherMutations,
+  requiredCommandLauncherModes,
   renderCommandShim,
 } from '@threadnote/threadnote/command-shim';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -564,23 +566,10 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
         });
       }
       const managedFileSnapshots: LocalFileSnapshot[] = [];
-      for (const mode of [
-        'cli',
-        'mcp',
-        'credential-oauth-m2m',
-        'credential-registry-oauth-m2m',
-        'credential-registry-oauth-publisher-m2m',
-        'credential-auth0-m2m',
-        'credential-registry-auth0-m2m',
-        'credential-registry-auth0-publisher-m2m',
-        'credential-registry-oauth-user',
-        'credential-registry-auth0-user',
-      ] as const) {
-        for (const kind of managedCommandLauncherKinds(system.platform)) {
-          managedFileSnapshots.push(
-            yield* captureFileSnapshot(fs, yield* commandLauncherPath(mode, kind), `${mode} ${kind} launcher`, 0o755),
-          );
-        }
+      for (const {mode, kind} of yield* plannedCommandLauncherMutations()) {
+        managedFileSnapshots.push(
+          yield* captureFileSnapshot(fs, yield* commandLauncherPath(mode, kind), `${mode} ${kind} launcher`, 0o755),
+        );
       }
       managedFileSnapshots.push(
         yield* captureFileSnapshot(fs, path.join(installRoot, 'active-release.json'), 'active release pointer', 0o600),
@@ -1022,18 +1011,7 @@ const verifyLaunchers = Effect.fn('developmentInstall.verifyLaunchers')(function
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   let cliLauncher = '';
-  for (const mode of [
-    'cli',
-    'mcp',
-    'credential-oauth-m2m',
-    'credential-registry-oauth-m2m',
-    'credential-registry-oauth-publisher-m2m',
-    'credential-auth0-m2m',
-    'credential-registry-auth0-m2m',
-    'credential-registry-auth0-publisher-m2m',
-    'credential-registry-oauth-user',
-    'credential-registry-auth0-user',
-  ] as const) {
+  for (const mode of yield* requiredCommandLauncherModes()) {
     for (const kind of managedCommandLauncherKinds(system.platform)) {
       const [launcher, expected] = yield* Effect.all([
         commandLauncherPath(mode, kind),

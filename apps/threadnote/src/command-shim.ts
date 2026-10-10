@@ -1,4 +1,4 @@
-import {Console, Effect, FileSystem, Option, Path} from 'effect';
+import {Console, Effect, FileSystem, Option, Path, PlatformError, Result, Schema} from 'effect';
 import {SHIM_MARKER} from './constants.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -14,7 +14,11 @@ const THREADNOTE_AUTH0_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadno
 const THREADNOTE_AUTH0_PUBLISHER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-auth0-publisher-m2m';
 const THREADNOTE_AUTH0_USER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-auth0-user';
 const THREADNOTE_OAUTH_USER_REGISTRY_CREDENTIAL_COMMAND = 'docker-credential-threadnote-oauth-user';
-type LauncherMode =
+class CommandShimConfigurationError extends Schema.TaggedError<CommandShimConfigurationError>()(
+  'CommandShimConfigurationError',
+  {message: Schema.String},
+) {}
+export type LauncherMode =
   | 'cli'
   | 'mcp'
   | 'credential-oauth-m2m'
@@ -37,6 +41,141 @@ const LAUNCHER_MODES: readonly LauncherMode[] = [
   'credential-registry-auth0-publisher-m2m',
   'credential-registry-auth0-user',
 ];
+const CORE_LAUNCHER_MODES: readonly LauncherMode[] = ['cli', 'mcp'];
+const CONTROL_HELPER_MODES = new Map<string, LauncherMode>([
+  ['oauth-m2m', 'credential-oauth-m2m'],
+  ['auth0-m2m', 'credential-auth0-m2m'],
+]);
+const DOCKER_HELPER_MODES = new Map<string, LauncherMode>([
+  ['threadnote-oauth-m2m', 'credential-registry-oauth-m2m'],
+  ['threadnote-oauth-publisher-m2m', 'credential-registry-oauth-publisher-m2m'],
+  ['threadnote-oauth-user', 'credential-registry-oauth-user'],
+  ['threadnote-auth0-m2m', 'credential-registry-auth0-m2m'],
+  ['threadnote-auth0-publisher-m2m', 'credential-registry-auth0-publisher-m2m'],
+  ['threadnote-auth0-user', 'credential-registry-auth0-user'],
+]);
+
+export function configuredLauncherModes(controlConfig: unknown, dockerConfig: unknown): readonly LauncherMode[] {
+  const selected = new Set<LauncherMode>(CORE_LAUNCHER_MODES);
+  if (isRecord(controlConfig) && controlConfig.schemaVersion === 1 && Array.isArray(controlConfig.bindings)) {
+    for (const binding of controlConfig.bindings) {
+      if (!isRecord(binding) || typeof binding.helper !== 'string') continue;
+      const mode = CONTROL_HELPER_MODES.get(binding.helper);
+      if (mode !== undefined) selected.add(mode);
+    }
+  }
+  if (isRecord(dockerConfig)) {
+    const helpers = isRecord(dockerConfig.credHelpers) ? Object.values(dockerConfig.credHelpers) : [];
+    for (const helper of [...helpers, dockerConfig.credsStore]) {
+      if (typeof helper !== 'string') continue;
+      const mode = DOCKER_HELPER_MODES.get(helper);
+      if (mode !== undefined) selected.add(mode);
+    }
+  }
+  return LAUNCHER_MODES.filter(mode => selected.has(mode));
+}
+
+export const requiredCommandLauncherModes = Effect.fn('commandShim.requiredModes')(function* (home?: string) {
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const threadnoteHome = home ?? (yield* expandPath(system.environment().THREADNOTE_HOME ?? '~/.threadnote'));
+  const dockerDirectory = system.environment().DOCKER_CONFIG ?? path.join(system.homeDirectory, '.docker');
+  if (!path.isAbsolute(dockerDirectory))
+    return yield* CommandShimConfigurationError.make({
+      message: 'Docker credential helper configuration directory must be absolute.',
+    });
+  const controlConfig = yield* readLauncherConfiguration(
+    path.join(threadnoteHome, 'graph-sharing', 'control-credentials.json'),
+    'control',
+  );
+  const dockerConfig = yield* readLauncherConfiguration(path.join(dockerDirectory, 'config.json'), 'docker');
+  return configuredLauncherModes(controlConfig, dockerConfig);
+});
+
+export const plannedCommandLauncherMutations = Effect.fn('commandShim.plannedMutations')(function* (home?: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const system = yield* SystemInfo;
+  const required = new Set(yield* requiredCommandLauncherModes(home));
+  const planned: {readonly mode: LauncherMode; readonly kind: CommandLauncherKind}[] = [];
+  for (const mode of LAUNCHER_MODES) {
+    for (const kind of managedCommandLauncherKinds(system.platform)) {
+      const launcher = yield* managedCommandShimPath(mode, kind);
+      if (Option.isSome(yield* fs.readLink(launcher).pipe(Effect.option))) continue;
+      const info = yield* fs.stat(launcher).pipe(Effect.option);
+      if (Option.isSome(info) && info.value.type !== 'File') continue;
+      const content = yield* readFileIfExists(launcher);
+      if (Option.isSome(info) && content === undefined) continue;
+      if (content !== undefined && !isManagedCommandShim(content)) continue;
+      if (required.has(mode) || content !== undefined) planned.push({mode, kind});
+    }
+  }
+  return planned;
+});
+
+const readLauncherConfiguration = Effect.fn('commandShim.readConfiguration')(function* (
+  file: string,
+  kind: 'control' | 'docker',
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const info = yield* fs.stat(file).pipe(Effect.match({onFailure: Result.fail, onSuccess: Result.succeed}));
+  if (Result.isFailure(info)) {
+    if (PlatformError.isPlatformError(info.failure) && info.failure.reason._tag === 'NotFound') {
+      const link = yield* fs.readLink(file).pipe(Effect.match({onFailure: Result.fail, onSuccess: Result.succeed}));
+      if (
+        Result.isFailure(link) &&
+        PlatformError.isPlatformError(link.failure) &&
+        link.failure.reason._tag === 'NotFound'
+      )
+        return undefined;
+    }
+    return yield* CommandShimConfigurationError.make({
+      message: `${kind} credential helper configuration is unavailable: ${file}`,
+    });
+  }
+  if (info.success.type !== 'File' || info.success.size > 65_536)
+    return yield* CommandShimConfigurationError.make({
+      message: `${kind} credential helper configuration is unreadable or exceeds 64 KiB: ${file}`,
+    });
+  const content = yield* fs.readFileString(file).pipe(
+    Effect.mapError(() =>
+      CommandShimConfigurationError.make({
+        message: `${kind} credential helper configuration is unavailable: ${file}`,
+      }),
+    ),
+  );
+  const config = yield* Effect.try({
+    try: () => JSON.parse(content) as unknown,
+    catch: () =>
+      CommandShimConfigurationError.make({message: `${kind} credential helper configuration is invalid: ${file}`}),
+  });
+  if (kind === 'control' ? !isControlConfiguration(config) : !isDockerConfiguration(config))
+    return yield* CommandShimConfigurationError.make({
+      message: `${kind} credential helper configuration is invalid: ${file}`,
+    });
+  return config;
+});
+
+function isControlConfiguration(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.schemaVersion === 1 &&
+    Array.isArray(value.bindings) &&
+    value.bindings.every(binding => isRecord(binding) && typeof binding.helper === 'string')
+  );
+}
+
+function isDockerConfiguration(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.credHelpers === undefined ||
+      (isRecord(value.credHelpers) && Object.values(value.credHelpers).every(helper => typeof helper === 'string'))) &&
+    (value.credsStore === undefined || typeof value.credsStore === 'string')
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export type CommandLauncherKind = 'cmd' | 'posix';
 
@@ -54,12 +193,20 @@ export const commandLauncherPath = Effect.fn('commandShim.launcherPath')(
   (mode: LauncherMode = 'cli', kind?: CommandLauncherKind) => managedCommandShimPath(mode, kind),
 );
 
-export const commandShimCheck = Effect.fn('commandShim.check')(function* () {
+export const commandShimCheck = Effect.fn('commandShim.check')(function* (home?: string) {
+  const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const paths: string[] = [];
-  for (const mode of LAUNCHER_MODES) {
+  for (const mode of yield* requiredCommandLauncherModes(home)) {
     for (const kind of managedCommandLauncherKinds(system.platform)) {
       const shimPath = yield* managedCommandShimPath(mode, kind);
+      if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) {
+        return {
+          detail: `${shimPath} is a symbolic link; repair will not overwrite it`,
+          name: 'threadnote launcher',
+          status: 'warn',
+        } satisfies DoctorCheck;
+      }
       const content = yield* readFileIfExists(shimPath);
       if (content === undefined) {
         return {
@@ -88,11 +235,35 @@ export const commandShimCheck = Effect.fn('commandShim.check')(function* () {
   return {detail: paths.join('; '), name: 'threadnote launcher', status: 'ok'} satisfies DoctorCheck;
 });
 
-export const installCommandShim = Effect.fn('commandShim.install')(function* (dryRun: boolean, releaseRoot?: string) {
+export const installCommandShim = Effect.fn('commandShim.install')(function* (
+  dryRun: boolean,
+  releaseRoot?: string,
+  home?: string,
+) {
+  const required = new Set(yield* requiredCommandLauncherModes(home));
   for (const mode of LAUNCHER_MODES) {
-    yield* installLauncher(mode, dryRun, releaseRoot);
+    if (required.has(mode)) yield* installLauncher(mode, dryRun, releaseRoot);
+    else yield* removeUnusedLauncher(mode, dryRun);
   }
   yield* ensureDefaultWindowsBinDirectoryOnUserPath(dryRun);
+});
+
+const removeUnusedLauncher = Effect.fn('commandShim.removeUnusedLauncher')(function* (
+  mode: LauncherMode,
+  dryRun: boolean,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const system = yield* SystemInfo;
+  for (const kind of managedCommandLauncherKinds(system.platform)) {
+    const shimPath = yield* managedCommandShimPath(mode, kind);
+    if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) continue;
+    const info = yield* fs.stat(shimPath).pipe(Effect.option);
+    if (Option.isNone(info) || info.value.type !== 'File') continue;
+    const content = yield* readFileIfExists(shimPath);
+    if (content !== undefined && isManagedCommandShim(content)) {
+      yield* removePath(shimPath, 'unused command launcher', dryRun);
+    }
+  }
 });
 
 const ensureDefaultWindowsBinDirectoryOnUserPath = Effect.fn('commandShim.ensureWindowsPath')(function* (
@@ -141,6 +312,10 @@ const installLauncherFile = Effect.fn('commandShim.installLauncherFile')(functio
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
   const shimPath = yield* managedCommandShimPath(mode, kind);
+  if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) {
+    yield* Console.warn(`WARN not overwriting symbolic-link command launcher: ${shimPath}`);
+    return;
+  }
   const existingContent = yield* readFileIfExists(shimPath);
   if (existingContent === undefined && (yield* pathEntryExists(fs, shimPath))) {
     yield* Console.warn(`WARN not overwriting unreadable command launcher: ${shimPath}`);
@@ -171,10 +346,15 @@ const installLauncherFile = Effect.fn('commandShim.installLauncherFile')(functio
 });
 
 export const removeCommandShim = Effect.fn('commandShim.remove')(function* (dryRun: boolean) {
+  const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   for (const mode of LAUNCHER_MODES) {
     for (const kind of managedCommandLauncherKinds(system.platform)) {
       const shimPath = yield* managedCommandShimPath(mode, kind);
+      if (Option.isSome(yield* fs.readLink(shimPath).pipe(Effect.option))) {
+        yield* Console.warn(`WARN not removing symbolic-link command launcher: ${shimPath}`);
+        continue;
+      }
       const content = yield* readFileIfExists(shimPath);
       if (content === undefined) {
         yield* Console.log(`Command launcher already absent: ${shimPath}`);

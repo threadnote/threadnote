@@ -263,7 +263,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
           const path = yield* Path.Path;
           const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
           const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
-          yield* installCommandShim(options.dryRun === true, activeReleaseRoot);
+          yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
         }),
         options.dryRun === true,
       );
@@ -294,7 +294,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
         source,
         version: latestVersion,
       });
-      yield* installCommandShim(dryRun, installed);
+      yield* installCommandShim(dryRun, installed, config.agentContextHome);
       yield* activateStandaloneRelease(installed, dryRun);
       return {currentVersion, releaseRoot: installed};
     }),

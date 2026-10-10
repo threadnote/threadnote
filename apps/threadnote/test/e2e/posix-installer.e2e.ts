@@ -414,18 +414,14 @@ esac
         },
       });
       expect(launcherVersion.stdout).toContain(packageManifest.version);
-      const publisherLauncher = await readFile(
-        join(binRoot, 'docker-credential-threadnote-auth0-publisher-m2m'),
-        'utf8',
-      );
-      expect(publisherLauncher).toContain('exec "$THREADNOTE_ENTRY" __credential-registry-auth0-publisher-m2m "$@"');
-      const oauthUserRegistryLauncher = await readFile(
-        join(binRoot, 'docker-credential-threadnote-oauth-user'),
-        'utf8',
-      );
-      expect(oauthUserRegistryLauncher).toContain('exec "$THREADNOTE_ENTRY" __credential-registry-oauth-user "$@"');
-      const userRegistryLauncher = await readFile(join(binRoot, 'docker-credential-threadnote-auth0-user'), 'utf8');
-      expect(userRegistryLauncher).toContain('exec "$THREADNOTE_ENTRY" __credential-registry-auth0-user "$@"');
+      expect(await readFile(join(binRoot, 'threadnote-mcp-server'), 'utf8')).toContain('mcp-broker');
+      for (const helper of [
+        'docker-credential-threadnote-auth0-publisher-m2m',
+        'docker-credential-threadnote-oauth-user',
+        'docker-credential-threadnote-auth0-user',
+      ]) {
+        await expect(stat(join(binRoot, helper))).rejects.toMatchObject({code: 'ENOENT'});
+      }
       const profiledVersion = await execute(
         'sh',
         [

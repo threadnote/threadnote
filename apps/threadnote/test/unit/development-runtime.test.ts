@@ -1731,7 +1731,7 @@ describe('exact-head development runtime', () => {
     }),
   );
 
-  effectIt.effect('restores the prior active pointer and launchers when launcher verification fails', () =>
+  effectIt.effect('restores obsolete owned helpers and the prior activation when launcher verification fails', () =>
     Effect.gen(function* () {
       const result = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -1763,18 +1763,35 @@ describe('exact-head development runtime', () => {
             ...baseSystem,
             environment: () => ({
               ...baseSystem.environment(),
+              DOCKER_CONFIG: path.join(root, 'docker'),
               THREADNOTE_BIN_DIR: binRoot,
+              THREADNOTE_HOME: path.join(root, 'home'),
               THREADNOTE_INSTALL_ROOT: installRoot,
             }),
           });
           const setup = Effect.gen(function* () {
             const cliLauncher = yield* commandLauncherPath('cli');
             const mcpLauncher = yield* commandLauncherPath('mcp');
+            const obsoleteLauncher = yield* commandLauncherPath('credential-auth0-m2m');
+            const foreignLauncher = yield* commandLauncherPath('credential-registry-auth0-user');
+            const linkedLauncher = yield* commandLauncherPath('credential-oauth-m2m');
             const priorCli = yield* renderCommandShim(priorReleaseRoot, 'cli');
+            const priorObsolete = yield* renderCommandShim(priorReleaseRoot, 'credential-auth0-m2m');
             yield* fs.makeDirectory(binRoot, {recursive: true});
             yield* fs.writeFileString(cliLauncher, priorCli, {mode: 0o755});
             yield* fs.writeFileString(mcpLauncher, 'unmanaged launcher\n', {mode: 0o755});
-            return {cliLauncher, mcpLauncher, priorCli};
+            yield* fs.writeFileString(obsoleteLauncher, priorObsolete, {mode: 0o744});
+            yield* fs.writeFileString(foreignLauncher, 'user owned launcher\n', {mode: 0o755});
+            yield* fs.symlink(cliLauncher, linkedLauncher);
+            return {
+              cliLauncher,
+              mcpLauncher,
+              obsoleteLauncher,
+              foreignLauncher,
+              linkedLauncher,
+              priorCli,
+              priorObsolete,
+            };
           }).pipe(Effect.provideService(SystemInfo, testSystem));
           const launchers = yield* setup;
           const failure = yield* activateLocalStandaloneRelease({
@@ -1799,7 +1816,13 @@ describe('exact-head development runtime', () => {
             cli: yield* fs.readFileString(launchers.cliLauncher),
             failure: String(failure),
             mcp: yield* fs.readFileString(launchers.mcpLauncher),
+            obsolete: yield* fs.readFileString(launchers.obsoleteLauncher),
+            obsoleteMode: (yield* fs.stat(launchers.obsoleteLauncher)).mode & 0o777,
+            foreign: yield* fs.readFileString(launchers.foreignLauncher),
+            linked: yield* fs.readLink(launchers.linkedLauncher),
             priorCli: launchers.priorCli,
+            priorObsolete: launchers.priorObsolete,
+            cliLauncher: launchers.cliLauncher,
             priorPointer,
           };
         }),
@@ -1809,6 +1832,10 @@ describe('exact-head development runtime', () => {
       expect(result.activePointer).toBe(result.priorPointer);
       expect(result.cli).toBe(result.priorCli);
       expect(result.mcp).toBe('unmanaged launcher\n');
+      expect(result.obsolete).toBe(result.priorObsolete);
+      if (process.platform !== 'win32') expect(result.obsoleteMode).toBe(0o744);
+      expect(result.foreign).toBe('user owned launcher\n');
+      expect(result.linked).toBe(result.cliLauncher);
     }),
   );
 
@@ -1845,25 +1872,30 @@ describe('exact-head development runtime', () => {
             ...baseSystem,
             environment: () => ({
               ...baseSystem.environment(),
+              DOCKER_CONFIG: path.join(root, 'docker'),
               THREADNOTE_BIN_DIR: binRoot,
+              THREADNOTE_HOME: path.join(root, 'home'),
               THREADNOTE_INSTALL_ROOT: installRoot,
             }),
           });
-          const [cliLauncher, mcpLauncher, priorCli] = yield* Effect.all([
+          const [cliLauncher, mcpLauncher, obsoleteLauncher, priorCli, priorObsolete] = yield* Effect.all([
             commandLauncherPath('cli'),
             commandLauncherPath('mcp'),
+            commandLauncherPath('credential-auth0-m2m'),
             renderCommandShim(priorReleaseRoot, 'cli'),
+            renderCommandShim(priorReleaseRoot, 'credential-auth0-m2m'),
           ]).pipe(Effect.provideService(SystemInfo, testSystem));
           yield* fs.makeDirectory(binRoot, {recursive: true});
           yield* fs.writeFileString(cliLauncher, priorCli, {mode: 0o755});
           yield* fs.writeFileString(mcpLauncher, 'unmanaged launcher\n', {mode: 0o755});
+          yield* fs.writeFileString(obsoleteLauncher, priorObsolete, {mode: 0o755});
           const rollbackAttempts: string[] = [];
           const failingFileSystem = FileSystem.FileSystem.of({
             ...fs,
             rename: (source, target) => {
               if (source.endsWith('.rollback')) {
                 rollbackAttempts.push(target);
-                if (target === cliLauncher || target === mcpLauncher) {
+                if (target === cliLauncher || target === obsoleteLauncher) {
                   return fs.rename(path.join(root, `injected-missing-${path.basename(target)}`), target);
                 }
               }

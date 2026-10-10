@@ -115,11 +115,13 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
       ];
       const installEnvironment = {
         ...process.env,
+        DOCKER_CONFIG: join(userHome, '.docker'),
         HOME: userHome,
         LOCALAPPDATA: join(userHome, 'AppData', 'Local'),
         PATH: [powerShellDirectory, join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')].join(delimiter),
         THREADNOTE_BIN_DIR: binRoot,
         THREADNOTE_INSTALL_ROOT: installRoot,
+        THREADNOTE_HOME: join(userHome, '.threadnote'),
         THREADNOTE_RELEASE_DOWNLOAD_ROOT: `http://127.0.0.1:${server.port}`,
         THREADNOTE_RELEASE_SOURCE: `http://127.0.0.1:${server.port}/releases`,
         USERPROFILE: userHome,
@@ -208,11 +210,9 @@ windowsIt('PowerShell bootstrap verifies and installs the standalone Bun release
         },
       });
       expect(launcherVersion.stdout).toContain(packageManifest.version);
-      const publisherLauncher = await readFile(
-        join(binRoot, 'docker-credential-threadnote-auth0-publisher-m2m.cmd'),
-        'utf8',
-      );
-      expect(publisherLauncher).toContain('__credential-registry-auth0-publisher-m2m %*');
+      await expect(stat(join(binRoot, 'docker-credential-threadnote-auth0-publisher-m2m.cmd'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
       const posixLauncher = join(binRoot, 'threadnote');
       const posixMcpLauncher = join(binRoot, 'threadnote-mcp-server');
       const posixLauncherContent = await readFile(posixLauncher, 'utf8');

@@ -1,5 +1,8 @@
 import {Console, Effect} from 'effect';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
+import {captureConsole} from '../../effect/console.js';
+import {commandShimCheck, installCommandShim} from '../../command-shim.js';
+import {isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {graphSharingFailure} from '@threadnote/graph/sharing/errors';
 import {
@@ -408,6 +411,12 @@ export const runRegistryOAuthConfigureCommand = Effect.fn('codeGraph.sharing.reg
     },
     {profile: selection.profile},
   );
+  if (isStandaloneThreadnoteBuild()) {
+    yield* captureConsole(installCommandShim(false, undefined, config.agentContextHome));
+    const launcherCheck = yield* commandShimCheck(config.agentContextHome);
+    if (launcherCheck.status !== 'ok')
+      return yield* graphSharingFailure('Registry credential launcher is unavailable; run `threadnote repair`.');
+  }
   if (options.json) yield* writeFinalCliOutput(JSON.stringify(result));
   else
     yield* Console.log('Configured the public OAuth registry reader. Run `threadnote graph auth registry login` once.');

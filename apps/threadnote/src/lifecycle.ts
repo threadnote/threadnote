@@ -221,7 +221,7 @@ export const collectDoctorChecks = Effect.fn('lifecycle.collectDoctorChecks')(fu
       status: 'ok',
     },
   ];
-  checks.push(yield* safeDoctorCheck('threadnote shim', commandShimCheck()));
+  checks.push(yield* safeDoctorCheck('threadnote shim', commandShimCheck(config.agentContextHome)));
   checks.push(yield* safeDoctorCheck('standalone process lifecycle', legacyProcessDoctorCheck(config)));
   checks.push(
     yield* safeDoctorCheck(
@@ -360,7 +360,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
       Effect.gen(function* () {
         yield* activateStandaloneRelease(releaseRoot, dryRun);
         yield* applyLegacyInstallationCleanup(legacyCleanup, dryRun);
-        yield* installCommandShim(dryRun);
+        yield* installCommandShim(dryRun, undefined, config.agentContextHome);
       }),
       dryRun,
     );
