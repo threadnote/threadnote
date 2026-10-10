@@ -394,7 +394,7 @@ export const docsSections: DocsSection[] = [
         body: [
           {
             type: 'paragraph',
-            text: 'Threadnote gives [supported coding-agent environments](/agents/) a shared source of project context. A coding-agent environment is the editor, CLI, or hosted integration where an agent works; the catalog calls that declared integration a surface. Before a task, Threadnote finds the reviewed decisions, unfinished work, and current code that matter. After the task, it asks which new lessons are worth keeping. Private work and code indexes stay local; Git-backed team reuse is optional.',
+            text: 'For hosted personal memory, follow [Personal Codex Cloud setup](/docs/#personal-codex-cloud) or [Personal Cursor Cloud setup](/docs/#personal-cursor-cloud). Threadnote gives [supported coding-agent environments](/agents/) a shared source of project context. A coding-agent environment is the editor, CLI, or hosted integration where an agent works; the catalog calls that declared integration a surface. Before a task, Threadnote finds the reviewed decisions, unfinished work, and current code that matter. After the task, it asks which new lessons are worth keeping. Private work and code indexes stay local; Git-backed team reuse is optional.',
           },
           {
             type: 'list',

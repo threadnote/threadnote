@@ -75,7 +75,8 @@ describe('agents CLI', () => {
       readonly version: number;
     };
     expect(catalog.version).toBe(1);
-    expect(catalog.agents).toHaveLength(27);
+    expect(catalog.agents).toHaveLength(28);
+    expect(catalog.agents.find(agent => agent.id === 'codex-cloud')?.projectGuidance.status).toBe('unsupported');
     expect(catalog.agents.some(agent => agent.id === 'gemini-cli')).toBe(true);
     expect(catalog.agents.find(agent => agent.id === 'gemini-cli')?.projectGuidance).toEqual({
       status: 'managed',

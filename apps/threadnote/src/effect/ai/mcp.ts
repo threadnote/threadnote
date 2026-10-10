@@ -247,6 +247,10 @@ export interface McpRegistrationLayerOptions {
   readonly productionLogHome?: string;
 }
 
+class ToolInvocationError extends Schema.TaggedError<ToolInvocationError>()('ToolInvocationError', {
+  message: Schema.String,
+}) {}
+
 export class EffectMcpServerRegistry {
   readonly #resourceTemplates: RegisteredResourceTemplate[] = [];
   readonly #tools: RegisteredTool[] = [];
@@ -266,6 +270,23 @@ export class EffectMcpServerRegistry {
 
   registerResourceTemplate(definition: ResourceTemplateDefinition, handle: ResourceTemplateHandler): void {
     this.#resourceTemplates.push({definition, handle});
+  }
+
+  /** Invoke the same validated application handler without starting an MCP transport. */
+  invokeTool(name: string, args: Record<string, unknown>) {
+    const registration = this.#tools.find(tool => tool.name === name);
+    return Effect.gen(function* () {
+      if (!registration) return yield* ToolInvocationError.make({message: `Unknown memory operation: ${name}`});
+      const services = yield* Effect.context<ApplicationServices>();
+      return yield* toolHandlerEffect(
+        () =>
+          registration.handle(args, {
+            progress: DISABLED_MCP_TOOL_PROGRESS,
+            requestContext: {transport: 'stdio'},
+          }),
+        services,
+      ).pipe(Effect.map(mcpCallToolResultWithTelemetryMetadata));
+    });
   }
 
   registrationLayer(

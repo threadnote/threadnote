@@ -1,5 +1,6 @@
 import {Effect, FileSystem, Path, PlatformError} from 'effect';
 import {DEFAULT_ACCOUNT, DEFAULT_AGENT_ID, USER_MANIFEST_NAME} from './constants.js';
+import {CodexCloudError, readCodexCloudProfile, sameCloudIdentity} from './codex/profile.js';
 import {readCursorCloudIdentityProfile} from './cursor/profile.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {toolRoot} from '@threadnote/workspace/installation';
@@ -22,6 +23,15 @@ export const getRuntimeConfig = Effect.fn('runtime.getRuntimeConfig')(function* 
   const environment = system.environment();
   const threadnoteHome = yield* expandPath(options.home ?? environment.THREADNOTE_HOME ?? '~/.threadnote');
   const cursorCloudProfile = yield* readCursorCloudIdentityProfile(threadnoteHome);
+  const codexCloudProfile = yield* readCodexCloudProfile(threadnoteHome);
+  if (cursorCloudProfile && codexCloudProfile && !sameCloudIdentity(cursorCloudProfile, codexCloudProfile)) {
+    return yield* CodexCloudError.make({
+      message:
+        'Cursor and Codex Cloud profiles have conflicting identities. Use a separate THREADNOTE_HOME for each identity.',
+    });
+  }
+  const cloudProfile = cursorCloudProfile ?? codexCloudProfile;
+  const cloudSource = cursorCloudProfile ? ('cursor-cloud-profile' as const) : ('codex-cloud-profile' as const);
   const configuredManifest = manifestOverride ?? options.manifest ?? environment.THREADNOTE_MANIFEST;
   const selectedManifest = configuredManifest ?? (yield* defaultManifestPath(threadnoteHome));
   const manifestPath = yield* expandPath(selectedManifest);
@@ -34,22 +44,14 @@ export const getRuntimeConfig = Effect.fn('runtime.getRuntimeConfig')(function* 
   const environmentAgentId = environment.THREADNOTE_AGENT_ID;
   const environmentUser = environment.THREADNOTE_USER;
   return {
-    account: environment.THREADNOTE_ACCOUNT ?? cursorCloudProfile?.account ?? DEFAULT_ACCOUNT,
+    account: environment.THREADNOTE_ACCOUNT ?? cloudProfile?.account ?? DEFAULT_ACCOUNT,
     agentContextHome: threadnoteHome,
-    agentId: environmentAgentId ?? cursorCloudProfile?.agentId ?? DEFAULT_AGENT_ID,
-    agentIdSource: environmentAgentId
-      ? ('environment' as const)
-      : cursorCloudProfile
-        ? ('cursor-cloud-profile' as const)
-        : ('system' as const),
+    agentId: environmentAgentId ?? cloudProfile?.agentId ?? DEFAULT_AGENT_ID,
+    agentIdSource: environmentAgentId ? ('environment' as const) : cloudProfile ? cloudSource : ('system' as const),
     manifestPath,
     manifestSource,
-    user: environmentUser ?? cursorCloudProfile?.user ?? system.userName,
-    userSource: environmentUser
-      ? ('environment' as const)
-      : cursorCloudProfile
-        ? ('cursor-cloud-profile' as const)
-        : ('system' as const),
+    user: environmentUser ?? cloudProfile?.user ?? system.userName,
+    userSource: environmentUser ? ('environment' as const) : cloudProfile ? cloudSource : ('system' as const),
   };
 });
 

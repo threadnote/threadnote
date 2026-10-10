@@ -12,6 +12,7 @@ import {errorMessage} from '@threadnote/platform/errors';
 import {resolveWorkspaceRepoName} from '../../utils.js';
 import {
   EffectMcpServerAdapter,
+  EffectMcpServerRegistry,
   McpInput,
   type McpProgressUpdate,
   type McpToolProgress,
@@ -146,7 +147,6 @@ import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 function stringList(value: string | readonly string[] | undefined): readonly string[] {
   return typeof value === 'string' ? [value] : (value ?? []);
 }
-
 function commonCitationSourceCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
   const commits = new Set(citations.map(citation => citation.sourceCommit));
   return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
@@ -827,15 +827,15 @@ function withOptionalCandidateReviewLock<A, E, R>(
   const locked = withCandidateReviewLock(agentContextHome, reviewId, effect);
   return lockHeld ? (effect as typeof locked) : locked;
 }
-
 export function registerSearchTool(
-  server: EffectMcpServerAdapter,
+  server: EffectMcpServerRegistry,
   config: RuntimeConfig,
   name: string,
   description: string,
   progressTiming: RecallProgressTiming,
   memoryScope?: CursorCloudMemoryScope,
 ): void {
+  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
   server.registerTool(
     name,
     {
@@ -864,7 +864,7 @@ export function registerSearchTool(
           minimum: 0,
           maximum: 1,
         }),
-        ...(memoryScope ? {team: McpInput.string('Configured Personal Cursor Cloud share')} : {}),
+        ...(memoryScope ? {team: McpInput.string(`Configured ${profileLabel} share`)} : {}),
         workset: McpInput.string('Named workset'),
       },
     },
@@ -892,7 +892,7 @@ export function registerSearchTool(
         return checkedUri.error;
       }
       if (workset?.trim() && memoryScope) {
-        return argumentError(`${name} does not allow worksets in the Cursor Cloud profile.`);
+        return argumentError(`${name} does not allow worksets in the ${memoryScope?.label ?? 'Cursor Cloud'} profile.`);
       }
       let memoryConnections: ParsedRecallMemoryConnectionInput | undefined;
       try {
@@ -934,8 +934,8 @@ export function registerSearchTool(
       }
       const uriShare =
         memoryScope && checkedUri.value ? cursorCloudShareForUri(memoryScope, checkedUri.value) : undefined;
-      if (memoryScope && checkedUri.value && !uriShare) {
-        return argumentError(`${name} uri must stay within a configured Personal Cursor Cloud share.`);
+      if (memoryScope && checkedUri.value && !cursorCloudUriWithinScope(memoryScope, checkedUri.value)) {
+        return argumentError(`${name} uri must stay within a configured ${profileLabel} share.`);
       }
       if (selectedShare && uriShare && selectedShare.team !== uriShare.team) {
         return argumentError(`${name} team must match the share containing uri.`);
@@ -945,7 +945,7 @@ export function registerSearchTool(
         selectedShare?.root ??
         (memoryScope?.shares.length === 1 ? memoryScope.shares[0].root : undefined);
       if (scopedUri && memoryScope && !cursorCloudUriWithinScope(memoryScope, scopedUri)) {
-        return argumentError(`${name} uri must stay within a configured Personal Cursor Cloud share.`);
+        return argumentError(`${name} uri must stay within a configured ${profileLabel} share.`);
       }
       return runRecallTool(
         config,
@@ -1355,12 +1355,13 @@ const referencedContextSection = Effect.fn('mcpServer.referencedContext')(functi
   return formatReferencedContextPointers(existingReferencedUris(candidates, existingRecords), MAX_REFERENCED_CONTEXT);
 });
 export function registerReadTool(
-  server: EffectMcpServerAdapter,
+  server: EffectMcpServerRegistry,
   config: RuntimeConfig,
   name: string,
   description: string,
   memoryScope?: CursorCloudMemoryScope,
 ): void {
+  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
   server.registerTool(
     name,
     {
@@ -1397,7 +1398,7 @@ export function registerReadTool(
             )
           : undefined;
         if (outsideScope) {
-          return argumentError(`${name} uri must stay within a configured Personal Cursor Cloud share.`);
+          return argumentError(`${name} uri must stay within a configured ${profileLabel} share.`);
         }
         const requestedShares = memoryScope
           ? requestedUris.map(requestedUri =>
@@ -1456,7 +1457,7 @@ export function registerReadTool(
           ? canonicalRead?.resources.find(resource => !cursorCloudUriWithinScope(memoryScope, resource.canonicalUri))
           : undefined;
         if (relocatedOutsideScope) {
-          return argumentError(`${name} relocated uri must stay within a configured Personal Cursor Cloud share.`);
+          return argumentError(`${name} relocated uri must stay within a configured ${profileLabel} share.`);
         }
         const projected = Result.try(() =>
           projectMemoryRead(resources, {

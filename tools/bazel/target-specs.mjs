@@ -591,6 +591,7 @@ export const targetSpecs = [
       'apps/website/faq',
       'assets/brand',
       'config/agent-profiles/cursor-cloud-personal',
+      'config/agent-profiles/codex-cloud-personal',
     ],
     data: [
       '.github/workflows/ci.yml',

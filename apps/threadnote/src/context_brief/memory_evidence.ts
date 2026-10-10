@@ -21,6 +21,7 @@ import {
 } from '../memory/deferred/code_anchor.js';
 
 import {isMemoryId} from '@threadnote/memory/identity-alias';
+import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 
 import {
   expireRecallIndexValidation,
@@ -125,10 +126,11 @@ function projectlessOnlyRecallEligibility(policy: RecallEligibilityPolicy): Reca
 export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrieveMemoryEvidence')(function* (
   config: RuntimeConfig,
   plan: ContextBriefPlanV1['memory'],
+  allowedUriScopes: readonly string[] = [contextBriefMemoryUriScope(config.user)],
 ) {
   const scopedEligibility = yield* contextBriefMemoryEligibility(config, plan.scope, plan.query);
   const index = yield* loadRecallIndexData(config, {
-    allowedUriScopes: [contextBriefMemoryUriScope(config.user)],
+    allowedUriScopes,
     eligibility: scopedEligibility.policy,
     includeInactive: false,
     limit: Math.max(plan.candidateLimit, plan.candidateLimit * MEMORY_RETRIEVAL_MULTIPLIER),
@@ -148,6 +150,7 @@ export const retrieveContextBriefMemoryEvidence = Effect.fn('contextBrief.retrie
     plan.candidateLimit,
     new Map(),
     plan.requireResolvableMemoryIdentity,
+    allowedUriScopes,
   );
   const candidates = read.candidates;
   return {
@@ -168,6 +171,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     config: RuntimeConfig,
     plan: ContextBriefPlanV1['codeAnchors'],
     options: {
+      readonly allowedUriScopes?: readonly string[];
       /** @internal Privacy-safe receipts for diagnosing first-read recovery. */
       readonly onFinalizationReceipt?: (receipt: DeferredCodeAnchorRouteFinalizationReceiptV1) => void;
     } = {},
@@ -253,9 +257,10 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     const resolvedOrdinals = resolvedAnchors.map(anchor => anchor.anchorOrdinal);
     const identity = yield* resolveRepositoryIdentity(callerCwd).pipe(Effect.option);
     const attemptedUris: string[] = [];
-    let finalizationUnavailable = identity._tag === 'None';
+    // Scoped cloud reads must not finalize pending memories outside their share boundary.
+    let finalizationUnavailable = options.allowedUriScopes === undefined && identity._tag === 'None';
     let refreshAfterContention = false;
-    if (identity._tag === 'Some') {
+    if (identity._tag === 'Some' && options.allowedUriScopes === undefined) {
       let remainingLimit = CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT;
       for (let pass = 0; pass < CONTEXT_BRIEF_DEFERRED_CODE_ANCHOR_FINALIZE_PASSES; pass++) {
         const previousAttemptCount = attemptedUris.length;
@@ -311,7 +316,7 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     const forceRecallRefresh = refreshAfterContention || invalidationFailed;
     let truncatedSelectorCount = 0;
     const linked = yield* loadRecallCodeLinks(config, {
-      allowedUriScopes: [contextBriefMemoryUriScope(config.user)],
+      allowedUriScopes: options.allowedUriScopes ?? [contextBriefMemoryUriScope(config.user)],
       anchors: resolvedAnchors.map(resolved => resolved.anchor),
       eligibility: scopedEligibility.policy,
       ...(forceRecallRefresh ? {forceRefresh: true} : {}),
@@ -339,7 +344,14 @@ export const retrieveContextBriefCodeLinkedMemoryEvidence = Effect.fn('contextBr
     );
     const rankedUris = [...matchesByUri.keys()];
     const readCandidatesResult = yield* Effect.result(
-      readContextBriefMemoryCandidates(config, rankedUris, plan.candidateLimit, matchesByUri, true),
+      readContextBriefMemoryCandidates(
+        config,
+        rankedUris,
+        plan.candidateLimit,
+        matchesByUri,
+        true,
+        options.allowedUriScopes,
+      ),
     );
     if (Result.isFailure(readCandidatesResult)) {
       return unavailableContextBriefCodeLinkedMemoryEvidenceAfterCapture(
@@ -416,8 +428,10 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
   limit: number,
   codeLinkMatchesByUri: ReadonlyMap<string, NonNullable<ContextBriefMemoryCandidateV1['codeLinkMatches']>> = new Map(),
   requireResolvableMemoryIdentity = false,
+  allowedUriScopes: readonly string[] = [contextBriefMemoryUriScope(config.user)],
 ) {
-  const records = yield* readMemoryRecordsByUri(config, rankedUris);
+  const scopedUris = rankedUris.filter(uri => allowedUriScopes.some(scope => resourceIdIsWithin(uri, scope)));
+  const records = yield* readMemoryRecordsByUri(config, scopedUris);
   const recordsByUri = new Map(records.map(record => [record.uri, record]));
   const memoryIds = [
     ...new Set(
@@ -428,7 +442,6 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
       ),
     ),
   ];
-  const allowedUriScopes = [contextBriefMemoryUriScope(config.user)];
   const identityCandidates =
     requireResolvableMemoryIdentity && memoryIds.length > 0
       ? yield* loadRecallMemoryIdentities(config, {allowedUriScopes, memoryIds})
@@ -441,7 +454,7 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
   const candidates: ContextBriefMemoryCandidateV1[] = [];
   const seen = new Set<string>();
   let stableIdentityUnavailable = false;
-  for (const uri of rankedUris) {
+  for (const uri of scopedUris) {
     if (seen.has(uri)) continue;
     seen.add(uri);
     const record = recordsByUri.get(uri);

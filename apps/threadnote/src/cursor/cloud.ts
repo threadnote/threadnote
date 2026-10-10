@@ -129,6 +129,8 @@ export interface CursorCloudShareScope {
 
 export interface CursorCloudMemoryScope {
   readonly mode: 'shared-read-write';
+  readonly label?: string;
+  readonly localReadRoots?: readonly string[];
   readonly shares: readonly CursorCloudShareScope[];
 }
 
@@ -211,7 +213,7 @@ export function normalizeCursorCloudTeams(teams: string | readonly string[] | un
 }
 
 export function cursorCloudScopeRoots(scope: CursorCloudMemoryScope): readonly string[] {
-  return scope.shares.map(share => share.root);
+  return [...scope.shares.map(share => share.root), ...(scope.localReadRoots ?? [])];
 }
 
 export function cursorCloudScopeTeams(scope: CursorCloudMemoryScope): readonly string[] {
@@ -232,7 +234,7 @@ export function cursorCloudShareForUri(scope: CursorCloudMemoryScope, uri: strin
 }
 
 export function cursorCloudUriWithinScope(scope: CursorCloudMemoryScope, uri: string): boolean {
-  return cursorCloudShareForUri(scope, uri) !== undefined;
+  return cursorCloudScopeRoots(scope).some(root => resourceIdIsWithin(uri, root));
 }
 
 export function cursorCloudMemoryScopeReceipt(scope: CursorCloudMemoryScope) {
@@ -415,7 +417,7 @@ export function cursorCloudRuntimeConfig(
   };
 }
 
-export function credentialFreeGitRemote(remote: string): string {
+export function credentialFreeGitRemote(remote: string, provider = 'Cursor Cloud'): string {
   const normalized = remote.trim();
   const hasForbiddenCharacter = [...normalized].some(character => {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -423,7 +425,7 @@ export function credentialFreeGitRemote(remote: string): string {
   });
   if (!normalized || hasForbiddenCharacter) {
     throw CursorCloudOperationError.make({
-      message: 'The Cursor Cloud memory remote must be a non-empty URL without whitespace.',
+      message: `The ${provider} memory remote must be a non-empty URL without whitespace.`,
     });
   }
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized)) {
@@ -431,12 +433,11 @@ export function credentialFreeGitRemote(remote: string): string {
     try {
       parsed = new URL(normalized);
     } catch {
-      throw CursorCloudOperationError.make({message: 'The Cursor Cloud memory remote must be a valid Git URL.'});
+      throw CursorCloudOperationError.make({message: `The ${provider} memory remote must be a valid Git URL.`});
     }
     if (parsed.username || parsed.password || parsed.search || parsed.hash) {
       throw CursorCloudOperationError.make({
-        message:
-          'The Cursor Cloud memory remote must not contain embedded credentials, query parameters, or fragments; configure authentication in Cursor or the Git provider.',
+        message: `The ${provider} memory remote must not contain embedded credentials, query parameters, or fragments; configure authentication in the environment or Git credential provider.`,
       });
     }
   }
@@ -447,12 +448,13 @@ export function planCursorCloudBootstrap(
   teamsFile: ShareTeamsFile,
   requestedRemote: string,
   requestedTeam = DEFAULT_CURSOR_CLOUD_IDENTITY,
+  provider = 'Cursor Cloud',
 ): CursorCloudBootstrapPlan {
   const team = normalizeTeamName(requestedTeam);
-  const remote = credentialFreeGitRemote(requestedRemote);
+  const remote = credentialFreeGitRemote(requestedRemote, provider);
   const existing = teamsFile.teams[team];
   if (!existing) return {action: 'initialize', remote, team};
-  assertEquivalentWritableTeam(existing, remote, team);
+  assertEquivalentWritableTeam(existing, remote, team, provider);
   return {action: 'reuse', remote, team};
 }
 
@@ -904,20 +906,20 @@ function cursorCloudDefaultIdentity(
   return source === 'cursor-cloud-profile' || source === 'environment' ? configured : DEFAULT_CURSOR_CLOUD_IDENTITY;
 }
 
-function assertEquivalentWritableTeam(existing: ShareTeamConfig, remote: string, team: string): void {
+function assertEquivalentWritableTeam(existing: ShareTeamConfig, remote: string, team: string, provider: string): void {
   if (existing.remote.trim() !== remote) {
     throw CursorCloudOperationError.make({
-      message: `Cursor Cloud memory team "${team}" already uses a different remote. Review it with threadnote share status before changing configuration.`,
+      message: `${provider} memory team "${team}" already uses a different remote. Review it with threadnote share status before changing configuration.`,
     });
   }
   if (shareTeamAccess(existing) !== 'read-write') {
     throw CursorCloudOperationError.make({
-      message: `Cursor Cloud memory team "${team}" is not read-write. Change it explicitly with threadnote share set-access before retrying.`,
+      message: `${provider} memory team "${team}" is not read-write. Change it explicitly with threadnote share set-access before retrying.`,
     });
   }
 }
 
-const configuredTeamChecks = Effect.fn('cursorCloud.configuredTeamChecks')(function* (
+export const configuredTeamChecks = Effect.fn('cursorCloud.configuredTeamChecks')(function* (
   fs: FileSystem.FileSystem,
   configured: ShareTeamConfig,
   team: string,

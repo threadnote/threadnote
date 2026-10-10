@@ -1,6 +1,6 @@
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {Console, Effect, Schema} from 'effect';
-import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
+import {EffectMcpServerRegistry, EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {enrichMemoryMetadataWithConfiguredLocalAi} from '../../effect/ai/enrichment.js';
 import {isInSharedNamespace, sharedTeamNameForUri} from '../../share/index.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
@@ -49,12 +49,13 @@ import {
 import {readMemoryRecordsByUri, writeCursorCloudSharedMemory, writeDurableMemory} from './memory.js';
 
 export function registerStoreTool(
-  server: EffectMcpServerAdapter,
+  server: EffectMcpServerRegistry,
   config: RuntimeConfig,
   name: string,
   description: string,
   memoryScope?: CursorCloudMemoryScope,
 ): void {
+  const profileLabel = memoryScope?.label ?? 'Personal Cursor Cloud';
   const handoffDescription =
     name === 'remember_context'
       ? ' Handoff: task; decisions/invariants; verification; blockers/risks; next_step. CodeRefs enable compact resume. Skip Knowledge Delta review.'
@@ -98,7 +99,7 @@ export function registerStoreTool(
         text: McpInput.string(),
         sourceAgentClient: McpInput.string(),
         status: McpInput.literals(['active', 'archived', 'expired', 'superseded']),
-        ...(memoryScope ? {team: McpInput.string('Target Personal Cursor Cloud share for durable memory')} : {}),
+        ...(memoryScope ? {team: McpInput.string(`Target ${profileLabel} share for durable memory`)} : {}),
         topic: McpInput.string(),
       },
     },
@@ -145,7 +146,7 @@ export function registerStoreTool(
             return argumentError(`${name} team must be one of: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`);
           }
           if (memoryKind === 'durable' && checkedReplaceUri.value && !replaceShare) {
-            return argumentError(`${name} replaceUri must stay within a configured Personal Cursor Cloud share.`);
+            return argumentError(`${name} replaceUri must stay within a configured ${profileLabel} share.`);
           }
           if (teamShare && replaceShare && teamShare.team !== replaceShare.team) {
             return argumentError(`${name} team must match the share containing replaceUri.`);
@@ -156,13 +157,13 @@ export function registerStoreTool(
         }
         if (memoryKind === 'durable' && !selectedShare) {
           return argumentError(
-            `${name} requires team when several Personal Cursor Cloud shares are configured: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`,
+            `${name} requires team when several ${profileLabel} shares are configured: ${cursorCloudScopeTeams(memoryScope).join(', ')}.`,
           );
         }
       }
       if (memoryScope && memoryKind !== 'durable' && memoryKind !== 'handoff') {
         return argumentError(
-          `${name} supports durable shared memories and transient local handoffs in the Cursor Cloud profile.`,
+          `${name} supports durable shared memories and transient local handoffs in the ${memoryScope?.label ?? 'Cursor Cloud'} profile.`,
         );
       }
       if (memoryScope) {
@@ -173,7 +174,7 @@ export function registerStoreTool(
         );
         if (outsideReference) {
           return argumentError(
-            `${name} references must stay within ${memoryKind === 'durable' ? `the selected share ${selectedShare!.team}` : 'the configured Personal Cursor Cloud shares'}.`,
+            `${name} references must stay within ${memoryKind === 'durable' ? `the selected share ${selectedShare!.team}` : `the configured ${profileLabel} shares`}.`,
           );
         }
         const handoffRoot = `threadnote://user/${uriSegment(config.user)}/memories/handoffs`;

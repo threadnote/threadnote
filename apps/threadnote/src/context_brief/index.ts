@@ -56,6 +56,7 @@ export interface ContextBriefRuntimeCompilerSources<
 
 /** Internal compiler controls for reviewed callers; never part of the Context Brief request schema. */
 interface ContextBriefCompilerOptions {
+  readonly allowedMemoryUriScopes?: readonly string[];
   readonly codeLinkedMemoryOnly?: boolean;
   readonly includeProcedureEvidence?: boolean;
   readonly projection?: (
@@ -215,7 +216,10 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
             retrieveContextBriefGraphEvidence(config, graphPlan, request =>
               retrieveContextBriefSourceEvidence(request),
             ),
-          codeLinkedMemoryEvidence: codePlan => retrieveContextBriefCodeLinkedMemoryEvidence(config, codePlan),
+          codeLinkedMemoryEvidence: codePlan =>
+            retrieveContextBriefCodeLinkedMemoryEvidence(config, codePlan, {
+              allowedUriScopes: options.allowedMemoryUriScopes,
+            }),
           memoryEvidence: memoryPlan =>
             options.codeLinkedMemoryOnly
               ? Effect.succeed({
@@ -224,7 +228,7 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
                   gaps: [],
                   trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
                 } satisfies ContextBriefMemoryRetrievalV1)
-              : retrieveContextBriefMemoryEvidence(config, memoryPlan),
+              : retrieveContextBriefMemoryEvidence(config, memoryPlan, options.allowedMemoryUriScopes),
           procedureEvidence: plan =>
             options.includeProcedureEvidence === false
               ? Effect.succeed({gaps: [], procedures: []})
@@ -290,6 +294,18 @@ export const compileContextBrief = Effect.fn('contextBrief.compile')(function* (
   input: ContextBriefRequestV1 | unknown,
 ) {
   return yield* compileContextBriefRuntime(config, input);
+});
+
+/** Cloud callers supply their validated share roots; unscoped procedure discovery stays disabled. */
+export const compileScopedContextBrief = Effect.fn('contextBrief.compileScoped')(function* (
+  config: RuntimeConfig,
+  input: ContextBriefRequestV1 | unknown,
+  allowedMemoryUriScopes: readonly string[],
+) {
+  return yield* compileContextBriefRuntime(config, input, {
+    allowedMemoryUriScopes,
+    includeProcedureEvidence: false,
+  });
 });
 
 /** Compile through the normal runtime evidence boundaries with one reviewed private projection. */

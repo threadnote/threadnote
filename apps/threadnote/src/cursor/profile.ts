@@ -1,6 +1,7 @@
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {validatePortableSegment} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {readCodexCloudProfile, sameCloudIdentity} from '../codex/profile.js';
 
 export const CURSOR_CLOUD_PROFILE_VERSION = 1 as const;
 
@@ -52,6 +53,12 @@ export const readCursorCloudIdentityProfile = Effect.fn('cursorCloud.readIdentit
 export const persistCursorCloudIdentityProfile = Effect.fn('cursorCloud.persistIdentityProfile')(function* (
   config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'agentId' | 'user'>,
 ) {
+  const codexProfile = yield* readCodexCloudProfile(config.agentContextHome);
+  if (codexProfile && !sameCloudIdentity(codexProfile, config)) {
+    return yield* CursorCloudIdentityProfileError.make({
+      message: 'This Threadnote home has a conflicting Codex Cloud identity. Use a separate THREADNOTE_HOME.',
+    });
+  }
   const existing = yield* readCursorCloudIdentityProfile(config.agentContextHome);
   const profile = cursorCloudIdentityProfile(config);
   if (existing) {

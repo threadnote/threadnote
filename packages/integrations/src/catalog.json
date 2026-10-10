@@ -34,6 +34,49 @@
       }
     },
     {
+      "id": "codex-cloud",
+      "agentId": "codex",
+      "displayName": "Codex Cloud (personal memory and graph)",
+      "tier": "manual",
+      "aliases": [],
+      "scopes": ["user"],
+      "platforms": ["linux"],
+      "capabilities": {
+        "mcp": {
+          "status": "unsupported",
+          "reason": "This profile uses scoped CLI commands; native hosted MCP registration is outside its contract."
+        },
+        "instructions": {
+          "status": "managed"
+        },
+        "skills": {
+          "status": "managed"
+        },
+        "hooks": {
+          "status": "unsupported",
+          "reason": "Startup uses the published environment Start skill, not desktop hooks."
+        }
+      },
+      "projectGuidance": {
+        "status": "unsupported",
+        "reason": "Bootstrap manages user-level cloud guidance; repository instructions remain authoritative."
+      },
+      "officialDocs": [
+        "https://learn.chatgpt.com/docs/environments/cloud-environments",
+        "https://learn.chatgpt.com/docs/build-skills"
+      ],
+      "lastVerified": "2026-10-05",
+      "caveats": [
+        "Requires a published environment, a configured Start skill, and private Git clone/push access.",
+        "Only local fixtures have been verified; a real published-environment cross-task smoke remains required."
+      ],
+      "setup": [
+        "Run threadnote cloud codex bootstrap --remote <credential-free-url> --team <name> --cwd <absolute-checkout> in the Install script.",
+        "Use the installed threadnote-start-skill.md as the Start skill and publish the environment."
+      ],
+      "verification": "Run cloud codex start --cwd <absolute-checkout> and verify --cwd <absolute-checkout> --json in a fresh task; confirm three skills load, query the local structural graph, and recall/read a durable write from a second fresh task."
+    },
+    {
       "id": "claude-code",
       "agentId": "claude",
       "displayName": "Claude Code",

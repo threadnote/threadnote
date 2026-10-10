@@ -62,6 +62,7 @@ bun_test(
         "//apps/threadnote:src/code_graph/query/anonymous_telemetry.ts",
         "//apps/threadnote:src/code_graph/runtime_adapters.ts",
         "//apps/threadnote:src/code_graph/workset/telemetry.ts",
+        "//apps/threadnote:src/codex/profile.ts",
         "//apps/threadnote:src/command-shim.ts",
         "//apps/threadnote:src/constants.ts",
         "//apps/threadnote:src/context_brief/index.ts",

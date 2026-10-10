@@ -1,10 +1,12 @@
+import {codexCloudPersonalDocsArticle} from './docsCodexCloudPersonal.js';
 import type {DocsSection} from './docsTypes.js';
 
 export const cursorCloudPersonalDocsSection: DocsSection = {
   id: 'personal-cloud-agents',
   title: 'Personal cloud agents',
-  description: 'Give your own Cursor Cloud Agents durable Git-backed memory through one personal MCP.',
+  description: 'Give personal Cursor and Codex Cloud agents durable Git-backed memory.',
   articles: [
+    codexCloudPersonalDocsArticle,
     {
       id: 'personal-cursor-cloud',
       title: 'Personal Cursor Cloud setup',
@@ -31,7 +33,7 @@ export const cursorCloudPersonalDocsSection: DocsSection = {
           rows: [
             [
               'Personal saved environment',
-              'Builds the Threadnote binary, Git share checkouts, Cursor rule, and three Agent Skills into the Cloud Agent VM image.',
+              'Builds the Threadnote binary, Git share checkouts, Cursor rule, and two Agent Skills into the Cloud Agent VM image.',
             ],
             [
               'One personal MCP',
@@ -43,7 +45,7 @@ export const cursorCloudPersonalDocsSection: DocsSection = {
             ],
             [
               'Current repository checkout',
-              'Supplies local code-graph evidence. Source code and graph data are not written to the memory repositories.',
+              'Supplies current source for verification. This personal memory profile does not prepare code graphs.',
             ],
           ],
         },
@@ -104,7 +106,7 @@ test -f "$HOME/.cursor/skills/threadnote-memory/SKILL.md"`,
         {type: 'heading', text: 'Why bootstrap installs skills'},
         {
           type: 'paragraph',
-          text: 'Cursor 4.6 discovers user-level skills under `~/.cursor/skills`, but it does not copy the skills from your laptop into Cloud Agents. Personal bootstrap therefore writes a Cloud-safe always-on rule plus `threadnote-context`, `threadnote-code-graph`, and `threadnote-memory` into the VM during the Build. The skills describe the actual personal toolset: multiple bounded shares, explicit write selection, local code graphs, and VM-local handoffs. See [Cursor Agent Skills](https://cursor.com/docs/skills).',
+          text: 'Cursor 4.6 discovers user-level skills under `~/.cursor/skills`, but it does not copy the skills from your laptop into Cloud Agents. Personal bootstrap therefore writes a Cloud-safe always-on rule plus `threadnote-context` and `threadnote-memory` into the VM during the Build. The skills describe the actual personal toolset: multiple bounded shares, explicit write selection and VM-local handoffs. See [Cursor Agent Skills](https://cursor.com/docs/skills).',
         },
         {
           type: 'warning',
@@ -163,7 +165,7 @@ threadnote doctor --dry-run`,
           type: 'list',
           items: [
             'The verification receipt must report status `ok`, version `2`, and both `teams` and `memoryRoots`.',
-            'The MCP tool list must include `recall_context`, `read_context`, `list_context`, `remember_context`, `inspect_code_graph`, and `analyze_code_graph`.',
+            'The MCP tool list must include `recall_context`, `read_context`, `list_context`, `remember_context`. Graph tools are unavailable in this memory-only profile.',
             'Ask the agent to recall a harmless test phrase, store one durable smoke memory with an explicit `team`, read the returned URI, and confirm that commit appears only in the selected Git repository.',
             'Delete or archive the smoke memory through the normal reviewed workflow; never use credentials or production data as a test value.',
           ],

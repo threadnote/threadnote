@@ -1,4 +1,10 @@
-export type RuntimeIdentitySource = 'cursor-cloud-command' | 'cursor-cloud-profile' | 'environment' | 'system';
+export type RuntimeIdentitySource =
+  | 'codex-cloud-command'
+  | 'codex-cloud-profile'
+  | 'cursor-cloud-command'
+  | 'cursor-cloud-profile'
+  | 'environment'
+  | 'system';
 
 export type RuntimeManifestSource = 'bundled-example' | 'configured' | 'user';
 
