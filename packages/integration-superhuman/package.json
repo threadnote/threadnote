@@ -23,7 +23,7 @@
     "./source": "./src/source.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@threadnote/integration-core": "workspace:*",
     "@threadnote/manager": "workspace:*",
     "@threadnote/platform": "workspace:*",
