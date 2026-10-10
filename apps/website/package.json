@@ -9,7 +9,7 @@
     "./site-prepared-metadata": "./tools/site-prepared-metadata.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@threadnote/evidence": "workspace:*",
     "@threadnote/integrations": "workspace:*",
     "@fontsource-variable/jetbrains-mono": "5.3.0",

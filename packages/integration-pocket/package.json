@@ -29,7 +29,7 @@
     "react": "^19.3.0"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@effect/vitest": "4.0.0",
     "@threadnote/integration-runtime": "workspace:*",
     "@threadnote/recall": "workspace:*",

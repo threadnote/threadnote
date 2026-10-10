@@ -168,7 +168,7 @@
     "@threadnote/testing": "workspace:*"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@effect/sql-sqlite-bun": "4.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "effect": "4.0.0",

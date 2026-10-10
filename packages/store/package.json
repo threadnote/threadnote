@@ -19,7 +19,7 @@
     "@threadnote/platform": "workspace:*"
   },
   "devDependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.0.0",
     "vitest": "5.0.1",

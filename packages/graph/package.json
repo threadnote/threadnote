@@ -444,7 +444,7 @@
     "./worktree_reconciliation": "./src/worktree_reconciliation.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.1",
     "@effect/sql-sqlite-bun": "4.0.0",
     "@threadnote/inference": "workspace:*",
     "@threadnote/platform": "workspace:*",
