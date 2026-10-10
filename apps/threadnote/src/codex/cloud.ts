@@ -267,6 +267,8 @@ export const runCodexCloudStart = Effect.fn('codexCloud.start')(function* (
   const profile = yield* requireCodexCloudProfile(config);
   yield* codexCloudMemoryScope(config);
   const cwd = yield* codexCloudGraphCwd(graphCwd);
+  const restored = yield* captureConsoleWithoutProgress(installCodexCloudAgentIntegration(config, false));
+  if (restored.output) yield* Console.error(restored.output);
   const refreshed = yield* captureConsoleWithoutProgress(
     withSharedRepositoryLock(
       config,

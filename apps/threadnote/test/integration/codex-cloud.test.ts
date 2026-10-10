@@ -14,8 +14,9 @@ const gitIdentity = {
   GIT_COMMITTER_NAME: 'Cloud Test',
 };
 
-async function fixture() {
+async function fixture(options: {runtimeCodexHome?: boolean} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'threadnote-codex-cloud-'));
+  const codexHome = options.runtimeCodexHome ? join(root, 'runtime', 'codex-home') : undefined;
   const remote = join(root, 'memory.git');
   const otherRemote = join(root, 'other.git');
   for (const path of [remote, otherRemote]) {
@@ -41,14 +42,14 @@ async function fixture() {
         THREADNOTE_USER: undefined,
         THREADNOTE_AGENT_ID: undefined,
         THREADNOTE_ACCOUNT: undefined,
-        CODEX_HOME: undefined,
+        CODEX_HOME: codexHome,
       },
       maxBuffer: 2 * 1024 * 1024,
     });
   const run = (args: readonly string[], targetHome = home) => cli(['cloud', 'codex', ...args], targetHome);
   const bootstrap = (targetHome = home, team = 'personal', url = remote) =>
     run(['bootstrap', '--remote', url, '--team', team], targetHome);
-  return {root, home, userHome, remote, otherRemote, run, bootstrap, cli};
+  return {root, home, userHome, codexHome, remote, otherRemote, run, bootstrap, cli};
 }
 
 function parsed(stdout: string) {
@@ -362,6 +363,92 @@ describe('Codex Cloud CLI integration', () => {
       await rm(join(f.home, 'cursor-cloud'), {recursive: true});
       await f.bootstrap(f.home, 'docs', f.otherRemote);
       expect(parsed((await f.run(['verify', '--json'])).stdout).shares).toEqual(['docs', 'personal']);
+    } finally {
+      await rm(f.root, {recursive: true, force: true});
+    }
+  }, 90_000);
+
+  it('rehydrates lost Codex Cloud startup artifacts without changing identity, user files, or shared memory', async () => {
+    const f = await fixture({runtimeCodexHome: true});
+    const codexHome = f.codexHome!;
+    const instruction = join(codexHome, 'AGENTS.md');
+    const startSkill = join(codexHome, 'threadnote-start-skill.md');
+    const configToml = join(codexHome, 'config.toml');
+    const customSkill = join(f.userHome, '.agents', 'skills', 'personal', 'SKILL.md');
+    try {
+      await mkdir(codexHome, {recursive: true});
+      await writeFile(configToml, 'model = "user-selected-model"\n');
+      await mkdir(join(f.userHome, '.agents', 'skills', 'personal'), {recursive: true});
+      await writeFile(customSkill, 'User-owned skill.\n');
+      await f.bootstrap();
+      const profile = await readFile(join(f.home, 'codex-cloud', 'profile.json'), 'utf8');
+      const teams = await readFile(join(f.home, 'share', 'teams.json'), 'utf8');
+      const registry = await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8');
+      const sharedHead = (await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim();
+      const persistentSkills = await Promise.all(
+        ['threadnote-context', 'threadnote-code-graph'].map(name =>
+          readFile(join(f.userHome, '.agents', 'skills', name, 'SKILL.md'), 'utf8'),
+        ),
+      );
+
+      await rm(instruction);
+      await rm(startSkill);
+      await expect(f.run(['verify', '--json'])).rejects.toMatchObject({
+        stdout: expect.stringContaining('"status":"fail"'),
+        stderr: expect.stringContaining('verification failed'),
+      });
+      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
+        sharedHead,
+      );
+      await expect(readFile(instruction)).rejects.toMatchObject({code: 'ENOENT'});
+      await expect(readFile(startSkill)).rejects.toMatchObject({code: 'ENOENT'});
+      expect(await readFile(configToml, 'utf8')).toBe('model = "user-selected-model"\n');
+      expect(await readFile(customSkill, 'utf8')).toBe('User-owned skill.\n');
+      expect(await readFile(join(f.home, 'codex-cloud', 'profile.json'), 'utf8')).toBe(profile);
+      expect(await readFile(join(f.home, 'share', 'teams.json'), 'utf8')).toBe(teams);
+      expect(await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8')).toBe(registry);
+      expect(
+        await Promise.all(
+          ['threadnote-context', 'threadnote-code-graph'].map(name =>
+            readFile(join(f.userHome, '.agents', 'skills', name, 'SKILL.md'), 'utf8'),
+          ),
+        ),
+      ).toEqual(persistentSkills);
+
+      const started = parsed((await f.run(['start', '--json'])).stdout);
+      expect(started).toMatchObject({
+        status: 'ok',
+        identity: {user: 'codex-cloud', agentId: 'codex-cloud'},
+        shares: ['personal'],
+      });
+      expect(await readFile(instruction, 'utf8')).toContain('Personal Codex Cloud');
+      expect(await readFile(startSkill, 'utf8')).toContain('--cwd "$PWD"');
+      expect(await readFile(configToml, 'utf8')).toBe('model = "user-selected-model"\n');
+      expect(await readFile(customSkill, 'utf8')).toBe('User-owned skill.\n');
+      expect(await readFile(join(f.home, 'codex-cloud', 'profile.json'), 'utf8')).toBe(profile);
+      expect(await readFile(join(f.home, 'share', 'teams.json'), 'utf8')).toBe(teams);
+      const restoredRegistry = await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8');
+      expect(JSON.parse(restoredRegistry).hosts.codex).toMatchObject({
+        mcp: {artifactProfile: 'codex-cloud-personal', hostRoot: codexHome, transport: 'cli'},
+        status: 'current',
+      });
+      const restoredFiles = await Promise.all([readFile(instruction, 'utf8'), readFile(startSkill, 'utf8')]);
+      expect(parsed((await f.run(['start', '--json'])).stdout).status).toBe('ok');
+      expect(await Promise.all([readFile(instruction, 'utf8'), readFile(startSkill, 'utf8')])).toEqual(restoredFiles);
+      expect(await readFile(join(f.home, 'integrations', 'agents.json'), 'utf8')).toBe(restoredRegistry);
+      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
+        sharedHead,
+      );
+
+      await rm(startSkill);
+      await writeFile(startSkill, 'Unowned Codex Cloud file.\n');
+      await expect(f.run(['start', '--json'])).rejects.toMatchObject({
+        stderr: expect.stringContaining('not managed by Threadnote'),
+      });
+      expect(await readFile(startSkill, 'utf8')).toBe('Unowned Codex Cloud file.\n');
+      expect((await exec('git', ['--git-dir', f.remote, 'rev-parse', 'refs/heads/main'])).stdout.trim()).toBe(
+        sharedHead,
+      );
     } finally {
       await rm(f.root, {recursive: true, force: true});
     }
