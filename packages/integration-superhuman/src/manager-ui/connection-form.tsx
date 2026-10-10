@@ -33,10 +33,12 @@ function scopeSummary(documents: readonly SuperhumanDocumentSelection[]): string
 
 export function SuperhumanConnectionForm({
   source,
+  reusableCredential = false,
   onClose,
   onSaved,
 }: {
   readonly source?: SuperhumanSource;
+  readonly reusableCredential?: boolean;
   readonly onClose: () => void;
   readonly onSaved: () => Promise<void>;
 }): React.ReactElement {
@@ -48,8 +50,8 @@ export function SuperhumanConnectionForm({
   const [titleStatus, setTitleStatus] = useState(source ? 'Loading saved selection titles…' : '');
   const [scopeChanged, setScopeChanged] = useState(false);
   const [token, setToken] = useState('');
-  const [credentialMode, setCredentialMode] = useState<'local' | 'environment'>(
-    source && source.credentialStorage !== 'local' ? 'environment' : 'local',
+  const [credentialMode, setCredentialMode] = useState<'reuse' | 'local' | 'environment'>(
+    source ? (source.credentialStorage !== 'local' ? 'environment' : 'local') : reusableCredential ? 'reuse' : 'local',
   );
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'SUPERHUMAN_DOCS_API_TOKEN');
   const [resolved, setResolved] = useState<ResolvedSuperhumanSelection | undefined>(
@@ -64,9 +66,11 @@ export function SuperhumanConnectionForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const credentialReady =
-    credentialMode === 'environment'
-      ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
-      : !!token || source?.credentialStorage === 'local';
+    credentialMode === 'reuse'
+      ? reusableCredential
+      : credentialMode === 'environment'
+        ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
+        : !!token || source?.credentialStorage === 'local';
   const checkedLinks = [
     ...new Set([
       ...linksFrom(links),
@@ -247,7 +251,9 @@ export function SuperhumanConnectionForm({
               placeholder="team-docs"
             />
           </label>
-          {credentialMode === 'local' ? (
+          {credentialMode === 'reuse' ? (
+            <p className="muted">An available Superhuman Docs credential will be reused for this connection.</p>
+          ) : credentialMode === 'local' ? (
             <label>
               API Read token{' '}
               {source?.credentialStorage === 'local' ? (
@@ -380,6 +386,21 @@ export function SuperhumanConnectionForm({
             <summary>Advanced settings</summary>
             <fieldset className="integration-credential-choice">
               <legend>Credential method</legend>
+              {!source && reusableCredential ? (
+                <label className="integration-checkbox">
+                  <input
+                    type="radio"
+                    name="superhuman-credential-mode"
+                    checked={credentialMode === 'reuse'}
+                    onChange={() => {
+                      setCredentialMode('reuse');
+                      setToken('');
+                      setNeedsCheck(true);
+                    }}
+                  />{' '}
+                  Reuse an available Superhuman Docs credential
+                </label>
+              ) : null}
               <label className="integration-checkbox">
                 <input
                   type="radio"

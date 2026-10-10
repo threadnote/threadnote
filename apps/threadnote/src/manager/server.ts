@@ -116,7 +116,7 @@ import {handleManagerProcessRequest} from './processes.js';
 import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
 import {handleManagerIntegrationRequest} from '../integrations/manager.js';
 import {handleManagerWorkspaceRequest} from './value.js';
-import {emptyManagerTree, readManagerTreeRoot} from '@threadnote/manager/tree';
+import {emptyManagerTree, readManagerTreeRoot, externalResourceTree} from '@threadnote/manager/tree';
 import {
   handleManagerWorksetRequest,
   isManagerWorksetApiPath,
@@ -269,6 +269,7 @@ interface ManagerTreeNode {
 }
 
 interface ReadTreeOptions {
+  readonly externalContentOnly?: boolean;
   readonly parseMemoryDocuments?: boolean;
   readonly rootName?: string;
 }
@@ -407,7 +408,7 @@ export const resourcesTree = Effect.fn('manager.resourcesTree')(function* (confi
   const uri = 'threadnote://resources';
   return yield* readManagerTreeRoot(
     lstat(root),
-    readTree(config, root, uri, '', {parseMemoryDocuments: false, rootName: 'resources'}),
+    readTree(config, root, uri, '', {externalContentOnly: true, parseMemoryDocuments: false, rootName: 'resources'}),
     emptyManagerTree('resources', uri),
   );
 });
@@ -1060,6 +1061,7 @@ const readTree: (
     const children = yield* Effect.forEach(
       entries
         .filter(entry => entry.isDirectory() || entry.isFile())
+        .filter(entry => !options.externalContentOnly || externalResourceTree.entryVisible(relativePath, entry))
         .sort(
           (left, right) =>
             Number(right.isDirectory()) - Number(left.isDirectory()) || left.name.localeCompare(right.name),
@@ -1076,7 +1078,7 @@ const readTree: (
       }),
     );
     return {
-      children,
+      children: options.externalContentOnly ? children.filter(externalResourceTree.nodeVisible) : children,
       isDir: true,
       isShared: isInSharedNamespace(config, uri),
       isSystem: SYSTEM_MEMORY_NAMES.has(name),

@@ -29,6 +29,7 @@ import {
   type SourceConfig,
 } from './config.js';
 import {withSourceLock} from '@threadnote/integration-core/lock';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {makeLinearClientBudget, type LinearClientOptions} from './client.js';
 import {syncLinearSource} from './sync.js';
 import {clearLinearSyncState, readLinearSyncState} from './state.js';
@@ -48,6 +49,7 @@ export interface LinearSourceAddOptions {
   readonly expectedFingerprint?: string | null;
   readonly apiToken?: Redacted.Redacted<string>;
   readonly credentialStorage?: 'local';
+  readonly requireAvailableCredential?: boolean;
   readonly credentialEnv?: string;
   readonly project?: string;
   readonly organizationId?: string;
@@ -119,13 +121,18 @@ const checkCredentialSafety = Effect.fn('linear.checkCredentialSafety')(function
   source: LinearSourceConfig,
   existing: LinearSourceConfig | undefined,
   options: LinearSourceAddOptions,
+  reused?: {readonly token: Redacted.Redacted<string>},
 ) {
   const effective =
-    options.apiToken ?? (yield* resolveLinearCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
+    options.apiToken ??
+    reused?.token ??
+    (yield* resolveLinearCredential(config, source).pipe(Effect.orElseSucceed(() => undefined)));
   const previous =
     existing === undefined
       ? undefined
       : yield* resolveLinearCredential(config, existing).pipe(Effect.orElseSucceed(() => undefined));
+  if (existing === undefined && effective === undefined && options.requireAvailableCredential)
+    return yield* error('An available API key is required for this Linear source.');
   if (source.credentialStorage === 'local' && effective === undefined)
     return yield* error('A protected API key is required for this Linear source.');
   for (const token of [effective, previous]) {
@@ -135,15 +142,22 @@ const checkCredentialSafety = Effect.fn('linear.checkCredentialSafety')(function
       return yield* error('Linear source configuration contains credential material.');
   }
 });
-function sourceFor(options: LinearSourceAddOptions, id: string, existing?: LinearSourceConfig): LinearSourceConfig {
+function sourceFor(
+  options: LinearSourceAddOptions,
+  id: string,
+  existing?: LinearSourceConfig,
+  reused?: {readonly source: {readonly credentialEnv: string; readonly credentialStorage?: 'local'}},
+): LinearSourceConfig {
   if (!options.project) throw error('Choose one local --project for Linear.');
   return validateLinearSourceConfig({
     type: 'linear',
     id,
     enabled: options.enabled ?? true,
-    credentialEnv: options.credentialEnv ?? existing?.credentialEnv ?? 'THREADNOTE_LINEAR_API_KEY',
+    credentialEnv:
+      options.credentialEnv ?? existing?.credentialEnv ?? reused?.source.credentialEnv ?? 'THREADNOTE_LINEAR_API_KEY',
     ...(options.apiToken !== undefined ||
     options.credentialStorage === 'local' ||
+    reused?.source.credentialStorage === 'local' ||
     (options.credentialEnv === undefined && existing?.credentialStorage === 'local')
       ? {credentialStorage: 'local' as const}
       : {}),
@@ -165,7 +179,12 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
   const id = validateSourceIdentifier(options.id, 'source id');
   if (options.apiToken !== undefined && !validLinearApiToken(options.apiToken))
     return yield* error('Invalid Linear API key.');
-  const initial = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+  const initialConfiguration = yield* readSourceConfiguration(config);
+  const initial = initialConfiguration.sources.find(item => item.id === id);
+  const previewReuse =
+    initial === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+      ? yield* reusableExternalCredential(config, initialConfiguration.sources, 'linear', id)
+      : undefined;
   const expected = (item: SourceConfig | undefined) => {
     if (
       options.expectedFingerprint !== undefined &&
@@ -175,12 +194,18 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
       throw LinearSourceConflictError.make({});
   };
   yield* Effect.try({try: () => expected(initial), catch: () => LinearSourceConflictError.make({})});
-  const preview = sourceFor(options, id, initial !== undefined && isLinearSource(initial) ? initial : undefined);
+  const preview = sourceFor(
+    options,
+    id,
+    initial !== undefined && isLinearSource(initial) ? initial : undefined,
+    previewReuse,
+  );
   yield* checkCredentialSafety(
     config,
     preview,
     initial !== undefined && isLinearSource(initial) ? initial : undefined,
     options,
+    previewReuse,
   );
   if (options.apply !== true) {
     yield* Console.log(
@@ -192,11 +217,16 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
     config,
     id,
     Effect.gen(function* () {
-      const existing = (yield* readSourceConfiguration(config)).sources.find(item => item.id === id);
+      const currentConfiguration = yield* readSourceConfiguration(config);
+      const existing = currentConfiguration.sources.find(item => item.id === id);
       yield* Effect.try({try: () => expected(existing), catch: () => LinearSourceConflictError.make({})});
       if (existing && !isLinearSource(existing)) return yield* error(`Source "${id}" already has another type.`);
-      const source = sourceFor(options, id, existing);
-      yield* checkCredentialSafety(config, source, existing, options);
+      const reuse =
+        existing === undefined && options.apiToken === undefined && options.credentialEnv === undefined
+          ? yield* reusableExternalCredential(config, currentConfiguration.sources, 'linear', id)
+          : undefined;
+      const source = sourceFor(options, id, existing, reuse);
+      yield* checkCredentialSafety(config, source, existing, options, reuse);
       const previousFingerprint = existing ? sourceConfigurationFingerprint(existing) : undefined;
       const prior = yield* receipt(config, id);
       const cleanup =
@@ -229,6 +259,8 @@ export const runLinearSourceAdd = Effect.fn('linear.add')(function* (
         );
       }
       if (options.apiToken !== undefined) yield* storeLinearCredential(config, id, options.apiToken);
+      else if (reuse !== undefined && source.credentialStorage === 'local')
+        yield* storeLinearCredential(config, id, reuse.token);
       else if (source.credentialStorage !== 'local') yield* removeLinearCredential(config, id);
       yield* mutateSourceConfiguration(config, current => {
         const latest = current.sources.find(item => item.id === id);

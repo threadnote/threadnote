@@ -8,18 +8,20 @@ import {api, errorMessage} from '@threadnote/manager/ui/support';
 
 export function PocketConnectionForm({
   source,
+  reusableCredential = false,
   onClose,
   onSaved,
 }: {
   readonly source?: PocketSource;
+  readonly reusableCredential?: boolean;
   readonly onClose: () => void;
   readonly onSaved: () => Promise<void>;
 }): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [id, setId] = useState(source?.id ?? '');
   const [token, setToken] = useState('');
-  const [credentialMode, setCredentialMode] = useState<'local' | 'environment'>(
-    source && source.credentialStorage !== 'local' ? 'environment' : 'local',
+  const [credentialMode, setCredentialMode] = useState<'reuse' | 'local' | 'environment'>(
+    source ? (source.credentialStorage !== 'local' ? 'environment' : 'local') : reusableCredential ? 'reuse' : 'local',
   );
   const [credentialEnv, setCredentialEnv] = useState(source?.credentialEnv ?? 'POCKET_API_KEY');
   const [projectMode, setProjectMode] = useState(source ? (source.project === null ? 'projectless' : 'project') : '');
@@ -30,9 +32,11 @@ export function PocketConnectionForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const credentialReady =
-    credentialMode === 'environment'
-      ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
-      : !!token || source?.credentialStorage === 'local';
+    credentialMode === 'reuse'
+      ? reusableCredential
+      : credentialMode === 'environment'
+        ? /^[A-Z_][A-Z0-9_]{0,127}$/.test(credentialEnv)
+        : !!token || source?.credentialStorage === 'local';
 
   useEffect(() => {
     if (!dirty && !busy) return;
@@ -110,7 +114,9 @@ export function PocketConnectionForm({
               placeholder="my-pocket"
             />
           </label>
-          {credentialMode === 'local' ? (
+          {credentialMode === 'reuse' ? (
+            <p className="muted">An available Pocket credential will be reused for this connection.</p>
+          ) : credentialMode === 'local' ? (
             <label>
               Pocket API key{' '}
               {source?.credentialStorage === 'local' ? (
@@ -162,6 +168,20 @@ export function PocketConnectionForm({
             <summary>Advanced settings</summary>
             <fieldset className="integration-credential-choice">
               <legend>Credential method</legend>
+              {!source && reusableCredential ? (
+                <label className="integration-checkbox">
+                  <input
+                    type="radio"
+                    name="pocket-credential-mode"
+                    checked={credentialMode === 'reuse'}
+                    onChange={() => {
+                      setCredentialMode('reuse');
+                      setToken('');
+                    }}
+                  />{' '}
+                  Reuse an available Pocket credential
+                </label>
+              ) : null}
               <label className="integration-checkbox">
                 <input
                   type="radio"

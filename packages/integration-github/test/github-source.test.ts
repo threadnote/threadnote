@@ -19,11 +19,16 @@ import {
   loadExternalResourceAccess,
   ExternalSourcePolicy,
 } from '@threadnote/store/external-resource';
-import {removeGitHubCredential, storeGitHubCredential} from '../src/credentials.js';
+import {removeGitHubCredential, resolveGitHubCredential, storeGitHubCredential} from '../src/credentials.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {makeSourceConfigurationRegistry, sourceConfigurationStoreLayer} from '@threadnote/integration-runtime/config';
 import {externalSourcePolicyLayer} from '@threadnote/integration-runtime/access-policy';
-import {githubSourceCodec, mutateSourceConfiguration} from '../src/config.js';
+import {
+  githubSourceCodec,
+  mutateSourceConfiguration,
+  readSourceConfiguration,
+  requireGitHubSource,
+} from '../src/config.js';
 import {githubExternalSourcePolicy} from '../src/access-policy.js';
 import {
   runGitHubSourceAdd,
@@ -115,6 +120,21 @@ const selectedFetch = (url: URL) => {
   return fixtureFetch([1, 2])(url);
 };
 describe('GitHub source', () => {
+  effectIt.effect('copies a reused local credential so a second connection survives the first removal', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'github-credential-reuse-'});
+      const config = yield* setup(home, 'first');
+      yield* runGitHubSourceAdd(config, {id: 'second', repositories: ['owner/other'], project: 'test', apply: true});
+      const second = requireGitHubSource(yield* readSourceConfiguration(config), 'second');
+      expect(second.credentialStorage).toBe('local');
+      yield* runGitHubSourceRemove(config, {id: 'first', apply: true});
+      expect(Redacted.value(yield* resolveGitHubCredential(config, second))).toBe('ghp_synthetic_test_only_key');
+      expect(
+        (yield* fs.readFileString(`${home}/threadnote/sources.yaml`)).includes('ghp_synthetic_test_only_key'),
+      ).toBe(false);
+    }).pipe(TestClock.withLive, provide),
+  );
   effectIt.effect('resolves evidence credentials lazily and rejects rotation or loss', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -68,6 +68,32 @@ const savedSelection = {
 };
 const mixed = {superhuman: {sources: [source]}};
 describe('Superhuman Docs connection', () => {
+  it('checks links and saves a new connection using an available credential by default', async () => {
+    const calls: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_path: string, init: RequestInit) => {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        calls.push(body);
+        return new Response(JSON.stringify(body.action === 'resolve-links' ? savedSelection : {}));
+      }),
+    );
+    await render(
+      <SuperhumanConnectionForm reusableCredential onClose={() => undefined} onSaved={async () => undefined} />,
+    );
+    expect(document.body.textContent).toContain('An available Superhuman Docs credential will be reused');
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    await fill(document.querySelector<HTMLInputElement>('input[placeholder="team-docs"]')!, 'second');
+    await fill(
+      document.querySelector<HTMLTextAreaElement>('#superhuman-links')!,
+      'https://docs.superhuman.com/d/synthetic/page-one',
+    );
+    await act(async () => button('Add links').click());
+    await choose(document.querySelector<HTMLSelectElement>('select')!, 'projectless');
+    await act(async () => button('Create connection').click());
+    expect(calls.map(call => call.action)).toEqual(['resolve-links', 'save-source']);
+    expect(calls.every(call => !('token' in call) && !('credentialEnv' in call))).toBe(true);
+  });
   it('requires checked links, invalidates scope on edits, and saves only resolved IDs with an explicit project', async () => {
     const calls: {path: string; body: Record<string, unknown>}[] = [];
     vi.stubGlobal(

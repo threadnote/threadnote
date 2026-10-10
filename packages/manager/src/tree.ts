@@ -1,5 +1,32 @@
 import {Effect, Predicate} from 'effect';
 
+function isExternalTreePath(relativePath: string): boolean {
+  return relativePath === 'external' || relativePath.startsWith('external/');
+}
+
+function externalResourceTreeEntryVisible(
+  relativePath: string,
+  entry: {readonly name: string; readonly isDirectory: () => boolean},
+): boolean {
+  return (
+    !isExternalTreePath(relativePath) ||
+    (!entry.name.startsWith('.') && (entry.isDirectory() || entry.name.endsWith('.md')))
+  );
+}
+
+function externalResourceTreeNodeVisible(node: {
+  readonly relativePath: string;
+  readonly isDir: boolean;
+  readonly children?: readonly unknown[];
+}): boolean {
+  return !isExternalTreePath(node.relativePath) || !node.isDir || (node.children?.length ?? 0) > 0;
+}
+
+export const externalResourceTree = {
+  entryVisible: externalResourceTreeEntryVisible,
+  nodeVisible: externalResourceTreeNodeVisible,
+};
+
 export function emptyManagerTree(name: string, uri: string) {
   return {
     children: [],

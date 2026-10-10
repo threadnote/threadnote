@@ -294,7 +294,7 @@ describe('Superhuman source sync', () => {
         sourceId: options.id,
         documentId: 'doc_one',
         pageId: 'page_one',
-        chunkId: `b-${sha256HexSync('line_one').slice(0, 24)}-0`,
+        chunkId: 'page',
       });
       const store = yield* ResourceStore;
       expect(yield* store.read({home, account: 'local', user: 'tester'}, uri)).toContain('needle');
@@ -422,7 +422,7 @@ describe('Superhuman source sync', () => {
           sourceId: 'multi',
           documentId,
           pageId: 'page_one',
-          chunkId: `b-${sha256HexSync('line_one').slice(0, 24)}-0`,
+          chunkId: 'page',
         }),
       );
       expect((yield* loadRecallIndexData(config, {includeInactive: false, query: 'needle'})).candidates).toHaveLength(
@@ -525,9 +525,9 @@ describe('Superhuman source sync', () => {
       expect(Result.isFailure(result)).toBe(true);
       const pending = yield* readExternalDocumentManifest(location, 'rollover', 'doc_one');
       expect(pending?.status).toBe('pending');
-      expect(Object.keys(pending?.chunks ?? {})).toHaveLength(2);
+      expect(Object.keys(pending?.chunks ?? {})).toEqual([oldUri]);
       expect(yield* fs.exists(`${home}/data/local/resources/${oldUri.slice('threadnote://resources/'.length)}`)).toBe(
-        false,
+        true,
       );
       for (const uri of Object.keys(pending!.chunks))
         expect(Result.isFailure(yield* store.read(location, uri).pipe(Effect.result))).toBe(true);
@@ -539,10 +539,7 @@ describe('Superhuman source sync', () => {
       const recovered = yield* readExternalDocumentManifest(location, 'rollover', 'doc_one');
       expect(recovered?.status).toBe('active');
       expect(Object.keys(recovered?.chunks ?? {})).toHaveLength(1);
-      for (const uri of Object.keys(pending!.chunks))
-        expect(yield* fs.exists(`${home}/data/local/resources/${uri.slice('threadnote://resources/'.length)}`)).toBe(
-          false,
-        );
+      expect(yield* store.read(location, oldUri)).toContain('final_line');
     }).pipe(TestClock.withLive, provideLayer),
   );
 
@@ -723,6 +720,85 @@ describe('Superhuman source sync', () => {
       expect(calls).toBe(0);
     }).pipe(provideLayer),
   );
+  effectIt.effect('syncs all lines of a large canvas page into one resource', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-page-sync-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runSuperhumanSourceAdd(config, {
+        id: 'pages',
+        apply: true,
+        documents: ['doc_one'],
+        credentialEnv: 'SUPERHUMAN_DOCS_TEST_TOKEN',
+        project: 'test',
+      });
+      const firstParagraph = 'a'.repeat(20 * 1024);
+      const fetch = async (url: URL) => {
+        if (url.pathname.endsWith('/content'))
+          return response({
+            items: [
+              {id: 'line_one', type: 'line', itemContent: {style: 'p', format: 'plainText', content: firstParagraph}},
+              {id: 'line_two', type: 'line', itemContent: {style: 'p', format: 'plainText', content: 'Final line'}},
+            ],
+          });
+        if (url.pathname.endsWith('/pages/page_one')) return response(page);
+        return response({items: [page]});
+      };
+      yield* runSuperhumanSourceSync(config, {id: 'pages', apply: true, clientOptions: {fetch}});
+      const location = {home, account: 'local', user: 'tester'};
+      const uri = externalResourceUri({sourceId: 'pages', documentId: 'doc_one', pageId: 'page_one', chunkId: 'page'});
+      const manifest = yield* readExternalDocumentManifest(location, 'pages', 'doc_one');
+      expect(Object.keys(manifest?.chunks ?? {})).toEqual([uri]);
+      const content = yield* (yield* ResourceStore).read(location, uri);
+      expect(content).toContain(`# Safe Notes\n\n${firstParagraph}\n\nFinal line`);
+      expect(content).not.toContain('[Superhuman Docs line:');
+    }).pipe(provideLayer),
+  );
+
+  effectIt.effect('quarantines a previously readable page when its replacement exceeds the resource limit', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-oversized-page-'});
+      const config = {agentContextHome: home, account: 'local', user: 'tester'} as RuntimeConfig;
+      yield* runSuperhumanSourceAdd(config, {
+        id: 'oversized',
+        apply: true,
+        documents: ['doc_one'],
+        credentialEnv: 'SUPERHUMAN_DOCS_TEST_TOKEN',
+        project: 'test',
+      });
+      yield* runSuperhumanSourceSync(config, {id: 'oversized', apply: true, clientOptions: {fetch: safeFetch}});
+      const location = {home, account: 'local', user: 'tester'};
+      const uri = externalResourceUri({
+        sourceId: 'oversized',
+        documentId: 'doc_one',
+        pageId: 'page_one',
+        chunkId: 'page',
+      });
+      const store = yield* ResourceStore;
+      expect(yield* store.read(location, uri)).toContain('needle evidence');
+      const fetch = async (url: URL) => {
+        if (url.pathname.endsWith('/content'))
+          return response({
+            items: [
+              {
+                id: url.searchParams.has('pageToken') ? 'line_two' : 'line_one',
+                type: 'line',
+                itemContent: {style: 'p', format: 'plainText', content: 'a'.repeat(241 * 1024)},
+              },
+            ],
+            ...(url.searchParams.has('pageToken') ? {} : {nextPageToken: 'next'}),
+          });
+        if (url.pathname.endsWith('/pages/page_one')) return response(page);
+        return response({items: [page]});
+      };
+      const result = yield* runSuperhumanSourceSync(config, {id: 'oversized', apply: true, clientOptions: {fetch}});
+      expect(result.warnings).toContain('Superhuman document doc_one: page too large.');
+      expect((yield* readExternalDocumentManifest(location, 'oversized', 'doc_one'))?.status).toBe('quarantined');
+      expect(Result.isFailure(yield* store.read(location, uri).pipe(Effect.result))).toBe(true);
+    }).pipe(provideLayer),
+  );
+
   effectIt.effect('activates a complete snapshot, then quarantines it on access denial', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -752,11 +828,12 @@ describe('Superhuman source sync', () => {
       expect(active?.status).toBe('active');
       expect(Object.keys(active?.chunks ?? {})).toHaveLength(1);
       const store = yield* ResourceStore;
+      const legacyChunkId = `b-${sha256HexSync('line_one').slice(0, 24)}-0`;
       const orphanUri = externalResourceUri({
         sourceId: 'test',
         documentId: 'doc_one',
         pageId: 'page_one',
-        chunkId: 'old',
+        chunkId: legacyChunkId,
       });
       const orphan = renderExternalResource(
         {
@@ -764,7 +841,7 @@ describe('Superhuman source sync', () => {
           sourceId: 'test',
           documentId: 'doc_one',
           pageId: 'page_one',
-          chunkId: 'old',
+          chunkId: legacyChunkId,
           project: 'test',
           title: 'Old',
           rendererVersion: 'v1',
@@ -787,7 +864,9 @@ describe('Superhuman source sync', () => {
       yield* runSuperhumanSourceSync(config, {id: 'test', apply: true, clientOptions: {fetch}});
       expect((yield* readExternalDocumentManifest(location, 'test', 'doc_one'))?.status).toBe('active');
       expect(
-        yield* fs.exists(`${home}/data/local/resources/external/superhuman/test/docs/doc_one/pages/page_one/old.md`),
+        yield* fs.exists(
+          `${home}/data/local/resources/external/superhuman/test/docs/doc_one/pages/page_one/${legacyChunkId}.md`,
+        ),
       ).toBe(false);
       const temporary = yield* runSuperhumanSourceSync(config, {
         id: 'test',

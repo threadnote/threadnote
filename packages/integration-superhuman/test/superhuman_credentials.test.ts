@@ -2,6 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Redacted, Result, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
+import {reusableExternalCredential, storeExternalCredential} from '@threadnote/integration-core/external-credentials';
 import type {SuperhumanSourceConfig} from '../src/config.js';
 import {
   removeSuperhumanCredential,
@@ -25,6 +26,53 @@ const source: SuperhumanSourceConfig = {
 };
 
 describe('protected Superhuman credentials', () => {
+  effectIt.effect('skips unavailable credentials and never selects another provider', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const agentContextHome = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-reuse-fallback-'});
+      const config = {agentContextHome};
+      const candidates = [
+        {type: 'superhuman', id: 'a', credentialEnv: 'UNUSED', credentialStorage: 'local' as const},
+        {type: 'superhuman', id: 'b', credentialEnv: 'UNUSED', credentialStorage: 'local' as const},
+        {type: 'github', id: 'c', credentialEnv: 'UNUSED', credentialStorage: 'local' as const},
+      ];
+      yield* storeExternalCredential(config, 'c', Redacted.make('synthetic-github'), 'github');
+      expect(yield* reusableExternalCredential(config, candidates, 'superhuman', 'new')).toBeUndefined();
+      yield* storeSuperhumanCredential(config, 'b', Redacted.make('synthetic-superhuman'));
+      const selected = yield* reusableExternalCredential(config, candidates, 'superhuman', 'new');
+      expect(selected?.source.id).toBe('b');
+      expect(Redacted.value(selected!.token)).toBe('synthetic-superhuman');
+    }).pipe(provideSuperhumanTestLayer),
+  );
+  effectIt.effect.prop(
+    'selects the same available same-provider credential regardless of source order',
+    {ids: Schema.Array(Schema.Literals(['a', 'b', 'c'])).check(Schema.isMinLength(1), Schema.isMaxLength(3))},
+    ({ids}) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const agentContextHome = yield* fs.makeTempDirectoryScoped({prefix: 'superhuman-reusable-credential-'});
+        const config = {agentContextHome};
+        const selected = [...new Set(ids)];
+        for (const id of selected) yield* storeSuperhumanCredential(config, id, Redacted.make(`synthetic-${id}`));
+        yield* storeExternalCredential(config, '0', Redacted.make('synthetic-github'), 'github');
+        const candidates = [
+          {type: 'github', id: '0', credentialEnv: 'UNUSED', credentialStorage: 'local' as const},
+          ...selected.map(id => ({
+            type: 'superhuman',
+            id,
+            credentialEnv: 'UNUSED',
+            credentialStorage: 'local' as const,
+          })),
+        ];
+        const first = yield* reusableExternalCredential(config, candidates, 'superhuman', 'new');
+        const reversed = yield* reusableExternalCredential(config, [...candidates].reverse(), 'superhuman', 'new');
+        const expected = [...selected].sort()[0];
+        expect(first?.source.id).toBe(expected);
+        expect(reversed?.source.id).toBe(expected);
+        expect(Redacted.value(first!.token)).toBe(`synthetic-${expected}`);
+      }).pipe(provideSuperhumanTestLayer),
+    {arbitrary: {runs: 12}},
+  );
   effectIt.effect.prop(
     'credential transitions match an isolated per-source model',
     {

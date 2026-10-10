@@ -17,6 +17,7 @@ import {withSourceLock} from '@threadnote/integration-core/lock';
 import {createLinearClient, LinearClientError, linearIssueInScope, type LinearClientOptions} from './client.js';
 import {linearUuid, validateLinearSourceConfig, type LinearSourceConfig} from './config.js';
 import {linearCredentialConfigured, resolveLinearCredential, validLinearApiToken} from './credentials.js';
+import {reusableExternalCredential} from '@threadnote/integration-core/external-credentials';
 import {LINEAR_COVERAGE} from './render.js';
 import {receipt, saveReceipt} from './storage.js';
 import {call} from './sync.js';
@@ -82,12 +83,20 @@ export const resolveLinearSelection = Effect.fn('manager.linearResolve')(functio
   if (provided && !validLinearApiToken(provided)) invalid('Provide a valid API key.');
   const token =
     provided ??
-    (yield* resolveLinearCredential(
-      config,
-      environment
-        ? {id: sourceId, credentialEnv: environment}
-        : (existing ?? {id: sourceId, credentialEnv: 'THREADNOTE_LINEAR_API_KEY'}),
-    ));
+    (!existing && !environment
+      ? (yield* reusableExternalCredential(
+          config,
+          (yield* readSourceConfiguration(config)).sources,
+          'linear',
+          sourceId,
+        ))?.token
+      : yield* resolveLinearCredential(
+          config,
+          environment
+            ? {id: sourceId, credentialEnv: environment}
+            : (existing ?? {id: sourceId, credentialEnv: 'THREADNOTE_LINEAR_API_KEY'}),
+        ));
+  if (token === undefined) invalid('Provide an API key or environment credential.');
   const teamIds = ids(body.teamIds, 64);
   const projectIds = ids(body.projectIds ?? [], 64);
   const issueIds = ids(body.issueIds ?? [], 256);
@@ -207,7 +216,18 @@ const route = Effect.fn('manager.linearRoute')(function* (request: ManagerIntegr
           const token = typeof body.token === 'string' && body.token.length ? Redacted.make(body.token) : undefined;
           const environment = env(body.credentialEnv);
           if (token && environment) invalid('Choose an API key or environment credential.');
-          if (!existing && !token && !environment) invalid('Provide an API key or environment credential.');
+          if (
+            !existing &&
+            !token &&
+            !environment &&
+            !(yield* reusableExternalCredential(
+              request.config,
+              (yield* readSourceConfiguration(request.config)).sources,
+              'linear',
+              sourceId,
+            ))
+          )
+            invalid('Provide an API key or environment credential.');
           if (typeof body.project !== 'string') invalid('Choose one local project.');
           if (!Number.isSafeInteger(body.refreshIntervalMinutes) || !Number.isSafeInteger(body.maxStaleHours))
             invalid('Choose valid freshness settings.');
@@ -221,6 +241,7 @@ const route = Effect.fn('manager.linearRoute')(function* (request: ManagerIntegr
             issueIds: ids(body.issueIds ?? [], 256),
             project: body.project,
             apiToken: token,
+            requireAvailableCredential: !existing && !token && !environment,
             credentialEnv: environment ?? existing?.credentialEnv,
             credentialStorage: token || (!environment && existing?.credentialStorage === 'local') ? 'local' : undefined,
             enabled: existing?.enabled ?? true,

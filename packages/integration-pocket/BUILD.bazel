@@ -427,6 +427,7 @@ bun_test(
         "//packages/integration-pocket:src/sync.ts",
         "//packages/integration-pocket:test/manager-ui.test.tsx",
         "//packages/integration-pocket:test/pocket_source.test.ts",
+        "//packages/integration-pocket:test/render.test.ts",
         "//packages/integration-pocket:test/work.test.ts",
         "//packages/integration-runtime:package.json",
         "//packages/integration-runtime:src/access-policy.ts",
@@ -550,6 +551,7 @@ bun_test(
         "tools/bazel/project-vitest.config.ts",
         "packages/integration-pocket/test/manager-ui.test.tsx",
         "packages/integration-pocket/test/pocket_source.test.ts",
+        "packages/integration-pocket/test/render.test.ts",
         "packages/integration-pocket/test/work.test.ts",
     ],
 )
