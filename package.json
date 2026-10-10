@@ -145,7 +145,7 @@
     "@types/react-dom": "^19.3.0",
     "@types/three": "^0.186.0",
     "@vitejs/plugin-react": "6.1.1",
-    "@vitest/coverage-istanbul": "5.0.1",
+    "@vitest/coverage-istanbul": "5.0.3",
     "@vscode/tree-sitter-wasm": "0.3.1",
     "fast-check": "4.10.1",
     "happy-dom": "20.14.5",
@@ -163,7 +163,7 @@
     "tree-sitter-systemverilog": "0.4.1",
     "typescript": "7.0.2",
     "vite": "8.3.0",
-    "vitest": "5.0.1",
+    "vitest": "5.0.3",
     "@threadnote/website": "workspace:*",
     "@threadnote/testing": "workspace:*"
   },
