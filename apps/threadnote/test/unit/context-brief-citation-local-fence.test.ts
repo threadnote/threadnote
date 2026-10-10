@@ -18,8 +18,9 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {RepositoryIdentityExpectation} from '@threadnote/graph/types';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
+import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, CommandOutputLimitExceeded, runCommandEffect} from '@threadnote/platform/command';
 
 import {
   contextBriefCitationScaleExtractorSet,
@@ -46,9 +47,15 @@ const mutations = [
   'receipt',
   'provenance',
 ] as const;
-type Mutation = (typeof mutations)[number] | 'none' | 'legacy-service';
+type Mutation = (typeof mutations)[number] | 'none' | 'legacy-service' | 'no-ready';
 
-const scenario = (mutation: Mutation, suffix = 0, overlapObservations = false) =>
+const scenario = (
+  mutation: Mutation,
+  suffix = 0,
+  overlapObservations = false,
+  overlapIdentity = false,
+  failInitialProbe = false,
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -57,20 +64,52 @@ const scenario = (mutation: Mutation, suffix = 0, overlapObservations = false) =
     const command = yield* CommandExecutor;
     const admissionStarted = yield* Deferred.make<void>();
     const overlayStarted = yield* Deferred.make<void>();
+    const identityStarted = yield* Deferred.make<void>();
+    const worktreeStarted = yield* Deferred.make<void>();
+    const overlapIdentityReads = (args: readonly string[]) =>
+      Effect.gen(function* () {
+        if (!overlapIdentity) return;
+        if (args.includes('--git-dir')) {
+          yield* Deferred.succeed(identityStarted, undefined);
+          yield* Deferred.await(worktreeStarted);
+        }
+        if (args.includes('--porcelain=v2')) {
+          yield* Deferred.succeed(worktreeStarted, undefined);
+          yield* Deferred.await(identityStarted);
+        }
+      });
+    let probeFailed = false;
+    let fallbackReads = 0;
     const observedCommand = CommandExecutor.of({
       ...command,
       execute: (executable, args, options) =>
         Effect.gen(function* () {
+          yield* overlapIdentityReads(args);
+          if (failInitialProbe && !probeFailed && args.includes('--porcelain=v2')) {
+            probeFailed = true;
+            return yield* CommandOutputLimitExceeded.make({
+              executable,
+              args,
+              message: 'Synthetic initial probe limit',
+              maxOutputBytes: 65_536,
+            });
+          }
+          if (args.includes('--porcelain=v1')) fallbackReads += 1;
           if (overlapObservations && args.includes('--git-path') && args.includes('info/exclude')) {
             yield* Deferred.succeed(admissionStarted, undefined);
             yield* Deferred.await(overlayStarted);
           }
-          if (overlapObservations && args.includes('--porcelain=v1')) {
+          if (overlapObservations && (args.includes('--porcelain=v1') || args.includes('--porcelain=v2'))) {
             yield* Deferred.succeed(overlayStarted, undefined);
             yield* Deferred.await(admissionStarted);
           }
           return yield* command.execute(executable, args, options);
         }),
+      executeBytes:
+        command.executeBytes === undefined
+          ? undefined
+          : (executable, args, options) =>
+              overlapIdentityReads(args).pipe(Effect.andThen(command.executeBytes!(executable, args, options))),
     });
     const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-citation-local-fence-'});
     const home = path.join(root, 'home');
@@ -162,6 +201,7 @@ const scenario = (mutation: Mutation, suffix = 0, overlapObservations = false) =
     });
     const observedStore = CodeGraphStore.of({
       ...store,
+      readySnapshot: (...args) => (mutation === 'no-ready' ? succeedUndefined : store.readySnapshot(...args)),
       acquireSnapshotLease: (...args) =>
         store.acquireSnapshotLease(...args).pipe(
           Effect.tap(() =>
@@ -252,13 +292,27 @@ const scenario = (mutation: Mutation, suffix = 0, overlapObservations = false) =
     const exact = mutation === 'none' || mutation === 'legacy-service';
     expect(receipts[0].status).toBe(exact ? 'exact' : 'unknown');
     if (exact) expect(receipts[0].coverage).toBe('current-complete');
-    expect(expectedCalls).toBe(mutation === 'legacy-service' ? 0 : 1);
+    expect(expectedCalls).toBe(mutation === 'legacy-service' || mutation === 'no-ready' ? 0 : 1);
     expect(ordinaryFinalCalls).toBe(mutation === 'legacy-service' ? 1 : 0);
     expect(sessions).toBe(1);
     expect(leases).toBe(0);
+    if (failInitialProbe) {
+      expect(probeFailed).toBe(true);
+      expect(fallbackReads).toBeGreaterThan(0);
+    }
   }).pipe(provideTestLayer(fixtureLayer), TestClock.withLive);
 
 describe('Context Brief local citation closing observation', () => {
+  effectIt.effect('returns unknown coverage for a missing ready snapshot when the optional probe is unavailable', () =>
+    scenario('no-ready', 0, false, false, true),
+  );
+  effectIt.effect('retains the policy-aware worktree fallback when the optional initial probe exceeds its bound', () =>
+    scenario('none', 0, false, false, true),
+  );
+  effectIt.effect(
+    'overlaps complete initial identity and worktree observations while retaining the closing fence',
+    () => scenario('none', 0, false, true),
+  );
   effectIt.effect('overlaps initial admission and worktree reads without skipping the closing fence', () =>
     scenario('none', 0, true),
   );
@@ -275,7 +329,7 @@ describe('Context Brief local citation closing observation', () => {
     effectIt,
     'preserves fail-closed mutation outcomes when initial observations overlap',
     {mutation: fc.constantFrom(...mutations), suffix: fc.nat(100_000)},
-    ({mutation, suffix}) => scenario(mutation, suffix, true),
+    ({mutation, suffix}) => scenario(mutation, suffix, true, true),
     {fastCheck: {numRuns: 8}},
   );
   fcEffectProp(

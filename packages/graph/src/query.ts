@@ -63,7 +63,7 @@ import {
 } from './query/selector.js';
 import {
   codeGraphLanguagePackStatuses,
-  repositoryIdentityObservation,
+  observeCodeGraphStatusSessionIdentity,
   postPromotionObservation,
   resolvePublishedRepositoryIdentityObservation,
 } from './query/status_helpers.js';
@@ -220,7 +220,8 @@ export class CodeGraphQueryService extends Context.Service<
         identity: RepositoryIdentity,
         options?: CodeGraphStatusOptions,
         identityAlreadyObserved = false,
-        preobservedWorktreeChanged?: boolean,
+        preobservedWorktreeChanged?:
+          boolean | Effect.Effect<boolean | undefined, unknown, FileSystem.FileSystem | Path.Path>,
         callerCwd = identity.repoRoot,
       ) =>
         Effect.gen(function* () {
@@ -285,9 +286,16 @@ export class CodeGraphQueryService extends Context.Service<
                   options?.telemetry,
                   telemetryPhase,
                   'query-worktree-observation',
-                  preobservedWorktreeChanged === false
-                    ? Effect.succeed({dirty: false as const, fingerprint: undefined})
-                    : worktreeOverlayState(identity),
+                  (Effect.isEffect(preobservedWorktreeChanged)
+                    ? preobservedWorktreeChanged
+                    : Effect.succeed(preobservedWorktreeChanged)
+                  ).pipe(
+                    Effect.flatMap(changed =>
+                      changed === false
+                        ? Effect.succeed({dirty: false as const, fingerprint: undefined})
+                        : worktreeOverlayState(identity),
+                    ),
+                  ),
                   options?.telemetryWorktreeDisposition,
                 );
           const [runtimeCurrent, overlay] = yield* Effect.all([runtimeRead, overlayRead], {concurrency: 2});
@@ -878,34 +886,27 @@ export class CodeGraphQueryService extends Context.Service<
           ),
         withStatusSession: (threadnoteHome, cwd, expected, options, use) =>
           withRepositoryServices(
-            Effect.gen(function* () {
-              const observation = yield* expected === undefined
-                ? withCodeGraphQueryTelemetryStage(
-                    options.telemetry,
-                    'graph.query.status',
-                    'query-repository-identity',
-                    resolveAndRecordCodeGraphLocalAssociation(threadnoteHome, cwd),
-                  ).pipe(Effect.map(local => repositoryIdentityObservation(local.identity)))
-                : withCodeGraphQueryTelemetryStage(
-                    options.telemetry,
-                    'graph.query.status',
-                    'query-repository-identity',
-                    resolvePublishedRepositoryIdentityObservation(cwd, expected, options.observeWorktree !== false),
-                  );
-              const identity = observation.identity;
-              const changed = options.afterIdentityObserved === undefined ? observation.worktreeChanged : undefined;
-              const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
-              const observe = statusForIdentity(threadnoteHome, identity, options, true, changed, cwd);
-              const read = observe.pipe(Effect.flatMap(use));
-              const readSession: typeof read = store.withSession(layout.databasePath, read, {existingOnly: true});
-              const result = yield* (yield* fs.exists(layout.databasePath))
-                ? readSession
-                : observe.pipe(
-                    Effect.flatMap(status => (status.readySnapshot === undefined ? use(status) : readSession)),
-                  );
-              if (options.requestMaintenance !== false) yield* requestMaintenance(threadnoteHome, identity);
-              return result;
-            }),
+            Effect.scoped(
+              Effect.gen(function* () {
+                const {identity, worktreeChanged: changed} = yield* observeCodeGraphStatusSessionIdentity(
+                  threadnoteHome,
+                  cwd,
+                  expected,
+                  options,
+                );
+                const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
+                const observe = statusForIdentity(threadnoteHome, identity, options, true, changed, cwd);
+                const read = observe.pipe(Effect.flatMap(use));
+                const readSession: typeof read = store.withSession(layout.databasePath, read, {existingOnly: true});
+                const result = yield* (yield* fs.exists(layout.databasePath))
+                  ? readSession
+                  : observe.pipe(
+                      Effect.flatMap(status => (status.readySnapshot === undefined ? use(status) : readSession)),
+                    );
+                if (options.requestMaintenance !== false) yield* requestMaintenance(threadnoteHome, identity);
+                return result;
+              }),
+            ),
           ),
       });
     }),
