@@ -23,7 +23,7 @@ import {execFileSync, spawn} from '@threadnote/testing/node-child-process';
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Context, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
+import {Clock, Context, Crypto, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Path, Ref} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {afterEach, describe, expect, it} from 'vitest';
@@ -206,11 +206,17 @@ describe('native code graph lifecycle', () => {
           indexed.identity.checkoutId,
           indexed.identity.worktreeId,
         );
+        const writerGateOptions = {
+          retryIntervalMilliseconds: 1,
+          staleAfterMilliseconds: 5_000,
+          waitTimeoutMilliseconds: 5_000,
+        };
+        const writerGateContext = yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>();
         const fs = yield* FileSystem.FileSystem;
         const queryBehindWriterGate = yield* withExclusiveFileLock(
           fs,
           writerGateLayout.databaseWriteLockPath,
-          {retryIntervalMilliseconds: 1, staleAfterMilliseconds: 5_000, waitTimeoutMilliseconds: 5_000},
+          writerGateOptions,
           Effect.gen(function* () {
             const reader = yield* graph
               .inspect({
@@ -299,20 +305,59 @@ describe('native code graph lifecycle', () => {
         const readCompleted = yield* Deferred.make<void, unknown>();
         const finish = yield* Deferred.make<void>();
         const retiredSnapshots = yield* Ref.make(0);
+        const writerActive = yield* Deferred.make<void, unknown>();
+        const releaseWriter = yield* Deferred.make<void>();
+        const competingWriter = yield* withExclusiveFileLock(
+          fs,
+          writerGateLayout.databaseWriteLockPath,
+          writerGateOptions,
+          Effect.acquireUseRelease(
+            Effect.sync(() => new Database(databasePath)),
+            database =>
+              Effect.sync(() => database.exec('BEGIN IMMEDIATE')).pipe(
+                Effect.andThen(Deferred.succeed(writerActive, undefined)),
+                Effect.andThen(Deferred.await(releaseWriter)),
+              ),
+            database =>
+              Effect.sync(() => {
+                try {
+                  if (database.inTransaction) database.exec('ROLLBACK');
+                } finally {
+                  database.close();
+                }
+              }),
+          ),
+        ).pipe(
+          Effect.onExit(exit => (Exit.isFailure(exit) ? Deferred.failCause(writerActive, exit.cause) : Effect.void)),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(writerActive);
         const query = yield* graph
           .inspect({
             cwd: root,
             interlock: {
               afterSnapshotSelected: () =>
-                Effect.sync(() => {
-                  const database = new Database(databasePath);
-                  try {
-                    database.exec('PRAGMA foreign_keys = ON');
-                    return database.query('DELETE FROM snapshots WHERE id = ?').run(indexed.snapshot.id).changes;
-                  } finally {
-                    database.close();
-                  }
-                }).pipe(Effect.flatMap(changes => Ref.set(retiredSnapshots, changes))),
+                withExclusiveFileLock(
+                  fs,
+                  writerGateLayout.databaseWriteLockPath,
+                  {
+                    ...writerGateOptions,
+                    onContention: () => Deferred.succeed(releaseWriter, undefined).pipe(Effect.asVoid),
+                  },
+                  Effect.sync(() => {
+                    const database = new Database(databasePath);
+                    try {
+                      database.exec('PRAGMA foreign_keys = ON');
+                      return database.query('DELETE FROM snapshots WHERE id = ?').run(indexed.snapshot.id).changes;
+                    } finally {
+                      database.close();
+                    }
+                  }),
+                ).pipe(
+                  Effect.flatMap(changes => Ref.set(retiredSnapshots, changes)),
+                  Effect.provide(writerGateContext),
+                  Effect.orDie,
+                ),
               beforeReadCompletion: () =>
                 Deferred.succeed(readCompleted, undefined).pipe(Effect.andThen(Deferred.await(finish))),
             },
@@ -326,6 +371,7 @@ describe('native code graph lifecycle', () => {
             Effect.forkChild,
           );
         yield* Deferred.await(readCompleted);
+        yield* Fiber.join(competingWriter);
         const active = yield* Effect.sync(() => snapshotLeaseCount(databasePath));
         yield* Deferred.succeed(finish, undefined);
         const queryAfterRetirement = yield* Fiber.join(query);
