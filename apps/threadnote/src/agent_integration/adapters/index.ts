@@ -13,11 +13,13 @@ import {continueAdapter} from './continue.js';
 import {antigravityCliAdapter, antigravityIdeAdapter} from './antigravity.js';
 import {kiloAdapter} from './kilo.js';
 import {windsurfAdapter} from './windsurf.js';
+import {opencodeAdapter} from './opencode.js';
 
 export const managedAgentAdapterDefinitions = [
   ...legacyAdapterDefinitions,
   geminiAdapter,
   qwenAdapter,
+  opencodeAdapter,
   ampAdapter,
   factoryAdapter,
   clineAdapter,

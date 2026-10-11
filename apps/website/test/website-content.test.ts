@@ -1122,6 +1122,32 @@ The body remains ordinary **Markdown**.
     expect(readme).not.toMatch(/claude\s*\/\s*cursor\s*\/\s*copilot/i);
   });
 
+  it('publishes OpenCode and Zeno setup with managed MCP, guidance, and skills', () => {
+    const integration = agentIntegrations.find(entry => entry.id === 'opencode');
+    expect(integration).toMatchObject({
+      displayName: 'OpenCode / Zeno',
+      tier: 'core',
+      aliases: ['zeno'],
+      scopes: ['user', 'project'],
+      capabilities: {
+        mcp: {status: 'managed'},
+        instructions: {status: 'managed'},
+        skills: {status: 'managed'},
+        hooks: {status: 'unsupported'},
+      },
+    });
+    const article = docsSections.flatMap(section => section.articles).find(entry => entry.id === 'agent-opencode');
+    expect(article?.keywords).toContain('zeno');
+    const content = JSON.stringify(article);
+    expect(content).toContain('threadnote agents install opencode');
+    expect(content).toContain('--scope project');
+    expect(content).toContain('restart OpenCode or Zeno');
+    expect(content).toContain('opencode.jsonc');
+    expect(content).toContain('AGENTS.md');
+    expect(content).toContain('.opencode/skills');
+    expect(content).not.toContain('No managed skill installation');
+  });
+
   it('documents Manager project and Workset operations with accessible motion-safe illustrations', async () => {
     const managerWorksets = docsSections
       .flatMap(section => section.articles)

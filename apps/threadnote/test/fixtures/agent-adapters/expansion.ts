@@ -1,5 +1,16 @@
 export const expansionFixtures = [
   {
+    id: 'opencode',
+    root: '{xdg}/opencode',
+    projectRoot: '{cwd}',
+    mcp: 'opencode.json',
+    instructions: 'AGENTS.md',
+    skills: '{root}/skills',
+    projectSkills: '{root}/.opencode/skills',
+    container: 'mcp',
+    commandArray: true,
+  },
+  {
     id: 'cline',
     root: '{home}/.cline',
     environmentMcpRoot: '{clineData}',

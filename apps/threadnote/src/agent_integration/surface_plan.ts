@@ -94,31 +94,31 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
         )
       : strategy.skillRoot === 'shared'
         ? path.join(scope === 'user' ? system.homeDirectory : cwd!, '.agents', 'skills')
-        : path.join(root, 'skills'));
+        : path.join(root, scope === 'user' ? 'skills' : (strategy.projectSkillRoot ?? 'skills')));
   const mcpRoot =
     previous?.mcp.root ?? (scope === 'user' ? (configuredMcpRoot ?? path.join(root, strategy.mcpRoot ?? '')) : root);
-  const mcpPath =
-    previous?.mcp.path ??
-    path.join(
-      mcpRoot,
-      scope === 'local'
-        ? strategy.localMcpFile!
-        : scope === 'project'
-          ? (strategy.projectMcpFile ?? strategy.mcpFile)
-          : strategy.mcpFile,
-    );
-  const expectedMcpPath = path.join(
-    mcpRoot,
+  const defaultMcpFile =
     scope === 'local'
       ? strategy.localMcpFile!
       : scope === 'project'
         ? (strategy.projectMcpFile ?? strategy.mcpFile)
-        : strategy.mcpFile,
+        : strategy.mcpFile;
+  const candidateMcpPaths = [...(strategy.mcpFileAlternatives ?? []), defaultMcpFile].map(file =>
+    path.join(mcpRoot, file),
   );
+  let mcpPath = previous?.mcp.path ?? path.join(mcpRoot, defaultMcpFile);
+  if (!previous) {
+    for (const candidate of candidateMcpPaths) {
+      if (yield* fs.exists(candidate)) {
+        mcpPath = candidate;
+        break;
+      }
+    }
+  }
   if (![root, skillRoot, mcpRoot, mcpPath, ...(cwd ? [cwd] : [])].every(target => path.isAbsolute(target)))
     return yield* AgentSurfaceError.make({message: 'Adapter receipt paths must be absolute.'});
   if (
-    mcpPath !== expectedMcpPath ||
+    !candidateMcpPaths.includes(mcpPath) ||
     (scope !== 'user' && root !== path.join(cwd!, strategy.projectRoot ?? strategy.root))
   )
     return yield* AgentSurfaceError.make({message: 'Adapter receipt paths do not match the recorded root and scope.'});

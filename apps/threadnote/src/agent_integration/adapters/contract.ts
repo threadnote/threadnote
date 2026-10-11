@@ -27,6 +27,8 @@ export interface JsonAgentStrategy {
   readonly mcpRoot?: string;
   readonly mcpRootEnvironment?: string;
   readonly mcpFile: string;
+  /** Existing files in host precedence order, before falling back to mcpFile. */
+  readonly mcpFileAlternatives?: readonly string[];
   readonly container: string;
   readonly instructionFile?: string;
   readonly projectInstructionFile?: string;
@@ -34,6 +36,7 @@ export interface JsonAgentStrategy {
   readonly instructionContent?: string;
   readonly projectInstructionPrefix?: string;
   readonly skillRoot: 'native' | 'shared' | 'none' | {readonly user: string; readonly project: string};
+  readonly projectSkillRoot?: string;
   readonly skillLayout?: 'flat';
   readonly entryType?: 'stdio' | 'local';
   readonly policyGlobs?: boolean;

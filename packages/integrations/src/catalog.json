@@ -364,11 +364,57 @@
       }
     },
     {
+      "id": "opencode",
+      "agentId": "opencode",
+      "displayName": "OpenCode / Zeno",
+      "tier": "core",
+      "aliases": ["zeno"],
+      "scopes": ["user", "project"],
+      "platforms": ["darwin", "linux", "win32"],
+      "capabilities": {
+        "mcp": {
+          "status": "managed"
+        },
+        "instructions": {
+          "status": "managed"
+        },
+        "skills": {
+          "status": "managed"
+        },
+        "hooks": {
+          "status": "unsupported",
+          "reason": "Lifecycle plugins are not installed or verified by this adapter."
+        }
+      },
+      "officialDocs": [
+        "https://opencode.ai/docs/mcp-servers/",
+        "https://opencode.ai/docs/config/",
+        "https://opencode.ai/docs/rules/",
+        "https://opencode.ai/docs/skills/"
+      ],
+      "lastVerified": "2026-10-11",
+      "caveats": [
+        "Uses the documented mcp.<name> schema with type local, command arrays, and environment. The separate opencode-v2 surface remains catalog only.",
+        "User root honors OPENCODE_CONFIG_DIR and XDG_CONFIG_HOME; project setup writes opencode.json, AGENTS.md, and .opencode/skills. Existing opencode.jsonc takes precedence and is edited with comments preserved.",
+        "Restart the host after installation. Custom OPENCODE_CONFIG paths, inline configuration, project overrides, and tool or skill permission policies can override the managed configuration.",
+        "Zeno 1.0.10 consumes the same configuration, instructions, and skills. Zeno is currently macOS only; OpenCode supports every listed platform."
+      ],
+      "setup": [
+        "Preview threadnote agents install opencode; add --apply to install, then restart OpenCode or Zeno. The zeno alias selects this same surface.",
+        "For project setup use threadnote agents install opencode --scope project --cwd <repository> --apply."
+      ],
+      "verification": "Official flat-schema contract and Zeno 1.0.10 bundled schema inspected; isolated lifecycle and JSONC fixtures cover installation, repair, disablement, and removal.",
+      "projectGuidance": {
+        "status": "managed",
+        "targetPath": "AGENTS.md"
+      }
+    },
+    {
       "id": "opencode-v2",
       "agentId": "opencode",
       "displayName": "OpenCode v2",
       "tier": "experimental",
-      "aliases": ["opencode"],
+      "aliases": [],
       "scopes": [],
       "platforms": ["darwin", "linux", "win32"],
       "capabilities": {
@@ -395,7 +441,7 @@
       ],
       "lastVerified": "2026-09-17",
       "caveats": [
-        "Catalog only: v2 uses mcp.servers and command arrays; v1 is incompatible. Requires version probing before installation."
+        "Catalog only: this separate v2 schema is not managed. For the documented flat mcp configuration used by OpenCode and Zeno, select opencode."
       ],
       "setup": ["Follow the official documentation; this catalog entry does not install configuration."],
       "verification": "Research only; installation not verified.",
