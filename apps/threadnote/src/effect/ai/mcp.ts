@@ -16,6 +16,7 @@ import {
 } from '../../telemetry/diagnostic.js';
 import {isMemoryReadRecoveryV1, type MemoryReadRecoveryV1} from '@threadnote/memory/read/recovery';
 import {omitAnonymousTelemetryRecorder, withAnonymousTelemetry} from '../telemetry.js';
+import {flattenJsonSchemaConstraints} from '../../mcp/json_schema_constraints.js';
 
 // Windows antivirus and filesystem scheduling can make an otherwise healthy
 // append exceed 50 ms. Keep MCP diagnostics best-effort and bounded without
@@ -1117,38 +1118,6 @@ export function mcpToolFailureResult(cause: Cause.Cause<unknown>): Effect.Effect
 function causeMessage(cause: Cause.Cause<unknown>): string {
   const squashed = Cause.squash(cause);
   return squashed instanceof Error ? squashed.message : String(squashed);
-}
-
-function flattenJsonSchemaConstraints(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(flattenJsonSchemaConstraints);
-  }
-  if (typeof value !== 'object' || value === null) {
-    return value;
-  }
-  const output = Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [key, flattenJsonSchemaConstraints(entry)]),
-  );
-  const constraints = output.allOf;
-  if (Array.isArray(constraints)) {
-    const merged: Record<string, unknown> = {};
-    for (const constraint of constraints) {
-      if (typeof constraint !== 'object' || constraint === null || Array.isArray(constraint)) {
-        return output;
-      }
-      for (const [key, entry] of Object.entries(constraint)) {
-        const hasPrevious = Object.hasOwn(merged, key) || Object.hasOwn(output, key);
-        const previous = Object.hasOwn(merged, key) ? merged[key] : output[key];
-        if (hasPrevious && JSON.stringify(previous) !== JSON.stringify(entry)) {
-          return output;
-        }
-        merged[key] = entry;
-      }
-    }
-    delete output.allOf;
-    Object.assign(output, merged);
-  }
-  return output;
 }
 
 function toolHandlerEffect(

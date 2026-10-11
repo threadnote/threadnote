@@ -7,6 +7,7 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {Schema} from 'effect';
+import {flattenJsonSchemaConstraints} from './json_schema_constraints.js';
 
 interface ToolRegistration {
   readonly name: string;
@@ -41,7 +42,12 @@ export class EffectSchemaSdkTools {
       description: config.description,
       annotations: config.annotations,
       inputSchema: () =>
-        (advertisedSchema ??= strictObjectSchemas(Schema.toJsonSchemaDocument(config.inputSchema).schema)),
+        (advertisedSchema ??= strictObjectSchemas(
+          flattenJsonSchemaConstraints(Schema.toJsonSchemaDocument(config.inputSchema).schema) as Record<
+            string,
+            unknown
+          >,
+        )),
       invoke: input => {
         let parsed: S['Type'];
         try {
