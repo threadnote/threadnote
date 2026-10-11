@@ -469,7 +469,7 @@ function startBackgroundCitationRepair(
       trimCitationRepairJobs(registry);
       const crypto = yield* Crypto.Crypto;
       const createdAt = managerTimestamp(yield* Clock.currentTimeMillis);
-      const id = `mcrj_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+      const id = `mcrj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
       const entry: InternalManagerCitationRepairJob = {
         job: {
           createdAt,

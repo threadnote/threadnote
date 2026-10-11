@@ -319,7 +319,7 @@ export const captureSourceEvidence = Effect.fn('sourceEvidence.capture')(functio
       if (fragmentStart < 0) return yield* invalid('Fragment is absent from the exact sanitized imported revision.');
       const crypto = yield* Crypto.Crypto;
       const now = yield* Clock.currentTimeMillis;
-      const pinId = yield* crypto.randomUUIDv4;
+      const pinId = yield* crypto.randomUUIDv4();
       const citation: SourceEvidenceCitationV1 = {
         version: 1,
         provider: inspected.provider,

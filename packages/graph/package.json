@@ -444,25 +444,25 @@
     "./worktree_reconciliation": "./src/worktree_reconciliation.ts"
   },
   "dependencies": {
-    "@effect/platform-bun": "4.0.0",
-    "@effect/sql-sqlite-bun": "4.0.0",
+    "@effect/platform-bun": "4.0.3",
+    "@effect/sql-sqlite-bun": "4.0.3",
     "@threadnote/inference": "workspace:*",
     "@threadnote/platform": "workspace:*",
     "@threadnote/protocol": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "fflate": "0.8.3",
     "jose": "6.2.12",
-    "js-yaml": "^5.4.2",
+    "js-yaml": "^5.4.3",
     "typescript-compiler": "npm:typescript@5.9.3",
     "unpdf": "1.8.1",
-    "web-tree-sitter": "0.27.0"
+    "web-tree-sitter": "0.27.1"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@effect/vitest": "4.0.3",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@threadnote/testing": "workspace:*",
-    "fast-check": "4.10.1",
-    "vitest": "5.0.1"
+    "fast-check": "4.10.2",
+    "vitest": "5.0.3"
   }
 }

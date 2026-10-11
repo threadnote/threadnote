@@ -557,7 +557,7 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       if (projection.state === 'unknown' || projection.filesystems.length < 1 || projection.filesystems.length > 2) {
         return {state: 'unknown'} as const;
       }
-      const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4}`);
+      const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4()}`);
       const receipt: CodeGraphDiskReservationReceipt = {
         calibrationIdentity: projection.calibrationIdentity,
         filesystems: [...projection.filesystems].sort((left, right) => left.key.localeCompare(right.key)),
@@ -573,7 +573,7 @@ const claimAttempt = Effect.fn('codeGraph.diskReservation.claimAttempt')(functio
       if (yield* fs.exists(receiptPath)) {
         return yield* CodeGraphDiskReservationLedgerError.make({message: 'Disk reservation token collided.'});
       }
-      const temporaryToken = sha256HexSync(`${token}\0${yield* crypto.randomUUIDv4}`);
+      const temporaryToken = sha256HexSync(`${token}\0${yield* crypto.randomUUIDv4()}`);
       const temporaryPath = path.join(options.ledgerRoot, `.${name}.${temporaryToken}.tmp`);
       yield* Effect.scoped(
         Effect.gen(function* () {

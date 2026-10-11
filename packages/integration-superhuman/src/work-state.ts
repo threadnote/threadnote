@@ -61,7 +61,7 @@ export const writeDocumentCursor = Effect.fn('superhuman.writeDocumentCursor')(f
   const crypto = yield* Crypto.Crypto;
   const path = yield* cursorPath(config, sourceId);
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporary = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporary, JSON.stringify({version: 1, fingerprint, requestId, offset}), {mode: 0o600});
   yield* fs.rename(temporary, path).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });

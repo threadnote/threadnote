@@ -69,6 +69,7 @@ bun_test(
         "//apps/threadnote:src/telemetry/config.ts",
         "//apps/threadnote:src/telemetry/diagnostic.ts",
         "//apps/threadnote:src/telemetry/operations.ts",
+        "//apps/threadnote:src/telemetry/otlp_serialization.ts",
         "//apps/threadnote:src/telemetry/session.ts",
         "//apps/threadnote:src/types.ts",
         "//apps/threadnote:src/utils.ts",

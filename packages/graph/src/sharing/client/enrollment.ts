@@ -134,7 +134,7 @@ export const enrollGraphControlClient = Effect.fn('codeGraph.sharing.enrollContr
       if (state === undefined || state.identity !== identity || state.worker !== undefined) {
         state = {
           identity,
-          operationId: yield* (yield* Crypto.Crypto).randomUUIDv4,
+          operationId: yield* (yield* Crypto.Crypto).randomUUIDv4(),
           schemaVersion: 1,
         };
         yield* writePrivateJsonFile(target, state);

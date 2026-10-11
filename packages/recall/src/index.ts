@@ -1027,7 +1027,7 @@ function useRecallDatabase<A, E, R>(
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
 ): Effect.Effect<A, E, R> {
   return Effect.scoped(
-    Layer.build(SqliteClient.layer({filename: databasePath})).pipe(
+    Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
       Effect.flatMap(context => effect.pipe(Effect.provide(context))),
     ),
   );
@@ -1045,7 +1045,7 @@ function useRecallDatabaseReadOnly<A, E, R>(
         filename: databasePath,
         readonly: true,
         readwrite: false,
-      }),
+      }).pipe(Layer.orDie),
     ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );
 }

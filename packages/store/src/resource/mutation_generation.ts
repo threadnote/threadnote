@@ -62,8 +62,8 @@ export const advanceCanonicalMutationGeneration = Effect.fn('resourceMutationGen
   const previousGeneration = yield* readCanonicalMutationGeneration(fs, path, home, account);
   const generationPath = resourceAccountMutationGenerationPath(path, home, account);
   const directory = path.dirname(generationPath);
-  const generation = `v1:${yield* crypto.randomUUIDv4}`;
-  const temporaryPath = `${generationPath}.${yield* crypto.randomUUIDv4}.tmp`;
+  const generation = `v1:${yield* crypto.randomUUIDv4()}`;
+  const temporaryPath = `${generationPath}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.scoped(
     Effect.gen(function* () {

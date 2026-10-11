@@ -537,7 +537,7 @@ const writeAutoUpdateState = Effect.fn('autoUpdate.writeState')(function* (state
   const crypto = yield* Crypto.Crypto;
   const target = yield* autoUpdateStatePath();
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(state, null, 2)}\n`, {flag: 'wx', mode: 0o600});

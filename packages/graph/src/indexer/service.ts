@@ -863,7 +863,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         scope,
                       );
                       const forceGeneration = options.force
-                        ? (yield* crypto.randomUUIDv4).replaceAll('-', '').slice(0, 16)
+                        ? (yield* crypto.randomUUIDv4()).replaceAll('-', '').slice(0, 16)
                         : undefined;
                       const forcedSnapshotId = forcedSnapshotIdentity(logicalSnapshotId, forceGeneration);
                       const directSnapshotId = directFullSnapshotIdentity(logicalSnapshotId);

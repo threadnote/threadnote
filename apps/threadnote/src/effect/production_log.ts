@@ -159,9 +159,9 @@ export function withProductionLogging<A, E, R>(
     const startedAt = yield* Clock.currentTimeMillis;
     const system = yield* SystemInfo;
     const crypto = yield* Crypto.Crypto;
-    const invocationId = yield* crypto.randomUUIDv4.pipe(
-      Effect.orElseSucceed(() => `${system.processId}-${startedAt}`),
-    );
+    const invocationId = yield* crypto
+      .randomUUIDv4()
+      .pipe(Effect.orElseSucceed(() => `${system.processId}-${startedAt}`));
     const version = yield* getThreadnoteVersion().pipe(Effect.orElseSucceed(() => 'unknown'));
     const operation = safeDiagnosticLabel(options.operation, 'unknown');
     const base = {
@@ -454,7 +454,7 @@ function writeProductionLogBatch(
 ) {
   return Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    const suffix = yield* crypto.randomUUIDv4;
+    const suffix = yield* crypto.randomUUIDv4();
     const activeTemporaryPath = `${activePath}.temporary-${suffix}`;
     const disposition = yield* appendToExistingProductionLog(
       fs,

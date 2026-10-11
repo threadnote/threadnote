@@ -189,7 +189,7 @@ const writeAutomaticCompactionReceipt = Effect.fn('codeGraph.writeAutomaticCompa
   }
   const temporary = path.join(
     root,
-    `.${CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_FILE}.${yield* crypto.randomUUIDv4}.tmp`,
+    `.${CODE_GRAPH_AUTOMATIC_COMPACTION_RECEIPT_FILE}.${yield* crypto.randomUUIDv4()}.tmp`,
   );
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

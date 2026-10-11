@@ -559,7 +559,7 @@ function writeCodexResumeReceipt(
   return Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     yield* fs.makeDirectory(pathService.dirname(receiptPath), {recursive: true, mode: 0o700});
-    const temporary = `${receiptPath}.${yield* crypto.randomUUIDv4}.tmp`;
+    const temporary = `${receiptPath}.${yield* crypto.randomUUIDv4()}.tmp`;
     yield* fs.writeFileString(temporary, `${JSON.stringify(receipt)}\n`, {flag: 'wx', mode: 0o600});
     yield* fs
       .rename(temporary, receiptPath)

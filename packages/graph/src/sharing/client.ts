@@ -756,7 +756,7 @@ const importVerifiedSharedCheckpoint = Effect.fn('codeGraph.sharing.importVerifi
   }
   const composedPath = yield* writeTemporaryCheckpointPack(
     path.join(layout.root, 'downloads'),
-    `${yield* crypto.randomUUIDv4}.cgcp`,
+    `${yield* crypto.randomUUIDv4()}.cgcp`,
     composed,
   );
   const imported = yield* importCodeGraphCheckpointSnapshot(runtimeConfigForHome(input.request.threadnoteHome), {

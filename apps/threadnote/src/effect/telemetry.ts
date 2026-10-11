@@ -1,7 +1,7 @@
 import * as FetchHttpClient from 'effect/http/FetchHttpClient';
 import * as HttpClient from 'effect/http/HttpClient';
 import * as HttpClientResponse from 'effect/http/HttpClientResponse';
-import {OtlpSerialization, OtlpTracer} from 'effect/observability';
+import {OtlpTracer} from 'effect/observability';
 import {Cause, Clock, ConfigProvider, Context, Effect, Exit, Layer, Result, Tracer} from 'effect';
 import type * as Headers from 'effect/http/Headers';
 import type * as Duration from 'effect/Duration';
@@ -16,6 +16,7 @@ import {
   type AnonymousTelemetryDiagnostic,
 } from '../telemetry/diagnostic.js';
 import {safeAnonymousTelemetryOperation} from '../telemetry/operations.js';
+import {anonymousTelemetrySerializationLayer} from '../telemetry/otlp_serialization.js';
 
 const TELEMETRY_SCHEMA_VERSION = 6;
 const TELEMETRY_VERSION_MAX_BYTES = 96;
@@ -466,7 +467,7 @@ export function anonymousTelemetryLayer(options?: AnonymousTelemetryRuntimeOptio
     shutdownTimeout: options.shutdownTimeout ?? '3 seconds',
     url: options.endpoint,
   }).pipe(
-    Layer.provide(OtlpSerialization.layerProtobuf),
+    Layer.provide(anonymousTelemetrySerializationLayer),
     Layer.provide(transportLayer),
     // OtlpResource otherwise merges ambient OTEL_RESOURCE_ATTRIBUTES and
     // OTEL_SERVICE_* values, which are outside Threadnote's consent allowlist.

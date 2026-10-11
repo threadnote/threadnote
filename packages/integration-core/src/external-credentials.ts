@@ -234,7 +234,7 @@ export const storeExternalCredential = Effect.fn('external.storeCredential')(fun
   const before = yield* inspectDirectories(directories, true);
   if (before === undefined) return yield* unavailable();
   yield* inspect(filename, 'file', true);
-  const temporary = `${filename}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${filename}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600}).pipe(Effect.mapError(unavailable));

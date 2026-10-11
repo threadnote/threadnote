@@ -97,7 +97,7 @@ export const persistCodexCloudProfile = Effect.fn('codexCloud.persistProfile')(f
   const path = yield* Path.Path;
   const target = yield* codexCloudProfilePath(config.agentContextHome);
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.profile.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(directory, `.profile.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* fs.writeFileString(temporary, `${JSON.stringify(profile, undefined, 2)}\n`, {mode: 0o600});
   yield* fs.rename(temporary, target).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));

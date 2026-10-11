@@ -267,7 +267,7 @@ export const configureRegistryOAuthUser = Effect.fn('codeGraph.sharing.configure
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option)))
     return yield* graphSharingFailure('Registry OAuth binding must not be a symbolic link.');
   const crypto = yield* Crypto.Crypto;
-  const staged = `${destination}.${yield* crypto.randomUUIDv4}.pending`;
+  const staged = `${destination}.${yield* crypto.randomUUIDv4()}.pending`;
   const replaced = existing.find(binding => binding.coordinatorUrl === validated.coordinatorUrl);
   const persisted =
     options.profile !== 'legacy-auth0' &&

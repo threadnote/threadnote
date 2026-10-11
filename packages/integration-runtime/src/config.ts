@@ -154,7 +154,7 @@ export function makeSourceConfigurationStore(registry: SourceConfigurationRegist
     const fs = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-    const temporaryPath = `${path}.${yield* (yield* Crypto.Crypto).randomUUIDv4}.tmp`;
+    const temporaryPath = `${path}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
     yield* fs.writeFileString(temporaryPath, serialized, {mode: 0o600});
     yield* fs
       .rename(temporaryPath, path)

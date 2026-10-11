@@ -115,7 +115,7 @@ const createTicket = Effect.fn('codeGraph.preparedSpoolBudget.createTicket')(fun
   const root = codeGraphPreparedSpoolBudgetRoot(path, options.threadnoteHome);
   yield* fs.makeDirectory(root, {recursive: true, mode: 0o700});
   if (system.platform !== 'win32') yield* fs.chmod(root, 0o700);
-  const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4}`);
+  const token = sha256HexSync(`${system.processId}\0${yield* crypto.randomUUIDv4()}`);
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   const ticket: PreparedSpoolBudgetEntry = {

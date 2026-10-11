@@ -49,7 +49,7 @@ export const durablyReplaceCodeMemoryLinkAgentLedger = Effect.fn('codeMemoryLink
   const path = yield* Path.Path;
   const target = path.resolve(targetInput);
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4}.durable.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.durable.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

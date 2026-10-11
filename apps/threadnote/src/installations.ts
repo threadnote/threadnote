@@ -78,7 +78,7 @@ export const activateStandaloneRelease = Effect.fn('installations.activateReleas
   }
   yield* recoverActiveReleasePromotion(fs, path, root);
   const crypto = yield* Crypto.Crypto;
-  const operationId = `${system.processId}-${yield* crypto.randomUUIDv4}`;
+  const operationId = `${system.processId}-${yield* crypto.randomUUIDv4()}`;
   yield* fs.makeDirectory(root, {recursive: true, mode: 0o700});
   const activePath = path.join(root, ACTIVE_RELEASE_FILE);
   const backupPath = path.join(root, ACTIVE_RELEASE_BACKUP_FILE);
@@ -555,7 +555,7 @@ const writePrivateJsonAtomically = Effect.fn('installations.writePrivateJsonAtom
 ) {
   const crypto = yield* Crypto.Crypto;
   const directory = path.dirname(target);
-  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(directory, `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(value, undefined, 2)}\n`, {flag: 'wx', mode: 0o600});

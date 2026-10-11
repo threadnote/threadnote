@@ -334,7 +334,7 @@ const recordResolvedCodeGraphLocalAssociationUnlocked = Effect.fn('codeGraph.rec
 
     const temporary = path.join(
       directory.value,
-      `.${identity.worktreeId}.${(yield* crypto.randomUUIDv4).replaceAll('-', '')}.tmp`,
+      `.${identity.worktreeId}.${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}.tmp`,
     );
     const written = yield* Effect.gen(function* () {
       yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

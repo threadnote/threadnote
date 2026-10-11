@@ -479,7 +479,7 @@ const mutateIntent = Effect.fn('codeGraph.mutateScopeRetirementIntent')(function
             message: 'Scoped retirement intent capacity is unavailable.',
           });
       }
-      const temporary = path.join(root, `${sha256HexSync(scopeId)}-${yield* crypto.randomUUIDv4}.tmp`);
+      const temporary = path.join(root, `${sha256HexSync(scopeId)}-${yield* crypto.randomUUIDv4()}.tmp`);
       const before = yield* fs.stat(root);
       yield* Effect.gen(function* () {
         yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});

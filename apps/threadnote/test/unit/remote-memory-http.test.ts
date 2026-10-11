@@ -699,8 +699,21 @@ describe('remote memory HTTP transport', () => {
     });
     expect(tools.find(tool => tool.name === 'list_memory_proposals')?.inputSchema).toMatchObject({
       additionalProperties: false,
-      properties: {limit: {maximum: 100}, status: {type: 'string'}},
+      properties: {limit: {type: 'integer', minimum: 1, maximum: 100}, status: {type: 'string'}},
     });
+    for (const [index, limit] of [0, 101, 1.5].entries()) {
+      const invalidLimit = await json(
+        await test.handler(
+          mcpRequest({
+            id: 43 + index,
+            method: 'tools/call',
+            params: {arguments: {limit, version: 1}, name: 'list_memory_proposals'},
+          }),
+        ),
+      );
+      expect(invalidLimit).toMatchObject({id: 43 + index, result: {isError: true}});
+    }
+    expect(test.calls).not.toContain('proposal:list');
     const invalidRejection = await json(
       await test.handler(
         mcpRequest({

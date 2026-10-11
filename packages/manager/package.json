@@ -71,18 +71,18 @@
     "@threadnote/platform": "workspace:*",
     "@threadnote/recall": "workspace:*",
     "@threadnote/workspace": "workspace:*",
-    "effect": "4.0.0",
-    "lucide-react": "^1.52.0",
+    "effect": "4.0.3",
+    "lucide-react": "^1.55.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "three": "^0.186.0"
+    "three": "^0.186.1"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0",
+    "@effect/vitest": "4.0.3",
     "@threadnote/testing": "workspace:*",
-    "fast-check": "4.10.1",
-    "vitest": "5.0.1"
+    "fast-check": "4.10.2",
+    "vitest": "5.0.3"
   }
 }

@@ -331,7 +331,7 @@ const fileLockToken = Effect.fn('fileLock.token')(function* (useCanonicalProcess
   return JSON.stringify({
     processId: system.processId,
     ...(processStartIdentity ? {processStartIdentity} : {}),
-    token: yield* crypto.randomUUIDv4,
+    token: yield* crypto.randomUUIDv4(),
     version: 1,
   } satisfies FileLockOwner);
 });

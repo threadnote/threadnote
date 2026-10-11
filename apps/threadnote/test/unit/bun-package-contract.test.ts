@@ -16,7 +16,7 @@ describe('Bun distribution contract', () => {
   it('uses Bun as the only application runtime and build toolchain', async () => {
     const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as PackageManifest;
     const allDependencies = {...manifest.dependencies, ...manifest.devDependencies};
-    const effectVersion = '4.0.0';
+    const effectVersion = '4.0.3';
 
     expect(manifest.packageManager).toMatch(/^bun@/);
     for (const packageName of [
@@ -29,8 +29,8 @@ describe('Bun distribution contract', () => {
       expect(allDependencies[packageName]).toBe(effectVersion);
     }
     expect(manifest.overrides?.['@effect/platform-node-shared']).toBe(effectVersion);
-    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.48.0');
-    expect(manifest.devDependencies?.oxlint).toBe('1.86.0');
+    expect(manifest.devDependencies?.['@effect/tsgo']).toBe('0.51.1');
+    expect(manifest.devDependencies?.oxlint).toBe('1.87.0');
     expect(manifest.devDependencies?.['oxlint-tsgolint']).toBe('7.0.2003');
     expect(allDependencies['@effect/platform-node']).toBeUndefined();
     expect(allDependencies['@effect/sql-sqlite-node']).toBeUndefined();
@@ -51,7 +51,7 @@ describe('Bun distribution contract', () => {
     expect(manifest.devDependencies?.nanoid).toBeUndefined();
     expect(manifest.overrides?.nanoid).toBeUndefined();
     expect(lockfile).toContain('"nanoid": ["nanoid@5.1.16"');
-    expect(lockfile).toContain('"postcss/nanoid": ["nanoid@3.3.18"');
+    expect(lockfile).toContain('"postcss/nanoid": ["nanoid@3.3.20"');
     expect(lockfile).not.toContain('"postcss/nanoid": ["nanoid@3.3.16"');
   });
 
@@ -65,7 +65,7 @@ describe('Bun distribution contract', () => {
     expect(manifest.overrides?.['fast-uri']).toBe('3.1.8');
     expect(lockfile).toContain('"fast-uri": ["fast-uri@3.1.8"');
     expect(lockfile).toMatch(
-      /^\s+"@modelcontextprotocol\/sdk": \["@modelcontextprotocol\/sdk@1\.30\.0"[^\r\n]*"ajv": "\^8\.17\.1"/mu,
+      /^\s+"@modelcontextprotocol\/sdk": \["@modelcontextprotocol\/sdk@1\.32\.1"[^\r\n]*"ajv": "\^8\.17\.1"/mu,
     );
     expect(lockfile).toMatch(/^\s+"ajv": \["ajv@8\.20\.0"[^\r\n]*"fast-uri": "\^3\.0\.1"/mu);
   });

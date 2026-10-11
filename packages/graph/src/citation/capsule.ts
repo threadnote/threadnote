@@ -321,7 +321,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
       );
       if (!selection.retain.some(value => value.id === capsule.id)) return false;
       const crypto = yield* Crypto.Crypto;
-      const temporary = path.join(directory, `pending-${yield* crypto.randomUUIDv4}`);
+      const temporary = path.join(directory, `pending-${yield* crypto.randomUUIDv4()}`);
       yield* fs.writeFileString(temporary, serialized, {mode: 0o600, flag: 'wx'});
       yield* fs.chmod(temporary, 0o600);
       yield* fs

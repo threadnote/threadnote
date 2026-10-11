@@ -303,7 +303,7 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
         }
         const crypto = yield* Crypto.Crypto;
         const now = yield* Clock.currentTimeMillis;
-        const pinId = yield* crypto.randomUUIDv4;
+        const pinId = yield* crypto.randomUUIDv4();
         const citation: MemoryObsidianEvidenceV1 = {
           version: 1,
           sourceId: source.id,
@@ -762,7 +762,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
             noteId:
               previousNoteId && matching?.every(previous => previous.noteId === previousNoteId)
                 ? previousNoteId
-                : yield* crypto.randomUUIDv4,
+                : yield* crypto.randomUUIDv4(),
             sanitizedHash: note.sanitizedHash,
             sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
             size: note.size,
@@ -773,7 +773,7 @@ const syncObsidianSource = Effect.fn('obsidian.syncSource')(function* (
           files: nextFiles,
           ...(plan.scan === undefined ? {} : {scan: plan.scan}),
           sourceId: source.id,
-          sourceInstanceId: plan.state.sourceInstanceId ?? (yield* crypto.randomUUIDv4),
+          sourceInstanceId: plan.state.sourceInstanceId ?? (yield* crypto.randomUUIDv4()),
           syncedAt:
             plan.scan === undefined ? DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis)) : plan.state.syncedAt,
           version: SOURCE_STATE_VERSION,
@@ -1037,7 +1037,7 @@ const writeSourceState = Effect.fn('obsidian.writeSourceState')(function* (path:
   const pathService = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {mode: PRIVATE_FILE_MODE});
   yield* fs
     .rename(temporaryPath, path)

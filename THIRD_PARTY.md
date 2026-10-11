@@ -10,9 +10,9 @@ Direct runtime software and packages bundled into the published JavaScript retai
 - `node-llama-cpp` (MIT), used in a supervised local worker with prebuilt `llama.cpp` binaries for GGUF inference
 - Bun (MIT), embedded into each compiled executable
 - `effect`, `@effect/platform-bun`, `@effect/ai-openai-compat`, `@effect/sql-sqlite-bun`, and `@effect/vitest` (MIT)
-- `@modelcontextprotocol/sdk` 1.30.0 (MIT), pinned for the Streamable HTTP and stdio MCP protocol boundary
+- `@modelcontextprotocol/sdk` 1.32.1 (MIT), pinned for the Streamable HTTP and stdio MCP protocol boundary
 - `jose` 6.2.12 (MIT), used for OAuth and Cursor workload JWT/JWKS verification
-- `pxpipe-proxy` 0.13.2 (MIT), used to render optional MCP memory PNG pages
+- `pxpipe-proxy` 0.14.0 (MIT), used to render optional MCP memory PNG pages
 - `postgres` 3.4.9 (MIT), used by the managed remote-memory PostgreSQL service and operator
 - `zod` 4.4.3 (MIT), retained transitively by `@modelcontextprotocol/sdk` for its protocol implementation
 - `react`, `react-dom`, and `react-markdown` (MIT)
@@ -23,7 +23,7 @@ Direct runtime software and packages bundled into the published JavaScript retai
 - TypeScript compiler 5.9 (`typescript-compiler`, Apache-2.0), bundled for native TypeScript/JavaScript graph extraction
 - `fflate` 0.8.3 (MIT), used for bounded local text extraction from tracked OpenXML, OpenDocument, and EPUB archives
 - `unpdf` 1.8.1 (MIT) and its bundled PDF.js engine (Apache-2.0), used for local tracked-PDF text and link extraction
-- `web-tree-sitter` 0.27.0 (MIT), bundled as the portable structural parser runtime
+- `web-tree-sitter` 0.27.1 (MIT), bundled as the portable structural parser runtime
 - `tree-sitter-java` 0.23.5 (MIT), bundled as a verified WASM grammar
 - `tree-sitter-kotlin` 0.3.8 plus pinned upstream revision `c8ac3d2` (MIT), bundled as a verified WASM grammar
 - `tree-sitter-swift` 0.7.3 (MIT), bundled as a verified WASM grammar

@@ -57,9 +57,9 @@ describe('remote memory reference deployment', () => {
     expect(dockerfile).toContain('apk add --no-cache git');
     expect(dockerfile).toContain('CMD ["bun", "apps/threadnote/src/standalone.ts", "remote-memory-service"]');
     expect(packageJson.dependencies).toMatchObject({
-      '@effect/platform-bun': '4.0.0',
-      effect: '4.0.0',
-      'js-yaml': '^5.4.2',
+      '@effect/platform-bun': '4.0.3',
+      effect: '4.0.3',
+      'js-yaml': '^5.4.3',
     });
   });
 

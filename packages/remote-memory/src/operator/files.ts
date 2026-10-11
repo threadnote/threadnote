@@ -98,7 +98,7 @@ export const writeRemoteMemoryExportBundle = Effect.fn('remoteMemory.operator.wr
     return yield* operatorFileError('The export output directory already exists.');
   }
   const crypto = yield* Crypto.Crypto;
-  const staging = path.join(path.dirname(output), `.threadnote-remote-export-${yield* crypto.randomUUIDv4}`);
+  const staging = path.join(path.dirname(output), `.threadnote-remote-export-${yield* crypto.randomUUIDv4()}`);
   yield* fs.makeDirectory(staging, {mode: 0o700, recursive: false});
   return yield* Effect.gen(function* () {
     for (const file of plan.files) {

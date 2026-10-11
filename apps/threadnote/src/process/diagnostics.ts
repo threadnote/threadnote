@@ -558,7 +558,7 @@ function registerThreadnoteProcess(home: string, baseRole: RegisteredThreadnoteP
       repairFailureReported: false,
       path,
       startedAt: DateTime.formatIso(yield* DateTime.now),
-      token: yield* crypto.randomUUIDv4,
+      token: yield* crypto.randomUUIDv4(),
       writeSemaphore,
     };
     registration = Option.some(active);

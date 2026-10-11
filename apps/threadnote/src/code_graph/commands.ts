@@ -1615,7 +1615,7 @@ export const runCodeGraphExport = Effect.fn('codeGraph.command.export')(function
   const nodeLimit = yield* parseCodeGraphExportLimit(options.nodeLimit, '--node-limit');
   const parent = path.dirname(output);
   yield* fs.makeDirectory(parent, {recursive: true});
-  const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.tmp`);
   const summary = yield* Effect.scoped(
     Effect.gen(function* () {
       const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

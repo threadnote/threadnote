@@ -14,7 +14,7 @@ export const writePrivateJsonFile = Effect.fn('codeGraph.sharing.writePrivateJso
     return yield* graphSharingFailure(`Refusing to replace a graph-sharing symbolic link: ${destination}`);
   }
   const crypto = yield* Crypto.Crypto;
-  const temporary = `${destination}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporary, `${JSON.stringify(value)}\n`, {mode: 0o600});
   yield* fs
     .rename(temporary, destination)
@@ -49,7 +49,7 @@ export const writePrivateBytesFile = Effect.fn('codeGraph.sharing.writePrivateBy
     return yield* graphSharingFailure(`Refusing to replace a graph-sharing symbolic link: ${destination}`);
   }
   const crypto = yield* Crypto.Crypto;
-  const temporary = `${destination}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFile(temporary, bytes, {mode: 0o600});
   yield* fs
     .rename(temporary, destination)

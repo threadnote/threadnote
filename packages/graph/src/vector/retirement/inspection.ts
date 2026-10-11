@@ -758,7 +758,7 @@ export function useExistingVectorDatabase<A, E, R>(
         disableWAL: true,
         filename: databasePath,
         readwrite: true,
-      }),
+      }).pipe(Layer.orDie),
     ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );
 }
@@ -784,7 +784,7 @@ export function useReadOnlyVectorDatabase<A, E, R>(
         filename: databasePath,
         readonly: true,
         readwrite: false,
-      }),
+      }).pipe(Layer.orDie),
     ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );
 }

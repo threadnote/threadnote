@@ -185,7 +185,7 @@ export const configureRegistryAuth0User = Effect.fn('codeGraph.sharing.configure
   if (Option.isSome(yield* fs.readLink(destination).pipe(Effect.option)))
     return yield* graphSharingFailure('Registry Auth0 binding must not be a symbolic link.');
   const crypto = yield* Crypto.Crypto;
-  const staged = `${destination}.${yield* crypto.randomUUIDv4}.pending`;
+  const staged = `${destination}.${yield* crypto.randomUUIDv4()}.pending`;
   yield* writePrivateJsonFile(staged, {bindings: [...next, validated], schemaVersion: 1});
   // Stage the binding first; Docker conflicts leave it unpublished, and a retry can reuse an installed helper.
   yield* Effect.gen(function* () {

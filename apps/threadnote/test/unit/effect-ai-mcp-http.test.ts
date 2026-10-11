@@ -352,7 +352,7 @@ describe('Effect MCP Streamable HTTP transport', () => {
   );
 
   it.each(['2025-06-18', '2025-11-25'])(
-    'requires the %s version header after initialization',
+    'uses the negotiated %s version when a session request omits the version header',
     async protocolVersion => {
       const fixture = makeFixture();
       try {
@@ -366,7 +366,16 @@ describe('Effect MCP Streamable HTTP transport', () => {
           },
         );
 
-        expect(response.status).toBe(400);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('mcp-protocol-version')).toBe(protocolVersion);
+        expect(await response.json()).toMatchObject({id: 2, result: {tools: [{name: HTTP_CONTEXT_TOOL}]}});
+
+        const mismatchedVersion = await rpcRequest(
+          fixture,
+          {id: 3, method: 'tools/list', params: {}},
+          {protocolVersion: protocolVersion === '2025-06-18' ? '2025-11-25' : '2025-06-18', sessionId},
+        );
+        expect(mismatchedVersion.status).toBe(400);
       } finally {
         await fixture.dispose();
       }

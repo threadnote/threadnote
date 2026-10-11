@@ -71,7 +71,7 @@ export const stopVerifiedLegacyLocalAi = Effect.fn('legacyRuntime.stopLocalAi')(
   }
 
   const crypto = yield* Crypto.Crypto;
-  const challenge = yield* crypto.randomUUIDv4;
+  const challenge = yield* crypto.randomUUIDv4();
   const host = config.host === '::1' ? '[::1]' : config.host;
   const response = yield* HttpService.pipe(
     Effect.flatMap(http =>

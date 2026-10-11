@@ -666,7 +666,7 @@ const atomicWrite = Effect.fn('contextMaintenance.writeEvidenceProjection')(func
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
-  const temporary = `${file}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${file}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs
     .writeFileString(temporary, text, {mode: 0o600})
     .pipe(
@@ -1193,7 +1193,7 @@ const enqueueEvidenceRequest = Effect.fn('contextMaintenance.enqueueEvidenceRequ
           pending.delete(uri);
         }
         if (combined.length === (previous?.uris.length ?? 0)) continue;
-        yield* writeEvidenceRequestPage(pageFile, {...candidate(), revision: yield* crypto.randomUUIDv4});
+        yield* writeEvidenceRequestPage(pageFile, {...candidate(), revision: yield* crypto.randomUUIDv4()});
       }
     }),
   ).pipe(Effect.mapError(() => requestPersistenceError()));

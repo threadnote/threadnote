@@ -35,7 +35,7 @@ export const writeModelSelection = Effect.fn('models.writeSelection')(function* 
   const path = yield* Path.Path;
   const directory = path.join(home, 'models');
   const target = path.join(directory, 'selection.json');
-  const temporary = path.join(directory, `.selection.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(directory, `.selection.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
   yield* fs.writeFileString(temporary, `${JSON.stringify(selection, undefined, 2)}\n`, {mode: 0o600});
   yield* fs.rename(temporary, target);
