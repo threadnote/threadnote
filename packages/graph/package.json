@@ -460,7 +460,7 @@
   },
   "devDependencies": {
     "@effect/vitest": "4.0.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.1",
     "vitest": "5.0.1"
