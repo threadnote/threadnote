@@ -153,7 +153,7 @@
     "mitata": "1.0.34",
     "oxlint": "1.86.0",
     "oxlint-tsgolint": "7.0.2003",
-    "prettier": "^3.9.8",
+    "prettier": "^3.9.9",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "tree-sitter-elixir": "0.3.5",
