@@ -75,7 +75,13 @@ describe('agents CLI', () => {
       readonly version: number;
     };
     expect(catalog.version).toBe(1);
-    expect(catalog.agents).toHaveLength(28);
+    expect(catalog.agents).toHaveLength(30);
+    for (const id of ['opencode', 'zeno-desktop']) {
+      expect(catalog.agents.find(agent => agent.id === id)?.projectGuidance).toEqual({
+        status: 'managed',
+        targetPath: 'AGENTS.md',
+      });
+    }
     expect(catalog.agents.find(agent => agent.id === 'codex-cloud')?.projectGuidance.status).toBe('unsupported');
     expect(catalog.agents.some(agent => agent.id === 'gemini-cli')).toBe(true);
     expect(catalog.agents.find(agent => agent.id === 'gemini-cli')?.projectGuidance).toEqual({
