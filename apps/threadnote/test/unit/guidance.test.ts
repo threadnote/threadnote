@@ -59,9 +59,11 @@ describe('project guidance blocks', () => {
       'gemini-cli': 'GEMINI.md',
       'kiro-cli': '.kiro/steering/threadnote.md',
       'omp-agent': '.omp/AGENTS.md',
+      opencode: 'AGENTS.md',
       'qwen-code': 'QWEN.md',
       'roo-project': '.roo/rules/threadnote.md',
       'windsurf-legacy': '.windsurf/rules/threadnote.md',
+      'zeno-desktop': 'AGENTS.md',
     });
     expect(getAgentAdapter('junie-cli')?.guidance).toBeUndefined();
     expect(getAgentAdapter('zed-native')?.guidance).toBeUndefined();

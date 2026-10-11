@@ -105,7 +105,11 @@ describe('agent expansion conformance', () => {
                 );
               else expect(plan.artifacts.some(artifact => artifact.name === 'instructions')).toBe(false);
               if ('skills' in fixture) {
-                const expectedSkills = fixture.skills.replace('{home}', home).replace('{root}', expectedRoot);
+                const expectedSkills = (
+                  scope !== 'user' && 'projectSkills' in fixture ? fixture.projectSkills : fixture.skills
+                )
+                  .replace('{home}', home)
+                  .replace('{root}', expectedRoot);
                 expect(plan.skillRoot).toBe(expectedSkills);
                 expect(plan.artifacts.filter(artifact => artifact.name.startsWith('skill '))).toHaveLength(4);
                 expect(plan.artifacts.at(-1)?.path).toBe(

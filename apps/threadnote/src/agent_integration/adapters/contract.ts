@@ -7,6 +7,8 @@ import type {AgentClient, DoctorCheck} from '../../types.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {AgentCatalogEntry} from '@threadnote/integrations/catalog';
 import type {AgentIntegrationRegistry, AgentSetupCompletion} from '../registry.js';
+import type {AgentJsonContainer} from '../json_config.js';
+import type {JsonObject} from '@threadnote/platform/json';
 
 export class AgentAdapterActionError extends Schema.TaggedError<AgentAdapterActionError>()('AgentAdapterActionError', {
   message: Schema.String,
@@ -27,13 +29,24 @@ export interface JsonAgentStrategy {
   readonly mcpRoot?: string;
   readonly mcpRootEnvironment?: string;
   readonly mcpFile: string;
-  readonly container: string;
+  /** Existing files in host precedence order, before falling back to mcpFile. */
+  readonly mcpFileAlternatives?: readonly string[];
+  readonly container: AgentJsonContainer;
+  readonly enablement?: 'enabled' | 'disabled';
+  /** Hosts that migrate legacy documents select the old container by top-level keys. */
+  readonly legacySchema?: {
+    readonly keys: readonly string[];
+    readonly container: AgentJsonContainer;
+    readonly enablement: 'enabled' | 'disabled';
+    readonly emptyDocument: JsonObject;
+  };
   readonly instructionFile?: string;
   readonly projectInstructionFile?: string;
   readonly instructionPrefix?: string;
   readonly instructionContent?: string;
   readonly projectInstructionPrefix?: string;
   readonly skillRoot: 'native' | 'shared' | 'none' | {readonly user: string; readonly project: string};
+  readonly projectSkillRoot?: string;
   readonly skillLayout?: 'flat';
   readonly entryType?: 'stdio' | 'local';
   readonly policyGlobs?: boolean;

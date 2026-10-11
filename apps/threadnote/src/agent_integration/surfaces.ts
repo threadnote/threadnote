@@ -26,6 +26,10 @@ import {
 } from './index.js';
 import {
   agentJsonHasComments,
+  agentServerContainer,
+  createdAgentContainerParents,
+  sameAgentContainer,
+  type AgentJsonContainer,
   jsonServerDisabled,
   mergeAgentServer,
   parseAgentJson,
@@ -78,17 +82,18 @@ export function installJsonAgentSurface(
           'A versioned adapter migration is required before repair can continue.',
       });
     }
-    const raw = yield* readFileIfExists(plan.mcpPath);
-    const parsed = yield* attempt(() => parseAgentJson(raw, adapter.json?.codec));
+    const raw = plan.mcpContent;
+    const parsed =
+      raw === undefined ? plan.emptyDocument : yield* attempt(() => parseAgentJson(raw, adapter.json?.codec));
     const strategy = plan.adapter.json!;
-    const container = parsed[strategy.container];
+    const container = agentServerContainer(parsed, plan.container);
     const current = isJsonObject(container) ? container[plan.name] : undefined;
     const peers = Object.values(registry.surfaces ?? {}).filter(
       receipt =>
         receipt.surfaceId !== id &&
         receipt.mcp.path === plan.mcpPath &&
         receipt.mcp.name === plan.name &&
-        receipt.strategy.container === strategy.container,
+        sameAgentContainer(receipt.strategy.container, plan.container),
     );
     if (peers.some(receipt => receipt.agentId !== adapter.catalog.agentId || receipt.mcp.toolset !== plan.toolset))
       return yield* AgentSurfaceError.make({
@@ -114,10 +119,13 @@ export function installJsonAgentSurface(
         ...(isJsonObject(plan.entry[environmentKey]) ? plan.entry[environmentKey] : {}),
       },
       ...(isJsonObject(current) && current.enabled === false ? {enabled: false} : {}),
+      ...(isJsonObject(current) && current.disabled === true ? {disabled: true} : {}),
     };
-    const next = yield* attempt(() => mergeAgentServer(parsed, strategy.container, plan.name, entry));
+    const next = yield* attempt(() => mergeAgentServer(parsed, plan.container, plan.name, entry));
     if (!options.apply) {
-      yield* Console.log(`Would merge ${strategy.container}.${plan.name} in ${plan.mcpPath}`);
+      yield* Console.log(
+        `Would merge ${typeof plan.container === 'string' ? plan.container : plan.container.join('.')}.${plan.name} in ${plan.mcpPath}`,
+      );
       for (const artifact of plan.artifacts) yield* Console.log(`Would install ${artifact.name}: ${artifact.path}`);
       return;
     }
@@ -134,7 +142,7 @@ export function installJsonAgentSurface(
       status: 'pending',
       artifacts: Object.fromEntries(plan.artifacts.map(artifact => [artifact.path, artifact.hash])),
       artifactDescriptors: plan.artifacts.map(({hash, kind, name, path}) => ({hash, kind, name, path})),
-      strategy: {codec: strategy.codec ?? 'json', container: strategy.container, kind: 'json'},
+      strategy: {codec: strategy.codec ?? 'json', container: plan.container, kind: 'json'},
       mcp: {
         root: plan.mcpRoot,
         path: plan.mcpPath,
@@ -142,6 +150,10 @@ export function installJsonAgentSurface(
         hash: yield* sha256Hex(JSON.stringify(entry)),
         toolset: plan.toolset,
         createdContainer: previous?.mcp.createdContainer ?? peers[0]?.mcp.createdContainer ?? container === undefined,
+        createdContainerParents:
+          previous?.mcp.createdContainerParents ??
+          peers[0]?.mcp.createdContainerParents ??
+          createdAgentContainerParents(parsed, plan.container),
         createdFile: previous?.mcp.createdFile ?? peers[0]?.mcp.createdFile ?? raw === undefined,
       },
     };
@@ -152,7 +164,7 @@ export function installJsonAgentSurface(
     if (JSON.stringify(next) !== JSON.stringify(parsed))
       yield* atomicAgentWrite(
         plan.mcpPath,
-        writeAgentServer(raw, strategy.codec ?? 'json', strategy.container, plan.name, next),
+        writeAgentServer(raw, strategy.codec ?? 'json', plan.container, plan.name, next),
         0o600,
         {content: raw},
       );
@@ -198,11 +210,11 @@ export const agentSurfaceStatus = Effect.fn('agentSurfaces.status')(function* (
   if (!receiptMatchesPlan(receipt, plan)) {
     return {state: 'stale' as const, detail: 'Installed adapter contract requires a versioned migration.'};
   }
-  const raw = yield* readFileIfExists(receipt.mcp.path);
+  const raw = plan.mcpContent;
   const parsed = yield* attempt(() => parseAgentJson(raw, receipt.strategy.codec));
   if (jsonServerDisabled(parsed, receipt.strategy.container, receipt.mcp.name, adapter.json.policyGlobs))
     return {state: 'disabled' as const, detail: 'Host configuration disables the server; review host policy.'};
-  const container = parsed[receipt.strategy.container];
+  const container = agentServerContainer(parsed, receipt.strategy.container);
   const entry = isJsonObject(container) ? container[receipt.mcp.name] : undefined;
   const environmentKey = adapter.json.commandArray ? 'environment' : 'env';
   if (
@@ -273,9 +285,9 @@ const removeAgentSurfaceFromRegistry = Effect.fn('agentSurfaces.removeFromRegist
   if (!receiptMatchesPlan(receipt, plan))
     return yield* AgentSurfaceError.make({message: 'Installed adapter contract requires a versioned migration.'});
   if (apply) yield* assertSurfaceTargets(plan);
-  const raw = yield* readFileIfExists(receipt.mcp.path);
+  const raw = plan.mcpContent;
   const parsed = yield* attempt(() => parseAgentJson(raw, receipt.strategy.codec));
-  const container = parsed[receipt.strategy.container];
+  const container = agentServerContainer(parsed, receipt.strategy.container);
   const entry = isJsonObject(container) ? container[receipt.mcp.name] : undefined;
   if (
     entry !== undefined &&
@@ -294,11 +306,17 @@ const removeAgentSurfaceFromRegistry = Effect.fn('agentSurfaces.removeFromRegist
         peer.surfaceId !== receipt.surfaceId &&
         peer.mcp.path === receipt.mcp.path &&
         peer.mcp.name === receipt.mcp.name &&
-        peer.strategy.container === receipt.strategy.container &&
+        sameAgentContainer(peer.strategy.container, receipt.strategy.container) &&
         !excludedConsumers.has(peer.surfaceId),
     )
   ) {
-    const next = removeAgentServer(parsed, receipt.strategy.container, receipt.mcp.name, receipt.mcp.createdContainer);
+    const next = removeAgentServer(
+      parsed,
+      receipt.strategy.container,
+      receipt.mcp.name,
+      receipt.mcp.createdContainer,
+      receipt.mcp.createdContainerParents,
+    );
     const rendered = writeAgentServer(raw, receipt.strategy.codec, receipt.strategy.container, receipt.mcp.name, next);
     if (
       receipt.mcp.createdFile &&
@@ -384,13 +402,17 @@ const assertSurfaceTargets = Effect.fn('agentSurfaces.assertTargets')(function* 
 
 function receiptMatchesPlan(
   receipt: AgentSurfaceReceipt,
-  plan: {readonly adapter: AgentAdapter; readonly artifacts: readonly AgentArtifact[]},
+  plan: {
+    readonly adapter: AgentAdapter;
+    readonly artifacts: readonly AgentArtifact[];
+    readonly container: AgentJsonContainer;
+  },
 ): boolean {
   if (
     receipt.adapterVersion !== plan.adapter.adapterVersion ||
     receipt.strategy.kind !== 'json' ||
     receipt.strategy.codec !== (plan.adapter.json?.codec ?? 'json') ||
-    receipt.strategy.container !== plan.adapter.json?.container
+    !sameAgentContainer(receipt.strategy.container, plan.container)
   ) {
     return false;
   }

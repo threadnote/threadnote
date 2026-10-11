@@ -13,11 +13,15 @@ import {continueAdapter} from './continue.js';
 import {antigravityCliAdapter, antigravityIdeAdapter} from './antigravity.js';
 import {kiloAdapter} from './kilo.js';
 import {windsurfAdapter} from './windsurf.js';
+import {opencodeAdapter} from './opencode.js';
+import {zenoAdapter} from './zeno.js';
 
 export const managedAgentAdapterDefinitions = [
   ...legacyAdapterDefinitions,
   geminiAdapter,
   qwenAdapter,
+  opencodeAdapter,
+  zenoAdapter,
   ampAdapter,
   factoryAdapter,
   clineAdapter,

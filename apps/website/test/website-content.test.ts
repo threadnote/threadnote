@@ -1122,6 +1122,43 @@ The body remains ordinary **Markdown**.
     expect(readme).not.toMatch(/claude\s*\/\s*cursor\s*\/\s*copilot/i);
   });
 
+  it('publishes OpenCode and Zeno setup with managed MCP, guidance, and skills', () => {
+    const integration = agentIntegrations.find(entry => entry.id === 'opencode');
+    expect(integration).toMatchObject({
+      displayName: 'OpenCode',
+      tier: 'core',
+      aliases: [],
+      scopes: ['user', 'project'],
+      capabilities: {
+        mcp: {status: 'managed'},
+        instructions: {status: 'managed'},
+        skills: {status: 'managed'},
+        hooks: {status: 'unsupported'},
+      },
+    });
+    const article = docsSections.flatMap(section => section.articles).find(entry => entry.id === 'agent-opencode');
+    const content = JSON.stringify(article);
+    expect(content).toContain('threadnote agents install opencode');
+    expect(content).toContain('--scope project');
+    expect(content).not.toContain('--cwd');
+    expect(content).toContain('restart OpenCode');
+    expect(content).toContain('opencode.jsonc');
+    expect(content).toContain('AGENTS.md');
+    expect(content).toContain('.opencode/skills');
+    expect(content).not.toContain('No managed skill installation');
+    const zeno = agentIntegrations.find(entry => entry.id === 'zeno-desktop');
+    expect(zeno).toMatchObject({displayName: 'Zeno', aliases: ['zeno'], scopes: ['user'], platforms: ['darwin']});
+    const zenoArticle = docsSections
+      .flatMap(section => section.articles)
+      .find(entry => entry.id === 'agent-zeno-desktop');
+    expect(zenoArticle?.keywords).toContain('zeno');
+    const zenoContent = JSON.stringify(zenoArticle);
+    expect(zenoContent).toContain('threadnote agents install zeno');
+    expect(zenoContent).toContain('Library/Application Support/ai.zeno.desktop/config/opencode');
+    expect(zenoContent).toContain('mcp.servers');
+    expect(zenoContent).toContain('lazy mcp dispatcher');
+  });
+
   it('documents Manager project and Workset operations with accessible motion-safe illustrations', async () => {
     const managerWorksets = docsSections
       .flatMap(section => section.articles)
