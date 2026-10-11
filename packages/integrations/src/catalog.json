@@ -401,7 +401,7 @@
       ],
       "setup": [
         "Preview threadnote agents install opencode; add --apply to install, then restart OpenCode.",
-        "For project setup use threadnote agents install opencode --scope project --cwd <repository> --apply."
+        "From the repository directory, run threadnote agents install opencode --scope project --apply for project setup."
       ],
       "verification": "Official flat-schema contract; isolated lifecycle and JSONC fixtures cover installation, repair, disablement, and removal.",
       "projectGuidance": {

@@ -1140,6 +1140,7 @@ The body remains ordinary **Markdown**.
     const content = JSON.stringify(article);
     expect(content).toContain('threadnote agents install opencode');
     expect(content).toContain('--scope project');
+    expect(content).not.toContain('--cwd');
     expect(content).toContain('restart OpenCode');
     expect(content).toContain('opencode.jsonc');
     expect(content).toContain('AGENTS.md');
