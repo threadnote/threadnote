@@ -145,7 +145,7 @@ export const registerCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDem
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -170,7 +170,7 @@ export const resumeCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDeman
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
   const processStartIdentity = yield* system.canonicalProcessStartIdentity?.(system.processId) ??
     system.processStartIdentity(system.processId);
   return yield* mutate(identity, state =>
@@ -194,7 +194,7 @@ export const enqueueCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDema
 ) {
   const crypto = yield* Crypto.Crypto;
   const now = yield* Clock.currentTimeMillis;
-  const token = `cgdq_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+  const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
   return yield* mutate(identity, state =>
     Effect.sync(() => {
       const registration = enqueueCodeGraphRefreshDemand(state, {now, targetKey, token});
@@ -398,7 +398,7 @@ function writeState(
       return yield* CodeGraphRefreshDemandSuperseded.make({
         message: 'Code graph refresh demand exceeds its bounded sidecar size.',
       });
-    const temporary = `${dataPath}.${yield* crypto.randomUUIDv4}.tmp`;
+    const temporary = `${dataPath}.${yield* crypto.randomUUIDv4()}.tmp`;
     yield* fs.writeFileString(temporary, content, {flag: 'wx', mode: 0o600});
     const temporaryInfo = yield* fs.stat(temporary);
     if (temporaryInfo.type !== 'File' || !fileSystemModeIsPrivate(runtimePlatform, temporaryInfo.mode)) {

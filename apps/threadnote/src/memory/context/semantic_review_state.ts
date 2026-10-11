@@ -114,7 +114,7 @@ export const writeSemanticReviewState = Effect.fn('semanticReview.writeState')(f
       'Semantic review storage is full. Preserve receipts and remove unused previews before continuing.',
     );
   yield* fs.makeDirectory(path.dirname(file), {recursive: true});
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4}.tmp`;
+  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

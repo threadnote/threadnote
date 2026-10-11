@@ -1,4 +1,4 @@
-/** Cryptographic UUID v4 for Promise/Node adapters that cannot yield `Crypto.randomUUIDv4`. */
+/** Cryptographic UUID v4 for Promise/Node adapters that cannot yield `Crypto.randomUUIDv4()`. */
 export function randomUuidV4(): string {
   const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
   bytes[6] = (bytes[6] & 0x0f) | 0x40;

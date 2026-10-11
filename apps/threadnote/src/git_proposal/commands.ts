@@ -421,7 +421,7 @@ const writeProposalArtifact = Effect.fn('gitProposal.writeArtifact')(function* (
   }
   yield* fs.makeDirectory(path.dirname(output), {recursive: true});
   const crypto = yield* Crypto.Crypto;
-  const temporary = `${output}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporary = `${output}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporary, built.artifact, {mode: 0o600});
   yield* fs.rename(temporary, output).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });

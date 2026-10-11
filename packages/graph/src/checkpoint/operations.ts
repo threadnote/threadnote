@@ -175,7 +175,7 @@ export const runCodeGraphCheckpointExport = Effect.fn('codeGraph.checkpoint.expo
   if (yield* fs.exists(output)) return yield* checkpointFailure(`Checkpoint output already exists: ${output}`);
   const parent = path.dirname(output);
   yield* fs.makeDirectory(parent, {recursive: true});
-  const spoolPath = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4}.spool`);
+  const spoolPath = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.spool`);
   const artifact = yield* withPrivateSpool(spoolPath, spool =>
     Effect.gen(function* () {
       let encoder: CodeGraphCheckpointStreamEncoderV1 | undefined;
@@ -323,7 +323,7 @@ export const importCodeGraphCheckpointSnapshot = Effect.fn('codeGraph.checkpoint
       if (reusable !== undefined) return {mode: 'reused' as const, snapshot: reusable};
       const ownerToken = yield* store.claimPersistentBuild(layout.databasePath, identity, building, {
         logicalSnapshotId: snapshotId,
-        owner: {buildId: yield* crypto.randomUUIDv4, processId: system.processId},
+        owner: {buildId: yield* crypto.randomUUIDv4(), processId: system.processId},
       });
       const imported = Effect.gen(function* () {
         yield* store.bindCheckpointImportBuild(layout.databasePath, snapshotId, {
@@ -820,7 +820,7 @@ function publishPreparedCheckpoint(
   return Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const parent = path.dirname(output);
-    const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4}.tmp`);
+    const temporary = path.join(parent, `.${path.basename(output)}.${yield* crypto.randomUUIDv4()}.tmp`);
     let publicationIdentity: OwnedFileIdentity | undefined;
     return yield* Effect.scoped(
       Effect.gen(function* () {

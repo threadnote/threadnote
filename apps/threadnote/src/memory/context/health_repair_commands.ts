@@ -976,7 +976,7 @@ const writeRepairJournal = Effect.fn('memory.contextHealthRepair.writeJournal')(
     return yield* repairError('Context-health repair journal exceeds its size limit.');
   }
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
   yield* fs
     .rename(temporaryPath, path)

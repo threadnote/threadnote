@@ -27,7 +27,7 @@ export const putCasFile = Effect.fn('codeGraph.sharing.putCasFile')(function* (c
   }
   const incoming = path.join(casRoot, 'incoming');
   yield* fs.makeDirectory(incoming, {recursive: true, mode: 0o700});
-  const staging = path.join(incoming, `${yield* crypto.randomUUIDv4}.tmp`);
+  const staging = path.join(incoming, `${yield* crypto.randomUUIDv4()}.tmp`);
   return yield* Effect.acquireUseRelease(
     fs.copyFile(sourcePath, staging).pipe(Effect.as(staging)),
     stagingPath =>

@@ -180,7 +180,7 @@ const materializeSharedCheckpoint = Effect.fn('codeGraph.sharing.materializeChec
     const crypto = yield* Crypto.Crypto;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const spool = path.join(input.casRoot, 'spool', `${yield* crypto.randomUUIDv4}.cgcp`);
+    const spool = path.join(input.casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
     return yield* Effect.acquireUseRelease(
       fs.makeDirectory(path.dirname(spool), {recursive: true, mode: 0o700}).pipe(Effect.as(spool)),
       spoolPath =>

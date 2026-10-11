@@ -146,7 +146,7 @@ export const enrollGraphControlWorker = Effect.fn('codeGraph.sharing.enrollContr
         operationId,
         principalId,
         ...(input.request.signingPublicKey === undefined ? {} : {signingPublicKey: input.request.signingPublicKey}),
-        workerId: `gw_${(yield* (yield* Crypto.Crypto).randomUUIDv4).replaceAll('-', '')}`,
+        workerId: `gw_${(yield* (yield* Crypto.Crypto).randomUUIDv4()).replaceAll('-', '')}`,
       };
       // Recheck after state I/O and immediately before a durable write or replay acknowledgement.
       const latest = yield* input.readCurrentPolicy;

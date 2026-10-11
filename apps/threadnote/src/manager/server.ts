@@ -1407,7 +1407,7 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       agent: input.agent,
       ...(selectedModel ? {model: selectedModel.id} : {}),
       createdAt: DateTime.formatIso(yield* DateTime.now),
-      id: yield* crypto.randomUUIDv4,
+      id: yield* crypto.randomUUIDv4(),
       sourceUris: input.sourceUris,
       status: 'running',
       target: input.target,

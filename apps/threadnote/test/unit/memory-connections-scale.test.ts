@@ -226,7 +226,7 @@ describe('memory-connections one-hop scale contract', () => {
     Effect.acquireUseRelease(
       Effect.gen(function* () {
         const crypto = yield* Crypto.Crypto;
-        const path = `${Bun.env.TMPDIR ?? '/tmp'}/memory-connections-scale-${yield* crypto.randomUUIDv4}.json`;
+        const path = `${Bun.env.TMPDIR ?? '/tmp'}/memory-connections-scale-${yield* crypto.randomUUIDv4()}.json`;
         yield* Effect.tryPromise(() =>
           Bun.write(path, new Uint8Array(MAX_MEMORY_CONNECTIONS_SCALE_ARTIFACT_BYTES + 1)),
         );

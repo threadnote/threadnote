@@ -743,7 +743,7 @@ const writeProjectionState = Effect.fn('obsidian.writeProjectionState')(function
   const pathService = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {
     mode: PROJECTION_PRIVATE_FILE_MODE,
   });
@@ -804,7 +804,7 @@ const writeProjectionFile = Effect.fn('obsidian.writeProjectionFile')(function* 
   const crypto = yield* Crypto.Crypto;
   const target = yield* safeProjectionTarget(root, file.relativePath);
   yield* fs.makeDirectory(pathService.dirname(target), {recursive: true});
-  const temporaryPath = `${target}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporaryPath = `${target}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, file.content, {mode: PROJECTION_NOTE_FILE_MODE});
   yield* fs
     .rename(temporaryPath, target)

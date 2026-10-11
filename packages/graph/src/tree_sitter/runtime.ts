@@ -7,8 +7,8 @@ import {toolRoot} from '@threadnote/workspace/installation';
 import type {VerifiedLanguageAsset} from '../languages/types.js';
 
 const RUNTIME_RELATIVE_PATH = 'runtime/web-tree-sitter.wasm';
-const RUNTIME_SHA256 = 'c03bccdc3b448a32848f5ae327e209c982bbb0840d43eec8bc2d5759544a1ed3';
-export const TREE_SITTER_RUNTIME_CACHE_IDENTITY = `web-tree-sitter:0.27.0:${RUNTIME_SHA256}`;
+const RUNTIME_SHA256 = 'beca80e44cccbf2299ed4d1e3fa6462a9a6fe818aeebf847547a392227ce4acc';
+export const TREE_SITTER_RUNTIME_CACHE_IDENTITY = `web-tree-sitter:0.27.1:${RUNTIME_SHA256}`;
 
 export interface ParsedTreeSitterSource {
   readonly language: Language;

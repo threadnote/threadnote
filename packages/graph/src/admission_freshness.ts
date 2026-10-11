@@ -211,7 +211,7 @@ export const recordCodeGraphSnapshotAdmission = Effect.fn('codeGraph.recordSnaps
   // Two bounded files per worktree and scope avoid retaining proof for every historical snapshot.
   for (const clean of options?.cleanOnly ? [true] : snapshot.dirty ? [false] : [false, true]) {
     const destination = codeGraphSnapshotAdmissionReceiptPath(path, layout, layout.worktreeId, clean, scope?.scopeKey);
-    const temporary = `${destination}.${yield* crypto.randomUUIDv4}.tmp`;
+    const temporary = `${destination}.${yield* crypto.randomUUIDv4()}.tmp`;
     yield* Effect.gen(function* () {
       yield* fs.writeFileString(temporary, encoded, {flag: 'wx', mode: 0o600});
       yield* fs.rename(temporary, destination);

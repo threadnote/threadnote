@@ -938,7 +938,7 @@ export const purgeCodeGraphIndex = Effect.fn('codeGraph.purgeIndex')(function* (
                     yield* options.interlock?.beforeRemoval?.() ?? Effect.void;
                     const quarantine = path.join(
                       path.dirname(verified.path),
-                      `.${checkoutId}.${yield* crypto.randomUUIDv4}.purging`,
+                      `.${checkoutId}.${yield* crypto.randomUUIDv4()}.purging`,
                     );
                     yield* fs.rename(verified.path, quarantine);
                     const moved = yield* inspectQuarantinedCodeGraphIndexPurgeTarget(fs, quarantine);
@@ -1240,7 +1240,7 @@ function cleanTemporaryMaterializationSpoolFile(
       if (dryRun) return 1;
       yield* interlock?.beforeSpoolQuarantine?.(candidate) ?? Effect.void;
       const crypto = yield* Crypto.Crypto;
-      const quarantine = path.join(repositoryTarget.path, `.${fileName}.${yield* crypto.randomUUIDv4}.repair`);
+      const quarantine = path.join(repositoryTarget.path, `.${fileName}.${yield* crypto.randomUUIDv4()}.repair`);
       yield* fs.rename(candidate, quarantine);
       return yield* Effect.gen(function* () {
         yield* verifyCodeGraphSpoolCleanupAuthority(fs, path, threadnoteHome, checkoutId, repositoryTarget, {

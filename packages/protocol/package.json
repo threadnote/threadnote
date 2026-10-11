@@ -8,11 +8,11 @@
     "./access-token": "./src/access-token.ts"
   },
   "dependencies": {
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "jose": "6.2.12"
   },
   "devDependencies": {
-    "fast-check": "4.10.1",
-    "vitest": "5.0.1"
+    "fast-check": "4.10.2",
+    "vitest": "5.0.3"
   }
 }

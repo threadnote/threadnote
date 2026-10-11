@@ -272,7 +272,7 @@ const bootstrapGraphPublisherCandidate = Effect.fn('codeGraph.sharing.bootstrapP
     };
   });
   if (yield* fs.exists(pointerPath)) return yield* existing;
-  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4}.cgcp`);
+  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
   const exported = yield* runCodeGraphCheckpointExport(config, {cwd, output: spool, quiet: true});
   const checkpointDigest = yield* putCasFile(casRoot, spool);
   yield* fs.remove(spool, {force: true});

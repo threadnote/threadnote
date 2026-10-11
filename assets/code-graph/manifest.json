@@ -2,10 +2,10 @@
   "version": 1,
   "runtime": {
     "id": "web-tree-sitter",
-    "version": "0.27.0",
-    "source": "https://github.com/tree-sitter/tree-sitter/tree/v0.27.0/lib/binding_web",
+    "version": "0.27.1",
+    "source": "https://github.com/tree-sitter/tree-sitter/tree/v0.27.1/lib/binding_web",
     "path": "runtime/web-tree-sitter.wasm",
-    "sha256": "c03bccdc3b448a32848f5ae327e209c982bbb0840d43eec8bc2d5759544a1ed3"
+    "sha256": "beca80e44cccbf2299ed4d1e3fa6462a9a6fe818aeebf847547a392227ce4acc"
   },
   "grammars": {
     "java": {

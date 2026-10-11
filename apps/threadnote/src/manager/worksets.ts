@@ -474,7 +474,7 @@ function mutateManagerManifest<Operation extends string>(
           const crypto = yield* Crypto.Crypto;
           const temporary = path.join(
             path.dirname(config.manifestPath),
-            `.${path.basename(config.manifestPath)}.manager-${yield* crypto.randomUUIDv4}.tmp`,
+            `.${path.basename(config.manifestPath)}.manager-${yield* crypto.randomUUIDv4()}.tmp`,
           );
           yield* Effect.gen(function* () {
             yield* fs.writeFileString(temporary, candidate, {flag: 'wx', mode: 0o600});
@@ -764,7 +764,7 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
       const total = catalog.definitions.find(definition => definition.name === workset)?.memberCount ?? 0;
       const crypto = yield* Crypto.Crypto;
       const createdAt = isoTimestamp(yield* Clock.currentTimeMillis);
-      const id = `cgwj_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+      const id = `cgwj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
       const entry: InternalManagerWorksetPrepareJob = {
         job: {
           createdAt,

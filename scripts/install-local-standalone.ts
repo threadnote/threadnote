@@ -484,10 +484,10 @@ const writeDevelopmentRuntimeOwner = Effect.fn('developmentInstall.writeRuntimeO
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const file = path.join(installRoot, DEVELOPMENT_RUNTIME_OWNER_FILE);
-  const temporary = path.join(installRoot, `.${DEVELOPMENT_RUNTIME_OWNER_FILE}.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(installRoot, `.${DEVELOPMENT_RUNTIME_OWNER_FILE}.${yield* crypto.randomUUIDv4()}.tmp`);
   const nextOwner: DevelopmentRuntimeOwnerV2 = {
     ...owner,
-    ownershipRevision: yield* crypto.randomUUIDv4,
+    ownershipRevision: yield* crypto.randomUUIDv4(),
     schemaVersion: DEVELOPMENT_RUNTIME_OWNER_SCHEMA_VERSION,
   };
   yield* Effect.gen(function* () {
@@ -992,7 +992,10 @@ const buildAndStageDevelopmentRelease = Effect.fn('developmentInstall.buildAndSt
     Option.none(),
   );
   const crypto = yield* Crypto.Crypto;
-  const stagedRoot = path.join(input.canonicalVersionsRoot, `.${input.version}.${yield* crypto.randomUUIDv4}.staging`);
+  const stagedRoot = path.join(
+    input.canonicalVersionsRoot,
+    `.${input.version}.${yield* crypto.randomUUIDv4()}.staging`,
+  );
   return yield* stageAndValidateDevelopmentRelease({
     distributionRoot,
     executableName: input.executableName,

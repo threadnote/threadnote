@@ -92,7 +92,7 @@ export const writeImageProjectionConfiguration = Effect.fn('imageProjection.writ
           'Image projection configuration must not be a symbolic link.',
         );
       }
-      const temporary = path.join(directory, `.config.${yield* crypto.randomUUIDv4}.tmp`);
+      const temporary = path.join(directory, `.config.${yield* crypto.randomUUIDv4()}.tmp`);
       yield* fs.writeFileString(temporary, serialized, {mode: IMAGE_PROJECTION_CONFIGURATION_FILE_MODE});
       yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
       yield* fs.chmod(file, IMAGE_PROJECTION_CONFIGURATION_FILE_MODE);

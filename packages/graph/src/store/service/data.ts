@@ -648,7 +648,7 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
       ),
     claimPersistentBuild: (databasePath, identity, snapshot, claim) =>
       Effect.gen(function* () {
-        const ownerToken = `${system.processId}:${yield* crypto.randomUUIDv4}`;
+        const ownerToken = `${system.processId}:${yield* crypto.randomUUIDv4()}`;
         const writerGate: CodeGraphWriterGate = effect => withWriterGate(databasePath, effect);
         yield* prepare(databasePath);
         yield* useDatabase(

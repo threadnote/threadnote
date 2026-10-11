@@ -944,7 +944,7 @@ function writeAtomically(
   return Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const parent = path.dirname(resolved.path);
-    const temporary = path.join(parent, `.${path.basename(resolved.path)}.${yield* crypto.randomUUIDv4}.tmp`);
+    const temporary = path.join(parent, `.${path.basename(resolved.path)}.${yield* crypto.randomUUIDv4()}.tmp`);
     yield* Effect.scoped(
       Effect.gen(function* () {
         const file = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

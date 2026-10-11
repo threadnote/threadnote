@@ -413,7 +413,7 @@ function writeValueEvents(
     const pathService = yield* Path.Path;
     yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
     const crypto = yield* Crypto.Crypto;
-    const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+    const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
     const content = events.length === 0 ? '' : `${events.map(event => JSON.stringify(event)).join('\n')}\n`;
     yield* fs.writeFileString(temporaryPath, content, {mode: 0o600});
     yield* fs

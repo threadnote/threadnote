@@ -157,7 +157,7 @@ const withCodeGraphMaintenanceIntentOwner = Effect.fn('codeGraph.withMaintenance
     processId: system.processId,
     processStartIdentity,
     startedAt: DateTime.formatIso(yield* DateTime.now),
-    token: yield* crypto.randomUUIDv4,
+    token: yield* crypto.randomUUIDv4(),
   } satisfies MaintenanceIntentOwner;
   const token = JSON.stringify(owner);
   yield* fs.makeDirectory(path.dirname(intent), {recursive: true, mode: 0o700});

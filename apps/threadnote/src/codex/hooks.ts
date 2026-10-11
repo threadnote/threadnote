@@ -86,7 +86,7 @@ export const runCodexHooksInstall = Effect.fn('hooks.installCodex')(function* (o
 
   yield* fs.makeDirectory(pathService.dirname(configPath), {recursive: true, mode: 0o700});
   const crypto = yield* Crypto.Crypto;
-  const temporary = pathService.join(pathService.dirname(configPath), `.hooks.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = pathService.join(pathService.dirname(configPath), `.hooks.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* fs.writeFileString(temporary, `${JSON.stringify(next, undefined, 2)}\n`, {flag: 'wx', mode: 0o600});
   yield* Effect.gen(function* () {
     if ((yield* readCodexHooksConfigFile(fs, configPath)) !== current) {

@@ -1316,7 +1316,7 @@ const writePostUpdateState = Effect.fn('update.writePostUpdateState')(function* 
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const target = yield* postUpdateStatePath(config);
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${yield* crypto.randomUUIDv4}.tmp`);
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${yield* crypto.randomUUIDv4()}.tmp`);
   yield* ensureDirectory(config.agentContextHome, false);
   yield* Effect.gen(function* () {
     yield* fs.writeFileString(temporary, `${JSON.stringify(state, null, 2)}\n`, {flag: 'wx', mode: 0o600});

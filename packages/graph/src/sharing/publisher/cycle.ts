@@ -619,7 +619,7 @@ const exportSignedGeneration = Effect.fn('codeGraph.sharing.exportSignedGenerati
   const identity = yield* resolveRepositoryIdentity(cwd);
   const casRoot = yield* resolveGraphShareCasRoot(config.agentContextHome, options.cas);
   const key = yield* loadPublisherKey(config.agentContextHome);
-  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4}.cgcp`);
+  const spool = path.join(casRoot, 'spool', `${yield* crypto.randomUUIDv4()}.cgcp`);
   const exported = yield* runCodeGraphCheckpointExport(config, {
     cwd,
     expectedSnapshotId: expected.snapshotId,

@@ -363,7 +363,7 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
         building = undefined;
       }
       if (!building) {
-        const generation = `${yield* Clock.currentTimeMillis}-${(yield* crypto.randomUUIDv4).slice(0, 8)}`;
+        const generation = `${yield* Clock.currentTimeMillis}-${(yield* crypto.randomUUIDv4()).slice(0, 8)}`;
         yield* sql`
           INSERT INTO vector_generations (
             generation,
@@ -1568,7 +1568,7 @@ function useVectorDatabase<A, E, R>(
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
 ): Effect.Effect<A, E, Exclude<R, SqlClient.SqlClient>> {
   return Effect.scoped(
-    Layer.build(SqliteClient.layer({filename: databasePath})).pipe(
+    Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
       Effect.flatMap(context => effect.pipe(Effect.provide(context))),
     ),
   );
@@ -1586,7 +1586,7 @@ function useVectorDatabaseReadOnly<A, E, R>(
         filename: databasePath,
         readonly: true,
         readwrite: false,
-      }),
+      }).pipe(Layer.orDie),
     ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );
 }

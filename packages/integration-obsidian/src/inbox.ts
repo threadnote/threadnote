@@ -266,7 +266,7 @@ const writeInboxState = Effect.fn('obsidian.writeInboxState')(function* (path: s
   const pathService = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   yield* fs.makeDirectory(pathService.dirname(path), {recursive: true});
-  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4}.tmp`;
+  const temporaryPath = `${path}.${yield* crypto.randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporaryPath, `${JSON.stringify(state, undefined, 2)}\n`, {mode: INBOX_FILE_MODE});
   yield* fs
     .rename(temporaryPath, path)

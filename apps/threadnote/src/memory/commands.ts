@@ -252,7 +252,7 @@ export const runRemember = Effect.fn('runRemember')(function* (config: RuntimeCo
   const citationSourceCommit = commonMemoryCodeCitationCommit(codeCitations);
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
   const crypto = yield* Crypto.Crypto;
-  const memoryId = replacement?.memoryId ?? `tn_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`;
+  const memoryId = replacement?.memoryId ?? `tn_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
   const sharedTeam = replaceUri ? sharedTeamNameForUri(config, replaceUri) : undefined;
   const relationScope = sharedTeam
     ? `threadnote://user/${uriSegment(config.user)}/memories/shared/${uriSegment(sharedTeam)}`
@@ -1888,7 +1888,7 @@ const buildHandoff = Effect.fn('memory.buildHandoff')(function* (options: Handof
   const workspaceComponent = yield* resolveWorkspaceComponentContext({includeProcessCwd: true});
   const metadata: MemoryMetadata = {
     kind: 'handoff',
-    memoryId: existingMemoryId ?? `tn_${(yield* crypto.randomUUIDv4).replaceAll('-', '')}`,
+    memoryId: existingMemoryId ?? `tn_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`,
     project: normalizeOptionalMetadata(options.project) ?? repoName,
     references: normalizeReferenceUris(options.references),
     sourceAgentClient: options.sourceAgentClient ?? 'codex',

@@ -179,7 +179,7 @@ const persistInventory = Effect.fn('contextMaintenance.persistInventory')(functi
   yield* fs
     .makeDirectory(path.dirname(file), {recursive: true})
     .pipe(withMaintenanceSnapshotDiagnostic('inventory-cache'));
-  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4}.tmp`;
+  const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
   yield* Effect.scoped(
     Effect.gen(function* () {
       const handle = yield* fs.open(temporary, {flag: 'wx', mode: 0o600});

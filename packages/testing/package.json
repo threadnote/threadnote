@@ -24,8 +24,8 @@
     "./windows-command-launcher": "./src/windows-command-launcher.ts"
   },
   "dependencies": {
-    "@effect/vitest": "4.0.0",
-    "effect": "4.0.0",
-    "fast-check": "4.10.1"
+    "@effect/vitest": "4.0.3",
+    "effect": "4.0.3",
+    "fast-check": "4.10.2"
   }
 }
