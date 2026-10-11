@@ -218,7 +218,7 @@ describe('agent catalog and adapter contracts', () => {
               yield* fs.makeDirectory(path.dirname(initial.artifacts[0].path), {recursive: true});
               yield* fs.writeFileString(initial.artifacts[0].path, staleInstruction);
               yield* fs.makeDirectory(path.dirname(initial.mcpPath), {recursive: true});
-              const unrelated = {theme: 'dark', [adapter.json!.container]: {unrelated: {command: 'other'}}};
+              const unrelated = {theme: 'dark', [fixture.container]: {unrelated: {command: 'other'}}};
               yield* fs.writeFileString(initial.mcpPath, JSON.stringify(unrelated));
               yield* installAgentSurface(config, adapter.catalog.id, {apply: true});
               const first = yield* fs.readFileString(initial.mcpPath);

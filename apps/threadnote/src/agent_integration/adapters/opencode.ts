@@ -1,6 +1,6 @@
 import {defineJsonAgentAdapter} from '../surfaces.js';
 
-/** OpenCode's documented flat MCP schema, also consumed by Zeno. */
+/** OpenCode's documented flat MCP schema. */
 export const opencodeAdapter = defineJsonAgentAdapter(
   'opencode',
   {

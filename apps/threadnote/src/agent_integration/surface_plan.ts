@@ -18,6 +18,9 @@ import type {AgentArtifact} from './index.js';
 import type {AgentSurfaceReceipt} from './registry.js';
 import {AgentSurfaceError} from './surfaces.js';
 import {AGENT_SKILLS} from './skills.js';
+import {parseAgentJson, sameAgentContainer} from './json_config.js';
+import {errorMessage} from '@threadnote/platform/errors';
+import {readFileIfExists} from '../utils.js';
 
 export interface SurfaceInstallOptions {
   readonly apply?: boolean;
@@ -122,6 +125,25 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
     (scope !== 'user' && root !== path.join(cwd!, strategy.projectRoot ?? strategy.root))
   )
     return yield* AgentSurfaceError.make({message: 'Adapter receipt paths do not match the recorded root and scope.'});
+  let container = strategy.container;
+  let enablement = strategy.enablement ?? 'enabled';
+  let emptyDocument: JsonObject = {};
+  const mcpContent = yield* readFileIfExists(mcpPath);
+  if (strategy.legacySchema !== undefined) {
+    const parsed = yield* Effect.try({
+      try: () => parseAgentJson(mcpContent, strategy.codec),
+      catch: cause => AgentSurfaceError.make({message: errorMessage(cause)}),
+    });
+    const legacy =
+      mcpContent === undefined && previous !== undefined
+        ? sameAgentContainer(previous.strategy.container, strategy.legacySchema.container)
+        : strategy.legacySchema.keys.some(key => Object.hasOwn(parsed, key));
+    if (legacy) {
+      container = strategy.legacySchema.container;
+      enablement = strategy.legacySchema.enablement;
+      emptyDocument = strategy.legacySchema.emptyDocument;
+    }
+  }
   const templateRoot = path.join(yield* toolRoot(), 'config');
   const bootstrap =
     strategy.instructionContent ?? (yield* fs.readFileString(path.join(templateRoot, 'agent-instructions.md'))).trim();
@@ -160,7 +182,9 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
   const toolset = options.toolset ?? previous?.mcp.toolset ?? 'core';
   const entry: JsonObject = {
     ...(strategy.entryType === undefined ? {} : {type: strategy.entryType}),
-    ...(strategy.commandArray ? {command: [...command], enabled: true} : {command: command[0], args: command.slice(1)}),
+    ...(strategy.commandArray
+      ? {command: [...command], [enablement]: enablement === 'enabled'}
+      : {command: command[0], args: command.slice(1)}),
     [strategy.commandArray ? 'environment' : 'env']: {
       THREADNOTE_ACCOUNT: config.account,
       THREADNOTE_AGENT_ID: config.agentId,
@@ -181,6 +205,9 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
     entry,
     mcpRoot,
     mcpPath,
+    mcpContent,
+    container,
+    emptyDocument,
     name: previous?.mcp.name ?? 'threadnote',
     toolset,
   };

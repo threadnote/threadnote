@@ -63,7 +63,7 @@ export interface AgentSurfaceReceipt {
   readonly strategy: {
     readonly kind: 'json';
     readonly codec: 'json' | 'jsonc';
-    readonly container: string;
+    readonly container: string | readonly string[];
   };
   readonly mcp: {
     readonly root?: string;
@@ -72,6 +72,7 @@ export interface AgentSurfaceReceipt {
     readonly hash: string;
     readonly toolset: McpToolset;
     readonly createdContainer: boolean;
+    readonly createdContainerParents?: number;
     readonly createdFile: boolean;
   };
 }
@@ -278,8 +279,11 @@ function isSurfaceReceipt(id: string, value: unknown): value is AgentSurfaceRece
     (value.scope === undefined || value.scope === 'user' || value.scope === 'project' || value.scope === 'local') &&
     (value.cwd === undefined || (typeof value.cwd === 'string' && value.cwd.length > 0)) &&
     ((value.scope !== 'project' && value.scope !== 'local') || typeof value.cwd === 'string') &&
-    typeof value.strategy.container === 'string' &&
-    value.strategy.container.length > 0 &&
+    (typeof value.strategy.container === 'string'
+      ? value.strategy.container.length > 0
+      : Array.isArray(value.strategy.container) &&
+        value.strategy.container.length > 0 &&
+        value.strategy.container.every(key => typeof key === 'string' && key.length > 0)) &&
     typeof value.mcp.path === 'string' &&
     value.mcp.path.length > 0 &&
     (value.mcp.root === undefined || (typeof value.mcp.root === 'string' && value.mcp.root.length > 0)) &&
@@ -288,6 +292,9 @@ function isSurfaceReceipt(id: string, value: unknown): value is AgentSurfaceRece
     /^[0-9a-f]{64}$/.test(value.mcp.hash) &&
     (value.mcp.toolset === 'core' || value.mcp.toolset === 'full') &&
     typeof value.mcp.createdContainer === 'boolean' &&
+    (value.mcp.createdContainerParents === undefined ||
+      (Number.isSafeInteger(value.mcp.createdContainerParents) &&
+        (value.mcp.createdContainerParents as number) >= 0)) &&
     typeof value.mcp.createdFile === 'boolean' &&
     Object.values(artifacts).every(hash => typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)) &&
     value.artifactDescriptors.every(
