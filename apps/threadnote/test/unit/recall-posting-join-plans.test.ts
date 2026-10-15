@@ -16,6 +16,7 @@ const prefix = 'threadnote://user/test/memories/allowed';
 const terms = ['alpha', 'beta', 'absent'];
 interface Document {
   readonly id: number;
+  readonly kind?: 'durable' | 'preference';
   readonly uri: string;
   readonly logicalKey: string;
   readonly length: number;
@@ -32,6 +33,7 @@ const generatedDocument = FC.record({
   approved: FC.boolean(),
   frequency: FC.integer({min: 1, max: 3}),
   length: FC.integer({min: 1, max: 100}),
+  kind: FC.constantFrom('durable' as const, 'preference' as const),
   logical: FC.integer({min: 0, max: 12}),
   project: FC.constantFrom(null, 'p', 'q'),
   terms: FC.subarray(['alpha', 'beta']),
@@ -196,7 +198,7 @@ describe('scoped recall posting joins', () => {
       scope: FC.constantFrom('prefix', 'exact', 'all', 'empty'),
       project: FC.constantFrom(undefined, 'p'),
       workspace: FC.constantFrom('all', 'hierarchy', 'sibling'),
-      policy: FC.constantFrom('any', 'approved', 'project', 'deny', 'pinned'),
+      policy: FC.constantFrom('any', 'approved', 'project', 'projectless', 'deny', 'pinned'),
     },
     ({rows, limit, scope, project, workspace, policy}) =>
       Effect.gen(function* () {
@@ -225,9 +227,11 @@ describe('scoped recall posting joins', () => {
                   projects:
                     policy === 'deny'
                       ? {mode: 'deny-all'}
-                      : policy === 'project'
-                        ? {mode: 'allow-projects-and-projectless', projects: ['p']}
-                        : {mode: 'unrestricted'},
+                      : policy === 'projectless'
+                        ? {mode: 'projectless-only'}
+                        : policy === 'project'
+                          ? {mode: 'allow-projects-and-projectless', projects: ['p']}
+                          : {mode: 'unrestricted'},
                 };
         const options: Selection = {
           allowedUriScopes,
@@ -245,7 +249,8 @@ describe('scoped recall posting joins', () => {
             (project === undefined || row.project === project) &&
             policy !== 'deny' &&
             (policy !== 'approved' || row.approved) &&
-            (policy !== 'project' || row.project === null || row.project === 'p') &&
+            (policy !== 'project' || row.kind === 'preference' || row.project === null || row.project === 'p') &&
+            (policy !== 'projectless' || row.kind === 'preference' || row.project === null) &&
             (workspace === 'all' ||
               (workspace === 'hierarchy'
                 ? row.workspace === null || row.workspace === 'team' || row.workspace === 'team/app'
@@ -341,7 +346,7 @@ const createDocuments = Effect.fn('test.createRecallJoinDocuments')(function* (d
   const sql = yield* SqlClient.SqlClient;
   yield* sql.unsafe(`CREATE TABLE documents (id INTEGER PRIMARY KEY, uri TEXT NOT NULL,
     logical_key TEXT NOT NULL, document_length INTEGER NOT NULL, project TEXT,
-    approved_authoritative INTEGER NOT NULL, workspace_scope TEXT)`);
+    approved_authoritative INTEGER NOT NULL, workspace_scope TEXT, candidate_json TEXT NOT NULL)`);
   yield* sql.unsafe(`CREATE TABLE postings (term TEXT NOT NULL, document_id INTEGER NOT NULL,
     field_weight REAL NOT NULL, term_frequency INTEGER NOT NULL, PRIMARY KEY(term, document_id)) WITHOUT ROWID`);
   yield* sql.unsafe('CREATE INDEX documents_uri ON documents(uri)');
@@ -352,7 +357,7 @@ const createDocuments = Effect.fn('test.createRecallJoinDocuments')(function* (d
       documents,
       row =>
         Effect.gen(function* () {
-          yield* sql.unsafe('INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)', [
+          yield* sql.unsafe('INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [
             row.id,
             row.uri,
             row.logicalKey,
@@ -360,6 +365,7 @@ const createDocuments = Effect.fn('test.createRecallJoinDocuments')(function* (d
             row.project,
             row.approved ? 1 : 0,
             row.workspace,
+            JSON.stringify({kind: row.kind ?? 'durable'}),
           ]);
           for (const term of row.terms)
             yield* sql.unsafe('INSERT INTO postings VALUES (?, ?, ?, ?)', [term, row.id, row.weight, row.frequency]);
