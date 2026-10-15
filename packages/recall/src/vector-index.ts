@@ -7,7 +7,7 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {readModelSelection} from '@threadnote/inference/models/selection';
-import {normalizeRecallProject, type RecallEligibilityPolicy} from './eligibility.js';
+import {recallIndexScopeProject, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallApprovedAuthoritative, recallEligibilityPredicate} from './index/eligibility.js';
 import {
   combineRecallSqlPredicates,
@@ -31,6 +31,7 @@ class VectorIndexOperationError extends Schema.TaggedError<VectorIndexOperationE
 }) {}
 
 const VECTOR_INDEX_DATABASE_VERSION = 5;
+const VECTOR_SCOPE_MAPPING_VERSION = 1;
 const VECTOR_INDEX_EMBED_BATCH_SIZE = 256;
 const VECTOR_INDEX_PAGE_SIZE = 400;
 const VECTOR_INDEX_INSERT_BATCH_SIZE = 100;
@@ -51,6 +52,7 @@ const VECTOR_INDEX_SCHEMA_COLUMNS = {
     'chunk_count',
     'state',
     'created_at',
+    'scope_mapping_version',
   ],
   vector_pointer: ['singleton', 'generation'],
   vector_values: ['id', 'vector_key', 'vector'],
@@ -70,6 +72,7 @@ interface VectorGenerationRow {
   readonly model_sha256: string;
   readonly normalized: 'l2';
   readonly state: 'building' | 'ready';
+  readonly scope_mapping_version?: number;
 }
 
 interface VectorRow {
@@ -294,7 +297,12 @@ const currentVectorIndexStatus = Effect.fn('vectorIndex.currentStatus')(function
     aliases,
     options.corpusGeneration ?? active.corpus_generation ?? undefined,
   );
-  if (!generationIsCompatible(active, manifest) || active.job_id !== jobId) return undefined;
+  if (
+    !generationIsCompatible(active, manifest) ||
+    active.scope_mapping_version !== VECTOR_SCOPE_MAPPING_VERSION ||
+    active.job_id !== jobId
+  )
+    return undefined;
   return {
     chunkCount: active.chunk_count,
     createdAt: active.created_at,
@@ -377,7 +385,8 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
             normalized,
             chunk_count,
             state,
-            created_at
+            created_at,
+            scope_mapping_version
           ) VALUES (
             ${generation},
             ${jobId},
@@ -390,7 +399,8 @@ const rebuildVectorIndexUnlocked = Effect.fn('vectorIndex.rebuildUnlocked')(func
             'l2',
             0,
             'building',
-            ${DateTime.formatIso(yield* DateTime.now)}
+            ${DateTime.formatIso(yield* DateTime.now)},
+            ${VECTOR_SCOPE_MAPPING_VERSION}
           )
         `;
         building = yield* selectGenerationByJob(sql, jobId);
@@ -838,9 +848,16 @@ const initializeVectorDatabase = Effect.fn('vectorIndex.initializeDatabase')(fun
       normalized TEXT NOT NULL CHECK(normalized = 'l2'),
       chunk_count INTEGER NOT NULL CHECK(chunk_count >= 0),
       state TEXT NOT NULL CHECK(state IN ('building', 'ready')),
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      scope_mapping_version INTEGER NOT NULL DEFAULT 0 CHECK(scope_mapping_version >= 0)
     )
   `);
+  const generationColumns = yield* sql.unsafe<{readonly name: string}>('PRAGMA table_info(vector_generations)');
+  if (!generationColumns.some(column => column.name === 'scope_mapping_version')) {
+    yield* sql.unsafe(
+      'ALTER TABLE vector_generations ADD COLUMN scope_mapping_version INTEGER NOT NULL DEFAULT 0 CHECK(scope_mapping_version >= 0)',
+    );
+  }
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS vector_pointer (
       singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -910,7 +927,12 @@ const validateVectorDatabaseStructure = Effect.fn('vectorIndex.validateDatabaseS
   for (const [table, expected] of Object.entries(VECTOR_INDEX_SCHEMA_COLUMNS)) {
     const rows = yield* sql.unsafe<{readonly name: string}>(`PRAGMA table_info('${table}')`);
     const actual = rows.map(row => row.name);
-    if (actual.length !== expected.length || actual.some((column, index) => column !== expected[index])) {
+    const compatibleColumns =
+      table === 'vector_generations' && !actual.includes('scope_mapping_version') ? expected.slice(0, -1) : expected;
+    if (
+      actual.length !== compatibleColumns.length ||
+      actual.some((column, index) => column !== compatibleColumns[index])
+    ) {
       return yield* VectorIndexOperationError.make({
         message: `Vector index table ${table} has invalid columns: ${actual.length > 0 ? actual.join(', ') : '(missing)'}.`,
       });
@@ -1443,7 +1465,11 @@ function generationMatchesCorpus(
   manifest: LocalModelManifest,
   corpusGeneration: string,
 ): boolean {
-  return generation.corpus_generation === corpusGeneration && generationIsCompatible(generation, manifest);
+  return (
+    generation.corpus_generation === corpusGeneration &&
+    generation.scope_mapping_version === VECTOR_SCOPE_MAPPING_VERSION &&
+    generationIsCompatible(generation, manifest)
+  );
 }
 
 function generationIsCompatible(generation: VectorGenerationRow, manifest: LocalModelManifest): boolean {
@@ -1459,7 +1485,7 @@ function generationIsCompatible(generation: VectorGenerationRow, manifest: Local
 
 function vectorChunkMappings(candidates: readonly RecallCandidate[]): readonly VectorChunkMapping[] {
   return candidates.flatMap(candidate => {
-    const project = normalizeRecallProject(candidate.fields?.project) ?? null;
+    const project = recallIndexScopeProject(candidate.kind, candidate.fields?.project);
     const approvedAuthoritative = recallApprovedAuthoritative(candidate.authority, candidate.trust) ? 1 : 0;
     return chunkRecallDocument(candidate.uri, candidate.text).map(chunk => ({
       ...chunk,
@@ -1502,6 +1528,7 @@ function vectorJobId(
     JSON.stringify({
       aliases,
       chunkerVersion: RECALL_CHUNKER_VERSION,
+      scopeMappingVersion: VECTOR_SCOPE_MAPPING_VERSION,
       chunks: identityChunks,
       corpusGeneration: corpusGeneration ?? null,
       dimensions: manifest.dimensions,
@@ -1539,6 +1566,10 @@ function assertVectorGeneration(generation: VectorGenerationRow): void {
     !/^[0-9a-f]{64}$/.test(generation.embedding_recipe) ||
     !Number.isInteger(generation.dimensions) ||
     generation.dimensions <= 0 ||
+    (generation.scope_mapping_version !== undefined &&
+      (!Number.isInteger(generation.scope_mapping_version) ||
+        generation.scope_mapping_version < 0 ||
+        generation.scope_mapping_version > VECTOR_SCOPE_MAPPING_VERSION)) ||
     !Number.isInteger(generation.chunker_version) ||
     generation.chunker_version <= 0 ||
     generation.normalized !== 'l2' ||

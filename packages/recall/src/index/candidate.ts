@@ -100,6 +100,7 @@ export function recallIndexCandidateIsEligible(
     policy === undefined ||
     recallCandidateIsEligible(policy, {
       authority: candidate.authority,
+      kind: candidate.kind,
       project: candidate.fields?.project,
       trust: candidate.trust,
     })

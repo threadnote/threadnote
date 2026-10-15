@@ -44,8 +44,21 @@ export function recallEligibilityPredicate(
 
   const predicates: string[] = [externalPredicate];
   const params: string[] = externalParams;
+  // Preferences are global guidance: their frontmatter `project` is a topic
+  // category, not a repository scope. Exempt them from the project filter so a
+  // workspace-scoped recall still surfaces them. The JSON exemption keeps
+  // existing rows (indexed with their category) eligible; new rows are stored
+  // projectless (see refresh/vector mappings). Vector chunks carry no
+  // candidate_json, so their exemption arrives via the projectless mapping and
+  // automatic re-embedding.
+  const preferenceExemption =
+    externalHashExpression === false ? undefined : `json_extract(${alias}.candidate_json, '$.kind') = 'preference'`;
   if (policy.projects.mode === 'projectless-only') {
-    predicates.push(`${alias}.project IS NULL`);
+    predicates.push(
+      preferenceExemption === undefined
+        ? `${alias}.project IS NULL`
+        : `(${alias}.project IS NULL OR ${preferenceExemption})`,
+    );
   } else if (policy.projects.mode === 'allow-projects-and-projectless') {
     const projects = policy.projects.projects
       .map(normalizeRecallProject)
@@ -53,7 +66,11 @@ export function recallEligibilityPredicate(
     if (projects.length === 0) {
       return {params: [], restricted: true, sql: '0 = 1'};
     }
-    predicates.push(`(${alias}.project IS NULL OR ${alias}.project IN (${projects.map(() => '?').join(', ')}))`);
+    predicates.push(
+      preferenceExemption === undefined
+        ? `(${alias}.project IS NULL OR ${alias}.project IN (${projects.map(() => '?').join(', ')}))`
+        : `(${alias}.project IS NULL OR ${alias}.project IN (${projects.map(() => '?').join(', ')}) OR ${preferenceExemption})`,
+    );
     params.push(...projects);
   }
   if (policy.authority === 'approved-authoritative') {
