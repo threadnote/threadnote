@@ -6,7 +6,7 @@ import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-
 import {isExternalResourceUri, loadExternalResourceAccess} from '@threadnote/store/external-resource';
 import type {IndexedRecallCodeLink} from '../code_links.js';
 import {memoryLinkLocatorDigest, type IndexedRecallMemoryLink} from '../memory/links.js';
-import {normalizeRecallProject} from '../eligibility.js';
+import {recallIndexScopeProject} from '../eligibility.js';
 import {recallApprovedAuthoritative} from './eligibility.js';
 import type {RecallIndexPosting} from './lexical.js';
 import {stripRecallAnchor} from './lexical.js';
@@ -236,6 +236,11 @@ export function forEachChangedRecallSourcePage<A, E, R>(
   });
 }
 
+/** Lexical-refresh scope project: delegates to the shared index-scope rule. */
+export function recallIndexedProject(candidate: RecallCandidate): string | null {
+  return recallIndexScopeProject(candidate.kind, candidate.fields?.project);
+}
+
 export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSources: readonly IndexedRecallSource[]) {
   return Effect.gen(function* () {
     if (indexedSources.length === 0) return;
@@ -247,7 +252,7 @@ export function insertIndexedRecallSources(sql: SqlClient.SqlClient, indexedSour
       ) VALUES ${indexedSources.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')}`,
       indexedSources.flatMap(indexed => [
         stripRecallAnchor(indexed.candidate.uri),
-        normalizeRecallProject(indexed.candidate.fields?.project) ?? null,
+        recallIndexedProject(indexed.candidate),
         recallApprovedAuthoritative(indexed.candidate.authority, indexed.candidate.trust) ? 1 : 0,
         normalizeRecallWorkspaceScope(indexed.candidate.fields?.workspaceScope) ?? null,
         normalizedRecallRecordedAt(indexed.candidate.timestamp),
