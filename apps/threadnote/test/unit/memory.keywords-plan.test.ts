@@ -76,6 +76,16 @@ describe('resolveMemoryKeywordPlan', () => {
     expect(() => resolveMemoryKeywordPlan({keywords: ['arc'], kind: 'smoke'})).toThrow(/smoke/);
   });
 
+  it('filters token-shaped values from explicit handoff keywords', () => {
+    const secretLike = `xapp${'a'.repeat(10)}`;
+    expect(
+      resolveMemoryKeywordPlan({keywords: [secretLike, `keyword-${secretLike}`, 'handoff-retry'], kind: 'handoff'}),
+    ).toEqual({
+      mode: 'explicit',
+      keywords: ['handoff-retry'],
+    });
+  });
+
   it('rejects generation for handoffs and smoke while preserving clear and replace controls', () => {
     for (const kind of ['handoff', 'smoke'] as const) {
       expect(() => resolveMemoryKeywordPlan({regenerateKeywords: true, kind, replacedKeywords: ['old']})).toThrow(
@@ -93,17 +103,26 @@ describe('resolveMemoryKeywordPlan', () => {
 
   it('preserves explicit handoff keywords across replacement without mutation or generation', () => {
     fc.assert(
-      fc.property(fc.array(fc.stringMatching(/^[a-z][a-z0-9]{2,20}$/), {minLength: 1, maxLength: 40}), keywords => {
-        const original = [...keywords];
-        const expected = [...new Set(keywords)].slice(0, 32);
-        const authored = resolveMemoryKeywordPlan({kind: 'handoff', keywords, replacedKeywords: ['obsolete']});
-        expect(authored).toEqual({mode: 'explicit', keywords: expected});
-        expect(shouldEnrichForKeywordPlan(authored)).toBe(false);
-        const replaced = resolveMemoryKeywordPlan({kind: 'handoff', replacedKeywords: expected});
-        expect(replaced).toEqual({mode: 'preserved', keywords: expected});
-        expect(shouldEnrichForKeywordPlan(replaced)).toBe(false);
-        expect(keywords).toEqual(original);
-      }),
+      fc.property(
+        fc.array(
+          fc.stringMatching(/^[a-z][a-z0-9]{2,20}$/).map(value => `keyword_${value}`),
+          {
+            minLength: 1,
+            maxLength: 40,
+          },
+        ),
+        keywords => {
+          const original = [...keywords];
+          const expected = [...new Set(keywords)].slice(0, 32);
+          const authored = resolveMemoryKeywordPlan({kind: 'handoff', keywords, replacedKeywords: ['obsolete']});
+          expect(authored).toEqual({mode: 'explicit', keywords: expected});
+          expect(shouldEnrichForKeywordPlan(authored)).toBe(false);
+          const replaced = resolveMemoryKeywordPlan({kind: 'handoff', replacedKeywords: expected});
+          expect(replaced).toEqual({mode: 'preserved', keywords: expected});
+          expect(shouldEnrichForKeywordPlan(replaced)).toBe(false);
+          expect(keywords).toEqual(original);
+        },
+      ),
       {numRuns: 50},
     );
   });

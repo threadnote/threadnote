@@ -1802,7 +1802,7 @@ describe('Threadnote MCP toolsets', () => {
         const canonicalUri =
           'threadnote://user/test-user/memories/shared/default/durable/projects/my-product/legacy-published-pointer.md';
         const content = canonicalMemoryContent(
-          'Legacy Published Pointer',
+          'legacy-published-pointer',
           'Legacy published pointer recovery anchor qz-legacy-published-7788.',
         ).replace('project: threadnote', 'project: My Product');
         const sharedPath = join(
@@ -1853,7 +1853,7 @@ describe('Threadnote MCP toolsets', () => {
         const recalledUris = (
           recalled.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]}
         ).results?.map(entry => entry.uri);
-        expect(recalledUris).toContain(
+        expect(recalledUris, JSON.stringify(recalled.structuredContent)).toContain(
           'memories/shared/default/durable/projects/my-product/legacy-published-pointer.md',
         );
 

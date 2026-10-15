@@ -1,3 +1,4 @@
+import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Effect, FileSystem, Layer, Option, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -188,29 +189,44 @@ describe('scoped graph retrieval', () => {
           Effect.provideService(CodeGraphStore, trackedStore),
         );
         const trackedQuery = Context.get(trackedContext, CodeGraphQueryService);
-        for (const operation of ['query', 'node', 'neighbors', 'explain'] as const) {
-          sessions.length = 0;
-          readSessions.clear();
-          const discovered = yield* serveCodeGraphDiscoveryRead({
-            cwd: root,
-            discover: true,
-            edgeLimit: 40,
-            manifestPath,
-            nodeId: node.id,
-            nodeLimit: 20,
-            operation,
-            project: 'a',
-            protocol: 1,
-            query: 'valueA',
-            threadnoteHome: home,
-          }).pipe(Effect.provideService(CodeGraphQueryService, trackedQuery));
-          expect(discovered.result?.freshness).toBe('stale');
-          expect(discovered.result?.snapshot.id).toBe(a.snapshot.id);
-          expect(discovered.result?.nodes.some(candidate => candidate.name === 'valueA')).toBe(true);
-          expect(discovered.result?.nodes.some(candidate => candidate.path.startsWith('apps/b/'))).toBe(false);
-          expect(sessions).toHaveLength(1);
-          expect([...readSessions]).toEqual(sessions);
-        }
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const database = new Database(staleStatus.databasePath);
+            database.exec('BEGIN IMMEDIATE');
+            return database;
+          }),
+          () =>
+            Effect.gen(function* () {
+              for (const operation of ['query', 'node', 'neighbors', 'explain'] as const) {
+                sessions.length = 0;
+                readSessions.clear();
+                const discovered = yield* serveCodeGraphDiscoveryRead({
+                  cwd: root,
+                  discover: true,
+                  edgeLimit: 40,
+                  manifestPath,
+                  nodeId: node.id,
+                  nodeLimit: 20,
+                  operation,
+                  project: 'a',
+                  protocol: 1,
+                  query: 'valueA',
+                  threadnoteHome: home,
+                }).pipe(Effect.provideService(CodeGraphQueryService, trackedQuery));
+                expect(discovered.result?.freshness).toBe('stale');
+                expect(discovered.result?.snapshot.id).toBe(a.snapshot.id);
+                expect(discovered.result?.nodes.some(candidate => candidate.name === 'valueA')).toBe(true);
+                expect(discovered.result?.nodes.some(candidate => candidate.path.startsWith('apps/b/'))).toBe(false);
+                expect(sessions).toHaveLength(1);
+                expect([...readSessions]).toEqual(sessions);
+              }
+            }),
+          database =>
+            Effect.sync(() => {
+              if (database.inTransaction) database.exec('ROLLBACK');
+              database.close();
+            }),
+        );
         expect(
           yield* query
             .inspect({...options, operation: 'query', query: 'valueA', strictFreshness: true})

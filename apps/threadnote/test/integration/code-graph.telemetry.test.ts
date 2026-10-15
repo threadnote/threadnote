@@ -32,8 +32,8 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 describe('code graph terminal telemetry wiring', () => {
   effectIt.effect('emits complete privacy-safe inspect and analyze lifecycles through the registered MCP tools', () => {
     const capture = capturingTracer();
-    let watcherEnsures = 0;
-    const harness = registeredTelemetryHarness(capture.tracer, () => watcherEnsures++);
+    let watcherEnrollments = 0;
+    const harness = registeredTelemetryHarness(capture.tracer, () => watcherEnrollments++);
     const privateQuery = 'private telemetry query';
 
     return Effect.gen(function* () {
@@ -45,7 +45,7 @@ describe('code graph terminal telemetry wiring', () => {
       });
 
       expect(result.isError).not.toBe(true);
-      expect(watcherEnsures).toBe(1);
+      expect(watcherEnrollments).toBe(1);
       const spans = capture.spans
         .map(span => Object.fromEntries(span.attributes))
         .filter(attributes => attributes['threadnote.operation'] === 'inspect_code_graph');
@@ -361,7 +361,7 @@ describe('code graph terminal telemetry wiring', () => {
 const TELEMETRY_HOME = '/threadnote-telemetry-handler-home';
 const TELEMETRY_REPOSITORY_ROOT = '/workspace/private-telemetry-repository';
 
-function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnsure: () => void) {
+function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnrollment: () => void) {
   const snapshot = {...analysisSnapshot([], []), id: `cgsn_${'1'.repeat(40)}`};
   const identity: RepositoryIdentity = {
     caseMode: 'sensitive',
@@ -412,7 +412,8 @@ function registeredTelemetryHarness(tracer: Tracer.Tracer, onWatcherEnsure: () =
   });
   const watcher = CodeGraphWatcher.of({
     cachedStatus: () => Effect.succeedNone,
-    ensure: () => Effect.sync(onWatcherEnsure),
+    ensure: () => Effect.sync(onWatcherEnrollment),
+    scheduleEnsure: () => Effect.sync(onWatcherEnrollment),
     metrics: Effect.succeed({
       activeRefreshKeys: 0,
       activeWatches: 0,

@@ -2256,6 +2256,7 @@ describe('manager http API', () => {
           worktreeId: identity.worktreeId,
         },
         force: false,
+        manifestPath: config.manifestPath,
         threadnoteHome: config.agentContextHome,
       });
 
