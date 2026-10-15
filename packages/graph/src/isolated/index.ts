@@ -1,3 +1,7 @@
+import {USER_MANIFEST_NAME} from '@threadnote/workspace/constants';
+import {expandPath} from '@threadnote/platform/paths';
+import {SystemInfo} from '@threadnote/platform/system';
+import {resolveCodeGraphRefreshRoute} from '../scope/routing.js';
 import {Clock, Effect, Path} from 'effect';
 import {observeCodeGraphAdmissionEnvironment} from '../admission_freshness.js';
 import {codeGraphBuildRequestKey} from '../indexer/build.js';
@@ -74,13 +78,31 @@ export function recoverIsolatedCodeGraphIndexSnapshot<E, R>(
  * instead of owning repository-sized SQLite work in their event loop.
  */
 export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIndex.snapshot')(function* (
-  options: CodeGraphIndexOptions & {
+  input: CodeGraphIndexOptions & {
     readonly manifestPath?: string;
     readonly manifestRevision?: string;
     readonly project?: NonNullable<CodeGraphIndexOptions['project']> & {readonly name?: string};
   },
 ) {
   const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const manifestPath = yield* expandPath(
+    input.manifestPath ??
+      system.environment().THREADNOTE_MANIFEST ??
+      path.join(input.threadnoteHome, USER_MANIFEST_NAME),
+  );
+  const refreshRoute = yield* resolveCodeGraphRefreshRoute(
+    manifestPath,
+    input.cwd,
+    input.project,
+    input.manifestRevision,
+  );
+  const options = {
+    ...input,
+    manifestPath,
+    manifestRevision: refreshRoute.manifestRevision,
+    project: refreshRoute.route.state === 'selected' ? refreshRoute.route.project : undefined,
+  };
   const store = yield* CodeGraphStore;
   const languagePacks = yield* CodeGraphLanguagePackRegistry;
   const identity = yield* resolveRepositoryIdentity(options.cwd);
@@ -116,6 +138,7 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
   const startedAt = yield* Clock.currentTimeMillis;
   const result = yield* runIsolatedCodeGraphIndex({
     admissionClass: options.admissionClass,
+    scopeRoute: refreshRoute.route.state,
     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
     cwd: options.cwd,
     full: options.force === true,

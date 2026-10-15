@@ -35,6 +35,60 @@ import {analysisSnapshot, pagedAnalysisStore} from '@threadnote/graph/test/helpe
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 describe('registered analyze_code_graph snapshot resolution', () => {
+  effectIt.effect('allows analysis selection to take thirty seconds within the default 55-second deadline', () => {
+    const ready = codeGraphStatus({ready: true, stale: true});
+    const harness = analyzeHandlerHarness({
+      analysisDelayMilliseconds: 30_000,
+      attachResults: [],
+      refresh: false,
+      statuses: [ready],
+    });
+    return Effect.gen(function* () {
+      const fiber = yield* harness
+        .invoke({
+          callerCwd: ready.identity.repoRoot,
+          operation: 'stats',
+          freshness: 'allow-stale',
+          responseFormat: 'dual',
+        })
+        .pipe(Effect.forkChild({startImmediately: true}));
+      yield* TestClock.adjust('30 seconds');
+      const result = yield* Fiber.join(fiber);
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      expect(result.structuredContent, JSON.stringify(result)).toMatchObject({type: 'code-graph-analysis'});
+      expect(harness.observation.analysisCalls).toBe(1);
+    }).pipe(provideTestLayer(harness.layer));
+  });
+
+  effectIt.effect('returns useful stale inspection evidence while watcher setup is gate-blocked', () => {
+    const ready = codeGraphStatus({ready: true, stale: true});
+    const harness = analyzeHandlerHarness({
+      attachResults: [],
+      ensureGate: Deferred.makeUnsafe<void>(),
+      refresh: false,
+      statuses: [ready],
+      rejectTargetedWatcherStatus: true,
+    });
+    return Effect.gen(function* () {
+      for (const operation of ['query', 'node', 'neighbors', 'explain'] as const) {
+        const result = yield* harness.invokeInspect({
+          callerCwd: ready.identity.repoRoot,
+          operation,
+          nodeId: `cgs_${'a'.repeat(32)}`,
+          query: 'value',
+          responseFormat: 'dual',
+        });
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          freshness: 'stale',
+          snapshot: {id: ready.readySnapshot!.id},
+          type: 'code-graph-inspection',
+        });
+        expect(JSON.stringify(result.structuredContent)).toContain('value');
+      }
+      expect(harness.observation.watcherStatusCalls).toBe(0);
+    }).pipe(provideTestLayer(harness.layer));
+  });
   it('keeps explicit graph limits and budgets while compacting only omitted local query values', () => {
     fc.assert(
       fc.property(
@@ -290,46 +344,13 @@ describe('registered analyze_code_graph snapshot resolution', () => {
     }).pipe(provideTestLayer(harness.layer));
   });
 
-  effectIt.effect('rejects unsafe short budgets and preserves one second for the accepted minimum', () => {
+  effectIt.effect('advertises fixed graph deadlines without a per-request timeout override', () => {
     const ready = codeGraphStatus({ready: true, stale: false});
-    const harness = analyzeHandlerHarness({
-      attachResults: [],
-      inspectDelayMilliseconds: 999,
-      refresh: false,
-      statuses: [ready],
-    });
-
-    return Effect.gen(function* () {
-      for (const readTimeoutMilliseconds of [1_000, 2_999, 3_000, 3_999]) {
-        const rejected = yield* harness.invokeInspect({
-          callerCwd: ready.identity.repoRoot,
-          operation: 'query',
-          query: 'value',
-          readTimeoutMilliseconds,
-        });
-        expect(rejected.isError).toBe(true);
-      }
-      expect(harness.observation.isolatedInspectCalls).toBe(0);
-
-      const started = harness.awaitIsolatedInspectCall(1);
-      const fiber = yield* harness
-        .invokeInspect({
-          callerCwd: ready.identity.repoRoot,
-          operation: 'query',
-          query: 'value',
-          readTimeoutMilliseconds: 4_000,
-          responseFormat: 'dual',
-        })
-        .pipe(Effect.forkChild({startImmediately: true}));
-      yield* started;
-      yield* TestClock.adjust('999 millis');
-      const accepted = yield* Fiber.join(fiber);
-
-      expect(accepted.structuredContent, JSON.stringify(accepted)).toMatchObject({
-        operation: 'query',
-        type: 'code-graph-inspection',
-      });
-      expect(harness.observation.isolatedInspectCalls).toBe(1);
+    const harness = analyzeHandlerHarness({attachResults: [], refresh: false, statuses: [ready]});
+    return Effect.sync(() => {
+      expect(harness.observation.inspectTool).toBeDefined();
+      expect(JSON.stringify(harness.observation.inspectTool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
+      expect(harness.observation.inspectTool?.description).toContain('55-second deadline');
     }).pipe(provideTestLayer(harness.layer));
   });
 
@@ -362,7 +383,11 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(harness.observation.isolatedInspectCalls).toBe(requests.length);
       expect(harness.observation.refreshOptions).toEqual([]);
       expect(harness.observation.watcherStatusTargets).toEqual(
-        requests.map(() => ({cwd: stale.identity.repoRoot, threadnoteHome: TEST_HOME})),
+        requests.map(() => ({
+          cwd: stale.identity.repoRoot,
+          threadnoteHome: TEST_HOME,
+          manifestPath: `${TEST_HOME}/seed-manifest.yaml`,
+        })),
       );
     }).pipe(provideTestLayer(harness.layer));
   });
@@ -387,7 +412,7 @@ describe('registered analyze_code_graph snapshot resolution', () => {
       expect(result.isError, JSON.stringify(result)).not.toBe(true);
       expect(result.structuredContent).toMatchObject({operation: 'query', type: 'code-graph-inspection'});
       expect(harness.observation.watcherStatusTargets).toEqual([
-        {cwd: ready.identity.repoRoot, threadnoteHome: TEST_HOME},
+        {cwd: ready.identity.repoRoot, threadnoteHome: TEST_HOME, manifestPath: `${TEST_HOME}/seed-manifest.yaml`},
       ]);
     }).pipe(provideTestLayer(harness.layer));
   });
@@ -841,6 +866,8 @@ interface AnalyzeHandlerHarnessInput {
   readonly allowBackgroundRequest?: boolean;
   readonly attachResults: readonly CodeGraphStatus[];
   readonly inspectDelayMilliseconds?: number;
+  readonly analysisDelayMilliseconds?: number;
+  readonly ensureGate?: Deferred.Deferred<void>;
   readonly liveGit?: boolean;
   readonly manifestPath?: string;
   readonly refresh: boolean;
@@ -901,6 +928,11 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
         return Option.some(input.refreshStatus ?? deferredRefreshStatus());
       }),
     ensure: options =>
+      Effect.sync(() => {
+        lifecycleEvents.push('watcher-ensure');
+        ensureOptions.push(options);
+      }).pipe(Effect.andThen(input.ensureGate === undefined ? Effect.void : Deferred.await(input.ensureGate))),
+    scheduleEnsure: options =>
       Effect.sync(() => {
         lifecycleEvents.push('watcher-ensure');
         ensureOptions.push(options);
@@ -968,6 +1000,7 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
         : arguments_.at(-1) === '--threadnote-code-graph-analysis-worker'
           ? Effect.gen(function* () {
               const request = JSON.parse(new TextDecoder().decode(options?.input)) as CodeGraphAnalysisReadInput;
+              if (input.analysisDelayMilliseconds !== undefined) yield* Effect.sleep(input.analysisDelayMilliseconds);
               const result = yield* serveCodeGraphAnalysisRead(request).pipe(
                 Effect.provideService(CodeGraphQueryService, query),
                 Effect.provideService(CodeGraphAnalysis, analysis),
@@ -1049,11 +1082,15 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
   type AddedTool = Parameters<EffectMcpServer['addTool']>[0];
   let analyzeHandle: AddedTool['handle'] | undefined;
   let inspectHandle: AddedTool['handle'] | undefined;
+  let inspectTool: AddedTool['tool'] | undefined;
   const mcpLayer = Layer.succeed(McpServer.McpServer, {
     addTool: (options: AddedTool) =>
       Effect.sync(() => {
         if (options.tool.name === 'analyze_code_graph') analyzeHandle = options.handle;
-        if (options.tool.name === 'inspect_code_graph') inspectHandle = options.handle;
+        if (options.tool.name === 'inspect_code_graph') {
+          inspectHandle = options.handle;
+          inspectTool = options.tool;
+        }
       }),
   } as unknown as EffectMcpServer);
   const applicationLayer = Layer.mergeAll(
@@ -1099,6 +1136,9 @@ function analyzeHandlerHarness(input: AnalyzeHandlerHarnessInput) {
       }),
     layer,
     observation: {
+      get inspectTool() {
+        return inspectTool;
+      },
       attachOptions,
       ensureOptions,
       get analysisCalls() {
@@ -1222,7 +1262,20 @@ function codeGraphInspectionResult(
   return {
     edges: [],
     freshness: status.stale ? 'stale' : 'current',
-    nodes: [],
+    nodes: [
+      {
+        contentHash: 'fixture',
+        exported: true,
+        id: `cgs_${'a'.repeat(32)}`,
+        kind: 'variable',
+        language: 'typescript',
+        name: 'value',
+        path: 'src/value.ts',
+        qualifiedName: 'value',
+        score: 1,
+        span: {line: 1, endLine: 1, column: 1, endColumn: 6},
+      },
+    ],
     operation,
     repository: {displayName: status.identity.displayName, repositoryId: status.identity.repositoryId},
     snapshot: {

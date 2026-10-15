@@ -1,5 +1,4 @@
 import {Clock, Context, Crypto, Effect, FileSystem, Layer, Option, Path, Schema} from 'effect';
-import * as SqlClient from 'effect/sql/SqlClient';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
@@ -82,6 +81,7 @@ export type {
 } from './query/contract.js';
 import {codeGraphSymbolSearchScoreMultiplier, CodeGraphStore, type CodeGraphStoreShape} from './store.js';
 import {CodeGraphEmbeddingIndex, type CodeGraphEmbeddingIndexShape} from './embedding.js';
+import {withCodeGraphReadTransaction} from './store/session.js';
 import {addUnavailableImpactBaseWarning} from './query/impact_base.js';
 import {loadSharedGraphQuerySource} from './sharing/provenance.js';
 import {
@@ -264,7 +264,7 @@ export class CodeGraphQueryService extends Context.Service<
                 stale: !current,
                 projectCoverage: codeGraphProjectCoverage(projectScope, identity, readySnapshot || undefined, current),
               },
-              {identity, projectScope, manifestPath: options?.manifestPath},
+              {identity, projectScope, projectScopeObserved: true, manifestPath: options?.manifestPath},
             );
           }
           const runtimeRead = readySnapshot
@@ -320,6 +320,7 @@ export class CodeGraphQueryService extends Context.Service<
           return attachCodeGraphStatusObservation(status, {
             identity,
             projectScope,
+            projectScopeObserved: true,
             manifestPath: options?.manifestPath,
             ...(overlay === undefined ? {} : {overlay}),
           });
@@ -665,16 +666,17 @@ export class CodeGraphQueryService extends Context.Service<
                   'fallback',
                 )).identity;
               const projectScope =
-                statusObservation?.projectScope ??
-                (options.readyScopeReceipt === undefined
-                  ? yield* observeCodeGraphQueryScope(
-                      options.threadnoteHome,
-                      options.cwd,
-                      identity,
-                      languagePacks,
-                      options,
-                    )
-                  : undefined);
+                statusObservation?.projectScope !== undefined || statusObservation?.projectScopeObserved === true
+                  ? statusObservation.projectScope
+                  : options.readyScopeReceipt === undefined
+                    ? yield* observeCodeGraphQueryScope(
+                        options.threadnoteHome,
+                        options.cwd,
+                        identity,
+                        languagePacks,
+                        options,
+                      )
+                    : undefined;
               const scopeReceipt = options.readyScopeReceipt ?? codeGraphQueryScopeReceipt(projectScope);
               const layout = codeGraphLayout(
                 path,
@@ -1715,14 +1717,7 @@ const inspectReadyGraph = Effect.fn('codeGraph.inspectReadyGraph')(function* (in
             : input.options.seedQueries.length - (scopedSeedQueries?.length ?? 0),
         );
   });
-  return yield* input.store.withSession(
-    input.layout.databasePath,
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      return yield* sql.withTransaction(read);
-    }),
-    {readOnly: true},
-  );
+  return yield* withCodeGraphReadTransaction(input.store, input.layout.databasePath, read);
 });
 
 class WorktreeChangedDuringQuery extends Schema.TaggedError<WorktreeChangedDuringQuery>()(

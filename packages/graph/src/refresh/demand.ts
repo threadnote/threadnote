@@ -38,6 +38,7 @@ export class CodeGraphRefreshDemandSuperseded extends Schema.TaggedError<CodeGra
 
 export interface CodeGraphRefreshDemandIdentity {
   readonly checkoutId: string;
+  readonly recoveryKey?: string;
   /** Opaque selected graph view; absent retains the legacy full-repository sidecar. */
   readonly scopeId?: string;
   readonly threadnoteHome: string;
@@ -152,6 +153,7 @@ export const registerCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDem
     Effect.sync(() => {
       const registration = registerCodeGraphRefreshDemand(state, {
         now,
+        recoveryKey: identity.recoveryKey,
         owner: {processId: system.processId, ...(processStartIdentity === undefined ? {} : {processStartIdentity})},
         targetKey,
         token,
@@ -178,6 +180,7 @@ export const resumeCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDeman
       const ownerLive = yield* activeDemandOwnerLive(state, observed, now, system);
       const registration = resumeDemandState(state, {
         now,
+        recoveryKey: identity.recoveryKey,
         owner: {processId: system.processId, ...(processStartIdentity === undefined ? {} : {processStartIdentity})},
         ownerLive,
         targetKey,
@@ -197,7 +200,12 @@ export const enqueueCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDema
   const token = `cgdq_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
   return yield* mutate(identity, state =>
     Effect.sync(() => {
-      const registration = enqueueCodeGraphRefreshDemand(state, {now, targetKey, token});
+      const registration = enqueueCodeGraphRefreshDemand(state, {
+        now,
+        recoveryKey: identity.recoveryKey,
+        targetKey,
+        token,
+      });
       return {state: registration.state, value: registration};
     }),
   );
@@ -252,11 +260,12 @@ export const deferCodeGraphBackgroundDemand = Effect.fn('codeGraph.refreshDemand
   identity: CodeGraphRefreshDemandIdentity,
   token: string,
   targetKey: string,
+  blocked = false,
 ) {
   const now = yield* Clock.currentTimeMillis;
   return yield* mutate(identity, state =>
     Effect.sync(() => {
-      const next = deferDemandState(state, token, targetKey, now);
+      const next = deferDemandState(state, token, targetKey, now, blocked);
       return {state: next, value: next};
     }),
   );
@@ -321,6 +330,21 @@ export function codeGraphRefreshDemandContinuity(
     };
   }
   if (desired) {
+    if (desired.retry?.blocked)
+      return {
+        type: 'code-graph-refresh-continuity',
+        version: 1,
+        state: 'deferred',
+        queueToken: desired.targetToken,
+        latestDesiredToken: desired.targetToken,
+        failure: {
+          code: 'unknown',
+          operation: 'refresh code graph',
+          reobserveTarget: true,
+          recovery: 'diagnose',
+          retryable: false,
+        },
+      };
     const retryAfterMilliseconds = desired.retry === undefined ? undefined : Math.max(0, desired.retry.notBefore - now);
     return {
       type: 'code-graph-refresh-continuity',

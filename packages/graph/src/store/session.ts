@@ -1,9 +1,10 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Cause, Context, Effect, Layer, Option, Path} from 'effect';
+import {Cause, Context, Effect, Exit, Layer, Option, Path, Scope} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
 import type {
   CodeGraphDatabaseSessionOptions,
+  CodeGraphStoreShape,
   CodeGraphSqliteWriterSettings,
   CodeGraphSqliteWriterTuning,
 } from './shape.js';
@@ -25,6 +26,59 @@ export class CodeGraphDatabaseSession extends Context.Service<
   CodeGraphDatabaseSession,
   CodeGraphDatabaseSessionShape
 >()('@threadnote/graph/store/session/CodeGraphDatabaseSession') {}
+
+export const withCodeGraphReadTransaction = <A, E, R>(
+  store: Pick<CodeGraphStoreShape, 'withSession'>,
+  databasePath: string,
+  read: Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
+    if (Option.isSome(session) && session.value.databasePath === databasePath) {
+      return yield* withDeferredReadTransaction(session.value.sql, read);
+    }
+    return yield* store.withSession(
+      databasePath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql.withTransaction(read);
+      }),
+      {readOnly: true},
+    );
+  });
+
+function withDeferredReadTransaction<A, E, R>(sql: SqlClient.SqlClient, read: Effect.Effect<A, E, R>) {
+  // Writable SQLite clients default to BEGIN IMMEDIATE. A ready read must
+  // retain its connection and transaction without reserving the writer lane.
+  const transaction = SqlClient.makeWithTransaction({
+    transactionService: sql.transactionService,
+    spanAttributes: [],
+    acquireConnection: Scope.make().pipe(
+      Effect.flatMap(scope =>
+        Scope.provide(sql.reserve, scope).pipe(
+          Effect.onError(cause => Scope.close(scope, Exit.failCause(cause))),
+          Effect.map(connection => [scope, connection] as const),
+        ),
+      ),
+    ),
+    begin: connection => connection.executeUnprepared('BEGIN', [], undefined).pipe(Effect.asVoid),
+    savepoint: (connection, id) =>
+      connection.executeUnprepared(`SAVEPOINT threadnote_read_${id}`, [], undefined).pipe(Effect.asVoid),
+    releaseSavepoint: (connection, id) =>
+      connection.executeUnprepared(`RELEASE SAVEPOINT threadnote_read_${id}`, [], undefined).pipe(Effect.asVoid),
+    commit: connection => connection.executeUnprepared('COMMIT', [], undefined).pipe(Effect.asVoid),
+    onCommitFailure: connection => connection.executeUnprepared('ROLLBACK', [], undefined).pipe(Effect.asVoid),
+    rollback: connection => connection.executeUnprepared('ROLLBACK', [], undefined).pipe(Effect.asVoid),
+    rollbackSavepoint: (connection, id) =>
+      connection.executeUnprepared(`ROLLBACK TO SAVEPOINT threadnote_read_${id}`, [], undefined).pipe(Effect.asVoid),
+  });
+  return Effect.gen(function* () {
+    // An enclosing transaction already pins these immutable reads. Reuse it
+    // rather than mixing this wrapper's semaphore with the client's wrapper.
+    if (Option.isSome(yield* Effect.serviceOption(sql.transactionService))) return yield* read;
+    return yield* transaction(read);
+  });
+}
 
 export function useDatabase<A, E, R>(
   databasePath: string,

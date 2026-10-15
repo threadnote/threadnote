@@ -319,107 +319,113 @@ export const serveCodeGraphDiscoveryRead = Effect.fn('codeGraph.serveDiscoveryRe
   } = {},
 ) {
   const query = yield* CodeGraphQueryService;
-  const status = yield* query.status(request.threadnoteHome, request.cwd, {
+  const statusOptions = {
     manifestPath: request.manifestPath,
     observeWorktree: codeGraphInspectionObservesWorktree(request.operation),
     project: request.project,
     requestMaintenance: false,
     telemetry: options.telemetry,
-  });
-  const attached = codeGraphInspectionNeedsReadyAttachment(status)
-    ? yield* query.attachSharedReadySnapshot(request.threadnoteHome, status.identity, status, {
-        allowBorrowedStale: codeGraphInspectionAllowsStaleReady(request.operation),
-        requestMaintenance: false,
-        telemetry: options.telemetry,
-      })
-    : status;
-  if (attached.readySnapshot === undefined) {
-    return {
-      unavailable: 'no-ready-snapshot' as const,
-      identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
-    };
-  }
-  const observation = codeGraphInspectionObservation(observationFromCodeGraphStatus(attached), request.operation);
-  const scopedSeedQueries = request.seedQueries?.filter(candidate =>
-    codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
-  );
-  const result = yield* query
-    .inspect({
-      project: request.project,
-      manifestPath: request.manifestPath,
-      ...(request.baseCommit === undefined ? {} : {baseCommit: request.baseCommit}),
-      ...(request.operation === 'impact' ? {baseCommitPolicy: 'ready-only' as const} : {}),
-      cwd: request.cwd,
-      depth: request.depth,
-      direction: request.direction,
-      edgeLimit: request.edgeLimit,
-      from: request.from,
-      includeHeuristic: request.includeHeuristic,
-      includeModelAssociations: request.includeModelAssociations,
-      nodeId: request.nodeId,
-      nodeLimit: request.nodeLimit,
-      operation: request.operation,
-      packageName: request.packageName,
-      query:
-        request.operation === 'impact'
-          ? impactQueryTransportSelector(request.query, request.seedQueries)
-          : request.query,
-      refresh: false,
-      requestMaintenance: false,
-      seedQueryCount: scopedSeedQueries?.length,
-      seedQueries: scopedSeedQueries,
-      ...(observation === undefined ? {} : {statusObservation: observation}),
-      symbol: request.symbol,
-      threadnoteHome: request.threadnoteHome,
-      to: request.to,
-    })
-    .pipe(
-      Effect.catchIf(
-        (error: unknown) => Schema.is(CodeGraphSnapshotUnavailable)(error),
-        () =>
-          Effect.succeed({
-            unavailable: 'no-ready-snapshot' as const,
-            identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
-          }),
-      ),
-    );
-  if (typeof result === 'object' && result !== null && 'unavailable' in result) return result;
-  const scopeId = observation?.projectScope?.scope?.scopeKey;
-  const refresh =
-    options.observeRefresh === undefined
-      ? undefined
-      : yield* options
-          .observeRefresh({
-            checkoutId: attached.identity.checkoutId,
-            ...(scopeId === undefined ? {} : {scopeId}),
-            threadnoteHome: request.threadnoteHome,
-            worktreeId: attached.identity.worktreeId,
-          })
-          .pipe(Effect.orElseSucceed(() => undefined));
-  const selection = codeGraphQueryAnonymousTelemetrySnapshotSelection(status, attached);
-  const surface = codeGraphQueryAnonymousTelemetrySnapshotSurface(attached, selection);
-  return {
-    result,
-    status: {
-      ...(refresh === undefined || refresh.state === 'idle' ? {} : {refresh}),
-      stale: attached.stale,
-      ...(attached.readySnapshot === undefined ? {} : {readySnapshotId: attached.readySnapshot.id}),
-      surface:
-        surface.selection === 'none'
-          ? surface
-          : {
-              freshness: surface.freshness,
-              selection: surface.selection,
-              snapshot: {
-                edgeCount: surface.snapshot.edgeCount,
-                fileCount: surface.snapshot.fileCount,
-                symbolCount: surface.snapshot.symbolCount,
-              },
-            },
-      worktreeId: attached.identity.worktreeId,
-      repoRoot: attached.identity.repoRoot,
-    },
   };
+  const read = (status: import('../types.js').CodeGraphStatus) =>
+    Effect.gen(function* () {
+      const attached = codeGraphInspectionNeedsReadyAttachment(status)
+        ? yield* query.attachSharedReadySnapshot(request.threadnoteHome, status.identity, status, {
+            allowBorrowedStale: codeGraphInspectionAllowsStaleReady(request.operation),
+            requestMaintenance: false,
+            telemetry: options.telemetry,
+          })
+        : status;
+      if (attached.readySnapshot === undefined) {
+        return {
+          unavailable: 'no-ready-snapshot' as const,
+          identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
+        };
+      }
+      const observation = codeGraphInspectionObservation(observationFromCodeGraphStatus(attached), request.operation);
+      const scopedSeedQueries = request.seedQueries?.filter(candidate =>
+        codeGraphScopeAdmitsPath(observation?.projectScope?.scope, candidate),
+      );
+      const result = yield* query
+        .inspect({
+          project: request.project,
+          manifestPath: request.manifestPath,
+          ...(request.baseCommit === undefined ? {} : {baseCommit: request.baseCommit}),
+          ...(request.operation === 'impact' ? {baseCommitPolicy: 'ready-only' as const} : {}),
+          cwd: request.cwd,
+          depth: request.depth,
+          direction: request.direction,
+          edgeLimit: request.edgeLimit,
+          from: request.from,
+          includeHeuristic: request.includeHeuristic,
+          includeModelAssociations: request.includeModelAssociations,
+          nodeId: request.nodeId,
+          nodeLimit: request.nodeLimit,
+          operation: request.operation,
+          packageName: request.packageName,
+          query:
+            request.operation === 'impact'
+              ? impactQueryTransportSelector(request.query, request.seedQueries)
+              : request.query,
+          refresh: false,
+          requestMaintenance: false,
+          seedQueryCount: scopedSeedQueries?.length,
+          seedQueries: scopedSeedQueries,
+          ...(observation === undefined ? {} : {statusObservation: observation}),
+          symbol: request.symbol,
+          threadnoteHome: request.threadnoteHome,
+          to: request.to,
+        })
+        .pipe(
+          Effect.catchIf(
+            (error: unknown) => Schema.is(CodeGraphSnapshotUnavailable)(error),
+            () =>
+              Effect.succeed({
+                unavailable: 'no-ready-snapshot' as const,
+                identity: {repoRoot: attached.identity.repoRoot, worktreeId: attached.identity.worktreeId},
+              }),
+          ),
+        );
+      if (typeof result === 'object' && result !== null && 'unavailable' in result) return result;
+      const scopeId = observation?.projectScope?.scope?.scopeKey;
+      const refresh =
+        options.observeRefresh === undefined
+          ? undefined
+          : yield* options
+              .observeRefresh({
+                checkoutId: attached.identity.checkoutId,
+                ...(scopeId === undefined ? {} : {scopeId}),
+                threadnoteHome: request.threadnoteHome,
+                worktreeId: attached.identity.worktreeId,
+              })
+              .pipe(Effect.orElseSucceed(() => undefined));
+      const selection = codeGraphQueryAnonymousTelemetrySnapshotSelection(status, attached);
+      const surface = codeGraphQueryAnonymousTelemetrySnapshotSurface(attached, selection);
+      return {
+        result,
+        status: {
+          ...(refresh === undefined || refresh.state === 'idle' ? {} : {refresh}),
+          stale: attached.stale,
+          ...(attached.readySnapshot === undefined ? {} : {readySnapshotId: attached.readySnapshot.id}),
+          surface:
+            surface.selection === 'none'
+              ? surface
+              : {
+                  freshness: surface.freshness,
+                  selection: surface.selection,
+                  snapshot: {
+                    edgeCount: surface.snapshot.edgeCount,
+                    fileCount: surface.snapshot.fileCount,
+                    symbolCount: surface.snapshot.symbolCount,
+                  },
+                },
+          worktreeId: attached.identity.worktreeId,
+          repoRoot: attached.identity.repoRoot,
+        },
+      };
+    });
+  return yield* query.withStatusSession === undefined
+    ? query.status(request.threadnoteHome, request.cwd, statusOptions).pipe(Effect.flatMap(read))
+    : query.withStatusSession(request.threadnoteHome, request.cwd, undefined, statusOptions, read);
 });
 
 /** Internal standalone worker. Input and output are bounded one-document JSON over stdio. */

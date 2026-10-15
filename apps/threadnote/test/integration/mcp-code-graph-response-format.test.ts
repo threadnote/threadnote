@@ -97,6 +97,7 @@ describe('MCP code graph response format', () => {
       await client.connect(transport);
       const tool = (await client.listTools()).tools.find(candidate => candidate.name === 'inspect_code_graph');
       expect(JSON.stringify(tool?.inputSchema)).toContain('responseFormat');
+      expect(JSON.stringify(tool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
       expect(JSON.stringify(tool?.inputSchema)).toContain('impact agent defaults to 1250');
       expect(JSON.stringify(tool?.inputSchema)).toContain('Ceiling:');
       expect(JSON.stringify(tool?.inputSchema)).toContain('agent shows 3 unless set');

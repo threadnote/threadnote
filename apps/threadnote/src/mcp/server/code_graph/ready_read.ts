@@ -112,7 +112,9 @@ export const completeCodeGraphReadyReadRefresh = Effect.fn('codeGraph.completeRe
   readonly target: Omit<CodeGraphWatchOptions, 'key'>;
   readonly watcher: CodeGraphWatcherShape;
 }) {
-  if (input.ensureWatcher) yield* input.watcher.ensure({...input.target, key: input.key});
+  if (input.ensureWatcher && input.watcher.scheduleEnsure !== undefined) {
+    yield* input.watcher.scheduleEnsure({...input.target, key: input.key});
+  }
   if (!input.backgroundRefreshRequested) return input.refresh;
   const observedContinuity =
     input.refresh ??
@@ -127,7 +129,7 @@ export const completeCodeGraphReadyReadRefresh = Effect.fn('codeGraph.completeRe
   // Durable demand discovery is maintenance, not part of the evidence read.
   // The watcher owns a keyed single-flight in its service scope so repeated
   // stale reads return promptly without accumulating detached filesystem work.
-  if (failure?.retryable !== false) {
+  if (failure?.retryable !== false || failure.reobserveTarget === true) {
     if (input.watcher.scheduleRequest !== undefined) {
       yield* input.watcher.scheduleRequest({...input.target, key: input.key});
     } else if (input.watcher.scheduleResume !== undefined) {

@@ -1,3 +1,4 @@
+import {CODE_GRAPH_EXPECTED_SCOPE_ID_ENV, CodeGraphScopeRoutingError} from '../scope/routing.js';
 import {Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as HttpClient from 'effect/http/HttpClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -288,6 +289,12 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                     scopeObservationOnly: true,
                   });
             const scope = scopedObservation?.scope;
+            const expectedScopeId = system.environment()[CODE_GRAPH_EXPECTED_SCOPE_ID_ENV];
+            if (expectedScopeId !== undefined && expectedScopeId !== (scope?.scopeKey ?? 'full-repository')) {
+              return yield* CodeGraphScopeRoutingError.make({
+                message: 'Graph refresh child scope does not match its selected parent target.',
+              });
+            }
             const scopeEvidence =
               scopedObservation === undefined
                 ? undefined
@@ -330,79 +337,6 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               });
             }
             yield* anonymousTelemetry.observeOverlay(requestedOverlay.dirty);
-            // Equivalent scoped observations update only applicability authority: no reporter, builder slot, or fact build.
-            if (
-              !request.force &&
-              scopeEvidence !== undefined &&
-              scope !== undefined &&
-              (yield* fs.exists(layout.databasePath))
-            ) {
-              const reused = yield* withExclusiveFileLock(
-                fs,
-                layout.lockPath,
-                CODE_GRAPH_LOCK_OPTIONS,
-                Effect.gen(function* () {
-                  const active = yield* store.loadScopeApplicability(
-                    layout.databasePath,
-                    initialIdentity.worktreeId,
-                    scope.scopeKey,
-                  );
-                  if (assessCodeGraphScopeApplicability(active, scopeEvidence).buildRequired || active === undefined)
-                    return undefined;
-                  const ready = yield* store.readySnapshot(
-                    layout.databasePath,
-                    initialIdentity.worktreeId,
-                    scope.scopeKey,
-                  );
-                  if (
-                    ready === undefined ||
-                    ready.id !== active.snapshotId ||
-                    !(yield* codeGraphSnapshotAdmissionCurrent(
-                      layout,
-                      ready,
-                      admissionEnvironment,
-                      languagePacks,
-                      false,
-                      codeGraphScopeAdmissionEvidence(active),
-                    ))
-                  )
-                    return undefined;
-                  yield* verifyIndexInput(
-                    initialIdentity,
-                    true,
-                    request.threadnoteHome,
-                    requestedOverlay,
-                    scopedObservation,
-                  );
-                  if ((yield* observeCodeGraphAdmissionEnvironment(initialIdentity)) !== admissionEnvironment)
-                    return undefined;
-                  yield* store.recordScopeApplicability(layout.databasePath, ready.id, scopeEvidence, scope);
-                  yield* recordCodeGraphSnapshotAdmission(
-                    layout,
-                    ready,
-                    admissionEnvironment,
-                    languagePacks,
-                    ensureVectors,
-                    {scope: codeGraphScopeAdmissionEvidence(scopeEvidence)},
-                  );
-                  return yield* reuseReadySnapshot({
-                    embedding,
-                    ensureVectors,
-                    identity: initialIdentity,
-                    layout,
-                    onProgress: request.onProgress,
-                    reusedFiles: ready.fileCount,
-                    skippedFiles: scopedObservation?.skipped ?? 0,
-                    snapshot: ready,
-                    startedAt: yield* Clock.currentTimeMillis,
-                    store,
-                    threadnoteHome: request.threadnoteHome,
-                    totalFiles: ready.fileCount,
-                  });
-                }),
-              );
-              if (reused !== undefined) return reused;
-            }
             const requestKey = request.force
               ? undefined
               : codeGraphBuildRequestKey(
@@ -451,6 +385,80 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                             }),
                       ),
                     );
+            // Equivalent scoped observations update only applicability authority: no reporter, builder slot, or fact build.
+            if (
+              !request.force &&
+              scopeEvidence !== undefined &&
+              scope !== undefined &&
+              (yield* fs.exists(layout.databasePath))
+            ) {
+              const reused = yield* withExclusiveFileLock(
+                fs,
+                layout.lockPath,
+                CODE_GRAPH_LOCK_OPTIONS,
+                Effect.gen(function* () {
+                  const active = yield* store.loadScopeApplicability(
+                    layout.databasePath,
+                    initialIdentity.worktreeId,
+                    scope.scopeKey,
+                  );
+                  if (assessCodeGraphScopeApplicability(active, scopeEvidence).buildRequired || active === undefined)
+                    return undefined;
+                  const ready = yield* store.readySnapshot(
+                    layout.databasePath,
+                    initialIdentity.worktreeId,
+                    scope.scopeKey,
+                  );
+                  if (
+                    ready === undefined ||
+                    ready.id !== active.snapshotId ||
+                    !(yield* codeGraphSnapshotAdmissionCurrent(
+                      layout,
+                      ready,
+                      admissionEnvironment,
+                      languagePacks,
+                      false,
+                      codeGraphScopeAdmissionEvidence(active),
+                    ))
+                  )
+                    return undefined;
+                  yield* verifyIndexInput(
+                    initialIdentity,
+                    true,
+                    request.threadnoteHome,
+                    requestedOverlay,
+                    scopedObservation,
+                  );
+                  if ((yield* observeCodeGraphAdmissionEnvironment(initialIdentity)) !== admissionEnvironment)
+                    return undefined;
+                  yield* beginDemandPublication();
+                  yield* store.recordScopeApplicability(layout.databasePath, ready.id, scopeEvidence, scope);
+                  yield* recordCodeGraphSnapshotAdmission(
+                    layout,
+                    ready,
+                    admissionEnvironment,
+                    languagePacks,
+                    ensureVectors,
+                    {scope: codeGraphScopeAdmissionEvidence(scopeEvidence)},
+                  );
+                  return yield* reuseReadySnapshot({
+                    embedding,
+                    ensureVectors,
+                    identity: initialIdentity,
+                    layout,
+                    onProgress: request.onProgress,
+                    reusedFiles: ready.fileCount,
+                    skippedFiles: scopedObservation?.skipped ?? 0,
+                    snapshot: ready,
+                    startedAt: yield* Clock.currentTimeMillis,
+                    store,
+                    threadnoteHome: request.threadnoteHome,
+                    totalFiles: ready.fileCount,
+                  });
+                }),
+              );
+              if (reused !== undefined) return reused;
+            }
             const reporter = yield* withCodeGraphMaintenanceRegistration(
               request.threadnoteHome,
               Effect.gen(function* () {

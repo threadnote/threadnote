@@ -58,6 +58,8 @@ const demandKey = (value: string) => value.repeat(64).slice(0, 64);
 
 function makeDemandDriverHarness(input: {
   readonly initialTarget: string;
+  readonly isSuperseded?: (cause: unknown) => boolean;
+  readonly isRouteMismatch?: (cause: unknown) => boolean;
   readonly onRefreshed?: (summary: {readonly edges: number; readonly symbols: number}) => Effect.Effect<void, unknown>;
   readonly run: (
     target: {readonly requestKey: string},
@@ -87,14 +89,15 @@ function makeDemandDriverHarness(input: {
     const driver = driveCodeGraphBackgroundDemand({
       complete: (target, token) =>
         transition(current => completeCodeGraphRefreshDemand(current, token, target.requestKey)),
-      defer: (target, token) =>
+      defer: (target, token, blocked) =>
         Clock.currentTimeMillis.pipe(
           Effect.flatMap(now =>
-            transition(current => deferCodeGraphRefreshDemand(current, token, target.requestKey, now)),
+            transition(current => deferCodeGraphRefreshDemand(current, token, target.requestKey, now, blocked)),
           ),
         ),
       fail: (target, token) => transition(current => failCodeGraphRefreshDemand(current, token, target.requestKey)),
-      isSuperseded: () => false,
+      isSuperseded: input.isSuperseded ?? (() => false),
+      isRouteMismatch: input.isRouteMismatch,
       observe: Ref.get(currentTarget).pipe(Effect.map(requestKey => ({requestKey}))),
       onRefreshed: input.onRefreshed ?? (() => Effect.void),
       recover: () => Effect.void,
@@ -273,6 +276,71 @@ describe('CodeGraphWatcher', () => {
         expect(yield* Ref.get(runs)).toBe(2);
       }),
     ),
+  );
+
+  effectIt.effect('defers unchanged superseded targets without registering another child', () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const harness = yield* makeDemandDriverHarness({
+        initialTarget: demandKey('a'),
+        isSuperseded: cause => cause === 'superseded',
+        run: () =>
+          Effect.suspend(() => (++attempts === 1 ? Effect.fail('superseded') : Effect.fail('unexpected retry'))),
+      });
+      const result = yield* harness.driver.pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') expect(Schema.is(CodeGraphRefreshRetryDeferred)(result.failure)).toBe(true);
+      expect(attempts).toBe(1);
+      const state = yield* Ref.get(harness.state);
+      expect(state.active).toBeUndefined();
+      expect(state.desired?.retry?.attempt).toBe(1);
+      const again = yield* harness.driver.pipe(Effect.result);
+      expect(again._tag).toBe('Failure');
+      expect(attempts).toBe(1);
+    }),
+  );
+
+  effectIt.effect('retains deterministic child route failures without scheduling another attempt', () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const harness = yield* makeDemandDriverHarness({
+        initialTarget: demandKey('a'),
+        isRouteMismatch: cause => cause === 'route mismatch',
+        run: () =>
+          Effect.suspend(() => {
+            attempts++;
+            return Effect.fail('route mismatch');
+          }),
+      });
+      yield* harness.driver.pipe(Effect.result);
+      const state = yield* Ref.get(harness.state);
+      expect(state.desired?.retry?.blocked).toBe(true);
+      yield* TestClock.adjust('1 hour');
+      yield* harness.driver.pipe(Effect.result);
+      expect(attempts).toBe(1);
+    }),
+  );
+
+  effectIt.effect('advances superseded work to a genuinely newer target', () =>
+    Effect.gen(function* () {
+      const attempts: string[] = [];
+      const harness = yield* makeDemandDriverHarness({
+        initialTarget: demandKey('a'),
+        isSuperseded: cause => cause === 'superseded',
+        run: (target, queue) =>
+          Effect.gen(function* () {
+            attempts.push(target.requestKey);
+            if (target.requestKey === demandKey('a')) {
+              yield* queue(demandKey('b'));
+              return yield* Effect.fail('superseded');
+            }
+            return {edges: 1, symbols: 1};
+          }),
+      });
+      yield* harness.driver;
+      expect(attempts).toEqual([demandKey('a'), demandKey('b')]);
+      expect((yield* Ref.get(harness.state)).active).toBeUndefined();
+    }),
   );
 
   effectIt.effect('consumes a prepared claim with its exact preflight target before reobserving', () =>

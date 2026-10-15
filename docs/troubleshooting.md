@@ -215,6 +215,9 @@ interruption. Repeat installs preserve a verified existing model. A checksum mis
 and never activates it. Lexical recall remains available if native inference is temporarily unavailable, while
 `threadnote doctor` reports the missing core capability as a failure.
 
+MCP semantic recall waits up to 30 seconds before falling back to deterministic lexical recall. A timed-out native
+request keeps its admission slot until it finishes, so repeated recalls cannot start overlapping semantic work.
+
 The runtime requests prebuilt `node-llama-cpp` binaries only. If `models runtime` reports that no compatible prebuilt
 binary exists, install the Threadnote archive matching your operating system and architecture; Threadnote will not
 silently compile one.
@@ -386,9 +389,8 @@ compatible snapshot and reports its freshness. On a cold project, `ready` permit
 analysis from another project's snapshot. Use `allow-stale` to prevent indexing and receive `no-ready-snapshot` when
 none is available. A historical complete project-coverage receipt is not proof of a readable ready snapshot.
 
-Ordinary MCP inspection and analysis use a 25-second total budget so recovery can reach a client with a 30-second
-deadline. For inspection, `readTimeoutMilliseconds` permits an explicit 1,000–55,000 ms budget when the client's
-deadline allows it. CLI `--read-timeout-ms` bounds the analysis read including snapshot selection and cleanup. Writer
+Ordinary MCP inspection and analysis use a 55-second total budget, including their finalization reserve.
+MCP tools use this fixed deadline and do not accept a per-request timeout override. CLI `--read-timeout-ms` bounds the analysis read including snapshot selection and cleanup. Writer
 contention returns a deferred state; a refresh failure carries its recovery information. Check those states before
 treating transport success as completed analysis, and respect retry guidance.
 

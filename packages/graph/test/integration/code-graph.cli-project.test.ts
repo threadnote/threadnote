@@ -1,3 +1,4 @@
+import {CODE_GRAPH_ISOLATED_BUILDER_ENV} from '@threadnote/graph/scope/routing';
 import {execFile} from '@threadnote/testing/node-child-process';
 import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -93,6 +94,15 @@ describe('code graph CLI project selection', () => {
       expect(String(ambiguousBrief.stderr)).toContain('- a: apps/a');
       expect(String(ambiguousBrief.stderr)).toContain('- b: apps/b');
       expect(String(ambiguousBrief.stderr)).not.toContain('graph-query-unavailable');
+      const isolatedEnvironment = {...process.env, [CODE_GRAPH_ISOLATED_BUILDER_ENV]: '1'};
+      const child = await runCli(['graph', 'index', ...base, '--no-vectors'], isolatedEnvironment).catch(
+        asProcessError,
+      );
+      expect(child).toMatchObject({code: 78});
+      const markedBrief = await runCli(['context', 'brief', ...base, '--task', 'find a'], isolatedEnvironment).catch(
+        asProcessError,
+      );
+      expect(markedBrief).toMatchObject({code: 1});
 
       const indexed = await runCli(['graph', 'index', ...base, '--project', 'a', '--no-vectors', '--json']);
       expect(JSON.parse(indexed.stdout)).toMatchObject({
@@ -742,12 +752,13 @@ function asProcessError(cause: unknown): NodeJS.ErrnoException & {stderr?: strin
   return cause as NodeJS.ErrnoException & {stderr?: string};
 }
 
-function runCli(args: readonly string[]) {
+function runCli(args: readonly string[], env?: NodeJS.ProcessEnv) {
   return execFilePromise(
     process.execPath,
     [join(process.cwd(), 'apps', 'threadnote', 'src', 'standalone.ts'), ...args],
     {
       cwd: process.cwd(),
+      ...(env === undefined ? {} : {env}),
       maxBuffer: 8 * 1024 * 1024,
     },
   );

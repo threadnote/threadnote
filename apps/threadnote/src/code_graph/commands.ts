@@ -46,7 +46,11 @@ import type {
   RepositoryIdentityExpectation,
 } from '@threadnote/graph/types';
 export {runCodeGraphWatch} from '@threadnote/graph/commands/watch';
-import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV, resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
+import {
+  CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV,
+  CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV,
+  resolveCodeGraphScopeRoute,
+} from '@threadnote/graph/scope/routing';
 import {
   findCodeGraphWorksetPath,
   inspectCodeGraphWorksetTopology,
@@ -820,6 +824,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
     cwd,
     options.project,
     system.environment()[CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV],
+    system.environment()[CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV] === 'full' ? 'full' : undefined,
   );
   const identity = yield* resolveRepositoryIdentity(cwd);
   if (options.expectedIdentity && !repositoryIdentityMatchesExpectation(identity, options.expectedIdentity)) {

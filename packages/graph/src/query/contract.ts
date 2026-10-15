@@ -59,6 +59,7 @@ export function codeGraphInspectionObservation(
   if (observation === undefined || codeGraphInspectionObservesWorktree(operation)) return observation;
   return {
     identity: observation.identity,
+    ...(observation.projectScopeObserved === undefined ? {} : {projectScopeObserved: observation.projectScopeObserved}),
     ...(observation.borrowedSnapshotId === undefined ? {} : {borrowedSnapshotId: observation.borrowedSnapshotId}),
     ...(observation.manifestPath === undefined ? {} : {manifestPath: observation.manifestPath}),
     ...(observation.projectScope === undefined ? {} : {projectScope: observation.projectScope}),
@@ -136,6 +137,8 @@ export interface CodeGraphTraversalTimeBudgets {
 export interface CodeGraphStatusObservation {
   readonly manifestPath?: string;
   readonly projectScope?: CodeGraphQueryScope;
+  /** Absent scope was verified as the full-repository route rather than omitted by the caller. */
+  readonly projectScopeObserved?: true;
   /** Read-only shared evidence selected without changing this worktree's active pointer. */
   readonly borrowedSnapshotId?: string;
   /** Exact ready snapshot selected by the parent status pass. */

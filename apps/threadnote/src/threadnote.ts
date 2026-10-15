@@ -1,3 +1,8 @@
+import {
+  CodeGraphScopeRoutingError,
+  CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE,
+  CODE_GRAPH_ISOLATED_BUILDER_ENV,
+} from '@threadnote/graph/scope/routing';
 import {Console, Effect, Schema} from 'effect';
 import {Command} from 'effect/cli';
 import {errorMessage} from '@threadnote/platform/errors';
@@ -58,7 +63,11 @@ export const cliEffect = (arguments_: readonly string[]) => {
           system.setExitCode(
             Schema.is(CodeGraphRefreshDemandSuperseded)(error)
               ? CODE_GRAPH_REFRESH_DEMAND_SUPERSEDED_EXIT_CODE
-              : failureExitCode,
+              : Schema.is(CodeGraphScopeRoutingError)(error) &&
+                  system.environment()[CODE_GRAPH_ISOLATED_BUILDER_ENV] === '1' &&
+                  inspectCliInvocation(arguments_).telemetryOperation === 'graph.index'
+                ? CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE
+                : failureExitCode,
           ),
         ),
       ),

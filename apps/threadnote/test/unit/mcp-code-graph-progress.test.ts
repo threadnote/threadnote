@@ -65,9 +65,10 @@ describe('MCP code graph indexing progress', () => {
       borrowedSnapshotId: FC.option(FC.string({maxLength: 40}), {nil: undefined}),
       dirty: FC.boolean(),
       observed: FC.boolean(),
+      scopeObserved: FC.boolean(),
       fingerprint: FC.string({maxLength: 64}),
     },
-    ({operation, borrowedSnapshotId, dirty, observed, fingerprint}) => {
+    ({operation, borrowedSnapshotId, dirty, observed, scopeObserved, fingerprint}) => {
       const observation: CodeGraphStatusObservation = {
         identity: {
           caseMode: 'sensitive',
@@ -81,6 +82,7 @@ describe('MCP code graph indexing progress', () => {
           worktreeId: 'worktree',
         },
         ...(borrowedSnapshotId === undefined ? {} : {borrowedSnapshotId}),
+        ...(scopeObserved ? {projectScopeObserved: true as const} : {}),
         projectScope: {
           project: {name: 'fixture-project', uri: 'threadnote://projects/fixture-project'},
         },
@@ -91,6 +93,7 @@ describe('MCP code graph indexing progress', () => {
       expect(projected?.identity).toBe(observation.identity);
       expect(projected?.borrowedSnapshotId).toBe(borrowedSnapshotId);
       expect(projected?.projectScope).toBe(observation.projectScope);
+      expect(projected?.projectScopeObserved).toBe(observation.projectScopeObserved);
       if (operation === 'path' || operation === 'impact') expect(projected).toBe(observation);
       else expect(projected?.overlay).toBeUndefined();
       expect(codeGraphInspectionObservation(projected, operation)).toEqual(projected);
@@ -130,7 +133,8 @@ describe('MCP code graph indexing progress', () => {
       let scheduledRequests = 0;
       let scheduledResumes = 0;
       const watcher = {
-        ensure: () =>
+        ensure: () => Effect.die('Completed evidence must not await watcher setup.'),
+        scheduleEnsure: () =>
           Effect.sync(() => {
             ensured += 1;
           }),
@@ -543,7 +547,7 @@ describe('MCP code graph indexing progress', () => {
       version: 2,
     });
     expect(readAnonymousTelemetryReportedOutcome(timedOut)).toBe('timed-out');
-
+    expect((timedOut.content[0] as {readonly text: string}).text).toContain("this request's 55-second MCP budget");
     const readyReadTimedOut = codeGraphQueryTimeoutResult('query', indexingStatus(60_000), true);
     expect(readyReadTimedOut.structuredContent).toMatchObject({
       readySnapshotAvailable: true,
@@ -552,7 +556,7 @@ describe('MCP code graph indexing progress', () => {
     });
     expect(JSON.stringify(readyReadTimedOut.structuredContent)).not.toContain('retryAfterMilliseconds');
     const readyReadTimeoutText = (readyReadTimedOut.content[0] as {readonly text: string}).text;
-    expect(readyReadTimeoutText).toContain('55-second MCP budget');
+    expect(readyReadTimeoutText).toContain("this request's 55-second MCP budget");
     expect(readyReadTimeoutText).toContain('--freshness ready --read-timeout-ms 120000');
     expect(readAnonymousTelemetryReportedOutcome(readyReadTimedOut)).toBe('timed-out');
 
@@ -1371,7 +1375,7 @@ describe('MCP code graph indexing progress', () => {
     });
     expect(codeGraphMcpAnalysisLimits('community', 5_000).communityMembers).toBe(5_000);
     expect(codeGraphMcpAnalysisBudget()).toEqual({
-      maxDurationMilliseconds: 24_000,
+      maxDurationMilliseconds: 54_000,
       maxEdges: 500_000,
       maxEdgeVisits: 1_000_000,
       maxNodes: 100_000,

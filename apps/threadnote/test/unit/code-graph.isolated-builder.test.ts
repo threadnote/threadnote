@@ -1,4 +1,4 @@
-import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV} from '@threadnote/graph/scope/routing';
+import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV, CodeGraphScopeRoutingError} from '@threadnote/graph/scope/routing';
 import {systemRuntimeBoundaries} from '../helpers/system-runtime-boundaries.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {TestError} from '@threadnote/testing/test-error';
@@ -203,6 +203,24 @@ describe('isolated code-graph builder spawn plan', () => {
     expect(spawnCalls).toBe(0);
   });
 
+  effectIt.effect('rejects a scoped target without a launchable selector before schema or identity access', () =>
+    Effect.gen(function* () {
+      let preflightCalls = 0;
+      const result = yield* runIsolatedCodeGraphIndex({
+        cwd: '/fixture/repository',
+        project: {graph: {closure: 'dependencies', roots: ['apps/docs']}, uri: 'threadnote://resources/repos/docs'},
+        assertRuntimeSchemaCompatible: () =>
+          Effect.sync(() => {
+            preflightCalls++;
+          }),
+        resolveIdentity: () => Effect.die('must reject before identity observation'),
+        threadnoteHome: '/fixture/home',
+      }).pipe(Effect.flip);
+      expect(result).toBeInstanceOf(CodeGraphScopeRoutingError);
+      expect(preflightCalls).toBe(0);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   it('reinvokes CLI graph index with --no-vectors, home, and cwd', () => {
     const plan = codeGraphIsolatedBuilderSpawnPlan(
       systemInfoStub({
@@ -230,6 +248,7 @@ describe('isolated code-graph builder spawn plan', () => {
     expect(plan.environment).toEqual({
       PATH: '/usr/bin',
       THREADNOTE_CODE_GRAPH_BUILDER_ADMISSION_CLASS: 'current-required',
+      THREADNOTE_CODE_GRAPH_ISOLATED_BUILDER: '1',
       THREADNOTE_HOME: '/home/.threadnote',
       THREADNOTE_TELEMETRY_CHILD: 'graph-builder',
       THREADNOTE_TELEMETRY_CONSENT_GENERATION: 'tng_000102030405060708090a0b0c0d0e0f',

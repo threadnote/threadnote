@@ -815,6 +815,44 @@ describe('isolated code graph discovery reads', () => {
     threadnoteHome: '/threadnote-home',
   };
 
+  effectIt.effect('keeps discovery selection and inspection inside the status session', () =>
+    Effect.gen(function* () {
+      const seen = {status: 0, attach: 0};
+      const ready = discoveryStatus();
+      const service = discoveryService(seen, {...result, operation: 'neighbors'}, ready);
+      let active = false;
+      let sessions = 0;
+      const actual = yield* serveCodeGraphDiscoveryRead(request).pipe(
+        Effect.provideService(CodeGraphQueryService, {
+          ...service,
+          status: () => Effect.die('Discovery must use the status session.'),
+          withStatusSession: (_home, _cwd, _expected, options, use) =>
+            Effect.acquireUseRelease(
+              Effect.sync(() => {
+                active = true;
+                sessions += 1;
+              }),
+              () => {
+                expect(options).toMatchObject({observeWorktree: false, requestMaintenance: false});
+                return use(ready);
+              },
+              () =>
+                Effect.sync(() => {
+                  active = false;
+                }),
+            ),
+          inspect: options => {
+            expect(active).toBe(true);
+            return service.inspect(options);
+          },
+        }),
+      );
+      expect(actual.result?.operation).toBe('neighbors');
+      expect(sessions).toBe(1);
+      expect(active).toBe(false);
+    }),
+  );
+
   effectIt.effect('runs status, selection, and read off-thread with a status summary', () =>
     Effect.gen(function* () {
       const seen = {status: 0, attach: 0, inspectOptions: undefined as unknown};

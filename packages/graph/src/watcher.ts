@@ -35,11 +35,8 @@ import type {
   RepositoryIdentity,
 } from './types.js';
 import type {ProjectManifest} from '@threadnote/workspace/config';
-import {
-  CodeGraphDiskCapacityObservationError,
-  CodeGraphDiskCapacityPressureError,
-  CodeGraphRuntimeReconnectRequiredError,
-} from './types.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {CodeGraphScopeRoutingError, type CodeGraphResolvedRefreshRoute} from './scope/routing.js';
 import {
   currentCodeGraphBuildStatus,
   readCodeGraphBuildStatuses,
@@ -63,7 +60,20 @@ import {
   observeCodeGraphBackgroundDemand,
   CodeGraphRefreshDemandSuperseded,
 } from './refresh/demand.js';
-import type {CodeGraphRefreshDemandRegistration, CodeGraphRefreshDemandState} from './refresh/demand_scheduler.js';
+import type {CodeGraphRefreshDemandRegistration} from './refresh/demand_scheduler.js';
+import {
+  CODE_GRAPH_REFRESH_OPERATION,
+  CodeGraphRefreshRetryDeferred,
+  codeGraphRefreshFailure,
+  codeGraphRefreshFailureFromCause,
+  driveCodeGraphBackgroundDemand,
+} from './refresh/driver.js';
+export {
+  CodeGraphRefreshRetryBlocked,
+  CodeGraphRefreshRetryDeferred,
+  codeGraphRefreshFailure,
+  driveCodeGraphBackgroundDemand,
+} from './refresh/driver.js';
 import {runCodeGraphLifecycleOpportunity} from './lifecycle/opportunity.js';
 import {classifyCodeGraphStoreFailure} from './store/failure.js';
 import {
@@ -92,6 +102,7 @@ import {
   readThreadnoteIgnoreSources,
   type CompiledIgnoreRule,
 } from './threadnote_ignore.js';
+import {resolveCodeGraphWatchOptions, sameCodeGraphWatchRoute} from './refresh/watch_route.js';
 import {makeKeyedBackgroundScheduler} from './watcher_resume_scheduler.js';
 import {makeCodeGraphWatchReconciliation} from './watcher_reconciliation.js';
 export {makeCodeGraphWatchReconciliation};
@@ -100,6 +111,11 @@ export interface CodeGraphWatchOptions {
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
   readonly cwd: string;
   readonly key: string;
+  readonly manifestPath?: string;
+  /** @internal Immutable routing observation shared by demand and execution. */
+  readonly refreshRoute?: CodeGraphResolvedRefreshRoute;
+  /** @internal Original selection retained by long-lived watches. */
+  readonly refreshIntent?: {readonly manifestPath: string; readonly project?: CodeGraphWatchOptions['project']};
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void>;
   readonly onRefreshed?: (symbols: number, edges: number) => Effect.Effect<void>;
   /** @internal private in-process equivalent of the isolated child environment token. */
@@ -112,8 +128,10 @@ export interface CodeGraphWatchOptions {
 
 interface CodeGraphBackgroundTarget {
   readonly admissionFingerprint: string;
+  readonly refreshRoute?: CodeGraphResolvedRefreshRoute;
   readonly demandIdentity: {
     readonly checkoutId: string;
+    readonly recoveryKey?: string;
     readonly scopeId?: string;
     readonly threadnoteHome: string;
     readonly worktreeId: string;
@@ -149,6 +167,7 @@ export interface CodeGraphRefreshFailure {
   readonly code: CodeGraphStoreFailureCode;
   readonly evidence?: CodeGraphDiskCapacityFailureEvidence;
   readonly operation: 'refresh code graph';
+  readonly reobserveTarget?: true;
   readonly recovery: CodeGraphStoreRecovery;
   readonly retryable: boolean;
 }
@@ -202,6 +221,7 @@ export interface CodeGraphWatcherShape {
     target?: Pick<CodeGraphWatchOptions, 'cwd' | 'project' | 'threadnoteHome'>,
   ) => Effect.Effect<Option.Option<CodeGraphRefreshStatus>>;
   readonly ensure: (options: CodeGraphWatchOptions) => Effect.Effect<void>;
+  readonly scheduleEnsure?: (options: CodeGraphWatchOptions) => Effect.Effect<void>;
   readonly metrics: Effect.Effect<CodeGraphWatcherMetrics>;
   readonly refresh: (options: CodeGraphWatchOptions) => Effect.Effect<boolean>;
   /** Registers background demand before scheduling; never waits for a build. */
@@ -278,6 +298,7 @@ interface ActiveRefresh {
 }
 
 interface ActiveWatch {
+  readonly route?: CodeGraphResolvedRefreshRoute;
   readonly cancel: Effect.Effect<void>;
   readonly generation: object;
   readonly lastUsedAt: number;
@@ -315,166 +336,9 @@ class CodeGraphWatcherError extends Schema.TaggedError<CodeGraphWatcherError>()(
   message: Schema.String,
 }) {}
 
-export class CodeGraphRefreshRetryDeferred extends Schema.TaggedError<CodeGraphRefreshRetryDeferred>()(
-  'CodeGraphRefreshRetryDeferred',
-  {notBefore: Schema.Finite},
-) {}
-
 const DEFAULT_IDLE_TIMEOUT_MILLISECONDS = 30 * 60_000;
 const DEFAULT_MAXIMUM_WATCHERS = 32;
 const DEFAULT_SWEEP_INTERVAL_MILLISECONDS = 60_000;
-const CODE_GRAPH_REFRESH_OPERATION = 'refresh code graph' as const;
-const CODE_GRAPH_REFRESH_FAILURE_METADATA = {
-  busy: {recovery: 'defer', retryable: true},
-  'confirmed-corruption': {recovery: 'manual-rebuild', retryable: false},
-  'incompatible-schema': {recovery: 'manual-migration', retryable: false},
-  'no-space': {recovery: 'free-space', retryable: false},
-  permission: {recovery: 'fix-permissions', retryable: false},
-  'schema-additive': {recovery: 'migrate-additive', retryable: false},
-  'transient-io': {recovery: 'retry-read-only', retryable: true},
-  unknown: {recovery: 'diagnose', retryable: false},
-} as const satisfies Record<CodeGraphStoreFailureCode, Pick<CodeGraphRefreshFailure, 'recovery' | 'retryable'>>;
-
-/** Convert native/store failures into a bounded record that cannot retain paths or raw causes. */
-export function codeGraphRefreshFailure(cause: unknown): CodeGraphRefreshFailure {
-  const classified = classifyCodeGraphStoreFailure(CODE_GRAPH_REFRESH_OPERATION, cause);
-  const code = Object.hasOwn(CODE_GRAPH_REFRESH_FAILURE_METADATA, classified.code) ? classified.code : 'unknown';
-  const defaults = CODE_GRAPH_REFRESH_FAILURE_METADATA[code];
-  const reconnectRequired = Schema.is(CodeGraphRuntimeReconnectRequiredError)(classified);
-  const capacityFailure =
-    Schema.is(CodeGraphDiskCapacityPressureError)(classified) ||
-    Schema.is(CodeGraphDiskCapacityObservationError)(classified);
-  return {
-    code,
-    ...(capacityFailure && classified.evidence !== undefined ? {evidence: classified.evidence} : {}),
-    operation: CODE_GRAPH_REFRESH_OPERATION,
-    recovery: reconnectRequired || capacityFailure ? classified.recovery : defaults.recovery,
-    retryable: reconnectRequired || capacityFailure ? classified.retryable : defaults.retryable,
-  };
-}
-
-function codeGraphRefreshFailureFromCause(cause: Cause.Cause<unknown>): CodeGraphRefreshFailure {
-  return codeGraphRefreshFailure(Option.getOrUndefined(Cause.findErrorOption(cause)));
-}
-
-interface CodeGraphBackgroundDemandDriverTarget {
-  readonly requestKey: string;
-}
-
-interface CodeGraphBackgroundDemandDriverSummary {
-  readonly edges: number;
-  readonly symbols: number;
-}
-
-type CodeGraphBackgroundDemandDriverOutcome =
-  | {readonly notBefore: number; readonly type: 'deferred'}
-  | {readonly type: 'idle'}
-  | {readonly state: CodeGraphRefreshDemandState; readonly type: 'completed'}
-  | {readonly state: CodeGraphRefreshDemandState; readonly type: 'superseded'}
-  | {
-      readonly cause: unknown;
-      readonly failure: CodeGraphRefreshFailure;
-      readonly state: CodeGraphRefreshDemandState;
-      readonly type: 'failed';
-    };
-
-/**
- * Drives one durable latest-target lane. Registration and publication state
- * transitions stay uninterruptible, while the build itself remains
- * interruptible and releases its claim into the bounded retry schedule.
- *
- * @internal exported for deterministic production-driver tests.
- */
-export function driveCodeGraphBackgroundDemand<Target extends CodeGraphBackgroundDemandDriverTarget>(input: {
-  readonly complete: (target: Target, token: string) => Effect.Effect<CodeGraphRefreshDemandState, unknown, never>;
-  readonly defer: (target: Target, token: string) => Effect.Effect<CodeGraphRefreshDemandState, unknown, never>;
-  readonly fail: (target: Target, token: string) => Effect.Effect<CodeGraphRefreshDemandState, unknown, never>;
-  readonly isSuperseded: (cause: unknown) => boolean;
-  readonly observe: Effect.Effect<Target, unknown, never>;
-  readonly onRefreshed: (summary: CodeGraphBackgroundDemandDriverSummary) => Effect.Effect<void, unknown, never>;
-  /** @internal A durable claim paired with its exact preflight observation. */
-  readonly prepared?: {readonly registration: CodeGraphRefreshDemandRegistration; readonly target: Target};
-  readonly recover: (target: Target) => Effect.Effect<void, unknown, never>;
-  readonly register: (target: Target) => Effect.Effect<CodeGraphRefreshDemandRegistration, unknown, never>;
-  readonly run: (
-    target: Target,
-    token: string,
-  ) => Effect.Effect<CodeGraphBackgroundDemandDriverSummary, unknown, never>;
-}): Effect.Effect<void, unknown, never> {
-  return Effect.gen(function* () {
-    let prepared = input.prepared;
-    for (;;) {
-      const target = prepared?.target ?? (yield* input.observe);
-      const preparedRegistration = prepared?.registration;
-      yield* input.recover(target);
-      const outcome = yield* Effect.uninterruptibleMask(restore =>
-        (preparedRegistration === undefined ? input.register(target) : Effect.succeed(preparedRegistration)).pipe(
-          Effect.flatMap((demand): Effect.Effect<CodeGraphBackgroundDemandDriverOutcome, unknown, never> => {
-            prepared = undefined;
-            // Only the process that created the claim drives it. Attachments,
-            // queued targets and delayed retries remain owned by their durable claim.
-            if (demand.type === 'deferred') {
-              return Effect.succeed({
-                notBefore: demand.target.retry?.notBefore ?? 0,
-                type: 'deferred' as const,
-              });
-            }
-
-            if (demand.type !== 'claimed') return Effect.succeed({type: 'idle' as const});
-            const token = demand.target.targetToken;
-            const releaseInterruptedClaim = input.defer(target, token).pipe(Effect.asVoid);
-            return restore(input.run(target, token)).pipe(
-              Effect.map(summary => ({summary, type: 'completed' as const})),
-              Effect.catchIf(input.isSuperseded, () =>
-                input.fail(target, token).pipe(Effect.map(state => ({state, type: 'superseded' as const}))),
-              ),
-              Effect.catch(cause => {
-                const failure = codeGraphRefreshFailure(cause);
-                const transition = failure.retryable ? input.defer(target, token) : input.fail(target, token);
-                return transition.pipe(Effect.map(state => ({cause, failure, state, type: 'failed' as const})));
-              }),
-              Effect.onInterrupt(() => releaseInterruptedClaim),
-              Effect.filterOrElse(
-                result => result.type !== 'completed',
-                result => {
-                  const completed = result as {
-                    readonly summary: CodeGraphBackgroundDemandDriverSummary;
-                    readonly type: 'completed';
-                  };
-                  return input.complete(target, token).pipe(
-                    Effect.flatMap(state =>
-                      restore(input.onRefreshed(completed.summary)).pipe(
-                        Effect.catchCause(() =>
-                          Effect.logWarning('Code graph refresh callback failed after durable publication completed.'),
-                        ),
-                        Effect.as({state, type: 'completed' as const}),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            );
-          }),
-        ),
-      );
-      if (outcome.type === 'idle') return;
-      if (outcome.type === 'deferred') {
-        return yield* CodeGraphRefreshRetryDeferred.make({notBefore: outcome.notBefore});
-      }
-      if (outcome.type === 'superseded') continue;
-      if (outcome.type === 'completed') {
-        if (outcome.state.desired === undefined) return;
-        continue;
-      }
-      const desired = outcome.state.desired;
-      if (desired !== undefined && desired.targetKey !== target.requestKey) continue;
-      if (desired?.retry !== undefined) {
-        return yield* CodeGraphRefreshRetryDeferred.make({notBefore: desired.retry.notBefore});
-      }
-      return yield* Effect.fail(outcome.cause);
-    }
-  });
-}
 
 /** @internal exported for watcher refresh reuse tests. */
 export function currentBackgroundRefreshSummary(
@@ -571,6 +435,15 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
       // Prewarm stays in-process only for CLI watchers — MCP skips it so the stdio process
       // does not take the repository lock for secondary ensureCommit work.
       const isolateBuilder = isCodeGraphIsolatedBuilderHost(systemInfo);
+      const runtimeFile = yield* fs.stat(systemInfo.executablePath).pipe(Effect.option);
+      const runtimeRecoveryIdentity = Option.isNone(runtimeFile)
+        ? systemInfo.executablePath
+        : JSON.stringify([
+            systemInfo.executablePath,
+            String(runtimeFile.value.size),
+            runtimeFile.value.mtime,
+            runtimeFile.value.birthtime,
+          ]);
       const schedulePrewarm = (options: CodeGraphWatchOptions) =>
         systemInfo.environment().THREADNOTE_CODE_GRAPH_PREWARM === '0'
           ? Effect.void
@@ -591,8 +464,16 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               Effect.forkIn(scope),
               Effect.asVoid,
             );
-      const observeTarget = (options: CodeGraphWatchOptions) =>
+      const resolveRefreshOptions = (options: CodeGraphWatchOptions) =>
+        resolveCodeGraphWatchOptions(options).pipe(
+          Effect.provideService(CommandExecutor, commandExecutor),
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(SystemInfo, systemInfo),
+        );
+      const observeTarget = (input: CodeGraphWatchOptions) =>
         Effect.gen(function* () {
+          const options = yield* resolveRefreshOptions(input);
           const identity = yield* resolveRepositoryIdentity(options.cwd).pipe(
             Effect.provideService(CommandExecutor, commandExecutor),
             Effect.provideService(FileSystem.FileSystem, fs),
@@ -638,8 +519,18 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                 );
           return {
             admissionFingerprint: admission,
+            refreshRoute: options.refreshRoute,
             demandIdentity: {
               checkoutId: identity.checkoutId,
+              recoveryKey: sha256HexSync(
+                JSON.stringify([
+                  options.refreshRoute?.manifestPath,
+                  options.refreshRoute?.manifestRevision,
+                  runtimeRecoveryIdentity,
+                  scope?.definitionDigest,
+                  scope?.closureDigest,
+                ]),
+              ),
               ...(scope === undefined ? {} : {scopeId: scope.scopeKey}),
               threadnoteHome: options.threadnoteHome,
               worktreeId: identity.worktreeId,
@@ -681,8 +572,16 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                 ),
                 Effect.as(options),
               );
-      const runBackgroundBuild = (options: CodeGraphWatchOptions, target: CodeGraphBackgroundTarget, token: string) =>
-        currentBackgroundRefreshSummary(target, store, languagePacks).pipe(
+      const runBackgroundBuild = (input: CodeGraphWatchOptions, target: CodeGraphBackgroundTarget, token: string) => {
+        const options =
+          target.refreshRoute === undefined
+            ? input
+            : {
+                ...input,
+                refreshRoute: target.refreshRoute,
+                project: target.refreshRoute.route.state === 'selected' ? target.refreshRoute.route.project : undefined,
+              };
+        return currentBackgroundRefreshSummary(target, store, languagePacks).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
           Effect.flatMap(current =>
@@ -693,6 +592,13 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     admissionClass: 'background',
                     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
                     cwd: options.cwd,
+                    ...(target.refreshRoute === undefined
+                      ? {}
+                      : {
+                          manifestPath: target.refreshRoute.manifestPath,
+                          manifestRevision: target.refreshRoute.manifestRevision,
+                          scopeRoute: target.refreshRoute.route.state,
+                        }),
                     onProgress: options.onProgress,
                     ...(options.project === undefined ? {} : {project: options.project}),
                     refreshDemandToken: token,
@@ -723,15 +629,19 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     ),
           ),
         );
+      };
       const driveBackgroundDemand = (options: CodeGraphWatchOptions): Effect.Effect<void, unknown> =>
         driveCodeGraphBackgroundDemand({
           complete: (target, token) =>
             provideDemandServices(completeCodeGraphBackgroundDemand(target.demandIdentity, token, target.requestKey)),
-          defer: (target, token) =>
-            provideDemandServices(deferCodeGraphBackgroundDemand(target.demandIdentity, token, target.requestKey)),
+          defer: (target, token, blocked) =>
+            provideDemandServices(
+              deferCodeGraphBackgroundDemand(target.demandIdentity, token, target.requestKey, blocked),
+            ),
           fail: (target, token) =>
             provideDemandServices(failCodeGraphBackgroundDemand(target.demandIdentity, token, target.requestKey)),
           isSuperseded: Schema.is(CodeGraphRefreshDemandSuperseded),
+          isRouteMismatch: Schema.is(CodeGraphScopeRoutingError),
           observe: observeTarget(options),
           onRefreshed: summary => options.onRefreshed?.(summary.symbols, summary.edges) ?? Effect.void,
           recover: target =>
@@ -777,6 +687,13 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                     admissionClass: options.admissionClass,
                     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
                     cwd: options.cwd,
+                    ...(target.refreshRoute === undefined
+                      ? {}
+                      : {
+                          manifestPath: target.refreshRoute.manifestPath,
+                          manifestRevision: target.refreshRoute.manifestRevision,
+                          scopeRoute: target.refreshRoute.route.state,
+                        }),
                     onProgress: options.onProgress,
                     ...(options.project === undefined ? {} : {project: options.project}),
                     requestKey: target.requestKey,
@@ -912,8 +829,9 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
         recover,
         prepareRefresh,
       );
-      const requestBackgroundDemand = (options: CodeGraphWatchOptions) =>
+      const requestBackgroundDemand = (input: CodeGraphWatchOptions) =>
         Effect.gen(function* () {
+          const options = yield* resolveRefreshOptions(input);
           const target = yield* observeTarget({...options, admissionClass: 'background'});
           // Reconcile only the durable scheduling hint against the existing
           // build-status and spawn-lock liveness authorities before claim.
@@ -973,8 +891,9 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
             }),
           );
         });
-      const resumeBackgroundDemand = (options: CodeGraphWatchOptions) =>
+      const resumeBackgroundDemand = (input: CodeGraphWatchOptions) =>
         Effect.gen(function* () {
+          const options = yield* resolveRefreshOptions(input);
           const target = yield* observeTarget({...options, admissionClass: 'background'});
           const build = yield* currentCodeGraphBuildStatus(target.layout, target.identity.worktreeId).pipe(
             Effect.provideService(FileSystem.FileSystem, fs),
@@ -1030,8 +949,24 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
         observability.backgroundFailure(anonymousTelemetryComponent, {operation: 'graph-refresh', failure});
       const scheduleResume = yield* makeCodeGraphResumeScheduler(resumeBackgroundDemand, reportBackgroundFailure);
       const scheduleRequest = yield* makeCodeGraphResumeScheduler(requestBackgroundDemand, reportBackgroundFailure);
+      const ensureResolved = (options: CodeGraphWatchOptions) =>
+        resolveRefreshOptions(options).pipe(Effect.flatMap(watcher.ensure));
+      const scheduleEnsure = yield* makeCodeGraphResumeScheduler(ensureResolved, reportBackgroundFailure);
       return CodeGraphWatcher.of({
         ...watcher,
+        ensure: options =>
+          ensureResolved(options).pipe(
+            Effect.catchCause(cause => cause.pipe(codeGraphRefreshFailureFromCause, reportBackgroundFailure)),
+          ),
+        refresh: options =>
+          resolveRefreshOptions(options).pipe(
+            Effect.flatMap(watcher.refresh),
+            Effect.catchCause(cause =>
+              cause.pipe(codeGraphRefreshFailureFromCause, reportBackgroundFailure, Effect.as(false)),
+            ),
+          ),
+        watch: options => resolveRefreshOptions(options).pipe(Effect.flatMap(watcher.watch)),
+        scheduleEnsure,
         cachedStatus: (key, target) => watcher.cachedStatus(key, target),
         request: requestBackgroundDemand,
         scheduleRequest,
@@ -1164,6 +1099,20 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
       let options = initialOptions;
       let lastFailure: Error | undefined;
       for (;;) {
+        const attemptOptions = options;
+        const consumed = options.refreshDemandPrepared;
+        if (consumed !== undefined) {
+          options = {...options, refreshDemandPrepared: undefined};
+          yield* SynchronizedRef.update(activeRefreshes, current => {
+            const active = current.get(key);
+            if (active?.completion !== completion || active.latestOptions.refreshDemandPrepared !== consumed)
+              return current;
+            return new Map(current).set(key, {
+              ...active,
+              latestOptions: {...active.latestOptions, refreshDemandPrepared: undefined},
+            });
+          });
+        }
         const activeBeforeRun = (yield* SynchronizedRef.get(activeRefreshes)).get(key);
         const retryWake = activeBeforeRun?.wake;
         const startedAtMilliseconds = yield* Clock.currentTimeMillis;
@@ -1182,7 +1131,7 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
                 const executing = current.executing + 1;
                 return {executing, highWater: Math.max(current.highWater, executing)};
               }).pipe(
-                Effect.andThen(restore(refreshRun(trackedRefreshOptions(options, tracker)))),
+                Effect.andThen(restore(refreshRun(trackedRefreshOptions(attemptOptions, tracker)))),
                 Effect.ensuring(
                   Ref.update(refreshExecutionMetrics, current => ({
                     ...current,
@@ -1247,13 +1196,17 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
           const retryOptions = yield* SynchronizedRef.modify(activeRefreshes, current => {
             const active = current.get(key);
             if (!active || active.completion !== completion) return [undefined, current] as const;
+            const retry = active.preparedPendingOptions ?? active.latestOptions;
             const next = new Map(current);
             next.set(key, {
               ...active,
-              currentAdmissionClass: active.latestOptions.admissionClass,
-              pending: false,
+              currentAdmissionClass: retry.admissionClass,
+              latestOptions:
+                active.preparedPendingOptions !== undefined && !active.pending ? retry : active.latestOptions,
+              pending: active.preparedPendingOptions === undefined ? false : active.pending,
+              preparedPendingOptions: undefined,
             });
-            return [active.latestOptions, next] as const;
+            return [retry, next] as const;
           });
           if (retryOptions === undefined) break;
           options = retryOptions;
@@ -1375,17 +1328,18 @@ export const makeCodeGraphWatcher = Effect.fn('codeGraph.makeWatcher')(function*
       yield* ensureIdleSweep;
       const now = yield* Clock.currentTimeMillis;
       const generation = {};
-      const reservation: ActiveWatch = {cancel: Effect.void, generation, lastUsedAt: now};
+      const reservation: ActiveWatch = {cancel: Effect.void, generation, lastUsedAt: now, route: options.refreshRoute};
       const decision = yield* SynchronizedRef.modify(activeWatches, current => {
         const existing = current.get(options.key);
-        if (existing) {
+        if (existing && sameCodeGraphWatchRoute(existing.route, options.refreshRoute)) {
           const next = new Map(current);
           next.set(options.key, {...existing, lastUsedAt: now});
           const decision: WatchStartDecision = {evicted: [], start: false};
           return [decision, next] as const;
         }
         const next = new Map(current);
-        const evicted: [string, ActiveWatch][] = [];
+        const evicted: [string, ActiveWatch][] = existing === undefined ? [] : [[options.key, existing]];
+        next.delete(options.key);
         while (next.size >= maximumWatchers) {
           const oldest = oldestWatch(next);
           if (!oldest) break;

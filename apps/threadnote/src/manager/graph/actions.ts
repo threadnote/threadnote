@@ -35,6 +35,7 @@ export const runManagerExplicitCwdGraphIndex = Effect.fn('managerGraphActions.ru
   );
   const captured = yield* captureConsole(
     runIsolatedCodeGraphIndexSnapshot({
+      manifestPath: config.manifestPath,
       cwd: identity.repoRoot,
       expectedIdentity: {
         checkoutId: identity.checkoutId,

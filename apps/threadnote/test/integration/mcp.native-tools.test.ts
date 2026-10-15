@@ -1853,7 +1853,7 @@ describe('Threadnote MCP toolsets', () => {
         const recalledUris = (
           recalled.structuredContent as {readonly results?: readonly {readonly uri?: unknown}[]}
         ).results?.map(entry => entry.uri);
-        expect(recalledUris).toContain(
+        expect(recalledUris, JSON.stringify(recalled.structuredContent)).toContain(
           'memories/shared/default/durable/projects/my-product/legacy-published-pointer.md',
         );
 
@@ -2863,14 +2863,14 @@ describe('Threadnote MCP toolsets', () => {
         expect(JSON.stringify(graphTool?.inputSchema)).toContain(
           'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd',
         );
-        expect(JSON.stringify(graphTool?.inputSchema)).toContain('default 55000');
+        expect(graphTool?.description).toContain('55-second deadline');
+        expect(JSON.stringify(graphTool?.inputSchema)).not.toContain('readTimeoutMilliseconds');
         expect(graphTool?.inputSchema).toMatchObject({
           additionalProperties: false,
           required: ['operation'],
           properties: {
             base: {type: 'string'},
             budgetTokens: {maximum: 1_500, minimum: 1, type: 'integer'},
-            readTimeoutMilliseconds: {maximum: 55_000, minimum: 4_000, type: 'integer'},
             callerCwd: {type: 'string'},
             cursor: {type: 'string'},
             depth: {maximum: 8, minimum: 0, type: 'integer'},

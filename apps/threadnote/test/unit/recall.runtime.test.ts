@@ -392,18 +392,24 @@ describe('recall runtime orchestration', () => {
   effectIt.effect('falls back predictably when serialized model work is contended', () =>
     Effect.gen(function* () {
       const inferencePermit = yield* Semaphore.make(1);
+      const retrievalCount = 8;
+      const workMilliseconds = 4_000;
+      const completedCount = Math.min(
+        retrievalCount,
+        Math.floor((MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS - 1) / workMilliseconds),
+      );
       let interrupted = 0;
       let invocations = 0;
       const retrievals = Array.from(
         {
-          length: 8,
+          length: retrievalCount,
         },
         (_unused, index) =>
           boundedRecallSemanticRetrieval(
             Effect.sync(() => {
               invocations += 1;
             }).pipe(
-              Effect.andThen(inferencePermit.withPermit(Effect.sleep(4_000).pipe(Effect.as(index)))),
+              Effect.andThen(inferencePermit.withPermit(Effect.sleep(workMilliseconds).pipe(Effect.as(index)))),
               Effect.onInterrupt(() => Effect.sync(() => (interrupted += 1))),
             ),
           ),
@@ -414,10 +420,10 @@ describe('recall runtime orchestration', () => {
       yield* Effect.yieldNow;
       yield* TestClock.adjust(MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS);
       const results = yield* Fiber.join(fiber);
-      expect(results.filter(result => result.status === 'completed')).toHaveLength(3);
-      expect(results.filter(result => result.status === 'timed-out')).toHaveLength(5);
-      expect(invocations).toBe(8);
-      expect(interrupted).toBe(5);
+      expect(results.filter(result => result.status === 'completed')).toHaveLength(completedCount);
+      expect(results.filter(result => result.status === 'timed-out')).toHaveLength(retrievalCount - completedCount);
+      expect(invocations).toBe(retrievalCount);
+      expect(interrupted).toBe(retrievalCount - completedCount);
       expect(yield* inferencePermit.withPermit(Effect.succeed('permit-released'))).toBe('permit-released');
     }),
   );

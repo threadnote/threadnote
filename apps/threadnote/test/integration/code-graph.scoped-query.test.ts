@@ -1,11 +1,16 @@
+import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Context, Effect, FileSystem, Layer, Option, Path} from 'effect';
+import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {CodeGraphDatabaseSession} from '@threadnote/graph/store/session';
+import {serveCodeGraphDiscoveryRead} from '@threadnote/graph/isolated/impact_query';
 import {prepareCodeGraphWorkset, inspectCodeGraphWorksetStatus} from '@threadnote/graph/workset_catalog/workset';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {
@@ -155,6 +160,73 @@ describe('scoped graph retrieval', () => {
         const repeatedStaleQuery = yield* query.inspect({...options, operation: 'query', query: 'valueA'});
         expect(repeatedStaleQuery.freshness).toBe('stale');
         expect(repeatedStaleQuery.snapshot.id).toBe(a.snapshot.id);
+        const store = yield* CodeGraphStore;
+        const sessions: SqlClient.SqlClient[] = [];
+        const readSessions = new Set<SqlClient.SqlClient>();
+        const recordSession = Effect.gen(function* () {
+          const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
+          expect(Option.isSome(session)).toBe(true);
+          if (Option.isSome(session)) readSessions.add(session.value.sql);
+        });
+        const trackedStore = {
+          ...store,
+          readySnapshot: (...args) => recordSession.pipe(Effect.andThen(store.readySnapshot(...args))),
+          loadScopeApplicability: (...args) =>
+            recordSession.pipe(Effect.andThen(store.loadScopeApplicability(...args))),
+          searchSymbolsMany: (...args) => recordSession.pipe(Effect.andThen(store.searchSymbolsMany(...args))),
+          symbolsByIds: (...args) => recordSession.pipe(Effect.andThen(store.symbolsByIds(...args))),
+          withSession: (databasePath, use, sessionOptions) =>
+            store.withSession(
+              databasePath,
+              Effect.gen(function* () {
+                sessions.push(yield* SqlClient.SqlClient);
+                return yield* use;
+              }),
+              sessionOptions,
+            ),
+        } satisfies typeof store;
+        const trackedContext = yield* Layer.build(Layer.fresh(CodeGraphQueryService.layer)).pipe(
+          Effect.provideService(CodeGraphStore, trackedStore),
+        );
+        const trackedQuery = Context.get(trackedContext, CodeGraphQueryService);
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const database = new Database(staleStatus.databasePath);
+            database.exec('BEGIN IMMEDIATE');
+            return database;
+          }),
+          () =>
+            Effect.gen(function* () {
+              for (const operation of ['query', 'node', 'neighbors', 'explain'] as const) {
+                sessions.length = 0;
+                readSessions.clear();
+                const discovered = yield* serveCodeGraphDiscoveryRead({
+                  cwd: root,
+                  discover: true,
+                  edgeLimit: 40,
+                  manifestPath,
+                  nodeId: node.id,
+                  nodeLimit: 20,
+                  operation,
+                  project: 'a',
+                  protocol: 1,
+                  query: 'valueA',
+                  threadnoteHome: home,
+                }).pipe(Effect.provideService(CodeGraphQueryService, trackedQuery));
+                expect(discovered.result?.freshness).toBe('stale');
+                expect(discovered.result?.snapshot.id).toBe(a.snapshot.id);
+                expect(discovered.result?.nodes.some(candidate => candidate.name === 'valueA')).toBe(true);
+                expect(discovered.result?.nodes.some(candidate => candidate.path.startsWith('apps/b/'))).toBe(false);
+                expect(sessions).toHaveLength(1);
+                expect([...readSessions]).toEqual(sessions);
+              }
+            }),
+          database =>
+            Effect.sync(() => {
+              if (database.inTransaction) database.exec('ROLLBACK');
+              database.close();
+            }),
+        );
         expect(
           yield* query
             .inspect({...options, operation: 'query', query: 'valueA', strictFreshness: true})
