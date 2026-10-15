@@ -7,6 +7,7 @@ import {
   MAX_DEFERRED_CODE_ANCHOR_FINALIZE_LIMIT,
   type DeferredCodeAnchorIntentV1,
 } from './code_anchor.js';
+import {isDeferredCodeAnchorFullProjectScope} from './code_anchor_scope.js';
 import {
   observeDeferredCodeAnchorCallerCheckout,
   type DeferredCodeAnchorCallerCheckoutObservation,
@@ -23,6 +24,8 @@ export {
 
 export interface DeferredCodeAnchorWorkspaceRefreshTarget {
   readonly cwd: string;
+  readonly project?: string;
+  readonly projectScope?: DeferredCodeAnchorIntentV1['projectScope'];
   readonly repositoryId: string;
   readonly worktreeId: string;
 }
@@ -44,10 +47,19 @@ export function selectDeferredCodeAnchorWorkspaceRefreshTargets(
     ) {
       continue;
     }
-    if (seen.has(intent.worktreeId)) continue;
-    seen.add(intent.worktreeId);
+    const scopeKey =
+      intent.projectScope === undefined
+        ? (intent.project ?? 'full')
+        : isDeferredCodeAnchorFullProjectScope(intent.projectScope)
+          ? 'full'
+          : intent.projectScope.scopeKey;
+    const targetKey = `${intent.repositoryId}\n${intent.worktreeId}\n${scopeKey}`;
+    if (seen.has(targetKey)) continue;
+    seen.add(targetKey);
     targets.push({
       cwd: intent.callerCwd,
+      ...(intent.project === undefined ? {} : {project: intent.project}),
+      ...(intent.projectScope === undefined ? {} : {projectScope: intent.projectScope}),
       repositoryId: intent.repositoryId,
       worktreeId: intent.worktreeId,
     });
@@ -73,7 +85,7 @@ const observeDeferredCodeAnchorCallerCheckouts = Effect.fn('memoryCodeAnchor.obs
 });
 
 export const listDeferredCodeAnchorWorkspaceRefreshTargets = Effect.fn('memoryCodeAnchor.listWorkspaceRefreshTargets')(
-  function* (config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'user'>) {
+  function* (config: Pick<RuntimeConfig, 'account' | 'agentContextHome' | 'manifestPath' | 'user'>) {
     const intents = (yield* listDeferredCodeAnchorIntents(config)).flatMap(entry =>
       entry.kind === 'valid' ? [entry.intent] : [],
     );
@@ -95,7 +107,9 @@ export const deferredCodeAnchorRefreshSchedulerLayer = Layer.effect(
             admissionClass: 'background',
             cwd: options.cwd,
             key: options.key,
+            manifestPath: options.manifestPath,
             threadnoteHome: options.threadnoteHome,
+            ...(options.graphProject === undefined ? {} : {project: options.graphProject}),
           })
           .pipe(Effect.asVoid, Effect.ignoreCause),
     });

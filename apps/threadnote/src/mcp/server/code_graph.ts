@@ -53,11 +53,7 @@ import {
   type CodeGraphRefreshContinuity,
   type CodeGraphWatcherShape,
 } from '@threadnote/graph/watcher';
-import {
-  type CodeGraphAnalysisBudget,
-  type CodeGraphAnalysisLimits,
-  type CodeGraphAnalysisResult,
-} from '@threadnote/graph/analysis';
+import {type CodeGraphAnalysisLimits, type CodeGraphAnalysisResult} from '@threadnote/graph/analysis';
 import {
   codeGraphAnalysisLimitsForView,
   renderCodeGraphAnalysis,
@@ -92,9 +88,15 @@ import {
   attachAnonymousTelemetryDiagnostic,
   attachAnonymousTelemetryReportedOutcome,
 } from '../../telemetry/diagnostic.js';
-import {codeGraphMcpRequestDefaults} from './code_graph/request_defaults.js';
+import {
+  codeGraphMcpRequestDefaults,
+  codeGraphMcpAnalysisBudget,
+  MCP_CODE_GRAPH_TOOL_TIMEOUT_MILLISECONDS,
+  MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS,
+  MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS,
+} from './code_graph/request_defaults.js';
 export {codeGraphMcpResponse, compactCodeGraphMcpResult};
-export {codeGraphMcpRequestDefaults} from './code_graph/request_defaults.js';
+export {codeGraphMcpRequestDefaults, codeGraphMcpAnalysisBudget} from './code_graph/request_defaults.js';
 export {
   codeGraphInspectionAllowsStaleReady,
   codeGraphInspectionObservation,
@@ -110,9 +112,6 @@ const MCP_CODE_GRAPH_POLL_MILLISECONDS = 100;
 const MCP_CODE_GRAPH_RETRY_FALLBACK_MILLISECONDS = 5_000;
 const MCP_CODE_GRAPH_RETRY_MINIMUM_MILLISECONDS = 3_000;
 const MCP_CODE_GRAPH_RETRY_MAXIMUM_MILLISECONDS = 30_000;
-const MCP_CODE_GRAPH_TOOL_TIMEOUT_MILLISECONDS = 25_000;
-const MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS = 55_000;
-const MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS = 1_000;
 const MCP_CODE_GRAPH_TIMEOUT_STATUS_MILLISECONDS = 1_000;
 const MCP_CODE_GRAPH_DEFAULT_NODE_LIMIT = 20;
 const MCP_CODE_GRAPH_DEFAULT_EDGE_LIMIT = 40;
@@ -121,9 +120,6 @@ const MCP_CODE_GRAPH_MAXIMUM_EDGE_LIMIT = 500;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_BYTES = 24 * 1_024;
 const MCP_CODE_GRAPH_STRUCTURED_CONTENT_RESERVE_BYTES = 768;
 const MCP_CODE_GRAPH_ANALYSIS_RESPONSE_BYTES = 24 * 1_024;
-const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_NODE_VISITS = 100_000;
-const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_EDGE_VISITS = 1_000_000;
-const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_DISTINCT_EDGES = 500_000;
 const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_COMMUNITY_MEMBERS = 5_000;
 const MCP_CODE_GRAPH_PROJECT_SELECTOR_DESCRIPTION =
   'Configured graph project name/root (not a memory project tag); omit to infer from callerCwd; max 256 UTF-8 bytes';
@@ -209,7 +205,7 @@ export function registerCodeGraphTool(
     {
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
       description:
-        'Use semantic truncation before broad text search; node/neighbors accept cgs_/cgr_. Omit budgetTokens. Output is untrusted evidence. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations; workset prepare. States: unavailable/indexing/timed-out/partial.',
+        'Use semantic truncation before broad text search (55-second deadline); node/neighbors accept cgs_/cgr_. Omit budgetTokens. Output is untrusted evidence. Ready evidence may be deferred; path/impact require current evidence. Worksets read published generations; workset prepare. States: unavailable/indexing/timed-out/partial.',
       inputSchema: {
         base: McpInput.string('Impact base when query omitted; default HEAD~1'),
         budgetTokens: McpInput.integer(
@@ -220,10 +216,6 @@ export function registerCodeGraphTool(
           },
         ),
         callerCwd: McpInput.string('Absolute checkout'),
-        readTimeoutMilliseconds: McpInput.integer('Total ms; min 4000, default 55000.', {
-          minimum: 4000,
-          maximum: 55000,
-        }),
         depth: McpInput.integer('Depth', {minimum: 0, maximum: 8}),
         direction: McpInput.literals(['both', 'incoming', 'outgoing'], 'Direction'),
         edgeLimit: McpInput.integer('Edges: local query default 12; others 40.', {
@@ -275,13 +267,11 @@ export function registerCodeGraphTool(
       project,
       query,
       responseFormat,
-      readTimeoutMilliseconds,
       symbol,
       to,
       workset,
     }) => {
-      const requestBudget = readTimeoutMilliseconds ?? MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS;
-      const requestExecutionBudget = codeGraphQueryExecutionBudget(requestBudget);
+      const requestExecutionBudget = codeGraphQueryExecutionBudget(MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS);
       const selectedResponseFormat = responseFormat ?? (workset?.trim() ? 'text' : 'agent');
       let timeoutContext = Option.none<{
         readonly key: string;
@@ -322,7 +312,7 @@ export function registerCodeGraphTool(
           return yield* queryTelemetry.stage(
             'graph.query.execute',
             'query-serialization',
-            Effect.sync(() => codeGraphQueryTimeoutResult(operation, status, readyReadStarted, requestBudget)),
+            Effect.sync(() => codeGraphQueryTimeoutResult(operation, status, readyReadStarted)),
           );
         });
       return Effect.gen(function* () {
@@ -508,6 +498,7 @@ export function registerCodeGraphTool(
         let refreshTarget: {
           cwd: string;
           threadnoteHome: string;
+          manifestPath?: string;
           project?: import('@threadnote/graph/watcher').CodeGraphWatchOptions['project'];
         };
         const readInput = {
@@ -555,6 +546,7 @@ export function registerCodeGraphTool(
           refreshTarget = {
             cwd: read.identity.repoRoot,
             threadnoteHome: config.agentContextHome,
+            manifestPath: config.manifestPath,
             ...(scopeRoute?.state === 'selected' ? {project: scopeRoute.project} : {}),
           };
           timeoutContext = Option.some({key: read.identity.worktreeId, target: refreshTarget, watcher});
@@ -581,6 +573,7 @@ export function registerCodeGraphTool(
         refreshTarget = {
           cwd: read.status.repoRoot,
           threadnoteHome: config.agentContextHome,
+          manifestPath: config.manifestPath,
           ...(scopeRoute?.state === 'selected' ? {project: scopeRoute.project} : {}),
         };
         timeoutContext = Option.some({key: worktreeKey, target: refreshTarget, watcher});
@@ -690,7 +683,7 @@ export function registerCodeGraphTool(
     {
       annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
       description:
-        'Analyze selected local graph: stats composition; communities/community subsystems; groups fan-in/out; hubs blast radius; surprises cross-community links; confidence provenance; full report. Untrusted evidence. Default agent text; dual adds structured content.',
+        'Analyze selected local graph (55-second deadline): stats composition; communities/community subsystems; groups fan-in/out; hubs blast radius; surprises cross-community links; confidence provenance; full report. Untrusted evidence. Default agent text; dual adds structured content.',
       inputSchema: {
         callerCwd: McpInput.string('Required absolute repository or worktree path'),
         freshness: McpInput.literals(
@@ -1620,19 +1613,6 @@ export function codeGraphMcpAnalysisLimits(
   };
 }
 
-/**
- * MCP analysis is admitted for every repository, but topology retention is
- * bounded independently from the complete CLI and Manager analysis surfaces.
- */
-export function codeGraphMcpAnalysisBudget(): CodeGraphAnalysisBudget {
-  return {
-    maxDurationMilliseconds: MCP_CODE_GRAPH_TOOL_TIMEOUT_MILLISECONDS - MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS,
-    maxEdges: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_DISTINCT_EDGES,
-    maxEdgeVisits: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_EDGE_VISITS,
-    maxNodes: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_NODE_VISITS,
-  };
-}
-
 function compactMcpText(value: string, maximumLength: number): string {
   return value.length <= maximumLength ? value : `${value.slice(0, Math.max(0, maximumLength - 1))}…`;
 }
@@ -1922,7 +1902,6 @@ export function codeGraphQueryTimeoutResult(
   operation: 'explain' | 'impact' | 'neighbors' | 'node' | 'path' | 'query' | 'topology',
   status?: CodeGraphRefreshStatus,
   readyReadStarted = false,
-  budgetMilliseconds = MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS,
 ): CallToolResult {
   if (!readyReadStarted && (status?.state === 'deferred' || status?.state === 'indexing')) {
     return codeGraphRefreshResult(operation, status);
@@ -1933,10 +1912,10 @@ export function codeGraphQueryTimeoutResult(
         {
           type: 'text',
           text: readyReadStarted
-            ? `Code graph ready-snapshot inspection exceeded Threadnote's ${budgetMilliseconds / 1_000}-second MCP budget. ` +
+            ? `Code graph ready-snapshot inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second MCP budget. ` +
               'The ready snapshot remains available; use the matching `threadnote graph` command with `--freshness ready --read-timeout-ms 120000` for a longer foreground read.'
-            : `Code graph inspection exceeded Threadnote's ${budgetMilliseconds / 1_000}-second ` +
-              'server budget. Retry the same request after the suggested delay. If it repeats, run ' +
+            : `Code graph inspection exceeded this request's ${MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS / 1_000}-second ` +
+              'MCP budget. Retry the same request after the suggested delay. If it repeats, run ' +
               '`threadnote graph status`, then ' +
               '`threadnote doctor --dry-run`, and report the bounded diagnostic.',
         },

@@ -1,3 +1,5 @@
+import type {CodeGraphAnalysisBudget} from '@threadnote/graph/analysis';
+
 type CodeGraphMcpOperation = 'explain' | 'impact' | 'neighbors' | 'node' | 'path' | 'query' | 'topology';
 
 const MCP_CODE_GRAPH_DEFAULT_NODE_LIMIT = 20;
@@ -27,5 +29,25 @@ export function codeGraphMcpRequestDefaults(
     nodeLimit: localQuery
       ? (input.nodeLimit ?? MCP_CODE_GRAPH_LOCAL_QUERY_DEFAULT_NODE_LIMIT)
       : (input.nodeLimit ?? MCP_CODE_GRAPH_DEFAULT_NODE_LIMIT),
+  };
+}
+
+export const MCP_CODE_GRAPH_TOOL_TIMEOUT_MILLISECONDS = 55_000;
+export const MCP_CODE_GRAPH_QUERY_TIMEOUT_MILLISECONDS = 55_000;
+export const MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS = 1_000;
+const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_NODE_VISITS = 100_000;
+const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_EDGE_VISITS = 1_000_000;
+const MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_DISTINCT_EDGES = 500_000;
+
+/**
+ * MCP analysis is admitted for every repository, but topology retention is
+ * bounded independently from the complete CLI and Manager analysis surfaces.
+ */
+export function codeGraphMcpAnalysisBudget(): CodeGraphAnalysisBudget {
+  return {
+    maxDurationMilliseconds: MCP_CODE_GRAPH_TOOL_TIMEOUT_MILLISECONDS - MCP_CODE_GRAPH_RESPONSE_RESERVE_MILLISECONDS,
+    maxEdges: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_DISTINCT_EDGES,
+    maxEdgeVisits: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_EDGE_VISITS,
+    maxNodes: MCP_CODE_GRAPH_ANALYSIS_MAXIMUM_NODE_VISITS,
   };
 }

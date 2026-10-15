@@ -16,6 +16,7 @@ import {
   selectDeferredCodeAnchorMissingCheckoutIntents,
   selectDeferredCodeAnchorWorkspaceRefreshTargets,
 } from '@threadnote/threadnote/memory/deferred/code_anchor_refresh';
+import {isDeferredCodeAnchorFullProjectScope} from '@threadnote/threadnote/memory/deferred/code_anchor_scope';
 
 const URI = 'threadnote://user/test/memories/durable/projects/threadnote/deferred.md';
 
@@ -216,7 +217,14 @@ describe('deferred code-anchor state model', () => {
             .map(intent => intent.callerCwd),
         );
         expect(new Set(targets.map(target => target.cwd))).toEqual(expectedCwds);
-        expect(new Set(targets.map(target => target.worktreeId)).size).toBe(targets.length);
+        expect(
+          new Set(
+            targets.map(target => {
+              const scope = target.projectScope;
+              return `${target.repositoryId}:${target.worktreeId}:${scope === undefined ? (target.project ?? 'full') : isDeferredCodeAnchorFullProjectScope(scope) ? 'full' : scope.scopeKey}`;
+            }),
+          ).size,
+        ).toBe(targets.length);
         expect(targets.some(target => target.cwd === '/repo-sibling')).toBe(false);
         expect(targets.some(target => target.cwd === '/repo-missing' && !expectedCwds.has('/repo-missing'))).toBe(
           false,
@@ -250,6 +258,80 @@ describe('deferred code-anchor state model', () => {
         }
       }),
   );
+
+  fcEffectProp(
+    effectIt,
+    'startup refresh selection preserves each graph scope and is idempotent and order-independent',
+    {scopes: fc.array(fc.integer({min: 0, max: 3}), {maxLength: 8})},
+    ({scopes}) =>
+      Effect.sync(() => {
+        const intents = scopes.map((scope, index) =>
+          deferredIntent({
+            memoryUri: `${URI}-${index}`,
+            project: `project-${scope}`,
+            projectScope: {
+              closureDigest: 'b'.repeat(64),
+              definitionDigest: 'a'.repeat(64),
+              project: `project-${scope}`,
+              scopeKey: `scope-${scope}`,
+            },
+          }),
+        );
+        const observations = new Map([
+          ['/repo', {state: 'present' as const, repositoryId: '1'.repeat(64), worktreeId: '2'.repeat(64)}],
+        ]);
+        const identify = (values: readonly DeferredCodeAnchorIntentV1[]) =>
+          selectDeferredCodeAnchorWorkspaceRefreshTargets(values, observations)
+            .map(target => {
+              const scope = target.projectScope;
+              return scope === undefined
+                ? (target.project ?? 'full')
+                : isDeferredCodeAnchorFullProjectScope(scope)
+                  ? 'full'
+                  : scope.scopeKey;
+            })
+            .sort();
+        const expectedScopes = [...new Set(scopes.map(scope => `scope-${scope}`))].sort();
+        expect(identify(intents)).toEqual(expectedScopes);
+        expect(identify([...intents, ...intents])).toEqual(expectedScopes);
+        expect(identify([...intents].reverse())).toEqual(expectedScopes);
+      }),
+  );
+
+  effectIt.effect('keeps two project intents in the same worktree as separate startup refreshes', () =>
+    Effect.sync(() => {
+      const observation = new Map([
+        ['/repo', {state: 'present' as const, repositoryId: '1'.repeat(64), worktreeId: '2'.repeat(64)}],
+      ]);
+      const targets = selectDeferredCodeAnchorWorkspaceRefreshTargets(
+        [
+          deferredIntent({
+            memoryUri: `${URI}-alpha`,
+            project: 'alpha',
+            projectScope: {
+              closureDigest: 'b'.repeat(64),
+              definitionDigest: 'a'.repeat(64),
+              project: 'alpha',
+              scopeKey: 'scope-alpha',
+            },
+          }),
+          deferredIntent({
+            memoryUri: `${URI}-beta`,
+            project: 'beta',
+            projectScope: {
+              closureDigest: 'd'.repeat(64),
+              definitionDigest: 'c'.repeat(64),
+              project: 'beta',
+              scopeKey: 'scope-beta',
+            },
+          }),
+        ],
+        observation,
+      );
+      expect(targets.map(target => target.project).sort()).toEqual(['alpha', 'beta']);
+      expect(targets.map(target => target.worktreeId)).toEqual(['2'.repeat(64), '2'.repeat(64)]);
+    }),
+  );
 });
 
 function deferredIntent(
@@ -258,6 +340,8 @@ function deferredIntent(
     readonly codeRefs?: readonly string[];
     readonly memoryUri?: string;
     readonly preparation?: 'caller' | 'workset';
+    readonly project?: string;
+    readonly projectScope?: DeferredCodeAnchorIntentV1['projectScope'];
     readonly repositoryId?: string;
     readonly worktreeId?: string;
   } = {},
@@ -285,6 +369,8 @@ function deferredIntent(
     intentId: 'tnca_test',
     memoryId: 'tn_memory',
     memoryUri: options.memoryUri ?? URI,
+    ...(options.project === undefined ? {} : {project: options.project}),
+    ...(options.projectScope === undefined ? {} : {projectScope: options.projectScope}),
     recovery: {
       code: 'exact-current-evidence-unavailable',
       indexingStarted: false,

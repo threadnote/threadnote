@@ -34,7 +34,7 @@ import {
   type DeferredCodeAnchorIntentV1,
 } from './code_anchor_scope.js';
 export type {DeferredCodeAnchorIntentV1} from './code_anchor_scope.js';
-import {scheduleDeferredCodeAnchorWorkspaceRefresh} from './code_anchor_scheduler.js';
+import {scheduleDeferredCodeAnchorIntentRefresh} from './code_anchor_scheduler.js';
 import {
   deferredCodeAnchorFinalizationVerified,
   memoryContentHash,
@@ -308,10 +308,7 @@ export const stageDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.stage')
   };
   yield* writeDeferredCodeAnchorIntent(config, intent);
   if (intent.recovery.preparation.target !== 'workset') {
-    yield* scheduleDeferredCodeAnchorWorkspaceRefresh(config, {
-      cwd: intent.callerCwd,
-      worktreeId: intent.worktreeId,
-    }).pipe(Effect.ignoreCause);
+    yield* scheduleDeferredCodeAnchorIntentRefresh(config, intent).pipe(Effect.ignoreCause);
   }
   return intent;
 });
@@ -726,10 +723,7 @@ const finalizeDeferredCodeAnchor = Effect.fn('memoryCodeAnchor.finalizeOne')(fun
         classified.retryable === true &&
         entry.intent.recovery.preparation.target !== 'workset'
       ) {
-        yield* scheduleDeferredCodeAnchorWorkspaceRefresh(config, {
-          cwd: entry.intent.callerCwd,
-          worktreeId: entry.intent.worktreeId,
-        }).pipe(Effect.ignoreCause);
+        yield* scheduleDeferredCodeAnchorIntentRefresh(config, entry.intent).pipe(Effect.ignoreCause);
       }
       return classified;
     }

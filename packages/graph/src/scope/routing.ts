@@ -6,6 +6,13 @@ import {expandPath} from '@threadnote/platform/paths';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {resolveRepositoryIdentity} from '../repository.js';
 
+export const CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE = 78;
+export const CODE_GRAPH_ISOLATED_BUILDER_ENV = 'THREADNOTE_CODE_GRAPH_ISOLATED_BUILDER';
+export const CODE_GRAPH_EXPECTED_SCOPE_ID_ENV = 'THREADNOTE_CODE_GRAPH_EXPECTED_SCOPE_ID';
+
+export const CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV = 'THREADNOTE_CODE_GRAPH_REFRESH_SCOPE_ROUTE';
+export const CODE_GRAPH_ABSENT_MANIFEST_REVISION = 'absent';
+
 export const CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV = 'THREADNOTE_CODE_GRAPH_EXPECTED_MANIFEST_REVISION';
 
 const WORKTREE_LIST_OUTPUT_BYTES_MAXIMUM = 1_048_576;
@@ -36,10 +43,12 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
   cwd: string,
   explicitProject?: string,
   expectedManifestRevision?: string,
+  selection?: 'full',
 ) {
   const fs = yield* FileSystem.FileSystem;
   if (!(yield* fs.exists(manifestPath))) {
-    if (expectedManifestRevision !== undefined) return yield* manifestRevisionChanged();
+    if (expectedManifestRevision !== undefined && expectedManifestRevision !== CODE_GRAPH_ABSENT_MANIFEST_REVISION)
+      return yield* manifestRevisionChanged();
     return {state: 'full'} as const satisfies CodeGraphScopeRoute;
   }
   const raw = yield* fs
@@ -54,6 +63,7 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
     try: () => parseSeedManifest(raw, manifestPath),
     catch: () => CodeGraphScopeRoutingError.make({message: 'Configured graph manifest could not be read.'}),
   });
+  if (selection === 'full') return {state: 'full'} as const satisfies CodeGraphScopeRoute;
   const path = yield* Path.Path;
   const caller = path.resolve(cwd);
   if (explicitProject !== undefined) {
@@ -168,6 +178,45 @@ export const resolveCodeGraphScopeRoute = Effect.fn('codeGraph.resolveScopeRoute
     projects: projects.map(project => ({name: project.name, roots: project.graph?.roots ?? []})),
     message: `Graph scope is ambiguous for this cwd: ${matches.length} configured scopes match. Set project (or CLI --project) to one of:\n${scopeChoices}`,
   });
+});
+
+export interface CodeGraphResolvedRefreshRoute {
+  readonly manifestPath: string;
+  readonly manifestRevision: string;
+  readonly route: CodeGraphScopeRoute;
+}
+
+/** Bind one manifest observation before demand identity, local deduplication or child launch. */
+export const resolveCodeGraphRefreshRoute = Effect.fn('codeGraph.resolveRefreshRoute')(function* (
+  manifestPath: string,
+  cwd: string,
+  project?: Pick<ProjectManifest, 'graph' | 'uri'> & {readonly name?: string},
+  expectedManifestRevision?: string,
+  projectFreshness: 'verify' | 'resolve' = 'verify',
+) {
+  if (project !== undefined && !project.name?.trim()) {
+    return yield* CodeGraphScopeRoutingError.make({
+      message: 'Graph refresh requires a configured project name. Select a project before refreshing.',
+    });
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const manifestRevision = (yield* fs.exists(manifestPath))
+    ? sha256HexSync(yield* fs.readFileString(manifestPath))
+    : CODE_GRAPH_ABSENT_MANIFEST_REVISION;
+  if (expectedManifestRevision !== undefined && expectedManifestRevision !== manifestRevision)
+    return yield* manifestRevisionChanged();
+  const route = yield* resolveCodeGraphScopeRoute(manifestPath, cwd, project?.name, manifestRevision);
+  if (
+    project !== undefined &&
+    (route.state !== 'selected' ||
+      route.project.uri !== project.uri ||
+      (projectFreshness === 'verify' && graphDefinition(route.project.graph) !== graphDefinition(project.graph)))
+  ) {
+    return yield* CodeGraphScopeRoutingError.make({
+      message: 'Configured graph refresh target changed. Resolve the project again before refreshing.',
+    });
+  }
+  return {manifestPath, manifestRevision, route} satisfies CodeGraphResolvedRefreshRoute;
 });
 
 function manifestRevisionChanged(): CodeGraphScopeRoutingError {
@@ -319,4 +368,16 @@ function selectedRoute(
   project: Pick<ProjectManifest, 'graph' | 'name' | 'uri'>,
 ): Extract<CodeGraphScopeRoute, {state: 'selected'}> {
   return {project, state: 'selected'};
+}
+
+function graphDefinition(graph: ProjectManifest['graph']): string {
+  return JSON.stringify(
+    graph === undefined
+      ? null
+      : {
+          closure: graph.closure,
+          include: [...new Set(graph.include ?? [])].sort(),
+          roots: [...new Set(graph.roots)].sort(),
+        },
+  );
 }

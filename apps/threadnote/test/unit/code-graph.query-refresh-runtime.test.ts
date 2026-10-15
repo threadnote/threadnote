@@ -178,10 +178,48 @@ const makeFixture = Effect.fn('test.makeQueryRuntimeFixture')(function* () {
       },
       ...options,
     });
-  return {admission, counters, failProvenance, failRead, fs, git, inspect, path, ready, repository, snapshot, valid};
+  return {
+    admission,
+    counters,
+    failProvenance,
+    failRead,
+    fs,
+    git,
+    identity,
+    inspect,
+    path,
+    ready,
+    repository,
+    snapshot,
+    valid,
+  };
 });
 
 describe('query runtime probe policy', () => {
+  effectIt.effect('reuses an observed full route while resolving omitted scope observations', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const manifestPath = fixture.path.join(fixture.repository, 'invalid-manifest.yaml');
+      yield* fixture.fs.writeFileString(manifestPath, 'not: [valid');
+      const result = yield* fixture.inspect({
+        manifestPath,
+        refresh: false,
+        strictFreshness: false,
+        statusObservation: {identity: fixture.identity, projectScopeObserved: true},
+      });
+      expect(result.nodes.map(candidate => candidate.id)).toContain(node.id);
+      const missingProof = yield* fixture
+        .inspect({
+          manifestPath,
+          refresh: false,
+          strictFreshness: false,
+          statusObservation: {identity: fixture.identity},
+        })
+        .pipe(Effect.result);
+      expect(missingProof._tag).toBe('Failure');
+    }).pipe(provideTestLayer(dependencies), TestClock.withLive),
+  );
+
   for (const operation of operations) {
     effectIt.effect(`preserves selected-snapshot and explicit refresh/strict checks for ${operation}`, () =>
       Effect.gen(function* () {

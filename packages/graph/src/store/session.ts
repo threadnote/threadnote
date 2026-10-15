@@ -4,6 +4,7 @@ import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
 import type {
   CodeGraphDatabaseSessionOptions,
+  CodeGraphStoreShape,
   CodeGraphSqliteWriterSettings,
   CodeGraphSqliteWriterTuning,
 } from './shape.js';
@@ -25,6 +26,26 @@ export class CodeGraphDatabaseSession extends Context.Service<
   CodeGraphDatabaseSession,
   CodeGraphDatabaseSessionShape
 >()('@threadnote/graph/store/session/CodeGraphDatabaseSession') {}
+
+export const withCodeGraphReadTransaction = <A, E, R>(
+  store: Pick<CodeGraphStoreShape, 'withSession'>,
+  databasePath: string,
+  read: Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
+    if (Option.isSome(session) && session.value.databasePath === databasePath) {
+      return yield* session.value.sql.withTransaction(read);
+    }
+    return yield* store.withSession(
+      databasePath,
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql.withTransaction(read);
+      }),
+      {readOnly: true},
+    );
+  });
 
 export function useDatabase<A, E, R>(
   databasePath: string,

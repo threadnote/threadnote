@@ -1,7 +1,7 @@
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {Context, Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
@@ -11,7 +11,7 @@ import {TestError} from '@threadnote/testing/test-error';
 import {observeCodeGraphAdmissionEnvironment} from '@threadnote/graph/admission_freshness';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphBuildRequestKey} from '@threadnote/graph/indexer/build';
-import {worktreeBuildRequestState} from '@threadnote/graph/inventory';
+import {inventoryRepository, worktreeBuildRequestState} from '@threadnote/graph/inventory';
 import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
 import {
   adoptCodeGraphBackgroundDemand,
@@ -28,6 +28,10 @@ import {
   codeGraphWorktreeSpawnLockPath,
 } from '@threadnote/graph/layout';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {runIsolatedCodeGraphIndexSnapshot} from '@threadnote/graph/isolated/index';
+import {runIsolatedCodeGraphIndex} from '@threadnote/graph/isolated/builder';
+import {resolveCodeGraphRefreshRoute} from '@threadnote/graph/scope/routing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
 
@@ -425,6 +429,151 @@ describe('code graph refresh demand sidecar', () => {
         expect(Number((yield* fs.stat(sidecar)).size)).toBeLessThan(8 * 1024);
       }),
     ).pipe(provideTestLayer(TestLayer)),
+  );
+
+  effectIt.effect(
+    'adopts the parent scoped demand through the actual isolated CLI route',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-refresh-cli-route-'});
+        const repository = path.join(home, 'repository');
+        const nested = path.join(repository, 'apps', 'docs');
+        yield* fs.makeDirectory(nested, {recursive: true});
+        yield* fs.makeDirectory(path.join(repository, 'apps', 'web'), {recursive: true});
+        yield* fs.writeFileString(
+          path.join(repository, 'package.json'),
+          JSON.stringify({name: 'fixture', workspaces: ['apps/*']}),
+        );
+        for (const name of ['docs', 'web']) {
+          yield* fs.writeFileString(path.join(repository, 'apps', name, 'package.json'), JSON.stringify({name}));
+          yield* fs.writeFileString(path.join(repository, 'apps', name, 'source.ts'), `export const ${name} = 1;\n`);
+        }
+        yield* Effect.sync(() => {
+          runGit(repository, ['init', '--quiet']);
+          runGit(repository, ['config', 'user.email', 'test@example.invalid']);
+          runGit(repository, ['config', 'user.name', 'Threadnote Test']);
+          runGit(repository, ['add', '.']);
+          runGit(repository, ['commit', '--quiet', '-m', 'fixture']);
+        });
+        const manifestPath = path.join(home, 'manifest.json');
+        const projects = ['docs', 'web'].map(name => ({
+          name,
+          path: repository,
+          seed: [],
+          uri: `threadnote://resources/repos/${name}`,
+          graph: {closure: 'dependencies', roots: [`apps/${name}`]},
+        }));
+        yield* fs.writeFileString(manifestPath, JSON.stringify({version: 1, projects}));
+        const route = yield* resolveCodeGraphRefreshRoute(manifestPath, nested);
+        expect(route.route.state).toBe('selected');
+        if (route.route.state !== 'selected') return yield* Effect.die('expected scoped route');
+        const identity = yield* resolveRepositoryIdentity(nested);
+        const observed = yield* inventoryRepository(identity, {
+          project: route.route.project,
+          includeOverlay: false,
+          scopeObservationOnly: true,
+          languagePacks: BUILTIN_LANGUAGE_PACK_REGISTRY,
+        });
+        const overlay = yield* worktreeBuildRequestState(identity, home, observed.scope);
+        const environment = yield* observeCodeGraphAdmissionEnvironment(identity);
+        const targetKey = codeGraphBuildRequestKey(
+          identity,
+          overlay,
+          BUILTIN_LANGUAGE_PACK_REGISTRY,
+          undefined,
+          false,
+          environment,
+          observed.scope,
+        );
+        const demandIdentity = {
+          checkoutId: identity.checkoutId,
+          worktreeId: identity.worktreeId,
+          scopeId: observed.scope?.scopeKey,
+          threadnoteHome: home,
+        };
+        const claim = yield* registerCodeGraphBackgroundDemand(demandIdentity, targetKey);
+        expect(claim.type).toBe('claimed');
+        const launch = {
+          admissionClass: 'background' as const,
+          assertRuntimeSchemaCompatible: () => Effect.void,
+          cwd: nested,
+          manifestPath,
+          manifestRevision: route.manifestRevision,
+          scopeRoute: route.route.state,
+          project: route.route.project,
+          scopeId: observed.scope?.scopeKey,
+          refreshDemandToken: claim.target.targetToken,
+          requestKey: targetKey,
+          threadnoteHome: home,
+        };
+        const result = yield* runIsolatedCodeGraphIndex(launch);
+        expect(result.symbols).toBeGreaterThan(0);
+        expect(result.requestKey).toBe(targetKey);
+        const state = JSON.parse(
+          yield* fs.readFileString(
+            codeGraphRefreshDemandPath(path, home, identity.checkoutId, identity.worktreeId, observed.scope?.scopeKey),
+          ),
+        );
+        expect(state.active).toMatchObject({targetKey, targetToken: claim.target.targetToken, phase: 'publishing'});
+        expect(yield* fs.exists(codeGraphRefreshDemandPath(path, home, identity.checkoutId, identity.worktreeId))).toBe(
+          false,
+        );
+        const store = yield* CodeGraphStore;
+        let scopeDatabaseReads = 0;
+        const instrumented = CodeGraphStore.of({
+          ...store,
+          loadScopeApplicability: (...args) => {
+            scopeDatabaseReads++;
+            return store.loadScopeApplicability(...args);
+          },
+          readySnapshot: (...args) => {
+            scopeDatabaseReads++;
+            return store.readySnapshot(...args);
+          },
+        });
+        const indexerContext = yield* Layer.build(
+          Layer.fresh(CodeGraphIndexer.layer).pipe(Layer.provide(Layer.succeed(CodeGraphStore, instrumented))),
+        );
+        const indexer = Context.get(indexerContext, CodeGraphIndexer);
+        const rejected = yield* indexer
+          .index({
+            cwd: nested,
+            project: route.route.project,
+            ensureVectors: false,
+            refreshDemandToken: `cgdq_${'f'.repeat(32)}`,
+            threadnoteHome: home,
+          })
+          .pipe(Effect.flip);
+        expect(Schema.is(CodeGraphRefreshDemandSuperseded)(rejected)).toBe(true);
+        expect(scopeDatabaseReads).toBe(0);
+        const recovered = yield* runIsolatedCodeGraphIndexSnapshot({
+          cwd: nested,
+          manifestPath,
+          threadnoteHome: home,
+          ensureVectors: false,
+        });
+        expect(recovered.snapshot.id).toBe(result.snapshotId);
+        expect(recovered.snapshot.scopeId).toBe(observed.scope?.scopeKey);
+
+        const manifestBytes = yield* fs.readFileString(manifestPath);
+        yield* fs.writeFileString(manifestPath, `${manifestBytes}\n`);
+        const drifted = yield* runIsolatedCodeGraphIndex({...launch, requestKey: secondKey}).pipe(Effect.flip);
+        expect(drifted).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+        yield* fs.writeFileString(manifestPath, manifestBytes);
+
+        const ambiguous = yield* resolveCodeGraphRefreshRoute(manifestPath, repository).pipe(Effect.flip);
+        expect(ambiguous).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+        const linked = path.join(home, 'linked');
+        yield* Effect.sync(() => runGit(repository, ['worktree', 'add', '--quiet', '-b', 'linked', linked]));
+        const linkedRoute = yield* resolveCodeGraphRefreshRoute(manifestPath, path.join(linked, 'apps', 'docs'));
+        expect(linkedRoute.route).toEqual(route.route);
+        const linkedIdentity = yield* resolveRepositoryIdentity(linked);
+        expect(linkedIdentity.checkoutId).toBe(identity.checkoutId);
+        expect(linkedIdentity.worktreeId).not.toBe(identity.worktreeId);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {timeout: 30_000},
   );
 
   effectIt.effect('stops a real indexer at the publication checkpoint after a newer target is queued', () =>

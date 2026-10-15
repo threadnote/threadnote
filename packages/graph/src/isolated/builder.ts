@@ -1,4 +1,11 @@
-import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV} from '../scope/routing.js';
+import {
+  CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV,
+  CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV,
+  CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE,
+  CODE_GRAPH_ISOLATED_BUILDER_ENV,
+  CODE_GRAPH_EXPECTED_SCOPE_ID_ENV,
+  CodeGraphScopeRoutingError,
+} from '../scope/routing.js';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Ref, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {isFileLockTimeout, readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -76,6 +83,8 @@ export interface CodeGraphIsolatedBuilderOptions {
   /** Bind Manager's selected manifest and reject configuration drift in the child. */
   readonly manifestPath?: string;
   readonly manifestRevision?: string;
+  readonly expectedScopeId?: string;
+  readonly scopeRoute?: 'full' | 'selected';
   /** Preserve MCP/workset structural-only indexing unless the caller explicitly enables vectors. */
   readonly noVectors?: boolean;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
@@ -100,6 +109,8 @@ export interface CodeGraphIsolatedBuilderOptions {
       readonly full?: boolean;
       readonly manifestPath?: string;
       readonly manifestRevision?: string;
+      readonly expectedScopeId?: string;
+      readonly scopeRoute?: 'full' | 'selected';
       readonly noVectors?: boolean;
       readonly project?: string;
       readonly refreshDemandToken?: string;
@@ -146,6 +157,8 @@ export function codeGraphIsolatedBuilderSpawnPlan(
     readonly full?: boolean;
     readonly manifestPath?: string;
     readonly manifestRevision?: string;
+    readonly expectedScopeId?: string;
+    readonly scopeRoute?: 'full' | 'selected';
     readonly noVectors?: boolean;
     readonly project?: string;
     readonly refreshDemandToken?: string;
@@ -170,10 +183,13 @@ export function codeGraphIsolatedBuilderSpawnPlan(
     environment: {
       ...system.intendedChildEnvironment(system.environment(), 'graph-builder'),
       [CODE_GRAPH_BUILDER_ADMISSION_CLASS_ENV]: options.admissionClass ?? 'current-required',
+      [CODE_GRAPH_ISOLATED_BUILDER_ENV]: '1',
       ...(options.refreshDemandToken === undefined
         ? {}
         : {THREADNOTE_CODE_GRAPH_REFRESH_DEMAND_TOKEN: options.refreshDemandToken}),
       [CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]: options.manifestRevision,
+      [CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV]: options.scopeRoute,
+      [CODE_GRAPH_EXPECTED_SCOPE_ID_ENV]: options.expectedScopeId,
       THREADNOTE_HOME: options.threadnoteHome,
     },
     executable: system.executablePath,
@@ -330,6 +346,11 @@ export const runIsolatedCodeGraphIndex: (
   const system = yield* SystemInfo;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  if ((options.scopeId !== undefined || options.project?.graph !== undefined) && !options.project?.name?.trim()) {
+    return yield* CodeGraphScopeRoutingError.make({
+      message: 'Scoped graph refresh requires a configured project name before child launch.',
+    });
+  }
   const identity = yield* options.resolveIdentity?.(options.cwd) ?? resolveRepositoryIdentity(options.cwd);
   const layout = codeGraphLayout(
     path,
@@ -345,6 +366,8 @@ export const runIsolatedCodeGraphIndex: (
     full: options.full,
     ...(options.manifestPath === undefined ? {} : {manifestPath: options.manifestPath}),
     ...(options.manifestRevision === undefined ? {} : {manifestRevision: options.manifestRevision}),
+    scopeRoute: options.scopeRoute,
+    expectedScopeId: options.scopeId ?? (options.scopeRoute === undefined ? undefined : 'full-repository'),
     noVectors: options.noVectors,
     project: options.project?.name,
     refreshDemandToken: options.refreshDemandToken,
@@ -407,6 +430,10 @@ export const runIsolatedCodeGraphIndex: (
           return yield* CodeGraphRefreshDemandSuperseded.make({
             message: 'Code graph refresh demand was superseded before build status publication.',
           });
+        if (startup.exitCode === CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE)
+          return yield* CodeGraphScopeRoutingError.make({
+            message: 'Isolated graph refresh route changed. Resolve the configured project before retrying.',
+          });
         if (startup.exitCode !== 0)
           return yield* IsolatedBuilderError.make({
             message: isolatedBuilderFailureMessage(startup.exitCode, undefined, child.stderrTail?.()),
@@ -457,6 +484,10 @@ export const runIsolatedCodeGraphIndex: (
   );
 
   if (exitCode !== 0) {
+    if (exitCode === CODE_GRAPH_SCOPE_ROUTING_EXIT_CODE)
+      return yield* CodeGraphScopeRoutingError.make({
+        message: 'Isolated graph refresh route changed. Resolve the configured project before retrying.',
+      });
     if (exitCode === CODE_GRAPH_REFRESH_DEMAND_SUPERSEDED_EXIT_CODE)
       return yield* CodeGraphRefreshDemandSuperseded.make({message: 'Code graph refresh demand was superseded.'});
     // A failed child is never rescued by a later sidecar; only enrich its failure with the exact owned status.

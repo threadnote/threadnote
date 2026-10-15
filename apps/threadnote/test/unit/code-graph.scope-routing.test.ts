@@ -4,7 +4,12 @@ import {Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
-import {CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV, resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
+import {
+  CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV,
+  CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV,
+  resolveCodeGraphRefreshRoute,
+  resolveCodeGraphScopeRoute,
+} from '@threadnote/graph/scope/routing';
 import {runBinaryCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -51,6 +56,83 @@ describe('graph scope manifest revision fencing', () => {
         state: 'selected',
         project,
       });
+    }).pipe(TestClock.withLive, provideTestLayer(layer)),
+  );
+
+  effectIt.effect('binds explicit full routes and rejects unnamed or changed project refresh inputs', () =>
+    Effect.gen(function* () {
+      const {config, fs, root, project, raw} = yield* fixture;
+      const full = yield* resolveCodeGraphScopeRoute(config.manifestPath, root, undefined, sha256HexSync(raw), 'full');
+      expect(full).toEqual({state: 'full'});
+      const unnamed = yield* resolveCodeGraphRefreshRoute(config.manifestPath, root, {
+        uri: project.uri,
+        graph: project.graph,
+      }).pipe(Effect.flip);
+      expect(unnamed).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+      const changed = yield* resolveCodeGraphRefreshRoute(config.manifestPath, root, {
+        ...project,
+        graph: {...project.graph, roots: ['apps/other']},
+      }).pipe(Effect.flip);
+      expect(changed).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+      const selected = yield* resolveCodeGraphRefreshRoute(config.manifestPath, root, {
+        ...project,
+        graph: {closure: project.graph.closure, roots: [...project.graph.roots]},
+      });
+      expect(selected.route).toEqual({state: 'selected', project});
+      yield* fs.remove(config.manifestPath);
+      const absent = yield* resolveCodeGraphRefreshRoute(config.manifestPath, root);
+      expect(absent.route).toEqual({state: 'full'});
+      yield* fs.writeFileString(config.manifestPath, raw);
+      const appeared = yield* resolveCodeGraphScopeRoute(
+        config.manifestPath,
+        root,
+        undefined,
+        absent.manifestRevision,
+        'full',
+      ).pipe(Effect.flip);
+      expect(appeared).toMatchObject({_tag: 'CodeGraphScopeRoutingError'});
+    }).pipe(TestClock.withLive, provideTestLayer(layer)),
+  );
+
+  effectIt.effect('keeps an isolated full route full when cwd would otherwise infer a configured project', () =>
+    Effect.gen(function* () {
+      const {config, root, raw} = yield* fixture;
+      const system = yield* SystemInfo;
+      let selectedProject: unknown = 'unobserved';
+      const result = yield* runCodeGraphIndex(config, {cwd: root, json: true}).pipe(
+        Effect.provideService(
+          CodeGraphIndexer,
+          CodeGraphIndexer.of({
+            index: request =>
+              Effect.sync(() => {
+                selectedProject = request.project;
+              }).pipe(Effect.andThen(Effect.fail('observed'))),
+            ensureCommit: () => Effect.die('unexpected ensure'),
+          }),
+        ),
+        Effect.provideService(
+          CliOutput,
+          CliOutput.of({
+            drain: Effect.void,
+            flush: Effect.void,
+            enqueueError: () => {},
+            enqueueOutput: () => {},
+            writeError: () => Effect.void,
+            writeFinal: () => Effect.void,
+          }),
+        ),
+        Effect.provideService(SystemInfo, {
+          ...system,
+          environment: () => ({
+            ...system.environment(),
+            [CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV]: sha256HexSync(raw),
+            [CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV]: 'full',
+          }),
+        }),
+        Effect.result,
+      );
+      expect(result._tag).toBe('Failure');
+      expect(selectedProject).toBeUndefined();
     }).pipe(TestClock.withLive, provideTestLayer(layer)),
   );
 

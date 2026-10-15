@@ -5,6 +5,7 @@ import {
   emptyCodeGraphRefreshDemand,
   enqueueCodeGraphRefreshDemand,
   registerCodeGraphRefreshDemand,
+  recoverCodeGraphRefreshDemand,
   resumeCodeGraphRefreshDemand,
 } from '@threadnote/graph/refresh/demand_scheduler';
 
@@ -175,6 +176,54 @@ describe('code graph refresh demand properties', () => {
         });
       }),
       {numRuns: 100},
+    );
+  });
+  it('suppresses invalid targets across repeated requests and resumes after a changed recovery fingerprint', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 40}), fc.boolean(), (repeats, enqueue) => {
+        const input = {now: 0, targetKey: zeroTarget, token: `cgdq_${'1'.repeat(32)}`, recoveryKey: 'c'.repeat(64)};
+        const claimed = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), input);
+        let state = deferCodeGraphRefreshDemand(claimed.state, input.token, input.targetKey, 0, true);
+        for (let index = 1; index <= repeats; index++) {
+          const observed = (enqueue ? enqueueCodeGraphRefreshDemand : registerCodeGraphRefreshDemand)(state, {
+            ...input,
+            now: index * 100_000,
+          });
+          expect(observed.type).toBe('deferred');
+          expect(observed.state.active).toBeUndefined();
+          state = observed.state;
+        }
+        const resumed = resumeCodeGraphRefreshDemand(state, {
+          ...input,
+          now: 1_000_000,
+          ownerLive: false,
+          recoveryKey: 'd'.repeat(64),
+        });
+        expect(resumed?.type).toBe('claimed');
+        expect(resumed?.target.retry).toBeUndefined();
+        expect(resumed?.target.recoveryKey).toBe('d'.repeat(64));
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  it('preserves failed-attempt history when a reclaimed retry owner dies before publication', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 8}), attempts => {
+        const input = {now: 0, targetKey: zeroTarget, token: `cgdq_${'1'.repeat(32)}`};
+        let state = registerCodeGraphRefreshDemand(emptyCodeGraphRefreshDemand(checkout, worktree), input).state;
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          state = deferCodeGraphRefreshDemand(state, input.token, input.targetKey, input.now);
+          input.now = state.desired!.retry!.notBefore;
+          state = registerCodeGraphRefreshDemand(state, input).state;
+        }
+        const recovered = recoverCodeGraphRefreshDemand(state, false);
+        expect(recovered.desired?.retry).toEqual(state.active?.retry);
+        const resumed = registerCodeGraphRefreshDemand(recovered, input);
+        const failedAgain = deferCodeGraphRefreshDemand(resumed.state, input.token, input.targetKey, input.now);
+        expect(failedAgain.desired?.retry?.attempt).toBe(Math.min(8, attempts + 1));
+      }),
+      {numRuns: 50},
     );
   });
 });

@@ -621,6 +621,7 @@ function prepareConfiguredSnapshot(
       attempt: number,
     ): Effect.Effect<Pick<CodeGraphIndexSummary, 'identity' | 'snapshot'>, unknown, IsolatedIndexRequirements> => {
       const indexOptions = {
+        manifestPath: config.manifestPath,
         project,
         cwd,
         ensureVectors: false,

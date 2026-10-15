@@ -11,6 +11,15 @@ import {
 } from '../../src/runtime.js';
 
 describe('MCP semantic retrieval cooldown', () => {
+  effectIt.effect('allows semantic evidence to complete within a thirty-second default budget', () =>
+    Effect.gen(function* () {
+      const gate = createMcpRecallSemanticRetrievalGate();
+      const read = yield* gate({}, Effect.sleep(29_000).pipe(Effect.as('semantic evidence'))).pipe(Effect.forkChild);
+      yield* TestClock.adjust(29_000);
+      expect(yield* Fiber.join(read)).toEqual({status: 'completed', value: 'semantic evidence'});
+    }),
+  );
+
   effectIt.effect('skips repeated semantic work after a timeout and retries after the cooldown', () =>
     Effect.gen(function* () {
       const gate = createMcpRecallSemanticRetrievalGate();
@@ -40,7 +49,10 @@ describe('MCP semantic retrieval cooldown', () => {
       const runtime = {};
       const first = yield* gate(runtime, Effect.never).pipe(Effect.forkChild);
       yield* TestClock.adjust(5_000);
-      const second = yield* gate(runtime, Effect.sleep(12_000).pipe(Effect.as('completed'))).pipe(Effect.forkChild);
+      const second = yield* gate(
+        runtime,
+        Effect.sleep(MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS - 3_000).pipe(Effect.as('completed')),
+      ).pipe(Effect.forkChild);
       yield* TestClock.adjust(MCP_RECALL_SEMANTIC_RETRIEVAL_TIMEOUT_MILLISECONDS - 5_000);
       expect(yield* Fiber.join(first)).toEqual({status: 'timed-out'});
       yield* TestClock.adjust(2_000);

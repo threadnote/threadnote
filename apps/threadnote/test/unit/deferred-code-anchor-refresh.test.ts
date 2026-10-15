@@ -3,6 +3,7 @@ import {Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphWatcher} from '@threadnote/graph/watcher';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -148,6 +149,7 @@ describe('deferred code-anchor workspace refresh', () => {
           {
             cwd: fixture.present,
             key: (yield* listDeferredCodeAnchorWorkspaceRefreshTargets(fixture.config))[0]?.worktreeId,
+            manifestPath: fixture.config.manifestPath,
             threadnoteHome: fixture.config.agentContextHome,
           },
         ]);
@@ -157,11 +159,18 @@ describe('deferred code-anchor workspace refresh', () => {
 
   effectIt.effect('schedules still-present worktrees as background builder admission', () =>
     Effect.gen(function* () {
-      const scheduled: Array<{readonly admissionClass?: string; readonly cwd: string}> = [];
-      yield* scheduleDeferredCodeAnchorWorkspaceRefresh(
-        {agentContextHome: '/threadnote-home'},
-        {cwd: '/repo', worktreeId: 'a'.repeat(64)},
-      ).pipe(
+      const fixture = yield* makeRefreshFixture();
+      yield* fixture.fs.writeFileString(
+        fixture.config.manifestPath,
+        `version: 1\nprojects:\n  - name: selected\n    path: ${JSON.stringify(fixture.present)}\n    uri: threadnote://resources/repos/selected\n    seed: []\n    graph:\n      roots: [src]\n      closure: dependencies\n      include: []\n`,
+      );
+      const scheduled: Array<{readonly admissionClass?: string; readonly cwd: string; readonly project?: string}> = [];
+      yield* scheduleDeferredCodeAnchorWorkspaceRefresh(fixture.config, {
+        cwd: fixture.present,
+        worktreeId: 'a'.repeat(64),
+        project: 'selected',
+      }).pipe(
+        Effect.provideService(CodeGraphQueryService, {status: () => Effect.succeed({} as never)} as never),
         provideTestLayer(
           deferredCodeAnchorRefreshSchedulerLayer.pipe(
             Layer.provide(
@@ -182,7 +191,11 @@ describe('deferred code-anchor workspace refresh', () => {
                   }),
                   refresh: options =>
                     Effect.sync(() => {
-                      scheduled.push({admissionClass: options.admissionClass, cwd: options.cwd});
+                      scheduled.push({
+                        admissionClass: options.admissionClass,
+                        cwd: options.cwd,
+                        project: options.project?.name,
+                      });
                       return true;
                     }),
                   request: () => Effect.die('Unexpected graph request.'),
@@ -191,22 +204,23 @@ describe('deferred code-anchor workspace refresh', () => {
                 }),
               ),
             ),
+            Layer.provideMerge(ApplicationLayer),
           ),
         ),
       );
-      expect(scheduled).toEqual([{admissionClass: 'background', cwd: '/repo'}]);
-    }),
+      expect(scheduled).toEqual([{admissionClass: 'background', cwd: fixture.present, project: 'selected'}]);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('does not schedule when the refresh scheduler is absent', () =>
     Effect.gen(function* () {
       const scheduled: string[] = [];
       yield* scheduleDeferredCodeAnchorWorkspaceRefresh(
-        {agentContextHome: '/threadnote-home'},
+        {agentContextHome: '/threadnote-home', manifestPath: '/missing-manifest.yaml'},
         {cwd: '/repo', worktreeId: 'a'.repeat(64)},
       );
       expect(scheduled).toEqual([]);
-    }),
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 });
 

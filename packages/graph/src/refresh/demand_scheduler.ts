@@ -13,7 +13,8 @@ export type CodeGraphRefreshDemandPhase = 'claimed' | 'preparing' | 'publishing'
 export interface CodeGraphRefreshDemandTarget {
   readonly attachmentCount: number;
   readonly requestedAt: number;
-  readonly retry?: {readonly attempt: number; readonly notBefore: number};
+  readonly recoveryKey?: string;
+  readonly retry?: {readonly attempt: number; readonly blocked?: true; readonly notBefore: number};
   readonly targetKey: string;
   readonly targetToken: string;
   readonly updatedAt: number;
@@ -74,7 +75,7 @@ export function emptyCodeGraphRefreshDemand(checkoutId: string, worktreeId: stri
  */
 export function enqueueCodeGraphRefreshDemand(
   state: CodeGraphRefreshDemandState,
-  input: {readonly now: number; readonly targetKey: string; readonly token: string},
+  input: {readonly now: number; readonly recoveryKey?: string; readonly targetKey: string; readonly token: string},
 ): CodeGraphRefreshDemandRegistration {
   const active = state.active;
   if (active?.targetKey === input.targetKey) {
@@ -91,22 +92,28 @@ export function enqueueCodeGraphRefreshDemand(
       return {
         state: {...state, desired: target, revision: nextRevision(state)},
         target,
-        type: target.retry && target.retry.notBefore > input.now ? 'deferred' : 'attached',
+        type: target.retry && (target.retry.blocked || target.retry.notBefore > input.now) ? 'deferred' : 'attached',
       };
     }
     const target: CodeGraphRefreshDemandTarget = {
       attachmentCount: 1,
       requestedAt: input.now,
+      recoveryKey: input.recoveryKey,
       targetKey: input.targetKey,
       targetToken: input.token,
       updatedAt: input.now,
     };
     return {state: {...state, desired: target, revision: nextRevision(state)}, target, type: 'queued'};
   }
-  const retained = state.desired?.targetKey === input.targetKey ? attach(state.desired, input.now) : undefined;
+  const retained =
+    state.desired?.targetKey === input.targetKey &&
+    (!state.desired.retry?.blocked || state.desired.recoveryKey === input.recoveryKey)
+      ? attach(state.desired, input.now)
+      : undefined;
   const target = retained ?? {
     attachmentCount: 1,
     requestedAt: input.now,
+    recoveryKey: input.recoveryKey,
     targetKey: input.targetKey,
     targetToken: input.token,
     updatedAt: input.now,
@@ -114,7 +121,7 @@ export function enqueueCodeGraphRefreshDemand(
   return {
     state: {...state, desired: target, revision: nextRevision(state)},
     target,
-    type: target.retry && target.retry.notBefore > input.now ? 'deferred' : 'queued',
+    type: target.retry && (target.retry.blocked || target.retry.notBefore > input.now) ? 'deferred' : 'queued',
   };
 }
 
@@ -123,6 +130,7 @@ export function registerCodeGraphRefreshDemand(
   state: CodeGraphRefreshDemandState,
   input: {
     readonly now: number;
+    readonly recoveryKey?: string;
     readonly owner?: CodeGraphRefreshDemandActive['claimOwner'];
     readonly targetKey: string;
     readonly token: string;
@@ -138,15 +146,21 @@ export function registerCodeGraphRefreshDemand(
     };
   }
   if (!active) {
-    const retained = state.desired?.targetKey === input.targetKey ? state.desired : undefined;
+    const retained =
+      state.desired?.targetKey === input.targetKey &&
+      (!state.desired.retry?.blocked || state.desired.recoveryKey === input.recoveryKey)
+        ? state.desired
+        : undefined;
     const target = retained ?? {
       attachmentCount: 1,
       requestedAt: input.now,
+      recoveryKey: input.recoveryKey,
       targetKey: input.targetKey,
       targetToken: input.token,
       updatedAt: input.now,
     };
-    if (retained?.retry && retained.retry.notBefore > input.now) return {state, target: retained, type: 'deferred'};
+    if (retained?.retry && (retained.retry.blocked || retained.retry.notBefore > input.now))
+      return {state, target: retained, type: 'deferred'};
     const claimed: CodeGraphRefreshDemandActive = {
       ...target,
       attachmentCount: retained ? Math.min(MAX_ATTACHMENTS, retained.attachmentCount + 1) : target.attachmentCount,
@@ -163,12 +177,14 @@ export function registerCodeGraphRefreshDemand(
   }
   if (state.desired?.targetKey === input.targetKey) {
     const target = attach(state.desired, input.now);
-    if (target.retry && target.retry.notBefore > input.now) return {state, target, type: 'deferred'};
+    if (target.retry && (target.retry.blocked || target.retry.notBefore > input.now))
+      return {state, target, type: 'deferred'};
     return {state: {...state, desired: target, revision: nextRevision(state)}, target, type: 'attached'};
   }
   const target: CodeGraphRefreshDemandTarget = {
     attachmentCount: 1,
     requestedAt: input.now,
+    recoveryKey: input.recoveryKey,
     targetKey: input.targetKey,
     targetToken: input.token,
     updatedAt: input.now,
@@ -181,6 +197,7 @@ export function resumeCodeGraphRefreshDemand(
   state: CodeGraphRefreshDemandState,
   input: {
     readonly now: number;
+    readonly recoveryKey?: string;
     readonly owner?: CodeGraphRefreshDemandActive['claimOwner'];
     readonly ownerLive: boolean;
     readonly targetKey: string;
@@ -202,7 +219,7 @@ export function resumeCodeGraphRefreshDemand(
       return {
         state: {...state, desired: target, revision: nextRevision(state)},
         target,
-        type: target.retry && target.retry.notBefore > input.now ? 'deferred' : 'attached',
+        type: target.retry && (target.retry.blocked || target.retry.notBefore > input.now) ? 'deferred' : 'attached',
       };
     }
     const target = attach(state.active, input.now);
@@ -215,6 +232,7 @@ export function resumeCodeGraphRefreshDemand(
   const desired: CodeGraphRefreshDemandTarget = {
     attachmentCount: candidate.attachmentCount,
     requestedAt: candidate.requestedAt,
+    recoveryKey: candidate.recoveryKey,
     ...(candidate.retry === undefined ? {} : {retry: candidate.retry}),
     targetKey: candidate.targetKey,
     targetToken: candidate.targetToken,
@@ -225,6 +243,7 @@ export function resumeCodeGraphRefreshDemand(
   return registerCodeGraphRefreshDemand(resumable, {
     now: input.now,
     owner: input.owner,
+    recoveryKey: input.recoveryKey,
     targetKey: desired.targetKey,
     token: desired.targetToken,
   });
@@ -282,7 +301,13 @@ export function recoverCodeGraphRefreshDemand(
   ownerLive: boolean,
 ): CodeGraphRefreshDemandState {
   if (!state.active || ownerLive) return state;
-  return {...state, active: undefined, revision: nextRevision(state)};
+  const {claimStartedAt: _started, claimOwner: _owner, phase: _phase, ...target} = state.active;
+  return {
+    ...state,
+    active: undefined,
+    desired: state.desired ?? (target.retry === undefined ? undefined : target),
+    revision: nextRevision(state),
+  };
 }
 
 /** Retry state is attached only to the latest desired target and is capped. */
@@ -291,6 +316,7 @@ export function deferCodeGraphRefreshDemand(
   token: string,
   targetKey: string,
   now: number,
+  blocked = false,
 ): CodeGraphRefreshDemandState {
   const active = state.active;
   if (active?.targetToken !== token || active.targetKey !== targetKey) return state;
@@ -302,7 +328,12 @@ export function deferCodeGraphRefreshDemand(
   const desired: CodeGraphRefreshDemandTarget = {
     attachmentCount: active.attachmentCount,
     requestedAt: active.requestedAt,
-    retry: {attempt, notBefore: now + Math.min(60_000, 250 * 2 ** (attempt - 1))},
+    recoveryKey: active.recoveryKey,
+    retry: {
+      attempt,
+      ...(blocked ? {blocked: true as const} : {}),
+      notBefore: now + Math.min(60_000, 250 * 2 ** (attempt - 1)),
+    },
     targetKey: active.targetKey,
     targetToken: active.targetToken,
     updatedAt: now,
@@ -334,11 +365,13 @@ export function validCodeGraphRefreshDemand(state: CodeGraphRefreshDemandState):
       Number.isSafeInteger((retry as {attempt?: unknown}).attempt) &&
       (retry as {attempt: number}).attempt >= 1 &&
       (retry as {attempt: number}).attempt <= 8 &&
+      ((retry as {blocked?: unknown}).blocked === undefined || (retry as {blocked?: unknown}).blocked === true) &&
       Number.isSafeInteger((retry as {notBefore?: unknown}).notBefore) &&
       (retry as {notBefore: number}).notBefore >= 0);
   const validTarget = (target: CodeGraphRefreshDemandTarget | undefined) =>
     target === undefined ||
     (CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.targetKey) &&
+      (target.recoveryKey === undefined || CODE_GRAPH_REFRESH_DEMAND_KEY.test(target.recoveryKey)) &&
       CODE_GRAPH_REFRESH_DEMAND_TOKEN.test(target.targetToken) &&
       Number.isSafeInteger(target.requestedAt) &&
       Number.isSafeInteger(target.updatedAt) &&
