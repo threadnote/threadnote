@@ -7,7 +7,7 @@ import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {readModelSelection} from '@threadnote/inference/models/selection';
-import {normalizeRecallProject, type RecallEligibilityPolicy} from './eligibility.js';
+import {recallIndexScopeProject, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallApprovedAuthoritative, recallEligibilityPredicate} from './index/eligibility.js';
 import {
   combineRecallSqlPredicates,
@@ -1459,7 +1459,7 @@ function generationIsCompatible(generation: VectorGenerationRow, manifest: Local
 
 function vectorChunkMappings(candidates: readonly RecallCandidate[]): readonly VectorChunkMapping[] {
   return candidates.flatMap(candidate => {
-    const project = normalizeRecallProject(candidate.fields?.project) ?? null;
+    const project = recallIndexScopeProject(candidate.kind, candidate.fields?.project);
     const approvedAuthoritative = recallApprovedAuthoritative(candidate.authority, candidate.trust) ? 1 : 0;
     return chunkRecallDocument(candidate.uri, candidate.text).map(chunk => ({
       ...chunk,

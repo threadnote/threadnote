@@ -1,4 +1,5 @@
 import type {MemoryAuthority, MemoryTrust} from '@threadnote/memory/document';
+import type {MemoryKind} from '@threadnote/memory/types';
 
 export type RecallAuthorityEligibility = 'any' | 'approved-authoritative';
 
@@ -37,6 +38,7 @@ export interface DeriveRecallEligibilityPolicyInput {
 
 export interface RecallEligibilityCandidateMetadata {
   readonly authority?: MemoryAuthority;
+  readonly kind?: MemoryKind;
   readonly project?: string;
   readonly trust?: MemoryTrust;
 }
@@ -44,7 +46,30 @@ export interface RecallEligibilityCandidateMetadata {
 export interface RecallEligibilityRankCandidate {
   readonly authority?: MemoryAuthority;
   readonly fields?: {readonly project?: string};
+  readonly kind?: MemoryKind;
   readonly trust?: MemoryTrust;
+}
+
+/**
+ * Preferences are global guidance, not project-scoped knowledge. Their
+ * frontmatter `project` is a topic category (e.g. `communication-style`), so
+ * project eligibility must never exclude them. This matches the candidate
+ * review (`readActiveProjectMemories`), exact-scope (`exactMemoryScopeUris`),
+ * and URI-segment (`memoryUriProjectSegment`) treatment of preferences.
+ */
+export function recallKindIsProjectGlobal(kind: MemoryKind | undefined): boolean {
+  return kind === 'preference';
+}
+
+/**
+ * Indexed scope project for a candidate. Shared by the lexical refresh and
+ * vector chunk mappings so the two index writes cannot drift: preferences
+ * index as projectless even though their frontmatter carries a topic
+ * category, keeping the `project IS NULL` fast path eligible.
+ */
+export function recallIndexScopeProject(kind: MemoryKind | undefined, project: string | undefined): string | null {
+  if (recallKindIsProjectGlobal(kind)) return null;
+  return normalizeRecallProject(project) ?? null;
 }
 
 const APPROVED_AUTHORITIES: ReadonlySet<MemoryAuthority> = new Set([
@@ -169,10 +194,13 @@ export function recallCandidateIsEligible(
   policy: RecallEligibilityPolicy,
   candidate: RecallEligibilityCandidateMetadata,
 ): boolean {
+  if (policy.kind === 'pinned-hard-uri-bypass') return true;
+  // An explicitly empty resolved workset fails closed for every kind,
+  // including global preferences.
+  if (policy.projects.mode === 'deny-all') return false;
   return (
-    policy.kind === 'pinned-hard-uri-bypass' ||
-    (recallProjectIsEligible(policy.projects, candidate.project) &&
-      recallAuthorityIsEligible(policy.authority, candidate.authority, candidate.trust))
+    (recallKindIsProjectGlobal(candidate.kind) || recallProjectIsEligible(policy.projects, candidate.project)) &&
+    recallAuthorityIsEligible(policy.authority, candidate.authority, candidate.trust)
   );
 }
 
@@ -182,6 +210,7 @@ export function recallRankCandidateIsEligible(
 ): boolean {
   return recallCandidateIsEligible(policy, {
     authority: candidate.authority,
+    kind: candidate.kind,
     project: candidate.fields?.project,
     trust: candidate.trust,
   });

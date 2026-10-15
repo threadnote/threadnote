@@ -8,8 +8,13 @@ import {
   recallAuthorityIsEligible,
   recallCandidateIsEligible,
   recallEligibilityPolicyRestrictsCandidates,
+  recallIndexScopeProject,
+  recallKindIsProjectGlobal,
+  recallRankCandidateIsEligible,
 } from '@threadnote/recall/eligibility';
 import {recallEligibilityPredicate} from '@threadnote/recall/index/eligibility';
+import {recallIndexedProject} from '@threadnote/recall/index/refresh';
+import type {RecallCandidate} from '@threadnote/recall/rank';
 
 describe('recall eligibility policy', () => {
   it('keeps an omitted explicit project global', () => {
@@ -272,6 +277,102 @@ describe('recall eligibility policy', () => {
           expect(recallAuthorityIsEligible('any', candidateAuthority, candidateTrust)).toBe(true);
         }
       }),
+      {numRuns: 100},
+    );
+  });
+
+  it('keeps writing-style preferences eligible under workspace scoping', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: 'user writing style for PR review replies code review comments',
+      workspaceProject: 'threadnote',
+    });
+
+    // The preference frontmatter project is a topic category, not a scope.
+    expect(recallKindIsProjectGlobal('preference')).toBe(true);
+    expect(recallKindIsProjectGlobal('durable')).toBe(false);
+    expect(recallCandidateIsEligible(policy, {kind: 'preference', project: 'communication-style'})).toBe(true);
+    expect(recallRankCandidateIsEligible(policy, {fields: {project: 'communication-style'}, kind: 'preference'})).toBe(
+      true,
+    );
+    // Other kinds stay scoped: an unrelated durable is still excluded.
+    expect(recallCandidateIsEligible(policy, {kind: 'durable', project: 'communication-style'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {kind: 'durable', project: 'threadnote'})).toBe(true);
+  });
+
+  it('fails closed for preferences under an explicitly empty workset', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      explicitProject: 'threadnote',
+      originalQuery: 'retry behavior',
+      worksetProjectNames: [],
+    });
+
+    expect(policy.kind).toBe('candidate-policy');
+    if (policy.kind !== 'candidate-policy') throw new Error('Expected candidate policy');
+    expect(policy.projects).toEqual({mode: 'deny-all'});
+    expect(recallCandidateIsEligible(policy, {kind: 'preference', project: 'communication-style'})).toBe(false);
+    expect(recallCandidateIsEligible(policy, {kind: 'preference'})).toBe(false);
+  });
+
+  it('exempts preferences from the lexical project predicate without dropping the project list', () => {
+    const policy = deriveRecallEligibilityPolicy({
+      originalQuery: 'user writing style for PR review replies',
+      workspaceProject: 'threadnote',
+    });
+
+    const predicate = recallEligibilityPredicate('d', policy);
+    expect(predicate.restricted).toBe(true);
+    expect(predicate.sql).toContain(`json_extract(d.candidate_json, '$.kind') = 'preference'`);
+    expect(predicate.params).toContain('threadnote');
+  });
+
+  it('indexes preferences as projectless scope while keeping their category in the candidate', () => {
+    const candidate = {
+      fields: {project: 'communication-style'},
+      kind: 'preference',
+      text: 'writing style',
+      uri: 'threadnote://user/test/memories/preferences/agent-posting-style.md',
+    } as RecallCandidate;
+
+    expect(recallIndexedProject(candidate)).toBeNull();
+    expect(recallIndexScopeProject(candidate.kind, candidate.fields?.project)).toBeNull();
+    expect(candidate.fields?.project).toBe('communication-style');
+    const durable = {
+      fields: {project: 'communication-style'},
+      kind: 'durable',
+      text: 'decision',
+      uri: 'threadnote://user/test/memories/durable/projects/threadnote/decision.md',
+    } as RecallCandidate;
+    expect(recallIndexedProject(durable)).toBe('communication-style');
+    expect(recallIndexScopeProject(durable.kind, durable.fields?.project)).toBe('communication-style');
+    expect(recallIndexScopeProject('preference', 'any-category')).toBeNull();
+    expect(recallIndexScopeProject('smoke', 'any-category')).toBe('any-category');
+  });
+
+  it('keeps preferences eligible under any non-deny-all project policy', () => {
+    const projectName = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/);
+    const derivation = fc.oneof(
+      fc.record({workspaceProject: projectName}),
+      fc.record({explicitProject: projectName}),
+      fc.record({worksetProjectNames: fc.array(projectName, {maxLength: 4})}),
+      fc.record({explicitProject: projectName, worksetProjectNames: fc.array(projectName, {maxLength: 4})}),
+    );
+    fc.assert(
+      fc.property(
+        derivation,
+        fc.option(fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/), {nil: undefined}),
+        (inputs, preferenceCategory) => {
+          const policy = deriveRecallEligibilityPolicy({originalQuery: 'ordinary workspace recall', ...inputs});
+          if (policy.kind !== 'candidate-policy' || policy.projects.mode === 'deny-all') return;
+          expect(
+            recallCandidateIsEligible(
+              policy,
+              preferenceCategory === undefined
+                ? {kind: 'preference'}
+                : {kind: 'preference', project: preferenceCategory},
+            ),
+          ).toBe(true);
+        },
+      ),
       {numRuns: 100},
     );
   });
