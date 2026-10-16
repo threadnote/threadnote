@@ -9902,6 +9902,7 @@ bun_test(
         "//:scripts/run-code-memory-link-codex-client.ts",
         "//:scripts/run-code-memory-link-dogfood.ts",
         "//:scripts/run-matched-evaluation.ts",
+        "//:scripts/run-topic-maintenance-longitudinal.ts",
         "//:scripts/support/code-graph-stage3-contract.ts",
         "//:scripts/support/code-graph-stage3-driver.ts",
         "//:scripts/support/code-graph-stage3-lifecycle.ts",

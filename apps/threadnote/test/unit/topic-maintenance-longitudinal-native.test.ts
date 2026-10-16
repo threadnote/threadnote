@@ -3,17 +3,24 @@ import {mkdtemp, mkdir, readFile, rm, writeFile} from '@threadnote/testing/node-
 import {join} from '@threadnote/testing/node-path';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {describe, expect, it} from 'vitest';
+import fc from 'fast-check';
 import {
   parseTopicStudyCorpusJsonV1,
   topicStudyProbePromptV1,
   topicStudyBodyV1,
+  topicStudyPreconditionFailedV1,
+  topicStudyCorpusHashV1,
+  topicStudyLedgerRowV1,
 } from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
 import {runTopicStudyNativeAdapter} from '../../../../scripts/topic-maintenance-longitudinal-native-adapter.js';
+import {appendTopicStudySlotV1} from '../../../../scripts/run-topic-maintenance-longitudinal.js';
 
 async function fixture(
   index: number,
   outcome: string,
   applyResponse: 'written' | 'preview-write' | 'altered-write' | 'unrelated-error' | 'source-conflict' = 'written',
+  startingRevision = 1,
+  badProtectedPreview = false,
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'topic-study-native-'));
   const home = join(directory, 'home'),
@@ -47,7 +54,13 @@ async function fixture(
     fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
   };
   const accepted = `MEMORY\nkind: durable\nmemory_id: tn_fixture\nproject: fixture\ncode_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${body.join('\n\n')}`;
-  const nextBody = body.map(text => text.replace('90 seconds', '95 seconds'));
+  const nextBody = body.map((text, ordinal) =>
+    badProtectedPreview
+      ? ordinal === 0
+        ? 'The initial fixture used a 30-second timeout.'
+        : text
+      : text.replace('90 seconds', '95 seconds'),
+  );
   const nextManifest = {
     ...manifest,
     version: 2,
@@ -64,7 +77,7 @@ async function fixture(
     `topic_maintenance: ${JSON.stringify(nextManifest)}\n\n${nextBody.join('\n\n')}`;
   const reviewId = 'review-fixture',
     digest = 'a'.repeat(64);
-  await writeFile(join(repository, 'config.ts'), 'export const timeoutSeconds = 95;\n');
+  await writeFile(join(repository, 'config.ts'), `export const timeoutSeconds = ${badProtectedPreview ? 90 : 95};\n`);
   await writeFile(
     join(home, 'study-state.json'),
     JSON.stringify({
@@ -94,7 +107,41 @@ async function fixture(
   );
   const commands: string[][] = [];
   let currentAccepted = accepted;
-  let previewRevision = 0;
+  const generation = {
+    model: 'local',
+    modelVersion: `actual-v1:${'b'.repeat(64)};maxTokens=4000;seed=0`,
+    promptVersion: 'actual-prompt-v1',
+    attempts: 2,
+    usage: {status: 'unavailable'},
+  };
+  type Review = {
+    reviewId: string;
+    revision: number;
+    project: string;
+    candidates: {candidateId: string; state: string}[];
+    maintenance: {
+      basis: {targetUri: string; observationRevision: string};
+      proposal: {body: string; draft: {outcome: string}};
+      generation: typeof generation;
+    };
+    auditEvents: {action: string; revision: number; candidateId: string; reviewId: string}[];
+    maintenanceApproval?: {stage: string; preview: {content: string; approvalDigest: string}};
+  };
+  let review: Review = {
+    reviewId,
+    revision: startingRevision,
+    project: 'fixture',
+    candidates: [{candidateId: `${reviewId}-1`, state: 'pending'}],
+    maintenance: {
+      basis: {targetUri: 'threadnote://fixture', observationRevision: 'new'},
+      proposal: {body: body.join('\n\n'), draft: {outcome}},
+      generation,
+    },
+    auditEvents: [],
+  };
+  let draftCount = 0;
+  let lastDraftSource = '';
+
   const ports = {
     execute: async (command: readonly string[]) => {
       commands.push([...command]);
@@ -105,29 +152,67 @@ async function fixture(
       else if (command[1] === 'read') stdout = currentAccepted;
       else if (command.includes('brief'))
         stdout = 'THREADNOTE BRIEF\nState: fresh\nCoverage: declared-only\nconfig.ts: current timeout 95 seconds';
-      else if (command.includes('draft'))
-        stdout = JSON.stringify({
-          reviewId,
-          revision: 1,
-          maintenance: {
-            proposal: {body: body.join('\n\n'), draft: {outcome}},
-            generation: {
-              model: 'local',
-              modelVersion: `actual-v1:${'b'.repeat(64)};maxTokens=4000;seed=0`,
-              promptVersion: 'actual-prompt-v1',
-              attempts: 2,
-              usage: {status: 'unavailable'},
-            },
-          },
-        });
-      else if (command.includes('draft-defer')) stdout = JSON.stringify({revision: 3});
-      else if (command.includes('draft-resume')) stdout = JSON.stringify({revision: 4});
-      else if (command.includes('draft-preview'))
-        stdout = JSON.stringify({
-          revision: ++previewRevision === 1 ? 2 : 5,
-          maintenanceApproval: {preview: {content: preview, approvalDigest: digest}},
-        });
-      else if (command.includes('draft-apply')) {
+      else if (command.includes('draft')) {
+        const source =
+          (await readFile(join(repository, 'config.ts'), 'utf8')) +
+          (await readFile(join(repository, 'health.ts'), 'utf8').catch(() => ''));
+        if (draftCount > 0 && review.candidates[0].state === 'pending') {
+          exitCode = 1;
+          stderr = 'A reviewed topic preview is pending. Resolve it before regenerating.';
+        } else if (draftCount > 0 && review.candidates[0].state === 'rejected' && source === lastDraftSource) {
+          exitCode = 1;
+          stderr = 'This exact topic evidence was rejected. A material change is required before redrafting.';
+        } else {
+          if (draftCount > 0)
+            review = {
+              ...review,
+              revision: review.revision + 1,
+              candidates: [{candidateId: `${reviewId}-1`, state: 'pending'}],
+              maintenanceApproval: undefined,
+            };
+          draftCount++;
+          lastDraftSource = source;
+          stdout = JSON.stringify(review);
+        }
+      } else if (command.includes('draft-view')) stdout = JSON.stringify(review);
+      else if (command.includes('draft-reject')) {
+        if (
+          Number(command[command.indexOf('--revision') + 1]) !== review.revision ||
+          command[command.indexOf('--case-id') + 1] !== 'case-fixture' ||
+          review.candidates[0].state !== 'pending'
+        ) {
+          exitCode = 1;
+          stderr = 'Exact pending review revision/case required.';
+        } else {
+          review = {
+            ...review,
+            revision: review.revision + 1,
+            candidates: [{candidateId: `${reviewId}-1`, state: 'rejected'}],
+            maintenanceApproval: undefined,
+          };
+          review.auditEvents.push({
+            action: 'reject',
+            revision: review.revision,
+            candidateId: `${reviewId}-1`,
+            reviewId,
+          });
+          stdout = JSON.stringify(review);
+        }
+      } else if (command.includes('draft-defer') || command.includes('draft-resume')) {
+        review = {
+          ...review,
+          revision: review.revision + 1,
+          candidates: [{candidateId: `${reviewId}-1`, state: command.includes('draft-defer') ? 'deferred' : 'pending'}],
+        };
+        stdout = JSON.stringify(review);
+      } else if (command.includes('draft-preview')) {
+        review = {
+          ...review,
+          revision: review.revision + 1,
+          maintenanceApproval: {stage: 'preview', preview: {content: preview, approvalDigest: digest}},
+        };
+        stdout = JSON.stringify(review);
+      } else if (command.includes('draft-apply')) {
         if (
           !command.includes('--approved') ||
           applyResponse === 'unrelated-error' ||
@@ -156,7 +241,19 @@ async function fixture(
             },
           });
         }
-      } else if (command.includes('run'))
+      } else if (command.includes('status'))
+        stdout = JSON.stringify({
+          cases: [
+            {
+              caseId: 'case-fixture',
+              family: 'topic-maintenance',
+              project: 'fixture',
+              slot: 'declared-support',
+              subjectUri: 'threadnote://fixture',
+            },
+          ],
+        });
+      else if (command.includes('run'))
         stdout = JSON.stringify({
           state: 'needs-decision',
           cases: [
@@ -194,6 +291,7 @@ async function fixture(
     directory,
     repository,
     accepted,
+    getReview: () => review,
     commands,
     request: {
       version: 1 as const,
@@ -345,6 +443,9 @@ describe('native public CLI longitudinal contract', () => {
         expect(result.model?.promptVersion).toBe('actual-prompt-v1');
         expect(result.model?.attempts).toBe(2);
         expect(result.promptHash).toBeNull();
+        expect(value.commands.filter(command => command.includes('draft-reject'))).toHaveLength(1);
+        expect(value.getReview().candidates[0].state).toBe('rejected');
+        expect(value.getReview().maintenanceApproval).toBeUndefined();
       } finally {
         await rm(value.directory, {recursive: true, force: true});
       }
@@ -359,6 +460,8 @@ describe('native public CLI longitudinal contract', () => {
         expect(result.status).toBe(response === 'preview-write' ? 'observed' : 'failed');
         expect(result.accepted).toBe(response === 'preview-write');
         expect(result.approved).toBe(response === 'preview-write');
+        if (response === 'preview-write')
+          expect(value.commands.some(command => command.includes('draft-reject'))).toBe(false);
       } finally {
         await rm(value.directory, {recursive: true, force: true});
       }
@@ -374,6 +477,7 @@ describe('native public CLI longitudinal contract', () => {
       expect(result.actualClass).not.toBe('stale-conflict');
       expect(await readFile(join(value.repository, 'config.ts'), 'utf8')).toContain('timeoutSeconds = 90');
       expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+      expect(value.getReview().candidates[0].state).toBe('rejected');
     } finally {
       await rm(value.directory, {recursive: true, force: true});
     }
@@ -386,6 +490,7 @@ describe('native public CLI longitudinal contract', () => {
       expect(result.status).toBe('observed');
       expect(result.actualClass).toBe('stale-conflict');
       expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+      expect(value.getReview().candidates[0].state).toBe('rejected');
     } finally {
       await rm(value.directory, {recursive: true, force: true});
     }
@@ -467,4 +572,338 @@ describe('native public CLI longitudinal contract', () => {
     expect(present).not.toContain('SECRET-GOLD');
     expect(missing).not.toContain('SECRET-GOLD');
   });
+});
+
+it('publicly rejects the exact prepared revision after a bad preview and admits the next material source change', async () => {
+  const value = await fixture(8, 'propose-update', 'written', 9, true);
+  try {
+    const first = await runTopicStudyNativeAdapter(value.request, value.ports);
+    expect(first.status).toBe('failed');
+    expect(first.reason).toBe('Independent protected-content/current-value check rejected draft.');
+    expect(first.draftAttempted).toBe(true);
+    expect(first.draftCompleted).toBe(true);
+    expect(first.computeMilliseconds).toBe(1);
+    expect(first.accepted).toBe(false);
+    const rejected = value.commands.find(command => command.includes('draft-reject'));
+    expect(rejected?.[rejected.indexOf('--revision') + 1]).toBe('10');
+    expect(rejected?.[rejected.indexOf('--case-id') + 1]).toBe('case-fixture');
+    const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+    expect(state.reviewRevision).toBe(11);
+    expect(first.targetBeforeHash).toBe(first.targetAfterHash);
+    await writeFile(join(value.repository, 'health.ts'), 'export const title = "material change";\n');
+    const second = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, index: 9, id: 'material-change'}},
+      {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          if (!command.includes('run')) return response;
+          const result = JSON.parse(response.stdout);
+          return {
+            ...response,
+            stdout: JSON.stringify({
+              ...result,
+              cases: result.cases.map((item: object) => ({...item, evidenceRevision: 'material-two'})),
+            }),
+          };
+        },
+      },
+    );
+    expect(second.draftCompleted).toBe(true);
+    expect(value.commands.filter(command => command.includes('draft'))).toHaveLength(2);
+    expect(second.reason).not.toBe('Draft generation failed.');
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it('fails closed when public review cleanup fails instead of repeating blocked model requests', async () => {
+  const value = await fixture(8, 'propose-update', 'written', 9, true);
+  try {
+    const ports = {
+      ...value.ports,
+      execute: async (command: readonly string[]) =>
+        command.includes('draft-reject')
+          ? {stdout: '', stderr: 'cleanup failed', exitCode: 1, elapsed: 1}
+          : value.ports.execute(command),
+    };
+    const first = await runTopicStudyNativeAdapter(value.request, ports);
+    expect(first.status).toBe('failed');
+    expect(first.reason).toContain('precondition failure');
+    expect(topicStudyPreconditionFailedV1(first)).toBe(true);
+    expect(first.reason).toContain('Independent protected-content/current-value check rejected draft.');
+    expect(first.draftCompleted).toBe(true);
+    expect(first.computeMilliseconds).toBe(1);
+    const count = value.commands.length;
+    const next = await runTopicStudyNativeAdapter({...value.request, event: {...value.request.event, index: 9}}, ports);
+    expect(next.reason).toContain('precondition failure');
+    expect(value.commands).toHaveLength(count);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it('closes safe non-applicable reviews at exactly the next revision for bounded arbitrary revisions', async () => {
+  await fc.assert(
+    fc.asyncProperty(
+      fc.integer({min: 1, max: 1_000_000}),
+      fc.constantFrom('policy-conflict', 'insufficient-evidence'),
+      async (revision, outcome) => {
+        const value = await fixture(17, outcome, 'written', revision);
+        try {
+          const result = await runTopicStudyNativeAdapter(value.request, value.ports);
+          expect(result.status).toBe('observed');
+          expect(result.accepted).toBe(false);
+          expect(value.getReview().revision).toBe(revision + 1);
+          expect(value.getReview().candidates[0].state).toBe('rejected');
+          expect(value.getReview().maintenanceApproval).toBeUndefined();
+          const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+          expect(state.reviewRevision).toBe(revision + 1);
+          expect(state.accepted).toBe(value.accepted);
+          expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+          expect(result.draftCompleted).toBe(true);
+          expect(result.computeMilliseconds).toBe(1);
+        } finally {
+          await rm(value.directory, {recursive: true, force: true});
+        }
+      },
+    ),
+    {numRuns: 12},
+  );
+});
+
+it.each(['generation-receipt', 'unknown-proposal', 'preview-refusal', 'apply-refusal', 'resumed-check'] as const)(
+  'closes a produced review after %s failure without crediting its unsuccessful attempt',
+  async failure => {
+    const value = await fixture(failure === 'resumed-check' ? 28 : 37, 'propose-update', 'written', 9);
+    let previews = 0;
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          if (failure === 'preview-refusal' && command.includes('draft-preview'))
+            return {stdout: '', stderr: 'preview refused', exitCode: 1, elapsed: 1};
+          if (failure === 'apply-refusal' && command.includes('draft-apply') && command.includes('--approved'))
+            return {stdout: '', stderr: 'apply refused', exitCode: 1, elapsed: 1};
+          const response = await value.ports.execute(command);
+          if (command.includes('draft') && ['generation-receipt', 'unknown-proposal'].includes(failure)) {
+            const review = JSON.parse(response.stdout);
+            if (failure === 'generation-receipt') review.maintenance.generation.modelVersion = 'unverified';
+            else review.maintenance.proposal = {};
+            return {...response, stdout: JSON.stringify(review)};
+          }
+          if (failure === 'resumed-check' && command.includes('draft-preview') && ++previews === 2) {
+            const review = JSON.parse(response.stdout);
+            review.maintenanceApproval.preview.content = review.maintenanceApproval.preview.content.replace(
+              '\n\nintro\n\n',
+              '\n\ncorrupted protected intro\n\n',
+            );
+            return {...response, stdout: JSON.stringify(review)};
+          }
+          return response;
+        },
+      });
+      expect(result.status).toBe('failed');
+      expect(topicStudyPreconditionFailedV1(result)).toBe(false);
+      expect(result.draftAttempted).toBe(true);
+      expect(result.draftCompleted).toBe(true);
+      expect(result.accepted).toBe(false);
+      expect(result.approved).toBe(false);
+      expect(result.computeMilliseconds).toBe(1);
+      expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+      expect(value.getReview().candidates[0].state).toBe('rejected');
+      const rejection = value.commands.filter(command => command.includes('draft-reject'));
+      expect(rejection).toHaveLength(1);
+      const expectedRevision =
+        failure === 'resumed-check'
+          ? 13
+          : ['generation-receipt', 'unknown-proposal', 'preview-refusal'].includes(failure)
+            ? 9
+            : 10;
+      expect(rejection[0][rejection[0].indexOf('--revision') + 1]).toBe(String(expectedRevision));
+      expect(value.getReview().revision).toBe(expectedRevision + 1);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it('keeps the authored rejection as one exact public decision without applying', async () => {
+  const value = await fixture(27, 'propose-update', 'written', 9);
+  try {
+    const result = await runTopicStudyNativeAdapter(value.request, value.ports);
+    expect(result.status).toBe('observed');
+    expect(result.accepted).toBe(false);
+    expect(value.commands.filter(command => command.includes('draft-reject'))).toHaveLength(1);
+    expect(value.commands.some(command => command.includes('draft-apply') && command.includes('--approved'))).toBe(
+      false,
+    );
+    expect(value.getReview().revision).toBe(11);
+    expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it.each(['draft', 'draft-preview'] as const)(
+  'stops when a successful %s response cannot identify its exact produced revision',
+  async action => {
+    const value = await fixture(8, 'propose-update', 'written', 9, true);
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          return command.includes(action) ? {...response, stdout: '{invalid json'} : response;
+        },
+      });
+      expect(topicStudyPreconditionFailedV1(result)).toBe(true);
+      expect(result.accepted).toBe(false);
+      expect(result.draftAttempted).toBe(true);
+      expect(result.draftCompleted).toBe(action === 'draft-preview');
+      expect(result.computeMilliseconds).toBe(1);
+      expect(result.commandReceiptHashes.length).toBeGreaterThan(0);
+      expect(value.commands.some(command => command.includes('draft-reject'))).toBe(false);
+      expect(value.getReview().candidates[0].state).toBe('pending');
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it.each(['case', 'revision', 'terminal-state', 'audit', 'approval'] as const)(
+  'stops on an unverifiable %s cleanup receipt without erasing the failed draft',
+  async mismatch => {
+    const value = await fixture(8, 'propose-update', 'written', 9, true);
+    let generations = 0;
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          if (mismatch === 'case' && command.includes('status')) {
+            const status = JSON.parse(response.stdout);
+            status.cases[0].subjectUri = 'threadnote://other';
+            return {...response, stdout: JSON.stringify(status)};
+          }
+          if (command.includes('draft-reject') && mismatch !== 'case') {
+            const review = JSON.parse(response.stdout);
+            if (mismatch === 'revision') review.revision++;
+            else if (mismatch === 'terminal-state') review.candidates[0].state = 'pending';
+            else if (mismatch === 'audit') review.auditEvents[0].candidateId = 'other-candidate';
+            else review.maintenanceApproval = {stage: 'preview'};
+            return {...response, stdout: JSON.stringify(review)};
+          }
+          return response;
+        },
+        generate: async () => {
+          generations++;
+          return value.ports.generate();
+        },
+      });
+      expect(topicStudyPreconditionFailedV1(result)).toBe(true);
+      expect(result.draftCompleted).toBe(true);
+      expect(result.computeMilliseconds).toBe(1);
+      expect(result.commandReceiptHashes.length).toBeGreaterThan(0);
+      expect(result.accepted).toBe(false);
+      expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+      expect(generations).toBe(0);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it('returns the failed attempt for durable runner capture even when reviewer state cannot be persisted', async () => {
+  const value = await fixture(17, 'policy-conflict', 'written', 9);
+  try {
+    const result = await runTopicStudyNativeAdapter(value.request, {
+      ...value.ports,
+      execute: async command => {
+        const response = await value.ports.execute(command);
+        if (command.includes('draft')) {
+          const path = join(value.request.home, 'study-state.json');
+          await rm(path);
+          await mkdir(path);
+        }
+        return response;
+      },
+    });
+    expect(topicStudyPreconditionFailedV1(result)).toBe(true);
+    expect(result.draftAttempted).toBe(true);
+    expect(result.draftCompleted).toBe(true);
+    expect(result.computeMilliseconds).toBe(1);
+    expect(result.commandReceiptHashes.length).toBeGreaterThan(0);
+    expect(result.accepted).toBe(false);
+    expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+    expect(value.getReview().candidates[0].state).toBe('rejected');
+    expect(result.reason).toContain('could not be persisted');
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it('durably stops after a successful public draft whose command trace cannot be appended', async () => {
+  const value = await fixture(24, 'propose-update', 'written', 9);
+  const tracePath = join(value.request.home, 'command-trace.jsonl');
+  let generations = 0;
+  try {
+    const ports = {
+      ...value.ports,
+      execute: async (command: readonly string[]) => {
+        const response = await value.ports.execute(command);
+        if (command.includes('draft')) {
+          await rm(tracePath);
+          await mkdir(tracePath);
+        }
+        return response;
+      },
+      generate: async () => {
+        generations++;
+        return value.ports.generate();
+      },
+    };
+    const result = await runTopicStudyNativeAdapter(value.request, ports);
+    expect(topicStudyPreconditionFailedV1(result)).toBe(true);
+    expect(result.draftAttempted).toBe(true);
+    expect(result.accepted).toBe(false);
+    expect(result.computeMilliseconds).toBe(1);
+    expect(value.commands.at(-1)).toContain('draft');
+    expect(generations).toBe(0);
+    const evidence = JSON.parse(await readFile(join(value.request.home, 'command-trace-failure.json'), 'utf8'));
+    expect(evidence.trace.command).toContain('draft');
+    expect(evidence.trace).toMatchObject({exitCode: 0, elapsed: 1});
+    expect(JSON.parse(evidence.trace.stdout)).toMatchObject({reviewId: 'review-fixture', revision: 9});
+    expect(result.commandReceiptHashes.at(-1)).toBe(evidence.receiptHash);
+    const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+    expect(state.preconditionFailure).toBe(result.reason);
+    expect(state.reviewRevision).toBeNull();
+    expect(value.getReview().candidates[0].state).toBe('pending');
+    const corpus = parseTopicStudyCorpusJsonV1(
+      await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
+    );
+    const row = topicStudyLedgerRowV1({
+      corpusHash: topicStudyCorpusHashV1(corpus),
+      runNonce: 'trace-failure',
+      arm: value.request.arm,
+      repetition: 1,
+      eventIndex: value.request.event.index,
+      eventId: value.request.event.id,
+      previousHash: null,
+      observation: result,
+    });
+    const ledgerPath = join(value.directory, 'outcomes.jsonl');
+    expect(await appendTopicStudySlotV1(ledgerPath, row)).toBe(true);
+    expect(await readFile(ledgerPath, 'utf8')).toBe(JSON.stringify(row) + '\n');
+    const count = value.commands.length;
+    const next = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, index: 25}},
+      ports,
+    );
+    expect(topicStudyPreconditionFailedV1(next)).toBe(true);
+    expect(value.commands).toHaveLength(count);
+    expect(generations).toBe(0);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
 });

@@ -8,6 +8,8 @@ import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertTopicStudyLedgerV1,
+  TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
+  topicStudyPreconditionFailedV1,
   parseTopicStudyGateInputV1,
   parseTopicStudyCorpusJsonV1,
   summarizeTopicStudyV1,
@@ -209,6 +211,15 @@ async function readGateEvidence(path: string | null): Promise<TopicStudyGateInpu
         downstreamNoRegression: null,
       }
     : parseTopicStudyGateInputV1(JSON.parse(await readFile(path, 'utf8')) as unknown);
+}
+
+/** The failed slot must be durable before its precondition failure stops the study. */
+export async function appendTopicStudySlotV1(
+  path: string,
+  row: ReturnType<typeof topicStudyLedgerRowV1>,
+): Promise<boolean> {
+  await appendFile(path, JSON.stringify(row) + '\n');
+  return topicStudyPreconditionFailedV1(row.observation);
 }
 
 async function main() {
@@ -487,12 +498,22 @@ async function main() {
               });
               assertTopicStudyLedgerV1([...rows, proposed].map(row => JSON.stringify(row)).join('\n'), corpus);
               observation = candidate;
-            } else observation = topicStudyUnavailableObservationV1(event, `Adapter exited ${result.exitCode}.`);
+            } else
+              observation = {
+                ...topicStudyUnavailableObservationV1(
+                  event,
+                  `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Adapter exited ${result.exitCode}; its public review lifecycle could not be verified.`,
+                ),
+                status: 'failed',
+              };
           } catch (error) {
-            observation = topicStudyUnavailableObservationV1(
-              event,
-              error instanceof Error ? error.message : 'Adapter failed.',
-            );
+            observation = {
+              ...topicStudyUnavailableObservationV1(
+                event,
+                `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}${error instanceof Error ? error.message : 'Adapter failed.'} Its public review lifecycle could not be verified.`,
+              ),
+              status: 'failed',
+            };
           }
         }
         await assertTopicStudyRuntime(runtime);
@@ -519,7 +540,29 @@ async function main() {
         });
         rows.push(row);
         previousHash = row.hash;
-        await appendFile(ledgerPath, JSON.stringify(row) + '\n');
+        if (await appendTopicStudySlotV1(ledgerPath, row)) {
+          const summary = summarizeTopicStudyV1(
+            rows,
+            corpus,
+            await readGateEvidence(options.gateEvidence),
+            options.repetitions,
+          );
+          await writeFile(
+            join(runDirectory, 'summary.json'),
+            JSON.stringify({executionStatus: 'precondition-failed', reason: observation.reason, ...summary}, null, 2),
+          );
+          process.stdout.write(
+            JSON.stringify({
+              runDirectory,
+              corpusHash,
+              executionStatus: 'precondition-failed',
+              reason: observation.reason,
+              ...summary,
+            }) + '\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
       }
     }
   }
@@ -535,4 +578,4 @@ async function main() {
   process.stdout.write(JSON.stringify({runDirectory, corpusHash, ...summary}) + '\n');
 }
 
-await main();
+if (import.meta.main) await main();

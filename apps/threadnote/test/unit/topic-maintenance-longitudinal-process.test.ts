@@ -18,7 +18,9 @@ import {
   topicStudyCorpusHashV1,
   topicStudyLedgerRowV1,
   topicStudyUnavailableObservationV1,
+  TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
 } from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
+import {appendTopicStudySlotV1} from '../../../../scripts/run-topic-maintenance-longitudinal.js';
 import {
   readBoundedChildOutput,
   topicStudyEnvironment,
@@ -33,6 +35,59 @@ function stream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
     },
   });
 }
+
+it('persists the failed attempt and receipts before stopping subsequent slots', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'topic-study-stop-'));
+  try {
+    const corpus = parseTopicStudyCorpusJsonV1(
+      await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
+    );
+    const ledgerPath = join(directory, 'outcomes.jsonl');
+    let slots = 0;
+    for (const event of corpus.events) {
+      slots++;
+      const observation = {
+        ...topicStudyUnavailableObservationV1(
+          event,
+          `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Public rejection failed.`,
+        ),
+        status: 'failed' as const,
+        draftAttempted: true,
+        draftCompleted: true,
+        computeMilliseconds: 321,
+        commandReceiptHashes: ['a'.repeat(64)],
+      };
+      const row = topicStudyLedgerRowV1({
+        corpusHash: topicStudyCorpusHashV1(corpus),
+        runNonce: 'stop-contract',
+        arm: 'maintained-local',
+        repetition: 1,
+        eventIndex: event.index,
+        eventId: event.id,
+        previousHash: null,
+        observation,
+      });
+      if (await appendTopicStudySlotV1(ledgerPath, row)) {
+        expect(await readFile(ledgerPath, 'utf8')).toBe(JSON.stringify(row) + '\n');
+        break;
+      }
+    }
+    expect(slots).toBe(1);
+    const [stored] = (await readFile(ledgerPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(stored.observation).toMatchObject({
+      status: 'failed',
+      draftCompleted: true,
+      accepted: false,
+      computeMilliseconds: 321,
+      commandReceiptHashes: ['a'.repeat(64)],
+    });
+  } finally {
+    await rm(directory, {recursive: true, force: true});
+  }
+});
 
 it('refuses model execution during replay and rejects a mismatched manifest without rewriting raw observations', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'topic-study-replay-'));

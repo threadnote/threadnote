@@ -7,6 +7,8 @@ import {join} from 'node:path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   topicStudyHash,
+  TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
+  topicStudyPreconditionFailedV1,
   classifyTopicStudyProposalV1,
   gradeTopicStudyAnswerV1,
   measureTopicStudyPreservationV1,
@@ -61,6 +63,7 @@ interface State {
   readonly lastEvidenceRevision: string | null;
   readonly reviewId: string | null;
   readonly reviewRevision: number | null;
+  readonly preconditionFailure?: string;
   readonly naiveBody: string;
   readonly manualUri: string | null;
   readonly manualBody: string;
@@ -99,9 +102,14 @@ export async function runTopicStudyNativeAdapter(
   const manifest = JSON.parse(await readFile(request.manifestPath, 'utf8')) as RunManifest;
   const statePath = join(request.home, 'study-state.json');
   let state: State | null = request.event.index === 1 ? null : (JSON.parse(await readFile(statePath, 'utf8')) as State);
+  if (state?.preconditionFailure)
+    return {...topicStudyUnavailableObservationV1(request.event, state.preconditionFailure), status: 'failed'};
   const receipts: string[] = [];
   const observationUnavailable = new Error('Maintenance current-event observation unavailable within bounded turns.');
   const tracePath = join(request.home, 'command-trace.jsonl');
+  const commandTrace: {failure: {command: readonly string[]; result: CommandResult; reason: string} | null} = {
+    failure: null,
+  };
   const env = topicStudyCommitEnvironment(
     topicStudyEnvironment({
       ...process.env,
@@ -112,14 +120,29 @@ export async function runTopicStudyNativeAdapter(
     request.event.index,
     true,
   );
-  const run = async (command: readonly string[], input?: string) => {
-    if (ports.execute) {
-      const result = await ports.execute(command, input);
-      const trace = {eventIndex: request.event.index, command, input: input ?? null, ...result};
-      receipts.push(topicStudyHash('topic-study-command-receipt-v1', trace));
+  const recordCommand = async (command: readonly string[], result: CommandResult, input?: string) => {
+    const trace = {eventIndex: request.event.index, command, input: input ?? null, ...result};
+    const receiptHash = topicStudyHash('topic-study-command-receipt-v1', trace);
+    receipts.push(receiptHash);
+    try {
       await appendFile(tracePath, JSON.stringify(trace) + '\n');
-      return result;
+    } catch {
+      let reason = `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Command trace persistence failed after exit ${result.exitCode}, elapsed ${result.elapsed}ms, receipt ${receiptHash}.`;
+      try {
+        // Child output is bounded by MAX_COMMAND_BYTES; retain the returned result without replaying the command.
+        await writeFile(join(request.home, 'command-trace-failure.json'), JSON.stringify({receiptHash, trace}));
+        reason += ' Returned command evidence: command-trace-failure.json.';
+      } catch {
+        reason += ' Returned command evidence could not be persisted.';
+      }
+      commandTrace.failure = {command, result, reason};
+      throw new Error(reason);
     }
+    return result;
+  };
+  const run = async (command: readonly string[], input?: string) => {
+    if (commandTrace.failure) throw new Error(commandTrace.failure.reason);
+    if (ports.execute) return recordCommand(command, await ports.execute(command, input), input);
     const child = Bun.spawn([...command], {
       cwd: request.repository,
       env,
@@ -136,10 +159,7 @@ export async function runTopicStudyNativeAdapter(
         child.exited,
       ]);
       const elapsed = Math.round(performance.now() - started);
-      const trace = {eventIndex: request.event.index, command, input: input ?? null, stdout, stderr, exitCode, elapsed};
-      receipts.push(topicStudyHash('topic-study-command-receipt-v1', trace));
-      await appendFile(tracePath, JSON.stringify(trace) + '\n');
-      return {stdout, stderr, exitCode, elapsed};
+      return await recordCommand(command, {stdout, stderr, exitCode, elapsed}, input);
     } finally {
       clearTimeout(timer);
     }
@@ -197,7 +217,7 @@ export async function runTopicStudyNativeAdapter(
   };
   let postReviewCompleted = false;
   const finishSourceTimeline = async () => {
-    if (postReviewCompleted) return;
+    if (postReviewCompleted || commandTrace.failure) return;
     const changed = await applyTopicStudySourceChanges(request.repository, request.event.postReviewChanges);
     if (changed) {
       await commit(`${request.event.id}-post-review`);
@@ -210,6 +230,152 @@ export async function runTopicStudyNativeAdapter(
     const index = read.stdout.indexOf('MEMORY\n');
     if (index < 0) throw new Error('CLI read had no canonical MEMORY section.');
     return read.stdout.slice(index).trim();
+  };
+  type PublicReview = {
+    reviewId: string;
+    revision: number;
+    project: string;
+    candidates: readonly {candidateId: string; state: string}[];
+    maintenance: {basis: {targetUri: string; observationRevision: string}};
+    auditEvents?: readonly {action: string; revision: number; candidateId: string; reviewId: string}[];
+    maintenanceApproval?: {stage: string};
+  };
+  let producedResponse = false;
+  let producedReview: {
+    reviewId: string;
+    revision: number;
+    candidateId: string | null;
+    basisHash: string | null;
+  } | null = null;
+  let acceptedBaseline: string | null = null;
+  let reviewClosed = false;
+  let cleanupError: string | null = null;
+  let cleanupReadback: string | null = null;
+  let cleanupMilliseconds = 0;
+  let failureEvidence: () => Partial<TopicStudyObservationV1> = () => ({});
+  const persistState = async () => {
+    if (!state) return;
+    try {
+      await writeFile(statePath, JSON.stringify(state));
+    } catch {
+      throw new Error(`${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Could not persist the exact public review state.`);
+    }
+  };
+  const recordReviewRevision = async (reviewId: string, revision: number) => {
+    if (
+      !state ||
+      !producedReview ||
+      typeof reviewId !== 'string' ||
+      !reviewId ||
+      reviewId !== producedReview.reviewId ||
+      !Number.isSafeInteger(revision) ||
+      revision < 1
+    )
+      throw new Error('Produced review revision is unavailable or changed.');
+    producedReview = {...producedReview, revision};
+    state = {...state, reviewId, reviewRevision: revision};
+    await persistState();
+  };
+  const closeProducedReview = async () => {
+    if (!producedResponse || reviewClosed || cleanupError || commandTrace.failure) return;
+    const cleanupStarted = performance.now();
+    try {
+      const selected = producedReview;
+      const target = state;
+      if (
+        !selected ||
+        !target ||
+        acceptedBaseline === null ||
+        selected.candidateId === null ||
+        selected.basisHash === null
+      )
+        throw new Error('Cannot identify the exact produced review and its accepted baseline.');
+      const sameReview = (review: PublicReview, revision: number, candidateState?: string) =>
+        review.reviewId === selected.reviewId &&
+        review.revision === revision &&
+        review.project === 'fixture' &&
+        review.candidates?.length === 1 &&
+        review.candidates[0].candidateId === selected.candidateId &&
+        (candidateState === undefined || review.candidates[0].state === candidateState) &&
+        review.maintenance?.basis?.targetUri === target.uri &&
+        topicStudyHash('topic-study-review-basis-v1', review.maintenance.basis) === selected.basisHash;
+      const readReview = async () =>
+        JSON.parse(
+          (await cli(['context', 'maintain', '--action', 'draft-view', '--review-id', selected.reviewId, '--json']))
+            .stdout,
+        ) as PublicReview;
+      const verifyAccepted = async () => {
+        cleanupReadback = await readAccepted(target.uri);
+        if (cleanupReadback !== acceptedBaseline)
+          throw new Error('Accepted content changed during the non-accepted review.');
+      };
+      const review = await readReview();
+      if (!sameReview(review, selected.revision))
+        throw new Error('Produced review identity, basis or exact revision changed before rejection.');
+      const status = JSON.parse(
+        (await cli(['context', 'maintain', '--action', 'status', '--case-id', target.caseId, '--json'])).stdout,
+      ) as {
+        cases?: readonly {caseId: string; family: string; project: string; slot: string; subjectUri: string}[];
+      };
+      const item = status.cases?.find(item => item.caseId === target.caseId);
+      if (
+        !item ||
+        item.family !== 'topic-maintenance' ||
+        item.project !== review.project ||
+        item.slot !== 'declared-support' ||
+        item.subjectUri !== target.uri
+      )
+        throw new Error('Produced review no longer matches the exact topic case.');
+      await verifyAccepted();
+      if (
+        review.candidates[0].state !== 'pending' &&
+        !(review.candidates[0].state === 'conflict' && review.maintenanceApproval?.stage === 'conflict')
+      )
+        throw new Error('Non-accepted review is not safely rejectable through the public decision API.');
+      const decision = await cli([
+        'context',
+        'maintain',
+        '--action',
+        'draft-reject',
+        '--review-id',
+        selected.reviewId,
+        '--revision',
+        String(selected.revision),
+        '--case-id',
+        target.caseId,
+        '--json',
+      ]);
+      const rejected = JSON.parse(decision.stdout) as PublicReview;
+      const revision = selected.revision + 1;
+      const terminalMatches = (value: PublicReview) => {
+        const audit = value.auditEvents?.at(-1);
+        return (
+          sameReview(value, revision, 'rejected') &&
+          audit?.action === 'reject' &&
+          audit.revision === revision &&
+          audit.reviewId === selected.reviewId &&
+          audit.candidateId === selected.candidateId &&
+          (review.candidates[0].state !== 'pending' || value.maintenanceApproval === undefined)
+        );
+      };
+      if (!terminalMatches(rejected))
+        throw new Error('Public rejection did not return the exact terminal rejected review revision.');
+      await recordReviewRevision(selected.reviewId, revision);
+      if (!terminalMatches(await readReview())) throw new Error('Public rejection terminal readback changed.');
+      await verifyAccepted();
+      reviewClosed = true;
+    } catch (error) {
+      cleanupError = error instanceof Error ? error.message : 'Public review rejection failed.';
+      if (state) {
+        try {
+          cleanupReadback = await readAccepted(state.uri);
+        } catch {
+          cleanupReadback = null;
+        }
+      }
+    } finally {
+      cleanupMilliseconds += Math.round(performance.now() - cleanupStarted);
+    }
   };
   const maintain = async (memoryId: string) => {
     const requestedAt = Date.now();
@@ -339,6 +505,7 @@ export async function runTopicStudyNativeAdapter(
     let sourceCommit = await git(['rev-parse', 'HEAD']);
     let sourceTreeHash = await topicStudySourceTreeHash(request.repository);
     const before = await readAccepted(state.uri);
+    acceptedBaseline = before;
     const evaluatedBefore =
       request.arm === 'naive-local'
         ? state.naiveBody
@@ -367,6 +534,26 @@ export async function runTopicStudyNativeAdapter(
     let status: TopicStudyObservationV1['status'] = 'observed';
     let reason: string | null = null;
     let faultExecuted = false;
+    failureEvidence = () => ({
+      sourceCommit,
+      sourceTreeHash,
+      targetBeforeHash: sha256HexSync(evaluatedBefore),
+      detected,
+      draftAttempted,
+      draftCompleted,
+      accepted,
+      approved,
+      actualClass,
+      model,
+      promptHash,
+      providerInputTokens,
+      providerOutputTokens,
+      providerChargeMicros,
+      computeMilliseconds,
+      setupMilliseconds,
+      scanMilliseconds,
+      evidenceMilliseconds,
+    });
     const supportedReviewFault = ['source-race', 'reject', 'defer-resume'].includes(request.event.fault);
     if (detected && request.arm.startsWith('maintained') && (request.event.fault === 'none' || supportedReviewFault)) {
       const backend = request.arm === 'maintained-local' ? 'local-ai' : 'effect-ai';
@@ -406,10 +593,13 @@ export async function runTopicStudyNativeAdapter(
             status = 'failed';
             reason = 'Draft generation failed.';
           } else {
+            producedResponse = true;
             const result = JSON.parse(draft.stdout) as {
               reviewId: string;
               revision: number;
+              candidates?: readonly {candidateId: string}[];
               maintenance?: {
+                basis?: {targetUri: string; observationRevision: string};
                 proposal?: unknown;
                 generation?: {
                   usage?: {inputTokens?: number; outputTokens?: number; costMicros?: number};
@@ -421,6 +611,18 @@ export async function runTopicStudyNativeAdapter(
               };
             };
             draftCompleted = true;
+            producedReview = {
+              reviewId: result.reviewId,
+              revision: result.revision,
+              candidateId:
+                result.candidates?.length === 1 && typeof result.candidates[0].candidateId === 'string'
+                  ? result.candidates[0].candidateId
+                  : null,
+              basisHash: result.maintenance?.basis
+                ? topicStudyHash('topic-study-review-basis-v1', result.maintenance.basis)
+                : null,
+            };
+            await recordReviewRevision(result.reviewId, result.revision);
             const generation = result.maintenance?.generation;
             model = {
               backend,
@@ -443,7 +645,6 @@ export async function runTopicStudyNativeAdapter(
             providerInputTokens = generation?.usage?.inputTokens ?? null;
             providerOutputTokens = generation?.usage?.outputTokens ?? null;
             providerChargeMicros = backend === 'local-ai' ? 0 : null;
-            state = {...state, reviewId: result.reviewId, reviewRevision: result.revision};
             const proposalClass = classifyTopicStudyProposalV1(result.maintenance?.proposal);
             if (
               generation?.model !== modelId ||
@@ -488,6 +689,7 @@ export async function runTopicStudyNativeAdapter(
                   revision: number;
                   maintenanceApproval?: {preview?: {content: string; approvalDigest: string}};
                 };
+                await recordReviewRevision(result.reviewId, prepared.revision);
                 const document = prepared.maintenanceApproval?.preview?.content ?? '';
                 const preservation = measureTopicStudyPreservationV1(
                   before,
@@ -535,23 +737,8 @@ export async function runTopicStudyNativeAdapter(
                     status = 'failed';
                     reason = 'Apply without explicit approval was not refused.';
                   } else if (request.event.fault === 'reject') {
-                    const decision = await cli(
-                      [
-                        'context',
-                        'maintain',
-                        '--action',
-                        'draft-reject',
-                        '--review-id',
-                        result.reviewId,
-                        '--revision',
-                        String(prepared.revision),
-                        '--case-id',
-                        state.caseId,
-                        '--json',
-                      ],
-                      false,
-                    );
-                    if (decision.exitCode !== 0) {
+                    await closeProducedReview();
+                    if (cleanupError) {
                       status = 'failed';
                       reason = 'Public reject decision failed.';
                     } else faultExecuted = true;
@@ -577,6 +764,7 @@ export async function runTopicStudyNativeAdapter(
                       reason = 'Public defer decision failed.';
                     } else {
                       const deferredReview = JSON.parse(deferred.stdout) as {revision: number};
+                      await recordReviewRevision(result.reviewId, deferredReview.revision);
                       const resumed = await cli(
                         [
                           'context',
@@ -598,6 +786,7 @@ export async function runTopicStudyNativeAdapter(
                         reason = 'Public resume decision failed.';
                       } else {
                         const resumedReview = JSON.parse(resumed.stdout) as {revision: number};
+                        await recordReviewRevision(result.reviewId, resumedReview.revision);
                         const preparedAgain = await cli(
                           [
                             'context',
@@ -622,6 +811,7 @@ export async function runTopicStudyNativeAdapter(
                             revision: number;
                             maintenanceApproval?: {preview?: {content: string; approvalDigest: string}};
                           };
+                          await recordReviewRevision(result.reviewId, resumedPreview.revision);
                           const resumedContent = resumedPreview.maintenanceApproval?.preview?.content ?? '';
                           const resumedDigest = resumedPreview.maintenanceApproval?.preview?.approvalDigest;
                           if (
@@ -886,6 +1076,7 @@ export async function runTopicStudyNativeAdapter(
       reason = `Fault ${request.event.fault} requires a dedicated execution adapter.`;
       actualClass = null;
     }
+    if (producedResponse && !accepted) await closeProducedReview();
     await finishSourceTimeline();
     sourceCommit = await git(['rev-parse', 'HEAD']);
     sourceTreeHash = await topicStudySourceTreeHash(request.repository);
@@ -915,28 +1106,30 @@ export async function runTopicStudyNativeAdapter(
     let downstreamModel: TopicStudyObservationV1['model'] = null;
     let downstreamPromptHash: string | null = null;
     let retrievalHash: string | null = null;
-    const retrieval = await cli(
-      [
-        'context',
-        'brief',
-        '--cwd',
-        request.repository,
-        '--project',
-        'fixture',
-        '--budget-tokens',
-        '1500',
-        '--detail',
-        'source',
-        '--code-ref',
-        'config.ts',
-        '--code-ref',
-        'health.ts',
-        '--task',
-        'Retrieve accepted context-health topic, current production and staging timeout evidence, historical timeout, review policy, exception preservation and declared dependency coverage.',
-      ],
-      false,
-    );
-    if (retrieval.exitCode !== 0 || !retrieval.stdout.trim()) {
+    const retrieval = cleanupError
+      ? {exitCode: 1, stdout: ''}
+      : await cli(
+          [
+            'context',
+            'brief',
+            '--cwd',
+            request.repository,
+            '--project',
+            'fixture',
+            '--budget-tokens',
+            '1500',
+            '--detail',
+            'source',
+            '--code-ref',
+            'config.ts',
+            '--code-ref',
+            'health.ts',
+            '--task',
+            'Retrieve accepted context-health topic, current production and staging timeout evidence, historical timeout, review policy, exception preservation and declared dependency coverage.',
+          ],
+          false,
+        );
+    if (cleanupError || retrieval.exitCode !== 0 || !retrieval.stdout.trim()) {
       probes.push(
         ...request.event.probes.map(probe => ({
           id: probe.id,
@@ -1011,18 +1204,61 @@ export async function runTopicStudyNativeAdapter(
       adjudication: null,
     };
     state = {...state, accepted: after, lastEvidenceRevision: evidenceRevision};
-    await writeFile(statePath, JSON.stringify(state));
+    await persistState();
   } catch (error) {
-    await finishSourceTimeline();
+    let reason = error instanceof Error ? error.message : 'Native CLI adapter failed.';
+    if (!commandTrace.failure) {
+      try {
+        await finishSourceTimeline();
+      } catch (timelineError) {
+        reason += ` Source timeline completion failed: ${timelineError instanceof Error ? timelineError.message : 'unknown failure'}`;
+      }
+    }
     observation = {
-      ...topicStudyUnavailableObservationV1(
-        request.event,
-        error instanceof Error ? error.message : 'Native CLI adapter failed.',
-      ),
+      ...topicStudyUnavailableObservationV1(request.event, reason),
+      ...failureEvidence(),
+      ...(commandTrace.failure?.command.includes('draft')
+        ? {computeMilliseconds: commandTrace.failure.result.elapsed}
+        : {}),
       status: error === observationUnavailable ? 'unavailable' : 'failed',
       commandReceiptHashes: receipts,
     };
-    if (state) await writeFile(statePath, JSON.stringify(state));
+    try {
+      await persistState();
+    } catch (persistError) {
+      observation = {
+        ...observation,
+        status: 'failed',
+        reason: `${persistError instanceof Error ? persistError.message : TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX} Original outcome: ${reason}`,
+      };
+    }
+  }
+  if (producedResponse && !observation.accepted) {
+    await closeProducedReview();
+    if (cleanupReadback !== null && acceptedBaseline !== null) {
+      observation = {
+        ...observation,
+        targetAfterHash: sha256HexSync(cleanupReadback),
+        ...measureTopicStudyPreservationV1(acceptedBaseline, cleanupReadback, request.event.allowedEditOrdinals),
+      };
+    }
+    if (observation.evidenceMilliseconds !== null)
+      observation = {...observation, evidenceMilliseconds: observation.evidenceMilliseconds + cleanupMilliseconds};
+    if (cleanupError) {
+      const reason = `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}${cleanupError} Original outcome: ${observation.reason ?? observation.actualClass ?? observation.status}`;
+      observation = {...observation, status: 'failed', reason};
+    }
+  }
+  if (topicStudyPreconditionFailedV1(observation) && state) {
+    state = {...state, preconditionFailure: observation.reason!};
+    try {
+      await persistState();
+    } catch {
+      observation = {
+        ...observation,
+        reason: `${observation.reason} The failed state could not be persisted; the runner must stop.`,
+      };
+    }
   }
   return observation;
 }

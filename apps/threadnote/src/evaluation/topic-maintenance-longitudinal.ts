@@ -1510,3 +1510,11 @@ function studyManifestPinsMatch(document: StudyDocument): boolean {
     return false;
   return true;
 }
+
+/** A failed reviewer transition invalidates subsequent longitudinal slots. */
+export const TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX = 'Topic study precondition failure: ';
+export function topicStudyPreconditionFailedV1(observation: TopicStudyObservationV1): boolean {
+  return (
+    observation.status === 'failed' && observation.reason?.startsWith(TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX) === true
+  );
+}
