@@ -29,18 +29,25 @@ export function citationSourceExcerpt(
   source: CodeGraphCitationEvidenceSourceV1,
   provenance: ContextHealthCitationSourceExcerptV1['provenance'],
   supportsCitation: boolean,
-  options: {readonly maximumBytes?: number; readonly maximumLines?: number; readonly startLine?: number},
+  options: {
+    readonly endLine?: number;
+    readonly maximumBytes?: number;
+    readonly maximumLines?: number;
+    readonly startLine?: number;
+  },
 ): ContextHealthCitationSourceExcerptV1 | undefined {
   const content = decodeUtf8(bytes);
   const startLine = options.startLine ?? 1;
+  const endLine = options.endLine;
   const maximumBytes = Math.min(options.maximumBytes ?? 8_192, 32_768);
   const maximumLines = Math.min(options.maximumLines ?? 24, 64);
   if (
     content === undefined ||
-    ![startLine, maximumBytes, maximumLines].every(value => Number.isSafeInteger(value) && value > 0)
+    ![startLine, maximumBytes, maximumLines].every(value => Number.isSafeInteger(value) && value > 0) ||
+    (endLine !== undefined && (!Number.isSafeInteger(endLine) || endLine < startLine))
   )
     return undefined;
-  const lines = content.split(/\r\n|\r|\n|\u2028|\u2029/u).slice(startLine - 1);
+  const lines = content.split(/\r\n|\r|\n|\u2028|\u2029/u).slice(startLine - 1, endLine);
   if (lines.length === 0) return undefined;
   const selected: string[] = [];
   let length = 0;

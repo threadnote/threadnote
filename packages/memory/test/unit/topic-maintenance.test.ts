@@ -10,6 +10,7 @@ import {
 } from '@threadnote/memory/document';
 import {
   buildTopicMaintenanceManifest,
+  hasTopicMaintenanceEnrollment,
   proposeTopicMaintenanceEnrollment,
   validateTopicMaintenanceEnrollmentInput,
   validateTopicMaintenanceManifest,
@@ -65,6 +66,20 @@ function decisions() {
 }
 
 describe('topic maintenance manifest', () => {
+  it('keeps malformed enrollment protected from automatic lifecycle changes', () => {
+    const source = record();
+    expect(hasTopicMaintenanceEnrollment(source)).toBe(false);
+    const proposal = proposeTopicMaintenanceEnrollment(source, decisions());
+    expect(hasTopicMaintenanceEnrollment(parseMemoryDocument(uri, proposal.content)!)).toBe(true);
+    const malformed = parseMemoryDocument(
+      uri,
+      proposal.content.replace(/topic_maintenance: .*\n/u, 'topic_maintenance: {bad-json}\n'),
+    )!;
+    expect(malformed.metadata.topicMaintenance).toBeUndefined();
+    expect(malformed.metadata.topicMaintenanceError).toBeDefined();
+    expect(hasTopicMaintenanceEnrollment(malformed)).toBe(true);
+  });
+
   it('permits only the exact dedicated initial enrollment while generic writers preserve evidence', () => {
     const source = record();
     const proposal = proposeTopicMaintenanceEnrollment(source, decisions());

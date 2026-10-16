@@ -302,9 +302,10 @@ export function prepareMaintenanceSemanticProgress(
 }
 
 export interface MaintenanceWorkSchedule {
-  readonly nextPhase: 'records' | 'semantic' | 'requested';
+  readonly nextPhase: 'records' | 'semantic' | 'requested' | 'topic';
   readonly lastSemanticProject?: string;
   readonly lastRequestedRoot?: string;
+  readonly lastTopicMemoryId?: string;
   readonly requestDiscovery?: ContextMaintenanceEvidenceRequestDiscovery;
 }
 
@@ -313,22 +314,24 @@ export function selectMaintenanceWorkPhase(
   pendingSemanticProjects: readonly string[],
   hasRecordTasks: boolean,
   pendingRequestedRoots: readonly string[] = [],
+  hasTopicTasks = false,
 ): {
-  readonly phase: 'records' | 'semantic' | 'requested';
+  readonly phase: 'records' | 'semantic' | 'requested' | 'topic';
   readonly project?: string;
   readonly root?: string;
   readonly next: MaintenanceWorkSchedule;
 } {
   const projects = [...new Set(pendingSemanticProjects)].sort();
   const roots = [...new Set(pendingRequestedRoots)];
-  const order = ['records', 'semantic', 'requested'] as const;
+  const order = ['records', 'semantic', 'requested', 'topic'] as const;
   const start = Math.max(0, order.indexOf(previous?.nextPhase ?? 'records'));
   const phase =
     [...order.slice(start), ...order.slice(0, start)].find(
       item =>
         (item === 'records' && hasRecordTasks) ||
         (item === 'semantic' && projects.length > 0) ||
-        (item === 'requested' && roots.length > 0),
+        (item === 'requested' && roots.length > 0) ||
+        (item === 'topic' && hasTopicTasks),
     ) ?? 'records';
   const nextPhase = order[(order.indexOf(phase) + 1) % order.length];
   if (phase === 'records') return {phase, next: {...previous, nextPhase}};
@@ -337,6 +340,7 @@ export function selectMaintenanceWorkPhase(
     const project = projects[(index + 1) % projects.length];
     return {phase, project, next: {...previous, nextPhase, lastSemanticProject: project}};
   }
+  if (phase === 'topic') return {phase, next: {...previous, nextPhase}};
   const index = previous?.lastRequestedRoot === undefined ? -1 : roots.indexOf(previous.lastRequestedRoot);
   const root = roots[(index + 1) % roots.length];
   return {phase, root, next: {...previous, nextPhase, lastRequestedRoot: root}};
@@ -348,9 +352,10 @@ export const selectMaintenanceWorkAndRequestCursor = Effect.fn('contextMaintenan
   page: ContextMaintenanceEvidenceRequestPage,
   now: number,
   scope?: string,
+  hasTopicTasks = false,
 ) {
   const roots = yield* pendingContextMaintenanceEvidenceRoots(page.requests, now, scope);
-  const work = selectMaintenanceWorkPhase(previous, semanticProjects, hasRecordTasks, roots.slice(0, 1));
+  const work = selectMaintenanceWorkPhase(previous, semanticProjects, hasRecordTasks, roots.slice(0, 1), hasTopicTasks);
   const requestDiscovery = advanceContextMaintenanceEvidenceRequestExecution(
     previous?.requestDiscovery,
     page,

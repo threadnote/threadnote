@@ -1,7 +1,19 @@
 import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
-import type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
-export type {ContextMaintenanceReceiptV2, ContextMaintenanceReadOptions} from './maintenance_contracts.js';
+import type {
+  ContextMaintenanceCaseV2,
+  ContextMaintenanceReceiptV2,
+  ContextMaintenanceReadOptions,
+  ContextMaintenanceStatusV2,
+  UndoJournal,
+  WorkCheckpoint,
+} from './maintenance_contracts.js';
+export type {
+  ContextMaintenanceCaseV2,
+  ContextMaintenanceReceiptV2,
+  ContextMaintenanceReadOptions,
+  ContextMaintenanceStatusV2,
+} from './maintenance_contracts.js';
 import {
   selectFairMaintenanceWork,
   selectMaintenanceCitationCaseTask,
@@ -34,7 +46,7 @@ export {
   maintenanceAnchorChunksComplete,
   duplicateArchiveSafe,
 } from './maintenance_policy.js';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
+import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -50,13 +62,12 @@ import {
   type MemoryRecord,
   type MemoryRelation,
 } from '@threadnote/memory/document';
+import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {memoryIdentityLockKey, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   contextHealthCaseIdV2,
   contextHealthCitationCaseSlotV2,
   migrateContextHealthCitationCaseSlotV2,
-  type ContextHealthCaseDispositionV2,
-  type ContextMaintenanceSnapshotDiagnosticV1,
 } from '@threadnote/context/health_maintenance';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
@@ -67,7 +78,6 @@ import {
   contextMaintenanceInventoryPreparation,
   prepareContextMaintenanceInventory,
   pruneAbsentMaintenanceCheckpoints,
-  type ContextMaintenanceInventoryPreparationV2,
 } from './maintenance_inventory.js';
 import {
   contextMaintenanceEvidenceDiscoveryPending,
@@ -94,13 +104,26 @@ import {writeMemoryFile, writeMemoryFileChecked} from '../../share/index.js';
 import {discardDeferredCodeAnchorIntent} from '../deferred/code_anchor.js';
 import {forgetResourceWithRetry} from '../../mcp/server/memory.js';
 import {previewContextHealthRepairPlanV1} from './health_repair.js';
-import {type ContextHealthRepairProposalV1} from './health_repair.js';
 import {
   applyAutomaticContextHealthArchive,
   previewAutomaticContextHealthArchiveReceipt,
 } from './health_repair_commands.js';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {buildContextMaintenancePacket} from './maintenance_packet.js';
+import {
+  advanceTopicMaintenanceCursor,
+  deferTopicMaintenanceCase,
+  enrolledTopicCandidate,
+  observeTopicMaintenanceCase,
+  pruneAbsentTopicCheckpoints,
+  readTopicMaintenanceCasePacket,
+  selectRetainedMaintenanceCases,
+  selectTopicMaintenanceRecord,
+  topicMaintenanceCaseId,
+  validTopicMaintenanceCheckpoints,
+  TOPIC_MAINTENANCE_FAMILY,
+  type TopicMaintenanceCheckpoint,
+} from './maintenance_topic.js';
 import {
   CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION,
   maintenanceRecordSourceObservation,
@@ -122,116 +145,6 @@ export class ContextMaintenanceError extends Schema.TaggedError<ContextMaintenan
   message: Schema.String,
 }) {}
 
-export interface ContextMaintenanceCaseV2 {
-  readonly caseId: string;
-  readonly project: string;
-  readonly memoryId: string;
-  readonly family: string;
-  readonly slot: string;
-  readonly evidenceRevision: string;
-  readonly disposition: ContextHealthCaseDispositionV2;
-  readonly reason: string;
-  readonly firstSeen: string;
-  readonly lastSeen: string;
-  readonly lastChecked: string;
-  readonly attemptCount: number;
-  readonly nextAttemptAt?: string;
-  readonly wake?: {readonly kind: 'evidence-generation'; readonly revision: string};
-  readonly citationId?: string;
-  readonly subjectUri?: string;
-  readonly archivedUri?: string;
-  readonly omittedSubjects?: number;
-  readonly omittedSources?: number;
-  readonly anchorEvidence?: {readonly status: string; readonly coverage: string; readonly provenance?: string};
-  readonly retirement?: {
-    readonly citationId: string;
-    readonly anchorSlot: string;
-    readonly evidenceRevision: string;
-    readonly expectedContentHash: string;
-    readonly retiredAt: string;
-    readonly reason: string;
-    readonly provenance?: 'historical-verified' | 'unverified';
-    readonly evidenceGeneration?: string;
-    readonly attemptedSteps?: readonly string[];
-  };
-  readonly causeKey?: string;
-  readonly repositoryId?: string;
-  readonly subjectContentHashes?: readonly {readonly uri: string; readonly hash: string}[];
-  readonly candidateReview?: {readonly reviewId: string; readonly revision: number; readonly candidateRevision: string};
-  readonly sourceSnapshot?: {readonly cwd: string; readonly generation: string; readonly revision: string};
-  readonly sourceSnapshots?: readonly {
-    readonly uri: string;
-    readonly cwd: string;
-    readonly generation: string;
-    readonly revision: string;
-  }[];
-  readonly events: readonly {readonly at: string; readonly reason: string}[];
-}
-
-interface UndoJournal extends ContextMaintenanceReceiptV2 {
-  readonly before: string;
-  readonly after: string;
-  readonly archiveProposal?: ContextHealthRepairProposalV1;
-  readonly archiveCallerCwd?: string;
-  readonly removed: readonly MemoryRelation[];
-  readonly relationChanges?: readonly {
-    readonly relation: MemoryRelation;
-    readonly targetHash?: string;
-    readonly successorHash?: string;
-    readonly lineageHashes?: readonly string[];
-  }[];
-}
-
-interface WorkCheckpoint {
-  readonly revision: string;
-  readonly citationAdmissionVersion?: number;
-  readonly checkedAt: string;
-  readonly retryAt?: string;
-  readonly checkedCitations?: number;
-  readonly attemptedCitations?: number;
-  readonly memoryHash?: string;
-  readonly sourceEpoch?: string;
-  readonly sourceRevision?: string;
-  readonly inventoryComplete?: boolean;
-}
-
-export interface ContextMaintenanceStatusV2 {
-  readonly version: 2;
-  readonly paused: boolean;
-  readonly state: 'idle' | 'running' | 'waiting-evidence' | 'needs-decision' | 'failed';
-  readonly generation: string;
-  readonly preparation?: ContextMaintenanceInventoryPreparationV2;
-  readonly semanticCoverage?: readonly import('@threadnote/context/health_semantic').ContextHealthSemanticProgressCoverage[];
-  readonly projects: readonly {
-    readonly project: string;
-    readonly generation: string;
-    readonly cursor: number;
-    readonly eligible: number;
-    readonly checked: number;
-    readonly eligibleCitations: number;
-    readonly checkedCitations: number;
-  }[];
-  readonly cases: readonly ContextMaintenanceCaseV2[];
-  readonly receipts: readonly ContextMaintenanceReceiptV2[];
-  readonly counts?: Readonly<Record<string, number>>;
-  readonly groups?: readonly {
-    readonly causeKey: string;
-    readonly project: string;
-    readonly disposition: ContextHealthCaseDispositionV2;
-    readonly reason: string;
-    readonly affectedMemories: number;
-  }[];
-  readonly omittedCases?: number;
-  readonly omittedReceipts?: number;
-  readonly page?: {readonly generation: string; readonly caseNextCursor?: string; readonly receiptNextCursor?: string};
-  readonly lastProgressAt?: string;
-  readonly error?: {
-    readonly reason: string;
-    readonly at: string;
-    readonly diagnostic?: ContextMaintenanceSnapshotDiagnosticV1;
-  };
-}
-
 export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly checkpoints: Readonly<Record<string, WorkCheckpoint>>;
   readonly lastProject?: string;
@@ -241,6 +154,7 @@ export interface MaintenanceState extends ContextMaintenanceStatusV2 {
   readonly decisionCheckpoints?: Readonly<Record<string, string>>;
   readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress>>;
   readonly workSchedule?: MaintenanceWorkSchedule;
+  readonly topicCheckpoints?: Readonly<Record<string, TopicMaintenanceCheckpoint>>;
 }
 
 export const readContextMaintenanceStatus = Effect.fn('contextMaintenance.status')(function* (
@@ -337,6 +251,11 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             ? {...record, metadata: {...record.metadata, project: 'unscoped'}}
             : record,
         );
+      const topicRecords = active.filter(
+        record =>
+          (options.project === undefined || record.metadata.project === options.project) &&
+          enrolledTopicCandidate(record),
+      );
       const now = DateTime.formatIso(DateTime.makeUnsafe(started));
       const generation = snapshot.success.generation;
       const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
@@ -429,6 +348,11 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           project: options.project,
           complete: snapshot.success.complete,
         });
+      const topicCheckpoints = pruneAbsentTopicCheckpoints(
+        state.topicCheckpoints ?? {},
+        new Set(topicRecords.map(topicMaintenanceCaseId)),
+        snapshot.success.complete && options.project === undefined,
+      );
       const pending = tasks.filter(task => options.project === undefined || task.project === options.project);
       const rotated = [...pending].sort((left, right) => {
         const priority = (task: typeof left) => {
@@ -485,12 +409,14 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         evidencePage,
         started,
         options.project,
+        topicRecords.length > 0,
       );
       state = {
         ...state,
         generation,
         semanticProgress: selectedCase === undefined ? semanticProgress : state.semanticProgress,
         workSchedule: selectedCase === undefined ? {...work.next, requestDiscovery} : state.workSchedule,
+        topicCheckpoints: selectedCase === undefined ? topicCheckpoints : state.topicCheckpoints,
         state: 'running',
         error: undefined,
       };
@@ -516,6 +442,45 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       if (selectedCase === undefined && work.phase === 'requested') {
         const request = evidenceRequests.find(item => contextMaintenanceEvidenceRequestKey(item) === work.root)!;
         yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
+      }
+      if (selectedCase === undefined && work.phase === 'topic') {
+        const selectedTopic = selectTopicMaintenanceRecord(topicRecords, state.workSchedule?.lastTopicMemoryId);
+        if (selectedTopic !== undefined) {
+          state = {
+            ...state,
+            workSchedule: advanceTopicMaintenanceCursor(state.workSchedule!, selectedTopic),
+          };
+          const root = roots.get(selectedTopic.metadata.project!) ?? options.cwd;
+          const expectedHash = logicalHashes.get(selectedTopic.uri) ?? contentHash(selectedTopic.content);
+          const turn = yield* observeTopicMaintenanceCase(
+            config,
+            selectedTopic,
+            expectedHash,
+            root,
+            now,
+            topicCheckpoints,
+            caseMap,
+          ).pipe(Effect.timeoutOption(5_000));
+          const result = Option.isSome(turn)
+            ? turn.value
+            : deferTopicMaintenanceCase(
+                selectedTopic,
+                expectedHash,
+                now,
+                topicCheckpoints[topicMaintenanceCaseId(selectedTopic)],
+                caseMap.get(topicMaintenanceCaseId(selectedTopic)),
+              );
+          if (result !== undefined) {
+            caseMap.set(result.caseId, result.item);
+            state = {
+              ...state,
+              topicCheckpoints: {
+                ...state.topicCheckpoints,
+                [result.caseId]: result.checkpoint,
+              },
+            };
+          }
+        }
       }
       // maxRecords still controls inventory pagination; record work remains four per tick.
       const selected =
@@ -611,7 +576,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                 : (record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? []).some(
                     citation => contextHealthCitationCaseSlotV2(citation) === item.slot,
                   )
-              : selectedCase === undefined && task.chunk === 0),
+              : selectedCase === undefined && task.chunk === 0 && item.family !== TOPIC_MAINTENANCE_FAMILY),
         );
         const seen = new Set<string>();
         if (selectedCase === undefined && task.chunk === 0) {
@@ -776,7 +741,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           ? Result.succeed(collected.success.report)
           : Result.fail(collected.failure);
         if (Result.isSuccess(report)) {
-          if (selectedCase === undefined && task.chunk === 0 && !isSharedMemoryUri(record.uri)) {
+          if (
+            selectedCase === undefined &&
+            task.chunk === 0 &&
+            !isSharedMemoryUri(record.uri) &&
+            !hasTopicMaintenanceEnrollment(record)
+          ) {
             const archive = previewContextHealthRepairPlanV1(report.success, repairCorpus).proposals.find(
               proposal =>
                 proposal.mutation.kind === 'archive-memory' &&
@@ -1079,19 +1049,12 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
           ? item
           : {...item, disposition: 'resolved' as const, reason: 'subject-inactive'},
       );
-      const terminal = caseValues
-        .filter(item => ['resolved', 'retired'].includes(item.disposition) && item.retirement === undefined)
-        .sort((a, b) => b.lastChecked.localeCompare(a.lastChecked))
-        .slice(0, 200);
-      const cases =
-        selectedCase !== undefined
-          ? caseValues
-          : [
-              ...caseValues.filter(
-                item => !['resolved', 'retired'].includes(item.disposition) || item.retirement !== undefined,
-              ),
-              ...terminal,
-            ];
+      const cases = selectRetainedMaintenanceCases(
+        caseValues,
+        activeIds,
+        snapshot.success.complete && options.project === undefined,
+        selectedCase !== undefined,
+      );
       const closingSourceEpochs = new Map<string, string>();
       for (const task of tasks) {
         if (
@@ -1446,6 +1409,8 @@ export const retireContextMaintenanceAnchor = Effect.fn('contextMaintenance.reti
         );
       const corpus = yield* readMaintenanceMemoryRecords(config, {requireReadable: true});
       const record = corpus.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId);
+      if (record !== undefined && hasTopicMaintenanceEnrollment(record))
+        return yield* fail('An enrolled topic anchor requires reviewed topic maintenance.');
       if (
         record === undefined ||
         contentHash(record.content) !== input.expectedContentHash ||
@@ -1665,7 +1630,8 @@ const readState = Effect.fn('contextMaintenance.readState')(function* (config: R
     !Array.isArray(state.receipts) ||
     !Array.isArray(state.projects) ||
     typeof state.checkpoints !== 'object' ||
-    state.checkpoints === null
+    state.checkpoints === null ||
+    !validTopicMaintenanceCheckpoints(state.topicCheckpoints)
   )
     return yield* fail('Maintenance state is malformed; preserve it for recovery.');
   return {...state, cases: migrateMaintenanceCases(state.cases)};
@@ -1709,6 +1675,8 @@ const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: s
   ).pipe(Effect.ignore);
 });
 function writeState(config: RuntimeConfig, state: MaintenanceState) {
+  if (!validTopicMaintenanceCheckpoints(state.topicCheckpoints))
+    return Effect.fail(fail('Maintenance topic checkpoints exceed their write boundary.'));
   return Effect.flatMap(statePath(config), file => atomicJson(file, state));
 }
 const pruneReceiptJournals = Effect.fn('contextMaintenance.pruneReceipts')(function* (
@@ -1893,6 +1861,25 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
     return yield* fail(
       'The selected maintenance case is stale. Run maintenance to refresh its evidence before requesting a decision packet.',
     );
+  if (item.family === TOPIC_MAINTENANCE_FAMILY) {
+    const assertTopicCaseCurrent = Effect.gen(function* () {
+      const latest = (yield* readState(config)).cases.find(current => current.caseId === item.caseId);
+      if (
+        latest?.evidenceRevision !== item.evidenceRevision ||
+        latest.disposition !== item.disposition ||
+        latest.reason !== item.reason
+      )
+        return yield* fail('The enrolled topic case changed. Refresh maintenance.');
+    });
+    return yield* readTopicMaintenanceCasePacket(
+      config,
+      item,
+      record,
+      state.topicCheckpoints?.[item.caseId],
+      selection,
+      assertTopicCaseCurrent,
+    );
+  }
   if (
     item.sourceSnapshot !== undefined &&
     ((yield* sourceGeneration(config, item.sourceSnapshot.cwd)) !== item.sourceSnapshot.generation ||

@@ -77,6 +77,10 @@ const VALIDATION_CONCURRENCY = 4;
 const VALIDATION_CACHE_LIMIT = 512;
 const validationReceiptCache = new Map<string, ContextBriefCitationValidationReceiptV2>();
 
+function lastCoveredSymbolLine(span: {readonly line: number; readonly endLine: number; readonly endColumn: number}) {
+  return span.endLine - (span.endColumn === 1 && span.endLine > span.line ? 1 : 0);
+}
+
 /** Bounded read overlay for a verified namespace change in this exact caller checkout. */
 export const validateContextBriefMemoryCitations = Effect.fn('contextBrief.validateMemoryCitations')(function* (
   config: RuntimeConfig,
@@ -481,7 +485,12 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
   config: RuntimeConfig,
   scope: ContextBriefScopeV1,
   citation: MemoryCodeCitationV1,
-  options: {readonly maximumBytes?: number; readonly maximumLines?: number; readonly startLine?: number} = {},
+  options: {
+    readonly maximumBytes?: number;
+    readonly maximumLines?: number;
+    readonly startLine?: number;
+    readonly symbolSpanOnly?: boolean;
+  } = {},
 ) {
   const attemptedSteps: string[] = ['verified-repository-routes'];
   const resolution = yield* resolveCodeGraphCitationRepositoryRoutes({
@@ -530,6 +539,8 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
               [{citation, index: 0, uri: ''}],
               DateTime.formatIso(yield* DateTime.now),
             );
+            if (options.symbolSpanOnly && citation.target.kind === 'symbol' && !checked.receipt.observedSpan)
+              return undefined;
             const observedPath = checked.receipt.observedPath ?? citation.path;
             const evidence = yield* store.effectiveSnapshotCitationEvidence(status.databasePath, snapshot.id, {
               paths: [observedPath],
@@ -577,6 +588,9 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
                   options.startLine ??
                   checked.receipt.observedSpan?.line ??
                   (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+                ...(options.symbolSpanOnly && citation.target.kind === 'symbol'
+                  ? {endLine: lastCoveredSymbolLine(checked.receipt.observedSpan!)}
+                  : {}),
               },
             );
           }),
@@ -661,6 +675,9 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
     const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
       ...options,
       startLine: options.startLine ?? (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+      ...(options.symbolSpanOnly && citation.target.kind === 'symbol'
+        ? {endLine: lastCoveredSymbolLine(citation.target.span)}
+        : {}),
     });
     if (excerpt !== undefined) excerpts.push(excerpt);
   }
