@@ -67,6 +67,19 @@ export interface TopicStudyProbeObservationV1 {
   readonly judged: 'correct' | 'incorrect' | 'unavailable' | 'adjudication-required';
 }
 
+export const TOPIC_STUDY_REVIEWER_VERSION = 'registered-literal-state-v1' as const;
+export interface TopicStudyLiteralStateV1 {
+  readonly beforeHash: string;
+  readonly sourceHash: string;
+  readonly eligible: boolean;
+  readonly repairOrdinals: readonly number[];
+}
+export interface TopicStudyReviewerMeasurementV1 {
+  readonly version: typeof TOPIC_STUDY_REVIEWER_VERSION;
+  readonly before: TopicStudyLiteralStateV1;
+  readonly after: TopicStudyLiteralStateV1 | null;
+}
+
 export interface TopicStudyObservationV1 {
   readonly status: TopicStudyStatus;
   readonly reason: string | null;
@@ -111,6 +124,7 @@ export interface TopicStudyObservationV1 {
   readonly commandReceiptHashes: readonly string[];
   readonly probes: readonly TopicStudyProbeObservationV1[];
   readonly adjudication: string | null;
+  readonly reviewerExpectation?: TopicStudyReviewerMeasurementV1;
 }
 
 export interface TopicStudyLedgerRowV1 {
@@ -325,6 +339,7 @@ export function assertTopicStudyLedgerV1(input: string, corpusInput: unknown): r
 }
 
 function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyObservationV1 {
+  const hasReviewer = input !== null && typeof input === 'object' && Object.hasOwn(input, 'reviewerExpectation');
   const source = record(input, 'observation', [
     'status',
     'reason',
@@ -361,6 +376,7 @@ function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyO
     'commandReceiptHashes',
     'probes',
     'adjudication',
+    ...(hasReviewer ? ['reviewerExpectation'] : []),
   ]);
   const status = member(source.status, ['observed', 'failed', 'unavailable'] as const);
   const parseModel = (input: unknown): TopicStudyObservationV1['model'] => {
@@ -442,6 +458,28 @@ function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyO
     commandReceiptHashes: list(source.commandReceiptHashes, 'receipt hashes').map(hash),
     probes,
     adjudication: nullableString(source.adjudication),
+    ...(hasReviewer ? {reviewerExpectation: parseReviewerMeasurement(source.reviewerExpectation)} : {}),
+  };
+}
+
+function parseReviewerMeasurement(input: unknown): TopicStudyReviewerMeasurementV1 {
+  const item = record(input, 'reviewer expectation', ['version', 'before', 'after']);
+  const state = (input: unknown): TopicStudyLiteralStateV1 => {
+    const value = record(input, 'literal state', ['beforeHash', 'sourceHash', 'eligible', 'repairOrdinals']);
+    const repairOrdinals = list(value.repairOrdinals, 'literal debt').map(value => integer(value, 3, 5));
+    if (repairOrdinals.some((ordinal, index) => index > 0 && ordinal <= repairOrdinals[index - 1]))
+      fail('literal debt must be unique and ordered');
+    return {
+      beforeHash: hash(value.beforeHash),
+      sourceHash: hash(value.sourceHash),
+      eligible: bool(value.eligible),
+      repairOrdinals,
+    };
+  };
+  return {
+    version: member(item.version, [TOPIC_STUDY_REVIEWER_VERSION]),
+    before: state(item.before),
+    after: item.after === null ? null : state(item.after),
   };
 }
 
@@ -637,10 +675,15 @@ export function summarizeTopicStudyV1(
     .map(row => row.observation.reviewerMilliseconds)
     .filter((value): value is number => value !== null);
   const candidateRows = rows.filter(row => row.arm.startsWith('maintained'));
-  const outcomeDisagreements = rows.filter(
+  const authoredClassDivergences = rows.filter(
     row =>
       row.observation.status === 'observed' &&
       row.observation.actualClass !== corpus.events[row.eventIndex - 1].expectedClass,
+  );
+  const outcomeDisagreements = authoredClassDivergences.filter(
+    row =>
+      !row.observation.reviewerExpectation ||
+      !['unchanged', 'review-required'].includes(corpus.events[row.eventIndex - 1].expectedClass),
   );
   const hardFailures = rows.filter(row => {
     const obs = row.observation;
@@ -649,6 +692,12 @@ export function summarizeTopicStudyV1(
       obs.identityPreserved === false ||
       obs.provenancePreserved === false ||
       obs.unrelatedBodyPreserved === false ||
+      (obs.accepted &&
+        obs.reviewerExpectation &&
+        (!obs.reviewerExpectation.before.eligible ||
+          (obs.reviewerExpectation.after &&
+            obs.reviewerExpectation.after.sourceHash === obs.reviewerExpectation.before.sourceHash &&
+            (!obs.reviewerExpectation.after.eligible || obs.reviewerExpectation.after.repairOrdinals.length > 0)))) ||
       (obs.status === 'observed' &&
         (corpus.events[row.eventIndex - 1].expectedClass === 'stale-conflict' ||
           corpus.events[row.eventIndex - 1].expectedClass === 'unavailable') &&
@@ -713,6 +762,26 @@ export function summarizeTopicStudyV1(
   if (gate.downstreamNoRegression !== true) reasons.push('downstream answer quality unproven or regressed');
   validateGateMeasurements(rows, corpus, gate, reasons);
   return {
+    authoredClassDivergenceCount: authoredClassDivergences.length,
+    literalReviewDebt: {
+      version: rows.some(row => row.observation.reviewerExpectation) ? TOPIC_STUDY_REVIEWER_VERSION : null,
+      beforeDebtRows: rows.filter(
+        row =>
+          row.observation.reviewerExpectation?.before.eligible &&
+          row.observation.reviewerExpectation.before.repairOrdinals.length,
+      ).length,
+      afterDebtRows: rows.filter(
+        row =>
+          row.observation.reviewerExpectation?.after?.eligible &&
+          row.observation.reviewerExpectation.after.repairOrdinals.length,
+      ).length,
+      unknownBeforeRows: rows.filter(
+        row => row.arm !== 'naive-local' && !row.observation.reviewerExpectation?.before.eligible,
+      ).length,
+      unknownAfterRows: rows.filter(
+        row => row.arm !== 'naive-local' && !row.observation.reviewerExpectation?.after?.eligible,
+      ).length,
+    },
     analysisVersion: TOPIC_STUDY_ANALYSIS_VERSION,
     decision: reasons.length === 0 ? ('GO' as const) : ('HOLD' as const),
     reasons,
@@ -743,6 +812,7 @@ export function summarizeTopicStudyV1(
       probeUnavailable: measuredProbes.unavailable,
     },
     detection: {
+      basis: 'authored-source-stream-v1' as const,
       truePositive,
       falsePositive,
       falseNegative,
@@ -937,6 +1007,94 @@ function studyDocument(text: string): StudyDocument | null {
 
 export function topicStudyBodyV1(document: string): string {
   return studyDocument(document)?.body ?? document;
+}
+
+/** Fixture-specific independent expectation: existing registered claims only; no event/proposal input. */
+export function topicStudyReviewExpectationV1(
+  before: string,
+  source: {eligible: boolean; config: string | null; health: string | null},
+) {
+  const document = studyDocument(before);
+  const paragraphs = document?.paragraphs ?? [];
+  const registeredOrdinals = [
+    3,
+    4,
+    ...(/^The staging fixture timeout is \d+ seconds\.$/u.test(paragraphs[5] ?? '') ? [5] : []),
+  ];
+  const unique = (text: string | null, pattern: RegExp) => {
+    const matches = [...(text ?? '').matchAll(pattern)];
+    return matches.length === 1 ? matches[0][1] : null;
+  };
+  const seconds = unique(source.config, /^export const timeoutSeconds = (\d+);[ \t]*(?:\/\/[^\n]*)?$/gmu);
+  const heading = unique(source.health, /^export const title = "([^"\n]+)";[ \t]*(?:\/\/[^\n]*)?$/gmu);
+  const staging = registeredOrdinals.includes(5)
+    ? unique(source.config, /^export const stagingTimeoutSeconds = (\d+);[ \t]*(?:\/\/[^\n]*)?$/gmu)
+    : null;
+  const roles = document?.manifest?.paragraphs as readonly {role?: string; support?: string}[] | undefined;
+  const eligible =
+    source.eligible &&
+    document !== null &&
+    /^The production fixture timeout is \d+ seconds\.$/u.test(paragraphs[3] ?? '') &&
+    /^The display heading is [^\n]+\.$/u.test(paragraphs[4] ?? '') &&
+    registeredOrdinals.every(
+      ordinal => !roles || (roles[ordinal]?.role === 'descriptive' && roles[ordinal]?.support === 'direct'),
+    ) &&
+    seconds !== null &&
+    heading !== null &&
+    (!registeredOrdinals.includes(5) || staging !== null);
+  const replacements = new Map([
+    [3, `The production fixture timeout is ${seconds} seconds.`],
+    [4, `The display heading is ${heading}.`],
+    ...(registeredOrdinals.includes(5) ? [[5, `The staging fixture timeout is ${staging} seconds.`] as const] : []),
+  ]);
+  const repairOrdinals = eligible
+    ? registeredOrdinals.filter(ordinal => paragraphs[ordinal] !== replacements.get(ordinal))
+    : [];
+  const parts = document?.body.split(/(\n\s*\n)/u) ?? [];
+  for (const ordinal of repairOrdinals) parts[ordinal * 2] = replacements.get(ordinal)!;
+  return {
+    version: TOPIC_STUDY_REVIEWER_VERSION,
+    beforeHash: sha256HexSync(before),
+    sourceHash: topicStudyHash('topic-study-review-source-v1', source),
+    eligible,
+    repairOrdinals,
+    registeredOrdinals,
+    expectedBody: eligible ? parts.join('') : null,
+  };
+}
+
+export function checkTopicStudyReviewV1(
+  before: string,
+  after: string,
+  expectation: ReturnType<typeof topicStudyReviewExpectationV1>,
+) {
+  const preservation = measureTopicStudyPreservationV1(
+    before,
+    after,
+    expectation.eligible ? expectation.repairOrdinals : [],
+  );
+  const document = studyDocument(after);
+  const expected = expectation.expectedBody?.split(/\n\s*\n/u);
+  const residualDebtOrdinals = expectation.eligible
+    ? expectation.registeredOrdinals.filter(ordinal => document?.paragraphs[ordinal] !== expected?.[ordinal])
+    : null;
+  const protectedContent =
+    preservation.identityPreserved === true &&
+    preservation.provenancePreserved === true &&
+    preservation.unrelatedBodyPreserved === true;
+  const acceptable =
+    expectation.eligible &&
+    expectation.beforeHash === sha256HexSync(before) &&
+    protectedContent &&
+    document?.body === expectation.expectedBody;
+  const reason = acceptable
+    ? null
+    : !expectation.eligible
+      ? 'Independent current source expectation unavailable.'
+      : protectedContent && residualDebtOrdinals?.length
+        ? `Unresolved registered literal claims: ${residualDebtOrdinals.join(', ')}.`
+        : 'Independent protected-content/current-value check rejected draft.';
+  return {...preservation, acceptable, residualDebtOrdinals, reason};
 }
 
 export function measureTopicStudyPreservationV1(before: string, after: string, allowedEditOrdinals: readonly number[]) {
@@ -1455,7 +1613,12 @@ export function topicStudyProbePromptV1(
 
 /** Pre-registered method amendment; each run pins its corpus content and the V1 ledger format. */
 export const TOPIC_STUDY_COMPARISON_METHOD_V1 = {
-  id: 'topic-plus-common-source-v1',
+  id: 'topic-plus-common-source-state-review-v2',
+  reviewer: {
+    version: TOPIC_STUDY_REVIEWER_VERSION,
+    policy:
+      'exact source-derived repairs of all existing registered direct literals; no optional staging insertion; protect all other body/identity/role/scope/validity/origin data',
+  },
   sourceRefs: ['health.ts', 'config.ts'],
   sourceBrief: {
     home: 'separate-empty-graph-only',

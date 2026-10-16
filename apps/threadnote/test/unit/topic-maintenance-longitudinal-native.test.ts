@@ -104,6 +104,7 @@ async function fixture(
   applyResponse: 'written' | 'preview-write' | 'altered-write' | 'unrelated-error' | 'source-conflict' = 'written',
   startingRevision = 1,
   badProtectedPreview = false,
+  previewBody?: readonly string[],
 ) {
   const directory = await mkdtemp(join(tmpdir(), 'topic-study-native-'));
   const home = join(directory, 'home'),
@@ -114,7 +115,13 @@ async function fixture(
     await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
   );
   const event = corpus.events[index - 1];
-  const body = ['intro', 'policy', 'history', 'The production fixture timeout is 90 seconds.', 'later exception'];
+  const body = [
+    'intro',
+    'policy',
+    'history',
+    'The production fixture timeout is 90 seconds.',
+    'The display heading is Context Health.',
+  ];
   const manifest = {
     version: 1,
     memoryId: 'tn_fixture',
@@ -137,13 +144,15 @@ async function fixture(
     fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
   };
   const accepted = `MEMORY\nkind: durable\nmemory_id: tn_fixture\nproject: fixture\ncode_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${body.join('\n\n')}`;
-  const nextBody = body.map((text, ordinal) =>
-    badProtectedPreview
-      ? ordinal === 0
-        ? 'The initial fixture used a 30-second timeout.'
-        : text
-      : text.replace('90 seconds', '95 seconds'),
-  );
+  const nextBody =
+    previewBody ??
+    body.map((text, ordinal) =>
+      badProtectedPreview
+        ? ordinal === 0
+          ? 'The initial fixture used a 30-second timeout.'
+          : text
+        : text.replace('90 seconds', '95 seconds'),
+    );
   const nextManifest = {
     ...manifest,
     version: 2,
@@ -640,7 +649,7 @@ describe('native public CLI longitudinal contract', () => {
       expect(manual).toContain('The staging fixture timeout is 50 seconds.');
       expect(manual).toContain('The production fixture timeout is 100 seconds.');
       expect(manual).not.toContain('production fixture timeout is 50 seconds');
-      expect(manual).toContain('later exception');
+      expect(manual).toContain('history');
       expect(manual).not.toContain('staging fixture timeout is 45 seconds');
       expect(manual.match(/The staging fixture timeout/g)).toHaveLength(1);
       expect(result.unrelatedBodyPreserved).toBe(true);
@@ -674,6 +683,9 @@ it('publicly rejects the exact prepared revision after a bad preview and admits 
     const first = await runTopicStudyNativeAdapter(value.request, value.ports);
     expect(first.status).toBe('failed');
     expect(first.reason).toBe('Independent protected-content/current-value check rejected draft.');
+    expect(first.identityPreserved).toBe(true);
+    expect(first.provenancePreserved).toBe(true);
+    expect(first.unrelatedBodyPreserved).toBe(true);
     expect(first.draftAttempted).toBe(true);
     expect(first.draftCompleted).toBe(true);
     expect(first.computeMilliseconds).toBe(1);
@@ -1089,7 +1101,12 @@ it('provides the same common source facts to every arm and the evaluated topic e
         .map(line => JSON.parse(line));
       const publicReceipt = trace.find(item => item.command.includes('brief'));
       expect(JSON.parse(publicReceipt.stdout).graph.sources[0].id).toBe('random-source-id');
-      expect(result.commandReceiptHashes.length).toBe(trace.length);
+      const reviewerReceipts =
+        arm === 'naive-local'
+          ? []
+          : (await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8')).trim().split('\n');
+      expect(result.commandReceiptHashes.length).toBe(trace.length + reviewerReceipts.length);
+      expect(result.reviewerExpectation?.before.eligible ?? arm === 'naive-local').toBe(true);
     } finally {
       await rm(value.directory, {recursive: true, force: true});
     }
@@ -1355,4 +1372,223 @@ it('projects equivalent source facts independently of private identifiers within
     ),
     {numRuns: 20},
   );
+});
+
+it.each([18, 28])(
+  'accepts exact actual-state production and heading catch-up independently of ideal allowances (event %s)',
+  async index => {
+    const value = await fixture(index, 'propose-update', 'preview-write', 9, false, [
+      'intro',
+      'policy',
+      'history',
+      'The production fixture timeout is 95 seconds.',
+      'The display heading is Context Health v2.',
+    ]);
+    try {
+      await writeFile(
+        join(value.repository, 'health.ts'),
+        'export const title = "Context Health v2";\nexport const preserveUntilReview = true;\n',
+      );
+      const result = await runTopicStudyNativeAdapter(
+        {...value.request, event: {...value.request.event, allowedEditOrdinals: []}},
+        value.ports,
+      );
+      expect(result.status).toBe('observed');
+      expect(result.accepted).toBe(true);
+      expect(result.unrelatedBodyPreserved).toBe(true);
+      expect(result.provenancePreserved).toBe(true);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it('rejects a production-only catch-up for residual heading debt and closes its exact public review', async () => {
+  const value = await fixture(18, 'propose-update', 'preview-write', 9);
+  try {
+    await writeFile(
+      join(value.repository, 'health.ts'),
+      'export const title = "Context Health v2";\nexport const preserveUntilReview = true;\n',
+    );
+    const result = await runTopicStudyNativeAdapter(value.request, value.ports);
+    expect(result.status).toBe('failed');
+    expect(result.reason).toContain('Unresolved registered literal claims: 4');
+    expect(result.accepted).toBe(false);
+    expect(value.getReview().candidates[0].state).toBe('rejected');
+    expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it('manual repairs existing direct claims without acquiring newly available staging claims', async () => {
+  const value = await comparatorFixture('scripted-manual');
+  try {
+    await writeFile(
+      join(value.repository, 'config.ts'),
+      'export const timeoutSeconds = 95;\nexport const stagingTimeoutSeconds = 50;\n',
+    );
+    await writeFile(join(value.repository, 'health.ts'), 'export const title = "Context Health v2";\n');
+    const result = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, allowedEditOrdinals: []}},
+      value.ports,
+    );
+    expect(result.accepted).toBe(true);
+    expect(result.reviewerExpectation?.before.repairOrdinals).toEqual([3, 4]);
+    expect(result.reviewerExpectation?.after?.repairOrdinals).toEqual([]);
+    expect(value.manual()).toContain('The display heading is Context Health v2.');
+    expect(value.manual()).not.toContain('The staging fixture timeout');
+    const receipt = (await readFile(join(value.request.home, 'reviewer-expectations.jsonl'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+    expect(receipt.map(item => item.phase)).toEqual(['before', 'manual-preview', 'manual-readback', 'after']);
+    expect(receipt[0].expectation.beforeHash).toBe(result.targetBeforeHash);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it.each(['none', 'manual-readback', 'after'] as const)(
+  'retains known physical manual provenance loss across a %s receipt failure',
+  async failedPhase => {
+    const value = await comparatorFixture('scripted-manual');
+    let written = false;
+    let postWriteReads = 0;
+    let generations = 0;
+    try {
+      const ports = {
+        ...value.ports,
+        execute: async (command: readonly string[]) => {
+          const response = await value.ports.execute(command);
+          if (command[1] === 'remember') written = true;
+          if (command[1] !== 'read' || command[2] !== 'threadnote://manual') return response;
+          if (
+            written &&
+            ++postWriteReads === (failedPhase === 'manual-readback' ? 1 : failedPhase === 'after' ? 2 : -1)
+          ) {
+            const receiptPath = join(value.request.home, 'reviewer-expectations.jsonl');
+            await rm(receiptPath);
+            await mkdir(receiptPath);
+          }
+          return {
+            ...response,
+            stdout: response.stdout.replace(
+              'project: fixture',
+              `project: fixture\nsource_commit: ${written ? 'b' : 'a'}`,
+            ),
+          };
+        },
+        generate: async (prompt: string) => {
+          generations++;
+          return value.ports.generate(prompt);
+        },
+      };
+      const result = await runTopicStudyNativeAdapter(value.request, ports);
+      expect(result.status).toBe('failed');
+      expect(result.accepted).toBe(true);
+      expect(result.approved).toBe(true);
+      expect(result.provenancePreserved).toBe(false);
+      expect(result.identityPreserved).toBe(true);
+      expect(result.unrelatedBodyPreserved).toBe(true);
+      expect(result.targetBeforeHash).not.toBe(result.targetAfterHash);
+      const actualAfter = value.manual().replace('project: fixture', 'project: fixture\nsource_commit: b');
+      expect(result.targetAfterHash).toBe(sha256HexSync(actualAfter));
+      expect(value.manual()).toContain('The production fixture timeout is 95 seconds.');
+      if (failedPhase === 'none') {
+        expect(result.reviewerExpectation?.after?.repairOrdinals).toEqual([]);
+        return;
+      }
+      expect(topicStudyPreconditionFailedV1(result)).toBe(true);
+      const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+      expect(state.preconditionFailure).toBe(result.reason);
+      const corpus = parseTopicStudyCorpusJsonV1(
+        await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
+      );
+      const row = topicStudyLedgerRowV1({
+        corpusHash: topicStudyCorpusHashV1(corpus),
+        runNonce: 'reviewer-receipt-failure',
+        arm: value.request.arm,
+        repetition: 1,
+        eventIndex: value.request.event.index,
+        eventId: value.request.event.id,
+        previousHash: null,
+        observation: result,
+      });
+      const ledgerPath = join(value.directory, 'outcomes.jsonl');
+      expect(await appendTopicStudySlotV1(ledgerPath, row)).toBe(true);
+      expect(await readFile(ledgerPath, 'utf8')).toBe(JSON.stringify(row) + '\n');
+      const summary = summarizeTopicStudyV1(
+        [row],
+        corpus,
+        {
+          realTopicPilotObserved: false,
+          alternatePermittedAndMeasured: false,
+          pairedHumanMedianReduction: null,
+          totalCostMeasured: false,
+          disagreementsAdjudicated: false,
+          downstreamNoRegression: null,
+        },
+        1,
+      );
+      expect(summary.comparatorHardFailureCount).toBe(1);
+      expect(summary.hardFailureCount).toBe(0);
+      const commands = value.commands.length;
+      const next = await runTopicStudyNativeAdapter(
+        {...value.request, event: {...value.request.event, index: 38}},
+        ports,
+      );
+      expect(topicStudyPreconditionFailedV1(next)).toBe(true);
+      expect(value.commands).toHaveLength(commands);
+      expect(generations).toBe(0);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it('resumed review uses the same complete current-claim oracle and rejects residual debt', async () => {
+  const value = await fixture(28, 'propose-update', 'preview-write', 9, false, [
+    'intro',
+    'policy',
+    'history',
+    'The production fixture timeout is 95 seconds.',
+    'The display heading is Context Health v2.',
+  ]);
+  let previews = 0;
+  try {
+    await writeFile(join(value.repository, 'health.ts'), 'export const title = "Context Health v2";\n');
+    const result = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, allowedEditOrdinals: []}},
+      {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          if (!command.includes('draft-preview') || ++previews !== 2) return response;
+          const preview = JSON.parse(response.stdout);
+          const content: string = preview.maintenanceApproval.preview.content;
+          const body = topicStudyBodyV1(content).replace('Context Health v2.', 'Context Health.');
+          preview.maintenanceApproval.preview.content =
+            content
+              .slice(0, content.indexOf('\n\n') + 2)
+              .replace(/^topic_maintenance: (.+)$/mu, (_line: string, json: string) => {
+                const manifest = JSON.parse(json);
+                manifest.bodyHash = sha256HexSync(body);
+                manifest.paragraphs[4].hash = sha256HexSync(body.split('\n\n')[4]);
+                return `topic_maintenance: ${JSON.stringify(manifest)}`;
+              }) + body;
+          return {...response, stdout: JSON.stringify(preview)};
+        },
+      },
+    );
+    expect(previews).toBe(2);
+    expect(result.status).toBe('failed');
+    expect(result.accepted).toBe(false);
+    expect(result.reason).toContain('Unresolved registered literal claims: 4');
+    expect(value.getReview().candidates[0].state).toBe('rejected');
+    expect(value.getReview().revision).toBe(14);
+    expect(result.targetBeforeHash).toBe(result.targetAfterHash);
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
 });

@@ -6,6 +6,10 @@ import {
   assertTopicStudyLedgerV1,
   gradeTopicStudyAnswerV1,
   measureTopicStudyPreservationV1,
+  topicStudyReviewExpectationV1,
+  checkTopicStudyReviewV1,
+  TOPIC_STUDY_REVIEWER_VERSION,
+  type TopicStudyObservationV1,
   parseTopicStudyCorpusJsonV1,
   parseTopicStudyGateInputV1,
   summarizeTopicStudyV1,
@@ -189,6 +193,99 @@ describe('topic maintenance longitudinal evaluation', () => {
     expect(files.get('config.ts')).toContain('timeoutSeconds = 125');
   });
 
+  it('roundtrips optional state receipts without changing legacy rows and separates authored labels from actual debt', async () => {
+    const input = await corpus();
+    const event = input.events.find(event => event.expectedClass === 'unchanged')!;
+    const state = {beforeHash: 'b'.repeat(64), sourceHash: 'c'.repeat(64), eligible: true, repairOrdinals: [3, 4]};
+    const reviewerExpectation = {
+      version: TOPIC_STUDY_REVIEWER_VERSION,
+      before: state,
+      after: {...state, repairOrdinals: []},
+    };
+    const observation: TopicStudyObservationV1 = {
+      ...topicStudyUnavailableObservationV1(event, 'measured state'),
+      status: 'observed' as const,
+      actualClass: 'review-required' as const,
+      reviewerExpectation,
+    };
+    const makeRow = (obs: typeof observation) =>
+      topicStudyLedgerRowV1({
+        corpusHash: topicStudyCorpusHashV1(input),
+        runNonce: 'stateful',
+        arm: 'maintained-local',
+        repetition: 1,
+        eventIndex: event.index,
+        eventId: event.id,
+        observation: obs,
+        previousHash: null,
+      });
+    const row = makeRow(observation);
+    expect(assertTopicStudyLedgerV1(JSON.stringify(row), input)).toEqual([row]);
+    const result = summarizeFixture([row], input, {
+      realTopicPilotObserved: false,
+      alternatePermittedAndMeasured: false,
+      pairedHumanMedianReduction: null,
+      totalCostMeasured: false,
+      disagreementsAdjudicated: false,
+      downstreamNoRegression: null,
+    });
+    expect(result.authoredClassDivergenceCount).toBe(1);
+    expect(result.outcomeDisagreementCount).toBe(0);
+    expect(result.detection.basis).toBe('authored-source-stream-v1');
+    expect(result.literalReviewDebt).toMatchObject({
+      beforeDebtRows: 1,
+      afterDebtRows: 0,
+      unknownBeforeRows: 0,
+      unknownAfterRows: 0,
+    });
+    const {reviewerExpectation: _receipt, ...legacy} = observation;
+    const legacyRow = makeRow(legacy);
+    expect(assertTopicStudyLedgerV1(JSON.stringify(legacyRow), input)).toEqual([legacyRow]);
+    expect(Object.hasOwn(legacyRow.observation, 'reviewerExpectation')).toBe(false);
+    expect(
+      summarizeFixture([legacyRow], input, {
+        realTopicPilotObserved: false,
+        alternatePermittedAndMeasured: false,
+        pairedHumanMedianReduction: null,
+        totalCostMeasured: false,
+        disagreementsAdjudicated: false,
+        downstreamNoRegression: null,
+      }).outcomeDisagreementCount,
+    ).toBe(1);
+    const intrinsic = input.events.find(item => item.expectedClass === 'stale-conflict')!;
+    const intrinsicRow = {...row, eventIndex: intrinsic.index, eventId: intrinsic.id};
+    const gate = {
+      realTopicPilotObserved: false,
+      alternatePermittedAndMeasured: false,
+      pairedHumanMedianReduction: null,
+      totalCostMeasured: false,
+      disagreementsAdjudicated: false,
+      downstreamNoRegression: null,
+    };
+    expect(summarizeFixture([intrinsicRow], input, gate).outcomeDisagreementCount).toBe(1);
+    const bad = makeRow({
+      ...observation,
+      reviewerExpectation: {...reviewerExpectation, before: {...state, repairOrdinals: [4, 3]}},
+    });
+    expect(() => assertTopicStudyLedgerV1(JSON.stringify(bad), input)).toThrow();
+    const debt = makeRow({
+      ...observation,
+      accepted: true,
+      approved: true,
+      reviewerExpectation: {...reviewerExpectation, after: state},
+    });
+    expect(
+      summarizeFixture([debt], input, {
+        realTopicPilotObserved: false,
+        alternatePermittedAndMeasured: false,
+        pairedHumanMedianReduction: null,
+        totalCostMeasured: false,
+        disagreementsAdjudicated: false,
+        downstreamNoRegression: null,
+      }).hardFailureCount,
+    ).toBe(1);
+  });
+
   it('canonical hashing is independent of object key insertion order', () => {
     fc.assert(
       fc.property(fc.dictionary(fc.string({minLength: 1, maxLength: 8}), fc.integer()), entries => {
@@ -257,6 +354,144 @@ describe('independent longitudinal answer and preservation contracts', () => {
       `code_citation: ${JSON.stringify(citation)}\ntopic_maintenance: ${JSON.stringify(manifest)}\n\n${paragraphs.join('\n\n')}`
     );
   }
+  const directParagraphs = (seconds = 60, heading = 'Context Health', staging?: number) => [
+    'Context remains an explanation.',
+    'Policy: preserve the accepted explanation until explicit review.',
+    'Historically the timeout was 30 seconds.',
+    `The production fixture timeout is ${seconds} seconds.`,
+    `The display heading is ${heading}.`,
+    ...(staging === undefined ? [] : [`The staging fixture timeout is ${staging} seconds.`]),
+  ];
+  const literalDocument = (paragraphs: readonly string[]) =>
+    document(2, [...paragraphs]).replace(/^topic_maintenance: (.+)$/mu, (_line, json: string) => {
+      const manifest = JSON.parse(json);
+      manifest.paragraphs = manifest.paragraphs.map((paragraph: {ordinal: number}) => ({
+        ...paragraph,
+        role: paragraph.ordinal === 1 ? 'normative' : paragraph.ordinal === 2 ? 'historical' : 'descriptive',
+        support: paragraph.ordinal === 0 ? 'contextual' : 'direct',
+        ...(paragraph.ordinal >= 3 ? {scope: paragraph.ordinal === 5 ? 'staging' : 'production'} : {}),
+      }));
+      return `topic_maintenance: ${JSON.stringify(manifest)}`;
+    });
+  const literalSources = (seconds = 90, heading = 'Context Health v2', staging?: number) => ({
+    eligible: true,
+    config:
+      `export const timeoutSeconds = ${seconds};\n` +
+      (staging === undefined ? '' : `export const stagingTimeoutSeconds = ${staging};\n`),
+    health: `export const title = "${heading}";\n`,
+  });
+
+  it('authorizes complete actual-state catchup and rejects partial residual heading debt', () => {
+    const before = literalDocument(directParagraphs());
+    const expectation = topicStudyReviewExpectationV1(before, literalSources());
+    expect(expectation.repairOrdinals).toEqual([3, 4]);
+    expect(expectation.expectedBody).toBe(directParagraphs(90, 'Context Health v2').join('\n\n'));
+    expect(
+      checkTopicStudyReviewV1(before, literalDocument(directParagraphs(90, 'Context Health v2')), expectation)
+        .acceptable,
+    ).toBe(true);
+    expect(checkTopicStudyReviewV1(before, literalDocument(directParagraphs(90)), expectation)).toMatchObject({
+      acceptable: false,
+      residualDebtOrdinals: [4],
+      reason: 'Unresolved registered literal claims: 4.',
+    });
+    expect(topicStudyReviewExpectationV1(before, {...literalSources(), eligible: false}).eligible).toBe(false);
+    expect(
+      topicStudyReviewExpectationV1(before, {
+        ...literalSources(),
+        config: 'export const timeoutSeconds = 90;\nexport const timeoutSeconds = 95;\n',
+      }).eligible,
+    ).toBe(false);
+  });
+
+  it('maintains existing staging but authorizes neither acquisition nor arbitrary descriptor rewording', () => {
+    const before = literalDocument(directParagraphs(90, 'Context Health v2'));
+    const expectation = topicStudyReviewExpectationV1(before, literalSources(90, 'Context Health v2', 50));
+    expect(expectation.repairOrdinals).toEqual([]);
+    expect(
+      checkTopicStudyReviewV1(before, literalDocument(directParagraphs(90, 'Context Health v2', 50)), expectation)
+        .acceptable,
+    ).toBe(false);
+    expect(
+      checkTopicStudyReviewV1(
+        before,
+        before.replace('The display heading is Context Health v2.', 'Display: Context Health v2.'),
+        expectation,
+      ).acceptable,
+    ).toBe(false);
+    const staged = literalDocument(directParagraphs(90, 'Context Health v2', 45));
+    const repair = topicStudyReviewExpectationV1(staged, literalSources(90, 'Context Health v2', 50));
+    expect(repair.repairOrdinals).toEqual([5]);
+    expect(
+      checkTopicStudyReviewV1(staged, literalDocument(directParagraphs(90, 'Context Health v2', 50)), repair)
+        .acceptable,
+    ).toBe(true);
+    expect(topicStudyReviewExpectationV1(staged, literalSources()).eligible).toBe(false);
+  });
+
+  it('protects identity, scope, roles, validity, origins and all nonrepair paragraphs during exact catchup', () => {
+    const before = literalDocument(directParagraphs());
+    const expectation = topicStudyReviewExpectationV1(before, literalSources());
+    const correct = literalDocument(directParagraphs(90, 'Context Health v2'));
+    const mutations = [
+      correct.replace('memory_id: tn_fixture', 'memory_id: tn_other'),
+      correct.replace('owner: original', 'owner: other'),
+      correct.replace('"scope":"production"', '"scope":"staging"'),
+      correct.replace('"role":"normative"', '"role":"descriptive"'),
+      correct.replace('"originCitationIds":["original"]', '"originCitationIds":[]'),
+      correct.replace('"scope":"production"', '"validity":"new","scope":"production"'),
+      ...[0, 1, 2].map(ordinal =>
+        literalDocument(
+          directParagraphs(90, 'Context Health v2').map((text, index) =>
+            index === ordinal ? `${text} Rewritten.` : text,
+          ),
+        ),
+      ),
+    ];
+    for (const altered of mutations)
+      expect(checkTopicStudyReviewV1(before, altered, expectation).acceptable).toBe(false);
+  });
+
+  it('exact repair authorization is invariant under inserted rejected attempts, with current claims and protected text fixed', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 1000}),
+        fc.integer({min: 1, max: 1000}),
+        fc.stringMatching(/^[a-z]{1,12}$/u),
+        fc.array(fc.nat(100), {maxLength: 8}),
+        (oldSeconds, currentSeconds, title, failures) => {
+          const before = literalDocument(directParagraphs(oldSeconds));
+          const source = literalSources(currentSeconds, title);
+          const correct = literalDocument(directParagraphs(currentSeconds, title));
+          // A rejected candidate never changes accepted state, regardless of its attempted edits or ideal allowances.
+          let actual = before;
+          for (const choice of failures) {
+            const candidate = literalDocument(
+              directParagraphs(oldSeconds).map((text, ordinal) => (ordinal === choice % 3 ? `${text} Corrupt.` : text)),
+            );
+            const assessment = checkTopicStudyReviewV1(
+              actual,
+              candidate,
+              topicStudyReviewExpectationV1(actual, source),
+            );
+            expect(assessment.acceptable).toBe(false);
+            if (assessment.acceptable) actual = candidate;
+          }
+          const expectation = topicStudyReviewExpectationV1(actual, source);
+          expect(expectation).toEqual(topicStudyReviewExpectationV1(before, source));
+          expect(expectation.repairOrdinals).toEqual([...(oldSeconds === currentSeconds ? [] : [3]), 4]);
+          expect(checkTopicStudyReviewV1(actual, correct, expectation).acceptable).toBe(true);
+          const reworded = correct.replace(
+            `The production fixture timeout is ${currentSeconds} seconds.`,
+            `Production timeout: ${currentSeconds} seconds.`,
+          );
+          expect(checkTopicStudyReviewV1(actual, reworded, expectation).acceptable).toBe(false);
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
+
   it('protects every independently declared untouched paragraph over bounded generated documents', () => {
     fc.assert(
       fc.property(

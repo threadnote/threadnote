@@ -14,6 +14,8 @@ import {
   gradeTopicStudyAnswerV1,
   measureTopicStudyPreservationV1,
   topicStudyBodyV1,
+  topicStudyReviewExpectationV1,
+  checkTopicStudyReviewV1,
   topicStudyWrittenReceiptV1,
   topicStudySourceConflictV1,
   topicStudyProbePromptV1,
@@ -418,6 +420,37 @@ export async function runTopicStudyNativeAdapter(
       }),
     };
   };
+  const expectationFor = (before: string, common: Awaited<ReturnType<typeof readCommonEvidence>>) =>
+    topicStudyReviewExpectationV1(before, {
+      eligible: common.eligible,
+      config: common.declared.files.find(file => file.path === 'config.ts')?.content ?? null,
+      health: common.declared.files.find(file => file.path === 'health.ts')?.content ?? null,
+    });
+  const literalState = (expectation: ReturnType<typeof expectationFor>) => ({
+    beforeHash: expectation.beforeHash,
+    sourceHash: expectation.sourceHash,
+    eligible: expectation.eligible,
+    repairOrdinals: expectation.repairOrdinals,
+  });
+  let independentBefore: ReturnType<typeof expectationFor> | null = null;
+  let reviewerExpectation: TopicStudyObservationV1['reviewerExpectation'];
+  let independentMilliseconds = 0;
+  const recordExpectation = async (
+    phase: string,
+    expectation: ReturnType<typeof expectationFor>,
+    assessment?: ReturnType<typeof checkTopicStudyReviewV1>,
+  ) => {
+    const started = performance.now();
+    const receipt = {eventIndex: request.event.index, phase, expectation, assessment: assessment ?? null};
+    try {
+      await appendFile(join(request.home, 'reviewer-expectations.jsonl'), `${JSON.stringify(receipt)}\n`);
+      receipts.push(topicStudyHash('topic-study-reviewer-expectation-v1', receipt));
+    } catch {
+      throw new Error(`${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Independent reviewer receipt could not be persisted.`);
+    } finally {
+      independentMilliseconds += Math.round(performance.now() - started);
+    }
+  };
   const commit = async (label: string) => {
     await git(['add', '-A']);
     await git([
@@ -470,6 +503,20 @@ export async function runTopicStudyNativeAdapter(
   let cleanupReadback: string | null = null;
   let cleanupMilliseconds = 0;
   let failureEvidence: () => Partial<TopicStudyObservationV1> = () => ({});
+  let physicalAfter: Pick<
+    TopicStudyObservationV1,
+    'targetAfterHash' | 'identityPreserved' | 'provenancePreserved' | 'unrelatedBodyPreserved'
+  > | null = null;
+  const observePhysicalAfter = (content: string, preservation: ReturnType<typeof measureTopicStudyPreservationV1>) => {
+    const {identityPreserved, provenancePreserved, unrelatedBodyPreserved} = preservation;
+    physicalAfter = {
+      targetAfterHash: sha256HexSync(content),
+      identityPreserved,
+      provenancePreserved,
+      unrelatedBodyPreserved,
+    };
+  };
+
   const persistState = async () => {
     if (!state) return;
     try {
@@ -739,9 +786,15 @@ export async function runTopicStudyNativeAdapter(
       targetBeforeHash: sha256HexSync(evaluatedBefore),
       setupMilliseconds,
       scanMilliseconds: commonSourceMilliseconds,
-      evidenceMilliseconds: commonRetrievalMilliseconds,
+      evidenceMilliseconds: commonRetrievalMilliseconds + independentMilliseconds,
+      ...(reviewerExpectation ? {reviewerExpectation} : {}),
     });
     const commonBefore = await readCommonEvidence();
+    if (request.arm !== 'naive-local') {
+      independentBefore = expectationFor(evaluatedBefore, commonBefore);
+      reviewerExpectation = {version: independentBefore.version, before: literalState(independentBefore), after: null};
+      await recordExpectation('before', independentBefore);
+    }
     if (request.event.index === 1) state = {...state, naiveSourceHash: commonBefore.opportunityHash};
     const scanStarted = performance.now();
     let caseRecord: Record<string, unknown> | null = null;
@@ -802,7 +855,8 @@ export async function runTopicStudyNativeAdapter(
       computeMilliseconds,
       setupMilliseconds,
       scanMilliseconds: scanMilliseconds + commonSourceMilliseconds,
-      evidenceMilliseconds: evidenceMilliseconds + commonRetrievalMilliseconds,
+      evidenceMilliseconds: evidenceMilliseconds + commonRetrievalMilliseconds + independentMilliseconds,
+      ...(reviewerExpectation ? {reviewerExpectation} : {}),
     });
     const supportedReviewFault = ['source-race', 'reject', 'defer-resume'].includes(request.event.fault);
     if (detected && request.arm.startsWith('maintained') && (request.event.fault === 'none' || supportedReviewFault)) {
@@ -941,29 +995,9 @@ export async function runTopicStudyNativeAdapter(
                 };
                 await recordReviewRevision(result.reviewId, prepared.revision);
                 const document = prepared.maintenanceApproval?.preview?.content ?? '';
-                const preservation = measureTopicStudyPreservationV1(
-                  before,
-                  document,
-                  request.event.allowedEditOrdinals,
-                );
-                const protectedText =
-                  preservation.identityPreserved === true &&
-                  preservation.provenancePreserved === true &&
-                  preservation.unrelatedBodyPreserved === true;
-                let currentSeconds: string | null = null;
-                try {
-                  currentSeconds =
-                    /(?:^|\n)export const timeoutSeconds = (\d+);/u.exec(
-                      await readFile(join(request.repository, 'config.ts'), 'utf8'),
-                    )?.[1] ?? null;
-                } catch {
-                  /* Missing source cannot authorize a current assertion. */
-                }
-                const matchesCurrent =
-                  currentSeconds !== null &&
-                  /production fixture timeout is (\d+) seconds/iu.exec(topicStudyBodyV1(document))?.[1] ===
-                    currentSeconds;
-                if (protectedText && matchesCurrent && prepared.maintenanceApproval?.preview?.approvalDigest) {
+                const assessment = checkTopicStudyReviewV1(before, document, independentBefore!);
+                await recordExpectation('preview', independentBefore!, assessment);
+                if (assessment.acceptable && prepared.maintenanceApproval?.preview?.approvalDigest) {
                   const approvalDigest = prepared.maintenanceApproval.preview.approvalDigest;
                   const denied = await cli(
                     [
@@ -1064,16 +1098,11 @@ export async function runTopicStudyNativeAdapter(
                           await recordReviewRevision(result.reviewId, resumedPreview.revision);
                           const resumedContent = resumedPreview.maintenanceApproval?.preview?.content ?? '';
                           const resumedDigest = resumedPreview.maintenanceApproval?.preview?.approvalDigest;
-                          if (
-                            !resumedDigest ||
-                            measureTopicStudyPreservationV1(before, resumedContent, request.event.allowedEditOrdinals)
-                              .unrelatedBodyPreserved !== true ||
-                            /production fixture timeout is (\d+) seconds/iu.exec(
-                              topicStudyBodyV1(resumedContent),
-                            )?.[1] !== currentSeconds
-                          ) {
+                          const resumedAssessment = checkTopicStudyReviewV1(before, resumedContent, independentBefore!);
+                          await recordExpectation('resumed-preview', independentBefore!, resumedAssessment);
+                          if (!resumedDigest || !resumedAssessment.acceptable) {
                             status = 'failed';
-                            reason = 'Resumed draft failed independent content check.';
+                            reason = resumedAssessment.reason ?? 'Resumed review approval digest unavailable.';
                           } else {
                             const applied = await cli(
                               [
@@ -1184,7 +1213,7 @@ export async function runTopicStudyNativeAdapter(
                   }
                 } else {
                   status = 'failed';
-                  reason = 'Independent protected-content/current-value check rejected draft.';
+                  reason = assessment.reason ?? 'Independent review approval digest unavailable.';
                 }
               }
             }
@@ -1231,66 +1260,56 @@ export async function runTopicStudyNativeAdapter(
       }
     } else if (request.arm === 'scripted-manual') {
       actualClass = 'unchanged';
-      let currentValue: string | null = null;
-      let stagingValue: string | null = null;
-      let heading: string | null = null;
-      if (commonBefore.eligible) {
-        const source = commonBefore.declared.files.find(file => file.path === 'config.ts')?.content ?? '';
-        const health = commonBefore.declared.files.find(file => file.path === 'health.ts')?.content ?? '';
-        currentValue = /(?:^|\n)export const timeoutSeconds = (\d+);/u.exec(source)?.[1] ?? null;
-        stagingValue = /(?:^|\n)export const stagingTimeoutSeconds = (\d+);/u.exec(source)?.[1] ?? null;
-        heading = /(?:^|\n)export const title = "([^"\n]+)";/u.exec(health)?.[1] ?? null;
-      } else {
+      if (!independentBefore!.eligible) {
         actualClass = 'unavailable';
-        reason = 'Scripted manual abstained: declared source evidence is missing, dirty, stale or over budget.';
-      }
-      if (currentValue !== null) {
-        let next = state.manualBody.replace(
-          /production fixture timeout is \d+ seconds/iu,
-          `production fixture timeout is ${currentValue} seconds`,
+        reason = 'Scripted manual abstained: declared source evidence or registered literal expectation unavailable.';
+      } else if (independentBefore!.repairOrdinals.length > 0 && state.manualUri) {
+        const next = independentBefore!.expectedBody!;
+        const anticipated = evaluatedBefore.slice(0, evaluatedBefore.indexOf('\n\n') + 2) + next;
+        const assessment = checkTopicStudyReviewV1(evaluatedBefore, anticipated, independentBefore!);
+        await recordExpectation('manual-preview', independentBefore!, assessment);
+        if (!assessment.acceptable) throw new Error('Scripted manual expected body failed independent review.');
+        const updated = await cli(
+          [
+            'remember',
+            '--project',
+            'fixture',
+            '--topic',
+            'manual-comparator',
+            '--replace-uri',
+            state.manualUri,
+            '--text',
+            next,
+            '--code-ref',
+            'health.ts',
+            '--code-ref',
+            'config.ts',
+            '--require-current-code-refs',
+          ],
+          false,
         );
-        if (heading !== null)
-          next = next.replace(/The display heading is [^.\n]+\./u, `The display heading is ${heading}.`);
-        if (stagingValue !== null) {
-          const sentence = `The staging fixture timeout is ${stagingValue} seconds.`;
-          const existing = /The staging fixture timeout is \d+ seconds\./giu;
-          next = existing.test(next) ? next.replace(existing, sentence) : `${next}\n\n${sentence}`;
-        }
-        if (next !== state.manualBody && state.manualUri) {
-          const updated = await cli(
-            [
-              'remember',
-              '--project',
-              'fixture',
-              '--topic',
-              'manual-comparator',
-              '--replace-uri',
-              state.manualUri,
-              '--text',
-              next,
-              '--code-ref',
-              'health.ts',
-              '--code-ref',
-              'config.ts',
-              '--require-current-code-refs',
-            ],
-            false,
-          );
-          if (updated.exitCode === 0) {
-            const nextUri = /Stored memory:\s+(threadnote:\/\/\S+)/u.exec(updated.stdout)?.[1] ?? null;
-            if (nextUri) {
-              state = {...state, manualUri: nextUri, manualBody: next};
-              accepted = true;
-              approved = true;
-              actualClass = 'review-required';
-            } else {
+        if (updated.exitCode === 0) {
+          const nextUri = /Stored memory:\s+(threadnote:\/\/\S+)/u.exec(updated.stdout)?.[1] ?? null;
+          if (nextUri) {
+            state = {...state, manualUri: nextUri, manualBody: next};
+            accepted = true;
+            approved = true;
+            actualClass = 'review-required';
+            const readback = await readAccepted(nextUri);
+            const assessment = checkTopicStudyReviewV1(evaluatedBefore, readback, independentBefore!);
+            observePhysicalAfter(readback, assessment);
+            await recordExpectation('manual-readback', independentBefore!, assessment);
+            if (!assessment.acceptable) {
               status = 'failed';
-              reason = 'Manual comparator update had no target URI.';
+              reason = assessment.reason;
             }
           } else {
             status = 'failed';
-            reason = 'Manual comparator update failed.';
+            reason = 'Manual comparator update had no target URI.';
           }
+        } else {
+          status = 'failed';
+          reason = 'Manual comparator update failed.';
         }
       }
     } else if (request.arm === 'naive-local') {
@@ -1351,22 +1370,34 @@ export async function runTopicStudyNativeAdapter(
     const preservation = measureTopicStudyPreservationV1(
       evaluatedBefore,
       evaluatedBody,
-      request.event.allowedEditOrdinals,
+      independentBefore?.repairOrdinals ?? request.event.allowedEditOrdinals,
     );
+    if (request.arm !== 'naive-local') observePhysicalAfter(evaluatedBody, preservation);
     const {identityPreserved, provenancePreserved} = preservation;
     const beforeSections = topicStudyBodyV1(evaluatedBefore).split('\n\n');
     const afterSections = topicStudyBodyV1(evaluatedBody).split('\n\n');
     const unrelatedBodyPreserved =
       preservation.unrelatedBodyPreserved ??
-      (beforeSections.length === afterSections.length &&
-        beforeSections.every(
-          (text, ordinal) => request.event.allowedEditOrdinals.includes(ordinal) || afterSections[ordinal] === text,
-        ));
+      (request.arm === 'naive-local'
+        ? beforeSections.length === afterSections.length &&
+          beforeSections.every(
+            (text, ordinal) => request.event.allowedEditOrdinals.includes(ordinal) || afterSections[ordinal] === text,
+          )
+        : null);
     const commonForProbe = cleanupError
       ? null
       : request.event.postReviewChanges.length > 0
         ? await readCommonEvidence()
         : commonBefore;
+    if (independentBefore && commonForProbe) {
+      const afterExpectation = expectationFor(evaluatedBody, commonForProbe);
+      reviewerExpectation = {
+        version: independentBefore.version,
+        before: literalState(independentBefore),
+        after: literalState(afterExpectation),
+      };
+      await recordExpectation('after', afterExpectation);
+    }
     const probeStart = performance.now();
     const probes: TopicStudyProbeObservationV1[] = [];
     let downstreamModel: TopicStudyObservationV1['model'] = null;
@@ -1443,12 +1474,13 @@ export async function runTopicStudyNativeAdapter(
       correctionBytes: null,
       setupMilliseconds,
       scanMilliseconds: scanMilliseconds + commonSourceMilliseconds,
-      evidenceMilliseconds: evidenceMilliseconds + commonRetrievalMilliseconds,
+      evidenceMilliseconds: evidenceMilliseconds + commonRetrievalMilliseconds + independentMilliseconds,
       downstreamMilliseconds: Math.round(performance.now() - probeStart),
       retainedBytes: null,
       commandReceiptHashes: receipts,
       probes,
       adjudication: null,
+      ...(reviewerExpectation ? {reviewerExpectation} : {}),
     };
     state = {...state, accepted: after, lastEvidenceRevision: evidenceRevision};
     await persistState();
@@ -1464,6 +1496,7 @@ export async function runTopicStudyNativeAdapter(
     observation = {
       ...topicStudyUnavailableObservationV1(request.event, reason),
       ...failureEvidence(),
+      ...(physicalAfter ?? {}),
       ...(commandTrace.failure?.command.includes('draft')
         ? {computeMilliseconds: commandTrace.failure.result.elapsed}
         : {}),
@@ -1486,7 +1519,7 @@ export async function runTopicStudyNativeAdapter(
       observation = {
         ...observation,
         targetAfterHash: sha256HexSync(cleanupReadback),
-        ...measureTopicStudyPreservationV1(acceptedBaseline, cleanupReadback, request.event.allowedEditOrdinals),
+        ...measureTopicStudyPreservationV1(acceptedBaseline, cleanupReadback, independentBefore?.repairOrdinals ?? []),
       };
     }
     if (observation.evidenceMilliseconds !== null)
