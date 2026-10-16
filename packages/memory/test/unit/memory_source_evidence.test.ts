@@ -7,6 +7,7 @@ import {
   parseMemoryDocument,
 } from '@threadnote/memory/document';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
+import {migrateMemoryDocumentToCurrent} from '@threadnote/memory/migrations';
 import type {SourceEvidenceCitationV1} from '@threadnote/store/source-evidence';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/evidence.md';
@@ -52,6 +53,14 @@ describe('source evidence memory boundary', () => {
     const changed = formatMemoryDocumentWithKeywords(formatted, ['decision']);
     expect(parseMemoryDocument(uri, changed)?.metadata.sourceEvidence).toEqual(evidence);
     expect(memoryCodeCitationContentSharingBlocker(uri, changed)).toBe('private-source-evidence');
+  });
+
+  it('migrates schema 8 source evidence to schema 9 without changing its bytes', () => {
+    const original = document();
+    const migrated = migrateMemoryDocumentToCurrent(original);
+    expect(migrated).toBe(original.replace('schema_version: 8', 'schema_version: 9'));
+    expect(parseMemoryDocument(uri, migrated)?.metadata.sourceEvidence).toEqual(evidence);
+    expect(memoryCodeCitationContentSharingBlocker(uri, migrated)).toBe('private-source-evidence');
   });
 
   it('rejects malformed, duplicate, noncanonical, and legacy-schema source citations', () => {

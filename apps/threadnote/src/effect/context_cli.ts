@@ -8,6 +8,7 @@ import {
   makeContextCheckCommand,
 } from './workflow_cli.js';
 import {makeContextMetadataCommand} from './maintenance_metadata_cli.js';
+import {makeContextTopicCommand} from './topic_maintenance_cli.js';
 import {runContextBrief} from '../context_brief/commands.js';
 import {runContextHealth} from '../memory/context/health_commands.js';
 import {runContextHealthAggregate, runContextHealthSchedule} from '../memory/context/health_aggregate_commands.js';
@@ -51,6 +52,7 @@ export function makeContextRuntimeCommand(
       contextMetadata,
       contextCheck,
       contextMaintain,
+      makeContextTopicCommand(withRuntimeEffect),
     ]),
   );
 }

@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "topic": "context-health",
+  "sourceFiles": [
+    {
+      "path": "health.ts",
+      "content": "export const title = \"Context Health\";\nexport const preserveUntilReview = true;\n"
+    },
+    {
+      "path": "config.ts",
+      "content": "export const timeoutSeconds = 30;\n"
+    }
+  ],
+  "paragraphs": [
+    {
+      "text": "Context Health reports citation freshness separately from semantic correctness.",
+      "role": "descriptive",
+      "support": "contextual",
+      "sourcePath": "health.ts"
+    },
+    {
+      "text": "Maintenance must preserve accepted content until review.",
+      "role": "normative",
+      "support": "direct",
+      "sourcePath": "health.ts"
+    },
+    {
+      "text": "The initial fixture used a 30-second timeout.",
+      "role": "historical",
+      "support": "direct",
+      "sourcePath": "config.ts"
+    },
+    {
+      "text": "The production fixture timeout is 30 seconds.",
+      "role": "descriptive",
+      "support": "direct",
+      "sourcePath": "config.ts",
+      "scope": "production"
+    },
+    {
+      "text": "The display heading is Context Health.",
+      "role": "descriptive",
+      "support": "direct",
+      "sourcePath": "health.ts"
+    }
+  ],
+  "additionalDependencies": [
+    {
+      "kind": "configuration",
+      "sourcePath": "config.ts"
+    }
+  ],
+  "change": {
+    "path": "config.ts",
+    "content": "export const timeoutSeconds = 60;\n",
+    "paragraphOrdinal": 3,
+    "replacement": "The production fixture timeout is 60 seconds."
+  },
+  "questions": [
+    {
+      "question": "What is the current production fixture timeout?",
+      "before": "30 seconds",
+      "after": "60 seconds"
+    },
+    {
+      "question": "What timeout did the initial revision use?",
+      "before": "30 seconds",
+      "after": "30 seconds"
+    },
+    {
+      "question": "Can maintenance silently overwrite accepted content?",
+      "before": "No; review is required",
+      "after": "No; review is required"
+    },
+    {
+      "question": "Does an exact code citation prove semantic correctness?",
+      "before": "No",
+      "after": "No"
+    }
+  ],
+  "manualBaseline": {
+    "workflow": [
+      "Read accepted memory",
+      "Inspect supporting old and new code",
+      "Edit only the current behavior paragraph",
+      "Preview and approve the update through the existing remember workflow",
+      "Read back and answer all probes"
+    ],
+    "reviewerTime": null,
+    "note": "Synthetic contract fixture, not a claim about production timeout behavior. Human reviewer time must be measured, never inferred from CLI latency.",
+    "observation": {
+      "date": "2026-10-16",
+      "runtime": "threadnote v5.2.1-local.g83002705310a0e627eeacd88cfcb6ede0f6f0085",
+      "scriptedCliSteps": 6,
+      "scriptedCliSeconds": 1.7161116680000001,
+      "reviewerSeconds": null,
+      "stableIdentityPreserved": true,
+      "historicalSupportRetained": true,
+      "unchangedParagraphsPreserved": true,
+      "scope": "One isolated synthetic run; excludes human review and source/index setup. It does not establish product savings."
+    }
+  }
+}

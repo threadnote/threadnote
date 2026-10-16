@@ -9,6 +9,7 @@ import {
   parseMemoryDocument,
 } from '../../src/document.js';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
+import {migrateMemoryDocumentToCurrent} from '../../src/migrations.js';
 
 const citation = (path: string) =>
   createMemoryCodeCitation({
@@ -146,6 +147,10 @@ describe('reviewed consolidation', () => {
       'Keep this claim.',
     );
     expect(parseMemoryDocument(source().uri, content)?.metadata.consolidation).toEqual(result.provenance);
+    const schema8 = content.replace('schema_version: 6', 'schema_version: 8');
+    const schema9 = migrateMemoryDocumentToCurrent(schema8);
+    expect(schema9).toBe(schema8.replace('schema_version: 8', 'schema_version: 9'));
+    expect(parseMemoryDocument(source().uri, schema9)?.metadata.consolidation).toEqual(result.provenance);
     expect(
       parseMemoryDocument(source().uri, content.replace(/Keep this claim\.$/, 'Changed.'))?.metadata.citationErrors
         ?.length,
