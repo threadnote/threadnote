@@ -13,7 +13,12 @@ import {
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {mkdtemp, mkdir, readFile, rm, writeFile, chmod, stat} from '@threadnote/testing/node-fs-promises';
-import {parseTopicStudyCorpusJsonV1} from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
+import {
+  parseTopicStudyCorpusJsonV1,
+  topicStudyCorpusHashV1,
+  topicStudyLedgerRowV1,
+  topicStudyUnavailableObservationV1,
+} from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
 import {
   readBoundedChildOutput,
   topicStudyEnvironment,
@@ -28,6 +33,59 @@ function stream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
     },
   });
 }
+
+it('refuses model execution during replay and rejects a mismatched manifest without rewriting raw observations', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'topic-study-replay-'));
+  try {
+    const corpus = parseTopicStudyCorpusJsonV1(
+      await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
+    );
+    const event = corpus.events[0];
+    const row = topicStudyLedgerRowV1({
+      corpusHash: topicStudyCorpusHashV1(corpus),
+      runNonce: 'offline-replay',
+      arm: 'maintained-local',
+      repetition: 1,
+      eventIndex: 1,
+      eventId: event.id,
+      previousHash: null,
+      observation: topicStudyUnavailableObservationV1(event, 'fixture'),
+    });
+    const ledgerPath = join(directory, 'outcomes.jsonl');
+    const ledger = JSON.stringify(row) + '\n';
+    await writeFile(ledgerPath, ledger);
+    await writeFile(join(directory, 'summary.json'), JSON.stringify({executionStatus: 'aborted-invalid-harness'}));
+    const manifestPath = join(directory, 'maintained-local-1-manifest.json');
+    const manifest = JSON.stringify({
+      version: 1,
+      arm: row.arm,
+      repetition: 1,
+      runNonce: row.runNonce,
+      corpusHash: 'wrong',
+    });
+    await writeFile(manifestPath, manifest);
+    for (const execute of [true, false]) {
+      const result = Bun.spawnSync(
+        [
+          process.execPath,
+          'scripts/run-topic-maintenance-longitudinal.ts',
+          '--replay',
+          directory,
+          ...(execute ? ['--execute'] : []),
+        ],
+        {env: topicStudyEnvironment(process.env), stdout: 'pipe', stderr: 'pipe'},
+      );
+      expect(result.exitCode).not.toBe(0);
+      expect(new TextDecoder().decode(result.stderr)).toContain(
+        execute ? '--replay cannot execute models' : 'Replay manifest does not match the sealed execution',
+      );
+      expect(await readFile(ledgerPath, 'utf8')).toBe(ledger);
+      expect(await readFile(manifestPath, 'utf8')).toBe(manifest);
+    }
+  } finally {
+    await rm(directory, {recursive: true, force: true});
+  }
+});
 
 describe('bounded longitudinal process capture', () => {
   it('accepts any chunk partition up to the byte ceiling', async () => {

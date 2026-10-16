@@ -100,6 +100,7 @@ export async function runTopicStudyNativeAdapter(
   const statePath = join(request.home, 'study-state.json');
   let state: State | null = request.event.index === 1 ? null : (JSON.parse(await readFile(statePath, 'utf8')) as State);
   const receipts: string[] = [];
+  const observationUnavailable = new Error('Maintenance current-event observation unavailable within bounded turns.');
   const tracePath = join(request.home, 'command-trace.jsonl');
   const env = topicStudyCommitEnvironment(
     topicStudyEnvironment({
@@ -211,15 +212,26 @@ export async function runTopicStudyNativeAdapter(
     return read.stdout.slice(index).trim();
   };
   const maintain = async (memoryId: string) => {
-    let selected: Record<string, unknown> | null = null;
-    for (let turn = 0; turn < 8; turn++) {
+    const requestedAt = Date.now();
+    const started = performance.now();
+    for (let turn = 0; turn < 8 && performance.now() - started < 30_000; turn++) {
       const response = await cli(['context', 'maintain', '--project', 'fixture', '--action', 'run', '--json']);
-      const result = JSON.parse(response.stdout) as {cases?: readonly Record<string, unknown>[]};
-      selected =
-        result.cases?.find(item => item.family === 'topic-maintenance' && item.memoryId === memoryId) ?? selected;
-      if (selected && ['needs-decision', 'waiting-evidence', 'resolved'].includes(String(selected.disposition))) break;
+      const result = JSON.parse(response.stdout) as {
+        state?: string;
+        paused?: boolean;
+        cases?: readonly Record<string, unknown>[];
+      };
+      const selected = result.cases?.find(item => item.family === 'topic-maintenance' && item.memoryId === memoryId);
+      if (
+        result.paused !== true &&
+        ['idle', 'needs-decision', 'waiting-evidence'].includes(result.state ?? '') &&
+        selected &&
+        Date.parse(String(selected.lastChecked)) >= requestedAt &&
+        ['needs-decision', 'waiting-evidence', 'resolved'].includes(String(selected.disposition))
+      )
+        return selected;
     }
-    return selected;
+    throw observationUnavailable;
   };
   const started = performance.now();
   let setupMilliseconds: number | null = null;
@@ -1007,7 +1019,7 @@ export async function runTopicStudyNativeAdapter(
         request.event,
         error instanceof Error ? error.message : 'Native CLI adapter failed.',
       ),
-      status: 'failed',
+      status: error === observationUnavailable ? 'unavailable' : 'failed',
       commandReceiptHashes: receipts,
     };
     if (state) await writeFile(statePath, JSON.stringify(state));

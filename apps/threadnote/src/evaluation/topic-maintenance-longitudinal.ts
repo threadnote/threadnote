@@ -1,6 +1,7 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const TOPIC_STUDY_VERSION = 1 as const;
+export const TOPIC_STUDY_ANALYSIS_VERSION = 2 as const;
 export const TOPIC_STUDY_ARMS = ['scripted-manual', 'maintained-local', 'maintained-alternate', 'naive-local'] as const;
 export type TopicStudyArm = (typeof TOPIC_STUDY_ARMS)[number];
 export type TopicStudyClass =
@@ -565,19 +566,67 @@ export function parseTopicStudyGateInputV1(input: unknown): TopicStudyGateInputV
   };
 }
 
+/** V1 native adapters retain diagnostic probes when a required fault cannot be injected. */
+export function topicStudyProbeEligibleV1(row: TopicStudyLedgerRowV1, event: TopicStudyEventV1): boolean {
+  return !(
+    row.version === 1 &&
+    event.fault !== 'none' &&
+    row.observation.status === 'unavailable' &&
+    row.observation.actualClass === null &&
+    row.observation.reason === `Fault ${event.fault} requires a dedicated execution adapter.`
+  );
+}
+
+function studyProbeCounts(rows: readonly TopicStudyLedgerRowV1[], corpus: TopicStudyCorpusV1) {
+  const probes = rows.flatMap(row =>
+    row.observation.probes.map(probe => ({
+      probe,
+      grade: gradeTopicStudyAnswerV1(
+        corpus.events[row.eventIndex - 1].probes.find(item => item.id === probe.id)!,
+        probe.answer,
+      ),
+      abstained: gradeTopicStudyAnswerV1({id: probe.id, question: '', answer: null}, probe.answer) === 'correct',
+    })),
+  );
+  return {
+    planned: rows.reduce((count, row) => count + corpus.events[row.eventIndex - 1].probes.length, 0),
+    answered: probes.filter(({probe}) => probe.answer !== null).length,
+    correct: probes.filter(({grade}) => grade === 'correct').length,
+    incorrect: probes.filter(({grade}) => grade === 'incorrect').length,
+    adjudicationRequired: probes.filter(({grade}) => grade === 'adjudication-required').length,
+    unavailable: probes.filter(({grade}) => grade === 'unavailable').length,
+    abstained: probes.filter(({abstained}) => abstained).length,
+    incorrectAbstentions: probes.filter(({grade, abstained}) => grade === 'incorrect' && abstained).length,
+  };
+}
+
 export function summarizeTopicStudyV1(
   rows: readonly TopicStudyLedgerRowV1[],
   corpusInput: unknown,
   gate: TopicStudyGateInputV1,
+  plannedRepetitions?: number,
 ) {
   const corpus = parseTopicStudyCorpusV1(corpusInput);
   const runKeys = new Set(rows.map(row => `${row.arm}/${row.repetition}`));
   const completeRuns = [...runKeys].filter(
     key => rows.filter(row => `${row.arm}/${row.repetition}` === key).length === corpus.events.length,
   );
-  const repetitions = Math.max(1, ...rows.map(row => row.repetition));
+  const observedRepetitions = Math.max(1, ...rows.map(row => row.repetition));
+  if (
+    plannedRepetitions !== undefined &&
+    (!Number.isSafeInteger(plannedRepetitions) || plannedRepetitions < observedRepetitions || plannedRepetitions > 10)
+  )
+    fail('planned repetitions must cover all recorded repetitions and be at most 10');
+  const repetitions = plannedRepetitions ?? observedRepetitions;
   const expectedRows = corpus.events.length * TOPIC_STUDY_ARMS.length * repetitions;
-  const probes = rows.flatMap(row => row.observation.probes);
+  const eligible = (row: TopicStudyLedgerRowV1) => topicStudyProbeEligibleV1(row, corpus.events[row.eventIndex - 1]);
+  const eligibleRows = rows.filter(eligible);
+  const unsupportedRows = rows.filter(row => !eligible(row));
+  const measuredProbes = studyProbeCounts(eligibleRows, corpus);
+  const diagnosticProbes = studyProbeCounts(rows, corpus);
+  const probesPerRepetition =
+    corpus.events.reduce((count, event) => count + event.probes.length, 0) * TOPIC_STUDY_ARMS.length;
+  const allSlotProbePlanned = probesPerRepetition * repetitions;
   const declared = rows.filter(row => corpus.events[row.eventIndex - 1].declaredPositive);
   const truePositive = declared.filter(row => row.observation.detected === true).length;
   const falseNegative = declared.filter(row => row.observation.detected === false).length;
@@ -604,10 +653,10 @@ export function summarizeTopicStudyV1(
         (corpus.events[row.eventIndex - 1].expectedClass === 'stale-conflict' ||
           corpus.events[row.eventIndex - 1].expectedClass === 'unavailable') &&
         obs.accepted) ||
-      obs.probes.some(probe => probe.judged === 'incorrect' && probe.answer !== null)
+      (eligible(row) && obs.probes.some(probe => probe.judged === 'incorrect' && probe.answer !== null))
     );
   });
-  const gradingMismatches = candidateRows.filter(row =>
+  const gradingMismatches = candidateRows.filter(eligible).filter(row =>
     row.observation.probes.some(probe => {
       const grade = gradeTopicStudyAnswerV1(
         corpus.events[row.eventIndex - 1].probes.find(item => item.id === probe.id)!,
@@ -621,6 +670,9 @@ export function summarizeTopicStudyV1(
   ];
   const candidateDisagreements = outcomeDisagreements.filter(row => row.arm.startsWith('maintained'));
   const reasons: string[] = [];
+  if (plannedRepetitions === undefined) reasons.push('planned repetition schedule unverified');
+  if (unsupportedRows.length)
+    reasons.push('required fault execution unavailable; diagnostic probes excluded from measured quality');
   if (
     rows.length !== expectedRows ||
     TOPIC_STUDY_ARMS.some(arm =>
@@ -637,7 +689,7 @@ export function summarizeTopicStudyV1(
   )
     reasons.push('failed or unavailable candidate/manual events or unavailable comparator');
   if (
-    candidateRows.some(row =>
+    candidateRows.filter(eligible).some(row =>
       row.observation.probes.some(
         probe =>
           probe.judged === 'unavailable' ||
@@ -661,11 +713,14 @@ export function summarizeTopicStudyV1(
   if (gate.downstreamNoRegression !== true) reasons.push('downstream answer quality unproven or regressed');
   validateGateMeasurements(rows, corpus, gate, reasons);
   return {
+    analysisVersion: TOPIC_STUDY_ANALYSIS_VERSION,
     decision: reasons.length === 0 ? ('GO' as const) : ('HOLD' as const),
     reasons,
     phase7Blocked: reasons.length > 0,
     denominators: {
-      plannedEvents: expectedRows,
+      plannedRepetitions: plannedRepetitions ?? null,
+      plannedEvents: plannedRepetitions === undefined ? null : expectedRows,
+      minimumEventsFromObservedRepetitions: corpus.events.length * TOPIC_STUDY_ARMS.length * observedRepetitions,
       recordedEvents: rows.length,
       observedEvents: rows.filter(row => row.observation.status === 'observed').length,
       failedEvents: rows.filter(row => row.observation.status === 'failed').length,
@@ -675,12 +730,17 @@ export function summarizeTopicStudyV1(
       draftAttempted: rows.filter(row => row.observation.draftAttempted).length,
       draftCompleted: rows.filter(row => row.observation.draftCompleted).length,
       accepted: rows.filter(row => row.observation.accepted).length,
-      probePlanned: rows.reduce((total, row) => total + corpus.events[row.eventIndex - 1].probes.length, 0),
-      probeAnswered: probes.filter(probe => probe.answer !== null).length,
-      probeAbstained: probes.filter(
-        probe => gradeTopicStudyAnswerV1({id: probe.id, question: '', answer: null}, probe.answer) === 'correct',
-      ).length,
-      probeUnavailable: probes.filter(probe => probe.judged === 'unavailable').length,
+      allSlotProbePlanned: plannedRepetitions === undefined ? null : allSlotProbePlanned,
+      minimumSlotProbePlanned: probesPerRepetition * observedRepetitions,
+      recordedSlotProbePlanned: diagnosticProbes.planned,
+      unrecordedSlotProbePlanned:
+        plannedRepetitions === undefined ? null : allSlotProbePlanned - diagnosticProbes.planned,
+      unsupportedFaultEvents: unsupportedRows.length,
+      unsupportedFaultProbes: diagnosticProbes.planned - measuredProbes.planned,
+      probePlanned: measuredProbes.planned,
+      probeAnswered: measuredProbes.answered,
+      probeAbstained: measuredProbes.abstained,
+      probeUnavailable: measuredProbes.unavailable,
     },
     detection: {
       truePositive,
@@ -694,8 +754,11 @@ export function summarizeTopicStudyV1(
     reviewerMillisecondsMedian: median(reviewerTimes),
     measuredProviderChargeMicros: rows.reduce((total, row) => total + (row.observation.providerChargeMicros ?? 0), 0),
     providerChargeUnknownEvents: rows.filter(row => row.observation.providerChargeMicros === null).length,
+    diagnosticProbes,
     byArm: TOPIC_STUDY_ARMS.map(arm => {
       const armRows = rows.filter(row => row.arm === arm);
+      const measured = studyProbeCounts(armRows.filter(eligible), corpus);
+      const diagnostic = studyProbeCounts(armRows, corpus);
       const elapsed = armRows
         .map(row => row.observation.computeMilliseconds)
         .filter((value): value is number => value !== null);
@@ -721,42 +784,13 @@ export function summarizeTopicStudyV1(
           row => row.arm === arm,
         ).length,
         outcomeDisagreements: outcomeDisagreements.filter(row => row.arm === arm).length,
-        correctProbes: armRows.reduce(
-          (count, row) =>
-            count +
-            row.observation.probes.filter(
-              probe =>
-                gradeTopicStudyAnswerV1(
-                  corpus.events[row.eventIndex - 1].probes.find(item => item.id === probe.id)!,
-                  probe.answer,
-                ) === 'correct',
-            ).length,
-          0,
-        ),
-        incorrectProbes: armRows.reduce(
-          (count, row) =>
-            count +
-            row.observation.probes.filter(
-              probe =>
-                gradeTopicStudyAnswerV1(
-                  corpus.events[row.eventIndex - 1].probes.find(item => item.id === probe.id)!,
-                  probe.answer,
-                ) === 'incorrect',
-            ).length,
-          0,
-        ),
-        adjudicationRequiredProbes: armRows.reduce(
-          (count, row) =>
-            count +
-            row.observation.probes.filter(
-              probe =>
-                gradeTopicStudyAnswerV1(
-                  corpus.events[row.eventIndex - 1].probes.find(item => item.id === probe.id)!,
-                  probe.answer,
-                ) === 'adjudication-required',
-            ).length,
-          0,
-        ),
+        measuredProbes: measured,
+        diagnosticProbes: diagnostic,
+        unsupportedFaultEvents: armRows.filter(row => !eligible(row)).length,
+        unsupportedFaultProbes: diagnostic.planned - measured.planned,
+        correctProbes: measured.correct,
+        incorrectProbes: measured.incorrect,
+        adjudicationRequiredProbes: measured.adjudicationRequired,
         computeMillisecondsMedian: median(elapsed),
         computeMillisecondsMaximum: elapsed.length ? Math.max(...elapsed) : null,
       };
@@ -1296,7 +1330,8 @@ function validateGateMeasurements(
     return !!decision && (grade(row, probe) === 'adjudication-required' || decision.judged === grade(row, probe));
   };
   let regression = false,
-    disagreement = false;
+    disagreement = false,
+    unavailableComparison = false;
   for (const row of candidates) {
     const manual = rows.find(
       item =>
@@ -1304,6 +1339,13 @@ function validateGateMeasurements(
     );
     if (!manual) {
       regression = true;
+      continue;
+    }
+    if (
+      !topicStudyProbeEligibleV1(row, corpus.events[row.eventIndex - 1]) ||
+      !topicStudyProbeEligibleV1(manual, corpus.events[manual.eventIndex - 1])
+    ) {
+      unavailableComparison = true;
       continue;
     }
     for (const probe of row.observation.probes) {
@@ -1327,6 +1369,7 @@ function validateGateMeasurements(
   }
   if (disagreement) reasons.push('referenced case-level answer adjudications missing');
   if (regression) reasons.push('matched manual downstream observations regress or are missing');
+  if (unavailableComparison) reasons.push('matched downstream fault coverage unavailable');
 }
 
 export function classifyTopicStudyProposalV1(

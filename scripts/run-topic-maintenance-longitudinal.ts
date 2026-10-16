@@ -53,6 +53,7 @@ interface Options {
   readonly gateEvidence: string | null;
   readonly repetitions: number;
   readonly execute: boolean;
+  readonly replay: string | null;
 }
 
 const DEFAULT_FIXTURE = 'apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1';
@@ -85,6 +86,7 @@ function optionsFromArgs(args: readonly string[]): Options {
     '--gate-evidence',
     '--repetitions',
     '--execute',
+    '--replay',
   ]);
   if ([...flags.keys()].some(key => !known.has(key))) throw new Error('Unknown longitudinal runner option.');
   const repetitions = Number(flags.get('--repetitions') ?? '1');
@@ -94,6 +96,7 @@ function optionsFromArgs(args: readonly string[]): Options {
   const adapter = flags.get('--adapter') ?? null;
   if (binary !== null && !isAbsolute(binary)) throw new Error('Binary path must be absolute.');
   if (adapter !== null && !isAbsolute(adapter)) throw new Error('Adapter path must be absolute.');
+  if (flags.has('--replay') && flags.has('--execute')) throw new Error('--replay cannot execute models.');
   return {
     corpus: flags.get('--corpus') ?? `${DEFAULT_FIXTURE}/sequence.json`,
     seal: flags.get('--seal') ?? `${DEFAULT_FIXTURE}/sequence.sha256`,
@@ -107,6 +110,7 @@ function optionsFromArgs(args: readonly string[]): Options {
     alternatePermitted: flags.has('--alternate-permitted'),
     repetitions,
     execute: flags.has('--execute'),
+    replay: flags.get('--replay') ?? null,
     expectedHead: flags.get('--expected-head') ?? null,
     gateEvidence: flags.get('--gate-evidence') ?? null,
   };
@@ -194,6 +198,19 @@ async function prepareSandbox(
   return {repo, home, env, commit, manifest};
 }
 
+async function readGateEvidence(path: string | null): Promise<TopicStudyGateInputV1> {
+  return path === null
+    ? {
+        realTopicPilotObserved: false,
+        alternatePermittedAndMeasured: false,
+        pairedHumanMedianReduction: null,
+        totalCostMeasured: false,
+        disagreementsAdjudicated: false,
+        downstreamNoRegression: null,
+      }
+    : parseTopicStudyGateInputV1(JSON.parse(await readFile(path, 'utf8')) as unknown);
+}
+
 async function main() {
   const options = optionsFromArgs(Bun.argv.slice(2));
   const [json, seal, baselineJson] = await Promise.all([
@@ -207,6 +224,101 @@ async function main() {
   const baseline = JSON.parse(baselineJson) as {sourceFiles: readonly {path: string; content: string}[]};
   if (sha256HexSync(baselineJson) !== corpus.initialFixtureHash) throw new Error('Baseline fixture hash mismatch.');
   const corpusHash = topicStudyCorpusHashV1(corpus);
+  if (options.replay !== null) {
+    const runDirectory = await realpath(options.replay);
+    const ledger = await readFile(join(runDirectory, 'outcomes.jsonl'), 'utf8');
+    const rows = assertTopicStudyLedgerV1(ledger, corpus);
+    const originalSummary = await readFile(join(runDirectory, 'summary.json'), 'utf8');
+    const originalExecutionStatus =
+      (JSON.parse(originalSummary) as {executionStatus?: unknown}).executionStatus ?? 'unspecified';
+    const executionHeads = new Set<string>();
+    const manifests = await Promise.all(
+      [...new Set(rows.map(row => `${row.arm}-${row.repetition}`))].map(async key => {
+        const raw = await readFile(join(runDirectory, `${key}-manifest.json`), 'utf8');
+        const manifest = JSON.parse(raw) as {
+          version?: unknown;
+          arm?: unknown;
+          repetition?: unknown;
+          runNonce?: unknown;
+          corpusHash?: unknown;
+          canonicalSeal?: unknown;
+          expectedHead?: unknown;
+          runtime?: {sourceHead?: unknown};
+        };
+        if (
+          manifest.version !== 1 ||
+          `${manifest.arm}-${manifest.repetition}` !== key ||
+          rows.some(row => `${row.arm}-${row.repetition}` === key && row.runNonce !== manifest.runNonce) ||
+          manifest.corpusHash !== corpusHash ||
+          manifest.canonicalSeal !== canonicalSeal ||
+          typeof manifest.expectedHead !== 'string' ||
+          !/^[0-9a-f]{40}$/u.test(manifest.expectedHead) ||
+          manifest.runtime?.sourceHead !== manifest.expectedHead
+        )
+          throw new Error('Replay manifest does not match the sealed execution.');
+        executionHeads.add(manifest.expectedHead);
+        return {name: `${key}-manifest.json`, sha256: sha256HexSync(raw)};
+      }),
+    );
+    if (executionHeads.size !== 1) throw new Error('Replay requires one immutable execution HEAD.');
+    const planJson = await readFile(join(runDirectory, 'plan.json'), 'utf8').catch(error => {
+      if ((error as {code?: string}).code === 'ENOENT') return null;
+      throw error;
+    });
+    let plannedRepetitions: number | undefined;
+    if (planJson !== null) {
+      const plan = JSON.parse(planJson) as {
+        version?: unknown;
+        expectedHead?: unknown;
+        corpusHash?: unknown;
+        canonicalSeal?: unknown;
+        repetitions?: unknown;
+      };
+      if (
+        plan.version !== 1 ||
+        plan.expectedHead !== [...executionHeads][0] ||
+        plan.corpusHash !== corpusHash ||
+        plan.canonicalSeal !== canonicalSeal ||
+        typeof plan.repetitions !== 'number' ||
+        !Number.isSafeInteger(plan.repetitions) ||
+        plan.repetitions < 1 ||
+        plan.repetitions > 10
+      )
+        throw new Error('Replay planned schedule is invalid.');
+      plannedRepetitions = plan.repetitions;
+    }
+    const sourceRoot = resolve(import.meta.dir, '..');
+    const current = await processResult(['git', 'rev-parse', 'HEAD'], sourceRoot, topicStudyEnvironment(process.env));
+    if (current.exitCode !== 0) throw new Error('Analysis HEAD is unavailable.');
+    const analysisRuntime = await captureTopicStudyRuntime(sourceRoot, current.stdout.trim());
+    const analysisCodeHash = sha256HexSync(
+      await readFile(join(sourceRoot, 'apps/threadnote/src/evaluation/topic-maintenance-longitudinal.ts')),
+    );
+    const summary = summarizeTopicStudyV1(
+      rows,
+      corpus,
+      await readGateEvidence(options.gateEvidence),
+      plannedRepetitions,
+    );
+    process.stdout.write(
+      JSON.stringify({
+        kind: 'topic-study-reanalysis',
+        executionHead: [...executionHeads][0],
+        analysisHead: analysisRuntime.sourceHead,
+        analysisCodeHash,
+        analysisRuntime,
+        corpusHash,
+        canonicalSeal,
+        ledgerSha256: sha256HexSync(ledger),
+        originalSummarySha256: sha256HexSync(originalSummary),
+        originalExecutionStatus,
+        planSha256: planJson === null ? null : sha256HexSync(planJson),
+        manifests,
+        summary,
+      }) + '\n',
+    );
+    return;
+  }
   if (!options.execute) {
     process.stdout.write(
       JSON.stringify({
@@ -244,6 +356,16 @@ async function main() {
   );
   let previousHash: string | null = null;
   const rows: ReturnType<typeof topicStudyLedgerRowV1>[] = [];
+  await writeFile(
+    join(runDirectory, 'plan.json'),
+    JSON.stringify({
+      version: 1,
+      expectedHead: options.expectedHead,
+      corpusHash,
+      canonicalSeal,
+      repetitions: options.repetitions,
+    }),
+  );
   for (const arm of TOPIC_STUDY_ARMS) {
     for (let repetition = 1; repetition <= options.repetitions; repetition++) {
       const expectedSourceFiles = new Map(baseline.sourceFiles.map(source => [source.path, source.content]));
@@ -404,20 +526,12 @@ async function main() {
   await assertTopicStudyRuntime(runtime, true);
   await assertTopicStudyModel(verifiedModel, true);
   assertTopicStudyLedgerV1(await readFile(ledgerPath, 'utf8'), corpus);
-  const missingGateEvidence: TopicStudyGateInputV1 = {
-    realTopicPilotObserved: false,
-    alternatePermittedAndMeasured: false,
-    pairedHumanMedianReduction: null,
-    totalCostMeasured: false,
-    disagreementsAdjudicated: false,
-    downstreamNoRegression: null,
-  };
-  const gate =
-    options.gateEvidence === null
-      ? missingGateEvidence
-      : parseTopicStudyGateInputV1(JSON.parse(await readFile(options.gateEvidence, 'utf8')) as unknown);
-  const summary = summarizeTopicStudyV1(rows, corpus, gate);
-  await writeFile(join(runDirectory, 'summary.json'), JSON.stringify(summary, null, 2));
+  const gate = await readGateEvidence(options.gateEvidence);
+  const summary = summarizeTopicStudyV1(rows, corpus, gate, options.repetitions);
+  await writeFile(
+    join(runDirectory, 'summary.json'),
+    JSON.stringify({executionStatus: 'completed', ...summary}, null, 2),
+  );
   process.stdout.write(JSON.stringify({runDirectory, corpusHash, ...summary}) + '\n');
 }
 

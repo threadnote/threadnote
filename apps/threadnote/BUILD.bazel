@@ -27323,6 +27323,7 @@ bun_workspace_test(
         "//:scripts/effect/errors.ts",
         "//:scripts/effect/system-layer.ts",
         "//:scripts/lint.ts",
+        "//:scripts/run-topic-maintenance-longitudinal.ts",
         "//:scripts/topic-maintenance-longitudinal-native-adapter.ts",
         "//:scripts/topic-maintenance-longitudinal-process.ts",
         "//:scripts/topic-maintenance-longitudinal-runtime.ts",

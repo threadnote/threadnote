@@ -158,6 +158,7 @@ async function fixture(
         }
       } else if (command.includes('run'))
         stdout = JSON.stringify({
+          state: 'needs-decision',
           cases: [
             {
               family: 'topic-maintenance',
@@ -165,6 +166,7 @@ async function fixture(
               caseId: 'case-fixture',
               disposition: 'needs-decision',
               evidenceRevision: 'new',
+              lastChecked: new Date().toISOString(),
             },
           ],
         });
@@ -208,6 +210,125 @@ async function fixture(
 }
 
 describe('native public CLI longitudinal contract', () => {
+  it.each(['resolved', 'needs-decision'])(
+    'waits past a retained %s case until the current event has been observed',
+    async disposition => {
+      const value = await fixture(17, 'policy-conflict');
+      let turns = 0;
+      try {
+        const result = await runTopicStudyNativeAdapter(value.request, {
+          ...value.ports,
+          execute: async command => {
+            if (command.includes('run') && ++turns === 1)
+              return {
+                stdout: JSON.stringify({
+                  state: disposition === 'resolved' ? 'running' : 'needs-decision',
+                  cases: [
+                    {
+                      family: 'topic-maintenance',
+                      memoryId: 'tn_fixture',
+                      caseId: 'case-fixture',
+                      disposition,
+                      evidenceRevision: 'prior',
+                      lastChecked: '2000-01-01T00:00:00.000Z',
+                    },
+                  ],
+                }),
+                stderr: '',
+                exitCode: 0,
+                elapsed: 1,
+              };
+            if (command.includes('draft')) expect(turns).toBeGreaterThan(1);
+            return value.ports.execute(command);
+          },
+        });
+        expect(turns).toBe(2);
+        expect(result.status).toBe('observed');
+        expect(result.actualClass).toBe('policy-conflict');
+      } finally {
+        await rm(value.directory, {recursive: true, force: true});
+      }
+    },
+  );
+
+  it('accepts a newly checked unchanged case without requiring its revision to change', async () => {
+    const value = await fixture(17, 'policy-conflict');
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          if (!command.includes('run')) return response;
+          const payload = JSON.parse(response.stdout);
+          return {
+            ...response,
+            stdout: JSON.stringify({
+              ...payload,
+              state: 'idle',
+              cases: payload.cases.map((item: object) => ({
+                ...item,
+                disposition: 'resolved',
+                evidenceRevision: 'prior',
+              })),
+            }),
+          };
+        },
+      });
+      expect(result.status).toBe('observed');
+      expect(result.actualClass).toBe('unchanged');
+      expect(result.draftAttempted).toBe(false);
+      expect(value.commands.filter(command => command.includes('run'))).toHaveLength(1);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  });
+
+  it('records an unavailable precondition after bounded stale responses without calling a model', async () => {
+    const value = await fixture(17, 'policy-conflict');
+    let turns = 0,
+      generations = 0;
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          if (command.includes('run')) {
+            turns++;
+            return {
+              stdout: JSON.stringify({
+                state: 'running',
+                cases: [
+                  {
+                    family: 'topic-maintenance',
+                    memoryId: 'tn_fixture',
+                    caseId: 'case-fixture',
+                    disposition: 'needs-decision',
+                    evidenceRevision: 'prior',
+                    lastChecked: '2000-01-01T00:00:00.000Z',
+                  },
+                ],
+              }),
+              stderr: '',
+              exitCode: 0,
+              elapsed: 1,
+            };
+          }
+          return value.ports.execute(command);
+        },
+        generate: async () => {
+          generations++;
+          return value.ports.generate();
+        },
+      });
+      expect(turns).toBe(8);
+      expect(result.status).toBe('unavailable');
+      expect(result.reason).toContain('current-event observation');
+      expect(generations).toBe(0);
+      expect(value.commands.some(command => command.includes('draft'))).toBe(false);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  });
+
   it.each(['policy-conflict', 'insufficient-evidence'])(
     'observes safe %s without preview/apply or accepted changes',
     async outcome => {

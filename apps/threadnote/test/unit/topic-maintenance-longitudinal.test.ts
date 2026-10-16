@@ -15,6 +15,10 @@ import {
   topicStudyUnavailableObservationV1,
 } from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
 
+function summarizeFixture(...args: Parameters<typeof summarizeTopicStudyV1>) {
+  return summarizeTopicStudyV1(args[0], args[1], args[2], 1);
+}
+
 const fixturePath = 'apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json';
 const sealPath = 'apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.sha256';
 
@@ -79,7 +83,7 @@ describe('topic maintenance longitudinal evaluation', () => {
       observation: topicStudyUnavailableObservationV1(event, 'model absent'),
       previousHash: null,
     });
-    const result = summarizeTopicStudyV1([row], input, {
+    const result = summarizeFixture([row], input, {
       realTopicPilotObserved: false,
       alternatePermittedAndMeasured: false,
       pairedHumanMedianReduction: null,
@@ -404,13 +408,13 @@ it('separates a failing naive comparator from complete maintained/manual candida
       adjudications: [],
     },
   });
-  const result = summarizeTopicStudyV1(rows, input, gate);
+  const result = summarizeFixture(rows, input, gate);
   expect(result.reasons).toEqual([]);
   expect(result.decision).toBe('GO');
   expect(result.hardFailureCount).toBe(0);
   expect(result.comparatorHardFailureCount).toBe(input.events.length);
   expect(
-    summarizeTopicStudyV1(
+    summarizeFixture(
       rows.map(row =>
         row.arm === 'naive-local'
           ? {...row, observation: {...row.observation, status: 'failed', reason: 'Measured baseline failure'}}
@@ -431,7 +435,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
         }
       : row,
   );
-  expect(summarizeTopicStudyV1(equivalentAnswers, input, gate).decision).toBe('GO');
+  expect(summarizeFixture(equivalentAnswers, input, gate).decision).toBe('GO');
   const forged = rows.map(row =>
     row.arm === 'maintained-local'
       ? {
@@ -445,7 +449,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
         }
       : row,
   );
-  expect(summarizeTopicStudyV1(forged, input, gate).decision).toBe('HOLD');
+  expect(summarizeFixture(forged, input, gate).decision).toBe('HOLD');
   const remappedStudy = (
     transform: (row: (typeof rows)[number]) => (typeof rows)[number]['observation'],
     adjudicatedRows: typeof rows = [],
@@ -511,7 +515,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
         : row.observation,
     [firstCandidate, rows[0]],
   );
-  const adverse = summarizeTopicStudyV1(wrongNumeric.rows, input, wrongNumeric.gate);
+  const adverse = summarizeFixture(wrongNumeric.rows, input, wrongNumeric.gate);
   expect(adverse.decision).toBe('HOLD');
   expect(adverse.hardFailureCount).toBeGreaterThan(0);
   const unanswered = remappedStudy(row =>
@@ -524,7 +528,7 @@ it('separates a failing naive comparator from complete maintained/manual candida
         }
       : row.observation,
   );
-  const missing = summarizeTopicStudyV1(unanswered.rows, input, unanswered.gate);
+  const missing = summarizeFixture(unanswered.rows, input, unanswered.gate);
   expect(missing.decision).toBe('HOLD');
   expect(missing.hardFailureCount).toBe(0);
   expect(missing.reasons).toContain('downstream probe observations unavailable');
@@ -537,12 +541,187 @@ it('separates a failing naive comparator from complete maintained/manual candida
       probes: row.observation.probes,
     },
   }));
-  expect(summarizeTopicStudyV1(nullRows, input, gate).decision).toBe('HOLD');
-  expect(summarizeTopicStudyV1(rows, input, {...gate, evidence: undefined}).decision).toBe('HOLD');
+  expect(summarizeFixture(nullRows, input, gate).decision).toBe('HOLD');
+  expect(summarizeFixture(rows, input, {...gate, evidence: undefined}).decision).toBe('HOLD');
   const declared = rows.filter(row => input.events[row.eventIndex - 1].declaredPositive);
   const unknown = rows.map(row =>
     declared.includes(row) ? {...row, observation: {...row.observation, detected: null}} : row,
   );
-  expect(summarizeTopicStudyV1(unknown, input, gate).detection.recall).toBe(0);
-  expect(summarizeTopicStudyV1(unknown, input, gate).detection.unknownPositive).toBe(declared.length);
+  expect(summarizeFixture(unknown, input, gate).detection.recall).toBe(0);
+  expect(summarizeFixture(unknown, input, gate).detection.unknownPositive).toBe(declared.length);
+});
+
+describe('executed-path probe eligibility', () => {
+  const gate = {
+    realTopicPilotObserved: false,
+    alternatePermittedAndMeasured: false,
+    pairedHumanMedianReduction: null,
+    totalCostMeasured: false,
+    disagreementsAdjudicated: false,
+    downstreamNoRegression: null,
+  };
+  async function unsupportedCase() {
+    const input = await corpus();
+    const event = input.events[32];
+    const observation = {
+      ...topicStudyUnavailableObservationV1(event, `Fault ${event.fault} requires a dedicated execution adapter.`),
+      probes: event.probes.map(probe => {
+        const answer = probe.answer === null ? '125 seconds' : probe.answer;
+        return {id: probe.id, answer, evidence: null, judged: gradeTopicStudyAnswerV1(probe, answer)};
+      }),
+    };
+    const row = topicStudyLedgerRowV1({
+      corpusHash: topicStudyCorpusHashV1(input),
+      runNonce: 'unexecuted-fault',
+      arm: 'maintained-local',
+      repetition: 1,
+      eventIndex: event.index,
+      eventId: event.id,
+      observation,
+      previousHash: null,
+    });
+    return {input, event, row};
+  }
+
+  it('retains unexecuted counterfactual answers as diagnostics without fabricating observed failures', async () => {
+    const {input, event, row} = await unsupportedCase();
+    const result = summarizeFixture([row], input, gate);
+    expect(result.decision).toBe('HOLD');
+    expect(result.hardFailureCount).toBe(0);
+    expect(result.denominators.unsupportedFaultEvents).toBe(1);
+    expect(result.denominators.unsupportedFaultProbes).toBe(event.probes.length);
+    expect(result.denominators.probePlanned).toBe(0);
+    expect(result.byArm[1].incorrectProbes).toBe(0);
+    expect(result.diagnosticProbes.incorrect).toBeGreaterThan(0);
+    expect(result.reasons).not.toContain('candidate answers or labels disagree with independent grading');
+  });
+
+  it('keeps actual failed attempts, unavailable answers and nonmatching reason contracts in the denominator', async () => {
+    const {input, event, row} = await unsupportedCase();
+    for (const observation of [
+      {...row.observation, status: 'failed' as const, reason: 'Actual execution failed'},
+      {...row.observation, reason: 'Fault graph-outage requires a dedicated execution adapter.'},
+      {...row.observation, actualClass: 'unavailable' as const},
+    ]) {
+      const result = summarizeFixture([{...row, observation}], input, gate);
+      expect(result.denominators.probePlanned).toBe(event.probes.length);
+      expect(result.denominators.unsupportedFaultEvents).toBe(0);
+      expect(result.hardFailureCount).toBeGreaterThan(0);
+    }
+    const unavailable = summarizeFixture(
+      [
+        {
+          ...row,
+          observation: topicStudyUnavailableObservationV1(event, 'Actual adapter execution failed'),
+        },
+      ],
+      input,
+      gate,
+    );
+    expect(unavailable.denominators.probePlanned).toBe(event.probes.length);
+    expect(unavailable.denominators.probeUnavailable).toBe(event.probes.length);
+  });
+
+  it('always reports physical safety violations even during unsupported fault slots', async () => {
+    const {input, row} = await unsupportedCase();
+    for (const violation of [
+      {accepted: true, approved: false},
+      {identityPreserved: false},
+      {provenancePreserved: false},
+      {unrelatedBodyPreserved: false},
+    ]) {
+      const result = summarizeFixture([{...row, observation: {...row.observation, ...violation}}], input, gate);
+      expect(result.hardFailureCount).toBe(1);
+      expect(result.decision).toBe('HOLD');
+      expect(result.denominators.unsupportedFaultEvents).toBe(1);
+    }
+  });
+
+  it('partitions every planned probe without discarding failures or mutating raw observations', async () => {
+    const input = await corpus();
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), {minLength: 50, maxLength: 50}), flags => {
+        const rows = input.events.map((event, index) =>
+          topicStudyLedgerRowV1({
+            corpusHash: topicStudyCorpusHashV1(input),
+            runNonce: 'partition-check',
+            arm: 'maintained-local',
+            repetition: 1,
+            eventIndex: event.index,
+            eventId: event.id,
+            previousHash: null,
+            observation: {
+              ...topicStudyUnavailableObservationV1(
+                event,
+                flags[index]
+                  ? `Fault ${event.fault} requires a dedicated execution adapter.`
+                  : 'Actual execution failed',
+              ),
+              status: flags[index] ? 'unavailable' : 'failed',
+            },
+          }),
+        );
+        const before = JSON.stringify(rows);
+        const result = summarizeFixture(rows, input, gate);
+        const counts = result.denominators;
+        expect(counts.allSlotProbePlanned).toBe(
+          counts.probePlanned + counts.unsupportedFaultProbes + counts.unrecordedSlotProbePlanned!,
+        );
+        expect(counts.recordedSlotProbePlanned).toBe(counts.probePlanned + counts.unsupportedFaultProbes);
+        expect(result.byArm.reduce((sum, arm) => sum + arm.measuredProbes.planned, 0)).toBe(counts.probePlanned);
+        for (const arm of result.byArm)
+          expect(arm.measuredProbes.planned).toBe(
+            arm.measuredProbes.correct +
+              arm.measuredProbes.incorrect +
+              arm.measuredProbes.adjudicationRequired +
+              arm.measuredProbes.unavailable,
+          );
+        expect(counts.unsupportedFaultEvents).toBe(
+          input.events.filter((event, index) => flags[index] && event.fault !== 'none').length,
+        );
+        expect(JSON.stringify(rows)).toBe(before);
+        expect(result.decision).toBe('HOLD');
+      }),
+      {numRuns: 30},
+    );
+  });
+});
+
+it('counts unstarted planned repetitions and labels a legacy schedule unknown', async () => {
+  const input = await corpus();
+  const event = input.events[0];
+  const row = topicStudyLedgerRowV1({
+    corpusHash: topicStudyCorpusHashV1(input),
+    runNonce: 'early-stop',
+    arm: 'scripted-manual',
+    repetition: 1,
+    eventIndex: 1,
+    eventId: event.id,
+    previousHash: null,
+    observation: topicStudyUnavailableObservationV1(event, 'stopped'),
+  });
+  const gate = {
+    realTopicPilotObserved: false,
+    alternatePermittedAndMeasured: false,
+    pairedHumanMedianReduction: null,
+    totalCostMeasured: false,
+    disagreementsAdjudicated: false,
+    downstreamNoRegression: null,
+  };
+  const known = summarizeTopicStudyV1([row], input, gate, 2);
+  expect(known.denominators.plannedEvents).toBe(400);
+  expect(known.denominators.minimumEventsFromObservedRepetitions).toBe(200);
+  expect(known.denominators.allSlotProbePlanned).toBe(
+    input.events.reduce((total, item) => total + item.probes.length, 0) * 8,
+  );
+  expect(known.denominators.unrecordedSlotProbePlanned).toBe(
+    known.denominators.allSlotProbePlanned! - event.probes.length,
+  );
+  const legacy = summarizeTopicStudyV1([row], input, gate);
+  expect(legacy.denominators.plannedEvents).toBeNull();
+  expect(legacy.denominators.allSlotProbePlanned).toBeNull();
+  expect(legacy.denominators.unrecordedSlotProbePlanned).toBeNull();
+  expect(legacy.reasons).toContain('planned repetition schedule unverified');
+  expect(legacy.decision).toBe('HOLD');
+  expect(() => summarizeTopicStudyV1([row], input, gate, 0)).toThrow('planned repetitions');
 });
