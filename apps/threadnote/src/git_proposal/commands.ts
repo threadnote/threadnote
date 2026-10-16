@@ -3,7 +3,12 @@ import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {listCandidateReviews, withCandidateReviewLock, type CandidateReview} from '@threadnote/memory/candidate';
+import {
+  loadCandidateReview,
+  listCandidateReviews,
+  withCandidateReviewLock,
+  type CandidateReview,
+} from '@threadnote/memory/candidate';
 import {
   memoryCodeCitationContentSharingBlocker,
   memoryCodeCitationSharingBlockerMessage,
@@ -21,16 +26,25 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   buildKnowledgeDeltaGitProposalV1,
   verifyKnowledgeDeltaGitProposalV1,
-  type KnowledgeDeltaGitProposalV1,
-  type KnowledgeDeltaGitProposalBuildV1,
   type ReviewedSharedMemoryMutationV1,
 } from './knowledge_delta.js';
 import {planKnowledgeDeltaGitMaterializationV1, type KnowledgeDeltaGitMaterializationPlanV1} from './materializer.js';
+import {
+  verifyTopicMaintenanceGitProposal,
+  type GitProposal,
+  type GitProposalBuild,
+} from './topic_maintenance_proposal.js';
+import {
+  buildReviewedTopicMaintenanceGitProposal,
+  verifyTopicMaintenanceMaterialization,
+} from './topic_maintenance_commands.js';
 
 const MAXIMUM_GIT_PROPOSAL_OUTPUT_BYTES = 256 * 1_024;
 
 export interface KnowledgeDeltaGitProposalExportOptionsV1 {
   readonly approved?: boolean;
+  readonly approvalDigest?: string;
+  readonly sourceCwd?: string;
   readonly candidateIds: readonly string[];
   readonly output?: string;
   readonly reviewId: string;
@@ -40,6 +54,8 @@ export interface KnowledgeDeltaGitProposalExportOptionsV1 {
 
 export interface KnowledgeDeltaGitProposalMaterializeOptionsV1 {
   readonly apply?: boolean;
+  readonly approvalDigest?: string;
+  readonly sourceCwd?: string;
   readonly proposal: string;
   readonly team?: string;
 }
@@ -64,13 +80,35 @@ export const runKnowledgeDeltaGitProposalMaterialize = Effect.fn('gitProposal.ma
     .readFileString(options.proposal)
     .pipe(Effect.mapError(() => operationError('Git proposal file is unreadable.')));
   const proposal = yield* Effect.try({
-    try: () => JSON.parse(rawProposal) as KnowledgeDeltaGitProposalV1,
+    try: () => JSON.parse(rawProposal) as GitProposal,
     catch: () => operationError('Git proposal file is unreadable or invalid JSON.'),
   });
   yield* Effect.try({
-    try: () => verifyKnowledgeDeltaGitProposalV1(proposal),
+    try: () =>
+      proposal.version === 2
+        ? verifyTopicMaintenanceGitProposal(proposal)
+        : verifyKnowledgeDeltaGitProposalV1(proposal),
     catch: cause => operationError(cause instanceof Error ? cause.message : 'Git proposal is invalid.'),
   });
+  const materialize = materializeProposal(config, options, proposal);
+  return yield* proposal.version === 2
+    ? withCandidateReviewLock(config.agentContextHome, proposal.knowledgeDelta.reviewId, materialize)
+    : materialize;
+});
+
+const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function* (
+  config: RuntimeConfig,
+  options: KnowledgeDeltaGitProposalMaterializeOptionsV1,
+  proposal: GitProposal,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (proposal.version === 2) {
+    if (options.apply === true && options.approvalDigest !== proposal.proposalHash)
+      return yield* operationError(
+        'Shared maintenance materialization requires the exact proposalHash as approvalDigest.',
+      );
+    yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
+  }
   const team = yield* resolveTeam(config, options.team);
   if (team.name !== proposal.target.team) {
     return yield* operationError(
@@ -127,6 +165,7 @@ export const runKnowledgeDeltaGitProposalMaterialize = Effect.fn('gitProposal.ma
   const existing = yield* materializedBranchCommit(read, branchRef);
   if (existing !== undefined) {
     yield* verifyMaterializedBranch(read, branchRef, existing, base, plan);
+    if (proposal.version === 2) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
     yield* Console.log(
       JSON.stringify({
         branch: plan.branch,
@@ -150,6 +189,7 @@ export const runKnowledgeDeltaGitProposalMaterialize = Effect.fn('gitProposal.ma
     return {branch: plan.branch, materialized: false, proposalHash: plan.proposalHash} as const;
   }
   const commit = yield* createMaterializedBranch(fs, yield* Path.Path, run, read, branchRef, base, plan);
+  if (proposal.version === 2) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
   yield* Console.log(
     JSON.stringify({
       branch: plan.branch,
@@ -257,11 +297,7 @@ export const buildReviewedKnowledgeDeltaGitProposal = Effect.fn('gitProposal.bui
   config: RuntimeConfig,
   options: Omit<KnowledgeDeltaGitProposalExportOptionsV1, 'output'>,
 ) {
-  if (options.approved !== true) {
-    return yield* operationError('Git proposal export requires --approved after explicit shared-mutation review.');
-  }
   const candidateIds = [...new Set(options.candidateIds.map(value => value.trim()).filter(Boolean))].sort();
-  if (candidateIds.length === 0) return yield* operationError('Select at least one --candidate-id to share.');
   if (candidateIds.length > 3) return yield* operationError('A Git proposal can contain at most three candidates.');
   const reviewId = options.reviewId.trim();
   return yield* withCandidateReviewLock(
@@ -276,6 +312,11 @@ export const buildReviewedKnowledgeDeltaGitProposal = Effect.fn('gitProposal.bui
           `Candidate review revision changed: expected ${options.revision}, current ${review.revision}. Review it again before export.`,
         );
       }
+      if (review.maintenance)
+        return yield* operationError('Topic maintenance requires the dedicated reviewed Git proposal adapter.');
+      if (options.approved !== true)
+        return yield* operationError('Git proposal export requires --approved after explicit shared-mutation review.');
+      if (candidateIds.length === 0) return yield* operationError('Select at least one --candidate-id to share.');
       const delta = projectKnowledgeDeltaV1(review);
       const team = yield* resolveTeam(config, options.team);
       const repository = yield* resolveRepositoryIdentity(team.config.worktree).pipe(
@@ -309,11 +350,30 @@ export const buildReviewedKnowledgeDeltaGitProposal = Effect.fn('gitProposal.bui
   );
 });
 
+/** Shared maintenance dispatch stays separate from the legacy V1 activation/publication API. */
+export const buildReviewedGitProposal = Effect.fn('gitProposal.buildReviewedVariant')(function* (
+  config: RuntimeConfig,
+  options: Omit<KnowledgeDeltaGitProposalExportOptionsV1, 'output'>,
+) {
+  const selected = yield* loadCandidateReview(config.agentContextHome, options.reviewId);
+  if (!selected.maintenance) return yield* buildReviewedKnowledgeDeltaGitProposal(config, options);
+  return yield* withCandidateReviewLock(
+    config.agentContextHome,
+    options.reviewId,
+    Effect.gen(function* () {
+      const review = yield* loadCandidateReview(config.agentContextHome, options.reviewId);
+      if (review.revision !== options.revision)
+        return yield* operationError('Shared maintenance review revision changed. Read its current preview.');
+      return yield* buildReviewedTopicMaintenanceGitProposal(config, review, options);
+    }),
+  );
+});
+
 export const runKnowledgeDeltaGitProposalExport = Effect.fn('gitProposal.exportCommand')(function* (
   config: RuntimeConfig,
   options: KnowledgeDeltaGitProposalExportOptionsV1,
 ) {
-  const built = yield* buildReviewedKnowledgeDeltaGitProposal(config, options);
+  const built = yield* buildReviewedGitProposal(config, options);
   if (options.output === undefined) {
     yield* Console.log(built.artifact.trimEnd());
     return;
@@ -405,7 +465,7 @@ function sharedTargetPath(projectInput: string, topicInput: string | undefined) 
 
 const writeProposalArtifact = Effect.fn('gitProposal.writeArtifact')(function* (
   output: string,
-  built: KnowledgeDeltaGitProposalBuildV1,
+  built: GitProposalBuild,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;

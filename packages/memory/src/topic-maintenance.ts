@@ -1,4 +1,9 @@
-import {assertMemoryCodeCitation, MAX_MEMORY_CODE_CITATIONS, MEMORY_SCHEMA_VERSION} from './code/citation.js';
+import {
+  assertMemoryCodeCitation,
+  MAX_MEMORY_CODE_CITATIONS,
+  MEMORY_SCHEMA_VERSION,
+  type MemoryCodeCitationV1,
+} from './code/citation.js';
 import {
   assertMemoryDocumentSchemaWritable,
   canonicalMemoryDocumentContent,
@@ -9,6 +14,7 @@ import {
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 
 export const TOPIC_MAINTENANCE_VERSION = 1 as const;
+export const TOPIC_MAINTENANCE_ACCEPTED_VERSION = 2 as const;
 export const MAX_TOPIC_MAINTENANCE_PARAGRAPHS = 64;
 export const MAX_TOPIC_MAINTENANCE_BYTES = 32 * 1024;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -47,6 +53,19 @@ export interface TopicMaintenanceManifestV1 {
   readonly paragraphs: readonly TopicMaintenanceParagraphV1[];
   readonly additionalDependencies: readonly TopicMaintenanceDependencyV1[];
 }
+
+export interface TopicMaintenanceAcceptedSourceV2 {
+  readonly citationId: string;
+  readonly acceptedCitationId: string;
+}
+
+export interface TopicMaintenanceManifestV2 extends Omit<TopicMaintenanceManifestV1, 'version'> {
+  readonly version: typeof TOPIC_MAINTENANCE_ACCEPTED_VERSION;
+  readonly originCitationIds: readonly string[];
+  readonly acceptedSources: readonly TopicMaintenanceAcceptedSourceV2[];
+}
+
+export type TopicMaintenanceManifest = TopicMaintenanceManifestV1 | TopicMaintenanceManifestV2;
 
 export interface TopicMaintenanceEnrollmentInput {
   readonly paragraphs: readonly TopicMaintenanceParagraphInput[];
@@ -123,22 +142,24 @@ export function buildTopicMaintenanceManifest(
   return manifest;
 }
 
-export function validateTopicMaintenanceManifest(manifest: unknown, record: MemoryRecord): TopicMaintenanceManifestV1 {
+export function validateTopicMaintenanceManifest(manifest: unknown, record: MemoryRecord): TopicMaintenanceManifest {
   validEvidence(record);
   if (
     !plainObject(manifest) ||
-    !exactKeys(manifest, [
-      'version',
-      'memoryId',
-      'repositoryId',
-      'bodyHash',
-      'coverage',
-      'paragraphs',
-      'additionalDependencies',
-    ])
+    !exactKeys(
+      manifest,
+      ['version', 'memoryId', 'repositoryId', 'bodyHash', 'coverage', 'paragraphs', 'additionalDependencies'],
+      manifest.version === 2 ? ['acceptedSources', 'originCitationIds'] : [],
+    )
   )
     throw new Error('Topic maintenance manifest has an invalid shape.');
-  if (manifest.version !== 1) throw new Error('Topic maintenance manifest has an unsupported version.');
+  if (manifest.version !== 1 && manifest.version !== 2)
+    throw new Error('Topic maintenance manifest has an unsupported version.');
+  if (
+    manifest.version === 2 &&
+    (!Object.hasOwn(manifest, 'acceptedSources') || !Object.hasOwn(manifest, 'originCitationIds'))
+  )
+    throw new Error('Topic maintenance accepted source vector is missing.');
   if (manifest.memoryId !== record.metadata.memoryId || !MEMORY_ID.test(manifest.memoryId as string))
     throw new Error('Topic maintenance memory identity changed.');
   if (manifest.repositoryId !== record.metadata.codeCitations![0].repositoryId)
@@ -204,9 +225,75 @@ export function validateTopicMaintenanceManifest(manifest: unknown, record: Memo
     if (seen.has(dependency.citationId)) throw new Error('Topic maintenance additional dependency is duplicated.');
     seen.add(dependency.citationId);
   }
+  if (manifest.version === 2) {
+    let priorOrigin = '';
+    if (
+      !Array.isArray(manifest.originCitationIds) ||
+      manifest.originCitationIds.length < 1 ||
+      manifest.originCitationIds.length > MAX_MEMORY_CODE_CITATIONS
+    )
+      throw new Error('Topic maintenance original citation lineage is invalid.');
+    for (const id of manifest.originCitationIds) {
+      if (typeof id !== 'string' || !CITATION_ID.test(id) || !citationIds.has(id) || id <= priorOrigin)
+        throw new Error('Topic maintenance original citation lineage is missing or unordered.');
+      priorOrigin = id;
+    }
+    const declared = new Set<string>([
+      ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
+      ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+    ]);
+    const citations = new Map(record.metadata.codeCitations!.map(citation => [citation.id, citation]));
+    if (
+      !Array.isArray(manifest.acceptedSources) ||
+      manifest.acceptedSources.length !== declared.size ||
+      manifest.acceptedSources.length > MAX_MEMORY_CODE_CITATIONS
+    )
+      throw new Error('Topic maintenance accepted sources must cover every declared citation exactly once.');
+    let previous = '';
+    for (const entry of manifest.acceptedSources) {
+      if (
+        !plainObject(entry) ||
+        !exactKeys(entry, ['citationId', 'acceptedCitationId']) ||
+        typeof entry.citationId !== 'string' ||
+        typeof entry.acceptedCitationId !== 'string' ||
+        !CITATION_ID.test(entry.citationId) ||
+        !CITATION_ID.test(entry.acceptedCitationId) ||
+        !declared.has(entry.citationId) ||
+        entry.citationId <= previous
+      )
+        throw new Error('Topic maintenance accepted source vector is malformed or unordered.');
+      const original = citations.get(entry.citationId);
+      const accepted = citations.get(entry.acceptedCitationId);
+      if (
+        !original ||
+        !accepted ||
+        accepted.repositoryId !== original.repositoryId ||
+        accepted.target.kind !== original.target.kind
+      )
+        throw new Error('Topic maintenance accepted source cites unknown or incompatible evidence.');
+      previous = entry.citationId;
+    }
+  }
   if (encodedBytes(JSON.stringify(manifest)) > MAX_TOPIC_MAINTENANCE_BYTES)
     throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
-  return manifest as unknown as TopicMaintenanceManifestV1;
+  return manifest as unknown as TopicMaintenanceManifest;
+}
+
+/** Resolve the accepted comparison pin without changing the paragraph's historical support citation. */
+export function topicMaintenanceAcceptedCitation(record: MemoryRecord, citationId: string): MemoryCodeCitationV1 {
+  const manifest = record.metadata.topicMaintenance;
+  if (!manifest) throw new Error('Topic maintenance is not enrolled.');
+  const validated = validateTopicMaintenanceManifest(manifest, record);
+  const declared = new Set([
+    ...validated.paragraphs.flatMap(paragraph => paragraph.citationIds),
+    ...validated.additionalDependencies.map(dependency => dependency.citationId),
+  ]);
+  if (!declared.has(citationId)) throw new Error('Topic maintenance citation is not declared.');
+  const acceptedId =
+    validated.version === 2
+      ? validated.acceptedSources.find(source => source.citationId === citationId)!.acceptedCitationId
+      : citationId;
+  return record.metadata.codeCitations!.find(citation => citation.id === acceptedId)!;
 }
 
 /** A pure proposal; the application owns exact-target CAS and the approved write. */
@@ -251,7 +338,8 @@ export function topicMaintenanceReplacementError(
   if (!previous && !proposed) return undefined;
   const sameEvidence =
     current.body === next.body &&
-    JSON.stringify(current.metadata.codeCitations ?? []) === JSON.stringify(next.metadata.codeCitations ?? []);
+    JSON.stringify(current.metadata.codeCitations ?? []) === JSON.stringify(next.metadata.codeCitations ?? []) &&
+    JSON.stringify(current.metadata.consolidation ?? null) === JSON.stringify(next.metadata.consolidation ?? null);
   if (!previous && proposed && enrollment && sameEvidence && JSON.stringify(enrollment) === JSON.stringify(proposed)) {
     try {
       eligibleRecord(current);

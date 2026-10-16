@@ -7,6 +7,7 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 
 import {
   canonicalMemoryDocumentContent,
+  declaresTopicMaintenanceHeader,
   parseMemoryDocument,
   parseMemoryRelationValue,
 } from '@threadnote/memory/document';
@@ -900,6 +901,11 @@ export function stripPersonalProvenance(
 
 /** Shared publication, ingest, and replace: keep identity-alias relations, drop local projection URIs. */
 export function stripPersonalProvenanceForSharedPublication(content: string): string {
+  if (declaresTopicMaintenanceHeader(content))
+    throw ShareOperationError.make({
+      message:
+        'Enrolled topics require the reviewed existing-target Git proposal path; generic publication cannot project their provenance.',
+    });
   return stripPersonalProvenance(content, {preserveStableMemoryRelations: true});
 }
 
@@ -1099,7 +1105,25 @@ const prepareSharedInboundContentEffect = Effect.fn('share.prepareSharedInboundC
 });
 
 function prepareSharedInboundContent(uri: string, rawContent: string): string {
-  const stripped = stripPersonalProvenanceForSharedPublication(canonicalMemoryDocumentContent(rawContent));
+  const canonical = canonicalMemoryDocumentContent(rawContent);
+  const enrolled = declaresTopicMaintenanceHeader(canonical);
+  const record = enrolled ? parseMemoryDocument(uri, canonical) : undefined;
+  if (
+    enrolled &&
+    (!record?.metadata.topicMaintenance ||
+      record.headerTitle !== 'MEMORY' ||
+      record.metadata.kind !== 'durable' ||
+      record.metadata.visibility !== 'shared' ||
+      record.metadata.topicMaintenanceError ||
+      record.metadata.consolidationError)
+  )
+    throw ShareOperationError.make({
+      message: `Refusing to ingest ${uri}: enrolled shared topics must retain valid public provenance.`,
+    });
+  // This is already-public Git content, not a personal-to-shared projection. Retain its reviewed origin and identity.
+  const stripped = record?.metadata.topicMaintenance
+    ? canonical
+    : stripPersonalProvenanceForSharedPublication(canonical);
   const citationBlocker = memoryCodeCitationContentSharingBlocker(uri, stripped);
   if (citationBlocker) {
     throw ShareOperationError.make({

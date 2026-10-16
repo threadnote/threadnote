@@ -16,6 +16,8 @@ export function sharePublishEligibilityError(
   const prefix = `threadnote://user/${uriSegment(config.user)}/memories/durable/projects/`;
   const resource = parseResourceId(sourceUri);
   const record = parseMemoryDocument(sourceUri, content);
+  if (record?.metadata.topicMaintenance !== undefined || record?.metadata.topicMaintenanceError !== undefined)
+    return `Refusing to publish ${sourceUri}: enrolled topics require the reviewed existing-target Git proposal path; generic publication cannot project their provenance.`;
   if (
     resource.anchor === undefined &&
     resource.canonicalUri.startsWith(prefix) &&

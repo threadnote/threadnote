@@ -2,12 +2,15 @@ import type {MemoryKind, MemoryStatus} from './types.js';
 import {
   MAX_TOPIC_MAINTENANCE_BYTES,
   validateTopicMaintenanceManifest,
-  type TopicMaintenanceManifestV1,
+  type TopicMaintenanceManifest,
 } from './topic-maintenance.js';
 import {
   MAX_CONSOLIDATION_BYTES,
+  MAX_CONSOLIDATION_V2_BYTES,
   validateConsolidationProvenance,
-  type ConsolidationProvenance,
+  validateConsolidationProvenanceV2,
+  validateConsolidationV2ActiveEvidence,
+  type ConsolidationReceipt,
 } from './consolidation.js';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
@@ -121,7 +124,7 @@ export interface MemoryMetadata {
   /** Closed parse/bounds errors that force precise freshness to abstain. */
   readonly citationErrors?: readonly MemoryCodeCitationError[];
   /** Reviewed derivation history; active dependencies remain in codeCitations/relations. */
-  readonly consolidation?: ConsolidationProvenance;
+  readonly consolidation?: ConsolidationReceipt;
   readonly consolidationError?: string;
   readonly createdAt?: string;
   readonly evidence?: readonly string[];
@@ -131,7 +134,7 @@ export interface MemoryMetadata {
   /** Private immutable external source evidence; supporting text lives in a bounded pin. */
   readonly sourceEvidence?: SourceEvidenceCitationV1;
   readonly sourceEvidenceError?: boolean;
-  readonly topicMaintenance?: TopicMaintenanceManifestV1;
+  readonly topicMaintenance?: TopicMaintenanceManifest;
   readonly topicMaintenanceError?: string;
   readonly kind: MemoryKind;
   readonly keywords?: readonly string[];
@@ -215,7 +218,10 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       ? evidenceLines[0].slice(EVIDENCE_HEADER.length + 2)
       : undefined;
   let obsidianEvidence: MemoryObsidianEvidenceV1 | undefined;
-  if ((schemaVersion === 7 || schemaVersion === 8 || schemaVersion === MEMORY_SCHEMA_VERSION) && evidenceValue) {
+  if (
+    (schemaVersion === 7 || schemaVersion === 8 || schemaVersion === 9 || schemaVersion === MEMORY_SCHEMA_VERSION) &&
+    evidenceValue
+  ) {
     try {
       const parsed: unknown = JSON.parse(evidenceValue);
       if (serializeMemoryObsidianEvidence(parsed) === evidenceValue) {
@@ -231,7 +237,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       ? sourceEvidenceLines[0].slice(SOURCE_EVIDENCE_HEADER.length + 2)
       : undefined;
   let sourceEvidence: SourceEvidenceCitationV1 | undefined;
-  if ((schemaVersion === 8 || schemaVersion === MEMORY_SCHEMA_VERSION) && sourceEvidenceValue) {
+  if ((schemaVersion === 8 || schemaVersion === 9 || schemaVersion === MEMORY_SCHEMA_VERSION) && sourceEvidenceValue) {
     try {
       const parsed: unknown = JSON.parse(sourceEvidenceValue);
       if (serializeSourceEvidenceCitation(parsed as SourceEvidenceCitationV1) === sourceEvidenceValue) {
@@ -243,7 +249,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   }
   const consolidationLines = lines.filter(line => /^\s*consolidation\s*:/u.test(line));
   const consolidationValues = memoryHeaderValues(lines, 'consolidation') ?? [];
-  let consolidation: ConsolidationProvenance | undefined;
+  let consolidation: ConsolidationReceipt | undefined;
   let consolidationError: string | undefined;
   if (consolidationLines.length) {
     try {
@@ -251,26 +257,40 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
         (schemaVersion !== 6 &&
           schemaVersion !== 7 &&
           schemaVersion !== 8 &&
+          schemaVersion !== 9 &&
           schemaVersion !== MEMORY_SCHEMA_VERSION) ||
         consolidationLines.length !== 1 ||
         !consolidationLines[0].startsWith('consolidation: ') ||
         consolidationValues.length !== 1 ||
-        new TextEncoder().encode(consolidationValues[0]).byteLength > MAX_CONSOLIDATION_BYTES
+        new TextEncoder().encode(consolidationValues[0]).byteLength > MAX_CONSOLIDATION_V2_BYTES
       )
         throw new Error('Invalid consolidation schema, duplicate header, or evidence bounds.');
       const parsedConsolidation: unknown = JSON.parse(consolidationValues[0]);
-      const evidence = validateConsolidationProvenance(
-        parsedConsolidation,
-        body,
-        memoryHeaderValueFromLines(lines, 'status') === 'archived',
-      );
-      consolidation = evidence.provenance;
       if (
-        JSON.stringify(evidence.codeCitations) !== JSON.stringify(codeCitationMetadata.citations ?? []) ||
-        JSON.stringify(evidence.relations) !==
-          JSON.stringify(parseMemoryRelations(memoryHeaderValues(lines, 'relation')) ?? [])
-      )
-        throw new Error('Active evidence differs from the reviewed consolidation.');
+        typeof parsedConsolidation === 'object' &&
+        parsedConsolidation !== null &&
+        'version' in parsedConsolidation &&
+        parsedConsolidation.version === 2
+      ) {
+        if (schemaVersion !== MEMORY_SCHEMA_VERSION)
+          throw new Error('Consolidation V2 requires memory schema version 10.');
+        consolidation = validateConsolidationProvenanceV2(parsedConsolidation, body);
+      } else {
+        if (new TextEncoder().encode(consolidationValues[0]).byteLength > MAX_CONSOLIDATION_BYTES)
+          throw new Error('Consolidation provenance exceeds the 60 KiB limit.');
+        const evidence = validateConsolidationProvenance(
+          parsedConsolidation,
+          body,
+          memoryHeaderValueFromLines(lines, 'status') === 'archived',
+        );
+        consolidation = evidence.provenance;
+        if (
+          JSON.stringify(evidence.codeCitations) !== JSON.stringify(codeCitationMetadata.citations ?? []) ||
+          JSON.stringify(evidence.relations) !==
+            JSON.stringify(parseMemoryRelations(memoryHeaderValues(lines, 'relation')) ?? [])
+        )
+          throw new Error('Active evidence differs from the reviewed consolidation.');
+      }
     } catch (error) {
       consolidationError = error instanceof Error ? error.message : 'Invalid consolidation evidence.';
       consolidation = undefined;
@@ -327,26 +347,34 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     uri: canonicalResourceInput(uri),
   };
   const maintenanceLines = lines.filter(line => /^\s*topic_maintenance\s*:/u.test(line));
-  if (!maintenanceLines.length) return record;
-  let topicMaintenance: TopicMaintenanceManifestV1 | undefined;
+  if (!maintenanceLines.length) return validateParsedConsolidationV2(record);
+  let topicMaintenance: TopicMaintenanceManifest | undefined;
   let topicMaintenanceError: string | undefined;
   try {
     if (
-      schemaVersion !== MEMORY_SCHEMA_VERSION ||
+      (schemaVersion !== 9 && schemaVersion !== MEMORY_SCHEMA_VERSION) ||
       maintenanceLines.length !== 1 ||
       !maintenanceLines[0].startsWith(`${TOPIC_MAINTENANCE_HEADER}: `)
     )
-      throw new Error('Topic maintenance requires one canonical schema 9 header.');
+      throw new Error('Topic maintenance requires one canonical schema 9 or 10 header.');
     const raw = maintenanceLines[0].slice(TOPIC_MAINTENANCE_HEADER.length + 2);
     if (new TextEncoder().encode(raw).byteLength > MAX_TOPIC_MAINTENANCE_BYTES)
       throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
     const parsed: unknown = JSON.parse(raw);
     if (JSON.stringify(parsed) !== raw) throw new Error('Topic maintenance manifest is not canonical JSON.');
+    if (
+      schemaVersion === 9 &&
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      'version' in parsed &&
+      parsed.version === 2
+    )
+      throw new Error('Topic maintenance V2 requires memory schema version 10.');
     topicMaintenance = validateTopicMaintenanceManifest(parsed, record);
   } catch (error) {
     topicMaintenanceError = error instanceof Error ? error.message : 'Invalid topic maintenance manifest.';
   }
-  return {
+  return validateParsedConsolidationV2({
     ...record,
     metadata: {
       ...record.metadata,
@@ -356,7 +384,33 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       topicMaintenance,
       topicMaintenanceError,
     },
-  };
+  });
+}
+
+function validateParsedConsolidationV2(record: MemoryRecord): MemoryRecord {
+  const receipt = record.metadata.consolidation;
+  if (receipt?.version !== 2) return record;
+  try {
+    const manifest = record.metadata.topicMaintenance;
+    if (manifest?.version !== 2) throw new Error('Consolidation V2 requires a valid topic maintenance V2 manifest.');
+    validateConsolidationV2ActiveEvidence(
+      receipt,
+      manifest,
+      record.metadata.codeCitations ?? [],
+      record.metadata.relations ?? [],
+    );
+    return record;
+  } catch (error) {
+    return {
+      ...record,
+      metadata: {
+        ...record.metadata,
+        citationErrors: [...(record.metadata.citationErrors ?? []), {reason: 'invalid-shape'}],
+        consolidation: undefined,
+        consolidationError: error instanceof Error ? error.message : 'Invalid consolidated topic evidence.',
+      },
+    };
+  }
 }
 
 export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: MemoryMetadata, body: string): string {
@@ -367,19 +421,32 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
       metadata.schemaVersion !== 6 &&
       metadata.schemaVersion !== 7 &&
       metadata.schemaVersion !== 8 &&
+      metadata.schemaVersion !== 9 &&
       metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
     )
-      throw new Error('Consolidation provenance requires memory schema version 6, 7, 8, or 9.');
-    const reviewed = validateConsolidationProvenance(
-      metadata.consolidation,
-      body.trim(),
-      metadata.status === 'archived',
-    );
-    if (
-      JSON.stringify(reviewed.codeCitations) !== JSON.stringify(metadata.codeCitations ?? []) ||
-      JSON.stringify(reviewed.relations) !== JSON.stringify(metadata.relations ?? [])
-    )
-      throw new Error('Active evidence differs from reviewed consolidation.');
+      throw new Error('Consolidation provenance requires memory schema version 6 through 10.');
+    if (metadata.consolidation.version === 2) {
+      if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION || metadata.topicMaintenance?.version !== 2)
+        throw new Error('Consolidation V2 requires schema 10 and a topic maintenance V2 manifest.');
+      const receipt = validateConsolidationProvenanceV2(metadata.consolidation, body.trim());
+      validateConsolidationV2ActiveEvidence(
+        receipt,
+        metadata.topicMaintenance,
+        metadata.codeCitations ?? [],
+        metadata.relations ?? [],
+      );
+    } else {
+      const reviewed = validateConsolidationProvenance(
+        metadata.consolidation,
+        body.trim(),
+        metadata.status === 'archived',
+      );
+      if (
+        JSON.stringify(reviewed.codeCitations) !== JSON.stringify(metadata.codeCitations ?? []) ||
+        JSON.stringify(reviewed.relations) !== JSON.stringify(metadata.relations ?? [])
+      )
+        throw new Error('Active evidence differs from reviewed consolidation.');
+    }
   }
   if (metadata.citationErrors && metadata.citationErrors.length > 0) {
     throw new Error('Cannot format memory metadata with unresolved code-citation errors.');
@@ -394,20 +461,27 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     metadata.obsidianEvidence &&
     metadata.schemaVersion !== 7 &&
     metadata.schemaVersion !== 8 &&
+    metadata.schemaVersion !== 9 &&
     metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
   ) {
-    throw new Error('Obsidian evidence requires memory schema version 7, 8, or 9.');
+    throw new Error('Obsidian evidence requires memory schema version 7 through 10.');
   }
   if (metadata.sourceEvidenceError) throw new Error('Invalid source evidence citation metadata.');
   if (metadata.sourceEvidence) {
-    if (metadata.schemaVersion !== 8 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
-      throw new Error('Source evidence requires memory schema version 8 or 9.');
+    if (
+      metadata.schemaVersion !== 8 &&
+      metadata.schemaVersion !== 9 &&
+      metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
+    )
+      throw new Error('Source evidence requires memory schema version 8, 9, or 10.');
     serializeSourceEvidenceCitation(metadata.sourceEvidence);
   }
   if (metadata.topicMaintenanceError) throw new Error(metadata.topicMaintenanceError);
   if (metadata.topicMaintenance) {
-    if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
-      throw new Error('Topic maintenance requires memory schema version 9.');
+    if (metadata.schemaVersion !== 9 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error('Topic maintenance requires memory schema version 9 or 10.');
+    if (metadata.topicMaintenance.version === 2 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error('Topic maintenance V2 requires memory schema version 10.');
     validateTopicMaintenanceManifest(metadata.topicMaintenance, {
       uri: 'threadnote://user/formatter/memories/durable/projects/topic/record.md',
       content: '',
@@ -526,6 +600,12 @@ export function formatMemoryDocumentWithKeywords(content: string, keywords: read
  */
 export function canonicalMemoryDocumentContent(content: string): string {
   return stripLegacyMemoryFieldsTrailer(content.trim()).trim();
+}
+
+/** Malformed declarations still protect a topic; use the parser's exact header boundary. */
+export function declaresTopicMaintenanceHeader(content: string): boolean {
+  const header = normalizeMemoryDocumentLineEndings(content.trim()).split('\n\n', 1)[0] ?? '';
+  return /^\s*topic_maintenance\s*:/imu.test(header);
 }
 
 function stripLegacyMemoryFieldsTrailer(content: string): string {

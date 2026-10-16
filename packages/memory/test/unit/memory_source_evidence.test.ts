@@ -7,6 +7,7 @@ import {
   parseMemoryDocument,
 } from '@threadnote/memory/document';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
+import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {migrateMemoryDocumentToCurrent} from '@threadnote/memory/migrations';
 import type {SourceEvidenceCitationV1} from '@threadnote/store/source-evidence';
 
@@ -55,10 +56,10 @@ describe('source evidence memory boundary', () => {
     expect(memoryCodeCitationContentSharingBlocker(uri, changed)).toBe('private-source-evidence');
   });
 
-  it('migrates schema 8 source evidence to schema 9 without changing its bytes', () => {
+  it('migrates schema 8 source evidence to the current schema without changing its bytes', () => {
     const original = document();
     const migrated = migrateMemoryDocumentToCurrent(original);
-    expect(migrated).toBe(original.replace('schema_version: 8', 'schema_version: 9'));
+    expect(migrated).toBe(original.replace('schema_version: 8', `schema_version: ${MEMORY_SCHEMA_VERSION}`));
     expect(parseMemoryDocument(uri, migrated)?.metadata.sourceEvidence).toEqual(evidence);
     expect(memoryCodeCitationContentSharingBlocker(uri, migrated)).toBe('private-source-evidence');
   });

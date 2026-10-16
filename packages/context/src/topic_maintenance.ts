@@ -3,6 +3,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {
+  topicMaintenanceAcceptedCitation,
   validateTopicMaintenanceManifest,
   type TopicMaintenanceDependencyV1,
   type TopicMaintenanceParagraphV1,
@@ -86,6 +87,7 @@ export function projectTopicMaintenanceObservation(
   sources: readonly TopicMaintenanceSourceObservationV1[],
 ): TopicMaintenanceObservationV1 {
   const originals = declaredCitations(record);
+  const baselines = originals.map(original => topicMaintenanceAcceptedCitation(record, original.id));
   if (sources.length !== originals.length || new Set(sources.map(source => source.citationId)).size !== sources.length)
     throw new Error('Topic evidence must cover every declared citation exactly once.');
   const byId = new Map(sources.map(source => [source.citationId, source]));
@@ -109,13 +111,14 @@ export function projectTopicMaintenanceObservation(
       targetHash,
       originals.map((original, index) => {
         const source = ordered[index];
+        const baseline = baselines[index];
         return [
           original.id,
           original.repositoryId,
-          original.path,
-          original.target.kind,
-          original.target.kind === 'symbol' ? original.target.fragmentHash.value : original.fileContentHash.value,
-          relevantState(original, source),
+          baseline.path,
+          baseline.target.kind,
+          baseline.target.kind === 'symbol' ? baseline.target.fragmentHash.value : baseline.fileContentHash.value,
+          relevantState(baseline, source),
           source.excerptTruncated === true,
           source.observedPath ?? source.current?.path ?? '',
           relevantHash(source) ?? '',
@@ -123,8 +126,8 @@ export function projectTopicMaintenanceObservation(
       }),
     ]),
   );
-  const unavailable = ordered.some((source, index) => relevantState(originals[index], source) === 'unavailable');
-  const changed = ordered.some((source, index) => relevantState(originals[index], source) !== 'same');
+  const unavailable = ordered.some((source, index) => relevantState(baselines[index], source) === 'unavailable');
+  const changed = ordered.some((source, index) => relevantState(baselines[index], source) !== 'same');
   const truncatedForReview = changed && ordered.some(source => source.excerptTruncated === true);
   const outcome = unavailable || truncatedForReview ? 'unavailable' : changed ? 'review-required' : 'unchanged';
   return {
@@ -147,6 +150,9 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
   options?: {readonly allowCapture?: boolean},
 ) {
   const citations = declaredCitations(record);
+  const baselines = new Map(
+    citations.map(citation => [citation.id, topicMaintenanceAcceptedCitation(record, citation.id)]),
+  );
   const trustedPrevious = (() => {
     if (!previous || previous.version !== TOPIC_MAINTENANCE_EVIDENCE_VERSION) return undefined;
     try {
@@ -189,7 +195,10 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
     return projectTopicMaintenanceObservation(record, unavailable);
   }
   const validated = yield* validateContextHealthMemoryCitations(config, scope, [
-    {uri: record.uri, codeCitations: citations},
+    {
+      uri: record.uri,
+      codeCitations: [...new Map([...baselines.values()].map(citation => [citation.id, citation])).values()],
+    },
   ]).pipe(Effect.orElseSucceed(() => []));
   const receipts = new Map(
     validated.flatMap(item => item.receipts.map(receipt => [receipt.citationId, receipt] as const)),
@@ -198,21 +207,31 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
     citations,
     citation =>
       Effect.gen(function* () {
-        const receipt = receipts.get(citation.id);
+        const baseline = baselines.get(citation.id)!;
+        const receipt = receipts.get(baseline.id);
         const evidence = yield* readContextHealthCitationEvidence(config, scope, citation, excerptOptions).pipe(
           Effect.orElseSucceed(() => undefined),
         );
+        const baselineEvidence =
+          baseline.id === citation.id
+            ? evidence
+            : yield* readContextHealthCitationEvidence(config, scope, baseline, excerptOptions).pipe(
+                Effect.orElseSucceed(() => undefined),
+              );
         const old = evidence?.excerpts.find(
           excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
         );
-        const now = evidence?.excerpts.find(excerpt => excerpt.provenance === 'current-verified');
+        const accepted = baselineEvidence?.excerpts.find(
+          excerpt => excerpt.provenance === 'historical-verified' && excerpt.supportsCitation,
+        );
+        const now = baselineEvidence?.excerpts.find(excerpt => excerpt.provenance === 'current-verified');
         const status = receipt?.status ?? 'unknown';
         const base = {
           citationId: citation.id,
           status,
           reason: receipt?.reason ?? 'validation-unavailable',
-          historicalAvailable: old !== undefined,
-          excerptTruncated: old?.truncated === true || now?.truncated === true,
+          historicalAvailable: old !== undefined && accepted !== undefined,
+          excerptTruncated: old?.truncated === true || accepted?.truncated === true || now?.truncated === true,
           ...(receipt?.observedPath === undefined ? {} : {observedPath: receipt.observedPath}),
           ...(receipt?.observedNodeId === undefined ? {} : {observedNodeId: receipt.observedNodeId}),
         };
@@ -222,13 +241,13 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           prior?.observedPath === receipt.observedPath && prior?.observedNodeId === receipt.observedNodeId;
         let current: MemoryCodeCitationV1 | undefined;
         if (
-          options?.allowCapture !== false &&
+          (options?.allowCapture !== false || record.metadata.topicMaintenance?.version === 2) &&
           status === 'exact' &&
           now.supportsCitation &&
-          citation.fileContentHash.value === now.source.fileContentHash &&
-          citation.extractorSet === now.source.extractorSet
+          baseline.fileContentHash.value === now.source.fileContentHash &&
+          baseline.extractorSet === now.source.extractorSet
         )
-          current = citation;
+          current = baseline;
         else if (
           sameLocator &&
           prior?.currentFileBytesHash === now.fileBytesHash &&
@@ -237,7 +256,7 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           current = prior.current;
         else if (options?.allowCapture !== false && status !== 'unknown' && status !== 'deleted') {
           const ref =
-            citation.target.kind === 'symbol' ? receipt.observedNodeId : (receipt.observedPath ?? citation.path);
+            baseline.target.kind === 'symbol' ? receipt.observedNodeId : (receipt.observedPath ?? baseline.path);
           if (ref)
             current = (yield* captureMemoryCodeCitations(config, {
               callerCwd,
@@ -248,9 +267,9 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           !current ||
           current.sourceDirty ||
           current.evidenceRetention !== 'capsule-retained' ||
-          current.repositoryId !== citation.repositoryId ||
-          current.target.kind !== citation.target.kind ||
-          current.path !== (receipt.observedPath ?? citation.path) ||
+          current.repositoryId !== baseline.repositoryId ||
+          current.target.kind !== baseline.target.kind ||
+          current.path !== (receipt.observedPath ?? baseline.path) ||
           current.extractorSet !== now.source.extractorSet ||
           current.fileContentHash.value !== now.source.fileContentHash
         )

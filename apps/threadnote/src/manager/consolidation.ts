@@ -78,7 +78,8 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
           address.segments[0] !== config.user ||
           isInSharedNamespace(config, resultUri) ||
           saved?.metadata.memoryId !== identity(id) ||
-          saved.metadata.consolidation?.operationId !== id ||
+          saved.metadata.consolidation?.version !== 1 ||
+          saved.metadata.consolidation.operationId !== id ||
           saved.metadata.consolidationError
         )
           return yield* MemoryOperationError.make({
@@ -86,7 +87,7 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
           });
         yield* attempt(() => validateConsolidationProvenance(saved.metadata.consolidation, saved.body));
       }
-      let previous = saved?.metadata.consolidation;
+      let previous = saved?.metadata.consolidation?.version === 1 ? saved.metadata.consolidation : undefined;
       const sources = job?.sources ?? previous?.sources;
       const draft = optionalString(body.draft) ?? job?.draft ?? saved?.body;
       if (!sources || !draft)
@@ -167,7 +168,8 @@ export const applyReviewedConsolidation = Effect.fn('manager.applyReviewedConsol
           if (
             candidate.trim() !== expected ||
             record?.metadata.memoryId !== identity(id) ||
-            record.metadata.consolidation?.requestHash !== reviewed.provenance.requestHash
+            record.metadata.consolidation?.version !== 1 ||
+            record.metadata.consolidation.requestHash !== reviewed.provenance.requestHash
           )
             return yield* MemoryOperationError.make({
               message: `Consolidation destination ${candidateUri} already exists. Choose another result topic; existing memories were preserved.`,

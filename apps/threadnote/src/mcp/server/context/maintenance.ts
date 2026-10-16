@@ -12,8 +12,63 @@ import {
   retireContextMaintenanceAnchor,
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
+import {readTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
+import {
+  applyTopicMaintenanceReview,
+  decideTopicMaintenanceReview,
+  prepareTopicMaintenanceReview,
+} from '../../../memory/context/maintenance_review.js';
 
 export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+  server.registerTool(
+    'context_maintenance_review',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false},
+      description:
+        'Read, preview, decide, or apply one exact private topic-maintenance review. Applying requires approved=true, the preview revision, and its full-document digest.',
+      inputSchema: {
+        action: McpInput.literals(['view', 'preview', 'apply', 'reject', 'defer', 'resume'], 'Exact review action'),
+        reviewId: McpInput.string('Exact private topic review ID'),
+        caseId: McpInput.string('Exact topic maintenance case for model review decisions'),
+        revision: McpInput.integer('Exact private review or approval revision', {minimum: 1}),
+        sourceCwd: McpInput.string('Absolute local evidence checkout for preview/apply'),
+        editedDraftJson: McpInput.string('Optional edited closed topic-draft JSON for preview only'),
+        approvalDigest: McpInput.string('Exact approved preview digest for apply'),
+        approved: McpInput.boolean('Explicit human approval for apply'),
+      },
+    },
+    input =>
+      Effect.gen(function* () {
+        const cwd = input.sourceCwd ?? (yield* SystemInfo).currentDirectory();
+        if ((input.action === 'preview' || input.action === 'apply') && !(yield* Path.Path).isAbsolute(cwd))
+          return argumentError('Topic review sourceCwd must be absolute.');
+        const result =
+          input.action === 'view'
+            ? yield* readTopicMaintenanceDraft(config, input.reviewId ?? '')
+            : input.action === 'preview'
+              ? yield* prepareTopicMaintenanceReview(config, {
+                  reviewId: input.reviewId ?? '',
+                  revision: input.revision ?? 0,
+                  sourceCwd: cwd,
+                  editedDraftJson: input.editedDraftJson,
+                })
+              : input.action === 'apply'
+                ? yield* applyTopicMaintenanceReview(config, {
+                    reviewId: input.reviewId ?? '',
+                    revision: input.revision ?? 0,
+                    sourceCwd: cwd,
+                    approvalDigest: input.approvalDigest ?? '',
+                    approved: input.approved === true,
+                  })
+                : yield* decideTopicMaintenanceReview(config, {
+                    reviewId: input.reviewId ?? '',
+                    revision: input.revision ?? 0,
+                    action: input.action ?? 'reject',
+                    caseId: input.caseId,
+                  });
+        return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+      }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
+  );
   server.registerTool(
     'context_maintenance_status',
     {

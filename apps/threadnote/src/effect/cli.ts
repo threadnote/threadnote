@@ -159,6 +159,7 @@ import * as valueReportCommands from '../value_report/commands.js';
 import {runPilotCommand, withPilotHome} from '../value_report/pilot/commands.js';
 import {runKnowledgeDeltaGitProposalExport, runKnowledgeDeltaGitProposalMaterialize} from '../git_proposal/commands.js';
 import {makeShareMemoryCommands, publishFlags} from './share/memory_cli.js';
+import {runSharedTopicProposal} from '../git_proposal/topic_maintenance_commands.js';
 import {initializeAutoUpdatePolicy, runAutoUpdateWorker, runThreadnoteUpdateCommand} from '../release/auto_update.js';
 import {
   cursorCloudRuntimeConfig,
@@ -1697,10 +1698,11 @@ const shareConflict = Command.make('conflict').pipe(
   Command.withSubcommands([conflictShow, conflictResolve]),
 );
 
-const {shareMaterialize, sharePropose, sharePublish} = makeShareMemoryCommands(
+const {shareMaterialize, sharePropose, sharePublish, shareTopicPropose} = makeShareMemoryCommands(
   (uri, options) => withRuntimeEffect(config => runSharePublish(config, uri, options)),
   options => withRuntimeEffect(config => runKnowledgeDeltaGitProposalExport(config, options)),
   options => withRuntimeEffect(config => runKnowledgeDeltaGitProposalMaterialize(config, options)),
+  options => withRuntimeEffect(config => runSharedTopicProposal(config, options)),
 );
 
 const artifactFlags = {
@@ -1816,6 +1818,7 @@ const share = Command.make('share').pipe(
     shareConflicts,
     shareConflict,
     sharePropose,
+    shareTopicPropose,
     shareMaterialize,
     sharePublish,
     sharePublishArtifact,

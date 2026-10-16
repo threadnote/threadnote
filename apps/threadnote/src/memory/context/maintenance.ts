@@ -123,6 +123,8 @@ import {
   validTopicMaintenanceCheckpoints,
   TOPIC_MAINTENANCE_FAMILY,
   type TopicMaintenanceCheckpoint,
+  type TopicReviewDecisionInput,
+  saveTopicReviewDecision,
 } from './maintenance_topic.js';
 import {
   CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION,
@@ -174,6 +176,14 @@ export const reconcileSemanticReviewMaintenanceCases = (config: RuntimeConfig) =
     config,
     readState(config).pipe(
       Effect.flatMap(state => saveReviewedSemanticMaintenanceCases(config, state, next => writeState(config, next))),
+    ),
+  );
+
+export const recordTopicMaintenanceReviewDecision = (config: RuntimeConfig, input: TopicReviewDecisionInput) =>
+  withStateLock(
+    config,
+    readState(config).pipe(
+      Effect.flatMap(state => saveTopicReviewDecision(state, input, next => writeState(config, next))),
     ),
   );
 

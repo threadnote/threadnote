@@ -7,13 +7,13 @@ import {
   observeTopicMaintenanceEvidence,
   buildTopicMaintenanceEvidencePacket,
 } from '@threadnote/context/topic_maintenance';
-import {Effect, Schema} from 'effect';
+import {DateTime, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {maintenanceContentHash, upsertCase} from './maintenance_policy.js';
 import {withMaintenancePacketRevision} from './maintenance_packet.js';
-import type {ContextMaintenanceCaseV2} from './maintenance.js';
+import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MaintenanceWorkSchedule} from './maintenance_decisions.js';
 
@@ -32,6 +32,7 @@ export interface TopicMaintenanceCheckpoint {
   readonly checkedAt: string;
   readonly coverage: 'declared-only';
   readonly suppressedRevision?: string;
+  readonly suppressedDecision?: 'reject' | 'defer';
   readonly observation?: TopicMaintenanceObservationV1;
   readonly recoveryObservation?: TopicMaintenanceObservationV1;
   readonly deferredAt?: string;
@@ -53,6 +54,7 @@ function compactCheckpoint(
     checkedAt: candidate.checkedAt,
     coverage: 'declared-only',
     ...(candidate.suppressedRevision ? {suppressedRevision: candidate.suppressedRevision} : {}),
+    ...(candidate.suppressedDecision ? {suppressedDecision: candidate.suppressedDecision} : {}),
     ...(candidate.deferredAt ? {deferredAt: candidate.deferredAt} : {}),
     ...(candidate.overflowReason ? {overflowReason: candidate.overflowReason} : {}),
   };
@@ -75,12 +77,91 @@ export function boundedTopicMaintenanceCheckpoint(
     coverage: 'declared-only',
     observation,
     ...(suppressedRevision ? {suppressedRevision} : {}),
+    ...(suppressedRevision && previous?.suppressedDecision ? {suppressedDecision: previous.suppressedDecision} : {}),
   };
   if (checkpointFits(candidate)) return candidate;
   return compactCheckpoint(
     {...candidate, overflowReason: 'topic-observation-overflow'},
     previous?.observation ?? previous?.recoveryObservation,
   );
+}
+
+export interface TopicReviewDecisionInput {
+  readonly caseId: string;
+  readonly observationRevision: string;
+  readonly action: 'reject' | 'defer' | 'resume';
+  readonly onStale?: 'ignore';
+}
+
+export function saveTopicReviewDecision<E, R>(
+  state: MaintenanceState,
+  input: TopicReviewDecisionInput,
+  persist: (state: MaintenanceState) => Effect.Effect<void, E, R>,
+) {
+  return Effect.gen(function* () {
+    const item = state.cases.find(item => item.caseId === input.caseId);
+    const checkpoint = state.topicCheckpoints?.[input.caseId];
+    if (!['reject', 'defer', 'resume'].includes(input.action) || !/^[0-9a-f]{64}$/u.test(input.observationRevision))
+      return yield* topicFail('Choose an exact topic review action and observation revision.');
+    if (
+      !item ||
+      item.family !== TOPIC_MAINTENANCE_FAMILY ||
+      item.slot !== TOPIC_MAINTENANCE_SLOT ||
+      !checkpoint ||
+      item.evidenceRevision !== input.observationRevision ||
+      checkpoint.revision !== input.observationRevision
+    ) {
+      if (input.onStale === 'ignore') return undefined;
+      return yield* topicFail('The topic evidence changed. Refresh maintenance before recording this decision.');
+    }
+    if (input.action === 'resume' && checkpoint.suppressedDecision === 'reject')
+      return yield* topicFail('A rejected topic review cannot resume. New material evidence may open another review.');
+    if (
+      input.action === 'resume'
+        ? checkpoint.suppressedRevision === undefined
+        : checkpoint.suppressedRevision === input.observationRevision && checkpoint.suppressedDecision === input.action
+    )
+      return item;
+    const {suppressedRevision: _revision, suppressedDecision: _decision, ...unsuppressed} = checkpoint;
+    const nextCheckpoint: TopicMaintenanceCheckpoint =
+      input.action === 'resume'
+        ? unsuppressed
+        : {
+            ...checkpoint,
+            suppressedRevision: input.observationRevision,
+            suppressedDecision: input.action,
+          };
+    const disposition =
+      input.action !== 'resume'
+        ? 'deferred-policy'
+        : checkpoint.outcome === 'review-required'
+          ? 'needs-decision'
+          : checkpoint.outcome === 'unavailable'
+            ? 'waiting-evidence'
+            : 'resolved';
+    const reason =
+      input.action === 'reject'
+        ? 'topic-review-rejected'
+        : input.action === 'defer'
+          ? 'topic-review-deferred'
+          : `topic-${checkpoint.outcome}`;
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const caseMap = new Map(state.cases.map(item => [item.caseId, item]));
+    const next = {...item, ...upsertCase(caseMap, {...item, disposition, reason}, now)};
+    caseMap.set(item.caseId, next);
+    const cases = [...caseMap.values()];
+    yield* persist({
+      ...state,
+      cases,
+      topicCheckpoints: {...state.topicCheckpoints, [item.caseId]: nextCheckpoint},
+      state: cases.some(item => item.disposition === 'needs-decision')
+        ? 'needs-decision'
+        : cases.some(item => item.disposition === 'waiting-evidence')
+          ? 'waiting-evidence'
+          : 'idle',
+    });
+    return next;
+  });
 }
 
 /** Inventory records are metadata projections; validate the full record after selecting. */
@@ -150,6 +231,7 @@ export function validTopicMaintenanceCheckpoints(value: unknown): value is Recor
           'checkedAt',
           'coverage',
           'suppressedRevision',
+          'suppressedDecision',
           'observation',
           'recoveryObservation',
           'deferredAt',
@@ -166,6 +248,8 @@ export function validTopicMaintenanceCheckpoints(value: unknown): value is Recor
       entry.coverage === 'declared-only' &&
       (entry.suppressedRevision === undefined ||
         (typeof entry.suppressedRevision === 'string' && /^[0-9a-f]{64}$/u.test(entry.suppressedRevision))) &&
+      (entry.suppressedDecision === undefined ||
+        (entry.suppressedRevision !== undefined && ['reject', 'defer'].includes(entry.suppressedDecision as string))) &&
       (entry.deferredAt === undefined || (typeof entry.deferredAt === 'string' && entry.deferredAt.length <= 40)) &&
       (entry.overflowReason === undefined || entry.overflowReason === 'topic-observation-overflow') &&
       (entry.observation === undefined
@@ -330,7 +414,9 @@ export const observeTopicMaintenanceCase = Effect.fn('contextMaintenance.observe
         ? 'needs-decision'
         : 'resolved';
   const reason = suppressed
-    ? 'same-revision-review-suppressed'
+    ? checkpoint.suppressedDecision === 'defer'
+      ? 'topic-review-deferred'
+      : 'topic-review-rejected'
     : (checkpoint.overflowReason ?? `topic-${observed.outcome}`);
   const next =
     previous?.evidenceRevision === observed.revision &&

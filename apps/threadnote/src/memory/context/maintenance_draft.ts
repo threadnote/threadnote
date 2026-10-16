@@ -50,16 +50,22 @@ export interface TopicDraftRequest {
   readonly regenerate?: boolean;
 }
 
-function readyEvidence(packet: Effect.Success<ReturnType<typeof readContextMaintenancePacket>>) {
+export function readyEvidence(
+  input: Effect.Success<ReturnType<typeof readContextMaintenancePacket>> | TopicMaintenanceEvidencePacketV1,
+) {
+  const packet = 'topicEvidence' in input ? input.topicEvidence : input;
   if (
-    !('topicEvidence' in packet) ||
-    packet.topicEvidence.outcome !== 'ready' ||
-    typeof packet.topicEvidence.body !== 'string' ||
-    !Array.isArray(packet.topicEvidence.paragraphs) ||
-    !Array.isArray(packet.topicEvidence.sources)
+    !('outcome' in packet) ||
+    !('body' in packet) ||
+    !('paragraphs' in packet) ||
+    !('sources' in packet) ||
+    packet.outcome !== 'ready' ||
+    typeof packet.body !== 'string' ||
+    !Array.isArray(packet.paragraphs) ||
+    !Array.isArray(packet.sources)
   )
     throw fail('The selected topic evidence is unavailable. Refresh its maintenance case before drafting.');
-  return packet.topicEvidence as TopicMaintenanceEvidencePacketV1 & {
+  return packet as TopicMaintenanceEvidencePacketV1 & {
     readonly outcome: 'ready';
     readonly body: string;
     readonly paragraphs: NonNullable<TopicMaintenanceEvidencePacketV1['paragraphs']>;
@@ -67,7 +73,7 @@ function readyEvidence(packet: Effect.Success<ReturnType<typeof readContextMaint
   };
 }
 
-function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMaintenanceDraftBasisV1 {
+export function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMaintenanceDraftBasisV1 {
   const handles = packet.sources.flatMap(source => [
     {id: `historical:${source.citationId}`, citationId: source.citationId, variant: 'historical' as const},
     {id: `current:${source.citationId}`, citationId: source.citationId, variant: 'current' as const},
@@ -85,7 +91,7 @@ function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMainten
   });
 }
 
-function reviewEvidenceFromPacket(packet: ReturnType<typeof readyEvidence>) {
+export function reviewEvidenceFromPacket(packet: ReturnType<typeof readyEvidence>) {
   if (
     packet.sources.some(
       source =>
@@ -126,7 +132,7 @@ function reviewEvidenceFromPacket(packet: ReturnType<typeof readyEvidence>) {
   ]);
 }
 
-function sameRelevantEvidence(
+export function sameRelevantEvidence(
   left: TopicMaintenanceReviewPayloadV1['reviewEvidence'],
   right: TopicMaintenanceReviewPayloadV1['reviewEvidence'],
 ) {
@@ -146,7 +152,7 @@ function sameRelevantEvidence(
   return JSON.stringify(relevant(left)) === JSON.stringify(relevant(right));
 }
 
-function sameRelevantBasis(left: TopicMaintenanceDraftBasisV1, right: TopicMaintenanceDraftBasisV1) {
+export function sameRelevantBasis(left: TopicMaintenanceDraftBasisV1, right: TopicMaintenanceDraftBasisV1) {
   return (
     left.version === right.version &&
     left.targetUri === right.targetUri &&
@@ -244,6 +250,7 @@ function sameGeneration(
   const maintenance = review.maintenance;
   return (
     maintenance !== undefined &&
+    maintenance.generation.origin !== 'manual' &&
     sameRelevantBasis(maintenance.basis, basis) &&
     maintenance.generation.agent === identity.agent &&
     maintenance.generation.model === identity.model &&
@@ -252,7 +259,7 @@ function sameGeneration(
   );
 }
 
-function privateReview(
+export function privateReview(
   prior: CandidateReview | undefined,
   basis: TopicMaintenanceDraftBasisV1,
   payload: TopicMaintenanceReviewPayloadV1,
@@ -297,6 +304,9 @@ function privateReview(
       {action: 'create_review' as const, at, candidateId, reviewId, revision},
     ].slice(-100),
     maintenance: payload,
+    ...(prior?.maintenanceClosedConflict === undefined
+      ? {}
+      : {maintenanceClosedConflict: prior.maintenanceClosedConflict}),
   };
 }
 
@@ -390,10 +400,23 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
       });
       const identity = yield* selectedTopicDraftIdentity(config, backend, model);
       const reviewId = `review-${sha256HexSync(`topic-maintenance\0${basis.targetUri}`).slice(0, 24)}`;
-      const existing = yield* loadCandidateReviewOptional(config.agentContextHome, reviewId);
+      const existing = yield* withCandidateReviewLock(
+        config.agentContextHome,
+        reviewId,
+        loadCandidateReviewOptional(config.agentContextHome, reviewId),
+      );
       if (existing && !existing.maintenance) return yield* fail('The target review identity is already occupied.');
       const currentState = existing?.candidates[0]?.state;
       if (currentState === 'applying') return yield* fail('The topic review is currently applying.');
+      if (currentState === 'conflict')
+        return yield* fail('The topic review has a recoverable conflict. Resolve it first.');
+      const sameObservedEvidence =
+        existing?.maintenance?.basis.observationRevision === basis.observationRevision &&
+        existing.maintenance.basis.targetHash === basis.targetHash;
+      if (currentState === 'deferred' && sameObservedEvidence)
+        return yield* fail('Resume the deferred topic review before drafting again.');
+      if (currentState === 'rejected' && sameObservedEvidence)
+        return yield* fail('This exact topic evidence was rejected. A material change is required before redrafting.');
       if (
         existing &&
         sameGeneration(existing, basis, identity) &&
@@ -403,10 +426,10 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
           'The cached topic review evidence differs from the current exact packet. Review it manually.',
         );
       if (existing && sameGeneration(existing, basis, identity) && input.regenerate !== true) return existing;
+      if (existing?.maintenanceApproval && currentState === 'pending')
+        return yield* fail('A reviewed topic preview is pending. Resolve it before regenerating.');
       if (existing && currentState === 'pending' && !sameGeneration(existing, basis, identity))
         return yield* fail('A different topic proposal is pending review. Resolve it before regenerating.');
-      if (existing && currentState !== 'pending' && input.regenerate !== true)
-        return yield* fail('The previous topic review is closed. Explicitly request regeneration.');
       const record = (yield* readMemoryRecordsByUri(config, [basis.targetUri]))[0];
       if (!record || maintenanceContentHash(record.content) !== basis.targetHash)
         return yield* fail('The accepted topic changed before generation. Refresh maintenance.');
@@ -477,35 +500,44 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
         catch: cause => fail(cause instanceof Error ? cause.message : 'Invalid private topic proposal.'),
       });
       const semanticEvidence = yield* semanticAdvisory(config, record, proposal.body);
-      const closing = yield* readContextMaintenancePacket(config, input.caseId);
-      const closingPacket = yield* Effect.try({
-        try: () => readyEvidence(closing),
-        catch: cause => cause as TopicDraftError,
-      });
-      const closingBasis = yield* Effect.try({
-        try: () => basisFromPacket(closingPacket),
-        catch: cause => fail(String(cause)),
-      });
-      if (
-        !sameRelevantBasis(basis, closingBasis) ||
-        !sameRelevantEvidence(reviewEvidence, reviewEvidenceFromPacket(closingPacket))
-      )
-        return yield* fail('The topic target or source evidence changed during generation. Refresh maintenance.');
-      const latest = (yield* readMemoryRecordsByUri(config, [basis.targetUri]))[0];
-      if (!latest || maintenanceContentHash(latest.content) !== basis.targetHash)
-        return yield* fail('The accepted topic changed during generation. Refresh maintenance.');
-      const at = DateTime.formatIso(yield* DateTime.now);
-      const review = privateReview(
-        existing,
-        basis,
-        payload,
-        latest.metadata.project ?? 'unscoped',
-        latest.metadata.topic ?? 'topic-maintenance',
-        semanticEvidence,
-        at,
+      return yield* withCandidateReviewLock(
+        config.agentContextHome,
+        reviewId,
+        Effect.gen(function* () {
+          const currentReview = yield* loadCandidateReviewOptional(config.agentContextHome, reviewId);
+          if (JSON.stringify(currentReview) !== JSON.stringify(existing))
+            return yield* fail('The topic review changed during generation. Read the current review before retrying.');
+          const closing = yield* readContextMaintenancePacket(config, input.caseId);
+          const closingPacket = yield* Effect.try({
+            try: () => readyEvidence(closing),
+            catch: cause => cause as TopicDraftError,
+          });
+          const closingBasis = yield* Effect.try({
+            try: () => basisFromPacket(closingPacket),
+            catch: cause => fail(String(cause)),
+          });
+          if (
+            !sameRelevantBasis(basis, closingBasis) ||
+            !sameRelevantEvidence(reviewEvidence, reviewEvidenceFromPacket(closingPacket))
+          )
+            return yield* fail('The topic target or source evidence changed during generation. Refresh maintenance.');
+          const latest = (yield* readMemoryRecordsByUri(config, [basis.targetUri]))[0];
+          if (!latest || maintenanceContentHash(latest.content) !== basis.targetHash)
+            return yield* fail('The accepted topic changed during generation. Refresh maintenance.');
+          const at = DateTime.formatIso(yield* DateTime.now);
+          const review = privateReview(
+            existing,
+            basis,
+            payload,
+            latest.metadata.project ?? 'unscoped',
+            latest.metadata.topic ?? 'topic-maintenance',
+            semanticEvidence,
+            at,
+          );
+          yield* saveCandidateReview(config.agentContextHome, review);
+          return review;
+        }),
       );
-      yield* saveCandidateReview(config.agentContextHome, review);
-      return review;
     }),
   );
 });
