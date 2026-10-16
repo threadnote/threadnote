@@ -38,7 +38,7 @@ describe('topic maintenance longitudinal evaluation', () => {
     expect(parsed.events[10].probes[0].answer).toBeNull();
     expect(parsed.events.map(event => event.probes[6].answer)).toEqual(
       Array.from({length: 50}, (_, offset) =>
-        offset < 19 || [23, 28, 31, 32].includes(offset) ? null : offset < 40 ? '45 seconds' : '50 seconds',
+        offset < 19 || [28, 31, 32].includes(offset) ? null : offset < 40 ? '45 seconds' : '50 seconds',
       ),
     );
     expect(() =>
@@ -46,6 +46,53 @@ describe('topic maintenance longitudinal evaluation', () => {
         JSON.stringify({...parsed, events: parsed.events.map(event => ({...event, probes: event.probes.slice(0, 6)}))}),
       ),
     ).toThrow('seven');
+  });
+
+  it('separates stale preview refusal from fresh post-race answers and preserves legacy replay', async () => {
+    const input = await corpus();
+    const race = input.events.find(event => event.id === 'source-preview-race')!;
+    expect(race.expectedClass).toBe('stale-conflict');
+    expect(race.postReviewChanges[0].content).toContain('timeoutSeconds = 90;');
+    expect(race.postReviewChanges[0].content).toContain('stagingTimeoutSeconds = 45;');
+    expect(race.probes.find(probe => probe.id === 'race')?.answer).toBe('No');
+    for (const [id, answer] of [
+      ['current', '90 seconds'],
+      ['staging', '45 seconds'],
+    ]) {
+      const probe = race.probes.find(item => item.id === id)!;
+      expect(probe.answer).toBe(answer);
+      expect(gradeTopicStudyAnswerV1(probe, answer)).toBe('correct');
+    }
+    const legacy = {
+      ...input,
+      events: input.events.map(event =>
+        event.id === race.id
+          ? {
+              ...event,
+              probes: event.probes.map(probe =>
+                ['current', 'staging'].includes(probe.id) ? {...probe, answer: null} : probe,
+              ),
+            }
+          : event,
+      ),
+    };
+    expect(sha256HexSync(topicStudyCanonicalJson(legacy))).toBe(
+      '4fca0c627a4f0a5a25f430f5358adf5189ecaac6f4cd72c78beda605d1ab30dd',
+    );
+    expect(topicStudyCorpusHashV1(legacy)).toBe('4da42cafcff571e9d8dae0f01aadedc2bfd027578dd1dc60d7b474ac0df97035');
+    const event = legacy.events[0];
+    const row = topicStudyLedgerRowV1({
+      corpusHash: topicStudyCorpusHashV1(legacy),
+      runNonce: 'legacy',
+      arm: 'maintained-local',
+      repetition: 1,
+      eventIndex: event.index,
+      eventId: event.id,
+      observation: topicStudyUnavailableObservationV1(event, 'legacy diagnostic'),
+      previousHash: null,
+    });
+    expect(assertTopicStudyLedgerV1(JSON.stringify(row), legacy)).toHaveLength(1);
+    expect(() => assertTopicStudyLedgerV1(JSON.stringify(row), input)).toThrow();
   });
 
   it('rejects tampering, truncation of required probes, and reordered events', async () => {

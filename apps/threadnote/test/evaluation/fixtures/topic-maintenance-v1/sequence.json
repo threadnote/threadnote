@@ -1351,7 +1351,7 @@
       ],
       "probes": [
         {
-          "answer": null,
+          "answer": "90 seconds",
           "id": "current",
           "question": "What is the verified current production fixture timeout?"
         },
@@ -1383,7 +1383,7 @@
         {
           "id": "staging",
           "question": "What is the verified current staging fixture timeout?",
-          "answer": null
+          "answer": "45 seconds"
         },
         {
           "answer": "No",

@@ -11,9 +11,92 @@ import {
   topicStudyPreconditionFailedV1,
   topicStudyCorpusHashV1,
   topicStudyLedgerRowV1,
+  summarizeTopicStudyV1,
 } from '@threadnote/threadnote/evaluation/topic-maintenance-longitudinal';
-import {runTopicStudyNativeAdapter} from '../../../../scripts/topic-maintenance-longitudinal-native-adapter.js';
+import {
+  projectTopicStudySourceBriefV1,
+  runTopicStudyNativeAdapter,
+} from '../../../../scripts/topic-maintenance-longitudinal-native-adapter.js';
 import {appendTopicStudySlotV1} from '../../../../scripts/run-topic-maintenance-longitudinal.js';
+
+function publicSourceBrief(sources: readonly {path: string; content: string}[]) {
+  return {
+    activeHandoffs: [],
+    durableDecisions: [],
+    stalenessAndConflicts: [],
+    coverage: {
+      gaps: [],
+      memory: {consideredCandidates: 0, codeAnchors: {matchedMemories: 0}},
+      omissions: {sourceExcerpts: 0},
+    },
+    scope: {freshness: 'fresh'},
+    evidenceState: 'fresh',
+    output: {truncated: false},
+    graph: {
+      sources: sources.map(source => ({
+        ...source,
+        id: 'random-source-id',
+        repositoryKey: 'random-repository',
+        coveredGraphRefs: ['random-graph-ref'],
+        startLine: 1,
+        endLine: source.content.split('\n').length,
+        freshness: 'fresh',
+        evidenceKind: 'graph-snapshot',
+        snapshotIdentity: 'current-clean',
+        truncated: false,
+      })),
+    },
+  };
+}
+
+async function comparatorFixture(arm: 'scripted-manual' | 'naive-local') {
+  const value = await fixture(37, 'propose-update');
+  const statePath = join(value.request.home, 'study-state.json');
+  const state = JSON.parse(await readFile(statePath, 'utf8'));
+  const header = 'MEMORY\nkind: durable\nmemory_id: tn_manual\nproject: fixture\n\n';
+  let manual = header + state.manualBody;
+  if (arm === 'scripted-manual') {
+    state.manualUri = 'threadnote://manual';
+    await writeFile(statePath, JSON.stringify(state));
+  }
+  const prompts: string[] = [];
+  const ports = {
+    ...value.ports,
+    execute: async (command: readonly string[]) => {
+      if (command[1] === 'read' && command[2] === 'threadnote://manual') {
+        value.commands.push([...command]);
+        return {stdout: manual, stderr: '', exitCode: 0, elapsed: 1};
+      }
+      if (command[1] === 'remember') {
+        value.commands.push([...command]);
+        manual = header + command[command.indexOf('--text') + 1];
+        return {stdout: 'Stored memory: threadnote://manual', stderr: '', exitCode: 0, elapsed: 1};
+      }
+      const response = await value.ports.execute(command);
+      if (!command.includes('run')) return response;
+      const payload = JSON.parse(response.stdout);
+      return {
+        ...response,
+        stdout: JSON.stringify({
+          ...payload,
+          state: 'idle',
+          cases: payload.cases.map((item: object) => ({...item, disposition: 'resolved', evidenceRevision: 'prior'})),
+        }),
+      };
+    },
+    generate: async (prompt: string) => {
+      prompts.push(prompt);
+      const generated = await value.ports.generate();
+      return prompt.startsWith('Rewrite')
+        ? {
+            ...generated,
+            draft: 'intro\n\npolicy\n\nhistory\n\nThe production fixture timeout is 95 seconds.\n\nlater exception',
+          }
+        : generated;
+    },
+  };
+  return {...value, request: {...value.request, arm}, ports, prompts, manual: () => manual};
+}
 
 async function fixture(
   index: number,
@@ -78,6 +161,10 @@ async function fixture(
   const reviewId = 'review-fixture',
     digest = 'a'.repeat(64);
   await writeFile(join(repository, 'config.ts'), `export const timeoutSeconds = ${badProtectedPreview ? 90 : 95};\n`);
+  await writeFile(
+    join(repository, 'health.ts'),
+    'export const title = "Context Health";\nexport const preserveUntilReview = true;\n',
+  );
   await writeFile(
     join(home, 'study-state.json'),
     JSON.stringify({
@@ -148,11 +235,18 @@ async function fixture(
       let stdout = '',
         stderr = '',
         exitCode = 0;
-      if (command[0] === 'git') stdout = 'a'.repeat(40);
+      if (command[0] === 'git') stdout = command[1] === 'status' ? '' : 'a'.repeat(40);
       else if (command[1] === 'read') stdout = currentAccepted;
-      else if (command.includes('brief'))
-        stdout = 'THREADNOTE BRIEF\nState: fresh\nCoverage: declared-only\nconfig.ts: current timeout 95 seconds';
-      else if (command.includes('draft')) {
+      else if (command.includes('brief')) {
+        expect(command).toContain('--home');
+        expect(command).toContain('--json');
+        const sources = [];
+        for (const path of ['health.ts', 'config.ts']) {
+          const content = await readFile(join(repository, path), 'utf8').catch(() => null);
+          if (content !== null) sources.push({path, content});
+        }
+        stdout = JSON.stringify(publicSourceBrief(sources));
+      } else if (command.includes('draft')) {
         const source =
           (await readFile(join(repository, 'config.ts'), 'utf8')) +
           (await readFile(join(repository, 'health.ts'), 'utf8').catch(() => ''));
@@ -781,7 +875,7 @@ it.each(['case', 'revision', 'terminal-state', 'audit', 'approval'] as const)(
         ...value.ports,
         execute: async command => {
           const response = await value.ports.execute(command);
-          if (mismatch === 'case' && command.includes('status')) {
+          if (mismatch === 'case' && command.includes('status') && command.includes('--case-id')) {
             const status = JSON.parse(response.stdout);
             status.cases[0].subjectUri = 'threadnote://other';
             return {...response, stdout: JSON.stringify(status)};
@@ -906,4 +1000,359 @@ it('durably stops after a successful public draft whose command trace cannot be 
   } finally {
     await rm(value.directory, {recursive: true, force: true});
   }
+});
+
+it.each(['scripted-manual', 'naive-local'] as const)(
+  'updates %s from declared bytes when the control detector is unchanged',
+  async arm => {
+    const value = await comparatorFixture(arm);
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, value.ports);
+      expect(result.status).toBe('observed');
+      expect(result.detected).toBe(false);
+      expect(result.actualClass).toBe('review-required');
+      const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+      expect(arm === 'scripted-manual' ? state.manualBody : state.naiveBody).toContain(
+        'production fixture timeout is 95 seconds',
+      );
+      expect(value.commands.some(command => command.includes('packet'))).toBe(false);
+      if (arm === 'scripted-manual') {
+        expect(result.accepted).toBe(true);
+        expect(
+          value.commands.some(
+            command => command.includes('remember') && command.includes('--require-current-code-refs'),
+          ),
+        ).toBe(true);
+      } else {
+        expect(result.draftAttempted).toBe(true);
+        const rewrite = value.prompts.find(prompt => prompt.startsWith('Rewrite'))!;
+        expect(rewrite).toContain('export const timeoutSeconds = 95;');
+        expect(rewrite).toContain('export const preserveUntilReview = true;');
+        expect(rewrite).not.toContain('case-fixture');
+        expect(rewrite).not.toContain('Current evidence packet');
+        const before = value.prompts.filter(prompt => prompt.startsWith('Rewrite')).length;
+        const second = await runTopicStudyNativeAdapter(
+          {...value.request, event: {...value.request.event, index: 38, indexGraph: false}},
+          value.ports,
+        );
+        expect(second.draftAttempted).toBe(false);
+        expect(value.prompts.filter(prompt => prompt.startsWith('Rewrite'))).toHaveLength(before);
+      }
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it('provides the same common source facts to every arm and the evaluated topic exactly once', async () => {
+  const evidences: string[] = [];
+  for (const arm of ['scripted-manual', 'naive-local', 'maintained-local', 'maintained-alternate'] as const) {
+    const value =
+      arm === 'scripted-manual' || arm === 'naive-local'
+        ? await comparatorFixture(arm)
+        : await fixture(37, 'policy-conflict');
+    const prompts: string[] = [];
+    try {
+      const result = await runTopicStudyNativeAdapter(
+        {...value.request, arm},
+        {
+          ...value.ports,
+          generate: async prompt => {
+            prompts.push(prompt);
+            return value.ports.generate(prompt);
+          },
+        },
+      );
+      const answer = prompts.find(prompt => prompt.startsWith('Answer every question'))!;
+      expect(answer.match(/\nintro\n/g)).toHaveLength(1);
+      expect(answer).not.toContain('threadnote://');
+      expect(answer).not.toContain('review-fixture');
+      expect(answer).not.toContain('case-fixture');
+      expect(answer).not.toContain('random-source-id');
+      const evidence = answer.split('(budget 1500 tokens):\n')[1].split('\n\nQuestions:')[0];
+      evidences.push(evidence);
+      expect(result.retrievalHash).toBe(sha256HexSync(evidence));
+      expect(JSON.parse(evidence).refs.map((ref: {path: string}) => ref.path)).toEqual(['health.ts', 'config.ts']);
+      const commonCommands = value.commands.filter(command =>
+        command.includes(join(value.request.home, 'common-source-home')),
+      );
+      expect(
+        commonCommands.some(
+          command => command.includes('brief') && command.includes('--json') && command.includes('1500'),
+        ),
+      ).toBe(true);
+      expect(commonCommands.every(command => command.includes('index') || command.includes('brief'))).toBe(true);
+      expect(result.evidenceMilliseconds).toBeGreaterThanOrEqual(1);
+      const trace = (await readFile(join(value.request.home, 'command-trace.jsonl'), 'utf8'))
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line));
+      const publicReceipt = trace.find(item => item.command.includes('brief'));
+      expect(JSON.parse(publicReceipt.stdout).graph.sources[0].id).toBe('random-source-id');
+      expect(result.commandReceiptHashes.length).toBe(trace.length);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  }
+  expect(new Set(evidences).size).toBe(1);
+});
+
+it.each(['scripted-manual', 'naive-local'] as const)(
+  'lets %s proceed independently when the control scan is unavailable',
+  async arm => {
+    const value = await comparatorFixture(arm);
+    try {
+      const result = await runTopicStudyNativeAdapter(value.request, {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          if (!command.includes('run')) return response;
+          const payload = JSON.parse(response.stdout);
+          return {
+            ...response,
+            stdout: JSON.stringify({
+              ...payload,
+              state: 'running',
+              cases: payload.cases.map((item: object) => ({...item, lastChecked: '2000-01-01T00:00:00Z'})),
+            }),
+          };
+        },
+      });
+      expect(result.detected).toBeNull();
+      expect(result.status).toBe('observed');
+      expect(result.reason).toContain('detector unavailable');
+      expect(arm === 'scripted-manual' ? result.accepted : result.draftCompleted).toBe(true);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it.each(['dirty', 'missing', 'stale-index', 'over-budget'] as const)(
+  'refuses comparator updates with %s declared evidence without cold indexing',
+  async unavailable => {
+    for (const arm of ['scripted-manual', 'naive-local'] as const) {
+      const value = await comparatorFixture(arm);
+      try {
+        await runTopicStudyNativeAdapter(value.request, value.ports);
+        const statePath = join(value.request.home, 'study-state.json');
+        const before = JSON.parse(await readFile(statePath, 'utf8'));
+        if (unavailable === 'missing') await rm(join(value.repository, 'health.ts'));
+        else if (unavailable === 'over-budget') await writeFile(join(value.repository, 'health.ts'), 'x'.repeat(9000));
+        else await writeFile(join(value.repository, 'config.ts'), 'export const timeoutSeconds = 110;\n');
+        const prior = value.commands.length;
+        const result = await runTopicStudyNativeAdapter(
+          {
+            ...value.request,
+            event: {
+              ...value.request.event,
+              index: 38,
+              indexGraph: unavailable === 'missing' || unavailable === 'over-budget',
+            },
+          },
+          {
+            ...value.ports,
+            execute: async command => {
+              const response = await value.ports.execute(command);
+              if (unavailable === 'dirty' && command[0] === 'git' && command[1] === 'status')
+                return {...response, stdout: ' M config.ts'};
+              if (['dirty', 'stale-index'].includes(unavailable) && command.includes('brief')) {
+                const brief = JSON.parse(response.stdout);
+                brief.scope.freshness = 'stale';
+                delete brief.graph.sources;
+                return {...response, stdout: JSON.stringify(brief)};
+              }
+              return response;
+            },
+          },
+        );
+        const after = JSON.parse(await readFile(statePath, 'utf8'));
+        expect(after.manualBody).toBe(before.manualBody);
+        expect(after.naiveBody).toBe(before.naiveBody);
+        expect(result.accepted).toBe(false);
+        expect(result.draftAttempted).toBe(false);
+        expect(result.actualClass).toBe('unavailable');
+        expect(result.reason).toContain('abstained');
+        const later = value.commands.slice(prior);
+        expect(later.some(command => command.includes('remember') || command.includes('packet'))).toBe(false);
+        expect(later.filter(command => command.includes('index') && command.includes('--home'))).toHaveLength(
+          ['missing', 'over-budget'].includes(unavailable) ? 1 : 0,
+        );
+      } finally {
+        await rm(value.directory, {recursive: true, force: true});
+      }
+    }
+  },
+);
+
+it('admits a naive rewrite when the same dirty bytes become clean and explicitly indexed', async () => {
+  const value = await comparatorFixture('naive-local');
+  try {
+    await runTopicStudyNativeAdapter(value.request, value.ports);
+    await writeFile(join(value.repository, 'config.ts'), 'export const timeoutSeconds = 100;\n');
+    const dirty = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, index: 38, indexGraph: false}},
+      {
+        ...value.ports,
+        execute: async command => {
+          const response = await value.ports.execute(command);
+          return command[0] === 'git' && command[1] === 'status' ? {...response, stdout: ' M config.ts'} : response;
+        },
+      },
+    );
+    expect(dirty.draftAttempted).toBe(false);
+    const committed = await runTopicStudyNativeAdapter(
+      {...value.request, event: {...value.request.event, index: 39, indexGraph: true}},
+      {
+        ...value.ports,
+        generate: async prompt => {
+          const generated = await value.ports.generate(prompt);
+          return prompt.startsWith('Rewrite')
+            ? {...generated, draft: 'The production fixture timeout is 100 seconds.'}
+            : generated;
+        },
+      },
+    );
+    expect(committed.detected).toBe(false);
+    expect(committed.draftCompleted).toBe(true);
+    const state = JSON.parse(await readFile(join(value.request.home, 'study-state.json'), 'utf8'));
+    expect(state.naiveBody).toBe('The production fixture timeout is 100 seconds.');
+  } finally {
+    await rm(value.directory, {recursive: true, force: true});
+  }
+});
+
+it.each(['unsupported', 'failed'] as const)(
+  'retains %s comparator slots and probe denominators under the new evidence boundary',
+  async kind => {
+    const value = await comparatorFixture('naive-local');
+    try {
+      const corpus = parseTopicStudyCorpusJsonV1(
+        await readFile('apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json', 'utf8'),
+      );
+      const event = kind === 'unsupported' ? corpus.events[12] : value.request.event;
+      const result = await runTopicStudyNativeAdapter(
+        {...value.request, event},
+        {
+          ...value.ports,
+          generate: async prompt =>
+            prompt.startsWith('Rewrite') && kind === 'failed' ? null : value.ports.generate(prompt),
+        },
+      );
+      expect(result.status).toBe(kind === 'unsupported' ? 'unavailable' : 'failed');
+      const row = topicStudyLedgerRowV1({
+        corpusHash: topicStudyCorpusHashV1(corpus),
+        runNonce: 'method-denominators',
+        arm: 'naive-local',
+        repetition: 1,
+        eventIndex: event.index,
+        eventId: event.id,
+        previousHash: null,
+        observation: result,
+      });
+      const summary = summarizeTopicStudyV1(
+        [row],
+        corpus,
+        {
+          realTopicPilotObserved: false,
+          alternatePermittedAndMeasured: false,
+          pairedHumanMedianReduction: null,
+          totalCostMeasured: false,
+          disagreementsAdjudicated: false,
+          downstreamNoRegression: null,
+        },
+        1,
+      );
+      expect(summary.denominators.recordedEvents).toBe(1);
+      expect(summary.denominators.plannedEvents).toBe(200);
+      expect(summary.denominators.recordedSlotProbePlanned).toBe(7);
+      expect(summary.denominators.unsupportedFaultEvents).toBe(kind === 'unsupported' ? 1 : 0);
+      expect(summary.denominators.probePlanned).toBe(kind === 'unsupported' ? 0 : 7);
+      expect(summary.denominators.failedEvents).toBe(kind === 'failed' ? 1 : 0);
+    } finally {
+      await rm(value.directory, {recursive: true, force: true});
+    }
+  },
+);
+
+it.each(['decision', 'handoff', 'anchor', 'warning', 'candidate'] as const)(
+  'rejects accidental %s memory contamination before source projection',
+  contamination => {
+    const brief = publicSourceBrief([{path: 'config.ts', content: 'export const timeoutSeconds = 60;'}]);
+    const input = JSON.parse(JSON.stringify(brief));
+    if (contamination === 'decision') input.durableDecisions = [{uri: 'threadnote://control'}];
+    else if (contamination === 'handoff') input.activeHandoffs = [{uri: 'threadnote://control'}];
+    else if (contamination === 'anchor') input.coverage.memory.codeAnchors.matchedMemories = 1;
+    else if (contamination === 'warning')
+      input.stalenessAndConflicts = [{kind: 'topic-support', message: 'Control has pending review'}];
+    else input.coverage.memory.consideredCandidates = 1;
+    expect(() =>
+      projectTopicStudySourceBriefV1(input, {hash: 'unneeded', clean: true, indexFresh: true, files: []}),
+    ).toThrow('precondition failure');
+  },
+);
+
+it('keeps public omissions and omitted-source DTOs explicit without inventing source facts', () => {
+  const declared = {
+    hash: 'unneeded',
+    clean: true,
+    indexFresh: true,
+    files: [
+      {path: 'health.ts', availability: 'present', content: 'PRIVATE-RAW-HEALTH'},
+      {path: 'config.ts', availability: 'present', content: 'PRIVATE-RAW-CONFIG'},
+    ],
+  };
+  const brief = publicSourceBrief([{path: 'health.ts', content: 'export const title = "Context Health";'}]);
+  brief.coverage.omissions.sourceExcerpts = 1;
+  const result = JSON.parse(projectTopicStudySourceBriefV1(brief, declared));
+  expect(result.refs[1]).toMatchObject({path: 'config.ts', selection: 'not-returned-by-public-brief', sources: []});
+  expect(result.publicSourceOmissions).toBe(1);
+  expect(JSON.stringify(result)).not.toContain('PRIVATE-RAW');
+  const stale = JSON.parse(JSON.stringify(brief));
+  delete stale.graph.sources;
+  stale.scope.freshness = 'stale';
+  expect(
+    JSON.parse(projectTopicStudySourceBriefV1(stale, declared)).refs.every(
+      (ref: {sources: unknown[]}) => ref.sources.length === 0,
+    ),
+  ).toBe(true);
+});
+
+it('projects equivalent source facts independently of private identifiers within a fixed byte budget', () => {
+  fc.assert(
+    fc.property(
+      fc.integer({min: 1, max: 200}),
+      fc.string({maxLength: 40}),
+      fc.integer({min: 0, max: 10000}),
+      (seconds, id, size) => {
+        const brief = publicSourceBrief([
+          {path: 'health.ts', content: `export const title = "Context Health";\n${'x'.repeat(size)}`},
+          {path: 'config.ts', content: `export const timeoutSeconds = ${seconds};`},
+        ]);
+        const changed = JSON.parse(JSON.stringify(brief));
+        changed.graph.sources.forEach((source: {id: string; repositoryKey: string; coveredGraphRefs: string[]}) => {
+          source.id = id;
+          source.repositoryKey = `threadnote://repo/${id}`;
+          source.coveredGraphRefs = [id];
+        });
+        const declared = {
+          hash: id,
+          clean: true,
+          indexFresh: true,
+          files: ['health.ts', 'config.ts'].map(path => ({path, availability: 'present', content: null})),
+        };
+        const projected = projectTopicStudySourceBriefV1(brief, declared);
+        expect(projectTopicStudySourceBriefV1(changed, declared)).toBe(projected);
+        expect(new TextEncoder().encode(projected).byteLength).toBeLessThanOrEqual(6000);
+        const refs = JSON.parse(projected).refs;
+        expect(refs.map((ref: {path: string}) => ref.path)).toEqual(['health.ts', 'config.ts']);
+        expect(
+          refs.every(
+            (ref: {sources: unknown[]; selection: string}) => ref.sources.length || ref.selection.includes('omitted'),
+          ),
+        ).toBe(true);
+      },
+    ),
+    {numRuns: 20},
+  );
 });

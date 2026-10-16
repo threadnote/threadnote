@@ -8,6 +8,7 @@ import {dirname, isAbsolute, join, resolve} from 'node:path';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertTopicStudyLedgerV1,
+  TOPIC_STUDY_COMPARISON_METHOD_V1,
   TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
   topicStudyPreconditionFailedV1,
   parseTopicStudyGateInputV1,
@@ -375,6 +376,7 @@ async function main() {
       corpusHash,
       canonicalSeal,
       repetitions: options.repetitions,
+      comparisonMethod: TOPIC_STUDY_COMPARISON_METHOD_V1,
     }),
   );
   for (const arm of TOPIC_STUDY_ARMS) {
@@ -399,6 +401,7 @@ async function main() {
       const manifest = {
         version: 1,
         arm,
+        comparisonMethod: TOPIC_STUDY_COMPARISON_METHOD_V1,
         repetition,
         runNonce,
         corpusHash,
