@@ -1,4 +1,4 @@
-import {Effect, Path} from 'effect';
+import {Effect, Path, Result, Schema} from 'effect';
 import {EffectMcpServerAdapter, McpInput} from '../../../effect/ai/mcp.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -13,6 +13,20 @@ import {
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
 import {readTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
+import {requestTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
+import {MAX_TOPIC_MAINTENANCE_BYTES} from '@threadnote/memory/topic-maintenance';
+import {MAX_TOPIC_MAINTENANCE_DRAFT_BYTES} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  inspectTopicEnrollment,
+  previewTopicEnrollment,
+  applyTopicEnrollment,
+} from '../../../memory/maintenance/topic_enrollment.js';
+import {managerTopicReviewCaseIdentity, projectManagerTopicReview} from '../../../manager/topic_review.js';
+
+class InvalidTopicEnrollmentJson extends Schema.TaggedError<InvalidTopicEnrollmentJson>()(
+  'InvalidTopicEnrollmentJson',
+  {},
+) {}
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
@@ -20,6 +34,102 @@ import {
 } from '../../../memory/context/maintenance_review.js';
 
 export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+  server.registerTool(
+    'context_topic_enrollment',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: true, idempotentHint: false},
+      description:
+        'Inspect an existing personal durable topic or preview/apply explicit enrollment with exact content hash and proposal revision.',
+      inputSchema: {
+        action: McpInput.literals(['inspect', 'preview', 'enroll'], 'Exact topic enrollment action'),
+        uri: McpInput.string('Personal durable memory URI or stable memory ID'),
+        callerCwd: McpInput.string('Absolute selected repository checkout for preview/enroll'),
+        inputJson: McpInput.string('Closed paragraph support and dependency decisions, JSON, at most 32 KiB'),
+        expectedContentHash: McpInput.string('Exact previewed target content hash for enroll'),
+        revision: McpInput.string('Exact previewed proposal revision for enroll'),
+        approved: McpInput.boolean('Explicit enrollment approval'),
+      },
+    },
+    input =>
+      Effect.gen(function* () {
+        if (input.action !== 'inspect' && input.action !== 'preview' && input.action !== 'enroll')
+          return argumentError('Choose inspect, preview, or enroll explicitly.');
+        if (typeof input.uri !== 'string' || !input.uri || input.uri.length > 4096)
+          return argumentError('Select a bounded personal topic URI.');
+        if (input.action === 'inspect') {
+          const result = yield* inspectTopicEnrollment(config, input.uri);
+          return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+        }
+        const cwd = input.callerCwd ?? '';
+        if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('Topic enrollment callerCwd must be absolute.');
+        if (
+          typeof input.inputJson !== 'string' ||
+          new TextEncoder().encode(input.inputJson).byteLength > MAX_TOPIC_MAINTENANCE_BYTES
+        )
+          return argumentError('Topic enrollment JSON must be within 32 KiB.');
+        const inputJson = input.inputJson;
+        const parsed = yield* Effect.try({
+          try: (): unknown => JSON.parse(inputJson),
+          catch: () => InvalidTopicEnrollmentJson.make({}),
+        }).pipe(Effect.result);
+        if (Result.isFailure(parsed)) return argumentError('Topic enrollment input must be valid JSON.');
+        if (
+          input.action === 'enroll' &&
+          (input.approved !== true ||
+            typeof input.expectedContentHash !== 'string' ||
+            !/^[a-f0-9]{64}$/u.test(input.expectedContentHash) ||
+            typeof input.revision !== 'string' ||
+            !/^[a-f0-9]{64}$/u.test(input.revision))
+        )
+          return argumentError('Enroll requires explicit approval and the exact preview hash and revision.');
+        const options = {uri: input.uri, callerCwd: cwd, input: parsed.success};
+        const result =
+          input.action === 'preview'
+            ? yield* previewTopicEnrollment(config, options)
+            : yield* applyTopicEnrollment(config, {
+                ...options,
+                expectedContentHash: input.expectedContentHash ?? '',
+                revision: input.revision ?? '',
+                approved: input.approved === true,
+              });
+        return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+      }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
+  );
+  server.registerTool(
+    'context_maintenance_draft',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: false},
+      description:
+        'Explicitly generate or regenerate a private topic proposal from one exact ready maintenance case and selected text model. Accepted memory is unchanged.',
+      inputSchema: {
+        caseId: McpInput.string('Exact topic maintenance case ID'),
+        backend: McpInput.literals(['local-ai', 'effect-ai'], 'Explicit text-only backend'),
+        modelId: McpInput.string('Exact installed or configured model ID'),
+        regenerate: McpInput.boolean('Explicitly regenerate instead of reusing an unchanged review'),
+      },
+    },
+    input =>
+      Effect.gen(function* () {
+        if (
+          typeof input.caseId !== 'string' ||
+          !/^health-case-[a-f0-9]{40}$/u.test(input.caseId) ||
+          (input.backend !== 'local-ai' && input.backend !== 'effect-ai') ||
+          typeof input.modelId !== 'string' ||
+          !input.modelId.trim() ||
+          new TextEncoder().encode(input.modelId).byteLength > 256 ||
+          [...input.modelId].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
+        )
+          return argumentError('Select an exact ready topic case, backend, and model.');
+        const review = yield* requestTopicMaintenanceDraft(config, {
+          caseId: input.caseId,
+          backend: input.backend,
+          modelId: input.modelId,
+          regenerate: input.regenerate === true,
+        });
+        const result = projectManagerTopicReview(review, yield* managerTopicReviewCaseIdentity(config, review))!;
+        return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+      }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
+  );
   server.registerTool(
     'context_maintenance_review',
     {
@@ -39,7 +149,42 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     },
     input =>
       Effect.gen(function* () {
-        const cwd = input.sourceCwd ?? (yield* SystemInfo).currentDirectory();
+        if (
+          input.action !== 'view' &&
+          input.action !== 'preview' &&
+          input.action !== 'apply' &&
+          input.action !== 'reject' &&
+          input.action !== 'defer' &&
+          input.action !== 'resume'
+        )
+          return argumentError('Choose an exact topic review action.');
+        if (typeof input.reviewId !== 'string' || !/^review-[a-f0-9]{24}$/u.test(input.reviewId))
+          return argumentError('Select an exact topic review ID.');
+        if (input.action !== 'view' && (!Number.isSafeInteger(input.revision) || (input.revision ?? 0) < 1))
+          return argumentError('Select the exact positive review revision.');
+        if (
+          input.action === 'preview' &&
+          input.editedDraftJson !== undefined &&
+          new TextEncoder().encode(input.editedDraftJson).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES
+        )
+          return argumentError('Edited topic draft JSON exceeds 32 KiB.');
+        if (
+          input.action === 'apply' &&
+          (input.approved !== true ||
+            typeof input.approvalDigest !== 'string' ||
+            !/^[a-f0-9]{64}$/u.test(input.approvalDigest))
+        )
+          return argumentError('Apply requires approved=true and the exact preview digest.');
+        if (
+          (input.action === 'reject' || input.action === 'defer' || input.action === 'resume') &&
+          input.caseId !== undefined &&
+          !/^health-case-[a-f0-9]{40}$/u.test(input.caseId)
+        )
+          return argumentError('Select an exact topic maintenance case.');
+        const cwd =
+          input.action === 'preview' || input.action === 'apply'
+            ? (input.sourceCwd ?? (yield* SystemInfo).currentDirectory())
+            : '';
         if ((input.action === 'preview' || input.action === 'apply') && !(yield* Path.Path).isAbsolute(cwd))
           return argumentError('Topic review sourceCwd must be absolute.');
         const result =
@@ -63,10 +208,12 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
                 : yield* decideTopicMaintenanceReview(config, {
                     reviewId: input.reviewId ?? '',
                     revision: input.revision ?? 0,
-                    action: input.action ?? 'reject',
+                    action: input.action,
                     caseId: input.caseId,
                   });
-        return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+        const projection = projectManagerTopicReview(result, yield* managerTopicReviewCaseIdentity(config, result));
+        if (!projection) return argumentError('The selected review is not a topic maintenance proposal.');
+        return {content: [{type: 'text' as const, text: JSON.stringify(projection)}], structuredContent: projection};
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
   );
   server.registerTool(

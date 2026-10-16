@@ -842,7 +842,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
               }
             }
           }
+          const enrolled = hasTopicMaintenanceEnrollment(record);
           for (const finding of report.success.findings) {
+            if (enrolled && ['citation-changed', 'citation-missing'].includes(finding.category)) continue;
             if (selectedCase !== undefined && !finding.category.startsWith('citation-')) continue;
             if (finding.caseIdentity?.family === 'candidate') continue;
             if (finding.category.startsWith('relation-')) continue;

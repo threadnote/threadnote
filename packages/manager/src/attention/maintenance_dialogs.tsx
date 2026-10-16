@@ -1,4 +1,5 @@
 import {SemanticResolutionReview} from './semantic_comparison.js';
+import {TopicReviewContent} from './topic_review.js';
 import {Copy, ExternalLink, RefreshCw} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
@@ -112,6 +113,20 @@ export function MaintenanceCaseDialog(props: {
   const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
   const reason = packet?.reason ?? item?.reason;
   const semanticReview = packet?.semanticEvidence !== undefined || item?.family === 'semantic-contradiction';
+  const topicReview =
+    (packet?.family ?? item?.family) === 'topic-maintenance' && (packet?.slot ?? item?.slot) === 'declared-support';
+  if (topicReview)
+    return (
+      <DetailModal title="Review topic update" onClose={props.onClose} className="topic-review-dialog">
+        <TopicReviewContent
+          project={props.project}
+          caseId={caseId}
+          initialPacket={packet}
+          onChanged={() => props.onChanged?.()}
+          onOpenLibrary={props.onOpenLibrary}
+        />
+      </DetailModal>
+    );
   return (
     <DetailModal
       title={semanticReview ? 'Compare conflicting memories' : (props.title ?? maintenanceMemoryTitle(uri))}

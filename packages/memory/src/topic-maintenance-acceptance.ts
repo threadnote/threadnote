@@ -55,7 +55,7 @@ export interface TopicMaintenanceAcceptancePreviewV1 {
 export interface TopicMaintenanceApprovalReceiptV1 {
   readonly version: 1;
   readonly reviewRevision: number;
-  readonly stage: 'preview' | 'prepared' | 'written' | 'conflict';
+  readonly stage: 'preview' | 'parked' | 'prepared' | 'written' | 'conflict';
   readonly preview: TopicMaintenanceAcceptancePreviewV1;
 }
 
@@ -449,7 +449,7 @@ export function validateTopicMaintenanceApprovalReceipt(
     !Number.isSafeInteger(input.reviewRevision) ||
     (input.reviewRevision as number) < 1 ||
     (input.reviewRevision as number) > revision ||
-    !['preview', 'prepared', 'written', 'conflict'].includes(input.stage as string)
+    !['preview', 'parked', 'prepared', 'written', 'conflict'].includes(input.stage as string)
   )
     fail('approval receipt is malformed.');
   const preview = validateTopicMaintenanceAcceptancePreview(input.preview, reviewPayload);

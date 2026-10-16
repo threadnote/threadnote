@@ -148,6 +148,12 @@ function renderAgentViewMemories(
       memory.memoryTrust,
     ].filter(value => value !== undefined);
     lines.push(`- ${inlineContextBriefText(memory.uri)} [${status.join('; ')}]`);
+    if (memory.topicMaintenance !== undefined) {
+      const topic = memory.topicMaintenance;
+      lines.push(
+        `   Topic maintenance — declared-only; excerpt paragraph ${topic.excerptOrdinal} ${topic.excerptRole}; historical=${topic.historicalParagraphs}; normative=${topic.normativeParagraphs}; unresolved=${topic.unresolvedParagraphs}; ${topic.attention}${topic.reviewId === undefined ? '' : `=${inlineContextBriefText(topic.reviewId)}`}`,
+      );
+    }
     if (memory.excerpt !== '') lines.push(`   ${inlineContextBriefText(memory.excerpt)}`);
     if (memory.continuationCard !== undefined)
       lines.push(`   Continue — ${inlineContextBriefPairs(memory.continuationCard)}`);

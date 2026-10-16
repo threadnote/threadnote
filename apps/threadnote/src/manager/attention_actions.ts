@@ -35,6 +35,7 @@ import {previewSemanticReview, applySemanticReview} from '../memory/context/sema
 import type {ManagerSemanticReviewInputV1} from '@threadnote/manager/attention/contracts';
 import {SemanticReviewError} from '../memory/context/semantic_review_state.js';
 import {ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-store';
+import {handleManagerTopicReview, managerTopicPacketReviewId} from './topic_review.js';
 
 const CITATION_FINDING_CATEGORIES = ['citation-changed', 'citation-missing', 'citation-unknown'] as const;
 const MAXIMUM_MANAGER_BULK_CITATION_REPAIRS = 100;
@@ -68,6 +69,8 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   readonly url: URL;
 }) {
   const route = request.url.pathname;
+  const topicReview = yield* handleManagerTopicReview(request);
+  if (topicReview !== undefined) return topicReview;
   if (route === '/api/attention/context-maintenance') {
     if (request.method === 'GET') {
       const project = request.url.searchParams.get('project') ?? undefined;
@@ -83,15 +86,17 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
           (maximumLines !== null && !/^(?:[1-9]|1[0-9]|2[0-4])$/u.test(maximumLines))
         )
           return invalid('Choose a positive source line and 1 to 24 excerpt lines.');
-        return {
-          status: 200,
-          body: yield* readContextMaintenancePacket(request.config, caseId, {
-            citationId: request.url.searchParams.get('citationId') ?? undefined,
-            memoryUri: request.url.searchParams.get('memoryUri') ?? undefined,
-            ...(startLine === null ? {} : {startLine: Number(startLine)}),
-            ...(maximumLines === null ? {} : {maximumLines: Number(maximumLines)}),
-          }),
-        };
+        const packet = yield* readContextMaintenancePacket(request.config, caseId, {
+          citationId: request.url.searchParams.get('citationId') ?? undefined,
+          memoryUri: request.url.searchParams.get('memoryUri') ?? undefined,
+          ...(startLine === null ? {} : {startLine: Number(startLine)}),
+          ...(maximumLines === null ? {} : {maximumLines: Number(maximumLines)}),
+        });
+        if (project !== undefined && packet.project !== project)
+          return invalid('This case belongs to another project.');
+        const reviewId =
+          'topicEvidence' in packet ? yield* managerTopicPacketReviewId(request.config, packet) : undefined;
+        return {status: 200, body: {...packet, ...(reviewId ? {reviewId} : {})}};
       }
       const limitText = request.url.searchParams.get('limit');
       if (limitText !== null && !/^(?:[1-9][0-9]?|100)$/u.test(limitText))
@@ -218,6 +223,11 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
           if (review.reviewId !== reviewId)
             return conflict('The stored review identity changed. Refresh the review inbox.');
           if (review.project !== project) return invalid('This review belongs to another project.');
+          if (review.maintenance)
+            return conflict(
+              'Open this topic in the maintenance review. Use /api/attention/topic-review.',
+              'topic-review-route-required',
+            );
           if (review.revision !== revision)
             return conflict('The review changed. Close and reopen it before refreshing replacement safety.');
           const candidate = review.candidates.find(item => item.candidateId === candidateId);
@@ -270,6 +280,11 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       return {status: 404, body: {error: 'This review is unavailable. Refresh the review inbox.'}};
     const review = loaded.success;
     if (review.project !== project) return invalid('This review belongs to another project.');
+    if (review.maintenance)
+      return conflict(
+        'Open this topic in the maintenance review. Use /api/attention/topic-review.',
+        'topic-review-route-required',
+      );
     if (route.endsWith('/preview')) return {status: 200, body: {review, delta: projectKnowledgeDeltaV1(review)}};
     if (typeof body.candidateId !== 'string' || !review.candidates.some(item => item.candidateId === body.candidateId))
       return invalid('Select a candidate from this review.');

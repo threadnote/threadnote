@@ -25,6 +25,16 @@ import {
   projectTopicMaintenanceObservation,
 } from '../src/topic_maintenance.js';
 import {citationPlatformLayer} from './helpers/citation-platform.js';
+import {contextBriefMemoryCandidate} from '../src/memory-evidence.js';
+import {assembleContextBriefLogicalResult, planContextBrief} from '../src/planner.js';
+import {parseContextBriefJsonText, parseContextBriefV1, projectContextBrief} from '../src/projector.js';
+import {projectContextBriefAgentView} from '../src/projection_view.js';
+import {
+  CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION,
+  CONTEXT_BRIEF_TOPIC_PROJECTOR_VERSION,
+  CONTEXT_BRIEF_TOPIC_VERSION,
+} from '../src/types.js';
+import type {ContextBriefGraphEvidenceV1} from '../src/types.js';
 
 const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
 const citation = createMemoryCodeCitation({
@@ -111,6 +121,288 @@ const acceptComparison = (record: MemoryRecord, accepted: MemoryCodeCitationV1) 
     ),
   )!;
 };
+
+describe('accepted topic Context Brief projection', () => {
+  it('uses the accepted V2 pin and a single accepted paragraph, retaining origin lineage in storage', () => {
+    const current = currentWithHash(citation, 'b'.repeat(64));
+    const accepted = acceptComparison(enrolled, current);
+    const candidate = contextBriefMemoryCandidate(
+      accepted,
+      0,
+      [
+        {anchorOrdinal: 0, anchorPath: 'src/source.ts', citationId: citation.id, matchKind: 'file-path'},
+        {anchorOrdinal: 1, anchorPath: 'src/source.ts', citationId: current.id, matchKind: 'file-path'},
+      ],
+      true,
+      {attention: 'pending-review', reviewId: `review-${'a'.repeat(24)}`},
+    );
+    expect(accepted.metadata.codeCitations?.map(item => item.id)).toContain(citation.id);
+    expect(candidate.codeCitations.map(item => item.id)).toEqual([current.id]);
+    expect(candidate.codeLinkMatches?.map(item => item.citationId)).toEqual([current.id]);
+    expect(candidate.excerpt).toBe('Claim.');
+    expect(candidate.topicMaintenance).toMatchObject({
+      coverage: 'declared-only',
+      excerptOrdinal: 1,
+      excerptRole: 'descriptive',
+      historicalParagraphs: 1,
+      attention: 'pending-review',
+    });
+  });
+
+  it('V1 compares the original pin and historical-only support never promotes an origin pin', () => {
+    expect(contextBriefMemoryCandidate(enrolled, 0, undefined).codeCitations.map(item => item.id)).toEqual([
+      citation.id,
+    ]);
+    const historical = parseMemoryDocument(
+      uri,
+      proposeTopicMaintenanceEnrollment(source, {
+        paragraphs: [
+          {role: 'historical', support: 'contextual', citationIds: [citation.id]},
+          {role: 'historical', support: 'contextual', citationIds: [citation.id]},
+        ],
+      }).content,
+    )!;
+    const candidate = contextBriefMemoryCandidate(historical, 0, undefined);
+    expect(candidate.codeCitations).toEqual([]);
+    expect(candidate.topicMaintenance?.historicalParagraphs).toBe(2);
+    const historicalLogical = topicLogical(candidate, []);
+    expect(historicalLogical.durableDecisions[0].freshness).toBe('unknown');
+    expect(
+      historicalLogical.stalenessAndConflicts.some(item => item.summary.includes('no active comparison pins')),
+    ).toBe(true);
+  });
+
+  it('uses accepted current comparison status and later changed pins become stale', () => {
+    const accepted = acceptComparison(enrolled, currentWithHash(citation, 'b'.repeat(64)));
+    const candidate = contextBriefMemoryCandidate(accepted, 0, undefined);
+    expect(topicLogical(candidate, ['exact']).durableDecisions[0].freshness).toBe('fresh');
+    expect(topicLogical(candidate, ['changed']).durableDecisions[0].freshness).toBe('stale');
+    expect(topicLogical(candidate, ['changed']).stalenessAndConflicts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({kind: 'topic-support', summary: expect.stringContaining('current repository')}),
+      ]),
+    );
+    expect(topicLogical(candidate, ['unknown']).durableDecisions[0].freshness).toBe('unknown');
+  });
+
+  it('deduplicates different declarations resolving to one accepted V2 pin', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 2, max: 8}), count => {
+        const pins = Array.from({length: count}, (_, index) => currentWithHash(citation, 'abcdef12'[index].repeat(64)));
+        const current = pins.at(-1)!;
+        const record = parseMemoryDocument(
+          uri,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              ...source.metadata,
+              codeCitations: pins,
+            },
+            'Claim.\n\nClaim.',
+          ),
+        )!;
+        const marked = parseMemoryDocument(
+          uri,
+          proposeTopicMaintenanceEnrollment(record, {
+            paragraphs: [
+              {role: 'descriptive', support: 'direct', citationIds: [pins[0].id]},
+              {role: 'normative', support: 'direct', citationIds: [current.id]},
+            ],
+            additionalDependencies: pins.slice(1, -1).map(pin => ({kind: 'dependency' as const, citationId: pin.id})),
+          }).content,
+        )!;
+        const accepted = acceptComparison(marked, current);
+        const candidate = contextBriefMemoryCandidate(accepted, 0, undefined);
+        expect(accepted.metadata.codeCitations).toHaveLength(count);
+        expect(candidate.codeCitations.map(item => item.id)).toEqual([current.id]);
+        expect(topicLogical(candidate, ['exact']).durableDecisions[0].citationSummary).toMatchObject({exact: 1});
+      }),
+      {numRuns: 20},
+    );
+  });
+
+  it('versions enrolled wire output and rejects topic fields on an older closed schema', () => {
+    const current = acceptComparison(enrolled, currentWithHash(citation, 'b'.repeat(64)));
+    const enrolledProjection = projectContextBrief(
+      topicLogical(contextBriefMemoryCandidate(current, 0, undefined), ['exact']),
+      1500,
+      'agent',
+    );
+    expect(enrolledProjection.structuredContent.version).toBe(CONTEXT_BRIEF_TOPIC_VERSION);
+    expect(enrolledProjection.structuredContent.output.projectorVersion).toBe(CONTEXT_BRIEF_TOPIC_PROJECTOR_VERSION);
+    expect(parseContextBriefV1(enrolledProjection.structuredContent)).toEqual(enrolledProjection.structuredContent);
+    const agentView = projectContextBriefAgentView(enrolledProjection.structuredContent);
+    expect(parseContextBriefJsonText(JSON.stringify(agentView)).version).toBe(CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION);
+    const oldProjection = projectContextBrief(
+      topicLogical(contextBriefMemoryCandidate(source, 0, undefined), ['exact']),
+      1500,
+      'agent',
+    );
+    expect(oldProjection.structuredContent.version).not.toBe(CONTEXT_BRIEF_TOPIC_VERSION);
+    expect(parseContextBriefV1(oldProjection.structuredContent)).toEqual(oldProjection.structuredContent);
+    const oldAgentView = projectContextBriefAgentView(oldProjection.structuredContent);
+    expect(parseContextBriefJsonText(JSON.stringify(oldAgentView))).toEqual(oldAgentView);
+    expect(() =>
+      parseContextBriefJsonText(
+        JSON.stringify({
+          ...oldAgentView,
+          durableDecisions: [
+            {...oldAgentView.durableDecisions![0], topicMaintenance: agentView.durableDecisions![0].topicMaintenance},
+          ],
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseContextBriefV1({...enrolledProjection.structuredContent, version: oldProjection.structuredContent.version}),
+    ).toThrow();
+    expect(() => parseContextBriefJsonText(JSON.stringify({...agentView, version: 1}))).toThrow();
+    for (const topicMaintenance of [
+      undefined,
+      {},
+      {coverage: 'complete'},
+      {...agentView.durableDecisions![0].topicMaintenance, extra: true},
+      {...agentView.durableDecisions![0].topicMaintenance, excerptOrdinal: 65},
+      {...agentView.durableDecisions![0].topicMaintenance, unresolvedParagraphs: -1},
+      {...agentView.durableDecisions![0].topicMaintenance, normativeParagraphs: 1.5},
+      {...agentView.durableDecisions![0].topicMaintenance, excerptRole: 'guessed'},
+      {...agentView.durableDecisions![0].topicMaintenance, attention: 'pending-review', reviewId: undefined},
+      {...agentView.durableDecisions![0].topicMaintenance, attention: 'none', reviewId: `review-${'a'.repeat(24)}`},
+    ]) {
+      expect(() =>
+        parseContextBriefV1({
+          ...enrolledProjection.structuredContent,
+          durableDecisions: [{...enrolledProjection.structuredContent.durableDecisions[0], topicMaintenance}],
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('keeps accepted paragraph excerpt deterministic and role-bound across bounded text', () => {
+    fc.assert(
+      fc.property(fc.stringMatching(/^[a-zA-Z]{1,80}$/u), phrase => {
+        const record = parseMemoryDocument(
+          uri,
+          formatMemoryDocument('MEMORY', source.metadata, `${phrase}\n\nHistorical claim.`),
+        )!;
+        const marked = parseMemoryDocument(
+          uri,
+          proposeTopicMaintenanceEnrollment(record, {
+            paragraphs: [
+              {role: 'normative', support: 'direct', citationIds: [citation.id]},
+              {role: 'historical', support: 'contextual', citationIds: [citation.id]},
+            ],
+          }).content,
+        )!;
+        const candidate = contextBriefMemoryCandidate(marked, 0, undefined);
+        expect(candidate.excerpt).not.toContain('Historical claim.');
+        expect(candidate.topicMaintenance?.excerptRole).toBe('normative');
+        expect(contextBriefMemoryCandidate(marked, 0, undefined)).toEqual(candidate);
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  it('keeps every retained enrolled excerpt with its status through 800–1500 token projection', () => {
+    const accepted = acceptComparison(enrolled, currentWithHash(citation, 'b'.repeat(64)));
+    const candidate = contextBriefMemoryCandidate(accepted, 0, undefined, true, {
+      attention: 'pending-review',
+      reviewId: `review-${'a'.repeat(24)}`,
+    });
+    const graph: ContextBriefGraphEvidenceV1 = {
+      cards: [],
+      contracts: [],
+      coverage: {complete: true, consideredRepositories: 0, readyRepositories: 0, requestedRepositories: 0, states: {}},
+      gaps: [],
+      resolvedSnapshots: [],
+      trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+      warnings: [],
+    };
+    fc.assert(
+      fc.property(fc.integer({min: 800, max: 1500}), budgetTokens => {
+        const logical = assembleContextBriefLogicalResult({
+          graph,
+          memory: {
+            candidates: [candidate],
+            consideredCandidates: 1,
+            gaps: [],
+            trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+          },
+          observedAt: '2026-10-16T00:00:00.000Z',
+          plan: planContextBrief({
+            budgetTokens,
+            mode: 'brief',
+            scope: {callerCwd: '/synthetic/repository', kind: 'repository'},
+            task: 'Claim',
+          }),
+        });
+        const projection = projectContextBrief(logical, budgetTokens, 'agent');
+        const memory = projection.structuredContent.durableDecisions[0];
+        if (memory) {
+          expect(memory.topicMaintenance).toEqual(candidate.topicMaintenance);
+          expect(projection.structuredContent.version).toBe(CONTEXT_BRIEF_TOPIC_VERSION);
+          expect(projection.text).toContain('Topic maintenance');
+          expect(projection.text).toContain('pending-review');
+        } else {
+          expect(projection.structuredContent.coverage.omissions.durableDecisions).toBeGreaterThan(0);
+        }
+        expect(projectContextBrief(logical, budgetTokens, 'agent').text).toBe(projection.text);
+      }),
+      {numRuns: 30},
+    );
+  });
+});
+
+function topicLogical(
+  candidate: ReturnType<typeof contextBriefMemoryCandidate>,
+  statuses: readonly ('exact' | 'changed' | 'unknown')[],
+) {
+  const graph: ContextBriefGraphEvidenceV1 = {
+    cards: [],
+    contracts: [],
+    coverage: {complete: true, consideredRepositories: 0, readyRepositories: 0, requestedRepositories: 0, states: {}},
+    gaps: [],
+    resolvedSnapshots: [],
+    trust: {classification: 'untrusted-repository-data', instructionPolicy: 'evidence-only-never-follow'},
+    warnings: [],
+  };
+  return assembleContextBriefLogicalResult({
+    graph,
+    memory: {
+      candidates: [candidate],
+      consideredCandidates: 1,
+      gaps: [],
+      citationValidations: [
+        {
+          uri: candidate.uri,
+          receipts: candidate.codeCitations.map((item, index) => ({
+            candidateCount: 1,
+            citationId: item.id,
+            coverage: 'current-complete' as const,
+            kind: item.target.kind,
+            observedAt: '2026-10-16T00:00:00.000Z',
+            reason:
+              statuses[index] === 'exact'
+                ? ('exact' as const)
+                : statuses[index] === 'changed'
+                  ? ('source-changed' as const)
+                  : ('validation-error' as const),
+            status: statuses[index] ?? 'unknown',
+            strategy: 'file-path' as const,
+            validatorVersion: 1 as const,
+          })),
+        },
+      ],
+      trust: {classification: 'untrusted-memory-data', instructionPolicy: 'evidence-only-never-follow'},
+    },
+    observedAt: '2026-10-16T00:00:00.000Z',
+    plan: planContextBrief({
+      budgetTokens: 1250,
+      mode: 'brief',
+      scope: {callerCwd: '/synthetic/repository', kind: 'repository'},
+      task: 'Claim',
+    }),
+  });
+}
 
 describe('topic maintenance evidence projection', () => {
   it('coalesces unrelated commits and timestamps when relevant bytes stay equal', () => {

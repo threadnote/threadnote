@@ -8,11 +8,14 @@ import {Predicate} from 'effect';
 export const CONTEXT_BRIEF_LEGACY_VERSION = 2 as const;
 export const CONTEXT_BRIEF_VERSION = 3 as const;
 export const CONTEXT_BRIEF_PROCEDURE_VERSION = 4 as const;
+export const CONTEXT_BRIEF_TOPIC_VERSION = 5 as const;
 export const CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION = 2 as const;
 export const CONTEXT_BRIEF_PROJECTOR_VERSION = 3 as const;
 export const CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION = 4 as const;
+export const CONTEXT_BRIEF_TOPIC_PROJECTOR_VERSION = 5 as const;
 export const CONTEXT_BRIEF_AGENT_VIEW_VERSION = 1 as const;
 export const CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION = 2 as const;
+export const CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION = 3 as const;
 export const CONTEXT_BRIEF_CITATION_VALIDATOR_VERSION = 1 as const;
 export const CONTEXT_BRIEF_MAXIMUM_PUBLIC_CITATION_RECEIPTS = 8 as const;
 export const CONTEXT_BRIEF_CITATION_RELOCATION_HINT_MAXIMUM_BYTES = 96 as const;
@@ -40,13 +43,19 @@ export type ContextBriefFreshness = 'fresh' | 'stale' | 'unknown';
 export type ContextBriefEvidenceState = 'sufficient' | 'partial' | 'degraded' | 'no-match';
 export type ContextBriefPreciseEvidenceStatus = 'exact' | 'relocated' | 'changed' | 'deleted' | 'unknown';
 export type ContextBriefResponseVersion =
-  typeof CONTEXT_BRIEF_LEGACY_VERSION | typeof CONTEXT_BRIEF_VERSION | typeof CONTEXT_BRIEF_PROCEDURE_VERSION;
+  | typeof CONTEXT_BRIEF_LEGACY_VERSION
+  | typeof CONTEXT_BRIEF_VERSION
+  | typeof CONTEXT_BRIEF_PROCEDURE_VERSION
+  | typeof CONTEXT_BRIEF_TOPIC_VERSION;
 export type ContextBriefProjectorVersion =
   | typeof CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION
   | typeof CONTEXT_BRIEF_PROJECTOR_VERSION
-  | typeof CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION;
+  | typeof CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION
+  | typeof CONTEXT_BRIEF_TOPIC_PROJECTOR_VERSION;
 export type ContextBriefAgentViewVersion =
-  typeof CONTEXT_BRIEF_AGENT_VIEW_VERSION | typeof CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION;
+  | typeof CONTEXT_BRIEF_AGENT_VIEW_VERSION
+  | typeof CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION
+  | typeof CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION;
 
 export type ContextBriefCitationValidationReasonV2 =
   | 'ambiguous-relocation'
@@ -288,6 +297,9 @@ export interface ContextBriefMemoryCandidateV1 {
   /** @internal Preserves topical admission when a reverse selector later fails validation. */
   readonly lexicallySelected?: true;
   readonly citationErrorCount: number;
+  readonly topicMaintenance?: ContextBriefTopicMaintenanceV1;
+  /** @internal Enrollment whose canonical manifest cannot be validated. */
+  readonly topicMaintenanceInvalid?: true;
   readonly excerpt: string;
   readonly kind: 'durable' | 'handoff';
   /** Stable storage identity used to emit a bounded read alias when the canonical URI cannot fit safely. */
@@ -298,6 +310,18 @@ export interface ContextBriefMemoryCandidateV1 {
   readonly topic?: string;
   readonly trust?: MemoryTrust;
   readonly uri: string;
+}
+
+/** Derived only from the canonical accepted manifest and a private review state. */
+export interface ContextBriefTopicMaintenanceV1 {
+  readonly coverage: 'declared-only';
+  readonly excerptOrdinal: number;
+  readonly excerptRole: 'descriptive' | 'normative' | 'historical';
+  readonly historicalParagraphs: number;
+  readonly normativeParagraphs: number;
+  readonly unresolvedParagraphs: number;
+  readonly attention: 'none' | 'pending-review' | 'review-unavailable';
+  readonly reviewId?: string;
 }
 
 /** Canonical memory identity and explicit anchors supplied to citation validation by Context Health. */
@@ -335,7 +359,7 @@ export interface ContextBriefContinuationCardV1 {
 
 export interface ContextBriefMemoryEvidenceV1 extends Omit<
   ContextBriefMemoryCandidateV1,
-  'citationErrorCount' | 'codeCitations' | 'codeLinkMatches' | 'lexicallySelected'
+  'citationErrorCount' | 'codeCitations' | 'codeLinkMatches' | 'lexicallySelected' | 'topicMaintenanceInvalid'
 > {
   readonly continuationCard?: ContextBriefContinuationCardV1;
   readonly citationErrorCount?: number;
@@ -404,7 +428,12 @@ export interface ContextBriefMemoryRetrievalV1 {
 export interface ContextBriefContextIssueV1 {
   readonly id: string;
   readonly kind:
-    'candidate-conflict' | 'invalid-code-citation' | 'stale-link' | 'stale-memory' | 'unknown-memory-freshness';
+    | 'candidate-conflict'
+    | 'invalid-code-citation'
+    | 'stale-link'
+    | 'stale-memory'
+    | 'unknown-memory-freshness'
+    | 'topic-support';
   readonly rank: number;
   readonly summary: string;
   readonly uris: readonly string[];
@@ -636,6 +665,7 @@ export interface ContextBriefAgentViewV1 {
 }
 
 export interface ContextBriefAgentViewMemoryV1 {
+  readonly topicMaintenance?: ContextBriefTopicMaintenanceV1;
   readonly actionCard?: ContextBriefMemoryActionCardV1;
   readonly continuationCard?: ContextBriefContinuationCardV1;
   readonly authority?: MemoryAuthority;
@@ -680,6 +710,12 @@ export type ContextBriefV4 = Omit<ContextBriefV1, 'output' | 'version'> & {
   };
   readonly version: typeof CONTEXT_BRIEF_PROCEDURE_VERSION;
 };
+export type ContextBriefV5 = Omit<ContextBriefV1, 'output' | 'version'> & {
+  readonly output: Omit<ContextBriefV1['output'], 'projectorVersion'> & {
+    readonly projectorVersion: typeof CONTEXT_BRIEF_TOPIC_PROJECTOR_VERSION;
+  };
+  readonly version: typeof CONTEXT_BRIEF_TOPIC_VERSION;
+};
 export type ContextBriefLogicalResultV2 = Omit<ContextBriefLogicalResultV1, 'version'> & {
   readonly version: typeof CONTEXT_BRIEF_LEGACY_VERSION;
 };
@@ -697,6 +733,9 @@ export type ProjectedContextBriefV3 = Omit<ProjectedContextBriefV1, 'structuredC
 };
 export type ProjectedContextBriefV4 = Omit<ProjectedContextBriefV1, 'structuredContent'> & {
   readonly structuredContent: ContextBriefV4;
+};
+export type ProjectedContextBriefV5 = Omit<ProjectedContextBriefV1, 'structuredContent'> & {
+  readonly structuredContent: ContextBriefV5;
 };
 
 const UTF8 = new TextEncoder();

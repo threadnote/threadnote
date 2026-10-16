@@ -46,7 +46,7 @@ export interface CodeMemoryLinkDogfoodObservationV1 {
   readonly graphStatus: CodeMemoryLinkDogfoodGraphStatusV1 | null;
   readonly id: CodeMemoryLinkDogfoodCaseId;
   readonly memoryMatches: number;
-  readonly outputVersion: 2 | 3 | 4;
+  readonly outputVersion: 2 | 3 | 4 | 5;
   readonly requestedAnchors: number;
   readonly resolvedAnchors: number;
   readonly responseBytes: number;
@@ -392,7 +392,7 @@ function parseObservationSummary(value: unknown): CodeMemoryLinkDogfoodObservati
   const budgetTokens = positiveInteger(observation.budgetTokens, 'dogfood budget tokens');
   if (budgetTokens > CODE_MEMORY_LINK_DOGFOOD_MAXIMUM_BUDGET_TOKENS) invalid('dogfood budget exceeds 1500 tokens');
   const outputVersion = observation.outputVersion;
-  if (outputVersion !== 2 && outputVersion !== 3 && outputVersion !== 4) {
+  if (outputVersion !== 2 && outputVersion !== 3 && outputVersion !== 4 && outputVersion !== 5) {
     invalid('dogfood output version must be 2, 3, or 4');
   }
   const codeAnchorCoverageComplete = observation.codeAnchorCoverageComplete;
