@@ -7,6 +7,7 @@ import {generateWithSelectedLocalModel} from '@threadnote/inference/models/infer
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
+import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../manager/topic_draft_schema.js';
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
 export const EFFECT_AI_API_KEY_ENV = 'THREADNOTE_EFFECT_AI_API_KEY';
@@ -81,7 +82,10 @@ export const ensureEffectAiReady = Effect.fn('EffectAi.ensureReady')(function* (
   void resolved;
 });
 
-export function aiConsolidatorLayer(config: EffectAiConfiguration): Layer.Layer<AiConsolidator> {
+export function aiConsolidatorLayer(
+  config: EffectAiConfiguration,
+  objectName = 'threadnote_consolidation',
+): Layer.Layer<AiConsolidator> {
   const languageModelLayer = effectAiLanguageModelLayer(config, 4000);
 
   return Layer.effect(
@@ -92,7 +96,7 @@ export function aiConsolidatorLayer(config: EffectAiConfiguration): Layer.Layer<
         consolidate: prompt =>
           model
             .generateObject({
-              objectName: 'threadnote_consolidation',
+              objectName,
               prompt,
               schema: ConsolidationDraft,
             })
@@ -132,25 +136,46 @@ export function effectAiLanguageModelLayer(
   }).pipe(Layer.provide(clientLayer));
 }
 
-export function runEffectAiConsolidation(prompt: string, config: EffectAiConfiguration) {
+export function runEffectAiConsolidation(prompt: string, config: EffectAiConfiguration, objectName?: string) {
   return Effect.scoped(
-    Layer.build(aiConsolidatorLayer(config)).pipe(
+    Layer.build(aiConsolidatorLayer(config, objectName)).pipe(
       Effect.flatMap(context => consolidateWithAiEffect(prompt).pipe(Effect.provide(context))),
     ),
   );
 }
 
-export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNative')(function* (
+export function runEffectAiTopicDraft(
+  prompt: string,
+  config: EffectAiConfiguration,
+  schema: ReturnType<typeof topicDraftModelSchema>,
+) {
+  return Effect.scoped(
+    Layer.build(effectAiLanguageModelLayer(config, 4000)).pipe(
+      Effect.flatMap(context =>
+        Effect.gen(function* () {
+          const model = yield* LanguageModel.LanguageModel;
+          const response = yield* model.generateObject({objectName: 'threadnote_topic_maintenance', prompt, schema});
+          const {decision, ...identity} = response.value;
+          return JSON.stringify({...identity, ...decision});
+        }).pipe(Effect.provide(context)),
+      ),
+    ),
+  );
+}
+
+const runNativeAiObject = Effect.fn('AiConsolidator.generateNativeObject')(function* (
   config: Pick<RuntimeConfig, 'agentContextHome'>,
   prompt: string,
-  modelId?: string,
+  modelId: string | undefined,
+  system: string,
+  jsonSchema: Readonly<Record<string, unknown>>,
 ) {
   const request = {
-    jsonSchema: Schema.toJsonSchemaDocument(ConsolidationDraft).schema,
+    jsonSchema,
     maxTokens: 4000,
     prompt,
     seed: 0,
-    system: 'Return only the requested Threadnote consolidation object.',
+    system,
   };
   const output = yield* modelId === undefined
     ? generateWithSelectedLocalModel(config.agentContextHome, request)
@@ -169,6 +194,22 @@ export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNat
         const runtime = yield* LocalModelRuntime;
         return yield* runtime.generate({...request, manifest, modelPath: status.path});
       });
+  return output;
+});
+
+export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNative')(function* (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  prompt: string,
+  modelId?: string,
+  system = 'Return only the requested Threadnote consolidation object.',
+) {
+  const output = yield* runNativeAiObject(
+    config,
+    prompt,
+    modelId,
+    system,
+    Schema.toJsonSchemaDocument(ConsolidationDraft).schema,
+  );
   if (output === undefined) return undefined;
   const draft = yield* Schema.decodeUnknownEffect(ConsolidationDraft)(output).pipe(
     Effect.mapError(cause =>
@@ -186,4 +227,31 @@ export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNat
     });
   }
   return value;
+});
+
+export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTopicDraft')(function* (
+  config: Pick<RuntimeConfig, 'agentContextHome'>,
+  prompt: string,
+  modelId: string,
+  schema: ReturnType<typeof topicDraftModelSchema>,
+) {
+  const output = yield* runNativeAiObject(
+    config,
+    prompt,
+    modelId,
+    'Return one complete topic maintenance JSON object matching the supplied schema.',
+    topicDraftNativeJsonSchema(schema),
+  );
+  if (output === undefined)
+    return yield* AiConsolidationFailed.make({
+      cause: modelId,
+      message: 'No local topic generation model is installed.',
+    });
+  const parsed = yield* Schema.decodeUnknownEffect(schema, {onExcessProperty: 'error'})(output).pipe(
+    Effect.mapError(cause =>
+      AiConsolidationFailed.make({cause, message: 'Native AI returned a malformed topic maintenance object.'}),
+    ),
+  );
+  const {decision, ...identity} = parsed;
+  return JSON.stringify({...identity, ...decision});
 });

@@ -160,6 +160,7 @@ bun_test(
         "//packages/memory:src/remote/receipts.ts",
         "//packages/memory:src/remote/relations.ts",
         "//packages/memory:src/remote/revisions.ts",
+        "//packages/memory:src/topic-maintenance-draft.ts",
         "//packages/memory:src/topic-maintenance.ts",
         "//packages/memory:src/types.ts",
         "//packages/memory:test/helpers/remote-memory-document.ts",

@@ -225,10 +225,16 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           options?.allowCapture !== false &&
           status === 'exact' &&
           now.supportsCitation &&
-          citation.fileContentHash.value === now.source.fileContentHash
+          citation.fileContentHash.value === now.source.fileContentHash &&
+          citation.extractorSet === now.source.extractorSet
         )
           current = citation;
-        else if (sameLocator && prior?.currentFileBytesHash === now.fileBytesHash) current = prior.current;
+        else if (
+          sameLocator &&
+          prior?.currentFileBytesHash === now.fileBytesHash &&
+          prior.current?.extractorSet === now.source.extractorSet
+        )
+          current = prior.current;
         else if (options?.allowCapture !== false && status !== 'unknown' && status !== 'deleted') {
           const ref =
             citation.target.kind === 'symbol' ? receipt.observedNodeId : (receipt.observedPath ?? citation.path);
@@ -245,6 +251,7 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           current.repositoryId !== citation.repositoryId ||
           current.target.kind !== citation.target.kind ||
           current.path !== (receipt.observedPath ?? citation.path) ||
+          current.extractorSet !== now.source.extractorSet ||
           current.fileContentHash.value !== now.source.fileContentHash
         )
           return base;

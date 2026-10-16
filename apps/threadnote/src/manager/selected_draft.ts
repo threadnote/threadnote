@@ -1,0 +1,182 @@
+import {Effect, Schema} from 'effect';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {SystemInfo} from '@threadnote/platform/system';
+import {errorMessage} from '@threadnote/platform/errors';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
+import {findExecutable} from '../utils.js';
+import type {ConsolidationAgent} from '../types.js';
+import type {ConsolidationModel} from './consolidation_models.js';
+import {ConsolidationModelsError} from './consolidation_models.js';
+import {ManagerOperationError} from './operation_error.js';
+import {runConsolidationAgentCommand} from './consolidation_agent.js';
+import {
+  ensureEffectAiReady,
+  resolveEffectAiConfiguration,
+  runEffectAiConsolidation,
+  runEffectAiTopicDraft,
+  runNativeAiConsolidation,
+  runNativeAiTopicDraft,
+} from '../effect/ai/consolidator.js';
+import {topicDraftModelSchema} from './topic_draft_schema.js';
+
+export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v3';
+export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
+export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
+export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;
+
+export interface SelectedDraftResult {
+  readonly text: string;
+  readonly backendIdentity: string;
+  readonly modelIdentity: string;
+  readonly modelVersion?: string;
+  readonly usage: {readonly status: 'unavailable'};
+  readonly settings: {readonly maxOutputTokens: 4000; readonly seed?: 0};
+}
+
+export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError>()('SelectedDraftError', {
+  message: Schema.String,
+}) {}
+const fail = (message: string) => SelectedDraftError.make({message});
+function remoteModelVersion(apiUrl: string | undefined): string {
+  let host = 'default';
+  if (apiUrl) {
+    try {
+      host = new URL(apiUrl).host.slice(0, 64) || 'custom';
+    } catch {
+      host = 'custom';
+    }
+  }
+  return `${host}:${sha256HexSync(apiUrl ?? 'effect-ai-default')}`;
+}
+
+export const selectedTopicDraftIdentity = Effect.fn('topicMaintenance.selectedDraftIdentity')(function* (
+  config: RuntimeConfig,
+  agent: ConsolidationAgent,
+  model: ConsolidationModel,
+) {
+  if (agent === 'local-ai') {
+    const manifest = yield* (yield* LocalModelCatalog).get(model.id);
+    if (manifest.role !== 'generation') return yield* fail('Select an installed generation model.');
+    return {
+      agent,
+      model: model.id,
+      modelVersion: `${manifest.revision}:${manifest.sha256}`,
+      backendIdentity: 'local-ai',
+      settings: 'seed=0;maxTokens=4000',
+    };
+  }
+  if (agent === 'effect-ai') {
+    const resolved = yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment());
+    if (!resolved || resolved.configuration.model !== model.id)
+      return yield* fail('Configure and select the exact Effect AI model before drafting.');
+    return {
+      agent,
+      model: model.id,
+      modelVersion: remoteModelVersion(resolved.configuration.apiUrl),
+      backendIdentity: resolved.configuration.apiUrl ?? 'effect-ai',
+      settings: 'maxTokens=4000',
+    };
+  }
+  return yield* fail('Topic maintenance requires a text-only local-ai or explicitly configured effect-ai model.');
+});
+
+/** One provider-policy switch serves consolidation and the text-only topic pilot. */
+export function runSelectedDraft(
+  config: RuntimeConfig,
+  agent: ConsolidationAgent,
+  model: ConsolidationModel | undefined,
+  prompt: string,
+  purpose: 'consolidation' | 'topic-maintenance',
+  topicBasis?: TopicMaintenanceDraftBasisV1,
+) {
+  const topic = purpose === 'topic-maintenance';
+  if (topic && new TextEncoder().encode(prompt).byteLength > TOPIC_DRAFT_MAX_PROMPT_BYTES)
+    return Effect.fail(fail('Topic maintenance prompt exceeds the 80 KiB input boundary.'));
+  if (topic && agent !== 'local-ai' && agent !== 'effect-ai')
+    return Effect.fail(
+      fail('Topic maintenance requires a text-only local-ai or explicitly configured effect-ai model.'),
+    );
+  if (topic && !topicBasis) return Effect.fail(fail('Topic maintenance requires a validated draft basis.'));
+  const topicSchema = topicBasis ? topicDraftModelSchema(topicBasis) : undefined;
+  const run = Effect.gen(function* () {
+    if (agent === 'local-ai') {
+      if (!model)
+        return yield* ConsolidationModelsError.make({
+          message: 'Choose a model before generating a consolidation draft.',
+        });
+      const manifest = topic ? yield* (yield* LocalModelCatalog).get(model.id) : undefined;
+      const native = yield* topicSchema
+        ? runNativeAiTopicDraft(config, prompt, model.id, topicSchema)
+        : runNativeAiConsolidation(config, prompt, model.id);
+      if (native === undefined)
+        return yield* ManagerOperationError.make({
+          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
+        });
+      return {
+        text: native,
+        backendIdentity: 'local-ai',
+        modelIdentity: model.id,
+        ...(manifest ? {modelVersion: `${manifest.revision}:${manifest.sha256}`} : {}),
+        usage: {status: 'unavailable' as const},
+        settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+      };
+    }
+    if (agent === 'effect-ai') {
+      const resolved = yield* resolveEffectAiConfiguration(config, (yield* SystemInfo).environment());
+      if (!resolved)
+        return yield* ManagerOperationError.make({
+          message: 'Configure an explicit remote Effect AI provider and reload model choices.',
+        });
+      if (!model || model.id !== resolved.configuration.model)
+        return yield* ConsolidationModelsError.make({
+          message: 'This model is no longer available. Reload model choices and select a model again.',
+        });
+      yield* ensureEffectAiReady(config, resolved);
+      const text = yield* topicSchema
+        ? runEffectAiTopicDraft(prompt, resolved.configuration, topicSchema)
+        : runEffectAiConsolidation(prompt, resolved.configuration);
+      return {
+        text,
+        backendIdentity: resolved.configuration.apiUrl ?? 'effect-ai',
+        modelIdentity: resolved.configuration.model,
+        modelVersion: remoteModelVersion(resolved.configuration.apiUrl),
+        usage: {status: 'unavailable' as const},
+        settings: {maxOutputTokens: 4000 as const},
+      };
+    }
+    if (agent !== 'codex' && agent !== 'claude')
+      return yield* ManagerOperationError.make({
+        message: `${agent} does not expose a supported non-interactive consolidation mode.`,
+      });
+    const executable = yield* findExecutable([agent]);
+    if (!executable) return yield* ManagerOperationError.make({message: `${agent} executable was not found.`});
+    const text = yield* runConsolidationAgentCommand(agent, executable, prompt, model).pipe(
+      Effect.catch(error => ManagerOperationError.make({message: errorMessage(error)})),
+    );
+    return {
+      text,
+      backendIdentity: agent,
+      modelIdentity: model?.id ?? agent,
+      usage: {status: 'unavailable' as const},
+      settings: {maxOutputTokens: 4000 as const},
+    };
+  });
+  return (
+    topic
+      ? run.pipe(
+          Effect.timeoutOrElse({
+            duration: TOPIC_DRAFT_MAX_DURATION_MS,
+            orElse: () => Effect.fail(fail('Topic maintenance generation exceeded the 120-second deadline.')),
+          }),
+        )
+      : run
+  ).pipe(
+    Effect.tap(result =>
+      topic && new TextEncoder().encode(result.text).byteLength > TOPIC_DRAFT_MAX_OUTPUT_BYTES
+        ? Effect.fail(fail('Topic maintenance draft exceeds the 32 KiB output boundary.'))
+        : Effect.void,
+    ),
+  );
+}

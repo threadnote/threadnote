@@ -421,24 +421,29 @@ export function buildTopicMaintenanceCasePacket<E, R>(
   assertCaseCurrent: Effect.Effect<void, E, R>,
 ) {
   const root = item.sourceSnapshot!.cwd;
-  const assertCurrent = Effect.gen(function* () {
-    yield* assertCaseCurrent;
-    const current = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
-    if (
-      !current ||
-      !enrolledTopicRecord(current) ||
-      maintenanceContentHash(current.content) !== item.subjectContentHashes?.[0]?.hash ||
-      (yield* readContextMaintenanceSourceEpoch(config, root)) !== item.sourceSnapshot!.generation
-    )
-      return yield* topicFail('The enrolled topic or source changed. Refresh maintenance.');
-    const evidence = yield* observeTopicMaintenanceEvidence(config, current, root, observation, {allowCapture: false});
-    if (evidence.revision !== item.evidenceRevision)
-      return yield* topicFail('The declared source evidence changed. Refresh maintenance.');
+  return Effect.gen(function* () {
+    const openingEpoch = yield* readContextMaintenanceSourceEpoch(config, root);
+    const assertCurrent = Effect.gen(function* () {
+      yield* assertCaseCurrent;
+      const current = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
+      if (
+        !current ||
+        !enrolledTopicRecord(current) ||
+        maintenanceContentHash(current.content) !== item.subjectContentHashes?.[0]?.hash ||
+        (yield* readContextMaintenanceSourceEpoch(config, root)) !== openingEpoch
+      )
+        return yield* topicFail('The enrolled topic or source changed. Refresh maintenance.');
+      const evidence = yield* observeTopicMaintenanceEvidence(config, current, root, observation, {
+        allowCapture: false,
+      });
+      if (evidence.revision !== item.evidenceRevision)
+        return yield* topicFail('The declared source evidence changed. Refresh maintenance.');
+    });
+    return yield* withMaintenancePacketRevision(
+      assertCurrent,
+      buildTopicMaintenanceEvidencePacket(config, record, root, observation),
+    );
   });
-  return withMaintenancePacketRevision(
-    assertCurrent,
-    buildTopicMaintenanceEvidencePacket(config, record, root, observation),
-  );
 }
 
 export function readTopicMaintenanceCasePacket<E, R>(
