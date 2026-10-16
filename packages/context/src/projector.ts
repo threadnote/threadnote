@@ -10,16 +10,15 @@ import {
   CONTEXT_BRIEF_FOLLOW_UP_BUDGET_TOKENS,
   CONTEXT_BRIEF_FOLLOW_UP_EDGE_LIMIT,
   CONTEXT_BRIEF_FOLLOW_UP_NODE_LIMIT,
-  CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION,
   CONTEXT_BRIEF_LEGACY_VERSION,
   CONTEXT_BRIEF_MAXIMUM_ESTIMATED_TOKENS,
   CONTEXT_BRIEF_MINIMUM_ESTIMATED_TOKENS,
   CONTEXT_BRIEF_MAXIMUM_PUBLIC_CITATION_RECEIPTS,
   CONTEXT_BRIEF_MAXIMUM_PUBLIC_CODE_RELATIONS,
   CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION,
-  CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION,
   CONTEXT_BRIEF_PROCEDURE_VERSION,
-  CONTEXT_BRIEF_PROJECTOR_VERSION,
+  CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION,
+  CONTEXT_BRIEF_TOPIC_VERSION,
   CONTEXT_BRIEF_VERSION,
   type ContextBriefGraphCardV1,
   type ContextBriefGraphContractV1,
@@ -34,6 +33,13 @@ import {
 import {isMemoryId, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {legacyEvidenceState, renderContextBriefAgentViewText, renderContextBriefText} from './agent_view_text.js';
 import {parseVerifiedProcedureEvidenceList} from './procedure/selection.js';
+import {
+  agentViewVersionError,
+  contextBriefProjectorVersion,
+  inferredContextBriefVersion,
+  projectedContextBriefVersion,
+  topicProjectionError,
+} from './topic_projection.js';
 import {
   contextBriefResumeFocusUri,
   contextBriefRelationshipMemoryByUri,
@@ -351,7 +357,9 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
   if (
     !Predicate.isObject(value) ||
     value.type !== 'context-brief-agent-view' ||
-    (value.version !== CONTEXT_BRIEF_AGENT_VIEW_VERSION && value.version !== CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION)
+    (value.version !== CONTEXT_BRIEF_AGENT_VIEW_VERSION &&
+      value.version !== CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION &&
+      value.version !== CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION)
   ) {
     throw invalid('text channel is not a supported Context Brief agent view');
   }
@@ -375,13 +383,7 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
   ]);
   const evidenceState = legacyEvidenceState(value);
   const mode = value.mode === undefined ? 'brief' : value.mode;
-  const briefVersion =
-    value.briefVersion ??
-    (value.version === CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION
-      ? CONTEXT_BRIEF_PROCEDURE_VERSION
-      : Predicate.isObject(value.coverage) && value.coverage.codeAnchors !== undefined
-        ? CONTEXT_BRIEF_VERSION
-        : CONTEXT_BRIEF_LEGACY_VERSION);
+  const briefVersion = value.briefVersion ?? inferredContextBriefVersion(value);
   const unsupported = Object.keys(value).filter(key => !allowedRootKeys.has(key));
   if (unsupported.length > 0)
     throw invalid(`agent view has unsupported field ${JSON.stringify(unsupported.sort()[0])}`);
@@ -395,7 +397,8 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
   if (
     (briefVersion !== CONTEXT_BRIEF_LEGACY_VERSION &&
       briefVersion !== CONTEXT_BRIEF_VERSION &&
-      briefVersion !== CONTEXT_BRIEF_PROCEDURE_VERSION) ||
+      briefVersion !== CONTEXT_BRIEF_PROCEDURE_VERSION &&
+      briefVersion !== CONTEXT_BRIEF_TOPIC_VERSION) ||
     typeof mode !== 'string' ||
     !['brief', 'locate', 'explain', 'trace', 'impact', 'resume'].includes(mode) ||
     !['sufficient', 'partial', 'degraded', 'no-match'].includes(evidenceState) ||
@@ -451,14 +454,11 @@ export function parseContextBriefJsonText(text: string): ContextBriefAgentViewV1
     if (!Array.isArray(memories)) continue;
     for (const [index, memory] of memories.entries()) validateAgentViewMemory(memory, `${field}[${index}]`);
   }
+  const topicError = topicProjectionError(value, value.version === CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION);
+  if (topicError !== undefined) throw invalid(topicError);
   if (value.coverage !== undefined) validateAgentViewCoverage(value.coverage);
-  if (value.version === CONTEXT_BRIEF_AGENT_VIEW_VERSION) {
-    if (value.verifiedProcedures !== undefined || briefVersion === CONTEXT_BRIEF_PROCEDURE_VERSION) {
-      throw invalid('legacy agent views cannot carry verified procedures');
-    }
-  } else if (briefVersion !== CONTEXT_BRIEF_PROCEDURE_VERSION || value.verifiedProcedures === undefined) {
-    throw invalid('procedure agent views require procedure-version evidence');
-  }
+  const versionError = agentViewVersionError(value, briefVersion);
+  if (versionError !== undefined) throw invalid(versionError);
   if (value.verifiedProcedures !== undefined) {
     try {
       parseVerifiedProcedureEvidenceList(value.verifiedProcedures);
@@ -805,6 +805,7 @@ function validateAgentViewMemory(value: unknown, label: string): void {
       'memoryTrust',
       'preciseStatus',
       'selectionBasis',
+      'topicMaintenance',
       'uri',
     ],
     label,
@@ -952,7 +953,8 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
     object.type !== 'context-brief' ||
     (object.version !== CONTEXT_BRIEF_LEGACY_VERSION &&
       object.version !== CONTEXT_BRIEF_VERSION &&
-      object.version !== CONTEXT_BRIEF_PROCEDURE_VERSION)
+      object.version !== CONTEXT_BRIEF_PROCEDURE_VERSION &&
+      object.version !== CONTEXT_BRIEF_TOPIC_VERSION)
   ) {
     throw invalid('projection type or version is unsupported');
   }
@@ -972,13 +974,15 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
       }
     }
   }
+  const topicError = topicProjectionError(object, object.version === CONTEXT_BRIEF_TOPIC_VERSION);
+  if (topicError !== undefined) throw invalid(topicError);
   const structuredFollowUps = object.recommendedFollowUps;
   for (const [index, followUp] of (Array.isArray(structuredFollowUps) ? structuredFollowUps : []).entries()) {
     validateContextBriefFollowUp(followUp, `recommendedFollowUps[${index}]`);
   }
   if (object.version === CONTEXT_BRIEF_PROCEDURE_VERSION) {
     if (object.verifiedProcedures === undefined) throw invalid('procedure projection requires verifiedProcedures');
-  } else if (object.verifiedProcedures !== undefined) {
+  } else if (object.version !== CONTEXT_BRIEF_TOPIC_VERSION && object.verifiedProcedures !== undefined) {
     throw invalid('legacy projections cannot carry verifiedProcedures');
   }
   if (object.verifiedProcedures !== undefined) {
@@ -1006,12 +1010,7 @@ export function parseContextBriefV1(value: unknown): ContextBriefV1 {
   }
   const output = object.output;
   if (
-    output.projectorVersion !==
-      (object.version === CONTEXT_BRIEF_LEGACY_VERSION
-        ? CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION
-        : object.version === CONTEXT_BRIEF_VERSION
-          ? CONTEXT_BRIEF_PROJECTOR_VERSION
-          : CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION) ||
+    output.projectorVersion !== contextBriefProjectorVersion(object.version) ||
     !nonNegativeInteger(output.omittedItems) ||
     !nonNegativeInteger(output.returnedItems) ||
     typeof output.truncated !== 'boolean'
@@ -1107,6 +1106,11 @@ function renderProjection(
   const omittedItems = Object.values(omissions).reduce((total, value) => total + value, 0);
   const taskSummary = jsonStringPrefix(logical.task, 96);
   const task = {summary: taskSummary, truncated: taskSummary !== logical.task};
+  const projectedVersion = projectedContextBriefVersion(logical.version, {
+    activeHandoffs,
+    durableDecisions,
+    stalenessAndConflicts,
+  });
   return {
     activeHandoffs,
     coverage: {
@@ -1147,12 +1151,7 @@ function renderProjection(
     mode: logical.mode,
     output: {
       omittedItems,
-      projectorVersion:
-        logical.version === CONTEXT_BRIEF_LEGACY_VERSION
-          ? CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION
-          : logical.version === CONTEXT_BRIEF_VERSION
-            ? CONTEXT_BRIEF_PROJECTOR_VERSION
-            : CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION,
+      projectorVersion: contextBriefProjectorVersion(projectedVersion),
       returnedItems: selected.length - selectedFollowUps.length + recommendedFollowUps.length,
       truncated: omittedItems > 0,
     },
@@ -1162,7 +1161,7 @@ function renderProjection(
     task,
     trust: logical.trust,
     type: 'context-brief',
-    version: logical.version,
+    version: projectedVersion,
     ...(logicalVerifiedProcedures.length === 0 ? {} : {verifiedProcedures}),
   };
 }
@@ -1223,12 +1222,7 @@ function renderMinimumProjection(
     mode: logical.mode,
     output: {
       omittedItems,
-      projectorVersion:
-        logical.version === CONTEXT_BRIEF_LEGACY_VERSION
-          ? CONTEXT_BRIEF_LEGACY_PROJECTOR_VERSION
-          : logical.version === CONTEXT_BRIEF_VERSION
-            ? CONTEXT_BRIEF_PROJECTOR_VERSION
-            : CONTEXT_BRIEF_PROCEDURE_PROJECTOR_VERSION,
+      projectorVersion: contextBriefProjectorVersion(logical.version),
       returnedItems: recommendedFollowUps.length,
       truncated: true,
     },

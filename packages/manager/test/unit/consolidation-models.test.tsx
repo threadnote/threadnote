@@ -22,8 +22,8 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-function Harness({agent}: {readonly agent: string}) {
-  const selection = useConsolidationModels(agent, true);
+function Harness({agent, storageKey}: {readonly agent: string; readonly storageKey?: string}) {
+  const selection = useConsolidationModels(agent, true, storageKey);
   return (
     <>
       <ConsolidationModelPicker selection={selection} disabled={false} />
@@ -52,7 +52,8 @@ function setup() {
   const container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
-  const render = (agent: string) => act(async () => root?.render(<Harness agent={agent} />));
+  const render = (agent: string, storageKey?: string) =>
+    act(async () => root?.render(<Harness agent={agent} storageKey={storageKey} />));
   const respond = (index: number, models: readonly ConsolidationModelOption[]) =>
     act(async () => {
       requests[index].resolve(new Response(JSON.stringify({models}), {headers: {'content-type': 'application/json'}}));
@@ -107,4 +108,14 @@ it('restores only listed choices and disables generation until a refreshed catal
   await ui.respond(2, [option('new-recommended')]);
   expect(ui.select().value).toBe('new-recommended');
   expect(ui.generate().disabled).toBe(false);
+});
+
+it('keeps topic model selection separate from consolidation selection', async () => {
+  localStorage.setItem('threadnote.manager.consolidationModel.local-ai', 'consolidation-choice');
+  const ui = setup();
+  await ui.render('local-ai', 'topicModel');
+  await ui.respond(0, [option('consolidation-choice'), option('topic-choice', false)]);
+  await ui.choose('topic-choice');
+  expect(localStorage.getItem('threadnote.manager.topicModel.local-ai')).toBe('topic-choice');
+  expect(localStorage.getItem('threadnote.manager.consolidationModel.local-ai')).toBe('consolidation-choice');
 });

@@ -2,7 +2,7 @@ import React, {useEffect, useState} from 'react';
 import {api, errorMessage} from './ui/support.js';
 import type {ConsolidationModelOption, ConsolidationModelsResponse} from './ui/contracts.js';
 
-export function useConsolidationModels(agent: string, enabled: boolean) {
+export function useConsolidationModels(agent: string, enabled: boolean, storageKey = 'consolidationModel') {
   const [attempt, setAttempt] = useState(0);
   const [catalog, setCatalog] = useState<{
     readonly agent: string;
@@ -26,7 +26,7 @@ export function useConsolidationModels(agent: string, enabled: boolean) {
       result => {
         if (controller.signal.aborted) return;
         const models = result.models;
-        const stored = readModel(agent);
+        const stored = readModel(agent, storageKey);
         setCatalog({agent, attempt, models});
         setSelected(previous => {
           const preferred = previous?.agent === agent ? previous.id : stored;
@@ -39,7 +39,7 @@ export function useConsolidationModels(agent: string, enabled: boolean) {
       },
     );
     return () => controller.abort();
-  }, [agent, attempt, enabled]);
+  }, [agent, attempt, enabled, storageKey]);
 
   return {
     models,
@@ -51,7 +51,7 @@ export function useConsolidationModels(agent: string, enabled: boolean) {
       if (!models.some(item => item.id === id)) return;
       setSelected({agent, id});
       try {
-        localStorage.setItem(modelKey(agent), id);
+        localStorage.setItem(modelKey(agent, storageKey), id);
       } catch {
         /* Model choice remains available when browser storage is disabled. */
       }
@@ -59,13 +59,13 @@ export function useConsolidationModels(agent: string, enabled: boolean) {
   };
 }
 
-function modelKey(agent: string): string {
-  return `threadnote.manager.consolidationModel.${agent}`;
+function modelKey(agent: string, storageKey: string): string {
+  return `threadnote.manager.${storageKey}.${agent}`;
 }
 
-function readModel(agent: string): string | undefined {
+function readModel(agent: string, storageKey: string): string | undefined {
   try {
-    return localStorage.getItem(modelKey(agent)) ?? undefined;
+    return localStorage.getItem(modelKey(agent, storageKey)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -74,13 +74,14 @@ function readModel(agent: string): string | undefined {
 export function ConsolidationModelPicker(props: {
   readonly selection: ReturnType<typeof useConsolidationModels>;
   readonly disabled: boolean;
+  readonly label?: string;
 }): React.ReactElement {
   const {selection} = props;
   return (
     <label>
-      Model
+      {props.label ?? 'Model'}
       <select
-        aria-label="Consolidation model"
+        aria-label={props.label ?? 'Consolidation model'}
         aria-busy={selection.loading}
         disabled={props.disabled || selection.loading || !selection.models.length}
         value={selection.model ?? ''}

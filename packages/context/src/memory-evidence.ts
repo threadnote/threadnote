@@ -3,6 +3,12 @@ export const MEMORY_RECALL_EMPTY_GAP = 'memory-recall-no-active-durable-or-hando
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {isMemoryId} from '@threadnote/memory/identity-alias';
+import {consolidationSections} from '@threadnote/memory/consolidation';
+import {
+  hasTopicMaintenanceEnrollment,
+  topicMaintenanceAcceptedCitation,
+  validateTopicMaintenanceManifest,
+} from '@threadnote/memory/topic-maintenance';
 
 import type {
   ContextBriefFreshness,
@@ -12,6 +18,7 @@ import type {
   ContextBriefMemoryRetrievalV1,
   ContextBriefPreciseEvidenceStatus,
   ContextBriefSnapshotV1,
+  ContextBriefTopicMaintenanceV1,
 } from './types.js';
 
 const MEMORY_EXCERPT_BYTES = 240;
@@ -373,29 +380,33 @@ export function contextBriefMemoryCandidate(
   rank: number,
   codeLinkMatches: ContextBriefMemoryCandidateV1['codeLinkMatches'],
   memoryIdentityResolvable = true,
+  topicAttention: Pick<ContextBriefTopicMaintenanceV1, 'attention' | 'reviewId'> = {attention: 'none'},
 ): ContextBriefMemoryCandidateV1 {
   if (record.metadata.kind !== 'durable' && record.metadata.kind !== 'handoff') {
     throw new Error('Context Brief memory candidate must be durable or handoff.');
   }
   const sourceCommit = boundedSourceCommit(record.metadata.sourceCommit);
-  const citationIds = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
+  const topic = contextBriefTopicProjection(record, topicAttention);
+  const codeCitations = topic?.citations ?? record.metadata.codeCitations ?? [];
+  const citationIds = new Set(codeCitations.map(citation => citation.id));
   const currentCodeLinkMatches = codeLinkMatches?.filter(match => citationIds.has(match.citationId));
-  const actionCard = record.metadata.kind === 'durable' ? parseMemoryActionCard(record.body) : undefined;
+  const actionCard =
+    record.metadata.kind === 'durable' && topic === undefined ? parseMemoryActionCard(record.body) : undefined;
   const continuationCard =
     record.metadata.kind === 'handoff' ? parseContextBriefContinuationCard(record.body) : undefined;
   return {
     ...(actionCard === undefined ? {} : {actionCard}),
     ...(continuationCard === undefined ? {} : {continuationCard}),
     ...(record.metadata.authority === undefined ? {} : {authority: record.metadata.authority}),
-    citationErrorCount: record.metadata.citationErrors?.length ?? 0,
-    codeCitations: record.metadata.codeCitations ?? [],
+    citationErrorCount: (record.metadata.citationErrors?.length ?? 0) + (topic?.invalid ? 1 : 0),
+    codeCitations,
     ...(currentCodeLinkMatches === undefined || currentCodeLinkMatches.length === 0
       ? {}
       : {codeLinkMatches: currentCodeLinkMatches}),
     excerpt:
       record.metadata.kind === 'handoff'
         ? handoffEvidenceExcerpt(record.body, continuationCard)
-        : memoryEvidenceExcerpt(record.body),
+        : (topic?.excerpt ?? memoryEvidenceExcerpt(record.body)),
     kind: record.metadata.kind,
     ...(memoryIdentityResolvable && record.metadata.memoryId !== undefined && isMemoryId(record.metadata.memoryId)
       ? {memoryId: record.metadata.memoryId}
@@ -404,9 +415,57 @@ export function contextBriefMemoryCandidate(
     rank,
     ...(sourceCommit === undefined ? {} : {sourceCommit}),
     ...(record.metadata.topic === undefined ? {} : {topic: record.metadata.topic}),
+    ...(topic?.status === undefined ? {} : {topicMaintenance: topic.status}),
+    ...(topic?.invalid ? {topicMaintenanceInvalid: true as const} : {}),
     ...(record.metadata.trust === undefined ? {} : {trust: record.metadata.trust}),
     uri: record.uri,
   };
+}
+
+/** Compare accepted pins only; historical origin citations remain in canonical storage. */
+export function contextBriefTopicProjection(
+  record: MemoryRecord,
+  attention: Pick<ContextBriefTopicMaintenanceV1, 'attention' | 'reviewId'> = {attention: 'none'},
+):
+  | {
+      readonly citations: ContextBriefMemoryCandidateV1['codeCitations'];
+      readonly excerpt?: string;
+      readonly invalid?: true;
+      readonly status?: ContextBriefTopicMaintenanceV1;
+    }
+  | undefined {
+  if (!hasTopicMaintenanceEnrollment(record)) return undefined;
+  try {
+    const manifest = validateTopicMaintenanceManifest(record.metadata.topicMaintenance, record);
+    const first = manifest.paragraphs[0];
+    const sections = consolidationSections(record.body);
+    const ids = [
+      ...new Set([
+        ...manifest.paragraphs
+          .filter(paragraph => paragraph.role !== 'historical')
+          .flatMap(paragraph => paragraph.citationIds),
+        ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+      ]),
+    ].sort();
+    const accepted = ids.map(id => topicMaintenanceAcceptedCitation(record, id));
+    return {
+      citations: [...new Map(accepted.map(citation => [citation.id, citation])).values()].sort((a, b) =>
+        a.id.localeCompare(b.id),
+      ),
+      excerpt: memoryEvidenceExcerpt(sections[0]),
+      status: {
+        coverage: 'declared-only',
+        excerptOrdinal: first.ordinal + 1,
+        excerptRole: first.role,
+        historicalParagraphs: manifest.paragraphs.filter(paragraph => paragraph.role === 'historical').length,
+        normativeParagraphs: manifest.paragraphs.filter(paragraph => paragraph.role === 'normative').length,
+        unresolvedParagraphs: manifest.paragraphs.filter(paragraph => paragraph.support === 'unresolved').length,
+        ...attention,
+      },
+    };
+  } catch {
+    return {citations: [], invalid: true};
+  }
 }
 
 /** Rank explicit continuation identity against the requested resume task without inspecting arbitrary body prose. */

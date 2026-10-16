@@ -6,6 +6,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {EffectMcpServerAdapter} from '@threadnote/threadnote/effect/ai/mcp';
+import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -33,10 +34,11 @@ import {
 } from '../../src/memory/context/maintenance_draft.js';
 import {
   applyTopicMaintenanceReview,
-  decideTopicMaintenanceReview,
   prepareTopicMaintenanceReview,
 } from '../../src/memory/context/maintenance_review.js';
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
+import {projectManagerTopicReview} from '../../src/manager/topic_review.js';
+import {handleManagerTopicReview} from '../../src/manager/topic_review.js';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
@@ -103,11 +105,14 @@ describe('reviewed personal topic acceptance', () => {
                 timestamp: '2026-10-16T00:00:00.000Z',
                 codeCitations: [citation],
               },
-              'Request timeout is 30 seconds.',
+              'Request timeout is 30 seconds.\n\nA request times out after 30 seconds.',
             ),
           )!;
           const enrolled = proposeTopicMaintenanceEnrollment(base, {
-            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [citation.id]}],
+            paragraphs: [
+              {role: 'descriptive', support: 'direct', citationIds: [citation.id]},
+              {role: 'descriptive', support: 'direct', citationIds: [citation.id]},
+            ],
             additionalDependencies: [],
           });
           const memory = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/timeout.md');
@@ -147,11 +152,18 @@ describe('reviewed personal topic acceptance', () => {
                   supportHandles: [`current:${citation.id}`],
                   rationale: 'Current source declares 60 seconds.',
                 },
+                {
+                  ordinal: 1,
+                  beforeHash: basis.paragraphs[1].hash,
+                  text: 'A request times out after 60 seconds.',
+                  supportHandles: [`current:${citation.id}`],
+                  rationale: 'Current source declares 60 seconds.',
+                },
               ],
               reviewedHandles: [`current:${citation.id}`],
               rationale: 'Update the descriptive timeout.',
               unresolvedQuestions: [],
-              removedClaims: ['Request timeout is 30 seconds.'],
+              removedClaims: ['Request timeout is 30 seconds.', 'A request times out after 30 seconds.'],
             }),
           );
           const review = privateReview(
@@ -163,11 +175,11 @@ describe('reviewed personal topic acceptance', () => {
               proposal,
               reviewEvidence: reviewEvidenceFromPacket(packet),
               generation: {
-                origin: 'manual',
-                agent: 'manual',
-                model: 'none',
-                promptVersion: 'manual-topic-v1',
-                attempts: 0,
+                origin: 'model',
+                agent: 'local-ai',
+                model: 'fixture-model',
+                promptVersion: 'fixture-topic-v1',
+                attempts: 1,
                 usage: {status: 'unavailable'},
               },
             },
@@ -206,10 +218,13 @@ describe('reviewed personal topic acceptance', () => {
             editedDraftFile,
             JSON.stringify({
               ...proposal.draft,
+              operations: proposal.draft.operations.map((operation, index) =>
+                index === 0 ? {...operation, text: 'The request timeout is 60 seconds.'} : operation,
+              ),
               rationale: 'Reviewed the same evidence and approved this exact replacement.',
             }),
           );
-          const previewReview = JSON.parse(
+          let previewReview = JSON.parse(
             (yield* cli([
               '--action',
               'draft-preview',
@@ -224,12 +239,34 @@ describe('reviewed personal topic acceptance', () => {
               '--json',
             ])).stdout,
           ) as CandidateReview;
+          const firstProjected = projectManagerTopicReview(previewReview)!;
+          expect(firstProjected.draft.operations[0]?.text).toBe('The request timeout is 60 seconds.');
+          const secondEditedDraft = {
+            ...firstProjected.draft,
+            operations: firstProjected.draft.operations.map((operation, index) =>
+              index === 1 ? {...operation, text: 'Requests time out after 60 seconds.'} : operation,
+            ),
+          };
+          previewReview = yield* prepareTopicMaintenanceReview(config, {
+            reviewId: review.reviewId,
+            revision: previewReview.revision,
+            sourceCwd: repository,
+            editedDraftJson: JSON.stringify(secondEditedDraft),
+          });
+          const secondProjected = projectManagerTopicReview(previewReview)!;
+          expect(secondProjected.draft.operations.map(operation => operation.text)).toEqual([
+            'The request timeout is 60 seconds.',
+            'Requests time out after 60 seconds.',
+          ]);
+          expect(secondProjected.proposal.body).toBe(
+            'The request timeout is 60 seconds.\n\nRequests time out after 60 seconds.',
+          );
           const preview = previewReview.maintenanceApproval!.preview;
           expect(preview.approvedProposal.draft.rationale).toBe(
             'Reviewed the same evidence and approved this exact replacement.',
           );
           expect(previewReview.maintenance?.proposal.draft.rationale).toBe(proposal.draft.rationale);
-          type ToolResult = {readonly isError?: boolean; readonly structuredContent?: CandidateReview};
+          type ToolResult = {readonly isError?: boolean; readonly structuredContent?: ManagerTopicReviewV1};
           const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
           const server = {
             registerTool: (name: string, _definition: unknown, handle: unknown) => {
@@ -242,7 +279,8 @@ describe('reviewed personal topic acceptance', () => {
             previewReview.revision,
           );
           expect(preview.beforeContent).toBe(accepted);
-          expect(preview.content).toContain('Request timeout is 60 seconds.');
+          expect(preview.content).toContain('The request timeout is 60 seconds.');
+          expect(preview.content).toContain('Requests time out after 60 seconds.');
           expect(preview.manifest.version).toBe(2);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
           const apply = () =>
@@ -274,6 +312,39 @@ describe('reviewed personal topic acceptance', () => {
           yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
           yield* commit('restored');
           yield* index();
+          const managerApply = () =>
+            handleManagerTopicReview({
+              config,
+              method: 'POST',
+              url: new URL('http://manager.test/api/attention/topic-review'),
+              body: Effect.succeed({
+                action: 'apply',
+                project: 'fixture',
+                reviewId: review.reviewId,
+                revision: previewReview.revision,
+                approvalDigest: preview.approvalDigest,
+                approved: true,
+              }),
+            });
+          const preparedBeforeWrite = candidateReviewWithState(
+            previewReview,
+            previewReview.candidates[0].candidateId,
+            'applying',
+          );
+          yield* saveCandidateReview(home, {
+            ...preparedBeforeWrite,
+            maintenanceApproval: {...previewReview.maintenanceApproval!, stage: 'prepared'},
+          });
+          expect(projectManagerTopicReview(preparedBeforeWrite)?.revision).toBe(previewReview.revision + 1);
+          expect(
+            projectManagerTopicReview({
+              ...preparedBeforeWrite,
+              maintenanceApproval: {...previewReview.maintenanceApproval!, stage: 'prepared'},
+            })?.canApply,
+          ).toBe(true);
+          const managerBeforeWrite = yield* managerApply();
+          expect(managerBeforeWrite?.status).toBe(200);
+          expect(managerBeforeWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
           const applied = JSON.parse(
             (yield* cli([
               '--action',
@@ -293,8 +364,7 @@ describe('reviewed personal topic acceptance', () => {
           expect(applied.candidates[0].state).toBe('applied');
           expect(applied.maintenanceApproval?.stage).toBe('written');
           expect(
-            (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent?.maintenanceApproval
-              ?.stage,
+            (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent?.approval?.stage,
           ).toBe('written');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           const replay = yield* apply();
@@ -305,7 +375,10 @@ describe('reviewed personal topic acceptance', () => {
             ...preparedAgain,
             maintenanceApproval: {...applied.maintenanceApproval!, stage: 'prepared'},
           });
-          const recovered = yield* apply();
+          const managerAfterWrite = yield* managerApply();
+          expect(managerAfterWrite?.status).toBe(200);
+          expect(managerAfterWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
+          const recovered = yield* loadCandidateReview(home, review.reviewId);
           expect(recovered.candidates[0].state).toBe('applied');
           expect(recovered.maintenanceApproval?.stage).toBe('written');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
@@ -325,11 +398,41 @@ describe('reviewed personal topic acceptance', () => {
           const conflicted = yield* loadCandidateReview(home, review.reviewId);
           expect(conflicted.maintenanceApproval?.stage).toBe('conflict');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
-          const closed = yield* decideTopicMaintenanceReview(config, {
-            reviewId: review.reviewId,
-            revision: conflicted.revision,
-            action: 'reject',
+          let newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          for (let tick = 0; tick < 12 && newerCase?.evidenceRevision === basis.observationRevision; tick++) {
+            yield* runContextMaintenance(config, {cwd: repository});
+            newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          }
+          expect(newerCase?.disposition).toBe('needs-decision');
+          expect(newerCase?.evidenceRevision).not.toBe(basis.observationRevision);
+          const conflictView = yield* handleManagerTopicReview({
+            config,
+            method: 'GET',
+            url: new URL(`http://manager.test/api/attention/topic-review?project=fixture&reviewId=${review.reviewId}`),
+            body: Effect.succeed({}),
           });
+          expect(conflictView?.status).toBe(200);
+          expect(conflictView?.body).toMatchObject({
+            state: 'conflict',
+            caseId,
+            caseObservationMatches: false,
+            canApply: false,
+          });
+          const projectedCaseId = (conflictView!.body as ManagerTopicReviewV1).caseId;
+          const closedResponse = yield* handleManagerTopicReview({
+            config,
+            method: 'POST',
+            url: new URL('http://manager.test/api/attention/topic-review'),
+            body: Effect.succeed({
+              action: 'reject',
+              project: 'fixture',
+              reviewId: review.reviewId,
+              revision: conflicted.revision,
+              caseId: projectedCaseId,
+            }),
+          });
+          expect(closedResponse?.status).toBe(200);
+          const closed = yield* loadCandidateReview(home, review.reviewId);
           expect(closed.candidates[0].state).toBe('rejected');
           expect(closed.maintenanceApproval).toEqual(conflicted.maintenanceApproval);
           expect(closed.maintenanceClosedConflict).toMatchObject({
@@ -343,13 +446,6 @@ describe('reviewed personal topic acceptance', () => {
           expect(closed.auditEvents.slice(-2).map(event => event.action)).toEqual(['conflict', 'reject']);
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           expect(Result.isFailure(yield* apply().pipe(Effect.result))).toBe(true);
-          let newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
-          for (let tick = 0; tick < 12 && newerCase?.evidenceRevision === basis.observationRevision; tick++) {
-            yield* runContextMaintenance(config, {cwd: repository});
-            newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
-          }
-          expect(newerCase?.disposition).toBe('needs-decision');
-          expect(newerCase?.evidenceRevision).not.toBe(basis.observationRevision);
           const catalog = yield* LocalModelCatalog;
           const modelId = 'gemma-4-e4b-it-q4';
           const manifest = yield* catalog.get(modelId);

@@ -10,7 +10,11 @@ import {
   stableUnique,
 } from '@threadnote/context/memory-evidence';
 export * from '@threadnote/context/memory-evidence';
-import {Effect, Option, Result, Schedule, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Result, Schedule, Schema} from 'effect';
+import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
+import {parseCandidateReview} from '@threadnote/memory/candidate';
+import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {resolveWorkset} from '@threadnote/workspace/manifest';
 import {readMemoryRecordsByUri} from '../memory/index.js';
@@ -464,10 +468,47 @@ const readContextBriefMemoryCandidates = Effect.fn('contextBrief.readMemoryCandi
       !requireResolvableMemoryIdentity ||
       (memoryId !== undefined && isMemoryId(memoryId) && resolvableMemoryIds.has(memoryId));
     if (!identityResolvable) stableIdentityUnavailable = true;
+    const attention = hasTopicMaintenanceEnrollment(record)
+      ? yield* readTopicReviewAttention(config, record)
+      : {attention: 'none' as const};
     candidates.push(
-      contextBriefMemoryCandidate(record, candidates.length, codeLinkMatchesByUri.get(uri), identityResolvable),
+      contextBriefMemoryCandidate(
+        record,
+        candidates.length,
+        codeLinkMatchesByUri.get(uri),
+        identityResolvable,
+        attention,
+      ),
     );
     if (candidates.length >= limit) break;
   }
   return {candidates, stableIdentityUnavailable};
+});
+
+/** Private bounded state read: the ordinary review loader synchronizes audit files. */
+const readTopicReviewAttention = Effect.fn('contextBrief.readTopicReviewAttention')(function* (
+  config: RuntimeConfig,
+  record: MemoryRecord,
+) {
+  const reviewId = `review-${sha256HexSync(`topic-maintenance\0${record.uri}`).slice(0, 24)}`;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(config.agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews', `${reviewId}.json`);
+  const exists = yield* fs.exists(file).pipe(Effect.orElseSucceed(() => false));
+  if (!exists) return {attention: 'none' as const};
+  const raw = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => undefined));
+  if (raw === undefined) return {attention: 'review-unavailable' as const};
+  const review = yield* Effect.try(() => parseCandidateReview(JSON.parse(raw))).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+  if (
+    review === undefined ||
+    review.reviewId !== reviewId ||
+    review.maintenance?.basis.targetUri !== record.uri ||
+    review.maintenance.basis.targetHash !== sha256HexSync(canonicalMemoryDocumentContent(record.content))
+  )
+    return {attention: 'review-unavailable' as const};
+  return review.candidates[0]?.state === 'pending'
+    ? {attention: 'pending-review' as const, reviewId}
+    : {attention: 'none' as const};
 });

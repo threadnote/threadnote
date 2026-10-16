@@ -55,6 +55,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     );
     const items = reviews
       .map(review => ({
+        ...(review.maintenance ? {kind: 'topic-maintenance' as const} : {}),
         candidates: review.candidates
           .filter(candidate =>
             view === 'history'

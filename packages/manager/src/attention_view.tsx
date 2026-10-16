@@ -7,6 +7,7 @@ import type {
   ManagerReviewInboxResponseV1,
 } from '@threadnote/manager/attention/contracts';
 import {ContextMaintenanceView} from './attention/maintenance_view.js';
+import {TopicReviewDialog} from './attention/topic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 
@@ -61,13 +62,33 @@ interface CitationRepairApplyResult {
 
 export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
   const [view, setView] = useState<'pending' | 'deferred' | 'history'>('pending');
-  const [selected, setSelected] = useState<{reviewId: string; candidateId: string; project: string}>();
+  const [selected, setSelected] = useState<{
+    reviewId: string;
+    candidateId: string;
+    project: string;
+    kind?: 'topic-maintenance';
+    view: 'pending' | 'deferred' | 'history';
+  }>();
   const [generation, setGeneration] = useState(0);
   const [inbox, setInbox] = useState<ManagerReviewInboxResponseV1>();
+  const returnFocus = useRef<{reviewId: string; candidateId: string} | undefined>(undefined);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     setSelected(undefined);
+  }, [props.project, view]);
+  useEffect(() => {
+    if (selected || !returnFocus.current) return;
+    const target = returnFocus.current;
+    const button = [...document.querySelectorAll<HTMLButtonElement>('button[data-review-id]')].find(
+      item => item.dataset.reviewId === target.reviewId && item.dataset.candidateId === target.candidateId,
+    );
+    if (button) {
+      button.focus();
+      returnFocus.current = undefined;
+    }
+  }, [selected, inbox]);
+  useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     setInbox(undefined);
@@ -92,6 +113,8 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       controller.abort();
     };
   }, [props.project, props.refreshGeneration, generation, view]);
+  const activeSelection =
+    selected && selected.view === view && (!props.project || selected.project === props.project) ? selected : undefined;
 
   return (
     <section aria-busy={loading} className="panel attention-panel is-active">
@@ -142,19 +165,31 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                   <section key={candidate.candidateId}>
                     <div className="attention-tags">
                       <span className={`attention-state is-${candidate.state}`}>{candidate.state}</span>
-                      <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
-                      <span>{Math.round(candidate.confidence * 100)}% confidence</span>
+                      {review.kind !== 'topic-maintenance' ? (
+                        <>
+                          <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
+                          <span>{Math.round(candidate.confidence * 100)}% confidence</span>
+                        </>
+                      ) : null}
                     </div>
-                    <div className="review-proposal-preview">
-                      <MarkdownViewer markdown={candidate.proposedText} />
-                    </div>
+                    {review.kind === 'topic-maintenance' ? (
+                      <p>Compare the accepted topic, its proposed update, and the current source before deciding.</p>
+                    ) : (
+                      <div className="review-proposal-preview">
+                        <MarkdownViewer markdown={candidate.proposedText} />
+                      </div>
+                    )}
                     <button
                       className="attention-review-button"
+                      data-review-id={review.reviewId}
+                      data-candidate-id={candidate.candidateId}
                       onClick={() =>
                         setSelected({
                           reviewId: review.reviewId,
                           candidateId: candidate.candidateId,
                           project: review.project,
+                          kind: review.kind,
+                          view,
                         })
                       }
                       type="button"
@@ -162,7 +197,9 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       <strong>{view === 'history' ? 'View review details →' : 'Review and decide →'}</strong>
                     </button>
                     <p>{candidate.reason}</p>
-                    {candidate.targetUri ? <code>{candidate.targetUri}</code> : null}
+                    {candidate.targetUri && review.kind !== 'topic-maintenance' ? (
+                      <code>{candidate.targetUri}</code>
+                    ) : null}
                   </section>
                 ))}
               </div>
@@ -178,11 +215,26 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           </button>
         </footer>
       ) : null}
-      {selected ? (
+      {activeSelection?.kind === 'topic-maintenance' ? (
+        <TopicReviewDialog
+          key={`${activeSelection.project}:${activeSelection.reviewId}`}
+          project={activeSelection.project}
+          reviewId={activeSelection.reviewId}
+          onClose={() => {
+            returnFocus.current = activeSelection;
+            setSelected(undefined);
+          }}
+          onChanged={() => setGeneration(value => value + 1)}
+          onOpenLibrary={uri => props.onOpenLibrary(uri)}
+        />
+      ) : activeSelection ? (
         <ReviewDetail
-          key={`${selected.project}:${selected.reviewId}:${selected.candidateId}`}
-          {...selected}
-          onClose={() => setSelected(undefined)}
+          key={`${activeSelection.project}:${activeSelection.reviewId}:${activeSelection.candidateId}`}
+          {...activeSelection}
+          onClose={() => {
+            returnFocus.current = activeSelection;
+            setSelected(undefined);
+          }}
           onChanged={() => setGeneration(value => value + 1)}
           onOpenLibrary={props.onOpenLibrary}
         />

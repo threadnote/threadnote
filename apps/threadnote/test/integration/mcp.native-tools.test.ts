@@ -114,6 +114,8 @@ const CORE_TOOL_NAMES = [
 ];
 
 const ADVANCED_TOOL_NAMES = [
+  'context_topic_enrollment',
+  'context_maintenance_draft',
   'context_maintenance_review',
   'share_topic_propose',
   'context_maintenance_status',

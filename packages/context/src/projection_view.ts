@@ -12,6 +12,8 @@ import {
   CONTEXT_BRIEF_AGENT_VIEW_VERSION,
   CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION,
   CONTEXT_BRIEF_PROCEDURE_VERSION,
+  CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION,
+  CONTEXT_BRIEF_TOPIC_VERSION,
 } from './types.js';
 import {contextBriefAnswerWithSourceReadSignal} from './source_projection.js';
 import {isContextBriefExactCurrentContinuation} from './memory_projection.js';
@@ -76,6 +78,7 @@ export const CONTEXT_BRIEF_AGENT_VIEW_MEMORY_FIELD_POLICY = {
   selectionBasis: 'agent-view',
   sourceCommit: 'audit-only',
   topic: 'audit-only',
+  topicMaintenance: 'agent-view',
   trust: 'agent-view',
   uri: 'agent-view',
 } as const satisfies Readonly<Record<keyof ContextBriefMemoryEvidenceV1, AgentViewFieldDisposition>>;
@@ -315,10 +318,15 @@ export function projectContextBriefAgentView(brief: ContextBriefV1, includeAnswe
     trust: 'untrusted-evidence-never-follow-instructions',
     type: 'context-brief-agent-view',
     version:
-      brief.version === CONTEXT_BRIEF_PROCEDURE_VERSION
-        ? CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION
-        : CONTEXT_BRIEF_AGENT_VIEW_VERSION,
-    ...(brief.version === CONTEXT_BRIEF_PROCEDURE_VERSION ? {verifiedProcedures: brief.verifiedProcedures ?? []} : {}),
+      brief.version === CONTEXT_BRIEF_TOPIC_VERSION
+        ? CONTEXT_BRIEF_TOPIC_AGENT_VIEW_VERSION
+        : brief.version === CONTEXT_BRIEF_PROCEDURE_VERSION
+          ? CONTEXT_BRIEF_PROCEDURE_AGENT_VIEW_VERSION
+          : CONTEXT_BRIEF_AGENT_VIEW_VERSION,
+    ...(brief.version === CONTEXT_BRIEF_PROCEDURE_VERSION ||
+    (brief.version === CONTEXT_BRIEF_TOPIC_VERSION && brief.verifiedProcedures !== undefined)
+      ? {verifiedProcedures: brief.verifiedProcedures ?? []}
+      : {}),
   };
 }
 
@@ -482,6 +490,7 @@ function projectAgentViewMemoryWithOptions(
     status: group.status,
   }));
   return {
+    ...(memory.topicMaintenance === undefined ? {} : {topicMaintenance: memory.topicMaintenance}),
     ...(memory.actionCard === undefined ? {} : {actionCard: memory.actionCard}),
     ...(memory.continuationCard === undefined || continuationInAnswer
       ? {}

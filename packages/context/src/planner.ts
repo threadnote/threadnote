@@ -122,6 +122,7 @@ export function assembleContextBriefLogicalResult(input: {
       codeCitations: _privateCodeCitations,
       codeLinkMatches: _privateCodeLinkMatches,
       lexicallySelected: _privateLexicallySelected,
+      topicMaintenanceInvalid,
       ...fullPublicCandidate
     } = candidate;
     if (
@@ -145,7 +146,16 @@ export function assembleContextBriefLogicalResult(input: {
         ...(citationSummary === undefined ? {} : {citationSummary}),
         ...(cohortCodeRelations.length === 0 ? {} : {cohortCodeRelations}),
         ...(codeRelations.length === 0 ? {} : {codeRelations, selectionBasis: 'code-citation' as const}),
-        freshness: preciseStatus === undefined ? coarse : reconcileContextBriefMemoryFreshness(coarse, preciseStatus),
+        freshness:
+          topicMaintenanceInvalid ||
+          (candidate.topicMaintenance !== undefined &&
+            (candidate.topicMaintenance.unresolvedParagraphs > 0 ||
+              candidate.codeCitations.length === 0 ||
+              citationErrorCount > 0))
+            ? ('unknown' as const)
+            : preciseStatus === undefined
+              ? coarse
+              : reconcileContextBriefMemoryFreshness(coarse, preciseStatus),
         freshnessBasis: preciseStatus === undefined ? ('source-commit' as const) : ('code-citations' as const),
         ...(preciseStatus === undefined ? {} : {preciseStatus}),
       },
@@ -304,6 +314,29 @@ function contextIssues(memories: readonly ContextBriefMemoryEvidenceV1[]): reado
         summary: `${memory.citationErrorCount ?? 0} code citation metadata error(s) were detected for ${memory.topic ?? memory.uri}.`,
         uris: [memory.uri],
       });
+    }
+    if (memory.topicMaintenance !== undefined) {
+      const moved = memory.citationReceipts?.some(receipt => receipt.status === 'relocated') ?? false;
+      if (memory.freshness !== 'fresh' || moved) {
+        const reason =
+          memory.freshness === 'stale'
+            ? 'Accepted comparison pins changed or were deleted in the current repository'
+            : memory.topicMaintenance.unresolvedParagraphs > 0
+              ? 'Declared topic support includes unresolved paragraphs'
+              : memory.preciseStatus === undefined
+                ? 'Declared topic support has no active comparison pins'
+                : memory.freshness === 'unknown'
+                  ? 'Accepted comparison pins cannot be validated against current repository evidence'
+                  : 'Accepted comparison pins moved in the current repository';
+        issues.push({
+          id: issueId('topic-support', [memory.uri]),
+          kind: 'topic-support',
+          rank: issues.length,
+          summary: `${reason} for ${memory.topic ?? memory.uri}; accepted text is unchanged.`,
+          uris: [memory.uri],
+        });
+      }
+      continue;
     }
     if (memory.citationReceipts?.some(receipt => receipt.status === 'relocated')) {
       issues.push({
@@ -499,6 +532,7 @@ function issuePriority(kind: ContextBriefContextIssueV1['kind']): number {
     case 'invalid-code-citation':
       return 1;
     case 'stale-memory':
+    case 'topic-support':
       return 2;
     case 'stale-link':
       return 3;
