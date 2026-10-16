@@ -30,6 +30,7 @@
     "./remote/repository": "./src/remote/repository.ts",
     "./remote/revisions": "./src/remote/revisions.ts",
     "./test/helpers/remote-memory-document": "./test/helpers/remote-memory-document.ts",
+    "./topic-maintenance": "./src/topic-maintenance.ts",
     "./types": "./src/types.ts"
   },
   "dependencies": {

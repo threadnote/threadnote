@@ -16,8 +16,8 @@ export function migrateMemoryDocumentV4ToV5(content: string): string {
   return content.replace(/^schema_version: 4(\r?)$/mu, 'schema_version: 5$1');
 }
 
-/** Current authoring schema adds optional derivation; upgrading preserves existing evidence verbatim. */
+/** Upgrade the canonical version header while preserving all existing evidence bytes. */
 export function migrateMemoryDocumentToCurrent(content: string): string {
   const v5 = migrateMemoryDocumentV4ToV5(content);
-  return v5.replace(/^schema_version: 5(\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
+  return v5.replace(/^schema_version: [5-8](\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
 }

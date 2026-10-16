@@ -65,6 +65,7 @@ import {
 } from '../../memory/deferred/code_anchor.js';
 import {isMemoryRelocationUri, readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {resolveLocalMemoryReplacementTarget} from '../../memory/replacement_target.js';
+import {topicMaintenanceReplacementError, type TopicMaintenanceManifestV1} from '@threadnote/memory/topic-maintenance';
 import {
   canonicalResourceUri,
   parseResourceId,
@@ -573,6 +574,11 @@ function writeDurableMemoryResolved(config: RuntimeConfig, params: WriteDurableM
         if (!currentReplaceTarget) {
           return argumentError(`Memory ${params.replaceUri} no longer exists.`);
         }
+        const maintenanceError = topicMaintenanceReplacementError(currentReplaceTarget, {
+          body: params.bodyText.trim(),
+          metadata: params.metadata,
+        });
+        if (maintenanceError) return argumentError(maintenanceError);
         if (
           currentReplaceTarget.metadata.obsidianEvidence &&
           JSON.stringify(currentReplaceTarget.metadata.obsidianEvidence) !==
@@ -806,6 +812,11 @@ export function writeCursorCloudSharedMemory(
               `Refusing to write shared memory ${targetUri}: possible ${scrub.blocker}. Strip the sensitive value first.`,
             );
           }
+          const projected = parseMemoryDocument(targetUri, scrub.cleaned);
+          if (!projected || projected.metadata.topicMaintenanceError)
+            return argumentError('Topic maintenance shared projection is malformed or stale.');
+          const maintenanceError = topicMaintenanceReplacementError(existingTarget, projected);
+          if (maintenanceError) return argumentError(maintenanceError);
           const relativePath = resourceUriToWorktreeRelative(config, targetUri, resolved.name);
           yield* assertSharedWorktreeFileReady(resolved.config.worktree, relativePath, existingTarget?.content);
           yield* ensureSharedDirectoryChain(config, 'threadnote-native', targetUri, false, {quiet: true});
@@ -905,6 +916,11 @@ const preparePersonalMemoryWriteResolved = Effect.fn('mcpServer.preparePersonalM
   if (replaced) {
     const schemaRewriteError = memorySchemaRewriteError(replaced.content);
     if (schemaRewriteError) return yield* Effect.fail(schemaRewriteError);
+    const maintenanceError = topicMaintenanceReplacementError(replaced, {
+      body: params.bodyText.trim(),
+      metadata: params.metadata,
+    });
+    if (maintenanceError) return yield* McpServerOperationError.make({message: maintenanceError});
   }
   const replacementProof =
     params.replaceUri && params.expectedReplaceContent
@@ -1007,6 +1023,11 @@ const writeSharedMemoryReplacement = Effect.fn('mcp_server.writeSharedMemoryRepl
   if (!existingTarget) {
     return argumentError(`Shared memory ${targetUri} no longer exists.`);
   }
+  const projected = parseMemoryDocument(targetUri, scrub.cleaned);
+  if (!projected || projected.metadata.topicMaintenanceError)
+    return argumentError('Topic maintenance shared projection is malformed or stale.');
+  const maintenanceError = topicMaintenanceReplacementError(existingTarget, projected);
+  if (maintenanceError) return argumentError(maintenanceError);
   const relativePath = resourceUriToWorktreeRelative(config, targetUri, resolved.name);
   yield* assertSharedWorktreeFileReady(resolved.config.worktree, relativePath, existingTarget.content);
   yield* ensureSharedDirectoryChain(config, ov, targetUri, false, {quiet: true});
@@ -1483,7 +1504,7 @@ export function writeMemoryContentWithExpectedHash(
   uri: string,
   content: string,
   expectedContent: string,
-  options: {readonly alreadyLocked?: boolean} = {},
+  options: {readonly alreadyLocked?: boolean; readonly topicEnrollment?: TopicMaintenanceManifestV1} = {},
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -1498,6 +1519,7 @@ export function writeMemoryContentWithExpectedHash(
         schemaError ||
         !postcondition ||
         postcondition.metadata.consolidationError ||
+        postcondition.metadata.topicMaintenanceError ||
         (postcondition.metadata.citationErrors?.length ?? 0) > 0
       ) {
         return argumentError(schemaError?.message ?? `Repair would produce invalid memory evidence for ${uri}.`);
@@ -1510,6 +1532,10 @@ export function writeMemoryContentWithExpectedHash(
           'Consolidation derivation requires evidence review before replacement; repair must preserve its pinned receipt.',
         );
       }
+      const currentSchemaError = memorySchemaRewriteError(current.content);
+      if (currentSchemaError) return argumentError(currentSchemaError.message);
+      const maintenanceError = topicMaintenanceReplacementError(current, postcondition, options.topicEnrollment);
+      if (maintenanceError) return argumentError(maintenanceError);
       yield* writeMemoryFile(config, ov, uri, content, 'replace', false, {quiet: true});
       yield* discardDeferredCodeAnchorIntent(config, uri);
       return {content: [{type: 'text' as const, text: `Updated memory: ${uri}`}]};

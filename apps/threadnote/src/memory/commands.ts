@@ -87,6 +87,7 @@ import {memoryReadRecoveryForError, memoryReadRecoveryText} from '@threadnote/me
 import {resolveLocalMemoryReplacementTarget, resolveStoreMemoryReplacementOptions} from './replacement_target.js';
 import type {StoreMemoryOptions} from './store_contract.js';
 import {consolidationRevision} from '@threadnote/memory/consolidation';
+import {topicMaintenanceReplacementError} from '@threadnote/memory/topic-maintenance';
 import {runArchive} from './archive.js';
 export {runArchive} from './archive.js';
 import {
@@ -1470,6 +1471,11 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
   const replaceUri = options.replaceUri;
   if (replaceUri) {
     const current = yield* resolveLocalMemoryReplacementTarget(config, replaceUri);
+    const maintenanceError = topicMaintenanceReplacementError(current.record, {
+      body: options.bodyText.trim(),
+      metadata: options.metadata,
+    });
+    if (maintenanceError) return yield* MemoryOperationError.make({message: maintenanceError});
     if (
       current.record?.metadata.obsidianEvidence &&
       JSON.stringify(current.record.metadata.obsidianEvidence) !== JSON.stringify(options.metadata.obsidianEvidence)
@@ -1587,12 +1593,17 @@ export const storeMemory = Effect.fn('storeMemory')(function* (config: RuntimeCo
       if (options.expectedReplaceRawContent !== undefined) {
         yield* assertCurrentReplacementRawContent(config, replaceUri, options.expectedReplaceRawContent);
       }
-      yield* assertCurrentReplacementWritable(
+      const currentReplacement = yield* assertCurrentReplacementWritable(
         config,
         replaceUri,
         options.expectedReplaceContent,
         replaceUri === memoryUri ? destination : undefined,
       );
+      const maintenanceError = topicMaintenanceReplacementError(currentReplacement, {
+        body: options.bodyText.trim(),
+        metadata: finalMetadata,
+      });
+      if (maintenanceError) return yield* MemoryOperationError.make({message: maintenanceError});
     }
     const relocationSourceContent =
       replaceUri && !isInPlaceUpdate ? yield* store.read(resourceStoreLocation(config), replaceUri) : undefined;
@@ -1749,6 +1760,10 @@ const storeSharedMemoryReplacement = Effect.fn('memory.storeSharedMemoryReplacem
     });
   }
   const memory = scrub.cleaned;
+  const projected = parseMemoryDocument(targetUri, memory);
+  if (!projected || projected.metadata.topicMaintenanceError) {
+    return yield* MemoryOperationError.make({message: 'Topic maintenance shared projection is malformed or stale.'});
+  }
   const relativePath = resourceUriToWorktreeRelative(config, targetUri, team.name);
 
   if (options.dryRun) {
@@ -1759,6 +1774,8 @@ const storeSharedMemoryReplacement = Effect.fn('memory.storeSharedMemoryReplacem
   if (!options.dryRun && !existingTarget) {
     return yield* MemoryOperationError.make({message: `Shared memory ${targetUri} no longer exists.`});
   }
+  const maintenanceError = topicMaintenanceReplacementError(existingTarget, projected);
+  if (maintenanceError) return yield* MemoryOperationError.make({message: maintenanceError});
   if (!options.dryRun) {
     yield* assertCurrentReplacementWritable(config, targetUri, options.expectedReplaceContent, existingTarget);
   }

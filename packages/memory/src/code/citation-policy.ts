@@ -21,9 +21,11 @@ export function memoryCodeCitationSharingBlocker(
     | 'obsidianEvidenceError'
     | 'sourceEvidence'
     | 'sourceEvidenceError'
-  >,
+  > &
+    Partial<Pick<MemoryMetadata, 'topicMaintenanceError'>>,
 ): MemoryCodeCitationSharingBlocker | undefined {
-  if (metadata.obsidianEvidenceError || metadata.sourceEvidenceError) return 'malformed-citation';
+  if (metadata.obsidianEvidenceError || metadata.sourceEvidenceError || metadata.topicMaintenanceError)
+    return 'malformed-citation';
   if (metadata.sourceEvidence) return 'private-source-evidence';
   if (metadata.obsidianEvidence) return 'private-obsidian-evidence';
   if ((metadata.citationErrors?.length ?? 0) > 0) return 'malformed-citation';
@@ -42,11 +44,15 @@ export function memoryCodeCitationContentSharingBlocker(
   const shapedHeader = inspectCodeCitationHeaderShape(content);
   const evidenceHeader = inspectObsidianEvidenceHeaderShape(content);
   const sourceEvidenceHeader = inspectEvidenceHeaderShape(content, 'source_evidence');
+  const topicMaintenanceHeader = inspectEvidenceHeaderShape(content, 'topic_maintenance');
   const parsed = parseMemoryDocument(uri, content);
   if (parsed) {
     const blocker = memoryCodeCitationSharingBlocker(parsed.metadata);
     if (blocker) return blocker;
-    return shapedHeader.hasNonCanonical || evidenceHeader.hasNonCanonical || sourceEvidenceHeader.hasNonCanonical
+    return shapedHeader.hasNonCanonical ||
+      evidenceHeader.hasNonCanonical ||
+      sourceEvidenceHeader.hasNonCanonical ||
+      topicMaintenanceHeader.hasNonCanonical
       ? 'malformed-citation'
       : sourceEvidenceHeader.hasCitationShape
         ? 'private-source-evidence'
@@ -54,7 +60,10 @@ export function memoryCodeCitationContentSharingBlocker(
           ? 'private-obsidian-evidence'
           : undefined;
   }
-  return shapedHeader.hasCitationShape || evidenceHeader.hasCitationShape || sourceEvidenceHeader.hasCitationShape
+  return shapedHeader.hasCitationShape ||
+    evidenceHeader.hasCitationShape ||
+    sourceEvidenceHeader.hasCitationShape ||
+    topicMaintenanceHeader.hasCitationShape
     ? 'malformed-citation'
     : undefined;
 }
@@ -83,7 +92,7 @@ function inspectObsidianEvidenceHeaderShape(content: string): {
 
 function inspectEvidenceHeaderShape(
   content: string,
-  name: 'obsidian_evidence' | 'source_evidence',
+  name: 'obsidian_evidence' | 'source_evidence' | 'topic_maintenance',
 ): {
   readonly hasCitationShape: boolean;
   readonly hasNonCanonical: boolean;

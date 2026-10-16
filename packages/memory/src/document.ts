@@ -1,5 +1,10 @@
 import type {MemoryKind, MemoryStatus} from './types.js';
 import {
+  MAX_TOPIC_MAINTENANCE_BYTES,
+  validateTopicMaintenanceManifest,
+  type TopicMaintenanceManifestV1,
+} from './topic-maintenance.js';
+import {
   MAX_CONSOLIDATION_BYTES,
   validateConsolidationProvenance,
   type ConsolidationProvenance,
@@ -45,6 +50,7 @@ export interface MemoryObsidianEvidenceV1 {
 
 const EVIDENCE_HEADER = 'obsidian_evidence';
 const SOURCE_EVIDENCE_HEADER = 'source_evidence';
+const TOPIC_MAINTENANCE_HEADER = 'topic_maintenance';
 const MAX_MEMORY_OBSIDIAN_EVIDENCE_BYTES = 4096;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const UUID_PATTERN = /^[a-f0-9-]{36}$/u;
@@ -125,6 +131,8 @@ export interface MemoryMetadata {
   /** Private immutable external source evidence; supporting text lives in a bounded pin. */
   readonly sourceEvidence?: SourceEvidenceCitationV1;
   readonly sourceEvidenceError?: boolean;
+  readonly topicMaintenance?: TopicMaintenanceManifestV1;
+  readonly topicMaintenanceError?: string;
   readonly kind: MemoryKind;
   readonly keywords?: readonly string[];
   readonly lastReviewed?: string;
@@ -207,7 +215,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       ? evidenceLines[0].slice(EVIDENCE_HEADER.length + 2)
       : undefined;
   let obsidianEvidence: MemoryObsidianEvidenceV1 | undefined;
-  if ((schemaVersion === 7 || schemaVersion === MEMORY_SCHEMA_VERSION) && evidenceValue) {
+  if ((schemaVersion === 7 || schemaVersion === 8 || schemaVersion === MEMORY_SCHEMA_VERSION) && evidenceValue) {
     try {
       const parsed: unknown = JSON.parse(evidenceValue);
       if (serializeMemoryObsidianEvidence(parsed) === evidenceValue) {
@@ -223,7 +231,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       ? sourceEvidenceLines[0].slice(SOURCE_EVIDENCE_HEADER.length + 2)
       : undefined;
   let sourceEvidence: SourceEvidenceCitationV1 | undefined;
-  if (schemaVersion === MEMORY_SCHEMA_VERSION && sourceEvidenceValue) {
+  if ((schemaVersion === 8 || schemaVersion === MEMORY_SCHEMA_VERSION) && sourceEvidenceValue) {
     try {
       const parsed: unknown = JSON.parse(sourceEvidenceValue);
       if (serializeSourceEvidenceCitation(parsed as SourceEvidenceCitationV1) === sourceEvidenceValue) {
@@ -240,7 +248,10 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
   if (consolidationLines.length) {
     try {
       if (
-        (schemaVersion !== 6 && schemaVersion !== 7 && schemaVersion !== MEMORY_SCHEMA_VERSION) ||
+        (schemaVersion !== 6 &&
+          schemaVersion !== 7 &&
+          schemaVersion !== 8 &&
+          schemaVersion !== MEMORY_SCHEMA_VERSION) ||
         consolidationLines.length !== 1 ||
         !consolidationLines[0].startsWith('consolidation: ') ||
         consolidationValues.length !== 1 ||
@@ -265,7 +276,7 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       consolidation = undefined;
     }
   }
-  return {
+  const record: MemoryRecord = {
     body,
     content: trimmed,
     headerTitle: firstLine,
@@ -315,6 +326,37 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
     },
     uri: canonicalResourceInput(uri),
   };
+  const maintenanceLines = lines.filter(line => /^\s*topic_maintenance\s*:/u.test(line));
+  if (!maintenanceLines.length) return record;
+  let topicMaintenance: TopicMaintenanceManifestV1 | undefined;
+  let topicMaintenanceError: string | undefined;
+  try {
+    if (
+      schemaVersion !== MEMORY_SCHEMA_VERSION ||
+      maintenanceLines.length !== 1 ||
+      !maintenanceLines[0].startsWith(`${TOPIC_MAINTENANCE_HEADER}: `)
+    )
+      throw new Error('Topic maintenance requires one canonical schema 9 header.');
+    const raw = maintenanceLines[0].slice(TOPIC_MAINTENANCE_HEADER.length + 2);
+    if (new TextEncoder().encode(raw).byteLength > MAX_TOPIC_MAINTENANCE_BYTES)
+      throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
+    const parsed: unknown = JSON.parse(raw);
+    if (JSON.stringify(parsed) !== raw) throw new Error('Topic maintenance manifest is not canonical JSON.');
+    topicMaintenance = validateTopicMaintenanceManifest(parsed, record);
+  } catch (error) {
+    topicMaintenanceError = error instanceof Error ? error.message : 'Invalid topic maintenance manifest.';
+  }
+  return {
+    ...record,
+    metadata: {
+      ...record.metadata,
+      citationErrors: topicMaintenanceError
+        ? [...(record.metadata.citationErrors ?? []), {reason: 'invalid-shape'}]
+        : record.metadata.citationErrors,
+      topicMaintenance,
+      topicMaintenanceError,
+    },
+  };
 }
 
 export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: MemoryMetadata, body: string): string {
@@ -324,9 +366,10 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     if (
       metadata.schemaVersion !== 6 &&
       metadata.schemaVersion !== 7 &&
+      metadata.schemaVersion !== 8 &&
       metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
     )
-      throw new Error('Consolidation provenance requires memory schema version 6, 7, or 8.');
+      throw new Error('Consolidation provenance requires memory schema version 6, 7, 8, or 9.');
     const reviewed = validateConsolidationProvenance(
       metadata.consolidation,
       body.trim(),
@@ -347,14 +390,31 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
   ) {
     throw new Error('Invalid Obsidian evidence citation metadata.');
   }
-  if (metadata.obsidianEvidence && metadata.schemaVersion !== 7 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION) {
-    throw new Error('Obsidian evidence requires memory schema version 7 or 8.');
+  if (
+    metadata.obsidianEvidence &&
+    metadata.schemaVersion !== 7 &&
+    metadata.schemaVersion !== 8 &&
+    metadata.schemaVersion !== MEMORY_SCHEMA_VERSION
+  ) {
+    throw new Error('Obsidian evidence requires memory schema version 7, 8, or 9.');
   }
   if (metadata.sourceEvidenceError) throw new Error('Invalid source evidence citation metadata.');
   if (metadata.sourceEvidence) {
-    if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
-      throw new Error(`Source evidence requires memory schema version ${MEMORY_SCHEMA_VERSION}.`);
+    if (metadata.schemaVersion !== 8 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error('Source evidence requires memory schema version 8 or 9.');
     serializeSourceEvidenceCitation(metadata.sourceEvidence);
+  }
+  if (metadata.topicMaintenanceError) throw new Error(metadata.topicMaintenanceError);
+  if (metadata.topicMaintenance) {
+    if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error('Topic maintenance requires memory schema version 9.');
+    validateTopicMaintenanceManifest(metadata.topicMaintenance, {
+      uri: 'threadnote://user/formatter/memories/durable/projects/topic/record.md',
+      content: '',
+      body: body.trim(),
+      headerTitle: title,
+      metadata,
+    });
   }
   if (
     metadata.codeCitations &&
@@ -395,6 +455,7 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     metadata.sourceEvidence
       ? `${SOURCE_EVIDENCE_HEADER}: ${serializeSourceEvidenceCitation(metadata.sourceEvidence)}`
       : undefined,
+    metadata.topicMaintenance ? `${TOPIC_MAINTENANCE_HEADER}: ${JSON.stringify(metadata.topicMaintenance)}` : undefined,
     metadata.consolidation ? memoryHeaderLine('consolidation', JSON.stringify(metadata.consolidation)) : undefined,
     memoryHeaderLine('candidate_id', metadata.candidateId),
     memoryHeaderLine('source_hash', metadata.sourceHash),
@@ -514,10 +575,12 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
   }
   const hasObsidianEvidence = header.split('\n').some(line => /^\s*obsidian_evidence\s*:/u.test(line));
   const hasSourceEvidence = header.split('\n').some(line => /^\s*source_evidence\s*:/u.test(line));
+  const hasTopicMaintenance = header.split('\n').some(line => /^\s*topic_maintenance\s*:/u.test(line));
   const schemaLines = header.split('\n').filter(line => /^\s*schema_version\s*:/u.test(line));
   if (schemaLines.length === 0) {
     if (hasObsidianEvidence) throw new Error('Malformed Obsidian evidence citation metadata.');
     if (hasSourceEvidence) throw new Error('Malformed source evidence citation metadata.');
+    if (hasTopicMaintenance) throw new Error('Malformed topic maintenance metadata.');
     return;
   }
   if (schemaLines.length !== 1) {
@@ -544,6 +607,16 @@ export function assertMemoryDocumentSchemaWritable(content: string): void {
     if (!record?.metadata.sourceEvidence || record.metadata.sourceEvidenceError) {
       throw new Error('Malformed source evidence citation metadata.');
     }
+  }
+  if (hasTopicMaintenance) {
+    const record = parseMemoryDocument(
+      'threadnote://user/validator/memories/durable/projects/topic/record.md',
+      content,
+    );
+    if (!record?.metadata.topicMaintenance || record.metadata.topicMaintenanceError)
+      throw new Error(
+        `Malformed topic maintenance metadata: ${record?.metadata.topicMaintenanceError ?? 'invalid header'}`,
+      );
   }
 }
 
@@ -634,7 +707,9 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
   const parseable = normalizeMemoryDocumentLineEndings(memory);
   const header = parseable.slice(0, Math.max(0, parseable.indexOf('\n\n')) || parseable.length);
   const lines = header.split('\n');
-  const parsedRecord = lines.some(line => /^\s*(?:consolidation|obsidian_evidence|source_evidence)\s*:/u.test(line))
+  const parsedRecord = lines.some(line =>
+    /^\s*(?:consolidation|obsidian_evidence|source_evidence|topic_maintenance)\s*:/u.test(line),
+  )
     ? parseMemoryDocument('threadnote://memory/inferred', memory)
     : undefined;
   const firstLine = lines[0]?.trim();
@@ -657,6 +732,8 @@ export function inferMemoryMetadata(memory: string): Partial<MemoryMetadata> {
     obsidianEvidenceError: parsedRecord?.metadata.obsidianEvidenceError,
     sourceEvidence: parsedRecord?.metadata.sourceEvidence,
     sourceEvidenceError: parsedRecord?.metadata.sourceEvidenceError,
+    topicMaintenance: parsedRecord?.metadata.topicMaintenance,
+    topicMaintenanceError: parsedRecord?.metadata.topicMaintenanceError,
     kind:
       parseMemoryKind(memoryHeaderValueFromLines(lines, 'kind')) ?? (firstLine === 'HANDOFF' ? 'handoff' : undefined),
     keywords: memoryHeaderValues(lines, 'keywords'),

@@ -542,6 +542,7 @@ bun_test(
         "//packages/memory:src/identity-alias.ts",
         "//packages/memory:src/lock.ts",
         "//packages/memory:src/relocation.ts",
+        "//packages/memory:src/topic-maintenance.ts",
         "//packages/memory:src/types.ts",
         "//packages/platform:package.json",
         "//packages/platform:src/child-environment-policy.ts",
