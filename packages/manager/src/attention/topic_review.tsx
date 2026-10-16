@@ -39,6 +39,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const [busy, setBusy] = useState(false);
   const [generation, setGeneration] = useState(0);
   const operationEpoch = useRef(0);
+  const mutationInFlight = useRef(false);
   useEffect(
     () => () => {
       operationEpoch.current += 1;
@@ -68,8 +69,8 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             options,
           );
         }
-        const preparedRecovery = result?.state === 'applying' && result.approval?.stage === 'prepared';
-        if (props.caseId && !preparedRecovery) {
+        const needsPacket = !result || (result.state === 'pending' && result.caseObservationMatches);
+        if (props.caseId && needsPacket) {
           currentPacket = await api<ManagerContextMaintenancePacketV2>(
             `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(props.caseId)}`,
             undefined,
@@ -96,11 +97,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             setReview(result);
             setDraft(result.draft);
           }
-          if (
-            !props.caseId &&
-            result.caseId &&
-            !(result.state === 'applying' && result.approval?.stage === 'prepared')
-          ) {
+          if (!props.caseId && result.caseId && result.state === 'pending' && result.caseObservationMatches) {
             const reviewPacket = await api<ManagerContextMaintenancePacketV2>(
               `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(result.caseId)}`,
               undefined,
@@ -148,8 +145,16 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       topic?.targetUri === review.targetUri &&
       topic?.targetHash === review.targetHash &&
       topic?.observationRevision === review.observationRevision);
+  const observationMatches = !review || review.generation.origin === 'manual' || review.caseObservationMatches;
   const canPreview =
-    !!review && draftReady && !!packetMatchesReview && !loading && !busy && !error && review.state === 'pending';
+    !!review &&
+    draftReady &&
+    !!packetMatchesReview &&
+    observationMatches &&
+    !loading &&
+    !busy &&
+    !error &&
+    review.state === 'pending';
   const approval = review?.approval;
   const previewCurrent =
     !!approval && !changedDraft && approval.reviewRevision === review?.revision && approval.stage === 'preview';
@@ -158,6 +163,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     !!review.canApply &&
     !!previewCurrent &&
     !!packetMatchesReview &&
+    observationMatches &&
     !loading &&
     !busy &&
     !error;
@@ -178,7 +184,8 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     (!review || review.state === 'pending');
 
   async function mutate(action: ManagerTopicReviewActionV1) {
-    if (busy) return;
+    if (busy || loading || mutationInFlight.current) return;
+    mutationInFlight.current = true;
     const epoch = ++operationEpoch.current;
     setBusy(true);
     setError('');
@@ -189,6 +196,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         return;
       setReview(result);
       setDraft(result.draft);
+      setLoading(true);
       setGeneration(value => value + 1);
       props.onChanged();
       setNotice(
@@ -205,10 +213,12 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     } catch (cause) {
       if (operationEpoch.current === epoch) {
         setError(errorMessage(cause));
+        setLoading(true);
         setGeneration(value => value + 1);
         props.onChanged();
       }
     } finally {
+      mutationInFlight.current = false;
       if (operationEpoch.current === epoch) setBusy(false);
     }
   }
@@ -285,7 +295,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         <h3>{review?.topic ?? 'Topic and source evidence'}</h3>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || loading}
           onClick={() => {
             setError('');
             setNotice('');
@@ -301,8 +311,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           Current source evidence is unavailable: {topic.reason ?? 'no verified excerpt was returned'}.
         </p>
       ) : null}
-      {!packet && review ? (
+      {!packet && review?.state === 'pending' ? (
         <p className="muted">The source case is unavailable. Refresh it before accepting this update.</p>
+      ) : null}
+      {review?.generation.origin !== 'manual' && review && !review.caseObservationMatches ? (
+        <p role="status">Source evidence changed since this draft. Review the updated case before continuing.</p>
       ) : null}
       {topic?.outcome === 'ready' ? (
         <section aria-label="Source evidence">
@@ -437,8 +450,20 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           </details>
           {approval && !changedDraft ? (
             <section aria-label="Exact final document" className="health-code-preview">
-              <h4>Exact final document to save</h4>
-              <p>Review this full document and its metadata before accepting.</p>
+              <h4>
+                {approval.stage === 'written'
+                  ? 'Saved final document'
+                  : previewCurrent || approval.stage === 'prepared'
+                    ? 'Exact final document to save'
+                    : 'Previous exact preview'}
+              </h4>
+              <p>
+                {approval.stage === 'written'
+                  ? 'This approved document was saved.'
+                  : previewCurrent || approval.stage === 'prepared'
+                    ? 'Review this full document and its metadata before accepting.'
+                    : 'This preview is retained for reference. Prepare a fresh preview before accepting.'}
+              </p>
               <MemoryBody content={approval.content} />
               <details>
                 <summary>Metadata and provenance changes</summary>
@@ -488,7 +513,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           Generate with
           <select
             aria-label="Topic generation provider"
-            disabled={busy}
+            disabled={busy || loading}
             value={backend}
             onChange={event => setBackend(event.target.value === 'effect-ai' ? 'effect-ai' : 'local-ai')}
           >
@@ -496,7 +521,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             <option value="effect-ai">Configured AI provider</option>
           </select>
         </label>
-        <ConsolidationModelPicker selection={modelSelection} disabled={busy} label="Topic generation model" />
+        <ConsolidationModelPicker
+          selection={modelSelection}
+          disabled={busy || loading}
+          label="Topic generation model"
+        />
         {modelSelection.error ? <p role="alert">{modelSelection.error}</p> : null}
         {!modelSelection.loading && !modelSelection.models.length ? (
           <p>No generation model is available for this provider.</p>
@@ -557,7 +586,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             </button>
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || loading || (review.generation.origin !== 'manual' && !caseId)}
               onClick={() =>
                 void mutate({
                   action: 'defer',
@@ -573,7 +602,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             <button
               type="button"
               className="danger"
-              disabled={busy}
+              disabled={busy || loading || (review.generation.origin !== 'manual' && !caseId)}
               onClick={() =>
                 void mutate({
                   action: 'reject',
@@ -591,7 +620,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         {review?.state === 'deferred' && (
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || loading || !observationMatches || (review.generation.origin !== 'manual' && !caseId)}
             onClick={() =>
               void mutate({
                 action: 'resume',
@@ -628,7 +657,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           <button
             type="button"
             className="danger"
-            disabled={busy || !caseId}
+            disabled={busy || loading || !caseId}
             onClick={() =>
               void mutate({
                 action: 'reject',

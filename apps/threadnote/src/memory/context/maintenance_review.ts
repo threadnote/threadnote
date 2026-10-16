@@ -86,7 +86,11 @@ export const prepareTopicMaintenanceReview = Effect.fn('topicMaintenance.prepare
           prepareTopicMaintenanceAcceptance(target, payload, {
             reviewId: review.reviewId,
             approvedAt,
-            editedDraftJson: input.editedDraftJson,
+            editedDraftJson:
+              input.editedDraftJson ??
+              (review.maintenanceApproval?.stage === 'parked'
+                ? JSON.stringify(review.maintenanceApproval.preview.approvedProposal.draft)
+                : undefined),
           }),
         catch: cause => fail(cause instanceof Error ? cause.message : 'The reviewed topic cannot be prepared.'),
       });
@@ -281,7 +285,12 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
         return yield* fail('The selected topic review changed. Read its current revision.');
       const closingConflict =
         input.action === 'reject' && candidate.state === 'conflict' && review.maintenanceApproval?.stage === 'conflict';
-      if (review.maintenanceApproval && review.maintenanceApproval.stage !== 'preview' && !closingConflict)
+      if (
+        review.maintenanceApproval &&
+        review.maintenanceApproval.stage !== 'preview' &&
+        review.maintenanceApproval.stage !== 'parked' &&
+        !closingConflict
+      )
         return yield* fail('The topic approval is already applying or recorded as a conflict.');
       const expected = input.action === 'resume' ? 'deferred' : 'pending';
       if (candidate.state !== expected && !closingConflict)
@@ -300,7 +309,13 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
               approvalDigest: review.maintenanceApproval.preview.approvalDigest,
             },
           }
-        : {...updated, maintenanceApproval: undefined};
+        : {
+            ...updated,
+            maintenanceApproval:
+              input.action === 'reject' || !review.maintenanceApproval
+                ? undefined
+                : {...review.maintenanceApproval, stage: 'parked' as const},
+          };
       yield* saveCandidateReview(config.agentContextHome, decided);
       if (decided.maintenance!.generation.origin !== 'manual')
         yield* reconcile(config, {

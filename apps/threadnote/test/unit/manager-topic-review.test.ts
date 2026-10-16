@@ -7,6 +7,7 @@ import type {CandidateReview} from '@threadnote/memory/candidate';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {handleManagerTopicReview, projectManagerTopicReview} from '../../src/manager/topic_review.js';
+import {TopicReviewError} from '../../src/memory/context/maintenance_review.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 
 const mocks = vi.hoisted(() => ({
@@ -291,6 +292,65 @@ describe('Manager topic review adapter', () => {
       });
       expect(stale?.status).toBe(409);
       expect(mocks.decide).toHaveBeenCalledTimes(1);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('recovers a persisted resume after a transient reconciliation failure', () =>
+    Effect.gen(function* () {
+      const deferred = {
+        ...review,
+        candidates: [{...review.candidates[0], state: 'deferred' as const}],
+      };
+      const resumed = {
+        ...deferred,
+        revision: 4,
+        candidates: [{...review.candidates[0], state: 'pending' as const}],
+        auditEvents: [{action: 'resume' as const, revision: 4}],
+      };
+      mocks.load.mockReturnValueOnce(Effect.succeed(deferred)).mockReturnValue(Effect.succeed(resumed));
+      mocks.decide
+        .mockReturnValueOnce(Effect.fail(TopicReviewError.make({message: 'reconcile interrupted'})))
+        .mockReturnValue(Effect.succeed(resumed));
+      const response = yield* call('POST', '/api/attention/topic-review', {
+        action: 'resume',
+        project: 'alpha',
+        reviewId,
+        revision: 3,
+        caseId,
+      });
+      expect(response?.status).toBe(200);
+      expect(response?.body).toMatchObject({state: 'pending', revision: 4});
+      expect(mocks.decide).toHaveBeenCalledTimes(2);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('requires reload after a failed replay without projecting cached state as current', () =>
+    Effect.gen(function* () {
+      const deferred = {
+        ...review,
+        candidates: [{...review.candidates[0], state: 'deferred' as const}],
+      };
+      const resumed = {
+        ...deferred,
+        revision: 4,
+        candidates: [{...review.candidates[0], state: 'pending' as const}],
+        auditEvents: [{action: 'resume' as const, revision: 4}],
+      };
+      mocks.load.mockReturnValueOnce(Effect.succeed(deferred)).mockReturnValue(Effect.succeed(resumed));
+      mocks.decide.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'reconcile unavailable'})));
+      const response = yield* call('POST', '/api/attention/topic-review', {
+        action: 'resume',
+        project: 'alpha',
+        reviewId,
+        revision: 3,
+        caseId,
+      });
+      expect(response?.status).toBe(409);
+      expect(response?.body).toMatchObject({
+        code: 'topic-review-decision-reload-required',
+      });
+      expect(response?.body).not.toHaveProperty('review');
+      expect(mocks.decide).toHaveBeenCalledTimes(2);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 

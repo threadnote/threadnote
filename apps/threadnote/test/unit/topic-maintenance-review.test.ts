@@ -34,7 +34,9 @@ import {
 } from '../../src/memory/context/maintenance_draft.js';
 import {
   applyTopicMaintenanceReview,
+  decideTopicMaintenanceReview,
   prepareTopicMaintenanceReview,
+  TopicReviewError,
 } from '../../src/memory/context/maintenance_review.js';
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {projectManagerTopicReview} from '../../src/manager/topic_review.js';
@@ -261,6 +263,63 @@ describe('reviewed personal topic acceptance', () => {
           expect(secondProjected.proposal.body).toBe(
             'The request timeout is 60 seconds.\n\nRequests time out after 60 seconds.',
           );
+          const deferred = yield* decideTopicMaintenanceReview(config, {
+            reviewId: review.reviewId,
+            revision: previewReview.revision,
+            action: 'defer',
+            caseId,
+          });
+          expect(deferred.candidates[0].state).toBe('deferred');
+          expect(deferred.maintenanceApproval?.stage).toBe('parked');
+          const deferredView = projectManagerTopicReview(yield* loadCandidateReview(home, review.reviewId))!;
+          expect(deferredView.draft).toEqual(secondProjected.draft);
+          expect(deferredView.proposal.body).toBe(secondProjected.proposal.body);
+          expect(deferredView.canApply).toBe(false);
+          const resumeSelection = {
+            reviewId: review.reviewId,
+            revision: deferred.revision,
+            action: 'resume' as const,
+            caseId,
+          };
+          const interruptedResume = yield* decideTopicMaintenanceReview(config, resumeSelection, () =>
+            Effect.fail(TopicReviewError.make({message: 'synthetic reconciliation interruption'})),
+          ).pipe(Effect.result);
+          expect(Result.isFailure(interruptedResume)).toBe(true);
+          const persistedResume = yield* loadCandidateReview(home, review.reviewId);
+          expect(persistedResume).toMatchObject({
+            revision: deferred.revision + 1,
+            candidates: [{state: 'pending'}],
+            maintenanceApproval: {stage: 'parked'},
+          });
+          const recoveredResume = yield* handleManagerTopicReview({
+            config,
+            method: 'POST',
+            url: new URL('http://manager.test/api/attention/topic-review'),
+            body: Effect.succeed({project: 'fixture', ...resumeSelection}),
+          });
+          expect(recoveredResume?.status).toBe(200);
+          const resumed = yield* loadCandidateReview(home, review.reviewId);
+          expect(resumed.revision).toBe(persistedResume.revision);
+          expect(resumed.candidates[0].state).toBe('pending');
+          expect(resumed.maintenanceApproval?.stage).toBe('parked');
+          expect(projectManagerTopicReview(resumed)?.draft).toEqual(secondProjected.draft);
+          expect(
+            Result.isFailure(
+              yield* applyTopicMaintenanceReview(config, {
+                reviewId: review.reviewId,
+                revision: previewReview.revision,
+                sourceCwd: repository,
+                approvalDigest: previewReview.maintenanceApproval!.preview.approvalDigest,
+                approved: true,
+              }).pipe(Effect.result),
+            ),
+          ).toBe(true);
+          previewReview = yield* prepareTopicMaintenanceReview(config, {
+            reviewId: review.reviewId,
+            revision: resumed.revision,
+            sourceCwd: repository,
+          });
+          expect(projectManagerTopicReview(previewReview)?.draft).toEqual(secondProjected.draft);
           const preview = previewReview.maintenanceApproval!.preview;
           expect(preview.approvedProposal.draft.rationale).toBe(
             'Reviewed the same evidence and approved this exact replacement.',

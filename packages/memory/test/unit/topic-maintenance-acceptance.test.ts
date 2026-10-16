@@ -311,6 +311,22 @@ describe('topic maintenance accepted document', () => {
       parseCandidateReview({...base, revision: 3, maintenanceApproval: {...approval, stage: 'prepared'}})
         .maintenanceApproval?.reviewRevision,
     ).toBe(2);
+    expect(
+      parseCandidateReview({...base, revision: 3, maintenanceApproval: {...approval, stage: 'parked'}})
+        .maintenanceApproval?.preview.approvedProposal,
+    ).toEqual(preview.approvedProposal);
+    fc.assert(
+      fc.property(fc.integer({min: 3, max: 100}), revision => {
+        const parked = parseCandidateReview({
+          ...base,
+          revision,
+          maintenanceApproval: {...approval, stage: 'parked'},
+        });
+        expect(parked.maintenanceApproval?.preview.approvedProposal).toEqual(preview.approvedProposal);
+        expect(() => parseCandidateReview({...base, revision, maintenanceApproval: approval})).toThrow();
+      }),
+      {numRuns: 32},
+    );
     expect(() => parseCandidateReview({...base, revision: 3, maintenanceApproval: approval})).toThrow();
     expect(() =>
       parseCandidateReview({

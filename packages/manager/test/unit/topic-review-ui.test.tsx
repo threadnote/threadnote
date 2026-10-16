@@ -99,12 +99,18 @@ let current = review();
 let evidencePacket = packet;
 let previewFailure = false;
 let preparedAfterWrite = false;
+let deferredReadGate: Promise<void> | undefined;
+let inboxRefreshFailure = false;
+let inboxReads = 0;
 const posted: Record<string, unknown>[] = [];
 beforeEach(() => {
   current = review();
   evidencePacket = packet;
   previewFailure = false;
   preparedAfterWrite = false;
+  deferredReadGate = undefined;
+  inboxRefreshFailure = false;
+  inboxReads = 0;
   posted.length = 0;
   (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
@@ -163,11 +169,21 @@ beforeEach(() => {
             approval: {...current.approval!, stage: 'written'},
             warnings: preparedAfterWrite ? ['The approved document was already written.'] : [],
           });
-        if (action.action === 'defer') current = review({revision: 4, state: 'deferred', canApply: false});
-        if (action.action === 'resume') current = review({revision: 5, state: 'pending', canApply: false});
+        if (action.action === 'defer')
+          current = review({...current, revision: current.revision + 1, state: 'deferred', canApply: false});
+        if (action.action === 'resume')
+          current = review({...current, revision: current.revision + 1, state: 'pending', canApply: false});
         result = current;
-      } else if (url.pathname === '/api/attention/topic-review') result = current;
-      else if (url.pathname === '/api/reviews')
+      } else if (url.pathname === '/api/attention/topic-review') {
+        if (current.state === 'deferred') await deferredReadGate;
+        result = current;
+      } else if (url.pathname === '/api/reviews') {
+        inboxReads += 1;
+        if (inboxRefreshFailure && inboxReads > 1)
+          return new Response(JSON.stringify({error: 'Inbox refresh is unavailable.'}), {
+            status: 503,
+            headers: {'content-type': 'application/json'},
+          });
         result = {
           version: 1,
           project: url.searchParams.get('project') ?? 'threadnote',
@@ -194,7 +210,7 @@ beforeEach(() => {
             },
           ],
         };
-      else throw new Error(`Unexpected request ${url.pathname}`);
+      } else throw new Error(`Unexpected request ${url.pathname}`);
       return new Response(JSON.stringify(result), {status: 200, headers: {'content-type': 'application/json'}});
     }),
   );
@@ -217,6 +233,12 @@ const button = (label: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(label))!;
 async function click(label: string) {
   await act(async () => button(label).click());
+}
+async function clickExact(label: string) {
+  const target = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+    item => item.textContent?.trim() === label,
+  )!;
+  await act(async () => target.click());
 }
 async function edit(ordinal: number, value: string) {
   const editor = document.querySelector<HTMLTextAreaElement>(
@@ -455,4 +477,94 @@ it('persists defer and resume through the topic action route', async () => {
   expect(button('Resume review')).toBeTruthy();
   await click('Resume review');
   expect(posted[1]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 4});
+});
+
+it('holds resume while the deferred revision reloads, then submits that revision', async () => {
+  const gate = Promise.withResolvers<void>();
+  deferredReadGate = gate.promise;
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Defer');
+  expect(document.body.textContent).toContain('Review deferred.');
+  expect(document.body.textContent).toContain('Loading topic and review…');
+  expect(button('Resume review').disabled).toBe(true);
+  await click('Resume review');
+  expect(posted.map(action => action.action)).toEqual(['defer']);
+  await act(async () => gate.resolve());
+  expect(button('Resume review').disabled).toBe(false);
+  await click('Resume review');
+  expect(posted[1]).toMatchObject({action: 'resume', reviewId: 'review-1', revision: 4, caseId: 'case-1'});
+  expect(document.body.textContent).toContain('Review resumed.');
+});
+
+it('keeps the edited draft through defer and resume, then requires a new exact preview', async () => {
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await edit(0, 'Reviewed current behavior.');
+  await click('Preview exact final document');
+  expect(button('Accept update').disabled).toBe(false);
+  await clickExact('Defer');
+  expect(document.body.textContent).toContain('Reviewed current behavior.');
+  await click('Resume review');
+  expect(
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
+  ).toBe('Reviewed current behavior.');
+  expect(button('Accept update').disabled).toBe(true);
+  await click('Preview exact final document');
+  expect(
+    (JSON.parse(String(posted.at(-1)?.editedDraftJson)) as ManagerTopicReviewV1['draft']).operations[0]?.text,
+  ).toBe('Reviewed current behavior.');
+  expect(button('Accept update').disabled).toBe(false);
+});
+
+it('retains a completed decision and its dialog when the inbox refresh fails', async () => {
+  await render(
+    <ReviewsPanel
+      project="threadnote"
+      projects={['threadnote']}
+      refreshGeneration={0}
+      onOpenLibrary={() => undefined}
+      onProjectChange={() => undefined}
+    />,
+  );
+  await click('Review and decide');
+  inboxRefreshFailure = true;
+  await clickExact('Defer');
+  expect(document.body.textContent).toContain('Review topic update');
+  expect(document.querySelector('dialog[open]')).toBeTruthy();
+  expect(document.body.textContent).toContain('Review deferred.');
+  expect(document.body.textContent).toContain('Inbox refresh is unavailable.');
+  expect(button('Resume review')).toBeTruthy();
+});
+
+it('allows closing a stale pending case while blocking preview and stale resume', async () => {
+  current = review({caseObservationMatches: false});
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(button('Defer').disabled).toBe(false);
+  await click('Defer');
+  expect(posted[0]).toMatchObject({action: 'defer', caseId: 'case-1'});
+  expect(button('Resume review').disabled).toBe(true);
 });

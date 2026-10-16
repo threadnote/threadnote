@@ -10,6 +10,7 @@ import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
   prepareTopicMaintenanceReview,
+  type TopicReviewDecisionInput,
 } from '../memory/context/maintenance_review.js';
 import {topicMaintenanceCaseId} from '../memory/context/maintenance_topic.js';
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
@@ -313,14 +314,41 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       )
         return conflict('The selected topic case changed. Refresh maintenance.');
     }
-    const decided = yield* decideTopicMaintenanceReview(request.config, {
+    const selection: TopicReviewDecisionInput = {
       reviewId,
       revision: body.revision as number,
       action,
       ...(typeof body.caseId === 'string' ? {caseId: body.caseId} : {}),
-    }).pipe(Effect.result);
-    if (Result.isFailure(decided))
-      return conflict('The topic review or case changed. Reload the review and try again.');
+    };
+    const decided = yield* decideTopicMaintenanceReview(request.config, selection).pipe(Effect.result);
+    if (Result.isFailure(decided)) {
+      const latest = yield* loadCandidateReview(request.config.agentContextHome, reviewId).pipe(Effect.result);
+      const persisted = Result.isSuccess(latest) ? latest.success : undefined;
+      const expectedState = action === 'resume' ? 'pending' : action === 'reject' ? 'rejected' : 'deferred';
+      const lastEvent = persisted?.auditEvents.at(-1);
+      if (
+        !persisted ||
+        persisted.project !== project ||
+        persisted.revision !== selection.revision + 1 ||
+        persisted.candidates.length !== 1 ||
+        persisted.candidates[0].state !== expectedState ||
+        lastEvent?.action !== action ||
+        lastEvent.revision !== persisted.revision
+      )
+        return conflict('The topic review or case changed. Reload the review and try again.');
+      const replay = yield* decideTopicMaintenanceReview(request.config, selection).pipe(Effect.result);
+      if (Result.isSuccess(replay)) {
+        const currentIdentity = yield* managerTopicReviewCaseIdentity(request.config, replay.success);
+        return {status: 200, body: projectManagerTopicReview(replay.success, currentIdentity)!};
+      }
+      return {
+        status: 409,
+        body: {
+          code: 'topic-review-decision-reload-required',
+          error: 'The review decision was saved. Reload the review to check its current state.',
+        },
+      };
+    }
     return {status: 200, body: projectManagerTopicReview(decided.success, identity)!};
   }
   if (

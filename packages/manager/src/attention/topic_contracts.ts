@@ -75,7 +75,7 @@ export interface ManagerTopicReviewV1 {
   }[];
   readonly warnings: readonly string[];
   readonly approval?: {
-    readonly stage: 'preview' | 'prepared' | 'written' | 'conflict';
+    readonly stage: 'preview' | 'parked' | 'prepared' | 'written' | 'conflict';
     readonly reviewRevision: number;
     readonly approvalDigest: string;
     readonly content: string;
