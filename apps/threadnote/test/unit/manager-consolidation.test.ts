@@ -114,7 +114,9 @@ describe('Manager reviewed consolidation application', () => {
         const record = parseMemoryDocument(applied.resultUri, yield* f.store.read(f.location, applied.resultUri))!;
         expect(record.metadata.codeCitations).toEqual([f.citation]);
         expect(record.metadata.relations).toEqual([f.relation]);
-        expect(record.metadata.consolidation?.sources.map(s => s.fragments)).toEqual([['Claim one.'], ['Claim two.']]);
+        const receipt = record.metadata.consolidation;
+        if (receipt?.version !== 1) throw new Error('Expected a V1 consolidation receipt.');
+        expect(receipt.sources.map(s => s.fragments)).toEqual([['Claim one.'], ['Claim two.']]);
         for (const source of f.sources)
           expect(yield* f.store.read(f.location, source.uri).pipe(Effect.option)).toMatchObject({_tag: 'None'});
         expect(yield* f.store.list(f.location, archiveRoot, {recursive: true})).toHaveLength(2);

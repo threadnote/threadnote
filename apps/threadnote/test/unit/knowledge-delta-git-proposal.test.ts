@@ -13,6 +13,7 @@ import {
 import {createMemoryCodeCitation, formatMemoryCodeCitationLines} from '@threadnote/memory/code/citation';
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
 import type {KnowledgeDeltaItemV1, KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
+import {enrolledGitTarget} from '../helpers/enrolled-git-target.js';
 
 const REVIEW_ID = 'review-0123456789abcdef';
 const BASE_COMMIT = 'a'.repeat(40);
@@ -158,6 +159,31 @@ describe('Knowledge Delta Git proposals', () => {
         target: TARGET,
       }),
     ).toThrow(/does not match its expected hash/u);
+  });
+
+  it('blocks a normal approved personal source from replacing an enrolled shared destination', () => {
+    const sourceContent = approvedSource(1, 'architecture');
+    const target = enrolledGitTarget('tn_architecture');
+    for (const content of [
+      target,
+      target.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:'),
+      target.replace(/^topic_maintenance: .+$/mu, ' topic_maintenance : {broken'),
+    ]) {
+      const mutation: ReviewedSharedMemoryMutationV1 = {
+        ...createMutation(1, 'architecture', sourceContent),
+        operation: 'replace',
+        expectedTarget: {state: 'present', content, contentHash: sha256HexSync(content)},
+      };
+      expect(() =>
+        buildKnowledgeDeltaGitProposalV1({
+          baseCommit: BASE_COMMIT,
+          delta: knowledgeDelta([item(1, 'architecture')]),
+          mutations: [mutation],
+          project: 'threadnote',
+          target: TARGET,
+        }),
+      ).toThrow(/enrolled shared target/);
+    }
   });
 
   it('fails closed for stale approval, cross-project content, and non-portable relations', () => {

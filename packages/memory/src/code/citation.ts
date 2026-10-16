@@ -1,7 +1,7 @@
 import {Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
-export const MEMORY_SCHEMA_VERSION = 9 as const;
+export const MEMORY_SCHEMA_VERSION = 10 as const;
 export const MEMORY_CODE_CITATION_SCHEMA_VERSION = 4 as const;
 export const MEMORY_CODE_CITATION_VERSION = 1 as const;
 export const MEMORY_CODE_CITATION_HEADER = 'code_citation' as const;
@@ -174,6 +174,7 @@ export function isMemoryCodeCitationSchemaVersion(schemaVersion: number | undefi
     schemaVersion === 6 ||
     schemaVersion === 7 ||
     schemaVersion === 8 ||
+    schemaVersion === 9 ||
     schemaVersion === MEMORY_SCHEMA_VERSION
   );
 }

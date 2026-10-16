@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {describe, expect} from 'vitest';
+import {describe, expect, it} from 'vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -53,17 +53,21 @@ function enrolled() {
 }
 
 describe('topic maintenance generic write boundaries', () => {
-  effectIt.effect('keeps the shared projection valid only while the accepted body and anchors survive', () =>
-    Effect.sync(() => {
-      const initial = enrolled();
-      const sharedUri = uri.replace('/memories/durable/', '/memories/shared/default/durable/');
-      const projected = stripPersonalProvenanceForSharedPublication(initial.content);
-      expect(parseMemoryDocument(sharedUri, projected)?.metadata.topicMaintenance).toEqual(initial.manifest);
-      expect(
-        parseMemoryDocument(sharedUri, projected.replace(body, `${body} Changed.`))?.metadata.topicMaintenanceError,
-      ).toBeDefined();
-    }),
-  );
+  it('blocks generic sharing of enrolled topics', () => {
+    const content = enrolled().content;
+    for (const variant of [content, content.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')])
+      expect(() => stripPersonalProvenanceForSharedPublication(variant)).toThrow(/reviewed existing-target/);
+  });
+
+  it('keeps an authored shared manifest valid only while accepted body and anchors survive', () => {
+    const initial = enrolled();
+    const sharedUri = uri.replace('/memories/durable/', '/memories/shared/default/durable/');
+    const content = formatMemoryDocument('MEMORY', {...initial.metadata, visibility: 'shared'}, body);
+    expect(parseMemoryDocument(sharedUri, content)?.metadata.topicMaintenance).toEqual(initial.manifest);
+    expect(
+      parseMemoryDocument(sharedUri, content.replace(body, `${body} Changed.`))?.metadata.topicMaintenanceError,
+    ).toBeDefined();
+  });
 
   effectIt.effect('rejects CLI and MCP replacement that changes body or loses manifest', () =>
     Effect.scoped(

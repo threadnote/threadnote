@@ -19,5 +19,5 @@ export function migrateMemoryDocumentV4ToV5(content: string): string {
 /** Upgrade the canonical version header while preserving all existing evidence bytes. */
 export function migrateMemoryDocumentToCurrent(content: string): string {
   const v5 = migrateMemoryDocumentV4ToV5(content);
-  return v5.replace(/^schema_version: [5-8](\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
+  return v5.replace(/^schema_version: [5-9](\r?)$/mu, `schema_version: ${MEMORY_SCHEMA_VERSION}$1`);
 }

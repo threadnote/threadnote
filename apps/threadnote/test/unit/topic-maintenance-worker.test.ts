@@ -1,10 +1,13 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
+import * as BunServices from '@effect/platform-bun/BunServices';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {SystemInfo} from '@threadnote/platform/system';
+import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
+import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -18,6 +21,7 @@ import {
 import {
   readContextMaintenancePacket,
   readContextMaintenanceStatus,
+  recordTopicMaintenanceReviewDecision,
   runContextMaintenance,
   type ContextMaintenanceCaseV2,
   type MaintenanceState,
@@ -232,6 +236,115 @@ describe('topic maintenance worker scheduling', () => {
     expect(pruneAbsentTopicCheckpoints(previous, new Set(), true)).toEqual({});
     expect(validTopicMaintenanceCheckpoints({[id]: {...checkpoint, body: 'unbounded'}})).toBe(false);
   });
+
+  effectIt.effect(
+    'persists exact-revision rejection, deferral and explicit resume without changing accepted content',
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-review-decisions-'});
+          const config = {
+            account: 'local',
+            agentContextHome: home,
+            agentId: 'test',
+            manifestPath: path.join(home, 'manifest.yaml'),
+            user: 'tester',
+          };
+          const selected = {...topicCase(1, 'needs-decision'), reason: 'topic-review-required'};
+          const other = topicCase(2, 'needs-decision');
+          const observation = {
+            version: 1 as const,
+            targetHash: 'b'.repeat(64),
+            revision: selected.evidenceRevision,
+            outcome: 'review-required' as const,
+            coverage: 'declared-only' as const,
+            canDraft: true,
+            sources: [],
+          };
+          const checkpoint = boundedTopicMaintenanceCheckpoint(observation, at);
+          const state: MaintenanceState = {
+            version: 2,
+            paused: false,
+            state: 'needs-decision',
+            generation: 'fixture',
+            projects: [],
+            cases: [selected, other],
+            receipts: [],
+            checkpoints: {},
+            topicCheckpoints: {[selected.caseId]: checkpoint},
+          };
+          const file = path.join(home, 'context-maintenance/state-v2.json');
+          yield* fs.makeDirectory(path.dirname(file), {recursive: true});
+          yield* fs.writeFileString(file, JSON.stringify(state));
+          const decide = (action: 'reject' | 'defer' | 'resume', observationRevision = selected.evidenceRevision) =>
+            recordTopicMaintenanceReviewDecision(config, {caseId: selected.caseId, observationRevision, action});
+          expect((yield* Effect.result(decide('reject', 'f'.repeat(64))))._tag).toBe('Failure');
+          expect(
+            yield* recordTopicMaintenanceReviewDecision(config, {
+              caseId: selected.caseId,
+              observationRevision: 'f'.repeat(64),
+              action: 'reject',
+              onStale: 'ignore',
+            }),
+          ).toBeUndefined();
+          expect(JSON.parse(yield* fs.readFileString(file))).toEqual(state);
+          yield* decide('defer');
+          const deferred = JSON.parse(yield* fs.readFileString(file));
+          expect(deferred.topicCheckpoints[selected.caseId]).toMatchObject({
+            suppressedRevision: selected.evidenceRevision,
+            suppressedDecision: 'defer',
+          });
+          expect(
+            deferred.cases.find((item: ContextMaintenanceCaseV2) => item.caseId === selected.caseId),
+          ).toMatchObject({disposition: 'deferred-policy', reason: 'topic-review-deferred'});
+          yield* decide('resume');
+          yield* decide('resume');
+          const resumed = JSON.parse(yield* fs.readFileString(file));
+          expect(resumed.topicCheckpoints[selected.caseId].suppressedRevision).toBeUndefined();
+          expect(resumed.cases.find((item: ContextMaintenanceCaseV2) => item.caseId === selected.caseId)).toMatchObject(
+            {disposition: 'needs-decision', reason: 'topic-review-required'},
+          );
+          yield* decide('reject');
+          const rejectedBytes = yield* fs.readFileString(file);
+          yield* decide('reject');
+          expect(yield* fs.readFileString(file)).toBe(rejectedBytes);
+          const rejected = JSON.parse(rejectedBytes);
+          expect(rejected.topicCheckpoints[selected.caseId]).toMatchObject({
+            suppressedRevision: selected.evidenceRevision,
+            suppressedDecision: 'reject',
+          });
+          expect(rejected.cases.find((item: ContextMaintenanceCaseV2) => item.caseId === other.caseId)).toEqual(other);
+          const afterMaterialChange = boundedTopicMaintenanceCheckpoint(
+            {...observation, revision: 'c'.repeat(64)},
+            at,
+            rejected.topicCheckpoints[selected.caseId],
+          );
+          expect(afterMaterialChange.suppressedRevision).toBeUndefined();
+          expect(
+            validTopicMaintenanceCheckpoints({[selected.caseId]: rejected.topicCheckpoints[selected.caseId]}),
+          ).toBe(true);
+        }),
+      ).pipe(
+        provideTestLayer(
+          Layer.merge(
+            BunServices.layer,
+            SystemInfo.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  Layer.succeed(ChildEnvironmentPolicy, {
+                    preserveIntendedChild: environment => environment,
+                    sanitizeExternal: environment => environment,
+                  }),
+                  Layer.succeed(RuntimeEntrypoint, {developmentEntrypoint: '/test/threadnote.ts'}),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+  );
 
   it('records a bounded budget deferral and preserves prior observation on retry', () => {
     const record = topic(2);
@@ -569,6 +682,35 @@ describe('topic maintenance worker scheduling', () => {
           expect(packet.topicEvidence).toMatchObject({outcome: 'ready', coverage: 'declared-only'});
           expect(packet.topicEvidence.sources).toHaveLength(1);
           expect(packet.evidenceCounts).toMatchObject({declared: 1, unavailable: 0});
+          yield* recordTopicMaintenanceReviewDecision(config, {
+            caseId,
+            observationRevision: after.evidenceRevision,
+            action: 'reject',
+          });
+          for (let tick = 0; tick < 4; tick++) yield* runContextMaintenance(config, {cwd: repository});
+          const suppressed = yield* currentCase;
+          expect(suppressed.evidenceRevision).toBe(after.evidenceRevision);
+          expect(suppressed).toMatchObject({disposition: 'deferred-policy', reason: 'topic-review-rejected'});
+          yield* fs.writeFileString(source, 'export const retryLimit = 5;\n');
+          yield* git(['add', '.']);
+          yield* git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'new evidence after rejection',
+          ]);
+          yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          let reopened = suppressed;
+          for (let tick = 0; tick < 12 && reopened.evidenceRevision === suppressed.evidenceRevision; tick++) {
+            yield* runContextMaintenance(config, {cwd: repository});
+            reopened = yield* currentCase;
+          }
+          expect(reopened.disposition).toBe('needs-decision');
+          expect(reopened.evidenceRevision).not.toBe(suppressed.evidenceRevision);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
         }),
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),

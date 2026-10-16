@@ -244,6 +244,25 @@ describe('stripPersonalProvenance', () => {
     expect(shared).toContain('Shared body.');
   });
 
+  it('blocks enrolled-topic projection before removing any provenance, including malformed manifest headers', () => {
+    const input = [
+      'MEMORY',
+      'kind: durable',
+      'consolidation: retained origin',
+      'topic_maintenance: {}',
+      '',
+      'Body.',
+    ].join('\n');
+    expect(() => stripPersonalProvenanceForSharedPublication(input)).toThrow(/reviewed existing-target Git proposal/);
+    expect(() =>
+      stripPersonalProvenanceForSharedPublication(input.replace('topic_maintenance:', ' topic_maintenance :')),
+    ).toThrow(/reviewed existing-target Git proposal/);
+    expect(input).toContain('consolidation: retained origin');
+    expect(
+      stripPersonalProvenanceForSharedPublication('MEMORY\nkind: durable\n\nMention topic_maintenance: in prose.'),
+    ).toContain('Mention topic_maintenance:');
+  });
+
   fcProp(
     it,
     'shared publication keeps identity-alias relations and drops local projection URIs',

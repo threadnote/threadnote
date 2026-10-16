@@ -96,16 +96,27 @@ export interface TopicMaintenanceReviewEvidenceV1 {
   readonly citation: MemoryCodeCitationV1;
 }
 
-export interface TopicMaintenanceGenerationReceiptV1 {
-  readonly agent: string;
-  readonly model: string;
-  readonly modelVersion?: string;
-  readonly promptVersion: string;
-  readonly attempts: 1 | 2;
-  readonly usage:
-    | {readonly status: 'unavailable'}
-    | {readonly status: 'measured'; readonly inputTokens: number; readonly outputTokens: number};
-}
+export type TopicMaintenanceGenerationReceiptV1 =
+  | {
+      readonly origin?: 'model';
+      readonly agent: string;
+      readonly model: string;
+      readonly modelVersion?: string;
+      readonly promptVersion: string;
+      readonly attempts: 1 | 2;
+      readonly usage:
+        | {readonly status: 'unavailable'}
+        | {readonly status: 'measured'; readonly inputTokens: number; readonly outputTokens: number};
+    }
+  | {
+      readonly origin: 'manual';
+      readonly agent: 'manual';
+      readonly model: 'none';
+      readonly modelVersion?: never;
+      readonly promptVersion: 'manual-topic-v1';
+      readonly attempts: 0;
+      readonly usage: {readonly status: 'unavailable'};
+    };
 
 /** Private review data; accepted memory metadata never contains this payload. */
 export interface TopicMaintenanceReviewPayloadV1 {
@@ -493,12 +504,11 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     !keys(input.proposal, ['version', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
     input.proposal.version !== 1 ||
     !object(input.generation) ||
-    !keys(input.generation, ['agent', 'model', 'promptVersion', 'attempts', 'usage'], ['modelVersion']) ||
+    !keys(input.generation, ['agent', 'model', 'promptVersion', 'attempts', 'usage'], ['modelVersion', 'origin']) ||
     !boundedText(input.generation.agent, 64) ||
     !boundedText(input.generation.model, 256) ||
     (input.generation.modelVersion !== undefined && !boundedText(input.generation.modelVersion, 256)) ||
     !boundedText(input.generation.promptVersion, 64) ||
-    ![1, 2].includes(input.generation.attempts as number) ||
     !object(input.generation.usage)
   )
     fail('invalid or oversized private review payload.');
@@ -513,6 +523,21 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     !['unavailable', 'measured'].includes(usage.status as string)
   )
     fail('invalid provider usage receipt.');
+  if (input.generation.origin === 'manual') {
+    if (
+      input.generation.agent !== 'manual' ||
+      input.generation.model !== 'none' ||
+      input.generation.modelVersion !== undefined ||
+      input.generation.promptVersion !== 'manual-topic-v1' ||
+      input.generation.attempts !== 0 ||
+      usage.status !== 'unavailable'
+    )
+      fail('invalid manual review origin receipt.');
+  } else if (
+    (input.generation.origin !== undefined && input.generation.origin !== 'model') ||
+    ![1, 2].includes(input.generation.attempts as number)
+  )
+    fail('invalid model generation receipt.');
   const basis = validateTopicMaintenanceDraftBasis(input.basis);
   validateTopicMaintenanceReviewEvidence(basis, input.reviewEvidence);
   const proposal = assemble(basis, validateDraft(input.proposal.draft, basis));

@@ -1,6 +1,13 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {captureConsolidationSource, reviewConsolidation, consolidationSections} from '../../src/consolidation.js';
+import {
+  buildConsolidationProvenanceV2,
+  captureConsolidationSource,
+  reviewConsolidation,
+  consolidationSections,
+  validateConsolidationProvenanceV2,
+  validateConsolidationV2ActiveEvidence,
+} from '../../src/consolidation.js';
 import {
   assertMemoryDocumentSchemaWritable,
   formatMemoryDocument,
@@ -10,9 +17,11 @@ import {
 } from '../../src/document.js';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
 import {migrateMemoryDocumentToCurrent} from '../../src/migrations.js';
+import {consolidationRevision} from '../../src/consolidation.js';
 
 const citation = (path: string) =>
   createMemoryCodeCitation({
+    evidenceRetention: 'capsule-retained',
     extractorSet: 'test',
     fileContentHash: {algorithm: 'sha256', value: 'a'.repeat(64)},
     path,
@@ -148,9 +157,9 @@ describe('reviewed consolidation', () => {
     );
     expect(parseMemoryDocument(source().uri, content)?.metadata.consolidation).toEqual(result.provenance);
     const schema8 = content.replace('schema_version: 6', 'schema_version: 8');
-    const schema9 = migrateMemoryDocumentToCurrent(schema8);
-    expect(schema9).toBe(schema8.replace('schema_version: 8', 'schema_version: 9'));
-    expect(parseMemoryDocument(source().uri, schema9)?.metadata.consolidation).toEqual(result.provenance);
+    const schema10 = migrateMemoryDocumentToCurrent(schema8);
+    expect(schema10).toBe(schema8.replace('schema_version: 8', 'schema_version: 10'));
+    expect(parseMemoryDocument(source().uri, schema10)?.metadata.consolidation).toEqual(result.provenance);
     expect(
       parseMemoryDocument(source().uri, content.replace(/Keep this claim\.$/, 'Changed.'))?.metadata.citationErrors
         ?.length,
@@ -166,6 +175,65 @@ describe('reviewed consolidation', () => {
       expect(parseMemoryDocument(source().uri, malformed)?.metadata.consolidationError).toBeDefined();
       expect(() => assertMemoryDocumentSchemaWritable(malformed)).toThrow();
     }
+  });
+  it('keeps immutable V1 note provenance while binding changed claim support to current code', () => {
+    const originalBody = 'Keep this claim.';
+    const body = 'Updated code claim.';
+    const original = reviewConsolidation(originalBody, [source()], [review(originalBody)], options);
+    const current = citation('new.ts');
+    const manifest = {
+      version: 2 as const,
+      memoryId: 'tn_topic_fixture',
+      repositoryId: current.repositoryId,
+      bodyHash: consolidationRevision(body),
+      coverage: 'declared-only' as const,
+      paragraphs: [
+        {
+          ordinal: 0,
+          hash: consolidationRevision(body),
+          role: 'descriptive' as const,
+          support: 'direct' as const,
+          citationIds: [current.id],
+        },
+      ],
+      additionalDependencies: [],
+      originCitationIds: [original.codeCitations[0].id],
+      acceptedSources: [{citationId: current.id, acceptedCitationId: current.id}],
+    };
+    const receipt = buildConsolidationProvenanceV2(original.provenance, originalBody, body, manifest, {
+      reviewId: 'review-one',
+      targetBeforeHash: '1'.repeat(64),
+      packetDigest: '2'.repeat(64),
+      observationRevision: '3'.repeat(64),
+    });
+    expect(validateConsolidationProvenanceV2(receipt, body)).toEqual(receipt);
+    expect(receipt.origin).toEqual(original.provenance);
+    expect(receipt.acceptance.paragraphs[0]).toMatchObject({evidence: 'reviewed-current', citationIds: [current.id]});
+    validateConsolidationV2ActiveEvidence(receipt, manifest, [...original.codeCitations, current], []);
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-08T00:00:00Z',
+        schemaVersion: 10,
+        memoryId: manifest.memoryId,
+        project: 'test',
+        topic: 'result',
+        codeCitations: [...original.codeCitations, current],
+        consolidation: receipt,
+        topicMaintenance: manifest,
+      },
+      body,
+    );
+    const parsed = parseMemoryDocument(source().uri, content)!;
+    expect(parsed.metadata.consolidation).toEqual(receipt);
+    expect(parsed.metadata.topicMaintenance).toEqual(manifest);
+    expect(parsed.metadata.citationErrors).toBeUndefined();
+    expect(() => validateConsolidationV2ActiveEvidence(receipt, manifest, original.codeCitations, [])).toThrow();
+    expect(() => validateConsolidationProvenanceV2(receipt, 'Different.')).toThrow();
+    expect(() => validateConsolidationProvenanceV2({...receipt, originBody: 'Forged.'}, body)).toThrow();
   });
   it('retains only exact final sections and round trips bounded arbitrary unsupported prose', () => {
     fc.assert(

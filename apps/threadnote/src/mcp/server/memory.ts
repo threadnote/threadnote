@@ -66,6 +66,8 @@ import {
 import {isMemoryRelocationUri, readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {resolveLocalMemoryReplacementTarget} from '../../memory/replacement_target.js';
 import {topicMaintenanceReplacementError, type TopicMaintenanceManifestV1} from '@threadnote/memory/topic-maintenance';
+import {validateApprovedTopicMaintenanceWrite} from '@threadnote/memory/topic-maintenance-acceptance';
+import type {CandidateReview} from '@threadnote/memory/candidate';
 import {
   canonicalResourceUri,
   parseResourceId,
@@ -1544,6 +1546,40 @@ export function writeMemoryContentWithExpectedHash(
       ? write
       : withMemoryUriLocks(fs, config.agentContextHome, [uri], write);
   });
+}
+
+/** Dedicated reviewed topic write. Its proof and target/source checks run under the account mutation lock. */
+export function writeApprovedTopicMaintenanceContent<E, R>(
+  config: RuntimeConfig,
+  review: CandidateReview,
+  beforeContent: string,
+  sourceCheck: Effect.Effect<unknown, E, R>,
+) {
+  const preview = review.maintenanceApproval?.preview;
+  if (!preview)
+    return Effect.fail(McpServerOperationError.make({message: 'The topic review has no approval preview.'}));
+  return writeMemoryFileChecked(
+    config,
+    'threadnote-native',
+    preview.targetUri,
+    preview.content,
+    'replace',
+    false,
+    Effect.gen(function* () {
+      const [current] = yield* readMemoryRecordsByUri(config, [preview.targetUri]);
+      if (!current || current.content !== beforeContent)
+        return yield* McpServerOperationError.make({message: 'The accepted topic changed before its approved write.'});
+      yield* Effect.try({
+        try: () => validateApprovedTopicMaintenanceWrite(current.content, preview.content, review),
+        catch: cause =>
+          McpServerOperationError.make({
+            message: cause instanceof Error ? cause.message : 'The prepared topic proof is invalid.',
+          }),
+      });
+      yield* sourceCheck;
+    }),
+    {quiet: true},
+  );
 }
 
 export function forgetResourceWithRetry(

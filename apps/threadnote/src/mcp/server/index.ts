@@ -77,7 +77,7 @@ import {registerContextMaintenanceTools} from './context/maintenance.js';
 import {registerContextHealthTool} from './context/health.js';
 import {registerContextHealthRepairTools} from './context/health_repair.js';
 import {registerMaintenanceMetadataTools} from './maintenance_metadata.js';
-import {registerKnowledgeDeltaGitProposalTool} from './git_proposal.js';
+import {registerKnowledgeDeltaGitProposalTool, registerTopicMaintenanceGitProposalTool} from './git_proposal.js';
 import {registerProcedurePublicationTools} from './procedure.js';
 import {registerActivationProofTool} from './activation.js';
 import {
@@ -431,6 +431,7 @@ function registerTools(
 
   if (capabilities.memoryPublish) {
     registerKnowledgeDeltaGitProposalTool(server, config);
+    if (capabilities.maintenance) registerTopicMaintenanceGitProposalTool(server, config);
     if (capabilities.lifecycle) registerProcedurePublicationTools(server, config);
   }
 

@@ -3,7 +3,13 @@ import {Schema} from 'effect';
 import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {uriSegment} from '@threadnote/workspace/manifest';
-import {canonicalMemoryDocumentContent, parseMemoryDocument, type MemoryRelation} from '@threadnote/memory/document';
+import {
+  canonicalMemoryDocumentContent,
+  declaresTopicMaintenanceHeader,
+  parseMemoryDocument,
+  type MemoryRelation,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {
   memoryCodeCitationContentSharingBlocker,
   memoryCodeCitationSharingBlockerMessage,
@@ -222,7 +228,13 @@ export function verifyKnowledgeDeltaGitProposalV1(proposal: KnowledgeDeltaGitPro
   );
   const ordered = [...proposal.files].sort(compareFile);
   if (ordered.some((file, index) => file !== proposal.files[index])) invalid('Git proposal files are not canonical.');
-  for (const file of proposal.files) verifyProposalFile(proposal, file);
+  for (const file of proposal.files) {
+    const record = verifyProposalFile(proposal, file);
+    if (record.metadata.topicMaintenance !== undefined)
+      invalid('Enrolled topic Git proposals require the maintenance variant and its source/policy fences.');
+    if (record.metadata.authority !== 'user_approved' || record.metadata.trust !== 'approved')
+      invalid(`Git proposal file ${file.path} does not carry reviewed publication authority.`);
+  }
 
   const {proposalHash: _proposalHash, ...unsigned} = proposal;
   const expected = sha256HexSync(canonicalJson(unsigned));
@@ -262,6 +274,11 @@ function proposalFile(
   }
   const source = parseMemoryDocument(mutation.sourceUri, canonicalSource);
   if (!source) invalid(`Candidate ${mutation.candidateId} source is not a memory document.`);
+  if (source.metadata.topicMaintenance !== undefined) {
+    invalid(
+      'Enrolled topics require the reviewed existing-target maintenance proposal path; generic publication cannot project their provenance.',
+    );
+  }
   if (source.headerTitle !== 'MEMORY' || source.metadata.kind !== 'durable' || source.metadata.status !== 'active') {
     invalid(`Candidate ${mutation.candidateId} source is not an active durable memory.`);
   }
@@ -343,6 +360,8 @@ function buildTargetPrecondition(
   if (sha256HexSync(mutation.expectedTarget.content) !== mutation.expectedTarget.contentHash) {
     invalid('Replacement target content does not match its expected hash.');
   }
+  if (declaresTopicMaintenanceHeader(mutation.expectedTarget.content))
+    invalid('Legacy V1 proposals cannot replace an enrolled shared target; use the reviewed maintenance variant.');
   const target = parseMemoryDocument('threadnote://proposal/target', mutation.expectedTarget.content);
   if (
     !target ||
@@ -392,7 +411,10 @@ function validateKnowledgeDelta(delta: KnowledgeDeltaV1, project: string): Knowl
   return delta;
 }
 
-function verifyProposalFile(proposal: KnowledgeDeltaGitProposalV1, file: KnowledgeDeltaGitProposalFileV1): void {
+export function verifyProposalFile(
+  proposal: Pick<KnowledgeDeltaGitProposalV1, 'knowledgeDelta' | 'project'>,
+  file: KnowledgeDeltaGitProposalFileV1,
+): MemoryRecord {
   if (file.approval.scope !== 'shared') invalid('Git proposal file does not carry explicit shared approval.');
   if (
     file.approval.reviewId !== proposal.knowledgeDelta.reviewId ||
@@ -417,8 +439,6 @@ function verifyProposalFile(proposal: KnowledgeDeltaGitProposalV1, file: Knowled
     record.metadata.kind !== 'durable' ||
     record.metadata.status !== 'active' ||
     record.metadata.visibility !== 'shared' ||
-    record.metadata.authority !== 'user_approved' ||
-    record.metadata.trust !== 'approved' ||
     record.metadata.project !== proposal.project ||
     record.metadata.topic !== topic ||
     record.metadata.memoryId !== file.memory.id
@@ -460,9 +480,13 @@ function verifyProposalFile(proposal: KnowledgeDeltaGitProposalV1, file: Knowled
       invalid(`Git proposal replace ${file.path} changes stable memory identity.`);
     }
   }
+  return record;
 }
 
-function canonicalRelations(relations: readonly MemoryRelation[], candidateId: string): readonly MemoryRelation[] {
+export function canonicalRelations(
+  relations: readonly MemoryRelation[],
+  candidateId: string,
+): readonly MemoryRelation[] {
   for (const relation of relations) {
     if (memoryIdFromIdentityAlias(relation.uri) === undefined) {
       invalid(`Candidate ${candidateId} has a non-portable reviewed relation.`);
@@ -511,11 +535,15 @@ function assertPersonalSourceUri(uri: string, project: string, topic: string, ca
   }
 }
 
-function sharedDurablePath(project: string, topic: string): string {
+export function sharedDurablePath(project: string, topic: string): string {
   return assertSafeShareRelativePath(`durable/projects/${uriSegment(project)}/${uriSegment(topic)}.md`);
 }
 
-function expectedBranchName(proposal: KnowledgeDeltaGitProposalV1): string {
+export function expectedBranchName(
+  proposal: Pick<KnowledgeDeltaGitProposalV1, 'base' | 'knowledgeDelta' | 'files' | 'project' | 'target'> & {
+    readonly maintenance?: unknown;
+  },
+): string {
   const contentSetHash = sha256HexSync(
     canonicalJson({
       baseCommit: proposal.base.expectedCommit,
@@ -525,6 +553,7 @@ function expectedBranchName(proposal: KnowledgeDeltaGitProposalV1): string {
       reviewId: proposal.knowledgeDelta.reviewId,
       revision: proposal.knowledgeDelta.expectedRevision,
       target: proposal.target,
+      ...(proposal.maintenance === undefined ? {} : {maintenance: proposal.maintenance}),
     }),
   );
   return `threadnote/knowledge-delta/${proposal.knowledgeDelta.reviewId}-${contentSetHash.slice(0, 12)}`;

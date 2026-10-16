@@ -88,7 +88,9 @@ describe('consolidation at publication and repair boundaries', () => {
     for (const active of [false, true]) {
       const memory = consolidatedMemory('Approved conclusion.', active);
       assertSharedProjection(stripPersonalProvenanceForSharedPublication(memory.content), active);
-      expect(memory.metadata.consolidation?.sources[0].fragments).toContain('Private discarded claim.');
+      const receipt = memory.metadata.consolidation;
+      if (receipt?.version !== 1) throw new Error('Expected a V1 consolidation receipt.');
+      expect(receipt.sources[0].fragments).toContain('Private discarded claim.');
     }
   });
   effectIt.effect('ingests a real shared file without excluded personal history or dirty local anchors', () =>

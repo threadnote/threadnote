@@ -4,8 +4,9 @@ import {Effect, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
-import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
-import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {MEMORY_SCHEMA_VERSION, createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {formatMemoryDocument, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {recordVerifiedCodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
@@ -81,6 +82,36 @@ const evidence = (hash: string) => ({
   currentFileBytesHash: hash,
 });
 
+const acceptComparison = (record: MemoryRecord, accepted: MemoryCodeCitationV1) => {
+  const manifest = record.metadata.topicMaintenance!;
+  const declaredIds = [
+    ...new Set([
+      ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
+      ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+    ]),
+  ].sort();
+  return parseMemoryDocument(
+    record.uri,
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        ...record.metadata,
+        schemaVersion: MEMORY_SCHEMA_VERSION,
+        codeCitations: [
+          ...new Map([...(record.metadata.codeCitations ?? []), accepted].map(item => [item.id, item])).values(),
+        ],
+        topicMaintenance: {
+          ...manifest,
+          version: 2,
+          originCitationIds: (record.metadata.codeCitations ?? []).map(item => item.id).sort(),
+          acceptedSources: declaredIds.map(citationId => ({citationId, acceptedCitationId: accepted.id})),
+        },
+      },
+      record.body,
+    ),
+  )!;
+};
+
 describe('topic maintenance evidence projection', () => {
   it('coalesces unrelated commits and timestamps when relevant bytes stay equal', () => {
     const baseline = projectTopicMaintenanceObservation(enrolled, [evidence('a'.repeat(64))]);
@@ -136,6 +167,25 @@ describe('topic maintenance evidence projection', () => {
           );
       }),
       {numRuns: 40},
+    );
+  });
+
+  it('compares against accepted evidence while preserving original claim support', () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom(...'0123456789abcdef'), {minLength: 64, maxLength: 64}), digits => {
+        const hash = digits.join('');
+        const accepted = acceptComparison(enrolled, currentWithHash(citation, hash));
+        expect(accepted.metadata.topicMaintenanceError).toBeUndefined();
+        const baseline = projectTopicMaintenanceObservation(accepted, [evidence(hash)]);
+        expect(baseline.outcome).toBe('unchanged');
+        expect(accepted.metadata.topicMaintenance!.paragraphs).toEqual(enrolled.metadata.topicMaintenance!.paragraphs);
+        expect(accepted.metadata.codeCitations).toContainEqual(citation);
+        const laterHash = hash === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64);
+        const later = projectTopicMaintenanceObservation(accepted, [evidence(laterHash)]);
+        expect(later.outcome).toBe('review-required');
+        expect(later.revision).not.toBe(baseline.revision);
+      }),
+      {numRuns: 30},
     );
   });
 
@@ -513,6 +563,41 @@ describe('topic maintenance current evidence', () => {
             expect(changed.outcome).toBe('review-required');
             expect(changed.revision).not.toBe(initial.revision);
             expect(changed.sources[0]?.historicalAvailable).toBe(true);
+            const acceptedRecord = acceptComparison(enrolledRecord, changed.sources[0].current!);
+            expect(acceptedRecord.metadata.topicMaintenanceError).toBeUndefined();
+            const acceptedInitial = yield* provide(observeTopicMaintenanceEvidence(config, acceptedRecord, repo));
+            expect(acceptedInitial.outcome).toBe('unchanged');
+            expect(acceptedInitial.sources[0]?.historicalAvailable).toBe(true);
+            const acceptedRestart = yield* provide(observeTopicMaintenanceEvidence(config, acceptedRecord, repo));
+            expect(acceptedRestart.revision).toBe(acceptedInitial.revision);
+            const acceptedReadOnly = yield* provide(
+              observeTopicMaintenanceEvidence(config, acceptedRecord, repo, undefined, {allowCapture: false}),
+            );
+            expect(acceptedReadOnly.outcome).toBe('unchanged');
+            expect(acceptedReadOnly.sources[0]?.current?.id).toBe(changed.sources[0]?.current?.id);
+            yield* fs.writeFileString(path.join(repo, 'unrelated.ts'), 'export const other = 3;\n');
+            yield* git(['add', '.']);
+            yield* git(['commit', '--quiet', '-m', 'unrelated after acceptance']);
+            yield* updateStatus();
+            const acceptedUnrelated = yield* provide(
+              observeTopicMaintenanceEvidence(config, acceptedRecord, repo, acceptedInitial, {allowCapture: false}),
+            );
+            expect(acceptedUnrelated.revision).toBe(acceptedInitial.revision);
+            const acceptedPacket = yield* provide(
+              buildTopicMaintenanceEvidencePacket(config, acceptedRecord, repo, acceptedUnrelated),
+            );
+            expect(acceptedPacket.sources?.[0]?.oldExcerpt?.content).toContain('value = 1');
+            expect(acceptedPacket.sources?.[0]?.newExcerpt?.content).toContain('value = 2');
+            yield* fs.writeFileString(path.join(repo, 'source.ts'), 'export const value = 3;\n');
+            yield* git(['add', '.']);
+            yield* git(['commit', '--quiet', '-m', 'new material evidence after acceptance']);
+            yield* updateStatus();
+            const acceptedLater = yield* provide(
+              observeTopicMaintenanceEvidence(config, acceptedRecord, repo, acceptedUnrelated),
+            );
+            expect(acceptedLater.outcome).toBe('review-required');
+            expect(acceptedLater.revision).not.toBe(acceptedInitial.revision);
+            expect(acceptedLater.sources[0]?.historicalAvailable).toBe(true);
             yield* fs.writeFileString(
               path.join(repo, 'source.ts'),
               [...Array.from({length: 10}, (_, index) => `// context ${index}`), 'export const value = 3;', ''].join(

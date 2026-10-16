@@ -16,6 +16,10 @@ import {
   validateTopicMaintenanceReviewPayload,
   type TopicMaintenanceReviewPayloadV1,
 } from './topic-maintenance-draft.js';
+import {
+  validateTopicMaintenanceApprovalReceipt,
+  type TopicMaintenanceApprovalReceiptV1,
+} from './topic-maintenance-acceptance.js';
 
 export type CandidateCategory = 'decision' | 'handoff' | 'invariant' | 'preference';
 export type CandidateComparison = 'contradiction' | 'duplicate' | 'new' | 'possible_duplicate' | 'replacement';
@@ -116,13 +120,56 @@ export interface CandidateReview {
   readonly sourceSessionId?: string;
   readonly structuredCloseout?: StructuredCloseoutV1;
   readonly maintenance?: TopicMaintenanceReviewPayloadV1;
+  readonly maintenanceApproval?: TopicMaintenanceApprovalReceiptV1;
+  readonly maintenanceClosedConflict?: TopicMaintenanceClosedConflictV1;
   readonly task: string;
   readonly topic: string;
   readonly version: 2;
 }
 
+/** Bounded identity of the latest explicitly closed topic conflict after its full approval is superseded. */
+export interface TopicMaintenanceClosedConflictV1 {
+  readonly version: 1;
+  readonly reviewRevision: number;
+  readonly targetUri: string;
+  readonly beforeContentHash: string;
+  readonly contentHash: string;
+  readonly approvalDigest: string;
+}
+
+function validTopicClosedConflict(review: CandidateReview): boolean {
+  const closed = review.maintenanceClosedConflict;
+  if (closed === undefined) return true;
+  if (
+    !review.maintenance ||
+    typeof closed !== 'object' ||
+    closed === null ||
+    Object.keys(closed).sort().join(',') !==
+      'approvalDigest,beforeContentHash,contentHash,reviewRevision,targetUri,version' ||
+    closed.version !== 1 ||
+    !Number.isSafeInteger(closed.reviewRevision) ||
+    closed.reviewRevision < 1 ||
+    closed.reviewRevision > review.revision ||
+    closed.targetUri !== review.maintenance.basis.targetUri ||
+    ![closed.beforeContentHash, closed.contentHash, closed.approvalDigest].every(value => /^[a-f0-9]{64}$/u.test(value))
+  )
+    return false;
+  const approval = review.maintenanceApproval;
+  if (approval === undefined) return true;
+  if (approval.reviewRevision > closed.reviewRevision) return true;
+  return (
+    approval.reviewRevision === closed.reviewRevision &&
+    approval.stage === 'conflict' &&
+    approval.preview.targetUri === closed.targetUri &&
+    approval.preview.beforeContentHash === closed.beforeContentHash &&
+    approval.preview.contentHash === closed.contentHash &&
+    approval.preview.approvalDigest === closed.approvalDigest
+  );
+}
+
 export interface CandidateAuditEvent {
-  readonly action: 'apply' | 'begin_apply' | 'conflict' | 'create_review' | 'defer' | 'refresh_safety' | 'reject';
+  readonly action:
+    'apply' | 'begin_apply' | 'conflict' | 'create_review' | 'defer' | 'refresh_safety' | 'reject' | 'resume';
   readonly allowDestructiveReplacement?: boolean;
   readonly at: string;
   readonly candidateId?: string;
@@ -624,6 +671,21 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
   if (review.maintenance !== undefined)
     yield* Effect.try({
       try: () => validateTopicMaintenanceReviewPayload(review.maintenance),
+      catch: cause => CandidateMemoryError.make({message: errorText(cause)}),
+    });
+  if (!validTopicClosedConflict(review))
+    return yield* CandidateMemoryError.make({message: 'invalid closed topic conflict receipt'});
+  if (review.maintenanceApproval !== undefined)
+    yield* Effect.try({
+      try: () => {
+        if (!review.maintenance) throw new Error('Approval requires a maintenance review.');
+        validateTopicMaintenanceApprovalReceipt(
+          review.maintenanceApproval,
+          review.maintenance,
+          review.reviewId,
+          review.revision,
+        );
+      },
       catch: cause => CandidateMemoryError.make({message: errorText(cause)}),
     });
   const fs = yield* FileSystem.FileSystem;
@@ -1203,12 +1265,16 @@ export function parseCandidateReview(value: unknown): CandidateReview {
   const review = value as Omit<CandidateReview, 'codeCitations' | 'version'> & {
     readonly codeCitations?: readonly MemoryCodeCitationV1[];
     readonly maintenance?: unknown;
+    readonly maintenanceApproval?: unknown;
+    readonly maintenanceClosedConflict?: unknown;
     readonly structuredCloseout?: unknown;
     readonly version: 1 | 2;
   };
   let codeCitations: readonly MemoryCodeCitationV1[] = [];
-  if (review.version !== 2 && review.maintenance !== undefined)
+  if (review.version !== 2 && (review.maintenance !== undefined || review.maintenanceApproval !== undefined))
     throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
+  if (review.maintenanceApproval !== undefined && review.maintenance === undefined)
+    throw CandidateMemoryError.make({message: 'maintenance approval requires a review payload'});
   if (review.version === 2) {
     if (!Array.isArray(review.codeCitations)) throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     try {
@@ -1218,7 +1284,7 @@ export function parseCandidateReview(value: unknown): CandidateReview {
       throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     }
   }
-  return {
+  const parsed: CandidateReview = {
     ...review,
     auditEvents: Array.isArray(review.auditEvents)
       ? review.auditEvents.filter(event => candidateAuditEventIsValid(event))
@@ -1230,8 +1296,21 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     ...(review.maintenance === undefined
       ? {}
       : {maintenance: validateTopicMaintenanceReviewPayload(review.maintenance)}),
+    ...(review.maintenanceApproval === undefined
+      ? {}
+      : {
+          maintenanceApproval: validateTopicMaintenanceApprovalReceipt(
+            review.maintenanceApproval,
+            review.maintenance!,
+            review.reviewId,
+            review.revision,
+          ),
+        }),
     version: 2,
   };
+  if (!validTopicClosedConflict(parsed))
+    throw CandidateMemoryError.make({message: 'invalid closed topic conflict receipt'});
+  return parsed;
 }
 
 function parseStructuredCloseout(value: unknown): StructuredCloseoutV1 {
@@ -1276,7 +1355,8 @@ function candidateAuditEventIsValid(value: unknown): value is CandidateAuditEven
       value.action === 'create_review' ||
       value.action === 'defer' ||
       value.action === 'refresh_safety' ||
-      value.action === 'reject') &&
+      value.action === 'reject' ||
+      value.action === 'resume') &&
     (!('allowDestructiveReplacement' in value) || typeof value.allowDestructiveReplacement === 'boolean') &&
     'at' in value &&
     typeof value.at === 'string' &&

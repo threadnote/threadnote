@@ -1,7 +1,7 @@
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {Effect, FileSystem, Path, Result} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -20,8 +20,15 @@ import {
   saveCandidateReview,
 } from '@threadnote/memory/candidate';
 import {applyMemoryCandidate} from '../../src/mcp/server/recall.js';
-import {readContextMaintenancePacket, runContextMaintenance} from '../../src/memory/context/maintenance.js';
+import {
+  readContextMaintenancePacket,
+  readContextMaintenanceStatus,
+  recordTopicMaintenanceReviewDecision,
+  runContextMaintenance,
+} from '../../src/memory/context/maintenance.js';
 import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft} from '../../src/memory/context/maintenance_draft.js';
+import {verifyTopicMaintenanceReviewSource} from '../../src/memory/context/maintenance_review_source.js';
+import {decideTopicMaintenanceReview} from '../../src/memory/context/maintenance_review.js';
 import {runSelectedDraft, selectedTopicDraftIdentity} from '../../src/manager/selected_draft.js';
 import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../src/manager/topic_draft_schema.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -309,6 +316,11 @@ describe('topic maintenance private draft generation', () => {
           expect(yield* fs.readFileString(memory)).toBe(accepted);
           expect(yield* listCandidateReviews(home)).toEqual([]);
           const review = yield* request();
+          const acceptedRecord = parseMemoryDocument(uri, yield* fs.readFileString(memory))!;
+          expect(
+            (yield* verifyTopicMaintenanceReviewSource(config, acceptedRecord, review.maintenance!, repository))
+              .outcome,
+          ).toBe('ready');
           expect(review.maintenance).toMatchObject({
             version: 1,
             generation: {attempts: 2, agent: 'local-ai', model: modelId},
@@ -359,10 +371,18 @@ describe('topic maintenance private draft generation', () => {
             at: '2026-10-16T00:00:01.000Z',
           });
           yield* saveCandidateReview(home, deferred);
-          expect((yield* request()).candidates[0].state).toBe('deferred');
+          expect(Result.isFailure(yield* request().pipe(Effect.result))).toBe(true);
+          expect(Result.isFailure(yield* request(true).pipe(Effect.result))).toBe(true);
           expect(calls).toBe(2);
+          const resumed = yield* decideTopicMaintenanceReview(config, {
+            reviewId: deferred.reviewId,
+            revision: deferred.revision,
+            action: 'resume',
+            caseId,
+          });
+          expect(resumed.candidates[0].state).toBe('pending');
           const restored = yield* request(true);
-          expect(restored.revision).toBeGreaterThan(deferred.revision);
+          expect(restored.revision).toBeGreaterThan(resumed.revision);
           expect(restored.candidates[0].state).toBe('pending');
           const system = yield* SystemInfo;
           const remoteUrl = 'https://example.invalid/v1';
@@ -387,7 +407,8 @@ describe('topic maintenance private draft generation', () => {
             () => Effect.die('Pending review must block a different model before execution.'),
           ).pipe(Effect.provideService(SystemInfo, remoteSystem), Effect.result);
           expect(Result.isFailure(blocked)).toBe(true);
-          const resolved = candidateReviewWithState(restored, restored.candidates[0].candidateId, 'deferred');
+          // Simulate a completed local review so a different selected provider may start a new proposal.
+          const resolved = candidateReviewWithState(restored, restored.candidates[0].candidateId, 'applied');
           yield* saveCandidateReview(home, resolved);
           let remoteCalls = 0;
           const remoteResult = (text: string) => ({
@@ -417,10 +438,18 @@ describe('topic maintenance private draft generation', () => {
           });
           expect(remoteCalls).toBe(1);
           expect(remoteReview.revision).toBeGreaterThan(resolved.revision);
-          yield* saveCandidateReview(
-            home,
-            candidateReviewWithState(remoteReview, remoteReview.candidates[0].candidateId, 'deferred'),
+          const deferredRemote = candidateReviewWithState(
+            remoteReview,
+            remoteReview.candidates[0].candidateId,
+            'deferred',
           );
+          yield* saveCandidateReview(home, deferredRemote);
+          yield* decideTopicMaintenanceReview(config, {
+            reviewId: deferredRemote.reviewId,
+            revision: deferredRemote.revision,
+            action: 'resume',
+            caseId,
+          });
           let abstentionCalls = 0;
           const abstentionGenerator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
             Effect.sync(() => {
@@ -455,11 +484,27 @@ describe('topic maintenance private draft generation', () => {
             remoteGenerator,
           ).pipe(Effect.provideService(SystemInfo, remoteSystem));
           expect(cachedAfterUnrelatedHead.revision).toBe(abstentionReview.revision);
+          expect(
+            (yield* verifyTopicMaintenanceReviewSource(
+              config,
+              acceptedRecord,
+              abstentionReview.maintenance!,
+              repository,
+            )).outcome,
+          ).toBe('ready');
           expect(remoteCalls).toBe(1);
-          yield* saveCandidateReview(
-            home,
-            candidateReviewWithState(abstentionReview, abstentionReview.candidates[0].candidateId, 'deferred'),
+          const deferredAbstention = candidateReviewWithState(
+            abstentionReview,
+            abstentionReview.candidates[0].candidateId,
+            'deferred',
           );
+          yield* saveCandidateReview(home, deferredAbstention);
+          yield* decideTopicMaintenanceReview(config, {
+            reviewId: deferredAbstention.reviewId,
+            revision: deferredAbstention.revision,
+            action: 'resume',
+            caseId,
+          });
           const indexer = yield* CodeGraphIndexer;
           const inFlightUnrelatedHead: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
             Effect.gen(function* () {
@@ -501,6 +546,90 @@ describe('topic maintenance private draft generation', () => {
           expect((yield* readTopicMaintenanceDraft(config, restored.reviewId)).revision).toBe(
             afterUnrelatedHead.revision,
           );
+          yield* indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          let changedCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          for (
+            let tick = 0;
+            tick < 12 && changedCase?.evidenceRevision === afterUnrelatedHead.maintenance?.basis.observationRevision;
+            tick++
+          ) {
+            yield* runContextMaintenance(config, {cwd: repository});
+            changedCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          }
+          expect(changedCase?.disposition).toBe('needs-decision');
+          expect(changedCase?.evidenceRevision).not.toBe(afterUnrelatedHead.maintenance?.basis.observationRevision);
+          const rejectedStale = yield* decideTopicMaintenanceReview(config, {
+            reviewId: afterUnrelatedHead.reviewId,
+            revision: afterUnrelatedHead.revision,
+            action: 'reject',
+            caseId,
+          });
+          expect(rejectedStale.candidates[0].state).toBe('rejected');
+          const retriedRejection = yield* decideTopicMaintenanceReview(config, {
+            reviewId: afterUnrelatedHead.reviewId,
+            revision: afterUnrelatedHead.revision,
+            action: 'reject',
+            caseId,
+          });
+          expect(retriedRejection.revision).toBe(rejectedStale.revision);
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]).toMatchObject({
+            disposition: 'needs-decision',
+            evidenceRevision: changedCase?.evidenceRevision,
+          });
+          const freshAfterRejection = yield* remoteRequest(remoteGenerator);
+          expect(freshAfterRejection.revision).toBeGreaterThan(rejectedStale.revision);
+          expect(freshAfterRejection.maintenance?.basis.observationRevision).toBe(changedCase?.evidenceRevision);
+          const deferredFresh = yield* decideTopicMaintenanceReview(config, {
+            reviewId: freshAfterRejection.reviewId,
+            revision: freshAfterRejection.revision,
+            action: 'defer',
+            caseId,
+          });
+          expect(Result.isFailure(yield* remoteRequest(remoteGenerator).pipe(Effect.result))).toBe(true);
+          yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 120;\n');
+          yield* git(['add', '.']);
+          yield* git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'changed-again',
+          ]);
+          yield* indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          let nextCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          for (let tick = 0; tick < 12 && nextCase?.evidenceRevision === changedCase?.evidenceRevision; tick++) {
+            yield* runContextMaintenance(config, {cwd: repository});
+            nextCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+          }
+          expect(nextCase?.evidenceRevision).not.toBe(changedCase?.evidenceRevision);
+          expect(nextCase?.disposition).toBe('needs-decision');
+          const staleResume = yield* decideTopicMaintenanceReview(config, {
+            reviewId: deferredFresh.reviewId,
+            revision: deferredFresh.revision,
+            action: 'resume',
+            caseId,
+          }).pipe(Effect.result);
+          expect(Result.isFailure(staleResume)).toBe(true);
+          expect((yield* loadCandidateReviewOptional(home, deferredFresh.reviewId))?.candidates[0].state).toBe(
+            'deferred',
+          );
+          const retriedDeferral = yield* decideTopicMaintenanceReview(config, {
+            reviewId: freshAfterRejection.reviewId,
+            revision: freshAfterRejection.revision,
+            action: 'defer',
+            caseId,
+          });
+          expect(retriedDeferral.revision).toBe(deferredFresh.revision);
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'needs-decision',
+          );
+          const freshAfterDeferral = yield* remoteRequest(remoteGenerator);
+          expect(freshAfterDeferral.revision).toBeGreaterThan(deferredFresh.revision);
+          expect(freshAfterDeferral.maintenance?.basis.observationRevision).toBe(nextCase?.evidenceRevision);
+          expect(freshAfterDeferral.candidates[0].state).toBe('pending');
           const binary = system.environment().THREADNOTE_E2E_BINARY;
           const executable = binary ?? system.executablePath;
           const prefix = binary ? [] : [path.join(system.currentDirectory(), 'apps/threadnote/src/standalone.ts')];
@@ -519,7 +648,47 @@ describe('topic maintenance private draft generation', () => {
               timeoutMs: 60_000,
             },
           );
-          expect(JSON.parse(cli.stdout).maintenance).toEqual(afterUnrelatedHead.maintenance);
+          expect(JSON.parse(cli.stdout).maintenance).toEqual(freshAfterDeferral.maintenance);
+          const deferredSaved = yield* Deferred.make<void>();
+          const releaseReconcile = yield* Deferred.make<void>();
+          const delayedReconcile: typeof recordTopicMaintenanceReviewDecision = (selected, input) =>
+            input.action === 'defer'
+              ? Effect.gen(function* () {
+                  yield* Deferred.succeed(deferredSaved, undefined);
+                  yield* Deferred.await(releaseReconcile);
+                  return yield* recordTopicMaintenanceReviewDecision(selected, input);
+                })
+              : recordTopicMaintenanceReviewDecision(selected, input);
+          const deferFiber = yield* Effect.forkScoped(
+            decideTopicMaintenanceReview(
+              config,
+              {reviewId: freshAfterDeferral.reviewId, revision: freshAfterDeferral.revision, action: 'defer', caseId},
+              delayedReconcile,
+            ),
+          );
+          yield* Deferred.await(deferredSaved);
+          expect((yield* loadCandidateReviewOptional(home, freshAfterDeferral.reviewId))?.candidates[0].state).toBe(
+            'deferred',
+          );
+          const resumeFiber = yield* Effect.forkScoped(
+            decideTopicMaintenanceReview(config, {
+              reviewId: freshAfterDeferral.reviewId,
+              revision: freshAfterDeferral.revision + 1,
+              action: 'resume',
+              caseId,
+            }),
+          );
+          yield* Effect.sleep('150 millis');
+          expect((yield* loadCandidateReviewOptional(home, freshAfterDeferral.reviewId))?.candidates[0].state).toBe(
+            'deferred',
+          );
+          yield* Deferred.succeed(releaseReconcile, undefined);
+          yield* Fiber.join(deferFiber);
+          const resumedAfterConcurrentDefer = yield* Fiber.join(resumeFiber);
+          expect(resumedAfterConcurrentDefer.candidates[0].state).toBe('pending');
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'needs-decision',
+          );
           const reviewPath = path.join(home, 'threadnote/candidates/v1/reviews', `${review.reviewId}.json`);
           yield* fs.writeFileString(reviewPath, '{malformed');
           expect(Result.isFailure(yield* loadCandidateReviewOptional(home, review.reviewId).pipe(Effect.result))).toBe(

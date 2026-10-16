@@ -14,6 +14,7 @@ import {
   type MemoryCodeCitationV1,
 } from './code/citation.js';
 import type {MemoryKind, MemoryStatus} from './types.js';
+import type {TopicMaintenanceManifestV2} from './topic-maintenance.js';
 
 export interface ConsolidationSource {
   readonly uri: string;
@@ -56,8 +57,32 @@ export interface ConsolidationProvenance extends ConsolidationOptions {
   readonly reviews: readonly ConsolidationReview[];
 }
 
+export interface ConsolidationProvenanceV2 {
+  readonly version: 2;
+  readonly origin: ConsolidationProvenance;
+  readonly originBody: string;
+  readonly bodyHash: string;
+  readonly requestHash: string;
+  readonly acceptance: {
+    readonly reviewId: string;
+    readonly targetBeforeHash: string;
+    readonly packetDigest: string;
+    readonly observationRevision: string;
+    readonly paragraphs: readonly {
+      readonly ordinal: number;
+      readonly originOrdinal: number;
+      readonly hash: string;
+      readonly evidence: 'origin' | 'reviewed-current';
+      readonly citationIds: readonly string[];
+    }[];
+  };
+}
+
+export type ConsolidationReceipt = ConsolidationProvenance | ConsolidationProvenanceV2;
+
 export const MAX_CONSOLIDATION_SOURCES = 16;
 export const MAX_CONSOLIDATION_BYTES = 60 * 1024;
+export const MAX_CONSOLIDATION_V2_BYTES = 128 * 1024;
 const digest = /^[a-f0-9]{64}$/;
 const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
 function fail(message: string): never {
@@ -114,6 +139,28 @@ const ProvenanceSchema = Schema.Struct({
   target: ConsolidationTargetSchema,
   sources: Schema.Array(SourceSchema).check(Schema.isMinLength(1), Schema.isMaxLength(16)),
   reviews: Schema.Array(ReviewSchema).check(Schema.isMaxLength(64)),
+});
+const ProvenanceV2Schema = Schema.Struct({
+  version: Schema.Literal(2),
+  origin: ProvenanceSchema,
+  originBody: Schema.String,
+  bodyHash: Schema.String,
+  requestHash: Schema.String,
+  acceptance: Schema.Struct({
+    reviewId: Schema.String,
+    targetBeforeHash: Schema.String,
+    packetDigest: Schema.String,
+    observationRevision: Schema.String,
+    paragraphs: Schema.Array(
+      Schema.Struct({
+        ordinal: Schema.Int,
+        originOrdinal: Schema.Int,
+        hash: Schema.String,
+        evidence: Schema.Literals(['origin', 'reviewed-current']),
+        citationIds: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+      }),
+    ).check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  }),
 });
 
 /** Blank-line-delimited paragraphs, including Markdown headings and code blocks, are reviewed verbatim. */
@@ -329,4 +376,127 @@ export function validateConsolidationProvenance(
   if (result.provenance.requestHash !== provenance.requestHash)
     fail('persisted receipt differs from reviewed provenance.');
   return result;
+}
+
+/** Preserve the original note derivation while binding one replaceable reviewed code-support layer. */
+export function buildConsolidationProvenanceV2(
+  previous: ConsolidationReceipt,
+  previousBody: string,
+  body: string,
+  manifest: TopicMaintenanceManifestV2,
+  acceptance: Omit<ConsolidationProvenanceV2['acceptance'], 'paragraphs'>,
+): ConsolidationProvenanceV2 {
+  const origin = previous.version === 1 ? previous : previous.origin;
+  const originBody = previous.version === 1 ? previousBody : previous.originBody;
+  validateConsolidationProvenance(origin, originBody);
+  if (previous.version === 2) validateConsolidationProvenanceV2(previous, previousBody);
+  const sections = consolidationSections(body);
+  const originalSections = consolidationSections(originBody);
+  if (sections.length !== originalSections.length || manifest.paragraphs.length !== sections.length)
+    fail('maintenance must preserve the original paragraph geometry.');
+  const paragraphs = sections.map((section, ordinal) => {
+    const review = origin.reviews[ordinal];
+    const citationIds = manifest.paragraphs[ordinal].citationIds;
+    const oldIds = [...new Set(review.supports.flatMap(support => support.citationIds))].sort();
+    const evidence =
+      section === review.section && JSON.stringify([...citationIds].sort()) === JSON.stringify(oldIds)
+        ? ('origin' as const)
+        : ('reviewed-current' as const);
+    return {
+      ordinal,
+      originOrdinal: ordinal,
+      hash: consolidationRevision(section),
+      evidence,
+      citationIds,
+    };
+  });
+  const payload = {
+    version: 2 as const,
+    origin,
+    originBody,
+    bodyHash: consolidationRevision(body.trim()),
+    acceptance: {...acceptance, paragraphs},
+  };
+  const receipt: ConsolidationProvenanceV2 = {...payload, requestHash: sha256HexSync(JSON.stringify(payload))};
+  validateConsolidationProvenanceV2(receipt, body);
+  return receipt;
+}
+
+export function validateConsolidationProvenanceV2(value: unknown, body: string): ConsolidationProvenanceV2 {
+  const receipt = Schema.decodeUnknownSync(ProvenanceV2Schema, strict)(value);
+  const stored = value as ConsolidationProvenanceV2;
+  if (bytes(JSON.stringify(receipt)) > MAX_CONSOLIDATION_V2_BYTES)
+    fail('maintenance provenance exceeds the 128 KiB limit.');
+  if (bytes(receipt.originBody) > 32 * 1024 || receipt.originBody.length === 0)
+    fail('maintenance origin body is missing or oversized.');
+  validateConsolidationProvenance(receipt.origin, receipt.originBody);
+  const sections = consolidationSections(body);
+  if (
+    sections.length !== consolidationSections(receipt.originBody).length ||
+    receipt.bodyHash !== consolidationRevision(body.trim()) ||
+    !digest.test(receipt.bodyHash) ||
+    !digest.test(receipt.requestHash) ||
+    !digest.test(receipt.acceptance.targetBeforeHash) ||
+    !digest.test(receipt.acceptance.packetDigest) ||
+    !digest.test(receipt.acceptance.observationRevision) ||
+    !/^review-[a-z0-9-]{1,80}$/u.test(receipt.acceptance.reviewId) ||
+    receipt.acceptance.paragraphs.length !== sections.length
+  )
+    fail('maintenance derivation is stale or malformed.');
+  for (const [ordinal, paragraph] of receipt.acceptance.paragraphs.entries()) {
+    const originReview = receipt.origin.reviews[ordinal];
+    const oldIds = [...new Set(originReview.supports.flatMap(support => support.citationIds))].sort();
+    if (
+      paragraph.ordinal !== ordinal ||
+      paragraph.originOrdinal !== ordinal ||
+      paragraph.hash !== consolidationRevision(sections[ordinal]) ||
+      new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
+      paragraph.citationIds.some(id => !/^tncc_[a-f0-9]{40}$/u.test(id)) ||
+      (paragraph.evidence === 'origin' &&
+        (sections[ordinal] !== originReview.section ||
+          JSON.stringify([...paragraph.citationIds].sort()) !== JSON.stringify(oldIds))) ||
+      (paragraph.evidence === 'reviewed-current' && paragraph.citationIds.length === 0)
+    )
+      fail(`maintenance paragraph ${ordinal + 1} has invalid origin or current support.`);
+  }
+  const payload = {
+    version: stored.version,
+    origin: stored.origin,
+    originBody: stored.originBody,
+    bodyHash: stored.bodyHash,
+    acceptance: stored.acceptance,
+  };
+  if (receipt.requestHash !== sha256HexSync(JSON.stringify(payload)))
+    fail('maintenance receipt differs from reviewed provenance.');
+  return stored;
+}
+
+export function validateConsolidationV2ActiveEvidence(
+  receipt: ConsolidationProvenanceV2,
+  manifest: TopicMaintenanceManifestV2,
+  citations: readonly MemoryCodeCitationV1[],
+  relations: readonly MemoryRelation[],
+): void {
+  const origin = validateConsolidationProvenance(receipt.origin, receipt.originBody);
+  if (JSON.stringify(relations) !== JSON.stringify(origin.relations))
+    fail('maintenance changed original reviewed relations.');
+  if (manifest.paragraphs.length !== receipt.acceptance.paragraphs.length)
+    fail('maintenance manifest and derivation paragraph counts differ.');
+  for (const [ordinal, paragraph] of receipt.acceptance.paragraphs.entries())
+    if (JSON.stringify(paragraph.citationIds) !== JSON.stringify(manifest.paragraphs[ordinal].citationIds))
+      fail(`maintenance paragraph ${ordinal + 1} cites different reviewed support.`);
+  const required = new Set([
+    ...origin.codeCitations.map(citation => citation.id),
+    ...manifest.originCitationIds,
+    ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
+    ...manifest.additionalDependencies.map(dependency => dependency.citationId),
+    ...manifest.acceptedSources.map(source => source.acceptedCitationId),
+  ]);
+  const actual = new Map(citations.map(citation => [citation.id, citation]));
+  if (required.size !== citations.length || required.size > MAX_MEMORY_CODE_CITATIONS)
+    fail('maintenance active citation union exceeds eight or differs from reviewed support.');
+  for (const id of required) if (!actual.has(id)) fail('maintenance omitted a reviewed citation.');
+  for (const original of origin.codeCitations)
+    if (JSON.stringify(actual.get(original.id)) !== JSON.stringify(original))
+      fail('maintenance changed immutable original code evidence.');
 }

@@ -4,6 +4,7 @@ import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {
   assertMemoryDocumentSchemaWritable,
+  declaresTopicMaintenanceHeader,
   formatMemoryDocument,
   formatMemoryDocumentWithKeywords,
   parseMemoryDocument,
@@ -12,6 +13,7 @@ import {
   buildTopicMaintenanceManifest,
   hasTopicMaintenanceEnrollment,
   proposeTopicMaintenanceEnrollment,
+  topicMaintenanceAcceptedCitation,
   validateTopicMaintenanceEnrollmentInput,
   validateTopicMaintenanceManifest,
   topicMaintenanceReplacementError,
@@ -66,6 +68,34 @@ function decisions() {
 }
 
 describe('topic maintenance manifest', () => {
+  it('detects declarations using the parser header boundary across line endings and whitespace rows', () => {
+    const proposal = proposeTopicMaintenanceEnrollment(record(), decisions());
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(' ', '\t', ' \t '), {minLength: 1, maxLength: 3}),
+        fc.constantFrom('\n', '\r\n', '\r'),
+        (rows, newline) => {
+          const content = proposal.content
+            .replace('topic_maintenance:', `${rows.join('\n')}\ntopic_maintenance:`)
+            .replaceAll('\n', newline);
+          expect(parseMemoryDocument(uri, content)?.metadata.topicMaintenance).toEqual(proposal.manifest);
+          expect(declaresTopicMaintenanceHeader(content)).toBe(true);
+          expect(
+            declaresTopicMaintenanceHeader(
+              content.replace(/topic_maintenance: [^\r\n]+/u, ' topic_maintenance : {broken'),
+            ),
+          ).toBe(true);
+          expect(
+            declaresTopicMaintenanceHeader(
+              record().content.replaceAll('\n', newline) + newline + newline + 'topic_maintenance: prose only',
+            ),
+          ).toBe(false);
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
   it('keeps malformed enrollment protected from automatic lifecycle changes', () => {
     const source = record();
     expect(hasTopicMaintenanceEnrollment(source)).toBe(false);
@@ -96,7 +126,7 @@ describe('topic maintenance manifest', () => {
     );
   });
 
-  it('enrolls canonical schema 9 while preserving existing provenance and duplicate paragraph identity', () => {
+  it('enrolls canonical schema 10 while preserving existing provenance and duplicate paragraph identity', () => {
     const source = record();
     const proposal = proposeTopicMaintenanceEnrollment(source, decisions());
     const parsed = parseMemoryDocument(uri, proposal.content)!;
@@ -105,7 +135,7 @@ describe('topic maintenance manifest', () => {
     expect(proposal.manifest.paragraphs.map(paragraph => paragraph.ordinal)).toEqual([0, 1, 2]);
     expect(proposal.manifest.paragraphs[0].hash).toBe(proposal.manifest.paragraphs[1].hash);
     expect(proposal.manifest.bodyHash).toBeDefined();
-    expect(proposal.content).toContain('schema_version: 9');
+    expect(proposal.content).toContain('schema_version: 10');
     expect(
       parseMemoryDocument(uri, formatMemoryDocumentWithKeywords(proposal.content, ['updated']))?.metadata
         .topicMaintenance,
@@ -179,7 +209,7 @@ describe('topic maintenance manifest', () => {
     expect(proposal.content.slice(proposal.content.indexOf('\r\n\r\n') + 4)).toBe(
       content.slice(content.indexOf('\r\n\r\n') + 4),
     );
-    expect(proposal.content).toContain('schema_version: 9\r\n');
+    expect(proposal.content).toContain('schema_version: 10\r\n');
   });
 
   it('rejects malformed and unsupported manifest headers before rewrite', () => {
@@ -189,7 +219,7 @@ describe('topic maintenance manifest', () => {
       content.replace(/^topic_maintenance: .*$/mu, line => `${line}\n${line}`),
       content.replace(/^topic_maintenance: .*$/mu, line => ` ${line}`),
       content.replace(/^topic_maintenance: .*$/mu, line => line.replace(': ', ':  ')),
-      content.replace('schema_version: 9', 'schema_version: 8'),
+      content.replace('schema_version: 10', 'schema_version: 8'),
       content.replace('Same paragraph.', 'Edited paragraph.'),
       content.replace('"version":1', '"version":2'),
     ];
@@ -199,6 +229,43 @@ describe('topic maintenance manifest', () => {
       expect(() => assertMemoryDocumentSchemaWritable(malformed)).toThrow(/topic maintenance/i);
       expect(memoryCodeCitationContentSharingBlocker(uri, malformed)).toBe('malformed-citation');
     }
+  });
+
+  it('reads V1 schema 9 and validates V2 accepted comparison pins on schema 10', () => {
+    const proposal = proposeTopicMaintenanceEnrollment(record(), decisions());
+    const legacy = parseMemoryDocument(uri, proposal.content.replace('schema_version: 10', 'schema_version: 9'))!;
+    expect(legacy.metadata.topicMaintenance?.version).toBe(1);
+    expect(topicMaintenanceAcceptedCitation(legacy, citation.id)).toEqual(citation);
+    const {id: _id, ...currentInput} = citation;
+    const current = createMemoryCodeCitation({
+      ...currentInput,
+      fileContentHash: {algorithm: 'sha256', value: 'b'.repeat(64)},
+      sourceCommit: '5'.repeat(40),
+      sourceSnapshotId: `cgsn_${'6'.repeat(40)}`,
+    });
+    const manifest = {
+      ...proposal.manifest,
+      version: 2 as const,
+      originCitationIds: [citation.id],
+      acceptedSources: [{citationId: citation.id, acceptedCitationId: current.id}],
+    };
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {...legacy.metadata, schemaVersion: 10, codeCitations: [citation, current], topicMaintenance: manifest},
+      legacy.body,
+    );
+    const accepted = parseMemoryDocument(uri, content)!;
+    expect(accepted.metadata.topicMaintenance).toEqual(manifest);
+    expect(topicMaintenanceAcceptedCitation(accepted, citation.id)).toEqual(current);
+    for (const changed of [
+      {...manifest, acceptedSources: []},
+      {...manifest, acceptedSources: [{...manifest.acceptedSources[0], acceptedCitationId: `tncc_${'f'.repeat(40)}`}]},
+      {...manifest, acceptedSources: [{...manifest.acceptedSources[0], unknown: true}]},
+    ])
+      expect(() => validateTopicMaintenanceManifest(changed, accepted)).toThrow();
+    const oldWriter = content.replace('schema_version: 10', 'schema_version: 9');
+    expect(parseMemoryDocument(uri, oldWriter)?.metadata.topicMaintenanceError).toMatch(/V2.*schema version 10/);
+    expect(() => assertMemoryDocumentSchemaWritable(oldWriter)).toThrow();
   });
 
   it('has deterministic round trips and invalidates any edited paragraph (property)', () => {

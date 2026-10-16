@@ -115,6 +115,8 @@ const ApplicationServicesLayer = Layer.mergeAll(
   cliOutputLayer,
   threadnoteCliFormatterLayer,
   codeGraphQueryLayer,
+  codeGraphStoreLayer,
+  codeGraphLanguagePackLayer,
   codeGraphAnalysisLayer,
   codeGraphWatcherLayer,
   commandLayer,

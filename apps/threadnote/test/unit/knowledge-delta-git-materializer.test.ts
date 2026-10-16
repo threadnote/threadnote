@@ -1,9 +1,15 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {buildKnowledgeDeltaGitProposalV1} from '@threadnote/threadnote/git_proposal/knowledge_delta';
+import {
+  buildKnowledgeDeltaGitProposalV1,
+  expectedBranchName,
+  verifyKnowledgeDeltaGitProposalV1,
+} from '@threadnote/threadnote/git_proposal/knowledge_delta';
 import {planKnowledgeDeltaGitMaterializationV1} from '@threadnote/threadnote/git_proposal/materializer';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
+import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
+import {enrolledGitTarget} from '../helpers/enrolled-git-target.js';
 
 const reviewId = 'review-0123456789abcdef';
 const source = [
@@ -96,4 +102,61 @@ describe('Knowledge Delta Git materializer', () => {
       {numRuns: 24},
     );
   });
+
+  it('rejects a prebuilt valid V1 replacement artifact whose exact baseline is enrolled', () => {
+    const enrolled = enrolledGitTarget('tn_source');
+    for (const content of [enrolled, enrolled.replace('topic_maintenance:', ' \n\t \ntopic_maintenance:')]) {
+      const prebuilt = replacementProposal(content);
+      expect(() => verifyKnowledgeDeltaGitProposalV1(prebuilt)).not.toThrow();
+      expect(() =>
+        planKnowledgeDeltaGitMaterializationV1(prebuilt, {...state, files: {[prebuilt.files[0].path]: content}}),
+      ).toThrow(/enrolled shared target/);
+    }
+  });
+
+  it('rejects malformed enrollment declarations across bounded header whitespace and line endings', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('', ' ', '\t'),
+        fc.constantFrom('', ' ', '\t'),
+        fc.constantFrom('\n', '\r\n'),
+        (indent, padding, newline) => {
+          const enrolled = enrolledGitTarget('tn_source')
+            .replace(/^topic_maintenance: .+$/mu, `${indent}topic_maintenance${padding}: {broken`)
+            .replaceAll('\n', newline);
+          const prebuilt = replacementProposal(enrolled);
+          expect(() =>
+            planKnowledgeDeltaGitMaterializationV1(prebuilt, {...state, files: {[prebuilt.files[0].path]: enrolled}}),
+          ).toThrow(/enrolled shared target/);
+        },
+      ),
+      {numRuns: 16},
+    );
+    const ordinary = source.replace('visibility: personal', 'visibility: shared') + '\n\ntopic_maintenance: prose only';
+    const compatible = replacementProposal(ordinary);
+    expect(() =>
+      planKnowledgeDeltaGitMaterializationV1(compatible, {...state, files: {[compatible.files[0].path]: ordinary}}),
+    ).not.toThrow();
+  });
 });
+
+/** Simulates a pre-existing/exported V1 artifact; a current builder must not authorize this downgrade. */
+function replacementProposal(target: string) {
+  const file = proposal.files[0];
+  const binding = {
+    ...proposal,
+    files: [
+      {
+        ...file,
+        operation: 'replace' as const,
+        targetPrecondition: {
+          state: 'present' as const,
+          expectedContentHash: sha256HexSync(target),
+          expectedMemoryId: file.memory.id,
+        },
+      },
+    ],
+  };
+  const {proposalHash: _hash, ...unsigned} = {...binding, branch: {name: expectedBranchName(binding)}};
+  return {...unsigned, proposalHash: sha256HexSync(canonicalJson(unsigned))};
+}

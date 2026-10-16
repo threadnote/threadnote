@@ -211,6 +211,21 @@ describe('topic maintenance draft contract', () => {
     };
     expect(validateTopicMaintenanceReviewEvidence(basis, reviewEvidence)).toEqual(reviewEvidence);
     expect(validateTopicMaintenanceReviewPayload(maintenance)).toEqual(maintenance);
+    const manual = {
+      origin: 'manual',
+      agent: 'manual',
+      model: 'none',
+      promptVersion: 'manual-topic-v1',
+      attempts: 0,
+      usage: {status: 'unavailable'},
+    };
+    expect(validateTopicMaintenanceReviewPayload({...maintenance, generation: manual}).generation).toEqual(manual);
+    expect(() => validateTopicMaintenanceReviewPayload({...maintenance, generation: {...manual, attempts: 1}})).toThrow(
+      /manual/,
+    );
+    expect(() =>
+      validateTopicMaintenanceReviewPayload({...maintenance, generation: {...manual, modelVersion: 'fake'}}),
+    ).toThrow(/manual/);
     expect(
       validateTopicMaintenanceReviewPayload({
         ...maintenance,
