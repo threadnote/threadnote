@@ -1357,7 +1357,10 @@ describe('native memory workflow', () => {
             {relativeUri: 'other.md', content: memory('Other memory.')},
             {
               relativeUri: 'cited.md',
-              content: memory('Future writer.').replace('schema_version: 7', 'schema_version: 9'),
+              content: memory('Future writer.').replace(
+                'schema_version: 7',
+                `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+              ),
             },
           ]);
           yield* assertRejectedWithoutWrites('newer than supported');
