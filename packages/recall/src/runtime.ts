@@ -303,7 +303,6 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         workspaceScope,
       }))
     : [];
-  const workspaceProject = input.project?.trim() || undefined;
   const workspaceBranch = navigationOnly ? undefined : input.workspaceBranch?.trim();
   const branchIndexSelections = workspaceBranch
     ? scopeSets.map(allowedUriScopes => ({
@@ -363,6 +362,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
           includeInactive: input.includeInactive,
           now,
           project: input.project,
+          eligibility: input.eligibility,
           queryVariants,
           workspaceScope,
         },
@@ -389,6 +389,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
           includeInactive: input.includeInactive,
           now,
           project: input.project,
+          eligibility: input.eligibility,
           queryVariants,
           workspaceScope,
         },
@@ -412,7 +413,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
   const shouldLoadCrossScopeFallback =
     Result.isSuccess(recallIndexResult) &&
     workspaceScope !== undefined &&
-    workspaceProject !== undefined &&
+    (input.eligibility !== undefined || (input.project?.trim().length ?? 0) > 0) &&
     broadTopicalRecallIndexes.some(index => recallCrossScopeFallbackRequired(index?.queryExhaustive));
   const crossScopeFallbackResult = shouldLoadCrossScopeFallback
     ? yield* loadRecallIndexData(config, {
@@ -424,7 +425,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
         eligibility: input.eligibility,
         includeInactive: input.includeInactive,
         limit: laneBudgets.crossSelectionLimit,
-        project: workspaceProject,
+        project: input.eligibility === undefined ? input.project : undefined,
         // Query variants are topical evidence too. Combining them keeps this
         // to one bounded sibling selection while rescuing a relevant memory
         // whose wording is reachable only through an approved rewrite.
@@ -439,6 +440,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
           includeInactive: input.includeInactive,
           now,
           project: input.project,
+          eligibility: input.eligibility,
           queryVariants,
           workspaceScope,
         })
@@ -451,6 +453,7 @@ const prepareRecallSectionsAttempt = Effect.fn('recall.prepareSectionsAttempt')(
           includeInactive: input.includeInactive,
           now,
           project: input.project,
+          eligibility: input.eligibility,
           queryVariants,
           workspaceScope,
         },
@@ -1022,11 +1025,14 @@ export function buildRecallIndexSelectionCandidates(
   indexedCandidates: readonly RecallCandidate[],
   project: string | undefined,
   limit: number,
+  eligibility?: RecallEligibilityPolicy,
 ): readonly RecallSelectionCandidate[] {
   const normalizedProject = project?.trim().toLowerCase();
-  const candidates = normalizedProject
-    ? indexedCandidates.filter(candidate => candidate.fields?.project?.trim().toLowerCase() === normalizedProject)
-    : indexedCandidates;
+  const candidates = indexedCandidates.filter(candidate =>
+    eligibility === undefined
+      ? !normalizedProject || candidate.fields?.project?.trim().toLowerCase() === normalizedProject
+      : recallRuntimeCandidateIsEligible(candidate, eligibility),
+  );
   return candidates.slice(0, Math.min(limit, MAX_RECALL_SELECTION_CANDIDATES)).map((candidate, index) => {
     const uri = candidate.uri.replace(/#.*$/, '');
     const uriTopic = uri.slice(uri.lastIndexOf('/') + 1).replace(/\.[a-z0-9]+$/i, '');
@@ -1152,7 +1158,7 @@ export const loadRecallExpansionVocabulary = Effect.fn('recall.loadExpansionVoca
       recallUriMatchesScopes(candidate.uri, input.allowedUriScopes) &&
       recallRuntimeCandidateIsEligible(candidate, input.eligibility),
   );
-  const rankedVocabulary = recallExpansionVocabulary(rankedCandidates, input.project);
+  const rankedVocabulary = recallExpansionVocabulary(rankedCandidates, input.project, input.eligibility);
   if (rankedVocabulary.length >= EXPANSION_VOCABULARY_LIMIT) {
     return rankedVocabulary;
   }
@@ -1161,9 +1167,13 @@ export const loadRecallExpansionVocabulary = Effect.fn('recall.loadExpansionVoca
     eligibility: input.eligibility,
     includeInactive: input.includeInactive,
     limit: EXPANSION_VOCABULARY_INDEX_SAMPLE_LIMIT,
-    project: input.project,
+    project: input.eligibility === undefined ? input.project : undefined,
   });
-  return recallExpansionVocabulary(mergeRecallIndexCandidates([rankedCandidates, index.candidates]), input.project);
+  return recallExpansionVocabulary(
+    mergeRecallIndexCandidates([rankedCandidates, index.candidates]),
+    input.project,
+    input.eligibility,
+  );
 });
 
 export function mergeRecallIndexCandidates(
@@ -1298,6 +1308,7 @@ export function prioritizeWorkspaceRecallCandidates(
   query: string,
   candidates: readonly RecallCandidate[],
   context: Pick<RecallRankContext, 'includeInactive' | 'now' | 'project' | 'queryVariants'> & {
+    readonly eligibility?: RecallEligibilityPolicy;
     readonly workspaceScope: string;
   },
 ): readonly RecallCandidate[] {
@@ -1317,6 +1328,7 @@ export function prioritizeCrossScopeRecallCandidates(
   query: string,
   candidates: readonly RecallCandidate[],
   context: Pick<RecallRankContext, 'includeInactive' | 'now' | 'project' | 'queryVariants'> & {
+    readonly eligibility?: RecallEligibilityPolicy;
     readonly workspaceScope: string;
   },
 ): readonly RecallCandidate[] {
@@ -1324,7 +1336,9 @@ export function prioritizeCrossScopeRecallCandidates(
   const crossScopeCandidates = candidates.filter(
     candidate =>
       recallWorkspaceScopeMatches(context.workspaceScope, candidate.fields?.workspaceScope, 'sibling') &&
-      (!project || candidate.fields?.project?.trim().toLowerCase() === project),
+      (context.eligibility === undefined
+        ? !project || candidate.fields?.project?.trim().toLowerCase() === project
+        : recallRuntimeCandidateIsEligible(candidate, context.eligibility)),
   );
   return rankRecallCandidates(query, crossScopeCandidates, {
     includeInactive: context.includeInactive,
@@ -1415,14 +1429,23 @@ export function mergeRecallExpansionCandidates(
 export function recallExpansionVocabulary(
   candidates: readonly RecallCandidate[],
   project: string | undefined,
+  eligibility?: RecallEligibilityPolicy,
 ): readonly string[] {
   if (!project) return [];
   const normalizedProject = project.trim().toLowerCase();
   const seen = new Set<string>();
   const vocabulary: string[] = [];
-  const projectCandidates = prioritizeRecallExpansionCandidates(
-    candidates.filter(candidate => candidate.fields?.project?.trim().toLowerCase() === normalizedProject),
+  const eligibleCandidates = candidates.filter(candidate =>
+    eligibility === undefined
+      ? candidate.fields?.project?.trim().toLowerCase() === normalizedProject
+      : recallRuntimeCandidateIsEligible(candidate, eligibility),
   );
+  const projectCandidates = [...prioritizeRecallExpansionCandidates(eligibleCandidates)].sort(
+    (left, right) =>
+      Number(right.fields?.project?.trim().toLowerCase() === normalizedProject) -
+      Number(left.fields?.project?.trim().toLowerCase() === normalizedProject),
+  );
+
   const append = (term: string | undefined, dedupeTerm = term): boolean => {
     const value = term?.trim();
     const dedupeValue = dedupeTerm?.trim();

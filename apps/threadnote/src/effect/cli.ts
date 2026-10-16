@@ -1380,7 +1380,7 @@ const recall = Command.make(
     ),
     dryRun: boolean('dry-run', 'Print the native query without searching'),
     includeArchived: boolean('include-archived', 'Include archived memories in recall results'),
-    inferScope: negatedBoolean('infer-scope', 'Disable query-based scope inference'),
+    inferScope: negatedBoolean('infer-scope', 'Disable implicit project, repository, URI and workset scope selection'),
     memoryRefs: repeatedString(
       'memory-ref',
       'Stable memory ID or managed memory URI to expand by one hop; repeat for multiple premises',
@@ -1391,7 +1391,10 @@ const recall = Command.make(
       'limit',
       'string',
     ),
-    project: optionalString('project', 'Restrict to this project plus projectless guidance; omit for global recall'),
+    project: optionalString(
+      'project',
+      'Exact project plus projectless guidance; default all configured projects in caller checkout',
+    ),
     query: optionalString('query', 'Search query; optional when --memory-ref supplies an explicit navigation seed'),
     relationTypes: repeatedString(
       'relation-type',

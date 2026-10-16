@@ -377,3 +377,54 @@ describe('recall eligibility policy', () => {
     );
   });
 });
+
+describe('plural recall workspace eligibility', () => {
+  it('preserves singular Context Brief behavior and accepts an explicit empty plural boundary', () => {
+    expect(deriveRecallEligibilityPolicy({originalQuery: 'tax', workspaceProject: 'product'})).toMatchObject({
+      projects: {projects: ['product']},
+    });
+    expect(deriveRecallEligibilityPolicy({originalQuery: 'tax', workspaceProjects: []})).toMatchObject({
+      projects: {mode: 'projectless-only'},
+    });
+  });
+
+  it('keeps project policy invariant under incidental query tokens', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('product', 'mobile', 'checkout', 'tax', 'foreign-workset'), {maxLength: 12}),
+        tokens => {
+          const policy = deriveRecallEligibilityPolicy({
+            originalQuery: tokens.join(' '),
+            workspaceProjects: ['product', 'product-mobile'],
+          });
+          expect(policy).toMatchObject({projects: {projects: ['product', 'product-mobile']}});
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+
+  it('is permutation invariant and adding a same-checkout sibling is monotone', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.stringMatching(/^[a-z]{1,12}$/), {maxLength: 12}),
+        fc.stringMatching(/^[a-z]{1,12}$/),
+        (projects, sibling) => {
+          const initial = deriveRecallEligibilityPolicy({originalQuery: 'tax', workspaceProjects: projects});
+          const added = deriveRecallEligibilityPolicy({
+            originalQuery: 'tax',
+            workspaceProjects: [...projects, sibling],
+          });
+          expect(
+            deriveRecallEligibilityPolicy({originalQuery: 'tax', workspaceProjects: [...projects].reverse()}),
+          ).toEqual(initial);
+          for (const project of [...projects, undefined])
+            if (recallCandidateIsEligible(initial, {project}))
+              expect(recallCandidateIsEligible(added, {project})).toBe(true);
+          expect(recallCandidateIsEligible(added, {project: sibling})).toBe(true);
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+});

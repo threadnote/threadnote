@@ -361,3 +361,11 @@ export function mcpErrorResult(error: unknown): CallToolResult {
 export function setMcpStartupVersion(version: string | undefined): void {
   mcpStartupVersion = version;
 }
+
+export function normalizeStringOrStrings(value: string | readonly string[] | undefined): readonly string[] {
+  return typeof value === 'string' ? [value] : (value ?? []);
+}
+export function commonCitationSourceCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
+  const commits = new Set(citations.map(citation => citation.sourceCommit));
+  return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
+}

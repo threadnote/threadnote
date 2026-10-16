@@ -1,13 +1,10 @@
 import {Effect, Result} from 'effect';
-import {inferProjectFromQuery, inferWorksetFromQuery, requireWorkset} from '@threadnote/workspace/manifest';
-import type {ProjectManifest} from '@threadnote/workspace/config';
+import {resolveRecallScope} from '../../memory/recall_scope.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {
-  enrichRecallQueryWithWorkspaceProjectContext,
   recallQueryRequestsBranchContext,
   resolveWorkspaceBranch,
   resolveWorkspaceComponentContext,
-  resolveWorkspaceRepoName,
   trimTrailingSlash,
 } from '../../utils.js';
 import {recallScoreThresholdPolicy} from '@threadnote/recall/threshold';
@@ -16,7 +13,7 @@ import {resolveEffectAiConfiguration} from '../../effect/ai/consolidator.js';
 import {jevConfiguration} from '../../effect/ai/jev.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {loadRecallExactMatches} from '@threadnote/recall/index';
-import {deriveRecallEligibilityPolicy, type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
+import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {lexicalIndexUnavailableWarning, type RecallOperationalWarning} from '@threadnote/recall/warning';
 import {
   exactMemoryScopes,
@@ -29,6 +26,7 @@ import {
 export interface RecallWorkspaceContextParams {
   readonly allowedUriScopes: readonly string[] | undefined;
   readonly callerCwd: string | undefined;
+  readonly inferScope?: boolean;
   readonly includeArchived: boolean;
   readonly pinnedUri: string | undefined;
   readonly project: string | undefined;
@@ -42,42 +40,26 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     const query = params.query;
     const navigationOnly = query.length === 0;
     const workspaceComponent =
-      !navigationOnly && !params.pinnedUri && !params.workset
+      !navigationOnly && params.inferScope !== false && !params.pinnedUri && !params.workset
         ? yield* resolveWorkspaceComponentContext({cwd: params.callerCwd, includeProcessCwd: false})
         : undefined;
     const workspaceBranch =
-      !navigationOnly && !params.pinnedUri && !params.workset && recallQueryRequestsBranchContext(query)
+      !navigationOnly &&
+      params.inferScope !== false &&
+      !params.pinnedUri &&
+      !params.workset &&
+      recallQueryRequestsBranchContext(query)
         ? yield* resolveWorkspaceBranch({cwd: params.callerCwd, includeProcessCwd: false})
         : undefined;
-    const projectQuery = navigationOnly
-      ? ''
-      : yield* enrichRecallQueryWithWorkspaceProjectContext(query, {
-          cwd: params.callerCwd,
-          includeProcessCwd: false,
-        });
-    const explicitProjectName = params.pinnedUri ? undefined : params.project;
-    const queryProject = params.pinnedUri
-      ? undefined
-      : yield* inferProjectFromQuery(config.manifestPath, explicitProjectName ?? params.query);
-    const project =
-      queryProject ??
-      (navigationOnly || params.pinnedUri || explicitProjectName
-        ? undefined
-        : yield* inferProjectFromQuery(config.manifestPath, projectQuery));
-    const inferredProjectMemoryName = params.pinnedUri
-      ? undefined
-      : (project?.name ??
-        (navigationOnly
-          ? undefined
-          : yield* resolveWorkspaceRepoName({cwd: params.callerCwd, includeProcessCwd: false})));
-    const recallProjectName = explicitProjectName ?? inferredProjectMemoryName;
+    const scope = yield* resolveRecallScope(config, params);
+    const project = scope.preferredManifestProject;
+    const recallProjectName = scope.preferredProject;
     const thresholdPolicy =
       params.threshold === undefined
         ? yield* recallScoreThresholdPolicy()
         : {source: 'call' as const, value: params.threshold};
     const threshold = thresholdPolicy.value;
     const thresholdConfigured = thresholdPolicy.source !== 'default';
-    const explicitWorkset = params.workset ? yield* requireWorkset(config.manifestPath, params.workset) : undefined;
     const passes: Array<readonly RecallHit[]> = [];
     const scopedRecallUris = new Set(
       [params.pinnedUri, ...(params.allowedUriScopes ?? [])].filter((uri): uri is string => uri !== undefined),
@@ -93,42 +75,19 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
     }
 
     const sections: string[] = [];
-    const workset = params.pinnedUri
-      ? undefined
-      : explicitWorkset
-        ? explicitWorkset
-        : navigationOnly
-          ? undefined
-          : yield* inferWorksetFromQuery(config.manifestPath, projectQuery);
+    const workset = scope.workset;
     if (workset && workset.projects.length > 0) {
       sections.push(`Workset scope: ${workset.name} (${workset.projects.map(member => member.name).join(', ')})`);
-      const alreadyScoped = new Set(
-        [params.pinnedUri, seededUri, ...scopedRecallUris].filter((uri): uri is string => uri !== undefined),
-      );
-      const worksetScopes = worksetScopeUris(config, workset)
-        .filter(uri => !alreadyScoped.has(uri))
-        .slice(0, MAX_WORKSET_PASSES);
-      for (const scope of worksetScopes) {
-        scopedRecallUris.add(scope);
-      }
+      for (const uri of worksetScopeUris(config, workset).slice(0, MAX_WORKSET_PASSES)) scopedRecallUris.add(uri);
     }
-
-    const eligibility = deriveRecallEligibilityPolicy({
-      explicitProject: params.project,
-      originalQuery: query,
-      pinnedHardUri: params.pinnedUri !== undefined,
-      workspaceProject: workset || params.project !== undefined ? undefined : recallProjectName,
-      worksetProjectNames: workset?.projects.map(member => member.name),
-    });
+    const eligibility = scope.eligibility;
 
     const exactLookup = yield* collectExactMemoryMatches(
       config,
       query,
       params.includeArchived,
       eligibility,
-      recallProjectName,
-      project,
-      params.allowedUriScopes,
+      params.pinnedUri ? [params.pinnedUri] : params.allowedUriScopes,
     );
     const effectAiResult = navigationOnly
       ? undefined
@@ -151,6 +110,7 @@ export function resolveRecallWorkspaceContext(config: RuntimeConfig, params: Rec
       passes,
       query,
       recallProjectName,
+      scopeProvenance: scope.provenance,
       scopedRecallUris,
       sections,
       seededUri,
@@ -167,8 +127,6 @@ const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatche
   query: string,
   includeArchived: boolean,
   eligibility: RecallEligibilityPolicy,
-  projectName: string | undefined,
-  project: ProjectManifest | undefined,
   allowedUriScopes?: readonly string[],
 ) {
   const terms = exactRecallTerms(query);
@@ -178,7 +136,7 @@ const collectExactMemoryMatches = Effect.fn('mcp_server.collectExactMemoryMatche
       operationalWarnings: [] as readonly RecallOperationalWarning[],
     };
   }
-  const scopes = allowedUriScopes ?? exactMemoryScopes(config, includeArchived, query, projectName, project);
+  const scopes = allowedUriScopes ?? exactMemoryScopes(config, includeArchived, query, undefined, undefined);
   const result = yield* loadRecallExactMatches(config, {
     eligibility,
     includeInactive: includeArchived,

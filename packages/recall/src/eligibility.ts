@@ -23,6 +23,20 @@ export type RecallEligibilityPolicy = {readonly externalResources?: Readonly<Rec
     }
 );
 
+export interface RecallScopeProvenance {
+  readonly mode: RecallProjectEligibility['mode'] | 'pinned-uri';
+  readonly reason:
+    | 'workspace-checkout'
+    | 'explicit-project'
+    | 'explicit-workset'
+    | 'pinned-uri'
+    | 'inference-disabled'
+    | 'no-workspace';
+  readonly projects?: readonly string[];
+  readonly omittedProjects?: number;
+  readonly truncatedProjectNames?: true;
+}
+
 export interface DeriveRecallEligibilityPolicyInput {
   /** The user-authored query before expansion or rewriting. */
   readonly originalQuery: string;
@@ -32,6 +46,8 @@ export interface DeriveRecallEligibilityPolicyInput {
   readonly explicitProject?: string;
   /** Project resolved from the caller workspace or manifest; unrelated projects stay ineligible. */
   readonly workspaceProject?: string;
+  /** Recall-only checkout boundary; an empty resolved set admits projectless guidance only. */
+  readonly workspaceProjects?: readonly string[];
   /** Undefined means no workset; an explicitly empty resolved workset fails closed. */
   readonly worksetProjectNames?: readonly string[];
 }
@@ -152,7 +168,7 @@ export function deriveRecallEligibilityPolicy(input: DeriveRecallEligibilityPoli
     input.explicitProject === undefined ? [] : [input.explicitProject],
   );
   const workspaceProject = normalizeRecallProjectNames(
-    input.workspaceProject === undefined ? [] : [input.workspaceProject],
+    input.workspaceProjects ?? (input.workspaceProject === undefined ? [] : [input.workspaceProject]),
   );
   const projects =
     resolvedWorksetProjects === undefined
@@ -167,7 +183,7 @@ export function deriveRecallEligibilityPolicy(input: DeriveRecallEligibilityPoli
     resolvedWorksetProjects !== undefined && projects.length === 0
       ? {mode: 'deny-all'}
       : projects.length === 0
-        ? {mode: 'unrestricted'}
+        ? {mode: input.workspaceProjects === undefined ? 'unrestricted' : 'projectless-only'}
         : {mode: 'allow-projects-and-projectless', projects};
 
   return {authority, kind: 'candidate-policy', projects: projectEligibility};
