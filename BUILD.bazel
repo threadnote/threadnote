@@ -16129,7 +16129,6 @@ bun_test(
         "//:docs/prerelease-manual-e2e-dogfood-matrix.md",
         "//:docs/release-readiness.md",
         "//:docs/releasing.md",
-        "//:docs/rfc-756-implementation.md",
         "//:docs/rollout.md",
         "//:docs/security.md",
         "//:docs/share.md",
