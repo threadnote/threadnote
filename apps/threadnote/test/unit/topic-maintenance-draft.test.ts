@@ -1,0 +1,533 @@
+import {it as effectIt} from '@effect/vitest';
+import {describe, expect, it} from 'vitest';
+import fc from 'fast-check';
+import {Effect, FileSystem, Path, Result} from 'effect';
+import {TestClock} from 'effect/testing';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
+import {runCommandEffect} from '@threadnote/platform/command';
+import {SystemInfo} from '@threadnote/platform/system';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
+import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {LocalModelStore} from '@threadnote/inference/models/store';
+import {
+  candidateReviewWithState,
+  listCandidateReviews,
+  loadCandidateReviewOptional,
+  saveCandidateReview,
+} from '@threadnote/memory/candidate';
+import {applyMemoryCandidate} from '../../src/mcp/server/recall.js';
+import {readContextMaintenancePacket, runContextMaintenance} from '../../src/memory/context/maintenance.js';
+import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft} from '../../src/memory/context/maintenance_draft.js';
+import {runSelectedDraft, selectedTopicDraftIdentity} from '../../src/manager/selected_draft.js';
+import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../src/manager/topic_draft_schema.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+
+const modelId = 'gemma-4-e4b-it-q4';
+
+describe('topic maintenance private draft generation', () => {
+  it('keeps every native outcome exclusive with operation cardinality across bounded evidence sets', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 8}), count => {
+        const ids = Array.from({length: count}, (_, index) => `tncc_${index.toString(16).padStart(40, '0')}`);
+        const basis: TopicMaintenanceDraftBasisV1 = {
+          version: 1,
+          targetUri: 'threadnote://user/tester/memories/durable/projects/fixture/topic.md',
+          targetHash: 'a'.repeat(64),
+          observationRevision: 'b'.repeat(64),
+          packetDigest: 'c'.repeat(64),
+          body: ids.map((_, index) => `Claim ${index}.`).join('\n\n'),
+          paragraphs: ids.map((id, index) => ({
+            ordinal: index,
+            hash: index.toString(16).padStart(64, '0'),
+            role: 'descriptive',
+            support: 'direct',
+            citationIds: [id],
+          })),
+          additionalDependencies: [],
+          handles: ids.flatMap(id => [
+            {id: `historical:${id}`, citationId: id, variant: 'historical' as const},
+            {id: `current:${id}`, citationId: id, variant: 'current' as const},
+          ]),
+        };
+        const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
+        const branches = schema.properties.decision.oneOf;
+        expect((schema as Record<string, unknown>).type).toBe('object');
+        expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
+          'propose-update',
+          'propose-revalidation',
+          'policy-conflict',
+          'insufficient-evidence',
+        ]);
+        expect(branches.map(branch => branch.properties.operations.minItems ?? 0)).toEqual([1, 0, 0, 0]);
+        expect(branches.slice(1).map(branch => branch.properties.operations.maxItems)).toEqual([0, 0, 0]);
+        expect(branches[1].properties.reviewedHandles.minItems).toBe(1);
+        expect(branches.slice(2).map(branch => branch.properties.reviewedHandles.maxItems)).toEqual([0, 0]);
+      }),
+      {numRuns: 16},
+    );
+  });
+
+  effectIt.effect('rejects tool-capable providers and oversized prompt without executing a model', () =>
+    Effect.gen(function* () {
+      const config = {
+        account: 'local',
+        agentContextHome: '/unused',
+        agentId: 'test',
+        manifestPath: '/unused',
+        user: 'tester',
+      };
+      const denied = yield* runSelectedDraft(config, 'codex', undefined, 'prompt', 'topic-maintenance').pipe(
+        Effect.result,
+      );
+      expect(Result.isFailure(denied)).toBe(true);
+      const oversized = yield* runSelectedDraft(
+        config,
+        'local-ai',
+        {id: modelId, label: modelId, isDefault: true},
+        'x'.repeat(80 * 1024 + 1),
+        'topic-maintenance',
+      ).pipe(Effect.result);
+      expect(Result.isFailure(oversized)).toBe(true);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'stores one strict private review, repairs once, caches across reads, and leaves accepted bytes untouched',
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-maintenance-draft-'});
+          const repository = path.join(home, 'repository');
+          yield* fs.makeDirectory(repository);
+          const source = path.join(repository, 'source.ts');
+          yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 30;\n');
+          yield* fs.writeFileString(path.join(repository, 'unrelated.ts'), 'export const cacheSize = 8;\n');
+          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+          yield* git(['init', '--quiet']);
+          yield* git(['add', '.']);
+          yield* git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'initial',
+          ]);
+          const config = {
+            account: 'local',
+            agentContextHome: home,
+            agentId: 'test',
+            manifestPath: path.join(home, 'manifest.yaml'),
+            user: 'tester',
+          };
+          yield* fs.writeFileString(
+            config.manifestPath,
+            `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
+          );
+          yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          const citations = yield* captureMemoryCodeCitations(config, {callerCwd: repository, refs: ['source.ts']});
+          const [unrelatedCitation] = yield* captureMemoryCodeCitations(config, {
+            callerCwd: repository,
+            refs: ['unrelated.ts'],
+          });
+          expect(citations).toHaveLength(1);
+          expect(unrelatedCitation).toBeDefined();
+          const uri = 'threadnote://user/tester/memories/durable/projects/fixture/source-topic.md';
+          const base = parseMemoryDocument(
+            uri,
+            formatMemoryDocument(
+              'MEMORY',
+              {
+                kind: 'durable',
+                status: 'active',
+                schemaVersion: 8,
+                memoryId: 'tn_source_topic',
+                project: 'fixture',
+                topic: 'source-topic',
+                sourceAgentClient: 'test',
+                timestamp: '2026-10-16T00:00:00.000Z',
+                codeCitations: [...citations, unrelatedCitation],
+              },
+              'Request timeout is 30 seconds.',
+            ),
+          )!;
+          const enrolled = proposeTopicMaintenanceEnrollment(base, {
+            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [citations[0].id]}],
+            additionalDependencies: [{kind: 'configuration', citationId: unrelatedCitation.id}],
+          });
+          const memory = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/source-topic.md');
+          yield* fs.makeDirectory(path.dirname(memory), {recursive: true});
+          yield* fs.writeFileString(memory, enrolled.content);
+          const accepted = yield* fs.readFileString(memory);
+          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
+          yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
+          yield* git(['add', '.']);
+          yield* git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '-m',
+            'changed',
+          ]);
+          yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          const stateFile = path.join(home, 'context-maintenance/state-v2.json');
+          let caseId = '';
+          for (let tick = 0; tick < 12; tick++) {
+            yield* runContextMaintenance(config, {cwd: repository});
+            const state = JSON.parse(yield* fs.readFileString(stateFile));
+            const item = state.cases.find((entry: {family: string}) => entry.family === 'topic-maintenance');
+            if (item?.disposition === 'needs-decision') {
+              caseId = item.caseId;
+              break;
+            }
+          }
+          expect(caseId).not.toBe('');
+          const packet = yield* readContextMaintenancePacket(config, caseId);
+          expect('topicEvidence' in packet && packet.topicEvidence.outcome).toBe('ready');
+          const competing = path.join(path.dirname(memory), 'competing-topic.md');
+          yield* fs.writeFileString(
+            competing,
+            formatMemoryDocument(
+              'MEMORY',
+              {
+                kind: 'durable',
+                status: 'active',
+                schemaVersion: 8,
+                memoryId: 'tn_competing_topic',
+                project: 'fixture',
+                topic: 'competing-topic',
+                sourceAgentClient: 'test',
+                timestamp: '2026-10-16T00:00:00.000Z',
+              },
+              'Request timeout is 60 seconds.',
+            ),
+          );
+          const otherProject = path.join(home, 'data/local/user/tester/memories/durable/projects/other/unrelated.md');
+          yield* fs.makeDirectory(path.dirname(otherProject), {recursive: true});
+          yield* fs.writeFileString(
+            otherProject,
+            formatMemoryDocument(
+              'MEMORY',
+              {
+                kind: 'durable',
+                status: 'active',
+                schemaVersion: 8,
+                memoryId: 'tn_other_project',
+                project: 'other',
+                topic: 'unrelated',
+                sourceAgentClient: 'test',
+                timestamp: '2026-10-16T00:00:00.000Z',
+              },
+              'Request timeout is 90 seconds.',
+            ),
+          );
+          const catalog = yield* LocalModelCatalog;
+          const manifest = yield* catalog.get(modelId);
+          const originalStore = yield* LocalModelStore;
+          const store = LocalModelStore.of({
+            ...originalStore,
+            status: (_home, selected) =>
+              Effect.succeed({
+                bytes: selected.size,
+                installed: true,
+                modelId: selected.id,
+                partialBytes: 0,
+                path: '/fake/model.gguf',
+                verified: true,
+              }),
+          });
+          const validJson = (prompt: string) => {
+            const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
+            const evidence = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+            return JSON.stringify({
+              version: 1,
+              targetHash: identity.targetHash,
+              observationRevision: identity.observationRevision,
+              packetDigest: identity.packetDigest,
+              outcome: 'propose-revalidation',
+              operations: [],
+              reviewedHandles: evidence.sources.map((item: {citationId: string}) => `current:${item.citationId}`),
+              rationale: 'The scoped claim remains correct after reviewing the changed source.',
+              unresolvedQuestions: [],
+              removedClaims: [],
+            });
+          };
+          const modelResult = (text: string) => ({
+            text,
+            backendIdentity: 'local-ai',
+            modelIdentity: modelId,
+            modelVersion: `${manifest.revision}:${manifest.sha256}`,
+            usage: {status: 'unavailable' as const},
+            settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+          });
+          let calls = 0;
+          const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.sync(() => {
+              calls += 1;
+              return modelResult(calls === 1 ? '{invalid' : validJson(prompt));
+            });
+          const request = (regenerate = false) =>
+            requestTopicMaintenanceDraft(config, {caseId, backend: 'local-ai', modelId, regenerate}, generator).pipe(
+              Effect.provideService(LocalModelStore, store),
+            );
+          expect(yield* loadCandidateReviewOptional(home, 'review-' + '0'.repeat(24))).toBeUndefined();
+          const stateBeforeFailure = yield* fs.readFileString(stateFile);
+          const invalidOutput: typeof runSelectedDraft = () => Effect.succeed(modelResult('{invalid'));
+          const invalid = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'local-ai', modelId},
+            invalidOutput,
+          ).pipe(Effect.provideService(LocalModelStore, store), Effect.result);
+          expect(Result.isFailure(invalid)).toBe(true);
+          const oversizedOutput: typeof runSelectedDraft = () => Effect.succeed(modelResult('x'.repeat(32 * 1024 + 1)));
+          const oversized = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'local-ai', modelId},
+            oversizedOutput,
+          ).pipe(Effect.provideService(LocalModelStore, store), Effect.result);
+          expect(Result.isFailure(oversized)).toBe(true);
+          const wrongModel: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.succeed({...modelResult(validJson(prompt)), modelIdentity: 'unselected-model'});
+          const mismatched = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'local-ai', modelId},
+            wrongModel,
+          ).pipe(Effect.provideService(LocalModelStore, store), Effect.result);
+          expect(Result.isFailure(mismatched)).toBe(true);
+          expect(yield* fs.readFileString(stateFile)).toBe(stateBeforeFailure);
+          expect(yield* fs.readFileString(memory)).toBe(accepted);
+          expect(yield* listCandidateReviews(home)).toEqual([]);
+          const review = yield* request();
+          expect(review.maintenance).toMatchObject({
+            version: 1,
+            generation: {attempts: 2, agent: 'local-ai', model: modelId},
+          });
+          expect(review.candidates[0].evidence).toContainEqual(expect.stringContaining('1 target conflicts'));
+          expect(review.candidates[0].evidence).toContainEqual(expect.stringContaining('incompatible-values'));
+          expect(calls).toBe(2);
+          expect((yield* request()).revision).toBe(review.revision);
+          expect(calls).toBe(2);
+          const tampered = {
+            ...review,
+            maintenance: {
+              ...review.maintenance!,
+              reviewEvidence: review.maintenance!.reviewEvidence.map(item =>
+                item.handleId === `current:${citations[0].id}`
+                  ? {
+                      ...item,
+                      citation: unrelatedCitation,
+                      source: {
+                        extractorSet: unrelatedCitation.extractorSet,
+                        fileContentHash: unrelatedCitation.fileContentHash.value,
+                        path: unrelatedCitation.path,
+                        repositoryId: unrelatedCitation.repositoryId,
+                        sourceCommit: unrelatedCitation.sourceCommit,
+                        sourceDirty: unrelatedCitation.sourceDirty,
+                        sourceSnapshotId: unrelatedCitation.sourceSnapshotId,
+                      },
+                    }
+                  : item,
+              ),
+            },
+          };
+          yield* saveCandidateReview(home, tampered);
+          expect(Result.isFailure(yield* request().pipe(Effect.result))).toBe(true);
+          expect(calls).toBe(2);
+          yield* saveCandidateReview(home, review);
+          expect((yield* readTopicMaintenanceDraft(config, review.reviewId)).maintenance).toEqual(review.maintenance);
+          expect(yield* fs.readFileString(memory)).toBe(accepted);
+          const denied = yield* applyMemoryCandidate(config, {
+            action: 'defer',
+            reviewId: review.reviewId,
+            candidateId: review.candidates[0].candidateId,
+            revision: review.revision,
+          }).pipe(Effect.result);
+          expect(Result.isSuccess(denied) && denied.success.isError).toBe(true);
+          const deferred = candidateReviewWithState(review, review.candidates[0].candidateId, 'deferred', {
+            action: 'defer',
+            at: '2026-10-16T00:00:01.000Z',
+          });
+          yield* saveCandidateReview(home, deferred);
+          expect((yield* request()).candidates[0].state).toBe('deferred');
+          expect(calls).toBe(2);
+          const restored = yield* request(true);
+          expect(restored.revision).toBeGreaterThan(deferred.revision);
+          expect(restored.candidates[0].state).toBe('pending');
+          const system = yield* SystemInfo;
+          const remoteUrl = 'https://example.invalid/v1';
+          const remoteModel = 'test-remote-model';
+          const remoteSystem = SystemInfo.of({
+            ...system,
+            environment: () => ({
+              ...system.environment(),
+              THREADNOTE_EFFECT_AI: 'true',
+              THREADNOTE_EFFECT_AI_API_URL: remoteUrl,
+              THREADNOTE_EFFECT_AI_MODEL: remoteModel,
+            }),
+          });
+          const remoteIdentity = yield* selectedTopicDraftIdentity(config, 'effect-ai', {
+            id: remoteModel,
+            label: remoteModel,
+            isDefault: true,
+          }).pipe(Effect.provideService(SystemInfo, remoteSystem));
+          const blocked = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'effect-ai', modelId: remoteModel},
+            () => Effect.die('Pending review must block a different model before execution.'),
+          ).pipe(Effect.provideService(SystemInfo, remoteSystem), Effect.result);
+          expect(Result.isFailure(blocked)).toBe(true);
+          const resolved = candidateReviewWithState(restored, restored.candidates[0].candidateId, 'deferred');
+          yield* saveCandidateReview(home, resolved);
+          let remoteCalls = 0;
+          const remoteResult = (text: string) => ({
+            text,
+            backendIdentity: remoteUrl,
+            modelIdentity: remoteModel,
+            modelVersion: remoteIdentity.modelVersion,
+            usage: {status: 'unavailable' as const},
+            settings: {maxOutputTokens: 4000 as const},
+          });
+          const remoteGenerator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.sync(() => {
+              remoteCalls += 1;
+              return remoteResult(validJson(prompt));
+            });
+          const remoteRequest = (generate: typeof runSelectedDraft) =>
+            requestTopicMaintenanceDraft(
+              config,
+              {caseId, backend: 'effect-ai', modelId: remoteModel, regenerate: true},
+              generate,
+            ).pipe(Effect.provideService(SystemInfo, remoteSystem));
+          const remoteReview = yield* remoteRequest(remoteGenerator);
+          expect(remoteReview.maintenance?.generation).toMatchObject({
+            agent: 'effect-ai',
+            model: remoteModel,
+            attempts: 1,
+          });
+          expect(remoteCalls).toBe(1);
+          expect(remoteReview.revision).toBeGreaterThan(resolved.revision);
+          yield* saveCandidateReview(
+            home,
+            candidateReviewWithState(remoteReview, remoteReview.candidates[0].candidateId, 'deferred'),
+          );
+          let abstentionCalls = 0;
+          const abstentionGenerator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.sync(() => {
+              abstentionCalls += 1;
+              const draft = JSON.parse(validJson(prompt)) as Record<string, unknown>;
+              draft.outcome = abstentionCalls === 1 ? 'propose-update' : 'insufficient-evidence';
+              draft.operations = [];
+              draft.reviewedHandles = [];
+              draft.rationale = 'The evidence does not establish a safe replacement.';
+              draft.unresolvedQuestions = ['Which policy applies to the changed source?'];
+              return remoteResult(JSON.stringify(draft));
+            });
+          const abstentionReview = yield* remoteRequest(abstentionGenerator);
+          expect(abstentionCalls).toBe(2);
+          expect(abstentionReview.maintenance?.proposal.draft.outcome).toBe('insufficient-evidence');
+          expect(abstentionReview.maintenance?.generation.attempts).toBe(2);
+          yield* git([
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.invalid',
+            'commit',
+            '--quiet',
+            '--allow-empty',
+            '-m',
+            'unrelated-head',
+          ]);
+          yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+          const cachedAfterUnrelatedHead = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'effect-ai', modelId: remoteModel},
+            remoteGenerator,
+          ).pipe(Effect.provideService(SystemInfo, remoteSystem));
+          expect(cachedAfterUnrelatedHead.revision).toBe(abstentionReview.revision);
+          expect(remoteCalls).toBe(1);
+          yield* saveCandidateReview(
+            home,
+            candidateReviewWithState(abstentionReview, abstentionReview.candidates[0].candidateId, 'deferred'),
+          );
+          const indexer = yield* CodeGraphIndexer;
+          const inFlightUnrelatedHead: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.gen(function* () {
+              yield* git([
+                '-c',
+                'user.name=Test',
+                '-c',
+                'user.email=test@example.invalid',
+                'commit',
+                '--quiet',
+                '--allow-empty',
+                '-m',
+                'in-flight-unrelated-head',
+              ]);
+              yield* indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+              return remoteResult(validJson(prompt));
+            }).pipe(Effect.orDie);
+          const afterUnrelatedHead = yield* remoteRequest(inFlightUnrelatedHead);
+          expect(afterUnrelatedHead.maintenance?.reviewEvidence).toHaveLength(4);
+          expect(afterUnrelatedHead.revision).toBeGreaterThan(abstentionReview.revision);
+          const raceGenerator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+            Effect.gen(function* () {
+              yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 90;\n');
+              yield* git(['add', '.']);
+              yield* git([
+                '-c',
+                'user.name=Test',
+                '-c',
+                'user.email=test@example.invalid',
+                'commit',
+                '--quiet',
+                '-m',
+                'raced',
+              ]);
+              return remoteResult(validJson(prompt));
+            }).pipe(Effect.orDie);
+          const raced = yield* remoteRequest(raceGenerator).pipe(Effect.result);
+          expect(Result.isFailure(raced)).toBe(true);
+          expect((yield* readTopicMaintenanceDraft(config, restored.reviewId)).revision).toBe(
+            afterUnrelatedHead.revision,
+          );
+          const binary = system.environment().THREADNOTE_E2E_BINARY;
+          const executable = binary ?? system.executablePath;
+          const prefix = binary ? [] : [path.join(system.currentDirectory(), 'apps/threadnote/src/standalone.ts')];
+          const cli = yield* runCommandEffect(
+            executable,
+            [...prefix, 'context', 'maintain', '--action', 'draft-view', '--review-id', review.reviewId, '--json'],
+            {
+              cwd: repository,
+              env: {
+                ...system.environment(),
+                THREADNOTE_HOME: home,
+                THREADNOTE_USER: config.user,
+                THREADNOTE_MANIFEST: config.manifestPath,
+                NO_COLOR: '1',
+              },
+              timeoutMs: 60_000,
+            },
+          );
+          expect(JSON.parse(cli.stdout).maintenance).toEqual(afterUnrelatedHead.maintenance);
+          const reviewPath = path.join(home, 'threadnote/candidates/v1/reviews', `${review.reviewId}.json`);
+          yield* fs.writeFileString(reviewPath, '{malformed');
+          expect(Result.isFailure(yield* loadCandidateReviewOptional(home, review.reviewId).pipe(Effect.result))).toBe(
+            true,
+          );
+          expect(yield* fs.readFileString(memory)).toBe(accepted);
+        }),
+      ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    90_000,
+  );
+});

@@ -387,6 +387,7 @@ export function applyMemoryCandidate(
     options.reviewLockHeld === true,
     Effect.gen(function* () {
       const review = yield* loadCandidateReview(config.agentContextHome, checkedReviewId.value);
+      if (review.maintenance !== undefined) return argumentError('Topic maintenance requires the reviewed apply flow.');
       const candidate = review.candidates.find(item => item.candidateId === checkedCandidateId.value);
       if (!candidate) {
         return argumentError(`Candidate ${checkedCandidateId.value} is not part of ${checkedReviewId.value}.`);
@@ -1325,7 +1326,6 @@ const recallHygieneHintsSection = Effect.fn('mcpServer.recallHygieneHints')(func
 });
 
 const MAX_REFERENCED_CONTEXT = 5;
-
 /**
  * Resolves the one-way `references:` pointers carried by the personal memories
  * recall just surfaced and appends bounded URI-only pointers. The caller can

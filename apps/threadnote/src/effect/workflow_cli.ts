@@ -406,7 +406,7 @@ export function makeContextMaintainCommand<E, R>(
     {
       action: defaultChoice(
         'action',
-        ['run', 'status', 'pause', 'resume', 'undo', 'packet', 'retire-anchor'],
+        ['run', 'status', 'pause', 'resume', 'undo', 'packet', 'retire-anchor', 'draft', 'draft-view'],
         'Local maintenance action',
         'run',
       ),
@@ -419,6 +419,10 @@ export function makeContextMaintainCommand<E, R>(
       project: optionalString('project', 'Optional project selection; omitted work is processed fairly'),
       receiptId: optionalString('receipt-id', 'Exact local automatic repair receipt for undo'),
       caseId: optionalString('case-id', 'Exact citation case refresh, bounded agent packet, or status selector'),
+      backend: optionalString('backend', 'Selected text-only topic draft backend: local-ai or effect-ai'),
+      modelId: optionalString('model-id', 'Exact selected generation model ID'),
+      regenerate: boolean('regenerate', 'Explicitly replace a prior topic draft revision'),
+      reviewId: optionalString('review-id', 'Exact private topic draft review ID for draft-view'),
       caseCursor: optionalString('case-cursor', 'Generation-bound next retained case page'),
       receiptCursor: optionalString('receipt-cursor', 'Generation-bound next retained receipt page'),
       citationId: optionalString('citation-id', 'Exact scoped citation evidence selector'),

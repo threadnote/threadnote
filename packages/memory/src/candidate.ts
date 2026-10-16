@@ -12,6 +12,10 @@ import {
   type MemoryCodeCitationV1,
 } from '@threadnote/memory/code/citation';
 import type {MemoryKind} from '@threadnote/memory/types';
+import {
+  validateTopicMaintenanceReviewPayload,
+  type TopicMaintenanceReviewPayloadV1,
+} from './topic-maintenance-draft.js';
 
 export type CandidateCategory = 'decision' | 'handoff' | 'invariant' | 'preference';
 export type CandidateComparison = 'contradiction' | 'duplicate' | 'new' | 'possible_duplicate' | 'replacement';
@@ -111,6 +115,7 @@ export interface CandidateReview {
   readonly sourceCommit?: string;
   readonly sourceSessionId?: string;
   readonly structuredCloseout?: StructuredCloseoutV1;
+  readonly maintenance?: TopicMaintenanceReviewPayloadV1;
   readonly task: string;
   readonly topic: string;
   readonly version: 2;
@@ -616,6 +621,11 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
   agentContextHome: string,
   review: CandidateReview,
 ) {
+  if (review.maintenance !== undefined)
+    yield* Effect.try({
+      try: () => validateTopicMaintenanceReviewPayload(review.maintenance),
+      catch: cause => CandidateMemoryError.make({message: errorText(cause)}),
+    });
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const path = candidateReviewPath(pathService, agentContextHome, review.reviewId);
@@ -645,6 +655,17 @@ export const loadCandidateReview = Effect.fn('candidate.loadReview')(function* (
   });
   yield* syncCandidateAudit(agentContextHome, review.auditEvents);
   return review;
+});
+
+/** Missing is optional; malformed or unreadable reviews remain explicit failures. */
+export const loadCandidateReviewOptional = Effect.fn('candidate.loadReviewOptional')(function* (
+  agentContextHome: string,
+  reviewId: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const path = candidateReviewPath(pathService, agentContextHome, reviewId);
+  return (yield* fs.exists(path)) ? yield* loadCandidateReview(agentContextHome, reviewId) : undefined;
 });
 
 /** Read the bounded private review set for maintenance reporting without mutating retention state. */
@@ -1181,10 +1202,13 @@ export function parseCandidateReview(value: unknown): CandidateReview {
   }
   const review = value as Omit<CandidateReview, 'codeCitations' | 'version'> & {
     readonly codeCitations?: readonly MemoryCodeCitationV1[];
+    readonly maintenance?: unknown;
     readonly structuredCloseout?: unknown;
     readonly version: 1 | 2;
   };
   let codeCitations: readonly MemoryCodeCitationV1[] = [];
+  if (review.version !== 2 && review.maintenance !== undefined)
+    throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
   if (review.version === 2) {
     if (!Array.isArray(review.codeCitations)) throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     try {
@@ -1203,6 +1227,9 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     ...(review.structuredCloseout === undefined
       ? {}
       : {structuredCloseout: parseStructuredCloseout(review.structuredCloseout)}),
+    ...(review.maintenance === undefined
+      ? {}
+      : {maintenance: validateTopicMaintenanceReviewPayload(review.maintenance)}),
     version: 2,
   };
 }

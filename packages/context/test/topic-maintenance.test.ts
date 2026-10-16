@@ -483,6 +483,25 @@ describe('topic maintenance current evidence', () => {
             expect(unrelated.outcome).toBe('unchanged');
             expect(unrelated.revision).toBe(initial.revision);
             expect((yield* observe(initial, {allowCapture: false})).revision).toBe(initial.revision);
+            status = {
+              ...status,
+              readySnapshot: {
+                ...status.readySnapshot!,
+                extractorSet: 'test-v2',
+                id: `cgsn_${sha256HexSync('new extractor set').slice(0, 40)}`,
+              },
+            };
+            const changedExtractorReadOnly = yield* observe(unrelated, {allowCapture: false});
+            expect(changedExtractorReadOnly.outcome).toBe('unavailable');
+            const reextracted = yield* observe(unrelated);
+            expect(reextracted.outcome).toBe('unchanged');
+            expect(reextracted.revision).toBe(initial.revision);
+            expect(reextracted.sources[0]?.current?.extractorSet).toBe('test-v2');
+            expect(reextracted.sources[0]?.current?.id).not.toBe(captured.id);
+            expect(reextracted.sources[0]?.historicalAvailable).toBe(true);
+            expect((yield* observe(reextracted, {allowCapture: false})).sources[0]?.current?.id).toBe(
+              reextracted.sources[0]?.current?.id,
+            );
             yield* fs.writeFileString(path.join(repo, 'source.ts'), 'export const value = 2;\n');
             yield* git(['add', '.']);
             yield* git(['commit', '--quiet', '-m', 'changed']);

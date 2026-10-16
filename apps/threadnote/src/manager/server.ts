@@ -21,12 +21,6 @@ import * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
-import {
-  ensureEffectAiReady,
-  resolveEffectAiConfiguration,
-  runEffectAiConsolidation,
-  runNativeAiConsolidation,
-} from '../effect/ai/consolidator.js';
 import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
 import {
   captureConsolidationSource,
@@ -43,14 +37,13 @@ import {
   ConsolidationModelsError,
   type ConsolidationModel,
 } from './consolidation_models.js';
-import {runConsolidationAgentCommand} from './consolidation_agent.js';
 export {consolidationAgentScript} from './consolidation_agent.js';
+import {runSelectedDraft} from './selected_draft.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import type {ApplicationServices} from '../effect/runtime.js';
 import {withSharedRepositoryLock} from '../effect/share/lock.js';
-import {SystemInfo} from '@threadnote/platform/system';
 import {
   runShareInit,
   runSharePublish,
@@ -1421,7 +1414,13 @@ function createConsolidation(context: ApiContext, body: Record<string, unknown>)
       });
       if (new Set(job.sources.map(source => source.uri)).size !== job.sources.length)
         return yield* ManagerOperationError.make({message: 'Select distinct source memories.'});
-      job.draft = yield* runConsolidationAgent(context.config, input.agent, sources, selectedModel);
+      job.draft = yield* runSelectedDraft(
+        context.config,
+        input.agent,
+        selectedModel,
+        consolidationPrompt(sources),
+        'consolidation',
+      ).pipe(Effect.map(result => result.text));
       job.status = 'completed';
     }).pipe(
       Effect.catch(error =>
@@ -1447,60 +1446,6 @@ const applyConsolidation = Effect.fn('manager.applyConsolidation')(function* (
     return yield* ManagerOperationError.make({message: 'Consolidation job is not completed.'});
   return yield* applyReviewedConsolidation(config, job, id, body);
 });
-
-function runConsolidationAgent(
-  runtimeConfig: RuntimeConfig,
-  agent: ConsolidationAgent,
-  sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[],
-  model?: ConsolidationModel,
-) {
-  const prompt = consolidationPrompt(sources);
-  if (agent === 'local-ai') {
-    return Effect.gen(function* () {
-      if (!model)
-        return yield* ConsolidationModelsError.make({
-          message: 'Choose a model before generating a consolidation draft.',
-        });
-      const native = yield* runNativeAiConsolidation(runtimeConfig, prompt, model.id);
-      return (
-        native ??
-        (yield* ManagerOperationError.make({
-          message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
-        }))
-      );
-    });
-  }
-  if (agent === 'effect-ai') {
-    return Effect.gen(function* () {
-      const resolved = yield* resolveEffectAiConfiguration(runtimeConfig, (yield* SystemInfo).environment());
-      if (resolved) {
-        if (!model || model.id !== resolved.configuration.model)
-          return yield* ConsolidationModelsError.make({
-            message: 'This model is no longer available. Reload model choices and select a model again.',
-          });
-        yield* ensureEffectAiReady(runtimeConfig, resolved);
-        return yield* runEffectAiConsolidation(prompt, resolved.configuration);
-      }
-      return yield* ManagerOperationError.make({
-        message: 'Configure an explicit remote Effect AI provider and reload model choices.',
-      });
-    });
-  }
-  if (agent !== 'codex' && agent !== 'claude') {
-    return Effect.fail(
-      ManagerOperationError.make({message: `${agent} does not expose a supported non-interactive consolidation mode.`}),
-    );
-  }
-  return Effect.gen(function* () {
-    const executable = yield* findExecutable([agent]);
-    if (!executable) {
-      return yield* ManagerOperationError.make({message: `${agent} executable was not found.`});
-    }
-    return yield* runConsolidationAgentCommand(agent, executable, prompt, model).pipe(
-      Effect.catch(error => ManagerOperationError.make({message: errorMessage(error)})),
-    );
-  });
-}
 
 function consolidationPrompt(sources: readonly {readonly content: string; readonly node: ManagerTreeNode}[]): string {
   return [
