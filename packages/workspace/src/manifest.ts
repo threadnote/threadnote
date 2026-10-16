@@ -44,7 +44,11 @@ export const inferProjectFromQuery = Effect.fn('manifest.inferProjectFromQuery')
   if (manifest._tag === 'None') {
     return undefined;
   }
-  const exactMentions = manifest.value.projects.flatMap(project =>
+  return inferProjectFromManifest(manifest.value, query);
+});
+
+export function inferProjectFromManifest(manifest: SeedManifest, query: string): ProjectManifest | undefined {
+  const exactMentions = manifest.projects.flatMap(project =>
     nameTokenSpans(query, project.name).map(span => ({...span, project})),
   );
   const maximalMentions = exactMentions.filter(
@@ -63,7 +67,7 @@ export const inferProjectFromQuery = Effect.fn('manifest.inferProjectFromQuery')
   }
   const queryTerms = new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? []);
   const projectsBySegment = new Map<string, ProjectManifest[]>();
-  for (const project of manifest.value.projects) {
+  for (const project of manifest.projects) {
     for (const segment of new Set(project.name.toLowerCase().split(/[^a-z0-9]+/))) {
       if (segment.length < 4 || GENERIC_PROJECT_NAME_SEGMENTS.has(segment)) {
         continue;
@@ -83,7 +87,7 @@ export const inferProjectFromQuery = Effect.fn('manifest.inferProjectFromQuery')
     }
   }
   return matches.size === 1 ? [...matches][0] : undefined;
-});
+}
 
 /**
  * Resolves a workset's member names to their `ProjectManifest` entries, dropping
@@ -121,12 +125,30 @@ export const requireWorkset = Effect.fn('manifest.requireWorkset')(function* (
   worksetName: string,
 ) {
   const manifest = yield* readSeedManifest(manifestPath);
+  return yield* Effect.try({
+    try: () => requireManifestWorkset(manifest, worksetName, manifestPath),
+    catch: cause =>
+      Schema.is(ManifestOperationError)(cause) ? cause : ManifestOperationError.make({cause, message: String(cause)}),
+  });
+});
+
+export function requireManifestWorkset(
+  manifest: SeedManifest,
+  worksetName: string,
+  manifestPath = 'manifest',
+): ResolvedWorkset {
   const workset = manifest.worksets?.find(entry => entry.name.toLowerCase() === worksetName.toLowerCase());
   if (!workset) {
-    return yield* ManifestOperationError.make({message: `No workset named "${worksetName}" in ${manifestPath}.`});
+    throw ManifestOperationError.make({message: `No workset named "${worksetName}" in ${manifestPath}.`});
   }
-  return resolveWorksetProjects(manifest, workset);
-});
+  const resolved = resolveWorksetProjects(manifest, workset);
+  if (resolved.unresolvedProjects.length > 0) {
+    throw ManifestOperationError.make({
+      message: `Workset "${worksetName}" contains unknown projects: ${resolved.unresolvedProjects.join(', ')}.`,
+    });
+  }
+  return resolved;
+}
 
 /** Returns the workset whose name appears as a token in `query`, or undefined. */
 export const inferWorksetFromQuery = Effect.fn('manifest.inferWorksetFromQuery')(function* (

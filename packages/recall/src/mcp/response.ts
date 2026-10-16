@@ -11,6 +11,7 @@ import {
   type AgentToolResponseMeasurement,
 } from '@threadnote/protocol/agent-response';
 import type {RecallConfidence} from '../rank.js';
+import type {RecallScopeProvenance} from '../eligibility.js';
 import type {RecallHit} from '@threadnote/recall/results';
 import {
   EXPLICIT_MEMORY_CONNECTION_CONFIDENCE_BASIS,
@@ -44,6 +45,7 @@ const POST_PROJECTION_NOTICE_RESERVE_BYTES = 256;
 export interface RecallMcpLogicalResponse {
   readonly confidence?: RecallConfidence;
   readonly memoryScope?: unknown;
+  readonly projectBoundary?: RecallScopeProvenance;
   readonly memoryConnections?: RecallMemoryConnectionsResult;
   readonly notices?: readonly string[];
   readonly queryExpansions: readonly string[];
@@ -78,6 +80,7 @@ export interface RecallMcpStructuredContent {
   readonly [key: string]: unknown;
   readonly confidence?: RecallMcpConfidence;
   readonly memoryScope?: unknown;
+  readonly projectBoundary?: RecallScopeProvenance;
   readonly memoryConnections?: RecallMcpMemoryConnections;
   readonly nextAction: {
     readonly tool: 'read_context';
@@ -173,7 +176,11 @@ export function projectRecallMcpResponse(
     actionableMemoryConnectionUris(logical.memoryConnections, new Set(logical.results.map(result => result.uri)))
       .length > 0;
   let selected:
-    | {readonly measurement: AgentToolResponseMeasurement; readonly structuredContent: RecallMcpStructuredContent}
+    | {
+        readonly measurement: AgentToolResponseMeasurement;
+        readonly structuredContent: RecallMcpStructuredContent;
+        readonly notices: readonly string[];
+      }
     | undefined;
   let minimumBytes = Number.POSITIVE_INFINITY;
 
@@ -194,10 +201,15 @@ export function projectRecallMcpResponse(
           includeExplainDetails,
           limits,
         );
-        const text = renderRecallMcpTextForFormat(structuredContent, notices, responseFormat);
-        const measurement = measureRecallMcpResponse(structuredContent, text, responseFormat);
-        minimumBytes = Math.min(minimumBytes, measurement.totalBytes);
-        if (measurement.totalBytes <= projectionMaximumBytes) selected = {measurement, structuredContent};
+        for (const details of recallMcpDetailVariants(structuredContent, notices)) {
+          const text = renderRecallMcpTextForFormat(details.structuredContent, details.notices, responseFormat);
+          const measurement = measureRecallMcpResponse(details.structuredContent, text, responseFormat);
+          minimumBytes = Math.min(minimumBytes, measurement.totalBytes);
+          if (measurement.totalBytes <= projectionMaximumBytes) {
+            selected = {...details, measurement};
+            break;
+          }
+        }
       }
     }
   }
@@ -207,8 +219,39 @@ export function projectRecallMcpResponse(
     measurement: selected.measurement,
     responseFormat,
     structuredContent: selected.structuredContent,
-    text: renderRecallMcpTextForFormat(selected.structuredContent, notices, responseFormat),
+    text: renderRecallMcpTextForFormat(selected.structuredContent, selected.notices, responseFormat),
   };
+}
+
+function recallMcpDetailVariants(
+  structuredContent: RecallMcpStructuredContent,
+  notices: readonly string[],
+): readonly {readonly structuredContent: RecallMcpStructuredContent; readonly notices: readonly string[]}[] {
+  const variants = [{structuredContent, notices}];
+  const boundary = structuredContent.projectBoundary;
+  const projects = boundary?.projects ?? [];
+  if (boundary !== undefined) {
+    for (let count = projects.length - 1; count >= 0; count -= 1) {
+      variants.push({
+        notices,
+        structuredContent: {
+          ...structuredContent,
+          projectBoundary: {
+            mode: boundary.mode,
+            reason: boundary.reason,
+            omittedProjects: (boundary.omittedProjects ?? 0) + projects.length - count,
+            ...(count === 0 ? {} : {projects: projects.slice(0, count)}),
+            ...(count > 0 && boundary.truncatedProjectNames ? {truncatedProjectNames: true as const} : {}),
+          },
+        },
+      });
+    }
+  }
+  const minimal = variants[variants.length - 1].structuredContent;
+  for (let count = notices.length - 1; count >= 0; count -= 1) {
+    variants.push({structuredContent: minimal, notices: notices.slice(0, count)});
+  }
+  return variants;
 }
 
 function measureRecallMcpResponse(
@@ -252,6 +295,9 @@ export function renderRecallMcpText(response: RecallMcpStructuredContent, notice
           `Seeded one-hop coverage: ${response.memoryConnections.coverage.resultCount} result(s), ${response.memoryConnections.connections.length} verified connection receipt(s), ${response.memoryConnections.premises.length} premise receipt(s)${response.memoryConnections.coverage.truncated ? '; truncated' : ''}. Relations are navigation evidence, not entailment.`,
         ]
       : []),
+    ...(response.projectBoundary === undefined
+      ? []
+      : [`Project boundary: ${JSON.stringify(response.projectBoundary)}`]),
     ...(response.warnings ?? []).map(renderRecallOperationalWarning),
     ...notices,
   ].join('\n');
@@ -285,6 +331,7 @@ export function renderRecallMcpAgentText(
       `Confidence: ${response.confidence.level} ${roundedConfidence(response.confidence.score)} (${response.confidence.basis.replaceAll('-', ' ')}). ${oneLine(response.confidence.reason)}`,
     );
   }
+  if (response.projectBoundary !== undefined) lines.push(`Project boundary: ${scalar(response.projectBoundary)}`);
   if (response.memoryScope !== undefined) lines.push(`Memory scope: ${scalar(response.memoryScope)}`);
   lines.push(
     `Returned ${response.output.returnedResults}/${response.output.totalResults} pointers${
@@ -421,6 +468,7 @@ function renderStructuredContent(
   const omittedResults = logical.results.length - results.length;
   return {
     ...(confidence === undefined ? {} : {confidence}),
+    ...(logical.projectBoundary === undefined ? {} : {projectBoundary: logical.projectBoundary}),
     ...(logical.memoryScope === undefined ? {} : {memoryScope: logical.memoryScope}),
     ...(memoryConnections === undefined ? {} : {memoryConnections}),
     nextAction: {

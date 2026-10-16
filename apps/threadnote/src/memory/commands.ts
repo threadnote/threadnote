@@ -27,7 +27,8 @@ import {
   resourceIdIsManagedMemoryNamespace,
   resourceIdWithoutAnchor,
 } from '@threadnote/store/resource-id';
-import {inferProjectFromQuery, inferWorksetFromQuery, requireWorkset, uriSegment} from '@threadnote/workspace/manifest';
+import {uriSegment} from '@threadnote/workspace/manifest';
+import {resolveRecallScope} from './recall_scope.js';
 import {
   activePersonalMemoryUrisFromText,
   buildCompactPlan,
@@ -120,7 +121,7 @@ import {
 import {loadRecallExactMatches} from '@threadnote/recall/index';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
-import {deriveRecallEligibilityPolicy, type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
+import {type RecallEligibilityPolicy} from '@threadnote/recall/eligibility';
 import {
   lexicalIndexUnavailableWarning,
   mergeRecallOperationalWarnings,
@@ -142,11 +143,10 @@ import type {
   RememberOptions,
 } from '../types.js';
 import type {MemoryKind} from '@threadnote/memory/types';
-import type {ProjectManifest, ResolvedWorkset, RuntimeConfig} from '@threadnote/workspace/config';
+import type {ResolvedWorkset, RuntimeConfig} from '@threadnote/workspace/config';
 export {parseCompactKind, parseMemoryStatus} from './parse.js';
 import {
   assertResourceUri,
-  enrichRecallQueryWithWorkspaceProjectContext,
   getInputText,
   gitValue,
   parsePositiveInteger,
@@ -154,7 +154,6 @@ import {
   resolveRepoName,
   resolveWorkspaceComponentContext,
   resolveWorkspaceBranch,
-  resolveWorkspaceRepoName,
   safeTimestamp,
   sha256,
   trimTrailingSlash,
@@ -391,7 +390,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     yield* withAnonymousTelemetryPhase('recall.shared-sync', syncSharedReposAndLog(config));
     yield* withAnonymousTelemetryPhase('recall.obsidian-sync', syncSourcesAndLog(config));
   }
-  const includeWorkspaceComponent = !navigationOnly && !options.uri && !options.workset;
+  const includeWorkspaceComponent = !navigationOnly && options.inferScope !== false && !options.uri && !options.workset;
   const workspaceOptions = options.callerCwd
     ? {cwd: options.callerCwd, includeProcessCwd: false}
     : {includeProcessCwd: true};
@@ -402,32 +401,25 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     includeWorkspaceComponent && recallQueryRequestsBranchContext(query)
       ? yield* resolveWorkspaceBranch(workspaceOptions)
       : undefined;
-  const projectQuery = navigationOnly
-    ? ''
-    : yield* enrichRecallQueryWithWorkspaceProjectContext(query, workspaceOptions);
   const dryRun = options.dryRun === true;
   const explicitUri = options.uri ? parseResourceId(options.uri).canonicalUri : undefined;
+  const scope = yield* resolveRecallScope(config, {
+    callerCwd: options.callerCwd ?? (yield* getInvocationCwd()),
+    inferScope: options.inferScope,
+    pinnedUri: explicitUri,
+    project: options.project,
+    query,
+    workset: options.workset,
+  });
+  const project = scope.preferredManifestProject;
+  const recallProjectName = scope.preferredProject;
   const inferredUri =
     explicitUri ??
-    (navigationOnly || options.inferScope === false ? undefined : yield* inferRecallUri(config, projectQuery));
-  const explicitProjectName = explicitUri ? undefined : normalizeOptionalMetadata(options.project);
-  const queryProject =
-    !explicitUri && (!navigationOnly || explicitProjectName)
-      ? yield* inferProjectFromQuery(config.manifestPath, explicitProjectName ?? query)
-      : undefined;
-  const project =
-    queryProject ??
-    (!navigationOnly && !explicitUri && !explicitProjectName
-      ? yield* inferProjectFromQuery(config.manifestPath, projectQuery)
-      : undefined);
-  const recallProjectName =
-    explicitProjectName ??
-    project?.name ??
-    (explicitUri || navigationOnly ? undefined : yield* resolveWorkspaceRepoName(workspaceOptions));
+    (navigationOnly || options.inferScope === false ? undefined : inferredRecallSkillUri(query, recallProjectName));
+  yield* Console.log(`Project boundary: ${JSON.stringify(scope.provenance)}`);
   const nodeLimit = options.nodeLimit
     ? yield* attemptSync(() => parsePositiveInteger(options.nodeLimit!, 'node limit'))
     : undefined;
-  const explicitWorkset = options.workset ? yield* requireWorkset(config.manifestPath, options.workset) : undefined;
   const explicitThreshold = options.threshold;
   const thresholdPolicy =
     explicitThreshold === undefined
@@ -484,15 +476,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     scopedRecallUris.add(seededUri);
   }
 
-  // Workset expansion: a named set of manifest projects recalled as one working
-  // set. Push a durable + seeded scope pass per member; the merge dedupes hits,
-  // and the scope list is deduped/capped so overlap only costs bounded searches.
-  const workset =
-    !options.uri && explicitWorkset
-      ? explicitWorkset
-      : !navigationOnly && !options.uri && options.inferScope !== false
-        ? yield* inferWorksetFromQuery(config.manifestPath, projectQuery)
-        : undefined;
+  const workset = scope.workset;
   if (workset && workset.projects.length > 0) {
     yield* Console.log(`Workset scope: ${workset.name} (${workset.projects.map(member => member.name).join(', ')})`);
     const alreadyScoped = new Set(
@@ -511,13 +495,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
     }
   }
 
-  const eligibility = deriveRecallEligibilityPolicy({
-    explicitProject: options.project?.trim() || undefined,
-    originalQuery: query,
-    pinnedHardUri: explicitUri !== undefined,
-    workspaceProject: workset ? undefined : recallProjectName,
-    worksetProjectNames: workset?.projects.map(member => member.name),
-  });
+  const eligibility = scope.eligibility;
 
   const exactLookup =
     dryRun || navigationOnly
@@ -525,7 +503,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
       : yield* collectNativeExactMemoryMatches(config, query, {
           includeArchived,
           eligibility,
-          project,
+          allowedUriScopes: explicitUri ? [explicitUri] : undefined,
         });
   const exactMatches = exactLookup.matches;
   let operationalWarnings: readonly RecallOperationalWarning[] = exactLookup.operationalWarnings;
@@ -614,7 +592,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   let recallSections = yield* prepareSections();
   const shouldAttemptAiExpansion = !dryRun && !navigationOnly && shouldExpandRecall(recallSections.confidence);
   const indexSelectionCandidates = shouldAttemptAiExpansion
-    ? buildRecallIndexSelectionCandidates(recallSections.expansionCandidates, recallProjectName, 24)
+    ? buildRecallIndexSelectionCandidates(recallSections.expansionCandidates, recallProjectName, 24, eligibility)
     : [];
   const indexSelectionIds =
     indexSelectionCandidates.length > 0
@@ -642,7 +620,7 @@ export const runRecall = Effect.fn('runRecall')(function* (config: RuntimeConfig
   const expansionVocabulary =
     needsFallbackExpansion && shouldExpandRecall(recallSections.confidence)
       ? yield* loadRecallExpansionVocabulary(config, {
-          allowedUriScopes: explicitUri ? [explicitUri] : [...scopedRecallUris],
+          allowedUriScopes: explicitUri ? [explicitUri] : undefined,
           eligibility,
           includeInactive: includeArchived,
           project: recallProjectName,
@@ -1406,22 +1384,12 @@ function packTargetForCurrentUser(sourceUri: string, user: string): string {
   throw MemoryOperationError.make({message: `Unsupported Threadnote pack source URI: ${sourceUri}.`});
 }
 
-const inferRecallUri = Effect.fn('memory.inferRecallUri')(function* (config: RuntimeConfig, query: string) {
-  // Only scope the base search when the query has an explicit "skills" intent —
-  // that narrowing matches user expectation ("find me a skill for X"). For
-  // general project-name matches we no longer scope the base search, because
-  // doing so used to exclude personal memories whenever the project name
-  // appeared in the query. Seeded resources are now surfaced via a parallel
-  // scoped pass in `augmentRecallWithSeededResources` so memories and seeded
-  // guidance both appear.
-  if (!hasAgentSkillCatalogIntent(query)) {
-    return undefined;
-  }
-  const project = yield* inferProjectFromQuery(config.manifestPath, query);
-  return project
-    ? `threadnote://resources/agent-skills/repo-local-${uriSegment(project.name)}`
+function inferredRecallSkillUri(query: string, projectName: string | undefined): string | undefined {
+  if (!hasAgentSkillCatalogIntent(query)) return undefined;
+  return projectName
+    ? `threadnote://resources/agent-skills/repo-local-${uriSegment(projectName)}`
     : 'threadnote://resources/agent-skills';
-});
+}
 
 export function hasAgentSkillCatalogIntent(query: string): boolean {
   const normalized = query.toLowerCase();
@@ -1445,8 +1413,8 @@ const collectNativeExactMemoryMatches = Effect.fn('memory.collectNativeExactMemo
   query: string,
   options: {
     readonly eligibility: RecallEligibilityPolicy;
+    readonly allowedUriScopes?: readonly string[];
     readonly includeArchived: boolean;
-    readonly project: ProjectManifest | undefined;
   },
 ) {
   const terms = exactRecallTerms(query);
@@ -1456,7 +1424,7 @@ const collectNativeExactMemoryMatches = Effect.fn('memory.collectNativeExactMemo
     includeInactive: options.includeArchived,
     limitPerTerm: 25,
     terms,
-    uriScopes: exactMemoryScopes(config, options.includeArchived, query, options.project),
+    uriScopes: options.allowedUriScopes ?? exactMemoryScopes(config, options.includeArchived, query),
   }).pipe(Effect.result);
   return Result.isSuccess(result)
     ? {matches: result.success, operationalWarnings: []}
@@ -1848,18 +1816,11 @@ function projectMemoryScopeUris(
     : scopes;
 }
 
-function exactMemoryScopes(
-  config: RuntimeConfig,
-  includeArchived: boolean,
-  query: string,
-  project: ProjectManifest | undefined,
-): readonly string[] {
+function exactMemoryScopes(config: RuntimeConfig, includeArchived: boolean, query: string): readonly string[] {
   return exactMemoryScopeUris({
     agentMemoriesUri: `threadnote://agent/${uriSegment(config.agentId)}/memories`,
     includeArchived,
     intents: exactRecallScopeIntents(query),
-    projectName: project ? uriSegment(project.name) : undefined,
-    projectResourceUri: project ? trimTrailingSlash(project.uri) : undefined,
     userBase: `threadnote://user/${uriSegment(config.user)}/memories`,
   });
 }

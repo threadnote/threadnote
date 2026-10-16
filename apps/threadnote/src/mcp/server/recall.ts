@@ -118,6 +118,8 @@ import {
   type RecallProgressTiming,
   type RuntimeConfig,
   argumentError,
+  commonCitationSourceCommit,
+  normalizeStringOrStrings,
   compactPersonalMemoryReferences,
   compactPersonalMemoryStructuredReferences as compactStructuredReferences,
   mcpErrorResult,
@@ -143,14 +145,6 @@ import {
 import {syncCursorCloudMemoryShares} from './cursor_cloud_memory.js';
 import {resolveRecallWorkspaceContext} from './recall_workspace_context.js';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
-
-function stringList(value: string | readonly string[] | undefined): readonly string[] {
-  return typeof value === 'string' ? [value] : (value ?? []);
-}
-function commonCitationSourceCommit(citations: readonly {readonly sourceCommit: string}[]): string | undefined {
-  const commits = new Set(citations.map(citation => citation.sourceCommit));
-  return commits.size === 1 ? citations[0]?.sourceCommit : undefined;
-}
 
 export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
@@ -237,7 +231,7 @@ export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, con
             'review_session_context requires project or an absolute callerCwd from which the repo can be inferred.',
           );
         }
-        const requestedCodeRefs = stringList(codeRefs);
+        const requestedCodeRefs = normalizeStringOrStrings(codeRefs);
         if (requestedCodeRefs.length > 0 && !callerCwd) {
           return argumentError('review_session_context requires absolute callerCwd when codeRefs are provided.');
         }
@@ -253,19 +247,19 @@ export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, con
           ...(candidatePolicy === 'handoff-only' || rationale === undefined ? {} : {rationale}),
           ...(candidatePolicy === 'handoff-only' || constraints === undefined
             ? {}
-            : {constraints: stringList(constraints)}),
-          decisions: candidatePolicy === 'handoff-only' ? [] : stringList(decisions),
-          evidence: stringList(evidence),
-          handoff: stringList(handoff),
-          invariants: candidatePolicy === 'handoff-only' ? [] : stringList(invariants),
+            : {constraints: normalizeStringOrStrings(constraints)}),
+          decisions: candidatePolicy === 'handoff-only' ? [] : normalizeStringOrStrings(decisions),
+          evidence: normalizeStringOrStrings(evidence),
+          handoff: normalizeStringOrStrings(handoff),
+          invariants: candidatePolicy === 'handoff-only' ? [] : normalizeStringOrStrings(invariants),
           ...(candidatePolicy === 'handoff-only' || verificationPerformed === undefined
             ? {}
-            : {verificationPerformed: stringList(verificationPerformed)}),
+            : {verificationPerformed: normalizeStringOrStrings(verificationPerformed)}),
           ...(candidatePolicy === 'handoff-only' || knowledgeInvalidated === undefined
             ? {}
-            : {knowledgeInvalidated: stringList(knowledgeInvalidated)}),
+            : {knowledgeInvalidated: normalizeStringOrStrings(knowledgeInvalidated)}),
           outcome: checkedOutcome.value,
-          preferences: candidatePolicy === 'handoff-only' ? [] : stringList(preferences),
+          preferences: candidatePolicy === 'handoff-only' ? [] : normalizeStringOrStrings(preferences),
           project: inferredProject,
           sourceAgentClient: sourceAgentClient?.trim() || 'mcp',
           sourceCommit: normalizeOptionalMetadata(sourceCommit) ?? commonCitationSourceCommit(codeCitations),
@@ -274,7 +268,7 @@ export function registerCandidateMemoryTools(server: EffectMcpServerAdapter, con
           topic: normalizeOptionalMetadata(topic) ?? uriSegment(checkedTask.value),
           ...(candidatePolicy === 'handoff-only' || unresolvedRisks === undefined
             ? {}
-            : {unresolvedRisks: stringList(unresolvedRisks)}),
+            : {unresolvedRisks: normalizeStringOrStrings(unresolvedRisks)}),
         };
         const closeoutSizeError = validateSessionCloseoutInput(rawCloseout);
         if (closeoutSizeError) {
@@ -849,7 +843,10 @@ export function registerSearchTool(
         query: McpInput.string('Task query; optional when memoryRefs supplies explicit navigation seeds'),
         uri: McpInput.string('Scope subtree'),
         callerCwd: McpInput.string('Absolute workspace cwd'),
-        project: McpInput.string('Project + projectless; omit for global'),
+        inferScope: McpInput.boolean(
+          'Default true; false disables implicit project, repository, URI and workset selection',
+        ),
+        project: McpInput.string('Exact project + projectless; default all configured projects in caller checkout'),
         nodeLimit: McpInput.integer('Max results', {minimum: 1, maximum: 100}),
         includeArchived: McpInput.boolean('Include archived'),
         memoryRefs: McpInput.stringOrStrings('One-hop memory IDs/URIs', {
@@ -874,6 +871,7 @@ export function registerSearchTool(
         callerCwd,
         explain,
         includeArchived,
+        inferScope,
         memoryRefs,
         nodeLimit,
         project,
@@ -952,6 +950,7 @@ export function registerSearchTool(
         {
           budgetTokens,
           callerCwd,
+          inferScope,
           explain: explain === true,
           project: project?.trim() || undefined,
           query: normalizedQuery,
@@ -981,16 +980,13 @@ export function registerSearchTool(
   );
 }
 
-function normalizeStringOrStrings(value: string | readonly string[] | undefined): readonly string[] {
-  return value === undefined ? [] : typeof value === 'string' ? [value] : value;
-}
-
 interface RecallToolParams {
   readonly allowedUriScopes: readonly string[] | undefined;
   readonly budgetTokens: number | undefined;
   readonly callerCwd: string | undefined;
   readonly explain: boolean;
   readonly includeArchived: boolean;
+  readonly inferScope?: boolean;
   readonly memoryRefs: readonly string[] | undefined;
   readonly nodeLimit: number | undefined;
   readonly pinnedUri: string | undefined;
@@ -1186,7 +1182,7 @@ function runRecallTool(
     let recallSections = yield* prepareSections();
     const shouldAttemptAiExpansion = !navigationOnly && shouldExpandRecall(recallSections.confidence);
     const indexSelectionCandidates = shouldAttemptAiExpansion
-      ? buildRecallIndexSelectionCandidates(recallSections.expansionCandidates, recallProjectName, 24)
+      ? buildRecallIndexSelectionCandidates(recallSections.expansionCandidates, recallProjectName, 24, eligibility)
       : [];
     const indexSelectionIds =
       indexSelectionCandidates.length > 0
@@ -1210,7 +1206,7 @@ function runRecallTool(
       groundedExpansionQueries.length < recallRewriteLimitForConfidence(recallSections.confidence);
     const expansionVocabulary = needsFallbackExpansion
       ? yield* loadRecallExpansionVocabulary(config, {
-          allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : [...scopedRecallUris]),
+          allowedUriScopes: params.allowedUriScopes ?? (params.pinnedUri ? [params.pinnedUri] : undefined),
           eligibility,
           includeInactive: params.includeArchived,
           project: recallProjectName,
@@ -1289,6 +1285,7 @@ function runRecallTool(
         projectRecallMcpResponse(
           {
             confidence: recallSections.confidence,
+            projectBoundary: workspaceContext.scopeProvenance,
             ...(memoryScope ? {memoryScope: cursorCloudMemoryScopeReceipt(memoryScope)} : {}),
             ...(recallSections.memoryConnections ? {memoryConnections: recallSections.memoryConnections} : {}),
             notices: responseNotices,

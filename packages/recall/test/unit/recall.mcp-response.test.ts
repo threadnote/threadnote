@@ -95,6 +95,148 @@ function seededNavigation(results: readonly RecallHit[]) {
 }
 
 describe('recall MCP response projection', () => {
+  it('retains bounded project provenance in compact and dual responses, including no-answer', () => {
+    const projectBoundary = {
+      mode: 'allow-projects-and-projectless' as const,
+      reason: 'workspace-checkout' as const,
+      projects: ['product', 'product-mobile', 'legacy-repo'],
+      omittedProjects: 0,
+    };
+    for (const responseFormat of ['agent', 'dual'] as const)
+      for (const results of [[], Array.from({length: 12}, (_, index) => hit(index))]) {
+        const projected = projectRecallMcpResponse(
+          {...logical(results), projectBoundary},
+          {budgetTokens: 700, responseFormat},
+        );
+        const boundary = projected.structuredContent.projectBoundary!;
+        expect(boundary).toMatchObject({mode: projectBoundary.mode, reason: projectBoundary.reason});
+        expect((boundary.projects?.length ?? 0) + (boundary.omittedProjects ?? 0)).toBe(
+          projectBoundary.projects.length,
+        );
+        expect(projected.text).toContain('Project boundary:');
+        if (results.length === 0) expect(boundary).toEqual(projectBoundary);
+        expect(projected.measurement.estimatedTokens).toBeLessThanOrEqual(700);
+      }
+  });
+
+  it('fits boundary provenance with degraded-index warnings and notices at minimum and default budgets', () => {
+    const projectBoundary = {
+      mode: 'allow-projects-and-projectless' as const,
+      reason: 'workspace-checkout' as const,
+      projects: Array.from({length: 4}, (_, index) => `${index}${'p'.repeat(47)}`),
+      omittedProjects: 2,
+    };
+    const input = {
+      ...logical(
+        [],
+        Array.from({length: 4}, (_, index) => `${index}${'x'.repeat(179)}`),
+      ),
+      confidence: {
+        level: 'no_answer' as const,
+        margin: 0,
+        reason: 'No candidate passed the minimum combined relevance threshold.',
+        score: 0,
+      },
+      projectBoundary,
+      warnings: [lexicalIndexUnavailableWarning()],
+    };
+    for (const budgetTokens of [700, 1500])
+      for (const responseFormat of ['agent', 'dual'] as const) {
+        const result = projectRecallMcpResponse(input, {budgetTokens, responseFormat});
+        expect(result.measurement.totalBytes).toBeLessThanOrEqual(budgetTokens * 3 - 256);
+        expect(result.structuredContent.projectBoundary).toMatchObject({
+          mode: projectBoundary.mode,
+          reason: projectBoundary.reason,
+        });
+        const boundary = result.structuredContent.projectBoundary!;
+        expect((boundary.projects?.length ?? 0) + (boundary.omittedProjects ?? 0)).toBe(6);
+        expect(result.structuredContent.warnings).toEqual(input.warnings);
+        expect(result.text).toContain('Recall index warning:');
+      }
+    expect(input.projectBoundary.projects).toHaveLength(4);
+  });
+
+  it('preserves explicit navigation receipts or budget recovery while compacting boundary details', () => {
+    const input = {
+      ...seededNavigation([hit(1)]),
+      projectBoundary: {
+        mode: 'allow-projects-and-projectless' as const,
+        reason: 'workspace-checkout' as const,
+        projects: Array.from({length: 4}, (_, index) => `${index}${'p'.repeat(47)}`),
+        omittedProjects: 2,
+      },
+      warnings: [lexicalIndexUnavailableWarning()],
+      notices: Array.from({length: 4}, (_, index) => `${index}${'x'.repeat(179)}`),
+    };
+    for (const budgetTokens of [700, 1500])
+      for (const responseFormat of ['agent', 'dual'] as const) {
+        const result = projectRecallMcpResponse(input, {budgetTokens, responseFormat});
+        expect(result.measurement.totalBytes).toBeLessThanOrEqual(budgetTokens * 3 - 256);
+        expect(result.structuredContent.warnings).toEqual(input.warnings);
+        expect(result.structuredContent.projectBoundary).toMatchObject({
+          mode: input.projectBoundary.mode,
+          reason: input.projectBoundary.reason,
+        });
+        if (result.structuredContent.nextAction.uris.length === 0) {
+          expect(result.structuredContent.output.budgetLimited).toBe(true);
+          expect(result.structuredContent.confidence?.basis).toBe('response-budget');
+        } else {
+          expect(result.structuredContent.confidence?.basis).toBe('explicit-memory-connection');
+          expect(
+            result.structuredContent.memoryConnections?.connections.some(
+              connection => connection.resolution === 'resolved',
+            ),
+          ).toBe(true);
+          expect(
+            result.structuredContent.memoryConnections?.premises.some(premise => premise.state === 'current'),
+          ).toBe(true);
+        }
+      }
+  });
+
+  it('bounds combined provenance, notices, profile scope and warnings without losing the boundary or warning', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.stringMatching(/^[a-z0-9]{1,48}$/), {minLength: 1, maxLength: 4}),
+        fc.array(fc.stringMatching(/^[a-z0-9 -]{1,240}$/), {maxLength: 8}),
+        fc.integer({min: 0, max: 100}),
+        (projects, notices, omittedProjects) => {
+          for (const responseFormat of ['agent', 'dual'] as const) {
+            const result = projectRecallMcpResponse(
+              {
+                ...logical([], notices),
+                projectBoundary: {
+                  mode: 'allow-projects-and-projectless',
+                  reason: 'workspace-checkout',
+                  projects,
+                  omittedProjects,
+                },
+                warnings: [lexicalIndexUnavailableWarning()],
+                memoryScope: {
+                  mode: 'cloud',
+                  root: 'threadnote://shared/team/memories',
+                  team: 'team',
+                  type: 'threadnote-memory-scope',
+                  version: 1,
+                },
+              },
+              {budgetTokens: 700, responseFormat},
+            );
+            expect(result.measurement.totalBytes).toBeLessThanOrEqual(700 * 3 - 256);
+            const boundary = result.structuredContent.projectBoundary!;
+            expect(boundary.reason).toBe('workspace-checkout');
+            expect(boundary.mode).toBe('allow-projects-and-projectless');
+            expect((boundary.projects?.length ?? 0) + (boundary.omittedProjects ?? 0)).toBe(
+              projects.length + omittedProjects,
+            );
+            expect(result.structuredContent.warnings).toEqual([lexicalIndexUnavailableWarning()]);
+          }
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
   it('attributes Linear evidence with unsupported discussion coverage and untrusted authority', () => {
     const result = hit(1, {
       category: 'resources',

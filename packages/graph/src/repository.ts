@@ -28,6 +28,28 @@ interface RegisteredRepositoryWorktree extends RepositoryWorktreeRegistryIdentit
   readonly root: string;
 }
 
+/** Bounded checkout metadata only: no HEAD, graph snapshot or indexing is required. */
+export const resolveRepositoryCheckoutIdentity = Effect.fn('codeGraph.resolveRepositoryCheckoutIdentity')(function* (
+  cwd: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const result = yield* runBinaryCommandEffect(
+    'git',
+    ['-C', cwd, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir', '--git-dir'],
+    {maxOutputBytes: GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM, timeoutMs: 5_000},
+  ).pipe(Effect.catchTag('CommandFailed', () => succeedUndefined));
+  if (result === undefined || result.exitCode !== 0) return undefined;
+  const newline = result.stdout.indexOf(10);
+  if (newline < 1) return undefined;
+  const root = new TextDecoder('utf-8', {fatal: true}).decode(result.stdout.subarray(0, newline));
+  const directories = parseGitDirectoryOutput(result.stdout.subarray(newline + 1));
+  if (directories === undefined) return undefined;
+  const repoRoot = yield* fs.realPath(root);
+  const gitCommonDirectory = yield* fs.realPath(path.resolve(repoRoot, directories.commonDirectory));
+  return {repoRoot, gitCommonDirectory, checkoutId: checkoutIdForGitCommonDirectory(gitCommonDirectory)};
+});
+
 /** @internal Complete live observation used when a caller also needs the non-serializing git-dir detail. */
 export const resolveRepositoryIdentityDetail = Effect.fn('codeGraph.resolveRepositoryIdentityDetail')(function* (
   cwd: string,

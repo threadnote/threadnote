@@ -806,6 +806,7 @@ bun_test(
         "//apps/threadnote:src/memory/migrations.ts",
         "//apps/threadnote:src/memory/pack_validation.ts",
         "//apps/threadnote:src/memory/parse.ts",
+        "//apps/threadnote:src/memory/recall_scope.ts",
         "//apps/threadnote:src/memory/relations.ts",
         "//apps/threadnote:src/memory/replacement_target.ts",
         "//apps/threadnote:src/memory/store_contract.ts",

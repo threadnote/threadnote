@@ -45,6 +45,7 @@ bun_test(
         "//packages/workspace:package.json",
         "//packages/workspace:src/config.ts",
         "//packages/workspace:src/manifest.ts",
+        "//packages/workspace:test/manifest-recall.test.ts",
         "//packages/workspace:test/unit/code-graph.workset-fixture.test.ts",
         "//:scripts/effect/errors.ts",
         "//:scripts/support/code-graph-workset-fixture.ts",
@@ -66,6 +67,7 @@ bun_test(
         "run",
         "--config",
         "tools/bazel/project-vitest.config.ts",
+        "packages/workspace/test/manifest-recall.test.ts",
         "packages/workspace/test/unit/code-graph.workset-fixture.test.ts",
     ],
 )
