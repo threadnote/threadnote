@@ -11,15 +11,15 @@ export function registerKnowledgeDeltaGitProposalTool(server: EffectMcpServerAda
     {
       annotations: {destructiveHint: false, readOnlyHint: true},
       description:
-        'Preview an existing shared-topic maintenance Git proposal, or export explicitly approved applied Knowledge Delta candidates. Topic export requires approved=true and approvalDigest equal to the complete preview proposalHash. Reads local Git/source evidence; never writes accepted memories, commits, branches or network state.',
+        'Preview shared topics or export applied Knowledge Delta. Topic export requires approved=true and approvalDigest=proposalHash. Reads local evidence only.',
       inputSchema: {
-        approved: McpInput.boolean('Required true after explicit review of the shared mutations'),
-        approvalDigest: McpInput.string('For topic maintenance, echo the complete preview proposalHash'),
-        sourceCwd: McpInput.string('Absolute cited source checkout for topic maintenance verification'),
-        candidateIds: McpInput.stringOrStrings('Applied candidate ID(s), one to three', {maximumItems: 3}),
-        reviewId: McpInput.string('Candidate review ID from closeout preview'),
-        revision: McpInput.integer('Exact current candidate review revision', {minimum: 1}),
-        team: McpInput.string('Shared Git team; defaults to the configured default team'),
+        approved: McpInput.boolean('Explicit approval of reviewed changes'),
+        approvalDigest: McpInput.string('Topic preview proposalHash'),
+        sourceCwd: McpInput.string('Absolute topic source checkout'),
+        candidateIds: McpInput.stringOrStrings('Applied candidate IDs (1–3)', {maximumItems: 3}),
+        reviewId: McpInput.string('Private review ID'),
+        revision: McpInput.integer('Exact review revision', {minimum: 1}),
+        team: McpInput.string('Configured team; default if omitted'),
       },
     },
     ({approved, approvalDigest, sourceCwd, candidateIds, reviewId, revision, team}) => {
@@ -48,7 +48,9 @@ export function registerKnowledgeDeltaGitProposalTool(server: EffectMcpServerAda
       );
     },
   );
+}
 
+export function registerTopicMaintenanceGitProposalTool(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
   server.registerTool(
     'share_topic_propose',
     {

@@ -21,7 +21,10 @@ import {
 } from '../../src/git_proposal/topic_maintenance_proposal.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
-import {registerKnowledgeDeltaGitProposalTool} from '../../src/mcp/server/git_proposal.js';
+import {
+  registerKnowledgeDeltaGitProposalTool,
+  registerTopicMaintenanceGitProposalTool,
+} from '../../src/mcp/server/git_proposal.js';
 import {runKnowledgeDeltaGitProposalMaterialize} from '../../src/git_proposal/commands.js';
 import {expectedBranchName, verifyKnowledgeDeltaGitProposalV1} from '../../src/git_proposal/knowledge_delta.js';
 import {prepareSharedInboundContentEffect, stripPersonalProvenanceForSharedPublication} from '../../src/share/core.js';
@@ -288,6 +291,7 @@ describe('reviewed existing shared topic Git proposal', () => {
         verifyTopicMaintenanceGitProposal(artifact);
         const mcp = new EffectMcpServerAdapter('shared-topic-test', '1', 'Shared topic proposal test');
         registerKnowledgeDeltaGitProposalTool(mcp, config);
+        registerTopicMaintenanceGitProposalTool(mcp, config);
         const mcpPacket = yield* mcp.invokeTool('share_topic_propose', {uri, sourceCwd});
         expect(mcpPacket.isError).not.toBe(true);
         const mcpPreview = yield* mcp.invokeTool('share_propose', {
