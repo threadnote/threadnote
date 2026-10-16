@@ -27,6 +27,7 @@ import {
   type MemoryCodeCitationV1,
 } from '@threadnote/memory/code/citation';
 import type {ContextHealthSelectorV1} from './health_selector.js';
+import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 
 export const CONTEXT_HEALTH_REPAIR_VERSION = 1 as const;
 export const DEFAULT_CONTEXT_HEALTH_REPAIR_PROPOSAL_LIMIT = 100 as const;
@@ -255,6 +256,12 @@ export function applyContextHealthRepairProposalV1(
     return conflict(input, 'shared-mutation-blocked', 'Local health repair never mutates a shared memory.');
   }
   const subject = uniqueRecord(records, subjectUri);
+  if (
+    subject !== undefined &&
+    hasTopicMaintenanceEnrollment(subject) &&
+    (mutation.kind === 'replace-citation' || mutation.kind === 'archive-memory')
+  )
+    return {records, status: 'review-required'};
   if (subject?.metadata.project !== undefined && subject.metadata.project !== proposal.project) {
     return conflict(input, 'project-mismatch', `Repair subject ${subjectUri} belongs to another project.`);
   }
@@ -500,6 +507,18 @@ function mutationForFinding(
   const targetUri = directedFinding?.currentUri ?? finding.repair.targetUri;
   const subject = subjectUri === undefined ? undefined : recordsByUri.get(subjectUri);
   const target = targetUri === undefined ? undefined : recordsByUri.get(targetUri);
+  if (
+    subject !== undefined &&
+    hasTopicMaintenanceEnrollment(subject) &&
+    ['repair-citation', 'archive-memory', 'deduplicate-memory'].includes(finding.repair.kind)
+  )
+    return {
+      kind: 'review-only',
+      reason: 'Enrolled topic support and lifecycle require reviewed topic maintenance.',
+      repairKind: finding.repair.kind,
+      subjectUri: subject.uri,
+      ...(targetUri === undefined ? {} : {targetUri}),
+    };
   if (
     subject !== undefined &&
     (finding.repair.kind === 'repair-citation' || finding.repair.kind === 'repair-relation')
@@ -801,6 +820,7 @@ function citationRepairContent(
   replacement: MemoryCodeCitationV1,
 ): string | undefined {
   try {
+    if (hasTopicMaintenanceEnrollment(record)) return undefined;
     assertMemoryDocumentSchemaWritable(record.content);
     if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if ((record.metadata.citationErrors?.length ?? 0) > 0) return undefined;
@@ -835,6 +855,7 @@ export function memoryContentWithCitationReplacementsV1(
   replacements: readonly {readonly citationId: string; readonly replacement: MemoryCodeCitationV1}[],
 ): string | undefined {
   try {
+    if (hasTopicMaintenanceEnrollment(record)) return undefined;
     assertMemoryDocumentSchemaWritable(record.content);
     if (consolidationEvidenceRepairBlocker(record) !== undefined) return undefined;
     if (replacements.length === 0 || (record.metadata.citationErrors?.length ?? 0) > 0) return undefined;

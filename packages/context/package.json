@@ -17,6 +17,7 @@
     "./procedure/selection": "./src/procedure/selection.ts",
     "./projector": "./src/projector.ts",
     "./types": "./src/types.ts",
+    "./topic_maintenance": "./src/topic_maintenance.ts",
     "./check": "./src/check.ts",
     "./health": "./src/health.ts",
     "./health_semantic": "./src/health_semantic.ts",

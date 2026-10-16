@@ -53,6 +53,11 @@ export interface TopicMaintenanceEnrollmentInput {
   readonly additionalDependencies?: readonly TopicMaintenanceDependencyV1[];
 }
 
+/** Malformed enrollment still protects the topic from unrelated automatic lifecycle changes. */
+export function hasTopicMaintenanceEnrollment(record: Pick<MemoryRecord, 'metadata'>): boolean {
+  return record.metadata.topicMaintenance !== undefined || record.metadata.topicMaintenanceError !== undefined;
+}
+
 /** Closed boundary for JSON callers; annotations are supplied by the author. */
 export function validateTopicMaintenanceEnrollmentInput(input: unknown): TopicMaintenanceEnrollmentInput {
   if (
