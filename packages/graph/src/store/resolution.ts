@@ -6,7 +6,7 @@ import {
   type CodeGraphResolutionProgressCallback,
   type CodeGraphResolutionSummary,
 } from './models.js';
-import {configureConnection} from './session.js';
+import {configureConnection, withCodeGraphDeferredTransaction} from './session.js';
 import {type CodeGraphProvenance, type RepositoryIdentity, CodeGraphStoreError} from '../types.js';
 import {
   activationMode,
@@ -351,7 +351,10 @@ const resolveActivationReferences = Effect.fn('codeGraph.resolveActivationRefere
         for (const alias of page.aliases) aliases.push(alias);
       }
       if (resolutions.length > 0) {
-        const transaction = sql.withTransaction(
+        const withTransaction: typeof sql.withTransaction = persistentFull
+          ? sql.withTransaction
+          : effect => withCodeGraphDeferredTransaction(sql, effect);
+        const transaction = withTransaction(
           Effect.gen(function* () {
             let transactionStageStartedAt = yield* Clock.currentTimeMillis;
             if (mode?.mode === 'persisted-full') {
