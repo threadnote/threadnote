@@ -6,7 +6,11 @@ import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect'
 import {TestClock} from 'effect/testing';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {describe, expect} from 'vitest';
-import {CodeGraphDatabaseSession, withCodeGraphReadTransaction} from '@threadnote/graph/store/session';
+import {
+  CodeGraphDatabaseSession,
+  withCodeGraphDeferredTransaction,
+  withCodeGraphReadTransaction,
+} from '@threadnote/graph/store/session';
 import {TestError} from '@threadnote/testing/test-error';
 
 const fixture = Effect.gen(function* () {
@@ -70,6 +74,27 @@ describe('code graph read transactions', () => {
         yield* Fiber.interrupt(fiber);
         yield* sql.withTransaction(sql`INSERT INTO evidence VALUES (3)`);
         expect(yield* read(select)).toEqual([{value: 1}, {value: 2}, {value: 3}]);
+      }).pipe(TestClock.withLive),
+    );
+
+    it.effect('preserves nested temporary savepoints inside an existing deferred read', () =>
+      Effect.gen(function* () {
+        const {read, sql} = yield* fixture;
+        yield* sql`CREATE TEMP TABLE staged (value INTEGER)`;
+        yield* read(
+          Effect.gen(function* () {
+            yield* sql`INSERT INTO staged VALUES (1)`;
+            const failed = yield* withCodeGraphDeferredTransaction(
+              sql,
+              sql`INSERT INTO staged VALUES (2)`.pipe(
+                Effect.andThen(Effect.fail(TestError.make({message: 'temporary failure'}))),
+              ),
+            ).pipe(Effect.result);
+            expect(failed._tag).toBe('Failure');
+            expect(yield* sql`SELECT value FROM staged`).toEqual([{value: 1}]);
+          }),
+        );
+        yield* sql.withTransaction(sql`INSERT INTO evidence VALUES (2)`);
       }).pipe(TestClock.withLive),
     );
   });

@@ -10,7 +10,7 @@ import {
   type CodeGraphStagingProgressCallback,
   type CodeGraphStagingStage,
 } from './models.js';
-import {configureConnection} from './session.js';
+import {configureConnection, withCodeGraphDeferredTransaction} from './session.js';
 import {type CodeGraphSnapshot, type RepositoryIdentity, CodeGraphStoreError} from '../types.js';
 import {type CodeGraphWorkspace} from '../languages/types.js';
 import {
@@ -855,7 +855,10 @@ const expandTransitiveReexportAliases = Effect.fn('codeGraph.expandTransitiveRee
       yield* Effect.yieldNow;
       continue;
     }
-    const transaction = sql.withTransaction(
+    const withTransaction: typeof sql.withTransaction = persistent
+      ? sql.withTransaction
+      : effect => withCodeGraphDeferredTransaction(sql, effect);
+    const transaction = withTransaction(
       Effect.gen(function* () {
         if (persistent) yield* assertPersistentBuildOwner(sql, mode.snapshotId, mode.ownerToken);
         let inserted = 0;
