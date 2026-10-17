@@ -199,6 +199,7 @@
     "./evaluation/threadnote-5-release-readiness-receipts": "./src/evaluation/threadnote-5-release-readiness-receipts.ts",
     "./evaluation/threadnote-5-release-readiness-validation": "./src/evaluation/threadnote-5-release-readiness-validation.ts",
     "./evaluation/threadnote-5-release-readiness-value-report": "./src/evaluation/threadnote-5-release-readiness-value-report.ts",
+    "./evaluation/topic-maintenance-longitudinal": "./src/evaluation/topic-maintenance-longitudinal.ts",
     "./git_proposal/commands": "./src/git_proposal/commands.ts",
     "./git_proposal/knowledge_delta": "./src/git_proposal/knowledge_delta.ts",
     "./git_proposal/materializer": "./src/git_proposal/materializer.ts",

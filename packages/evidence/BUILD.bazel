@@ -386,6 +386,8 @@ bun_test(
         "//apps/threadnote:test/evaluation/fixtures/threadnote-5-task-loop-v1/fixture.json",
         "//apps/threadnote:test/evaluation/fixtures/token-efficiency-calibration-v1/fixture.json",
         "//apps/threadnote:test/evaluation/fixtures/topic-maintenance-v1/baseline.json",
+        "//apps/threadnote:test/evaluation/fixtures/topic-maintenance-v1/sequence.json",
+        "//apps/threadnote:test/evaluation/fixtures/topic-maintenance-v1/sequence.sha256",
         "//:package.json",
         "//packages/context:package.json",
         "//packages/context:src/agent_view_text.ts",
