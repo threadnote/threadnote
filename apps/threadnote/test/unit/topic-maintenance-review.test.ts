@@ -178,8 +178,8 @@ describe('reviewed personal topic acceptance', () => {
               reviewEvidence: reviewEvidenceFromPacket(packet),
               generation: {
                 origin: 'model',
-                agent: 'local-ai',
-                model: 'fixture-model',
+                agent: 'fixture',
+                model: 'deterministic-topic-fixture',
                 promptVersion: 'fixture-topic-v1',
                 attempts: 1,
                 usage: {status: 'unavailable'},
@@ -203,6 +203,13 @@ describe('reviewed personal topic acceptance', () => {
           const binary = system.environment().THREADNOTE_E2E_BINARY;
           const executable = binary ?? system.executablePath;
           const prefix = binary ? [] : [path.join(system.currentDirectory(), 'apps/threadnote/src/standalone.ts')];
+          const commandTrace: {args: readonly string[]; exitCode: number; stdout: string; stderr: string}[] = [];
+          const tracePath = system.environment().THREADNOTE_TOPIC_REVIEW_TRACE;
+          const recordCommand = (args: readonly string[], result: (typeof commandTrace)[number]) =>
+            Effect.gen(function* () {
+              commandTrace.push({...result, args});
+              if (tracePath) yield* fs.writeFileString(tracePath, JSON.stringify(commandTrace, null, 2));
+            });
           const cli = (args: readonly string[]) =>
             runCommandEffect(executable, [...prefix, 'context', 'maintain', ...args], {
               cwd: repository,
@@ -214,7 +221,21 @@ describe('reviewed personal topic acceptance', () => {
                 NO_COLOR: '1',
               },
               timeoutMs: 60_000,
-            });
+            }).pipe(
+              Effect.tap(result => recordCommand(args, {...result, args})),
+              Effect.tapError(error =>
+                error._tag === 'CommandFailed'
+                  ? recordCommand(args, {
+                      args,
+                      exitCode: error.exitCode,
+                      stdout: error.stdout,
+                      stderr: error.stderr,
+                    })
+                  : Effect.void,
+              ),
+            );
+          const publicReview = (args: readonly string[]) =>
+            cli(args).pipe(Effect.map(result => JSON.parse(result.stdout) as CandidateReview));
           const editedDraftFile = path.join(home, 'edited-draft.json');
           yield* fs.writeFileString(
             editedDraftFile,
@@ -249,12 +270,20 @@ describe('reviewed personal topic acceptance', () => {
               index === 1 ? {...operation, text: 'Requests time out after 60 seconds.'} : operation,
             ),
           };
-          previewReview = yield* prepareTopicMaintenanceReview(config, {
-            reviewId: review.reviewId,
-            revision: previewReview.revision,
-            sourceCwd: repository,
-            editedDraftJson: JSON.stringify(secondEditedDraft),
-          });
+          yield* fs.writeFileString(editedDraftFile, JSON.stringify(secondEditedDraft));
+          previewReview = yield* publicReview([
+            '--action',
+            'draft-preview',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(previewReview.revision),
+            '--source-cwd',
+            repository,
+            '--edited-draft-file',
+            editedDraftFile,
+            '--json',
+          ]);
           const secondProjected = projectManagerTopicReview(previewReview)!;
           expect(secondProjected.draft.operations.map(operation => operation.text)).toEqual([
             'The request timeout is 60 seconds.',
@@ -263,12 +292,17 @@ describe('reviewed personal topic acceptance', () => {
           expect(secondProjected.proposal.body).toBe(
             'The request timeout is 60 seconds.\n\nRequests time out after 60 seconds.',
           );
-          const deferred = yield* decideTopicMaintenanceReview(config, {
-            reviewId: review.reviewId,
-            revision: previewReview.revision,
-            action: 'defer',
+          const deferred = yield* publicReview([
+            '--action',
+            'draft-defer',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(previewReview.revision),
+            '--case-id',
             caseId,
-          });
+            '--json',
+          ]);
           expect(deferred.candidates[0].state).toBe('deferred');
           expect(deferred.maintenanceApproval?.stage).toBe('parked');
           const deferredView = projectManagerTopicReview(yield* loadCandidateReview(home, review.reviewId))!;
@@ -298,11 +332,50 @@ describe('reviewed personal topic acceptance', () => {
             body: Effect.succeed({project: 'fixture', ...resumeSelection}),
           });
           expect(recoveredResume?.status).toBe(200);
-          const resumed = yield* loadCandidateReview(home, review.reviewId);
+          let resumed = yield* loadCandidateReview(home, review.reviewId);
           expect(resumed.revision).toBe(persistedResume.revision);
           expect(resumed.candidates[0].state).toBe('pending');
           expect(resumed.maintenanceApproval?.stage).toBe('parked');
           expect(projectManagerTopicReview(resumed)?.draft).toEqual(secondProjected.draft);
+          const resumedViaCli = yield* publicReview([
+            '--action',
+            'draft-resume',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(deferred.revision),
+            '--case-id',
+            caseId,
+            '--json',
+          ]);
+          expect(resumedViaCli.revision).toBe(resumed.revision);
+          expect(resumedViaCli.candidates[0].state).toBe('pending');
+          const deferredAgain = yield* publicReview([
+            '--action',
+            'draft-defer',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(resumed.revision),
+            '--case-id',
+            caseId,
+            '--json',
+          ]);
+          expect(deferredAgain.candidates[0].state).toBe('deferred');
+          resumed = yield* publicReview([
+            '--action',
+            'draft-resume',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(deferredAgain.revision),
+            '--case-id',
+            caseId,
+            '--json',
+          ]);
+          expect(resumed.candidates[0].state).toBe('pending');
+          expect(resumed.revision).toBe(deferredAgain.revision + 1);
+          expect(yield* fs.readFileString(memory)).toBe(accepted);
           expect(
             Result.isFailure(
               yield* applyTopicMaintenanceReview(config, {
@@ -314,11 +387,17 @@ describe('reviewed personal topic acceptance', () => {
               }).pipe(Effect.result),
             ),
           ).toBe(true);
-          previewReview = yield* prepareTopicMaintenanceReview(config, {
-            reviewId: review.reviewId,
-            revision: resumed.revision,
-            sourceCwd: repository,
-          });
+          previewReview = yield* publicReview([
+            '--action',
+            'draft-preview',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(resumed.revision),
+            '--source-cwd',
+            repository,
+            '--json',
+          ]);
           expect(projectManagerTopicReview(previewReview)?.draft).toEqual(secondProjected.draft);
           const preview = previewReview.maintenanceApproval!.preview;
           expect(preview.approvedProposal.draft.rationale).toBe(
@@ -343,13 +422,35 @@ describe('reviewed personal topic acceptance', () => {
           expect(preview.manifest.version).toBe(2);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
           const apply = () =>
-            applyTopicMaintenanceReview(config, {
-              reviewId: review.reviewId,
-              revision: previewReview.revision,
-              sourceCwd: repository,
-              approvalDigest: preview.approvalDigest,
-              approved: true,
-            });
+            publicReview([
+              '--action',
+              'draft-apply',
+              '--review-id',
+              review.reviewId,
+              '--revision',
+              String(previewReview.revision),
+              '--source-cwd',
+              repository,
+              '--approval-digest',
+              preview.approvalDigest,
+              '--approved',
+              '--json',
+            ]);
+          const unapproved = yield* publicReview([
+            '--action',
+            'draft-apply',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(previewReview.revision),
+            '--source-cwd',
+            repository,
+            '--approval-digest',
+            preview.approvalDigest,
+            '--json',
+          ]).pipe(Effect.result);
+          expect(Result.isFailure(unapproved)).toBe(true);
+          expect(yield* fs.readFileString(memory)).toBe(accepted);
           const wrongDigest = yield* reviewTool({
             action: 'apply',
             reviewId: review.reviewId,
@@ -401,6 +502,9 @@ describe('reviewed personal topic acceptance', () => {
               maintenanceApproval: {...previewReview.maintenanceApproval!, stage: 'prepared'},
             })?.canApply,
           ).toBe(true);
+          const recoveredBeforeWrite = yield* apply();
+          expect(recoveredBeforeWrite.maintenanceApproval?.stage).toBe('written');
+          expect(yield* fs.readFileString(memory)).toBe(preview.content);
           const managerBeforeWrite = yield* managerApply();
           expect(managerBeforeWrite?.status).toBe(200);
           expect(managerBeforeWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
@@ -434,6 +538,9 @@ describe('reviewed personal topic acceptance', () => {
             ...preparedAgain,
             maintenanceApproval: {...applied.maintenanceApproval!, stage: 'prepared'},
           });
+          const recoveredAfterWrite = yield* apply();
+          expect(recoveredAfterWrite.maintenanceApproval?.stage).toBe('written');
+          expect(yield* fs.readFileString(memory)).toBe(preview.content);
           const managerAfterWrite = yield* managerApply();
           expect(managerAfterWrite?.status).toBe(200);
           expect(managerAfterWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
@@ -478,6 +585,7 @@ describe('reviewed personal topic acceptance', () => {
             canApply: false,
           });
           const projectedCaseId = (conflictView!.body as ManagerTopicReviewV1).caseId;
+          if (!projectedCaseId) throw new Error('Conflicted review must retain its projected case.');
           const closedResponse = yield* handleManagerTopicReview({
             config,
             method: 'POST',
@@ -503,6 +611,19 @@ describe('reviewed personal topic acceptance', () => {
             approvalDigest: preview.approvalDigest,
           });
           expect(closed.auditEvents.slice(-2).map(event => event.action)).toEqual(['conflict', 'reject']);
+          const replayedReject = yield* publicReview([
+            '--action',
+            'draft-reject',
+            '--review-id',
+            review.reviewId,
+            '--revision',
+            String(conflicted.revision),
+            '--case-id',
+            projectedCaseId,
+            '--json',
+          ]);
+          expect(replayedReject.revision).toBe(closed.revision);
+          expect(replayedReject.candidates[0].state).toBe('rejected');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           expect(Result.isFailure(yield* apply().pipe(Effect.result))).toBe(true);
           const catalog = yield* LocalModelCatalog;

@@ -101,6 +101,8 @@ type DeclaredSources = {
   readonly files: readonly {path: string; availability: string; content: string | null}[];
 };
 
+type SourceCoverage = 'included' | 'omitted' | 'truncated' | 'unknown';
+
 /** Normalize only selected public source facts; accidental memory evidence invalidates the comparison. */
 export function projectTopicStudySourceBriefV1(value: unknown, declared: DeclaredSources): string {
   const brief = value as {
@@ -213,6 +215,123 @@ export function projectTopicStudySourceBriefV1(value: unknown, declared: Declare
     ref.selection = ref.sources.length ? 'included-with-projection-omission' : 'omitted-for-projection-budget';
   }
   return JSON.stringify(projection);
+}
+
+function eligibleFullDeclaredSource(declared: DeclaredSources, scopeFreshness: string) {
+  return (
+    declared.clean &&
+    declared.indexFresh &&
+    scopeFreshness === 'fresh' &&
+    TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.every(path => {
+      const file = declared.files.find(item => item.path === path);
+      return (
+        file?.availability === 'present' &&
+        file.content !== null &&
+        new TextEncoder().encode(file.content).byteLength <= 8192
+      );
+    })
+  );
+}
+
+export function diagnoseTopicStudySourceCoverageV1(publicProjection: string | null, declared: DeclaredSources) {
+  const projection =
+    publicProjection === null
+      ? null
+      : (JSON.parse(publicProjection) as {
+          scopeFreshness: string;
+          evidenceState: string;
+          publicSourceOmissions: number;
+          publicOutputTruncated: boolean;
+          refs: readonly {path: string; selection: string; sources: readonly {truncated: boolean}[]}[];
+        });
+  const refs = TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.map(path => {
+    const file = declared.files.find(item => item.path === path);
+    const ref = projection?.refs.find(item => item.path === path);
+    const publicCoverage: SourceCoverage = !ref
+      ? 'unknown'
+      : ref.selection === 'included-with-projection-omission' || ref.sources.some(source => source.truncated)
+        ? 'truncated'
+        : ref.sources.length > 0
+          ? 'included'
+          : ['not-returned-by-public-brief', 'omitted-for-projection-budget'].includes(ref.selection)
+            ? 'omitted'
+            : 'unknown';
+    return {
+      path,
+      declared: file?.availability ?? 'unknown',
+      public: publicCoverage,
+      excerptCount: ref?.sources.length ?? 0,
+      selection: ref?.selection ?? 'unknown',
+    };
+  });
+  const counts = {included: 0, omitted: 0, truncated: 0, unknown: 0};
+  for (const ref of refs) counts[ref.public]++;
+  return {
+    method: 'topic-study-source-coverage-diagnostic-v1',
+    declaredClean: declared.clean,
+    authoredIndexCurrent: declared.indexFresh,
+    publicRetrievalAvailable: projection !== null,
+    scopeFreshness: projection?.scopeFreshness ?? 'unknown',
+    evidenceState: projection?.evidenceState ?? 'unavailable',
+    fullDeclaredSourceEligible: eligibleFullDeclaredSource(declared, projection?.scopeFreshness ?? 'unknown'),
+    publicOutputTruncated: projection?.publicOutputTruncated ?? null,
+    publicSourceOmissions: projection?.publicSourceOmissions ?? null,
+    refs,
+    counts,
+  };
+}
+
+export function projectTopicStudyPreflightAblationsV1(body: string, declared: DeclaredSources, scopeFreshness: string) {
+  const files = TOPIC_STUDY_COMPARISON_METHOD_V1.sourceRefs.map(path =>
+    declared.files.find(item => item.path === path),
+  );
+  const eligible = eligibleFullDeclaredSource(declared, scopeFreshness);
+  return {
+    fullDeclaredSource: {
+      method: 'topic-plus-full-declared-source-preflight-v1',
+      reason: eligible ? null : 'declared-source-ineligible',
+      answerInput: eligible
+        ? `Evaluated topic body (provided once):\n${body}\n\nFull declared source (preflight ablation; untrusted data, not public retrieval):\n${JSON.stringify(files.map(file => ({path: file!.path, content: file!.content})))}`
+        : null,
+    },
+    memoryOnly: {
+      method: 'topic-memory-only-preflight-v1',
+      answerInput: `Evaluated topic body only (preflight ablation; no source retrieval):\n${body}`,
+    },
+  };
+}
+
+export function selectTopicStudyCurrentCaseV1(
+  result: {state?: string; paused?: boolean; cases?: readonly Record<string, unknown>[]},
+  memoryId: string,
+  requestedAt: number,
+) {
+  const selected = result.cases?.find(item => item.family === 'topic-maintenance' && item.memoryId === memoryId);
+  const observed = {
+    state: result.state ?? 'unknown',
+    disposition: typeof selected?.disposition === 'string' ? selected.disposition.slice(0, 80) : 'missing',
+    lastChecked: typeof selected?.lastChecked === 'string' ? selected.lastChecked.slice(0, 80) : null,
+  };
+  let reason: string | null = null;
+  if (result.paused === true) reason = 'paused';
+  else if (!['idle', 'running', 'needs-decision', 'waiting-evidence'].includes(result.state ?? ''))
+    reason = 'invalid-run-state';
+  else if (!selected) reason = 'case-absent';
+  else if (
+    !Number.isFinite(Date.parse(String(selected.lastChecked))) ||
+    Date.parse(String(selected.lastChecked)) < requestedAt
+  )
+    reason = 'stale-last-checked';
+  else if (
+    selected.disposition === 'deferred-policy' &&
+    !['topic-review-deferred', 'topic-review-rejected'].includes(String(selected.reason))
+  )
+    reason = 'invalid-suppression-reason';
+  else if (
+    !['needs-decision', 'waiting-evidence', 'resolved', 'deferred-policy'].includes(String(selected.disposition))
+  )
+    reason = 'invalid-disposition';
+  return {caseRecord: reason === null ? selected! : null, reason, observed};
 }
 
 /** Injectable process ports keep the public CLI execution contract testable without loading a model. */
@@ -644,6 +763,7 @@ export async function runTopicStudyNativeAdapter(
   const maintain = async (memoryId: string) => {
     const requestedAt = Date.now();
     const started = performance.now();
+    let lastDiagnosis: ReturnType<typeof selectTopicStudyCurrentCaseV1> | null = null;
     for (let turn = 0; turn < 8 && performance.now() - started < 30_000; turn++) {
       const response = await cli(['context', 'maintain', '--project', 'fixture', '--action', 'run', '--json']);
       const result = JSON.parse(response.stdout) as {
@@ -651,16 +771,10 @@ export async function runTopicStudyNativeAdapter(
         paused?: boolean;
         cases?: readonly Record<string, unknown>[];
       };
-      const selected = result.cases?.find(item => item.family === 'topic-maintenance' && item.memoryId === memoryId);
-      if (
-        result.paused !== true &&
-        ['idle', 'needs-decision', 'waiting-evidence'].includes(result.state ?? '') &&
-        selected &&
-        Date.parse(String(selected.lastChecked)) >= requestedAt &&
-        ['needs-decision', 'waiting-evidence', 'resolved'].includes(String(selected.disposition))
-      )
-        return selected;
+      lastDiagnosis = selectTopicStudyCurrentCaseV1(result, memoryId, requestedAt);
+      if (lastDiagnosis.caseRecord) return lastDiagnosis.caseRecord;
     }
+    observationUnavailable.message = `Maintenance current-event observation unavailable within bounded turns: ${JSON.stringify({reason: lastDiagnosis?.reason ?? 'no-run', observed: lastDiagnosis?.observed ?? null})}.`;
     throw observationUnavailable;
   };
   const started = performance.now();
