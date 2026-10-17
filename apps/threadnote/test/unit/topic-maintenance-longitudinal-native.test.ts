@@ -411,6 +411,40 @@ async function fixture(
 }
 
 describe('native public CLI longitudinal contract', () => {
+  it.each(['topic-review-rejected', 'topic-review-deferred'])(
+    'observes a freshly checked suppressed topic with reason %s in one run',
+    async reason => {
+      const value = await fixture(17, 'policy-conflict');
+      try {
+        const result = await runTopicStudyNativeAdapter(value.request, {
+          ...value.ports,
+          execute: async command => {
+            const response = await value.ports.execute(command);
+            if (!command.includes('run')) return response;
+            const payload = JSON.parse(response.stdout);
+            return {
+              ...response,
+              stdout: JSON.stringify({
+                ...payload,
+                state: 'running',
+                cases: payload.cases.map((item: object) => ({
+                  ...item,
+                  disposition: 'deferred-policy',
+                  reason,
+                })),
+              }),
+            };
+          },
+        });
+        expect(result.status).toBe('observed');
+        expect(result.detected).toBe(false);
+        expect(value.commands.filter(command => command.includes('run'))).toHaveLength(1);
+      } finally {
+        await rm(value.directory, {recursive: true, force: true});
+      }
+    },
+  );
+
   it.each(['resolved', 'needs-decision'])(
     'waits past a retained %s case until the current event has been observed',
     async disposition => {
@@ -523,6 +557,8 @@ describe('native public CLI longitudinal contract', () => {
       expect(turns).toBe(8);
       expect(result.status).toBe('unavailable');
       expect(result.reason).toContain('current-event observation');
+      expect(result.reason).toContain('stale-last-checked');
+      expect(result.reason).toContain('2000-01-01T00:00:00.000Z');
       expect(generations).toBe(0);
       expect(value.commands.some(command => command.includes('draft'))).toBe(false);
     } finally {

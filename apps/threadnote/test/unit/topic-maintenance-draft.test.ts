@@ -5,12 +5,16 @@ import {Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
-import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  validateTopicMaintenanceDraftBasis,
+  type TopicMaintenanceDraftBasisV1,
+} from '@threadnote/memory/topic-maintenance-draft';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
@@ -26,16 +30,125 @@ import {
   recordTopicMaintenanceReviewDecision,
   runContextMaintenance,
 } from '../../src/memory/context/maintenance.js';
-import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft} from '../../src/memory/context/maintenance_draft.js';
+import {
+  basisFromPacket,
+  readTopicMaintenanceDraft,
+  readyEvidence,
+  requestTopicMaintenanceDraft,
+  topicMaintenanceDraftPrompt,
+} from '../../src/memory/context/maintenance_draft.js';
 import {verifyTopicMaintenanceReviewSource} from '../../src/memory/context/maintenance_review_source.js';
 import {decideTopicMaintenanceReview} from '../../src/memory/context/maintenance_review.js';
 import {runSelectedDraft, selectedTopicDraftIdentity} from '../../src/manager/selected_draft.js';
-import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../src/manager/topic_draft_schema.js';
+import {
+  topicDraftGenerationEligible,
+  topicDraftGenerationScopeSupported,
+  topicDraftModelSchema,
+  topicDraftNativeJsonSchema,
+} from '../../src/manager/topic_draft_schema.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const modelId = 'gemma-4-e4b-it-q4';
 
 describe('topic maintenance private draft generation', () => {
+  it('selects direct descriptive paragraphs in accepted order without changing the basis', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            role: fc.constantFrom('descriptive', 'normative', 'historical' as const),
+            support: fc.constantFrom('direct', 'contextual', 'unresolved' as const),
+          }),
+          {minLength: 1, maxLength: 8},
+        ),
+        combinations => {
+          const paragraphs = combinations.map((item, ordinal) => ({
+            ...item,
+            ordinal,
+            hash: ordinal.toString(16).padStart(64, '0'),
+            citationIds: item.support === 'unresolved' ? [] : [`tncc_${ordinal.toString(16).padStart(40, '0')}`],
+          }));
+          const before = JSON.stringify(paragraphs);
+          expect(paragraphs.filter(topicDraftGenerationEligible).map(item => item.ordinal)).toEqual(
+            combinations.flatMap((item, ordinal) =>
+              item.role === 'descriptive' && item.support === 'direct' ? [ordinal] : [],
+            ),
+          );
+          const ids = paragraphs.flatMap(paragraph => paragraph.citationIds);
+          const basis: TopicMaintenanceDraftBasisV1 = {
+            version: 1,
+            targetUri: 'threadnote://user/tester/memories/durable/projects/fixture/topic.md',
+            targetHash: 'a'.repeat(64),
+            observationRevision: 'b'.repeat(64),
+            packetDigest: 'c'.repeat(64),
+            body: paragraphs.map(paragraph => `Claim ${paragraph.ordinal}.`).join('\n\n'),
+            paragraphs,
+            additionalDependencies: [],
+            handles: ids.map(id => ({id: `current:${id}`, citationId: id, variant: 'current' as const})),
+          };
+          const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
+          const expected = paragraphs.filter(
+            paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct',
+          );
+          expect(topicDraftGenerationScopeSupported(basis, false)).toBe(true);
+          expect(topicDraftGenerationScopeSupported(basis, true)).toBe(
+            expected.length > 0 || combinations.every(paragraph => paragraph.role !== 'descriptive'),
+          );
+          expect(branches.some(branch => branch.properties.outcome.enum[0] === 'propose-update')).toBe(
+            expected.length > 0,
+          );
+          if (expected.length)
+            expect(
+              branches[0].properties.operations.items.oneOf.map(
+                (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => [
+                  variant.properties.ordinal.enum[0],
+                  variant.properties.beforeHash.enum[0],
+                ],
+              ),
+            ).toEqual(expected.map(paragraph => [paragraph.ordinal, paragraph.hash]));
+          expect(JSON.stringify(paragraphs)).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('keeps non-editable bases in no-update outcome branches', () => {
+    const basis: TopicMaintenanceDraftBasisV1 = {
+      version: 1,
+      targetUri: 'threadnote://user/tester/memories/durable/projects/fixture/topic.md',
+      targetHash: 'a'.repeat(64),
+      observationRevision: 'b'.repeat(64),
+      packetDigest: 'c'.repeat(64),
+      body: 'A contextual paragraph.',
+      paragraphs: [
+        {
+          ordinal: 0,
+          hash: 'd'.repeat(64),
+          role: 'descriptive',
+          support: 'contextual',
+          citationIds: ['tncc_' + '0'.repeat(40)],
+        },
+      ],
+      additionalDependencies: [],
+      handles: [{id: 'current:tncc_' + '0'.repeat(40), citationId: 'tncc_' + '0'.repeat(40), variant: 'current'}],
+    };
+    const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
+    expect(topicDraftGenerationScopeSupported(basis, true)).toBe(false);
+    expect(topicDraftGenerationScopeSupported(basis, false)).toBe(true);
+    expect(
+      topicDraftGenerationScopeSupported(
+        {...basis, paragraphs: basis.paragraphs.map(paragraph => ({...paragraph, role: 'normative' as const}))},
+        true,
+      ),
+    ).toBe(true);
+    expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
+      'propose-revalidation',
+      'policy-conflict',
+      'insufficient-evidence',
+    ]);
+  });
+
   it('keeps every native outcome exclusive with operation cardinality across bounded evidence sets', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 8}), count => {
@@ -73,6 +186,20 @@ describe('topic maintenance private draft generation', () => {
         expect(branches.slice(1).map(branch => branch.properties.operations.maxItems)).toEqual([0, 0, 0]);
         expect(branches[1].properties.reviewedHandles.minItems).toBe(1);
         expect(branches.slice(2).map(branch => branch.properties.reviewedHandles.maxItems)).toEqual([0, 0]);
+        expect(
+          branches[0].properties.operations.items.oneOf.map(
+            (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => ({
+              ordinal: variant.properties.ordinal.enum[0],
+              beforeHash: variant.properties.beforeHash.enum[0],
+            }),
+          ),
+        ).toEqual(
+          basis.paragraphs.map(paragraph => ({
+            ordinal: paragraph.ordinal,
+            beforeHash: paragraph.hash,
+          })),
+        );
+        expect(JSON.stringify(schema)).not.toContain('"anyOf"');
       }),
       {numRuns: 16},
     );
@@ -163,11 +290,14 @@ describe('topic maintenance private draft generation', () => {
                 timestamp: '2026-10-16T00:00:00.000Z',
                 codeCitations: [...citations, unrelatedCitation],
               },
-              'Request timeout is 30 seconds.',
+              'Request timeout is 30 seconds.\n\nThis topic describes runtime configuration.',
             ),
           )!;
           const enrolled = proposeTopicMaintenanceEnrollment(base, {
-            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [citations[0].id]}],
+            paragraphs: [
+              {role: 'descriptive', support: 'direct', citationIds: [citations[0].id]},
+              {role: 'descriptive', support: 'contextual', citationIds: [citations[0].id]},
+            ],
             additionalDependencies: [{kind: 'configuration', citationId: unrelatedCitation.id}],
           });
           const memory = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/source-topic.md');
@@ -202,6 +332,20 @@ describe('topic maintenance private draft generation', () => {
           expect(caseId).not.toBe('');
           const packet = yield* readContextMaintenancePacket(config, caseId);
           expect('topicEvidence' in packet && packet.topicEvidence.outcome).toBe('ready');
+          const ready = readyEvidence(packet);
+          const longClaim = 'Request timeout is 30 seconds. ' + 'x'.repeat(28 * 1024);
+          const longBasis = validateTopicMaintenanceDraftBasis({
+            ...basisFromPacket(ready),
+            body: longClaim + '\n\nThis topic describes runtime configuration.',
+            paragraphs: ready.paragraphs.map((paragraph, ordinal) =>
+              ordinal === 0 ? {...paragraph, hash: sha256HexSync(longClaim)} : paragraph,
+            ),
+          });
+          for (const previousError of [undefined, 'The prior draft outcome does not match its operations.']) {
+            const prompt = topicMaintenanceDraftPrompt(ready, longBasis, previousError, '{invalid');
+            expect(prompt.split(longClaim)).toHaveLength(2);
+            expect(new TextEncoder().encode(prompt).byteLength).toBeLessThanOrEqual(80 * 1024);
+          }
           const competing = path.join(path.dirname(memory), 'competing-topic.md');
           yield* fs.writeFileString(
             competing,
@@ -270,6 +414,28 @@ describe('topic maintenance private draft generation', () => {
               removedClaims: [],
             });
           };
+          const validUpdateJson = (prompt: string) => {
+            const draft = JSON.parse(validJson(prompt));
+            const evidence = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+            const paragraph = evidence.paragraphs[0];
+            expect(paragraph.text).toBe('Request timeout is 30 seconds.');
+            expect(evidence.paragraphs[1].text).toBe('This topic describes runtime configuration.');
+            expect(prompt).toContain('including still-stale accepted claims from earlier events');
+            return JSON.stringify({
+              ...draft,
+              outcome: 'propose-update',
+              reviewedHandles: [],
+              operations: [
+                {
+                  ordinal: paragraph.ordinal,
+                  beforeHash: paragraph.hash,
+                  text: 'Request timeout is 60 seconds.',
+                  supportHandles: [`current:${citations[0].id}`],
+                  rationale: 'The current source states 60 seconds.',
+                },
+              ],
+            });
+          };
           const modelResult = (text: string) => ({
             text,
             backendIdentity: 'local-ai',
@@ -282,7 +448,7 @@ describe('topic maintenance private draft generation', () => {
           const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
             Effect.sync(() => {
               calls += 1;
-              return modelResult(calls === 1 ? '{invalid' : validJson(prompt));
+              return modelResult(calls === 1 ? '{invalid' : validUpdateJson(prompt));
             });
           const request = (regenerate = false) =>
             requestTopicMaintenanceDraft(config, {caseId, backend: 'local-ai', modelId, regenerate}, generator).pipe(
@@ -312,6 +478,34 @@ describe('topic maintenance private draft generation', () => {
             wrongModel,
           ).pipe(Effect.provideService(LocalModelStore, store), Effect.result);
           expect(Result.isFailure(mismatched)).toBe(true);
+          const contextualOperation: typeof runSelectedDraft = (_config, _agent, _model, prompt) => {
+            const draft = JSON.parse(validJson(prompt));
+            const paragraph = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs[1];
+            return Effect.succeed(
+              modelResult(
+                JSON.stringify({
+                  ...draft,
+                  outcome: 'propose-update',
+                  reviewedHandles: [],
+                  operations: [
+                    {
+                      ordinal: paragraph.ordinal,
+                      beforeHash: paragraph.hash,
+                      text: 'This topic now describes changed runtime configuration.',
+                      supportHandles: [`current:${citations[0].id}`],
+                      rationale: 'The source changed.',
+                    },
+                  ],
+                }),
+              ),
+            );
+          };
+          const contextual = yield* requestTopicMaintenanceDraft(
+            config,
+            {caseId, backend: 'local-ai', modelId},
+            contextualOperation,
+          ).pipe(Effect.provideService(LocalModelStore, store), Effect.result);
+          expect(Result.isFailure(contextual)).toBe(true);
           expect(yield* fs.readFileString(stateFile)).toBe(stateBeforeFailure);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
           expect(yield* listCandidateReviews(home)).toEqual([]);
@@ -325,8 +519,13 @@ describe('topic maintenance private draft generation', () => {
             version: 1,
             generation: {attempts: 2, agent: 'local-ai', model: modelId},
           });
-          expect(review.candidates[0].evidence).toContainEqual(expect.stringContaining('1 target conflicts'));
-          expect(review.candidates[0].evidence).toContainEqual(expect.stringContaining('incompatible-values'));
+          expect(review.maintenance?.proposal.changedOrdinals).toEqual([0]);
+          expect(review.maintenance?.proposal.body).toBe(
+            'Request timeout is 60 seconds.\n\nThis topic describes runtime configuration.',
+          );
+          expect(review.candidates[0].evidence).toContainEqual(
+            expect.stringContaining('Advisory bounded semantic comparison'),
+          );
           expect(calls).toBe(2);
           expect((yield* request()).revision).toBe(review.revision);
           expect(calls).toBe(2);
