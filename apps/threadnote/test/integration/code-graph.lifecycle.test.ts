@@ -6166,7 +6166,7 @@ describe('native code graph lifecycle', () => {
       expect(registeredBeforeRelease).toBe(false);
       expect(yield* Deferred.isDone(registered)).toBe(true);
       expect(repair).toMatchObject({databases: 1, discarded: 0});
-    }).pipe(provideTestLayer(ApplicationLayer)),
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   it('does not follow vector cleanup symlinks outside the derived index root', async () => {
