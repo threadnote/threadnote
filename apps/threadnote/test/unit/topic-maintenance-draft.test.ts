@@ -42,6 +42,7 @@ import {decideTopicMaintenanceReview} from '../../src/memory/context/maintenance
 import {runSelectedDraft, selectedTopicDraftIdentity} from '../../src/manager/selected_draft.js';
 import {
   topicDraftGenerationEligible,
+  topicDraftGenerationScopeSupported,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../src/manager/topic_draft_schema.js';
@@ -89,6 +90,10 @@ describe('topic maintenance private draft generation', () => {
           const expected = paragraphs.filter(
             paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct',
           );
+          expect(topicDraftGenerationScopeSupported(basis, false)).toBe(true);
+          expect(topicDraftGenerationScopeSupported(basis, true)).toBe(
+            expected.length > 0 || combinations.every(paragraph => paragraph.role !== 'descriptive'),
+          );
           expect(branches.some(branch => branch.properties.outcome.enum[0] === 'propose-update')).toBe(
             expected.length > 0,
           );
@@ -129,6 +134,14 @@ describe('topic maintenance private draft generation', () => {
       handles: [{id: 'current:tncc_' + '0'.repeat(40), citationId: 'tncc_' + '0'.repeat(40), variant: 'current'}],
     };
     const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
+    expect(topicDraftGenerationScopeSupported(basis, true)).toBe(false);
+    expect(topicDraftGenerationScopeSupported(basis, false)).toBe(true);
+    expect(
+      topicDraftGenerationScopeSupported(
+        {...basis, paragraphs: basis.paragraphs.map(paragraph => ({...paragraph, role: 'normative' as const}))},
+        true,
+      ),
+    ).toBe(true);
     expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
       'propose-revalidation',
       'policy-conflict',

@@ -34,7 +34,7 @@ import {
   type SelectedDraftResult,
 } from '../../manager/selected_draft.js';
 import type {ConsolidationAgent} from '../../types.js';
-import {topicDraftGenerationEligible} from '../../manager/topic_draft_schema.js';
+import {topicDraftGenerationEligible, topicDraftGenerationScopeSupported} from '../../manager/topic_draft_schema.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
 import {prepareContextMaintenanceInventory} from './maintenance_inventory.js';
 import {readContextMaintenancePacket} from './maintenance.js';
@@ -392,6 +392,15 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
       const initial = yield* readContextMaintenancePacket(config, input.caseId);
       const packet = yield* Effect.try({try: () => readyEvidence(initial), catch: cause => cause as TopicDraftError});
       const basis = yield* Effect.try({try: () => basisFromPacket(packet), catch: cause => fail(String(cause))});
+      if (
+        !topicDraftGenerationScopeSupported(
+          basis,
+          packet.sources.some(source => source.oldExcerpt.content !== source.newExcerpt.content),
+        )
+      )
+        return yield* fail(
+          'Changed source excerpts have no direct descriptive paragraph eligible for automatic repair. Review this topic manually.',
+        );
       const reviewEvidence = yield* Effect.try({
         try: () => validateTopicMaintenanceReviewEvidence(basis, reviewEvidenceFromPacket(packet)),
         catch: cause => fail(cause instanceof Error ? cause.message : 'Verified topic evidence is unavailable.'),

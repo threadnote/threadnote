@@ -5,6 +5,14 @@ export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBas
   return paragraph.role === 'descriptive' && paragraph.support === 'direct';
 }
 
+export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftBasisV1, sourceExcerptChanged: boolean) {
+  return (
+    !sourceExcerptChanged ||
+    basis.paragraphs.some(topicDraftGenerationEligible) ||
+    basis.paragraphs.every(paragraph => paragraph.role !== 'descriptive')
+  );
+}
+
 /** Generation grammar only; the memory-owned validator remains the final authority. */
 export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
