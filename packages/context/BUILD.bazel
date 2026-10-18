@@ -50,6 +50,7 @@ bun_test(
         "//packages/context:test/unit/context-health-citation-traversal.test.ts",
         "//packages/context:test/unit/context-health-citation-validation.test.ts",
         "//packages/context:test/unit/context-health-schedule.test.ts",
+        "//packages/context:test/unit/context-health-topic-history.test.ts",
         "//packages/context:test/unit/context_health.test.ts",
         "//packages/graph:package.json",
         "//packages/graph:src/admission_freshness.ts",
@@ -539,6 +540,7 @@ bun_test(
         "packages/context/test/unit/context-health-citation-traversal.test.ts",
         "packages/context/test/unit/context-health-citation-validation.test.ts",
         "packages/context/test/unit/context-health-schedule.test.ts",
+        "packages/context/test/unit/context-health-topic-history.test.ts",
         "packages/context/test/unit/context_health.test.ts",
     ],
 )
