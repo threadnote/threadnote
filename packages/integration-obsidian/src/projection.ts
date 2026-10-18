@@ -4,7 +4,7 @@ import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {uriSegment} from '@threadnote/workspace/manifest';
-import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
+import {memoryHasPrivateEvidenceProvenance} from '@threadnote/memory/code/citation-policy';
 import {formatMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {
   canonicalMemoryDocumentContent,
@@ -551,13 +551,7 @@ const renderProjectionMemory = Effect.fn('obsidian.renderProjectionMemory')(func
   memoryId: string,
   projectedPathByUri: ReadonlyMap<string, string>,
 ) {
-  const privateEvidence = memoryCodeCitationContentSharingBlocker(record.uri, record.content);
-  if (
-    privateEvidence === 'private-obsidian-evidence' ||
-    privateEvidence === 'private-source-evidence' ||
-    privateEvidence === 'malformed-citation'
-  )
-    return undefined;
+  if (memoryHasPrivateEvidenceProvenance(record.uri, record.content)) return undefined;
   const canonical = canonicalMemoryDocumentContent(record.content);
   const sourceHash = record.metadata.sourceHash ?? `sha256:${yield* sha256Hex(canonical)}`;
   const visibility = record.metadata.visibility ?? (isSharedMemoryUri(record.uri) ? 'shared' : 'personal');

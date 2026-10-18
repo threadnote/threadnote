@@ -94,7 +94,9 @@ const currentScope = Effect.fn('topicExpansion.currentScope')(function* (
     snapshot.dirty ||
     status.stale ||
     status.freshness !== 'current' ||
-    observed?.overlay?.dirty !== false ||
+    // Scoped status proves its selected inputs; the full checkout is checked below.
+    (observed?.overlay?.dirty !== false &&
+      (observed?.projectScope?.scope === undefined || observed?.overlay !== undefined)) ||
     !observed.projectScopeObserved ||
     status.projectCoverage?.completeness === 'partial' ||
     (observed.projectScope?.scope &&

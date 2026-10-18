@@ -115,12 +115,14 @@ const CORE_TOOL_NAMES = [
 
 const ADVANCED_TOOL_NAMES = [
   'context_topic_enrollment',
+  'context_topic_dependency_expansion',
   'context_maintenance_draft',
   'context_maintenance_review',
   'share_topic_propose',
   'context_maintenance_status',
   'context_maintain',
   'context_maintenance_packet',
+  'context_maintenance_capture',
   'search',
   'read',
   'list',

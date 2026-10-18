@@ -10,7 +10,9 @@ import {
 } from '../../src/memory/maintenance/topic_expansion.js';
 
 /** Real Git/graph/capsule fixture shared by application and Manager boundary tests. */
-export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')(function* () {
+export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')(function* (
+  options: {readonly scoped?: boolean} = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-expansion-'});
@@ -22,6 +24,16 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   );
   yield* fs.writeFileString(path.join(repository, 'src/dependency.ts'), 'export const dependency = 32;\n');
   yield* fs.writeFileString(path.join(repository, 'settings.json'), '{"limit":32}\n');
+  if (options.scoped) {
+    yield* fs.writeFileString(
+      path.join(repository, 'package.json'),
+      JSON.stringify({name: 'fixture-workspace', private: true, workspaces: ['src']}),
+    );
+    yield* fs.writeFileString(
+      path.join(repository, 'src/package.json'),
+      JSON.stringify({name: 'fixture-code', private: true, type: 'module'}),
+    );
+  }
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
   const commit = (message: string) =>
     Effect.gen(function* () {
@@ -39,11 +51,25 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   };
   yield* fs.writeFileString(
     config.manifestPath,
-    `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
+    `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n${options.scoped ? '    graph:\n      roots: [src]\n      closure: dependencies\n' : ''}`,
   );
   const index = () =>
     CodeGraphIndexer.pipe(
-      Effect.flatMap(indexer => indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false})),
+      Effect.flatMap(indexer =>
+        indexer.index({
+          cwd: repository,
+          threadnoteHome: home,
+          ensureVectors: false,
+          ...(options.scoped
+            ? {
+                project: {
+                  uri: 'threadnote://resources/repos/fixture',
+                  graph: {roots: ['src'], closure: 'dependencies' as const},
+                },
+              }
+            : {}),
+        }),
+      ),
     );
   yield* index();
   const [origin] = yield* captureMemoryCodeCitations(config, {

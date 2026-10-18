@@ -72,6 +72,24 @@ export function memoryCodeCitationContentSharingBlocker(
     : undefined;
 }
 
+/** Private provenance cannot cross a projection boundary, even when its metadata is malformed. */
+export function memoryHasPrivateEvidenceProvenance(uri: string, content: string): boolean {
+  if (
+    inspectEvidenceHeaderShape(content, 'obsidian_evidence').hasCitationShape ||
+    inspectEvidenceHeaderShape(content, 'source_evidence').hasCitationShape
+  )
+    return true;
+  const topicHeader = inspectEvidenceHeaderShape(content, 'topic_maintenance');
+  if (!topicHeader.hasCitationShape) return false;
+  const parsed = parseMemoryDocument(uri, content);
+  return (
+    !parsed ||
+    topicHeader.hasNonCanonical ||
+    !!parsed.metadata.topicMaintenanceError ||
+    (parsed.metadata.topicMaintenance?.version === 3 && parsed.metadata.topicMaintenance.sourceKind === 'obsidian')
+  );
+}
+
 export function memoryCodeCitationSharingBlockerMessage(blocker: MemoryCodeCitationSharingBlocker): string {
   switch (blocker) {
     case 'dirty-source':

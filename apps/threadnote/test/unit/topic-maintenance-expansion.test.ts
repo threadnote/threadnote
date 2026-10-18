@@ -22,6 +22,7 @@ import {
 } from '../../src/memory/context/maintenance_review.js';
 import {
   previewTopicDependencyExpansion,
+  inspectTopicDependencyExpansion,
   applyTopicDependencyExpansion,
   restartTopicDependencyExpansion,
   loadTopicDependencyExpansionPreview,
@@ -44,6 +45,8 @@ const capsuleBytes = Effect.fn('test.expansionCapsuleBytes')(function* (home: st
   const visit = (directory: string): Effect.Effect<void, unknown> =>
     Effect.gen(function* () {
       for (const name of yield* fs.readDirectory(directory)) {
+        // SQLite sidecars can disappear during a checkpoint and are not citation capsules.
+        if (name.endsWith('.sqlite-shm') || name.endsWith('.sqlite-wal')) continue;
         const file = path.join(directory, name);
         const stat = yield* fs.stat(file);
         if (stat.type === 'Directory') yield* visit(file);
@@ -56,6 +59,48 @@ const capsuleBytes = Effect.fn('test.expansionCapsuleBytes')(function* (home: st
 });
 
 describe('reviewed bounded dependency expansion runtime', () => {
+  effectIt.effect(
+    'expands a complete selected project graph while refusing dirty files outside its scope and changed configuration',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const f = yield* makeTopicExpansionFixture({scoped: true});
+        const before = yield* fs.readFileString(f.memoryPath);
+        const originalCapsules = yield* capsuleBytes(f.home);
+        expect(f.inspected.status).toBe('ready');
+        expect(f.choices.coverage?.every(read => read.status === 'exhaustive')).toBe(true);
+
+        const settings = path.join(f.repository, 'settings.json');
+        const settingsBefore = yield* fs.readFileString(settings);
+        yield* fs.writeFileString(settings, '{"limit":48}\n');
+        expect(
+          (yield* inspectTopicDependencyExpansion(f.config, {
+            uri: f.uri,
+            callerCwd: f.repository,
+            project: 'fixture',
+          }).pipe(Effect.result))._tag,
+        ).toBe('Failure');
+        expect((yield* applyTopicDependencyExpansion(f.config, approval(f)).pipe(Effect.result))._tag).toBe('Failure');
+        expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
+        expect(yield* capsuleBytes(f.home)).toEqual(originalCapsules);
+        yield* fs.writeFileString(settings, settingsBefore);
+
+        const manifestBefore = yield* fs.readFileString(f.config.manifestPath);
+        yield* fs.writeFileString(f.config.manifestPath, manifestBefore + '# changed configuration\n');
+        expect((yield* applyTopicDependencyExpansion(f.config, approval(f)).pipe(Effect.result))._tag).toBe('Failure');
+        expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
+        expect(yield* capsuleBytes(f.home)).toEqual(originalCapsules);
+        yield* fs.writeFileString(f.config.manifestPath, manifestBefore);
+
+        expect((yield* applyTopicDependencyExpansion(f.config, approval(f))).status).toBe('expanded');
+        const accepted = parseMemoryDocument(f.uri, yield* fs.readFileString(f.memoryPath))!;
+        expect(accepted.body).toBe(f.body);
+        expect(accepted.metadata.codeCitations).toContainEqual(f.origin);
+        expect(accepted.metadata.topicMaintenance?.paragraphs).toEqual(f.record.metadata.topicMaintenance?.paragraphs);
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect(
     'restarts an expired pre-capture intent with a fresh separately approved operation and immutable physical history',
     () =>
