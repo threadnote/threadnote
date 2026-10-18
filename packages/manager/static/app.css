@@ -9625,3 +9625,484 @@ h4 {
   padding: 0;
   min-height: 0;
 }
+
+:root {
+  --review-info: #9bc2ff;
+  --review-protected: #c2b1ff;
+}
+:root[data-theme='light'] {
+  --review-info: #37629b;
+  --review-protected: #6b4ba4;
+}
+:is(.review-badge, .review-notice, .memory-excerpt) {
+  --review-tone: color-mix(in srgb, var(--muted) 90%, var(--text));
+}
+:is(.review-badge, .review-notice, .memory-excerpt)[data-tone='info'] {
+  --review-tone: var(--review-info);
+}
+:is(.review-badge, .review-notice, .memory-excerpt)[data-tone='protected'] {
+  --review-tone: var(--review-protected);
+}
+:is(.review-badge, .review-notice)[data-tone='proposal'] {
+  --review-tone: var(--accent);
+}
+:is(.review-badge, .review-notice)[data-tone='warning'] {
+  --review-tone: var(--warn);
+}
+:is(.review-badge, .review-notice)[data-tone='danger'] {
+  --review-tone: var(--danger);
+}
+.review-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+.review-badge {
+  align-items: center;
+  display: inline-flex;
+  gap: 5px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 9px;
+  border: 1px solid color-mix(in srgb, var(--review-tone) 24%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--review-tone) 10%, var(--panel));
+  color: var(--review-tone);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.review-badge svg,
+.review-notice > svg,
+.review-scope-note > svg {
+  flex-shrink: 0;
+}
+.memory-excerpt {
+  margin: 12px 0;
+  padding: 14px 17px;
+  border: 1px solid color-mix(in srgb, var(--review-tone) 18%, var(--line));
+  border-left: 3px solid var(--review-tone);
+  border-radius: 0 9px 9px 0;
+  background: color-mix(in srgb, var(--review-tone) 5%, var(--panel));
+  min-width: 0;
+}
+.memory-excerpt figcaption {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  color: var(--review-tone);
+  font-size: 11px;
+  font-weight: 500;
+  margin-bottom: 9px;
+}
+.memory-excerpt blockquote,
+.semantic-memory-card .memory-excerpt blockquote {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  white-space: pre-wrap;
+  font-family: ui-serif, Georgia, serif;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.65;
+}
+.memory-excerpt .markdown-viewer {
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.65;
+  min-height: 0;
+  padding: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.review-proposal-text {
+  font-size: 14px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.memory-excerpt .markdown-viewer > :first-child,
+.review-proposal .markdown-viewer > :first-child {
+  margin-top: 0;
+}
+.memory-excerpt .markdown-viewer > :last-child,
+.review-proposal .markdown-viewer > :last-child {
+  margin-bottom: 0;
+}
+.semantic-memory-card > .memory-excerpt {
+  margin: 18px 20px;
+}
+.review-proposal,
+.review-proposal-preview {
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 36%, var(--line));
+  border-radius: 9px;
+  background: linear-gradient(120deg, var(--accent-soft), var(--panel));
+  min-width: 0;
+}
+.review-content-label {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  margin-bottom: 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+.review-proposal textarea {
+  font-size: 14px;
+  line-height: 1.65;
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--line));
+  resize: vertical;
+}
+.review-notice {
+  align-items: start;
+  display: flex;
+  gap: 11px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--review-tone) 28%, var(--line));
+  border-left: 3px solid var(--review-tone);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--review-tone) 8%, var(--panel));
+  font-size: 12px;
+  line-height: 1.6;
+}
+.review-notice > svg,
+.review-notice strong {
+  color: var(--review-tone);
+}
+.review-notice strong {
+  display: block;
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+.topic-review-content {
+  display: grid;
+  gap: 18px;
+}
+.topic-review-content > .health-dialog-section-heading {
+  margin: 0;
+}
+.topic-review-content > .health-dialog-section-heading h3 {
+  font-size: 19px;
+  letter-spacing: -0.3px;
+}
+.topic-review-summary {
+  display: grid;
+  gap: 13px;
+}
+.review-scope-note {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.review-scope-note > svg {
+  color: var(--review-info);
+}
+.review-scope-note p {
+  margin: 0;
+  line-height: 1.5;
+}
+.review-scope-note strong {
+  color: var(--text);
+  font-weight: 500;
+}
+.topic-review-notes {
+  display: grid;
+  gap: 8px;
+}
+.review-disclosure,
+.review-source-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  min-width: 0;
+  padding: 0 14px;
+}
+.review-disclosure > summary,
+.review-source-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.review-disclosure > summary::-webkit-details-marker,
+.review-source-card > summary::-webkit-details-marker {
+  display: none;
+}
+.review-disclosure > summary::after,
+.review-source-card > summary::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  margin-left: auto;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+}
+.review-disclosure[open] > summary::after,
+.review-source-card[open] > summary::after {
+  transform: rotate(225deg);
+}
+.review-disclosure > summary:focus-visible,
+.review-source-card > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.review-disclosure[open] > summary,
+.review-source-card[open] > summary {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 13px;
+}
+.review-disclosure-hint {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+.review-advisory > summary > svg {
+  color: var(--warn);
+}
+.review-disclosure p,
+.review-disclosure ul {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.review-disclosure li + li {
+  margin-top: 8px;
+}
+.review-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 14px;
+  margin: 16px 0;
+  font-size: 12px;
+}
+.review-metadata dt {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.review-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.review-section-heading,
+.review-section-heading h4,
+.topic-paragraph > header,
+.topic-paragraph-title,
+.topic-paragraph-context,
+.topic-paragraph-context > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.review-section-heading,
+.topic-paragraph > header {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+.review-section-heading h4 {
+  margin: 0;
+  font-size: 14px;
+}
+.review-section-heading h4 > svg {
+  color: var(--accent);
+}
+.review-section-heading > span:not(.review-badge) {
+  color: var(--muted);
+  font-size: 11px;
+}
+.topic-paragraphs,
+.topic-source-evidence {
+  display: grid;
+  gap: 14px;
+}
+.topic-paragraph {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+.topic-paragraph.has-proposal {
+  border-color: var(--accent-line);
+  box-shadow: inset 0 3px var(--accent);
+}
+.topic-paragraph-title h5 {
+  font-size: 13px;
+  margin: 0;
+}
+.topic-paragraph-number {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.topic-paragraph-context {
+  color: var(--muted);
+  flex-wrap: wrap;
+  font-size: 11px;
+  margin: 10px 0 14px;
+  overflow-wrap: anywhere;
+}
+.topic-text-comparison {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.topic-text-comparison > .memory-excerpt {
+  margin: 0;
+}
+.review-current-text > .review-content-label {
+  color: var(--muted);
+  font-weight: 400;
+}
+.review-current-text textarea {
+  line-height: 1.65;
+  min-height: 90px;
+}
+.topic-support-choices {
+  margin: 16px 0 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+.topic-support-choices legend {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 0 6px;
+}
+.topic-support-choices .review-confirmation {
+  font-size: 11px;
+  padding: 8px;
+  margin: 3px 0;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+.topic-support-choices .review-confirmation:has(input:checked) {
+  background: var(--accent-soft);
+}
+.topic-support-choices small {
+  color: var(--muted);
+}
+.review-source-card > summary code {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+.review-source-card .health-evidence-comparison {
+  padding-bottom: 14px;
+}
+.review-source-card h5 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.review-source-card pre {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--code-bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.review-final-document {
+  min-width: 0;
+  border: 1px solid var(--accent-line);
+  border-radius: 9px;
+  padding: 18px;
+  background: var(--panel);
+}
+.review-final-document h4 {
+  margin: 0 0 8px;
+  color: var(--accent);
+}
+.review-final-document > p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.topic-generation-controls {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 14px;
+}
+.topic-generation-controls label {
+  display: grid;
+  flex: 1 1 180px;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.topic-review-actions {
+  position: sticky;
+  z-index: 2;
+  bottom: -24px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px -24px -24px;
+  padding: 16px 24px;
+  background: var(--panel-raised);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -8px 22px rgb(0 0 0 / 5%);
+}
+.topic-review-actions:empty {
+  display: none;
+}
+.topic-review-actions > .primary {
+  margin-left: auto;
+}
+.health-decision-card > header {
+  align-items: start;
+}
+.health-decision-card > header > div {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 680px) {
+  .topic-text-comparison {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .topic-paragraph {
+    padding: 14px;
+  }
+  .topic-review-actions {
+    bottom: -16px;
+    margin-inline: -16px;
+    margin-bottom: -16px;
+    padding: 12px 16px;
+  }
+  .topic-review-actions > button {
+    flex: 1 1 auto;
+  }
+  .topic-review-actions > .primary {
+    margin-left: 0;
+  }
+  .review-disclosure-hint {
+    display: none;
+  }
+}

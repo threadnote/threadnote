@@ -1,4 +1,6 @@
 import {MarkdownViewer} from './ui/controls.js';
+import {Sparkles} from 'lucide-react';
+import {MemoryExcerpt, ReviewBadge} from './review_presentation.js';
 import React, {useEffect, useRef, useState} from 'react';
 import type {
   ManagerCitationRepairJobResponseV1,
@@ -155,7 +157,10 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                   </span>
                   <h3>{review.task}</h3>
                 </div>
-                <span className="attention-count">{review.candidates.length}</span>
+                <ReviewBadge tone="proposal">
+                  <Sparkles size={12} aria-hidden="true" /> {review.candidates.length}{' '}
+                  {review.candidates.length === 1 ? 'proposal' : 'proposals'}
+                </ReviewBadge>
               </header>
               <p className="muted">
                 Created {new Date(review.createdAt).toLocaleString()} · revision {review.revision}
@@ -164,7 +169,19 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                 {review.candidates.map(candidate => (
                   <section key={candidate.candidateId}>
                     <div className="attention-tags">
-                      <span className={`attention-state is-${candidate.state}`}>{candidate.state}</span>
+                      <ReviewBadge
+                        tone={
+                          candidate.state === 'conflict'
+                            ? 'danger'
+                            : candidate.state === 'pending'
+                              ? 'warning'
+                              : candidate.state === 'applied'
+                                ? 'proposal'
+                                : 'neutral'
+                        }
+                      >
+                        {candidate.state}
+                      </ReviewBadge>
                       {review.kind !== 'topic-maintenance' ? (
                         <>
                           <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
@@ -176,6 +193,9 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       <p>Compare the accepted topic, its proposed update, and the current source before deciding.</p>
                     ) : (
                       <div className="review-proposal-preview">
+                        <div className="review-content-label">
+                          <Sparkles size={14} aria-hidden="true" /> Proposed memory
+                        </div>
                         <MarkdownViewer markdown={candidate.proposedText} />
                       </div>
                     )}
@@ -196,7 +216,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                     >
                       <strong>{view === 'history' ? 'View review details →' : 'Review and decide →'}</strong>
                     </button>
-                    <p>{candidate.reason}</p>
+                    <p className="muted">{candidate.reason}</p>
                     {candidate.targetUri && review.kind !== 'topic-maintenance' ? (
                       <code>{candidate.targetUri}</code>
                     ) : null}
@@ -577,7 +597,9 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
                       {group.findings.length} issue{group.findings.length === 1 ? '' : 's'}
                     </span>
                   </header>
-                  {group.preview?.excerpt ? <p className="health-memory-preview">{group.preview.excerpt}</p> : null}
+                  {group.preview?.excerpt ? (
+                    <MemoryExcerpt label="Saved memory">{group.preview.excerpt}</MemoryExcerpt>
+                  ) : null}
                   <div className="health-record-actions">
                     <button onClick={() => props.onOpenLibrary(group.uri)} type="button">
                       Open memory
@@ -900,7 +922,7 @@ function CitationRepairDialog(props: {
                 {citationRepairGroups(preview.items).map(group => (
                   <article key={group.subjectUri}>
                     <strong>{group.title}</strong>
-                    {group.excerpt ? <p>{group.excerpt}</p> : null}
+                    {group.excerpt ? <MemoryExcerpt label="Saved memory">{group.excerpt}</MemoryExcerpt> : null}
                     <span>
                       {group.items.length} citation{group.items.length === 1 ? '' : 's'} ready in this memory
                     </span>

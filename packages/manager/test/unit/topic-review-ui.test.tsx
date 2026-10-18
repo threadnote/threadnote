@@ -231,6 +231,40 @@ async function render(element: React.ReactElement) {
 }
 const button = (label: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('button')].find(item => item.textContent?.includes(label))!;
+
+it('keeps blockers prominent and technical review notes behind closed disclosures', async () => {
+  current = review({
+    blockingReason: 'Refresh the source evidence before accepting.',
+    warnings: ['Advisory analyzer uncertainty: unsupported-extraction (1).'],
+  });
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  const disclosure = (label: string) =>
+    [...document.querySelectorAll<HTMLDetailsElement>('details')].find(item =>
+      item.querySelector('summary')?.textContent?.includes(label),
+    );
+  expect(disclosure('Generation details')?.open).toBe(false);
+  expect(disclosure('Review notes')?.open).toBe(false);
+  expect(disclosure('Review notes')?.textContent).toContain('unsupported-extraction');
+  const blocker = [...document.querySelectorAll('[role="status"]')].find(item =>
+    item.textContent?.includes('Refresh the source evidence before accepting.'),
+  );
+  expect(blocker).toBeTruthy();
+  expect(blocker?.closest('details')).toBeNull();
+  expect(document.querySelector('blockquote')?.textContent).toContain('Observed behavior.');
+  expect(document.querySelector('textarea[aria-label="Proposed descriptive paragraph 1"]')).toHaveProperty(
+    'value',
+    'Updated behavior.',
+  );
+});
+
 async function click(label: string) {
   await act(async () => button(label).click());
 }
@@ -459,6 +493,7 @@ it('blocks acceptance when the source packet is unavailable even with a persiste
     />,
   );
   expect(document.body.textContent).toContain('Current source evidence is unavailable');
+  expect(document.body.textContent).not.toContain('This draft needs fresh evidence');
   expect(button('Accept update').disabled).toBe(true);
 });
 
@@ -562,6 +597,8 @@ it('allows closing a stale pending case while blocking preview and stale resume'
       onOpenLibrary={() => undefined}
     />,
   );
+  expect(document.body.textContent).toContain('The source case is unavailable.');
+  expect(document.body.textContent).not.toContain('This draft needs fresh evidence');
   expect(button('Preview exact final document').disabled).toBe(true);
   expect(button('Defer').disabled).toBe(false);
   await click('Defer');

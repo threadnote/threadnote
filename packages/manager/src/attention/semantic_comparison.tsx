@@ -9,6 +9,7 @@ import type {
   ManagerSemanticReviewApplyResultV1,
 } from './contracts.js';
 import {MemoryBody} from '../detail_modal.js';
+import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 
@@ -66,16 +67,16 @@ export function SemanticComparisonEvidence(props: {
               >
                 <header>
                   <h3>Memory {label}</h3>
-                  <span className="semantic-claim-role">
+                  <ReviewBadge tone={claim.role === 'descriptive' ? 'info' : 'protected'}>
                     {claim.role === 'descriptive'
                       ? 'Observed behavior'
                       : claim.role === 'normative'
                         ? 'Required behavior'
                         : 'Historical decision'}
-                  </span>
+                  </ReviewBadge>
                 </header>
                 <p className="semantic-memory-name">{maintenanceMemoryTitle(claim.recordUri)}</p>
-                <blockquote>{claim.text}</blockquote>
+                <MemoryExcerpt label={`Statement from memory ${label}`}>{claim.text}</MemoryExcerpt>
                 <dl className="semantic-memory-context">
                   <div>
                     <dt>Section</dt>
