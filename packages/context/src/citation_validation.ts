@@ -26,6 +26,7 @@ import {decodeUtf8} from '@threadnote/graph/inventory/content';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
+import type {CodeGraphStatusOptions} from '@threadnote/graph/query/contract';
 import {codeGraphSnapshotRuntimeCurrent} from '@threadnote/graph/query/snapshot_runtime';
 import {
   observeCleanRepositoryWorktree,
@@ -274,12 +275,7 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                 statuses.set(
                   route.identity.repoRoot,
                   yield* query
-                    .status(config.agentContextHome, route.identity.repoRoot, {
-                      manifestPath: config.manifestPath,
-                      ...(scope.project === undefined ? {} : {project: scope.project}),
-                      observeWorktree: true,
-                      requestMaintenance: false,
-                    })
+                    .status(config.agentContextHome, route.identity.repoRoot, citationStatusOptions(config, scope))
                     .pipe(Effect.orElseSucceed(() => undefined)),
                 );
               const status = statuses.get(route.identity.repoRoot);
@@ -321,7 +317,11 @@ const recoverContextHealthCitationEvidence = Effect.fn('contextHealth.recoverCit
                       databasePath: status.databasePath,
                       finalFence: Effect.all(
                         [
-                          statusRepositoryFinalFence(config, {cwd: route.identity.repoRoot, status}),
+                          statusRepositoryFinalFence(config, {
+                            cwd: route.identity.repoRoot,
+                            status,
+                            statusOptions: citationStatusOptions(config, scope),
+                          }),
                           revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route),
                         ],
                         {concurrency: 2},
@@ -501,17 +501,13 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
   });
   const excerpts: ContextHealthCitationSourceExcerptV1[] = [];
   const query = yield* CodeGraphQueryService;
+  const statusOptions = citationStatusOptions(config, scope);
   const store = yield* CodeGraphStore;
   if (!resolution.ambiguous)
     for (const route of resolution.routes) {
       attemptedSteps.push('current-source');
       const current = yield* Effect.gen(function* () {
-        const status = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
-          manifestPath: config.manifestPath,
-          ...(scope.project === undefined ? {} : {project: scope.project}),
-          observeWorktree: true,
-          requestMaintenance: false,
-        });
+        const status = yield* query.status(config.agentContextHome, route.identity.repoRoot, statusOptions);
         if (
           status.stale ||
           status.freshness !== 'current' ||
@@ -562,12 +558,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
               !(yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
             )
               return undefined;
-            const after = yield* query.status(config.agentContextHome, route.identity.repoRoot, {
-              manifestPath: config.manifestPath,
-              ...(scope.project === undefined ? {} : {project: scope.project}),
-              observeWorktree: true,
-              requestMaintenance: false,
-            });
+            const after = yield* query.status(config.agentContextHome, route.identity.repoRoot, statusOptions);
             if (!sameExactSnapshot(status, after)) return undefined;
             return citationSourceExcerpt(
               bytes,
@@ -855,6 +846,16 @@ interface StatusReadyRepository {
   readonly cwd: string;
   readonly expected?: RepositoryIdentityExpectation;
   readonly status: CodeGraphStatus;
+  readonly statusOptions: CodeGraphStatusOptions;
+}
+
+function citationStatusOptions(config: RuntimeConfig, scope: ContextBriefScopeV1): CodeGraphStatusOptions {
+  return {
+    manifestPath: config.manifestPath,
+    ...(scope.project === undefined ? {} : {project: scope.project}),
+    observeWorktree: true,
+    requestMaintenance: false,
+  };
 }
 
 interface ValidationRepositoryTarget {
@@ -933,7 +934,7 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
     }
   }
   const query = yield* CodeGraphQueryService;
-  const statusOptions = {observeWorktree: true, requestMaintenance: false} as const;
+  const statusOptions = citationStatusOptions(config, scope);
   const observations = yield* Effect.forEach(
     resolution.targets,
     target => {
@@ -948,7 +949,7 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
         ) {
           return succeedUndefined;
         }
-        const repository = {...target, status} satisfies StatusReadyRepository;
+        const repository = {...target, status, statusOptions} satisfies StatusReadyRepository;
         if (status.readySnapshot === undefined || status.stale || status.freshness !== 'current') {
           return Effect.succeed({
             repositoryId,
@@ -993,7 +994,14 @@ const validateBoundedMemoryCitations = Effect.fn('contextBrief.validateBoundedMe
         if (tasks === undefined) return Effect.succeedNone;
         if (retentionHome !== undefined || !tasks.every(task => task.citation.target.kind === 'file'))
           return statusAndValidate.pipe(Effect.option);
-        return validatePublishedRepositoryTasks(config, target.cwd, target.published, tasks, observedAt).pipe(
+        return validatePublishedRepositoryTasks(
+          config,
+          target.cwd,
+          target.published,
+          tasks,
+          observedAt,
+          statusOptions,
+        ).pipe(
           Effect.orElseSucceed(() => undefined),
           Effect.flatMap(results =>
             results === undefined
@@ -1083,6 +1091,7 @@ const validatePublishedRepositoryTasks = Effect.fn('contextBrief.validatePublish
   published: CodeGraphWorksetCatalogPublishedMemberV1,
   tasks: readonly CitationTask[],
   observedAt: string,
+  statusOptions: CodeGraphStatusOptions,
 ) {
   const path = yield* Path.Path;
   const query = yield* CodeGraphQueryService;
@@ -1116,10 +1125,7 @@ const validatePublishedRepositoryTasks = Effect.fn('contextBrief.validatePublish
               return false;
             }
             const policyAwareFence = query
-              .statusForPublishedIdentity(config.agentContextHome, cwd, published, {
-                observeWorktree: true,
-                requestMaintenance: false,
-              })
+              .statusForPublishedIdentity(config.agentContextHome, cwd, published, statusOptions)
               .pipe(
                 Effect.map(
                   status =>
@@ -1193,15 +1199,12 @@ const statusRepositoryFinalFence = (
     // identity, policy, runtime and worktree state without recording its association twice.
     // Keep legacy custom query services on their full status path.
     const after = yield* repository.expected === undefined && typeof query.statusForPublishedIdentity !== 'function'
-      ? query.status(config.agentContextHome, repository.cwd, {
-          observeWorktree: true,
-          requestMaintenance: false,
-        })
+      ? query.status(config.agentContextHome, repository.cwd, repository.statusOptions)
       : query.statusForPublishedIdentity(
           config.agentContextHome,
           repository.cwd,
           repository.expected ?? repository.status.identity,
-          {observeWorktree: true, requestMaintenance: false},
+          repository.statusOptions,
         );
     return sameExactSnapshot(repository.status, after);
   });

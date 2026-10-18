@@ -191,7 +191,231 @@ function fixture(body = 'Old claim.\n\nHistorical note.', consolidated = false, 
   return {record, review};
 }
 
+function revalidationSupportFixture(initial: 'dependency' | 'narrow') {
+  const base = fixture('Unchanged claim.\n\nHistorical note.', false, 1);
+  const additional = base.record.metadata.codeCitations!.find(item => item.path === 'src/extra-0.ts')!;
+  const {id: _id, ...additionalInput} = additional;
+  const currentAdditional = createMemoryCodeCitation({
+    ...additionalInput,
+    sourceCommit: 'a'.repeat(40),
+    sourceSnapshotId: `cgsn_${'b'.repeat(40)}`,
+    fileContentHash: {algorithm: 'sha256', value: 'c'.repeat(64)},
+  });
+  const unenrolled = parseMemoryDocument(uri, base.record.content.replace(/^topic_maintenance:.*\n/mu, ''))!;
+  const enrolled = proposeTopicMaintenanceEnrollment(unenrolled, {
+    paragraphs: base.review.basis.paragraphs.map(item => ({
+      role: item.role,
+      support: item.support,
+      scope: item.scope,
+      citationIds: item.ordinal === 0 && initial === 'narrow' ? [oldCitation.id, additional.id] : item.citationIds,
+    })),
+    additionalDependencies: initial === 'dependency' ? [{kind: 'dependency', citationId: additional.id}] : [],
+  });
+  const record = parseMemoryDocument(uri, enrolled.content)!;
+  const basis = {
+    ...base.review.basis,
+    targetHash: consolidationRevision(canonicalMemoryDocumentContent(record.content)),
+    paragraphs: record.metadata.topicMaintenance!.paragraphs,
+    additionalDependencies: record.metadata.topicMaintenance!.additionalDependencies,
+    handles: [
+      ...base.review.basis.handles,
+      {id: `historical:${additional.id}`, citationId: additional.id, variant: 'historical' as const},
+      {id: `current:${additional.id}`, citationId: additional.id, variant: 'current' as const},
+    ],
+  };
+  const reviewEvidence = [
+    ...base.review.reviewEvidence,
+    ...[additional, currentAdditional].map((citation, index) => ({
+      ...base.review.reviewEvidence[index],
+      handleId: `${index === 0 ? 'historical' : 'current'}:${additional.id}`,
+      citation,
+      source: {
+        extractorSet: citation.extractorSet,
+        fileContentHash: citation.fileContentHash.value,
+        path: citation.path,
+        repositoryId: citation.repositoryId,
+        sourceCommit: citation.sourceCommit,
+        sourceDirty: citation.sourceDirty,
+        sourceSnapshotId: citation.sourceSnapshotId,
+      },
+    })),
+  ];
+  const draft = {
+    ...base.review.proposal.draft,
+    targetHash: basis.targetHash,
+    outcome: 'propose-revalidation',
+    operations: [],
+    reviewedHandles: [`current:${additional.id}`],
+    paragraphDispositions: {
+      version: 1,
+      entries: [
+        {
+          ordinal: 0,
+          beforeHash: basis.paragraphs[0].hash,
+          disposition: 'revalidate',
+          supportHandles: [`current:${additional.id}`],
+          rationale: 'The current additional source supports the unchanged claim.',
+        },
+      ],
+    },
+  };
+  const proposal = parseTopicMaintenanceDraft(basis, JSON.stringify(draft));
+  const review = {
+    ...base.review,
+    basis,
+    proposal,
+    reviewEvidence,
+    generation: {
+      agent: 'local-ai',
+      model: 'test',
+      promptVersion: 'topic-maintenance-draft-v5',
+      attempts: 1 as const,
+      usage: {status: 'unavailable' as const},
+    },
+  };
+  return {record, review, additional, currentAdditional};
+}
+
 describe('topic maintenance accepted document', () => {
+  it.each(['dependency', 'narrow'] as const)(
+    'persists explicit no-text revalidation support from %s selections',
+    initial => {
+      const {record, review, additional, currentAdditional} = revalidationSupportFixture(initial);
+      const before = JSON.stringify({record, review});
+      const preview = prepareTopicMaintenanceAcceptance(record, review, {
+        reviewId: 'review-support',
+        approvedAt: '2026-10-16T12:00:00.000Z',
+      });
+      const accepted = parseMemoryDocument(uri, preview.content)!;
+      expect(accepted.body).toBe(record.body);
+      expect(preview.manifest.paragraphs[0].citationIds).toEqual([currentAdditional.id]);
+      expect(preview.manifest.paragraphs[1]).toEqual(record.metadata.topicMaintenance!.paragraphs[1]);
+      expect(preview.manifest.acceptedSources).toContainEqual({
+        citationId: currentAdditional.id,
+        acceptedCitationId: currentAdditional.id,
+      });
+      if (initial === 'dependency')
+        expect(preview.manifest.acceptedSources).toContainEqual({
+          citationId: additional.id,
+          acceptedCitationId: currentAdditional.id,
+        });
+      expect(preview.manifest.originCitationIds).toEqual(record.metadata.codeCitations!.map(item => item.id).sort());
+      for (const historical of record.metadata.codeCitations!) expect(preview.codeCitations).toContainEqual(historical);
+      expect(validateTopicMaintenanceAcceptancePreview(preview, review)).toEqual(preview);
+      expect(JSON.stringify({record, review})).toBe(before);
+    },
+  );
+
+  it('preserves exact selected current pins for bounded support subsets and ordering', () => {
+    const {record, review, additional, currentAdditional} = revalidationSupportFixture('narrow');
+    const before = JSON.stringify({record, review});
+    fc.assert(
+      fc.property(fc.shuffledSubarray([oldCitation.id, additional.id], {minLength: 1}), selected => {
+        const supportHandles = selected.map(id => `current:${id}`);
+        const proposal = parseTopicMaintenanceDraft(
+          review.basis,
+          JSON.stringify({
+            ...review.proposal.draft,
+            reviewedHandles: supportHandles,
+            paragraphDispositions: {
+              version: 1,
+              entries: [{...review.proposal.draft.paragraphDispositions!.entries[0], supportHandles}],
+            },
+          }),
+        );
+        const preview = prepareTopicMaintenanceAcceptance(
+          record,
+          {...review, proposal},
+          {reviewId: 'review-subset', approvedAt: '2026-10-16T12:00:00.000Z'},
+        );
+        const expected = selected.map(id => (id === oldCitation.id ? currentCitation.id : currentAdditional.id)).sort();
+        expect(preview.manifest.paragraphs[0].citationIds).toEqual(expected);
+        for (const id of expected)
+          expect(preview.manifest.acceptedSources).toContainEqual({citationId: id, acceptedCitationId: id});
+        expect(preview.manifest.paragraphs[1]).toEqual(record.metadata.topicMaintenance!.paragraphs[1]);
+        expect(parseMemoryDocument(uri, preview.content)!.body).toBe(record.body);
+        expect(preview.manifest.originCitationIds).toEqual(record.metadata.codeCitations!.map(item => item.id).sort());
+        expect(validateTopicMaintenanceAcceptancePreview(preview, {...review, proposal})).toEqual(preview);
+        expect(JSON.stringify({record, review})).toBe(before);
+      }),
+      {numRuns: 16},
+    );
+  });
+
+  it('reproduces legacy previews without treating global reviewed handles as paragraph reselection', () => {
+    const {record, review} = revalidationSupportFixture('dependency');
+    const {paragraphDispositions: _accounting, ...legacyDraft} = review.proposal.draft;
+    const proposal = parseTopicMaintenanceDraft(review.basis, JSON.stringify(legacyDraft));
+    const legacy = {...review, proposal};
+    const preview = prepareTopicMaintenanceAcceptance(
+      record,
+      {...legacy, generation: fixture().review.generation},
+      {reviewId: 'review-legacy', approvedAt: '2026-10-16T12:00:00.000Z'},
+    );
+    expect(preview.manifest.paragraphs[0].citationIds).toEqual([oldCitation.id]);
+    expect(validateTopicMaintenanceAcceptancePreview(preview, legacy)).toEqual(preview);
+  });
+
+  it('keeps legacy approvals inspectable while refusing new model previews and writes', () => {
+    const {record, review} = fixture();
+    const options = {reviewId: 'review-one', approvedAt: '2026-10-16T12:00:00.000Z'};
+    const preview = prepareTopicMaintenanceAcceptance(record, review, options);
+    const modelReview = {
+      ...review,
+      generation: {
+        agent: 'local-ai',
+        model: 'test',
+        promptVersion: 'topic-maintenance-draft-v4',
+        attempts: 1 as const,
+        usage: {status: 'unavailable' as const},
+      },
+    };
+    expect(validateTopicMaintenanceAcceptancePreview(preview, modelReview)).toEqual(preview);
+    expect(() => prepareTopicMaintenanceAcceptance(record, modelReview, options)).toThrow(/incomplete or legacy/);
+    expect(() =>
+      validateApprovedTopicMaintenanceWrite(record.content, preview.content, {
+        reviewId: 'review-one',
+        revision: 2,
+        maintenance: modelReview,
+        maintenanceApproval: {version: 1, reviewRevision: 2, stage: 'prepared', preview},
+      }),
+    ).toThrow(/incomplete or legacy/);
+    const draft = {
+      ...review.proposal.draft,
+      paragraphDispositions: {
+        version: 1 as const,
+        entries: [
+          {
+            ordinal: 0,
+            beforeHash: review.basis.paragraphs[0].hash,
+            disposition: 'update' as const,
+            supportHandles: [`current:${oldCitation.id}`],
+            rationale: 'Current source supports the new claim.',
+          },
+        ],
+      },
+    };
+    const proposal = parseTopicMaintenanceDraft(review.basis, JSON.stringify(draft));
+    const accounted = prepareTopicMaintenanceAcceptance(record, {...modelReview, proposal}, options);
+    expect(accounted.approvedProposal.draft.paragraphDispositions).toEqual(draft.paragraphDispositions);
+    expect(accounted.approvalDigest).not.toBe(preview.approvalDigest);
+    const unresolved = parseTopicMaintenanceDraft(
+      review.basis,
+      JSON.stringify({
+        ...draft,
+        outcome: 'propose-revalidation',
+        operations: [],
+        paragraphDispositions: {
+          version: 1,
+          entries: [{...draft.paragraphDispositions.entries[0], disposition: 'unresolved', supportHandles: []}],
+        },
+      }),
+    );
+    expect(() => prepareTopicMaintenanceAcceptance(record, {...modelReview, proposal: unresolved}, options)).toThrow(
+      /incomplete or legacy/,
+    );
+  });
+
   it('prepares exact V2 body, support, origin and private approval proof', () => {
     const {record, review} = fixture();
     const preview = prepareTopicMaintenanceAcceptance(record, review, {

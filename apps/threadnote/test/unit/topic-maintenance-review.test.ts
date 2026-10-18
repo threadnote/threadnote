@@ -146,6 +146,18 @@ describe('reviewed personal topic acceptance', () => {
               observationRevision: basis.observationRevision,
               packetDigest: basis.packetDigest,
               outcome: 'propose-update',
+              paragraphDispositions: {
+                version: 1,
+                entries: basis.paragraphs
+                  .filter(item => item.role === 'descriptive' && item.support === 'direct')
+                  .map(item => ({
+                    ordinal: item.ordinal,
+                    beforeHash: item.hash,
+                    disposition: 'update',
+                    supportHandles: [`current:${citation.id}`],
+                    rationale: 'Current source declares 60 seconds.',
+                  })),
+              },
               operations: [
                 {
                   ordinal: 0,
@@ -652,6 +664,18 @@ describe('reviewed personal topic acceptance', () => {
                 observationRevision: identity.observationRevision,
                 packetDigest: identity.packetDigest,
                 outcome: 'propose-update',
+                paragraphDispositions: {
+                  version: 1,
+                  entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
+                    (item: {ordinal: number; beforeHash: string; currentHandles: string[]}) => ({
+                      ordinal: item.ordinal,
+                      beforeHash: item.beforeHash,
+                      disposition: item.ordinal === 0 ? 'update' : 'revalidate',
+                      supportHandles: item.currentHandles,
+                      rationale: 'Checked current source.',
+                    }),
+                  ),
+                },
                 operations: [
                   {
                     ordinal: 0,

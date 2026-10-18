@@ -19,6 +19,7 @@ import {
 } from './document.js';
 import {
   parseTopicMaintenanceDraft,
+  topicMaintenanceParagraphCoverage,
   validateTopicMaintenanceReviewPayload,
   type TopicMaintenanceDraftProposalV1,
   type TopicMaintenanceReviewPayloadV1,
@@ -209,8 +210,31 @@ function metadataDiff(before: string, after: string): TopicMaintenanceAcceptance
   });
 }
 
+export function assertTopicMaintenanceAcceptanceCoverage(
+  review: TopicMaintenanceReviewPayloadV1,
+  proposal: TopicMaintenanceDraftProposalV1 = review.proposal,
+): void {
+  if (
+    review.generation.origin !== 'manual' &&
+    topicMaintenanceParagraphCoverage(review.basis, proposal.draft).status !== 'complete'
+  )
+    fail(
+      'Model paragraph dispositions are incomplete or legacy. Regenerate or explicitly review every eligible paragraph before accepting.',
+    );
+}
+
 /** Pure reviewed proposal; callers own source fences, locks, and target CAS. */
 export function prepareTopicMaintenanceAcceptance(
+  record: MemoryRecord,
+  review: TopicMaintenanceReviewPayloadV1,
+  options: TopicMaintenanceAcceptanceOptionsV1,
+): TopicMaintenanceAcceptancePreviewV1 {
+  const preview = assembleTopicMaintenanceAcceptance(record, review, options);
+  assertTopicMaintenanceAcceptanceCoverage(review, preview.approvedProposal);
+  return preview;
+}
+
+function assembleTopicMaintenanceAcceptance(
   record: MemoryRecord,
   reviewInput: TopicMaintenanceReviewPayloadV1,
   options: TopicMaintenanceAcceptanceOptionsV1,
@@ -243,11 +267,15 @@ export function prepareTopicMaintenanceAcceptance(
   const evidence = new Map(review.reviewEvidence.map(item => [item.handleId, item]));
   const paragraphs = old.paragraphs.map((paragraph, ordinal) => {
     const operation = approvedProposal.draft.operations.find(item => item.ordinal === ordinal);
+    const revalidation = approvedProposal.draft.paragraphDispositions?.entries.find(
+      item => item.ordinal === ordinal && item.disposition === 'revalidate',
+    );
+    const supportHandles = operation?.supportHandles ?? revalidation?.supportHandles;
     return {
       ...paragraph,
       hash: consolidationRevision(consolidationSections(approvedProposal.body)[ordinal]),
-      citationIds: operation
-        ? [...new Set(operation.supportHandles.map(handle => evidence.get(handle)!.citation.id))].sort()
+      citationIds: supportHandles
+        ? [...new Set(supportHandles.map(handle => evidence.get(handle)!.citation.id))].sort()
         : paragraph.citationIds,
     };
   });
@@ -427,7 +455,7 @@ export function validateTopicMaintenanceAcceptancePreview(
   const preview = input as unknown as TopicMaintenanceAcceptancePreviewV1;
   const {approvalDigest: digest, ...base} = preview;
   if (approvalDigest(base) !== digest) fail('approval preview digest differs from final document.');
-  const reproduced = prepareTopicMaintenanceAcceptance(prior, review, {
+  const reproduced = assembleTopicMaintenanceAcceptance(prior, review, {
     reviewId: preview.reviewId,
     approvedAt: preview.approvedAt,
     editedDraftJson: JSON.stringify(preview.approvedProposal.draft),
@@ -480,6 +508,7 @@ export function validateApprovedTopicMaintenanceWrite(
     fail('review has no prepared exact approval proof.');
   validateTopicMaintenanceApprovalReceipt(receipt, review.maintenance, review.reviewId, review.revision);
   const preview = receipt.preview;
+  assertTopicMaintenanceAcceptanceCoverage(review.maintenance, preview.approvedProposal);
   if (canonicalMemoryDocumentContent(beforeContent) !== preview.beforeContent || finalContent !== preview.content)
     fail('target or proposed bytes differ from prepared approval.');
   return preview;

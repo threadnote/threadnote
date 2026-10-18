@@ -51,6 +51,61 @@ export interface TopicMaintenanceReplaceOperationV1 {
   readonly rationale: string;
 }
 
+export interface TopicMaintenanceParagraphDispositionV1 {
+  readonly ordinal: number;
+  readonly beforeHash: string;
+  readonly disposition: 'update' | 'revalidate' | 'unresolved';
+  readonly supportHandles: readonly string[];
+  readonly rationale: string;
+}
+
+export interface TopicMaintenanceParagraphCoverageV1 {
+  readonly status: 'legacy' | 'complete' | 'incomplete';
+  readonly eligibleCount: number;
+  readonly dispositionCount: number;
+  readonly resolvedCount: number;
+  readonly missingOrdinals: readonly number[];
+  readonly unresolvedOrdinals: readonly number[];
+}
+
+export function topicMaintenanceParagraphEligible(paragraph: TopicMaintenanceParagraphV1): boolean {
+  return paragraph.role === 'descriptive' && paragraph.support === 'direct';
+}
+
+/** Structural accounting only; declared dispositions are not proof of semantic correctness. */
+export function topicMaintenanceParagraphCoverage(
+  basis: Pick<TopicMaintenanceDraftBasisV1, 'paragraphs'>,
+  draft: TopicMaintenanceDraftV1,
+): TopicMaintenanceParagraphCoverageV1 {
+  const eligible = basis.paragraphs.filter(topicMaintenanceParagraphEligible);
+  const entries = draft.paragraphDispositions?.entries ?? [];
+  const missingOrdinals = eligible
+    .filter(item => !entries.some(entry => entry.ordinal === item.ordinal))
+    .map(item => item.ordinal);
+  const unresolvedOrdinals = entries
+    .filter(item => item.disposition === 'unresolved')
+    .map(item => item.ordinal)
+    .sort((a, b) => a - b);
+  const resolvedCount = entries.filter(
+    item => item.disposition !== 'unresolved' && item.supportHandles.length > 0,
+  ).length;
+  return {
+    status: !draft.paragraphDispositions
+      ? 'legacy'
+      : missingOrdinals.length ||
+          unresolvedOrdinals.length ||
+          resolvedCount !== eligible.length ||
+          entries.length !== eligible.length
+        ? 'incomplete'
+        : 'complete',
+    eligibleCount: eligible.length,
+    dispositionCount: entries.length,
+    resolvedCount,
+    missingOrdinals,
+    unresolvedOrdinals,
+  };
+}
+
 export interface TopicMaintenanceDraftV1 {
   readonly version: 1;
   readonly targetHash: string;
@@ -62,6 +117,10 @@ export interface TopicMaintenanceDraftV1 {
   readonly rationale: string;
   readonly unresolvedQuestions: readonly string[];
   readonly removedClaims: readonly string[];
+  readonly paragraphDispositions?: {
+    readonly version: 1;
+    readonly entries: readonly TopicMaintenanceParagraphDispositionV1[];
+  };
 }
 
 export interface TopicMaintenanceDraftProposalV1 {
@@ -276,18 +335,22 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
 function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasisV1): TopicMaintenanceDraftV1 {
   if (
     !object(input) ||
-    !keys(input, [
-      'version',
-      'targetHash',
-      'observationRevision',
-      'packetDigest',
-      'outcome',
-      'operations',
-      'reviewedHandles',
-      'rationale',
-      'unresolvedQuestions',
-      'removedClaims',
-    ]) ||
+    !keys(
+      input,
+      [
+        'version',
+        'targetHash',
+        'observationRevision',
+        'packetDigest',
+        'outcome',
+        'operations',
+        'reviewedHandles',
+        'rationale',
+        'unresolvedQuestions',
+        'removedClaims',
+      ],
+      ['paragraphDispositions'],
+    ) ||
     input.version !== 1 ||
     input.targetHash !== basis.targetHash ||
     input.observationRevision !== basis.observationRevision ||
@@ -345,6 +408,61 @@ function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasisV1): Top
     (input.outcome !== 'propose-revalidation' && input.outcome !== 'propose-update' && input.reviewedHandles.length > 0)
   )
     fail('draft outcome does not match its evidence and paragraph operations.');
+  if (input.paragraphDispositions !== undefined) {
+    const accounting = input.paragraphDispositions;
+    if (
+      !object(accounting) ||
+      !keys(accounting, ['version', 'entries']) ||
+      accounting.version !== 1 ||
+      !Array.isArray(accounting.entries) ||
+      accounting.entries.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
+    )
+      fail('invalid paragraph dispositions.');
+    const entries = accounting.entries;
+    const accounted = new Set<number>();
+    for (const entry of entries) {
+      if (
+        !object(entry) ||
+        !keys(entry, ['ordinal', 'beforeHash', 'disposition', 'supportHandles', 'rationale']) ||
+        !Number.isSafeInteger(entry.ordinal) ||
+        !basis.paragraphs[entry.ordinal as number] ||
+        accounted.has(entry.ordinal as number)
+      )
+        fail('invalid or duplicate paragraph disposition.');
+      const paragraph = basis.paragraphs[entry.ordinal as number];
+      const operation = input.operations.find(item => item.ordinal === entry.ordinal);
+      const allowed = new Set(
+        [...paragraph.citationIds, ...basis.additionalDependencies.map(item => item.citationId)].map(
+          id => `current:${id}`,
+        ),
+      );
+      if (
+        !topicMaintenanceParagraphEligible(paragraph) ||
+        entry.beforeHash !== paragraph.hash ||
+        !['update', 'revalidate', 'unresolved'].includes(entry.disposition as string) ||
+        !boundedText(entry.rationale, 1024) ||
+        !boundedStrings(entry.supportHandles, 8, 64) ||
+        new Set(entry.supportHandles).size !== entry.supportHandles.length ||
+        entry.supportHandles.some(handle => !allowed.has(handle) || !known.has(handle)) ||
+        (entry.disposition === 'unresolved' ? entry.supportHandles.length !== 0 : entry.supportHandles.length === 0) ||
+        (entry.disposition === 'update'
+          ? !operation ||
+            entry.supportHandles.length !== operation.supportHandles.length ||
+            entry.supportHandles.some(handle => !operation.supportHandles.includes(handle))
+          : operation !== undefined)
+      )
+        fail('contradictory or unsupported paragraph disposition.');
+      accounted.add(entry.ordinal as number);
+    }
+    if (
+      input.operations.some(
+        operation => !entries.some(entry => entry.ordinal === operation.ordinal && entry.disposition === 'update'),
+      )
+    )
+      fail('paragraph disposition is missing for a replacement.');
+    if (basis.paragraphs.some(item => topicMaintenanceParagraphEligible(item) && !accounted.has(item.ordinal)))
+      fail('paragraph dispositions omit an eligible descriptive paragraph.');
+  }
   return input as unknown as TopicMaintenanceDraftV1;
 }
 
@@ -377,6 +495,7 @@ function assemble(
 export function parseTopicMaintenanceDraft(
   basisInput: TopicMaintenanceDraftBasisV1,
   rawJson: string,
+  options: {readonly requireParagraphDispositions?: boolean} = {},
 ): TopicMaintenanceDraftProposalV1 {
   const basis = validateTopicMaintenanceDraftBasis(basisInput);
   if (!boundedText(rawJson, MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)) fail('model output is empty or oversized.');
@@ -386,7 +505,10 @@ export function parseTopicMaintenanceDraft(
   } catch {
     fail('model output is not closed JSON.');
   }
-  return assemble(basis, validateDraft(parsed, basis));
+  const draft = validateDraft(parsed, basis);
+  if (options.requireParagraphDispositions && !draft.paragraphDispositions)
+    fail('explicit paragraph dispositions are required.');
+  return assemble(basis, draft);
 }
 
 /** Rejects incompatible packet evidence before generation; payload loading uses the same checks. */

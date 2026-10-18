@@ -9959,6 +9959,13 @@ h4 {
   margin: 10px 0 14px;
   overflow-wrap: anywhere;
 }
+.topic-paragraph-decision {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
 .topic-text-comparison {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

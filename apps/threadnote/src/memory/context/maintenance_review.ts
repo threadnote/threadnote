@@ -2,7 +2,10 @@ import {DateTime, Effect, FileSystem, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
-import {prepareTopicMaintenanceAcceptance} from '@threadnote/memory/topic-maintenance-acceptance';
+import {
+  assertTopicMaintenanceAcceptanceCoverage,
+  prepareTopicMaintenanceAcceptance,
+} from '@threadnote/memory/topic-maintenance-acceptance';
 import {
   candidateReviewWithState,
   loadCandidateReview,
@@ -159,6 +162,11 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
           }
           if (current.content !== original.content && current.content !== preview.content)
             return yield* fail('The accepted topic changed after approval preview.');
+          if (current.content === original.content)
+            yield* Effect.try({
+              try: () => assertTopicMaintenanceAcceptanceCoverage(payload, preview.approvedProposal),
+              catch: cause => fail(cause instanceof Error ? cause.message : 'Paragraph review is incomplete.'),
+            });
           if (approval.stage === 'preview') {
             if (
               review.revision !== input.revision ||

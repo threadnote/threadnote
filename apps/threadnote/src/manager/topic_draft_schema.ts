@@ -1,8 +1,11 @@
 import {Schema} from 'effect';
-import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  topicMaintenanceParagraphEligible,
+  type TopicMaintenanceDraftBasisV1,
+} from '@threadnote/memory/topic-maintenance-draft';
 
 export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasisV1['paragraphs'][number]) {
-  return paragraph.role === 'descriptive' && paragraph.support === 'direct';
+  return topicMaintenanceParagraphEligible(paragraph);
 }
 
 export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftBasisV1, sourceExcerptChanged: boolean) {
@@ -28,7 +31,24 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
     }),
   );
   const operation = Schema.Union(operationVariants.length ? operationVariants : [Schema.String]);
+  const dispositionVariants = descriptive.map(paragraph =>
+    Schema.Struct({
+      ordinal: Schema.Literal(paragraph.ordinal),
+      beforeHash: Schema.Literal(paragraph.hash),
+      disposition: Schema.Literals(['update', 'revalidate', 'unresolved']),
+      supportHandles: Schema.Array(currentHandle),
+      rationale: Schema.String.check(Schema.isMinLength(1)),
+    }),
+  );
+  const disposition = Schema.Union(dispositionVariants.length ? dispositionVariants : [Schema.String]);
   const common = {
+    paragraphDispositions: Schema.Struct({
+      version: Schema.Literal(1),
+      entries: Schema.Array(disposition).check(
+        Schema.isMinLength(descriptive.length),
+        Schema.isMaxLength(descriptive.length),
+      ),
+    }),
     rationale: Schema.String.check(Schema.isMinLength(1)),
     unresolvedQuestions: Schema.Array(Schema.String),
     removedClaims: Schema.Array(Schema.String),

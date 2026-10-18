@@ -1,8 +1,13 @@
 import React, {useEffect, useRef, useState} from 'react';
+import {Schema} from 'effect';
 import {consolidationSections} from '@threadnote/memory/consolidation';
 import type {
   TopicMaintenanceDraftV1,
   TopicMaintenanceReplaceOperationV1,
+} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  topicMaintenanceParagraphCoverage,
+  topicMaintenanceParagraphEligible,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {ConsolidationModelPicker, useConsolidationModels} from '../consolidation_models.js';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
@@ -14,7 +19,7 @@ import {
   TopicReviewSummary,
   TopicSourceEvidence,
 } from './topic_review_presentation.js';
-import {api, errorMessage} from '../ui/support.js';
+import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {ManagerTopicReviewActionV1, ManagerTopicReviewV1} from './topic_contracts.js';
 
@@ -27,6 +32,13 @@ interface TopicReviewProps {
   readonly onClose: () => void;
   readonly onOpenLibrary: (uri: string) => void;
 }
+
+const ReviewRecovery = Schema.Struct({
+  action: Schema.Literal('open-review'),
+  reviewId: Schema.String.check(Schema.isPattern(/^review-[a-f0-9]{24}$/u)),
+  state: Schema.Literals(['applying', 'conflict', 'deferred', 'rejected', 'pending']),
+});
+const isReviewRecovery = Schema.is(ReviewRecovery);
 
 export function TopicReviewDialog(props: TopicReviewProps): React.ReactElement {
   return (
@@ -43,11 +55,16 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const [backend, setBackend] = useState<'local-ai' | 'effect-ai'>('local-ai');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [recovery, setRecovery] = useState<typeof ReviewRecovery.Type>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [generation, setGeneration] = useState(0);
+  const [invalidatedApproval, setInvalidatedApproval] = useState<string>();
+  const selectionKey = JSON.stringify([props.project, props.caseId, props.reviewId, props.initialPacket?.reviewId]);
+  const activeSelection = useRef(selectionKey);
+  const learnedReview = useRef<{readonly selection: string; readonly reviewId: string} | undefined>(undefined);
   const operationEpoch = useRef(0);
-  const mutationInFlight = useRef(false);
+  const mutationInFlight = useRef<number | undefined>(undefined);
   useEffect(
     () => () => {
       operationEpoch.current += 1;
@@ -60,6 +77,18 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const caseId = props.caseId ?? review?.caseId;
 
   useEffect(() => {
+    if (activeSelection.current !== selectionKey) {
+      activeSelection.current = selectionKey;
+      operationEpoch.current += 1;
+      mutationInFlight.current = undefined;
+      setBusy(false);
+      setReview(undefined);
+      setDraft(undefined);
+      setError('');
+      setNotice('');
+      setRecovery(undefined);
+      setInvalidatedApproval(undefined);
+    }
     const controller = new AbortController();
     const epoch = operationEpoch.current;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
@@ -68,7 +97,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     async function load() {
       try {
         let currentPacket = props.initialPacket;
-        let selectedReviewId = props.reviewId ?? currentPacket?.reviewId;
+        let selectedReviewId =
+          (learnedReview.current?.selection === selectionKey ? learnedReview.current.reviewId : undefined) ??
+          props.reviewId ??
+          currentPacket?.reviewId;
         let result: ManagerTopicReviewV1 | undefined;
         if (selectedReviewId) {
           result = await api<ManagerTopicReviewV1>(
@@ -102,6 +134,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           )
             throw new Error('The selected topic review changed. Refresh it.');
           if (!controller.signal.aborted && operationEpoch.current === epoch) {
+            learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
             setReview(result);
             setDraft(result.draft);
           }
@@ -127,15 +160,18 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     }
     void load();
     return () => controller.abort();
-  }, [props.project, props.caseId, props.reviewId, generation]);
+  }, [props.project, props.caseId, props.reviewId, selectionKey, generation]);
 
   const topic = packet?.topicEvidence;
   const acceptedBody = review?.acceptedBody ?? topic?.body;
   const originalParagraphs = acceptedBody ? safeSections(acceptedBody) : [];
   const changedDraft =
     review !== undefined && draft !== undefined && JSON.stringify(draft) !== JSON.stringify(review.draft);
+  const paragraphCoverage = review && draft ? topicMaintenanceParagraphCoverage(review, draft) : undefined;
+  const paragraphsReady = review?.generation.origin === 'manual' || paragraphCoverage?.status === 'complete';
   const draftReady =
     !!draft &&
+    paragraphsReady &&
     (draft.outcome === 'propose-update' || draft.outcome === 'propose-revalidation') &&
     (draft.outcome !== 'propose-update' || draft.operations.length > 0) &&
     (draft.outcome !== 'propose-revalidation' || (draft.operations.length === 0 && draft.reviewedHandles.length > 0)) &&
@@ -165,10 +201,15 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     review.state === 'pending';
   const approval = review?.approval;
   const previewCurrent =
-    !!approval && !changedDraft && approval.reviewRevision === review?.revision && approval.stage === 'preview';
+    !!approval &&
+    !changedDraft &&
+    approval.reviewRevision === review?.revision &&
+    approval.stage === 'preview' &&
+    approvalIdentity(review) !== invalidatedApproval;
   const canApply =
     review?.state === 'pending' &&
     !!review.canApply &&
+    paragraphsReady &&
     !!previewCurrent &&
     !!packetMatchesReview &&
     observationMatches &&
@@ -178,7 +219,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const canResumeAcceptance =
     review?.state === 'applying' &&
     approval?.stage === 'prepared' &&
-    !!review.canApply &&
+    (!!review.canApply || !!review.canFinishVerification) &&
     !changedDraft &&
     !loading &&
     !busy &&
@@ -192,16 +233,24 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     (!review || review.state === 'pending');
 
   async function mutate(action: ManagerTopicReviewActionV1) {
-    if (busy || loading || mutationInFlight.current) return;
-    mutationInFlight.current = true;
+    if (busy || loading || mutationInFlight.current !== undefined) return;
     const epoch = ++operationEpoch.current;
+    mutationInFlight.current = epoch;
     setBusy(true);
     setError('');
     setNotice('');
+    setRecovery(undefined);
     try {
       const result = await api<ManagerTopicReviewV1>('/api/attention/topic-review', action);
-      if (operationEpoch.current !== epoch || result.project !== props.project || result.kind !== 'topic-maintenance')
+      if (
+        operationEpoch.current !== epoch ||
+        result.project !== props.project ||
+        result.kind !== 'topic-maintenance' ||
+        ('reviewId' in action && result.reviewId !== action.reviewId)
+      )
         return;
+      learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
+      if (action.action === 'preview') setInvalidatedApproval(undefined);
       setReview(result);
       setDraft(result.draft);
       setLoading(true);
@@ -220,33 +269,51 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       );
     } catch (cause) {
       if (operationEpoch.current === epoch) {
+        if (
+          Schema.is(ManagerApiError)(cause) &&
+          cause.code === 'topic-draft-review-blocked' &&
+          isReviewRecovery(cause.recovery)
+        )
+          setRecovery(cause.recovery);
+        if ((action.action === 'apply' || action.action === 'preview') && review?.approval?.stage === 'preview')
+          setInvalidatedApproval(approvalIdentity(review));
         setError(errorMessage(cause));
         setLoading(true);
         setGeneration(value => value + 1);
         props.onChanged();
       }
     } finally {
-      mutationInFlight.current = false;
+      if (mutationInFlight.current === epoch) mutationInFlight.current = undefined;
       if (operationEpoch.current === epoch) setBusy(false);
     }
   }
 
+  function canEditParagraph(ordinal: number): boolean {
+    const paragraph = review?.paragraphs[ordinal];
+    return (
+      !busy &&
+      !loading &&
+      mutationInFlight.current === undefined &&
+      review?.state === 'pending' &&
+      paragraph?.role === 'descriptive' &&
+      (review.generation.origin === 'manual' || topicMaintenanceParagraphEligible(paragraph))
+    );
+  }
+
   function editParagraph(ordinal: number, text: string) {
-    if (!draft || !review) return;
+    if (!draft || !review || !canEditParagraph(ordinal)) return;
     const before = review.paragraphs[ordinal];
     if (!before || before.role !== 'descriptive') return;
     const existing = draft.operations.find(item => item.ordinal === ordinal);
     const accepted = originalParagraphs[ordinal] ?? '';
     if (text === accepted) {
       const operations = draft.operations.filter(item => item.ordinal !== ordinal);
-      const reviewedHandles = [
-        ...new Set([
-          ...draft.reviewedHandles,
-          ...review.support.filter(source => source.variant === 'current').map(source => source.handleId),
-        ]),
-      ];
+      const reviewedHandles = [...new Set([...draft.reviewedHandles, ...(existing?.supportHandles ?? [])])];
       setDraft({
-        ...draft,
+        ...reviseDisposition(draft, ordinal, {
+          disposition: 'revalidate',
+          supportHandles: existing?.supportHandles ?? [],
+        }),
         operations,
         reviewedHandles,
         outcome: operations.length ? 'propose-update' : 'propose-revalidation',
@@ -266,7 +333,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           rationale: 'Reviewed edit to the descriptive claim.',
         };
     setDraft({
-      ...draft,
+      ...reviseDisposition(draft, ordinal, {disposition: 'update', supportHandles: operation.supportHandles}),
       outcome: 'propose-update',
       reviewedHandles: [...new Set([...draft.reviewedHandles, ...paragraphHandles])],
       operations: [...draft.operations.filter(item => item.ordinal !== ordinal), operation].sort(
@@ -276,21 +343,48 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   }
 
   function editSupport(ordinal: number, handleId: string, checked: boolean) {
-    if (!draft || !review) return;
+    if (!draft || !review || !canEditParagraph(ordinal)) return;
     const existing = draft.operations.find(item => item.ordinal === ordinal);
+    const disposition = draft.paragraphDispositions?.entries.find(item => item.ordinal === ordinal);
     const before = review.paragraphs[ordinal];
     if (!before || before.role !== 'descriptive') return;
-    if (!existing) return;
-    const operation: TopicMaintenanceReplaceOperationV1 = existing;
+    if (!existing && (!disposition || disposition.disposition === 'unresolved')) return;
+    const selected = existing?.supportHandles ?? disposition!.supportHandles;
     const supportHandles = checked
-      ? [...new Set([...operation.supportHandles, handleId])]
-      : operation.supportHandles.filter(value => value !== handleId);
+      ? [...new Set([...selected, handleId])]
+      : selected.filter(value => value !== handleId);
+    setDraft({
+      ...reviseDisposition(draft, ordinal, {supportHandles}),
+      reviewedHandles: checked ? [...new Set([...draft.reviewedHandles, handleId])] : draft.reviewedHandles,
+      operations: draft.operations.map(item => (item.ordinal === ordinal ? {...item, supportHandles} : item)),
+    });
+  }
+
+  function editDisposition(ordinal: number, decision: string) {
+    if (!draft || !review || !canEditParagraph(ordinal)) return;
+    const paragraph = review.paragraphs[ordinal];
+    if (!paragraph || !topicMaintenanceParagraphEligible(paragraph)) return;
+    if (!['', 'update', 'revalidate', 'unresolved'].includes(decision)) return;
+    const operation = draft.operations.find(item => item.ordinal === ordinal);
+    if (decision === 'update' && !operation) return;
+    const operations =
+      decision === 'revalidate' || decision === 'unresolved'
+        ? draft.operations.filter(item => item.ordinal !== ordinal)
+        : draft.operations;
+    const entries = draft.paragraphDispositions?.entries.filter(item => item.ordinal !== ordinal) ?? [];
+    if (decision)
+      entries.push({
+        ordinal,
+        beforeHash: paragraph.hash,
+        disposition: decision as 'update' | 'revalidate' | 'unresolved',
+        supportHandles: decision === 'update' ? operation!.supportHandles : [],
+        rationale: decision === 'unresolved' ? 'Needs manual review.' : 'Explicit paragraph review.',
+      });
     setDraft({
       ...draft,
-      reviewedHandles: checked ? [...new Set([...draft.reviewedHandles, handleId])] : draft.reviewedHandles,
-      operations: [...draft.operations.filter(item => item.ordinal !== ordinal), {...operation, supportHandles}].sort(
-        (a, b) => a.ordinal - b.ordinal,
-      ),
+      operations,
+      outcome: operations.length ? 'propose-update' : 'propose-revalidation',
+      paragraphDispositions: {version: 1, entries: entries.sort((a, b) => a.ordinal - b.ordinal)},
     });
   }
 
@@ -319,6 +413,21 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       {error ? (
         <ReviewNotice role="alert" tone="danger" title="Review needs attention">
           {error}
+          {recovery ? (
+            <button
+              type="button"
+              disabled={busy || loading}
+              onClick={() => {
+                learnedReview.current = {selection: selectionKey, reviewId: recovery.reviewId};
+                setRecovery(undefined);
+                setError('');
+                setLoading(true);
+                setGeneration(value => value + 1);
+              }}
+            >
+              Open existing review
+            </button>
+          ) : null}
         </ReviewNotice>
       ) : null}
       {notice ? (
@@ -347,6 +456,20 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       ) : null}
       {review ? (
         <>
+          {review.state === 'pending' &&
+          review.generation.origin === 'model' &&
+          paragraphCoverage?.status !== 'complete' ? (
+            <ReviewNotice tone="warning" title="Paragraph review incomplete">
+              Record an update, an unchanged decision with source support, or a manual-review need for each eligible
+              paragraph. A new exact preview requires all decisions to be resolved. Regenerate a legacy draft if needed.
+            </ReviewNotice>
+          ) : null}
+          {paragraphCoverage?.status === 'complete' ? (
+            <p className="muted">
+              {paragraphCoverage.resolvedCount} of {paragraphCoverage.eligibleCount} paragraph decisions recorded. Check
+              each decision against its sources; accounting does not verify correctness.
+            </p>
+          ) : null}
           <TopicReviewNotes review={review} />
           {review.draft.unresolvedQuestions.map((question, index) => (
             <ReviewNotice key={`q${index}`} tone="warning" title="Unresolved question">
@@ -371,8 +494,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             review={review}
             draft={draft}
             originalParagraphs={originalParagraphs}
+            disabled={busy || loading}
             onEditParagraph={editParagraph}
             onEditSupport={editSupport}
+            onEditDisposition={editDisposition}
           />
           {topic ? <TopicSourceEvidence topic={topic} /> : null}
           {review.additionalDependencies.length > 0 ? (
@@ -422,6 +547,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             </section>
           ) : null}
           {changedDraft ? <p role="status">Edits need a new preview before acceptance.</p> : null}
+          {review.state === 'pending' &&
+          approval?.stage === 'preview' &&
+          approvalIdentity(review) === invalidatedApproval ? (
+            <p role="status">Prepare a new exact preview before accepting this update.</p>
+          ) : null}
           {!draftReady ? (
             <p role="status">
               This draft needs supported descriptive text or a supported unchanged review before preview.
@@ -599,7 +729,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
               })
             }
           >
-            Resume approved update
+            {review.canFinishVerification ? 'Finish saved update verification' : 'Resume approved update'}
           </button>
         )}
         {review?.state === 'conflict' && (
@@ -623,6 +753,33 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       </footer>
     </section>
   );
+}
+
+function approvalIdentity(review: ManagerTopicReviewV1 | undefined): string | undefined {
+  const approval = review?.approval;
+  return approval ? `${review.reviewId}:${approval.reviewRevision}:${approval.approvalDigest}` : undefined;
+}
+
+function reviseDisposition(
+  draft: TopicMaintenanceDraftV1,
+  ordinal: number,
+  changes: Partial<
+    Pick<
+      NonNullable<TopicMaintenanceDraftV1['paragraphDispositions']>['entries'][number],
+      'disposition' | 'supportHandles'
+    >
+  >,
+): TopicMaintenanceDraftV1 {
+  const accounting = draft.paragraphDispositions;
+  return accounting
+    ? {
+        ...draft,
+        paragraphDispositions: {
+          ...accounting,
+          entries: accounting.entries.map(entry => (entry.ordinal === ordinal ? {...entry, ...changes} : entry)),
+        },
+      }
+    : draft;
 }
 
 function safeSections(body: string): readonly string[] {

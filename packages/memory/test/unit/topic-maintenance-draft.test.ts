@@ -1,10 +1,12 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {assertTopicMaintenanceAcceptanceCoverage} from '../../src/topic-maintenance-acceptance.js';
 import {parseCandidateReview} from '../../src/candidate.js';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
 import {consolidationRevision, consolidationSections} from '../../src/consolidation.js';
 import {
   parseTopicMaintenanceDraft,
+  topicMaintenanceParagraphCoverage,
   validateTopicMaintenanceDraftBasis,
   validateTopicMaintenanceReviewEvidence,
   validateTopicMaintenanceReviewPayload,
@@ -75,6 +77,257 @@ const parse = (basis: TopicMaintenanceDraftBasisV1, draft: unknown) =>
   parseTopicMaintenanceDraft(basis, JSON.stringify(draft));
 
 describe('topic maintenance draft contract', () => {
+  const accounted = (basis: TopicMaintenanceDraftBasisV1) => ({
+    ...draftFor(basis),
+    paragraphDispositions: {
+      version: 1 as const,
+      entries: basis.paragraphs
+        .filter(item => item.role === 'descriptive' && item.support === 'direct')
+        .map(item => ({
+          ordinal: item.ordinal,
+          beforeHash: item.hash,
+          disposition: item.ordinal === 0 ? ('update' as const) : ('revalidate' as const),
+          supportHandles: [currentHandle],
+          rationale: 'Current declared source supports this disposition.',
+        })),
+    },
+  });
+
+  it('rejects a cap-only update silently omitting the eligibility paragraph', () => {
+    const basis = basisFor('Draft cap is 32 KiB.\n\nOnly direct descriptive paragraphs are eligible.');
+    const draft = accounted(basis);
+    const required = (value: unknown) =>
+      parseTopicMaintenanceDraft(basis, JSON.stringify(value), {requireParagraphDispositions: true});
+    expect(() => required(draftFor(basis))).toThrow(/disposition/);
+    expect(() =>
+      required({
+        ...draft,
+        paragraphDispositions: {version: 1, entries: draft.paragraphDispositions.entries.slice(0, 1)},
+      }),
+    ).toThrow(/disposition/);
+    expect(topicMaintenanceParagraphCoverage(basis, required(draft).draft)).toMatchObject({
+      status: 'complete',
+      eligibleCount: 2,
+      resolvedCount: 2,
+    });
+    const unresolved = {
+      ...draft,
+      paragraphDispositions: {
+        version: 1,
+        entries: [
+          draft.paragraphDispositions.entries[0],
+          {...draft.paragraphDispositions.entries[1], disposition: 'unresolved', supportHandles: []},
+        ],
+      },
+    };
+    expect(topicMaintenanceParagraphCoverage(basis, required(unresolved).draft)).toMatchObject({
+      status: 'incomplete',
+      unresolvedOrdinals: [1],
+    });
+    expect(topicMaintenanceParagraphCoverage(basis, parse(basis, draftFor(basis)).draft).status).toBe('legacy');
+  });
+
+  it.each(['insufficient-evidence', 'policy-conflict'] as const)(
+    'preserves supported partial revalidation under an overall %s outcome',
+    outcome => {
+      const basis = basisFor('The cap remains 32 KiB.\n\nEligibility needs manual review.');
+      const draft = {
+        ...accounted(basis),
+        outcome,
+        operations: [],
+        reviewedHandles: [],
+        unresolvedQuestions: ['Which eligibility rule is authoritative?'],
+        paragraphDispositions: {
+          version: 1 as const,
+          entries: [
+            {
+              ordinal: 0,
+              beforeHash: basis.paragraphs[0].hash,
+              disposition: 'revalidate' as const,
+              supportHandles: [currentHandle],
+              rationale: 'The current declared source still supports this cap.',
+            },
+            {
+              ordinal: 1,
+              beforeHash: basis.paragraphs[1].hash,
+              disposition: 'unresolved' as const,
+              supportHandles: [],
+              rationale: 'The declared excerpts do not resolve the eligibility rule.',
+            },
+          ],
+        },
+      };
+      const before = JSON.stringify({basis, draft});
+      const proposal = parseTopicMaintenanceDraft(basis, JSON.stringify(draft), {requireParagraphDispositions: true});
+      expect(proposal.body).toBe(basis.body);
+      expect(proposal.changedOrdinals).toEqual([]);
+      expect(proposal.draft).toMatchObject({outcome, operations: [], reviewedHandles: []});
+      expect(topicMaintenanceParagraphCoverage(basis, proposal.draft)).toMatchObject({
+        status: 'incomplete',
+        eligibleCount: 2,
+        dispositionCount: 2,
+        resolvedCount: 1,
+        unresolvedOrdinals: [1],
+      });
+      expect(() =>
+        assertTopicMaintenanceAcceptanceCoverage({
+          version: 1,
+          basis,
+          proposal,
+          reviewEvidence: [],
+          generation: {
+            agent: 'local-ai',
+            model: 'test',
+            promptVersion: 'topic-maintenance-draft-v5',
+            attempts: 1,
+            usage: {status: 'unavailable'},
+          },
+        }),
+      ).toThrow(/incomplete or legacy/);
+      expect(() => parse(basis, {...draft, reviewedHandles: [currentHandle]})).toThrow(/outcome/);
+      expect(() => parse(basis, {...draft, operations: accounted(basis).operations})).toThrow(/outcome/);
+      expect(JSON.stringify({basis, draft})).toBe(before);
+    },
+  );
+
+  it('rejects duplicate, stale, protected, contradictory and unsupported dispositions', () => {
+    const basis = basisFor('Alpha.\n\nBeta.\n\nPolicy.', ['descriptive', 'descriptive', 'normative']);
+    const draft = accounted(basis);
+    const [first, second] = draft.paragraphDispositions.entries;
+    for (const entries of [
+      [first, first],
+      [first, {...second, ordinal: 9}],
+      [first, {...second, beforeHash: 'f'.repeat(64)}],
+      [first, {...second, ordinal: 2, beforeHash: basis.paragraphs[2].hash}],
+      [{...first, disposition: 'revalidate'}, second],
+      [{...first, disposition: 'unresolved', supportHandles: []}, second],
+      [first, {...second, disposition: 'update'}],
+      [first, {...second, supportHandles: [historicalHandle]}],
+      [first, {...second, supportHandles: []}],
+      [first, {...second, supportHandles: ['current:tncc_' + 'f'.repeat(40)]}],
+      [first, {...second, disposition: 'unresolved'}],
+    ])
+      expect(() => parse(basis, {...draft, paragraphDispositions: {version: 1, entries}})).toThrow(/disposition/);
+  });
+
+  it('binds support to each paragraph or explicit additional dependency and keeps empty selections incomplete', () => {
+    const base = basisFor('Alpha.\n\nBeta.');
+    const otherId = `tncc_${'f'.repeat(40)}`;
+    const otherHandle = `current:${otherId}`;
+    const basis = validateTopicMaintenanceDraftBasis({
+      ...base,
+      paragraphs: [base.paragraphs[0], {...base.paragraphs[1], citationIds: [otherId]}],
+      handles: [
+        ...base.handles,
+        {id: `historical:${otherId}`, citationId: otherId, variant: 'historical'},
+        {id: otherHandle, citationId: otherId, variant: 'current'},
+      ],
+    });
+    const draft = accounted(basis);
+    expect(() => parse(basis, draft)).toThrow(/disposition/);
+    const correct = {
+      ...draft,
+      paragraphDispositions: {
+        version: 1 as const,
+        entries: [
+          draft.paragraphDispositions.entries[0],
+          {...draft.paragraphDispositions.entries[1], supportHandles: [otherHandle]},
+        ],
+      },
+    };
+    expect(parse(basis, correct).body).toBe('Updated claim.\n\nBeta.');
+    const empty = {
+      ...correct,
+      paragraphDispositions: {
+        version: 1 as const,
+        entries: correct.paragraphDispositions.entries.map(item => ({...item, supportHandles: []})),
+      },
+    };
+    expect(topicMaintenanceParagraphCoverage(basis, empty)).toMatchObject({status: 'incomplete', resolvedCount: 0});
+    const dependent = {...basis, additionalDependencies: [{kind: 'dependency' as const, citationId: otherId}]};
+    const supportedByDependency = {
+      ...correct,
+      operations: [{...correct.operations[0], supportHandles: [otherHandle]}],
+      paragraphDispositions: {
+        version: 1,
+        entries: correct.paragraphDispositions.entries.map(item => ({...item, supportHandles: [otherHandle]})),
+      },
+    };
+    expect(parse(dependent, supportedByDependency).changedOrdinals).toEqual([0]);
+    expect(() =>
+      parse(basis, {...correct, paragraphDispositions: {...correct.paragraphDispositions, version: 2}}),
+    ).toThrow(/disposition/);
+  });
+
+  it('fits full paragraph accounting inside the unchanged draft output boundary and refuses oversized accounting', () => {
+    const basis = basisFor(Array.from({length: 64}, (_, i) => `Claim ${i}.`).join('\n\n'));
+    const entries = basis.paragraphs.map(item => ({
+      ordinal: item.ordinal,
+      beforeHash: item.hash,
+      disposition: 'revalidate' as const,
+      supportHandles: [currentHandle],
+      rationale: 'Checked current evidence.',
+    }));
+    const draft = {
+      ...draftFor(basis),
+      outcome: 'propose-revalidation' as const,
+      operations: [],
+      paragraphDispositions: {version: 1 as const, entries},
+    };
+    const raw = JSON.stringify(draft);
+    expect(new TextEncoder().encode(raw).byteLength).toBeLessThanOrEqual(32 * 1024);
+    expect(parseTopicMaintenanceDraft(basis, raw, {requireParagraphDispositions: true}).body).toBe(basis.body);
+    const oversized = {
+      ...draft,
+      paragraphDispositions: {version: 1, entries: entries.map(item => ({...item, rationale: 'x'.repeat(1024)}))},
+    };
+    expect(() => parse(basis, oversized)).toThrow(/oversized/);
+  });
+
+  it('accounts for arbitrary eligible sets independently of entry order without mutation', () => {
+    fc.assert(
+      fc.property(fc.array(fc.boolean(), {minLength: 1, maxLength: 24}), roles => {
+        const basis = basisFor(
+          roles.map((_, i) => `Claim ${i}.`).join('\n\n'),
+          roles.map(direct => (direct ? 'descriptive' : 'historical')),
+        );
+        const entries = basis.paragraphs
+          .filter(item => item.role === 'descriptive')
+          .map(item => ({
+            ordinal: item.ordinal,
+            beforeHash: item.hash,
+            disposition: 'revalidate' as const,
+            supportHandles: [currentHandle],
+            rationale: 'Checked current evidence.',
+          }));
+        const draft = {
+          ...draftFor(basis),
+          outcome: 'propose-revalidation' as const,
+          operations: [],
+          paragraphDispositions: {version: 1 as const, entries: [...entries].reverse()},
+        };
+        const before = JSON.stringify({basis, draft});
+        const result = parseTopicMaintenanceDraft(basis, JSON.stringify(draft), {requireParagraphDispositions: true});
+        expect(result.body).toBe(basis.body);
+        expect(topicMaintenanceParagraphCoverage(basis, result.draft)).toMatchObject({
+          status: 'complete',
+          eligibleCount: roles.filter(Boolean).length,
+          resolvedCount: roles.filter(Boolean).length,
+        });
+        if (entries.length)
+          expect(() =>
+            parseTopicMaintenanceDraft(
+              basis,
+              JSON.stringify({...draft, paragraphDispositions: {version: 1, entries: entries.slice(1)}}),
+              {requireParagraphDispositions: true},
+            ),
+          ).toThrow(/disposition/);
+        expect(JSON.stringify({basis, draft})).toBe(before);
+      }),
+      {numRuns: 40},
+    );
+  });
+
   it('replaces only the captured descriptive span and preserves surrounding bytes and annotations', () => {
     const basis = validateTopicMaintenanceDraftBasis(
       basisFor('  Alpha.  \n \n\tBeta. \n', ['descriptive', 'historical']),

@@ -1,4 +1,7 @@
-import type {TopicMaintenanceDraftV1} from '@threadnote/memory/topic-maintenance-draft';
+import type {
+  TopicMaintenanceDraftV1,
+  TopicMaintenanceParagraphCoverageV1,
+} from '@threadnote/memory/topic-maintenance-draft';
 import type {TopicMaintenanceParagraphV1, TopicMaintenanceDependencyV1} from '@threadnote/memory/topic-maintenance';
 
 export type ManagerTopicReviewActionV1 =
@@ -49,6 +52,7 @@ export interface ManagerTopicReviewV1 {
   readonly acceptedBody: string;
   readonly observationRevision: string;
   readonly coverage: 'declared-only';
+  readonly paragraphCoverage?: TopicMaintenanceParagraphCoverageV1;
   readonly generation: {
     readonly origin: 'model' | 'manual';
     readonly agent: string;
@@ -83,5 +87,6 @@ export interface ManagerTopicReviewV1 {
     readonly metadataDiff: readonly {readonly field: string; readonly beforeHash: string; readonly afterHash: string}[];
   };
   readonly canApply: boolean;
+  readonly canFinishVerification?: boolean;
   readonly blockingReason?: string;
 }

@@ -44,6 +44,9 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         action: McpInput.literals(['inspect', 'preview', 'enroll'], 'Exact topic enrollment action'),
         uri: McpInput.string('Personal durable memory URI or stable memory ID'),
         callerCwd: McpInput.string('Absolute selected repository checkout for preview/enroll'),
+        project: McpInput.string(
+          'Configured graph project name or root for preview/enroll; otherwise infer from callerCwd',
+        ),
         inputJson: McpInput.string('Closed paragraph support and dependency decisions, JSON, at most 32 KiB'),
         expectedContentHash: McpInput.string('Exact previewed target content hash for enroll'),
         revision: McpInput.string('Exact previewed proposal revision for enroll'),
@@ -62,6 +65,11 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         }
         const cwd = input.callerCwd ?? '';
         if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('Topic enrollment callerCwd must be absolute.');
+        if (
+          input.project !== undefined &&
+          (!input.project.trim() || new TextEncoder().encode(input.project).byteLength > 256)
+        )
+          return argumentError('Select a graph project name or root within 256 bytes.');
         if (
           typeof input.inputJson !== 'string' ||
           new TextEncoder().encode(input.inputJson).byteLength > MAX_TOPIC_MAINTENANCE_BYTES
@@ -82,7 +90,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
             !/^[a-f0-9]{64}$/u.test(input.revision))
         )
           return argumentError('Enroll requires explicit approval and the exact preview hash and revision.');
-        const options = {uri: input.uri, callerCwd: cwd, input: parsed.success};
+        const options = {uri: input.uri, callerCwd: cwd, project: input.project, input: parsed.success};
         const result =
           input.action === 'preview'
             ? yield* previewTopicEnrollment(config, options)

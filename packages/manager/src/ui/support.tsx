@@ -77,14 +77,22 @@ export class ManagerApiError extends Schema.TaggedError<ManagerApiError>()('Mana
   code: Schema.optionalKey(Schema.String),
   message: Schema.String,
   retryAfterMilliseconds: Schema.optionalKey(Schema.Finite),
+  recovery: Schema.optionalKey(Schema.Unknown),
   status: Schema.Finite,
 }) {
-  static of(message: string, status: number, code?: string, retryAfterMilliseconds?: number): ManagerApiError {
+  static of(
+    message: string,
+    status: number,
+    code?: string,
+    retryAfterMilliseconds?: number,
+    recovery?: unknown,
+  ): ManagerApiError {
     return ManagerApiError.make({
       message,
       status,
       ...(code === undefined ? {} : {code}),
       ...(retryAfterMilliseconds === undefined ? {} : {retryAfterMilliseconds}),
+      ...(recovery === undefined ? {} : {recovery}),
     });
   }
 }
@@ -123,6 +131,7 @@ async function api<T>(
       readonly error?: string;
       readonly reason?: string;
       readonly retryAfterMilliseconds?: number;
+      readonly recovery?: unknown;
     };
     if (!response.ok) {
       throw ManagerApiError.of(
@@ -130,6 +139,7 @@ async function api<T>(
         response.status,
         data.code,
         data.retryAfterMilliseconds,
+        data.recovery,
       );
     }
     return data as T;

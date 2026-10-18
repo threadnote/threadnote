@@ -21,6 +21,7 @@ export function makeContextTopicCommand(withRuntimeEffect: CliRuntimeRunner) {
   const enrollment = {
     ...target,
     cwd: optionalString('cwd', 'Committed repository supporting this topic; defaults to current directory'),
+    project: optionalString('project', 'Configured graph project name or root; otherwise infer from cwd'),
     input: requiredString('input', 'JSON paragraph support decisions and declared dependency citation IDs'),
   };
   return Command.make('topic').pipe(
@@ -58,6 +59,7 @@ export function makeContextTopicCommand(withRuntimeEffect: CliRuntimeRunner) {
 const readEnrollmentInput = Effect.fn('topicMaintenance.readInput')(function* (options: {
   readonly uri: string;
   readonly cwd?: string;
+  readonly project?: string;
   readonly input: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
@@ -72,7 +74,7 @@ const readEnrollmentInput = Effect.fn('topicMaintenance.readInput')(function* (o
     catch: cause => MemoryOperationError.make({message: 'Enrollment input is not valid JSON.', cause}),
   });
   const system = yield* SystemInfo;
-  return {uri: options.uri, callerCwd: options.cwd ?? system.currentDirectory(), input};
+  return {uri: options.uri, callerCwd: options.cwd ?? system.currentDirectory(), project: options.project, input};
 });
 
 const applyEnrollmentCommand = Effect.fn('topicMaintenance.enrollCommand')(function* (

@@ -73,6 +73,18 @@ const review = (overrides: Partial<ManagerTopicReviewV1> = {}): ManagerTopicRevi
     rationale: 'Source changed.',
     unresolvedQuestions: [],
     removedClaims: [],
+    paragraphDispositions: {
+      version: 1,
+      entries: [
+        {
+          ordinal: 0,
+          beforeHash: hash,
+          disposition: 'update',
+          supportHandles: [`current:${citationId}`],
+          rationale: 'Source changed.',
+        },
+      ],
+    },
   },
   proposal: {body: 'Updated behavior.\n\nPolicy requirement.', finalBodyHash: hash, changedOrdinals: [0]},
   paragraphs: [
@@ -98,8 +110,12 @@ let root: Root | undefined;
 let current = review();
 let evidencePacket = packet;
 let previewFailure = false;
+let applyFailure = false;
+let rejectTerminalPacket = false;
+let generationRecovery: unknown;
 let preparedAfterWrite = false;
 let deferredReadGate: Promise<void> | undefined;
+let previewGate: Promise<void> | undefined;
 let inboxRefreshFailure = false;
 let inboxReads = 0;
 const posted: Record<string, unknown>[] = [];
@@ -107,8 +123,12 @@ beforeEach(() => {
   current = review();
   evidencePacket = packet;
   previewFailure = false;
+  applyFailure = false;
+  rejectTerminalPacket = false;
+  generationRecovery = undefined;
   preparedAfterWrite = false;
   deferredReadGate = undefined;
+  previewGate = undefined;
   inboxRefreshFailure = false;
   inboxReads = 0;
   posted.length = 0;
@@ -126,16 +146,37 @@ beforeEach(() => {
       let result: unknown;
       if (url.pathname === '/api/consolidation-models')
         result = {models: [{id: 'local-model', label: 'Local model', isDefault: true}]};
-      else if (url.pathname === '/api/attention/context-maintenance') result = evidencePacket;
-      else if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
+      else if (url.pathname === '/api/attention/context-maintenance') {
+        if (rejectTerminalPacket && current.state === 'applied')
+          return new Response(JSON.stringify({error: 'The subject case is stale after acceptance.'}), {
+            status: 409,
+            headers: {'content-type': 'application/json'},
+          });
+        result = evidencePacket;
+      } else if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
         const action = JSON.parse(String(init.body)) as Record<string, unknown>;
         posted.push(action);
+        if ((action.action === 'generate' || action.action === 'regenerate') && generationRecovery)
+          return new Response(
+            JSON.stringify({
+              error: 'This topic has a recoverable review conflict.',
+              code: 'topic-draft-review-blocked',
+              recovery: generationRecovery,
+            }),
+            {status: 409, headers: {'content-type': 'application/json'}},
+          );
         if (action.action === 'preview' && previewFailure)
           return new Response(JSON.stringify({error: 'The source changed. Refresh this review.'}), {
             status: 409,
             headers: {'content-type': 'application/json'},
           });
+        if (action.action === 'apply' && applyFailure)
+          return new Response(JSON.stringify({error: 'The source changed. Refresh this review.'}), {
+            status: 409,
+            headers: {'content-type': 'application/json'},
+          });
         if (action.action === 'preview') {
+          await previewGate;
           const draft = JSON.parse(String(action.editedDraftJson)) as ManagerTopicReviewV1['draft'];
           const paragraphs = current.acceptedBody.split(/\n\n/u);
           for (const operation of draft.operations) paragraphs[operation.ordinal] = operation.text;
@@ -173,6 +214,8 @@ beforeEach(() => {
           current = review({...current, revision: current.revision + 1, state: 'deferred', canApply: false});
         if (action.action === 'resume')
           current = review({...current, revision: current.revision + 1, state: 'pending', canApply: false});
+        if (action.action === 'reject')
+          current = review({...current, revision: current.revision + 1, state: 'rejected', canApply: false});
         result = current;
       } else if (url.pathname === '/api/attention/topic-review') {
         if (current.state === 'deferred') await deferredReadGate;
@@ -315,6 +358,72 @@ it('previews a closed edited draft and applies only its exact revision and diges
   });
 });
 
+it('freezes paragraph decisions, text and support while an exact preview is pending', async () => {
+  const gate = Promise.withResolvers<void>();
+  previewGate = gate.promise;
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Preview exact final document');
+  const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
+  const editor = document.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="Proposed descriptive paragraph 1"]',
+  )!;
+  const support = document.querySelector<HTMLFieldSetElement>('.topic-support-choices')!;
+  expect(decision.disabled).toBe(true);
+  expect(editor.disabled).toBe(true);
+  expect(support.disabled).toBe(true);
+  await act(async () => {
+    decision.value = 'unresolved';
+    decision.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  await act(async () => gate.resolve());
+  expect(decision.value).toBe('update');
+  expect(decision.disabled).toBe(false);
+  expect(button('Accept update').disabled).toBe(false);
+  await act(async () => {
+    decision.value = 'unresolved';
+    decision.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(button('Accept update').disabled).toBe(true);
+  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(posted.map(action => action.action)).toEqual(['preview']);
+});
+
+it.each(['model', 'manual'] as const)(
+  'keeps contextual descriptive text read-only for %s reviews as appropriate',
+  async origin => {
+    current = review({
+      generation: {...review().generation, origin},
+      paragraphs: [
+        ...review().paragraphs,
+        {ordinal: 2, hash, role: 'descriptive', support: 'contextual', citationIds: [citationId]},
+      ],
+      acceptedBody: `${acceptedBody}\n\nContextual observation.`,
+    });
+    await render(
+      <TopicReviewDialog
+        project="threadnote"
+        reviewId="review-1"
+        onChanged={() => undefined}
+        onClose={() => undefined}
+        onOpenLibrary={() => undefined}
+      />,
+    );
+    const editor = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Proposed descriptive paragraph 3"]',
+    );
+    expect(Boolean(editor)).toBe(origin === 'manual');
+    expect(document.body.textContent).toContain('Contextual observation.');
+  },
+);
+
 it.each(['threadnote', ''])('routes topic inbox items to their project from scope %s', async project => {
   await render(
     <ReviewsPanel
@@ -375,6 +484,199 @@ it('keeps a failed inbox preview visible for recovery', async () => {
   expect(document.body.textContent).toContain('The source changed. Refresh this review.');
 });
 
+it('retains a learned review identity after acceptance instead of reloading its stale subject case', async () => {
+  rejectTerminalPacket = true;
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      initialPacket={{...packet, reviewId: undefined}}
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Preview exact final document');
+  await click('Accept update');
+  await click('Refresh evidence');
+  expect(current.state).toBe('applied');
+  expect(document.body.textContent).toContain('Saved final document');
+  expect(document.body.textContent).not.toContain('The subject case is stale after acceptance.');
+  expect(document.body.textContent).not.toContain('Acceptance paused');
+});
+
+it('opens the exact blocked review for explicit recovery without generating or closing it automatically', async () => {
+  const reviewId = `review-${'b'.repeat(24)}`;
+  current = review({reviewId, state: 'conflict'});
+  evidencePacket = {...packet, reviewId: undefined};
+  generationRecovery = {action: 'open-review', reviewId, state: 'conflict'};
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Generate draft');
+  expect(posted.map(action => action.action)).toEqual(['generate']);
+  expect(document.body.textContent).toContain('recoverable review conflict');
+  await click('Open existing review');
+  expect(button('Close conflicted review')).toBeTruthy();
+  expect(posted.map(action => action.action)).toEqual(['generate']);
+  await click('Close conflicted review');
+  expect(posted[1]).toMatchObject({action: 'reject', reviewId, revision: 3, caseId: 'case-1'});
+});
+
+it('ignores a malformed review recovery selector', async () => {
+  evidencePacket = {...packet, reviewId: undefined};
+  generationRecovery = {action: 'open-review', reviewId: '../../another-review', state: 'conflict'};
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Generate draft');
+  expect(document.body.textContent).toContain('recoverable review conflict');
+  expect(
+    [...document.querySelectorAll('button')].some(item => item.textContent?.includes('Open existing review')),
+  ).toBe(false);
+});
+
+it('finishes verification of a legacy already-written update through its exact saved approval', async () => {
+  current = review({
+    state: 'applying',
+    revision: 5,
+    canApply: false,
+    canFinishVerification: true,
+    draft: {...review().draft, paragraphDispositions: undefined},
+    approval: {
+      stage: 'prepared',
+      reviewRevision: 4,
+      approvalDigest: hash,
+      content: '# Topic',
+      contentHash: hash,
+      metadataDiff: [],
+    },
+  });
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(button('Finish saved update verification').disabled).toBe(false);
+  await click('Finish saved update verification');
+  expect(posted[0]).toMatchObject({action: 'apply', revision: 4, approvalDigest: hash, approved: true});
+});
+
+it('requires a new exact preview after an acceptance refusal even when a refresh returns the old approval', async () => {
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Preview exact final document');
+  applyFailure = true;
+  await click('Accept update');
+  expect(button('Accept update').disabled).toBe(true);
+  await click('Refresh evidence');
+  expect(button('Accept update').disabled).toBe(true);
+  expect(document.body.textContent).toContain('Previous exact preview');
+  applyFailure = false;
+  await click('Preview exact final document');
+  expect(button('Accept update').disabled).toBe(false);
+});
+
+it('requires an explicit supported disposition for every eligible paragraph in a legacy model draft', async () => {
+  current = review({
+    draft: {...review().draft, paragraphDispositions: undefined},
+  });
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(document.body.textContent).toContain('Paragraph review incomplete');
+  const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
+  await act(async () => {
+    decision.value = 'update';
+    decision.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(button('Preview exact final document').disabled).toBe(false);
+  await click('Preview exact final document');
+  expect(JSON.parse(String(posted[0].editedDraftJson)).paragraphDispositions.entries).toEqual([
+    expect.objectContaining({
+      ordinal: 0,
+      beforeHash: hash,
+      disposition: 'update',
+      supportHandles: [`current:${citationId}`],
+    }),
+  ]);
+});
+
+it('keeps an unresolved paragraph blocked until its unchanged decision has explicit current support', async () => {
+  current = review({
+    draft: {
+      ...review().draft,
+      operations: [],
+      outcome: 'insufficient-evidence',
+      reviewedHandles: [],
+      paragraphDispositions: {
+        version: 1,
+        entries: [
+          {
+            ordinal: 0,
+            beforeHash: hash,
+            disposition: 'unresolved',
+            supportHandles: [],
+            rationale: 'Needs manual review.',
+          },
+        ],
+      },
+    },
+  });
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      reviewId="review-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(button('Preview exact final document').disabled).toBe(true);
+  const decision = document.querySelector<HTMLSelectElement>('select[aria-label="Review decision for paragraph 1"]')!;
+  await act(async () => {
+    decision.value = 'revalidate';
+    decision.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(button('Preview exact final document').disabled).toBe(true);
+  const support = [...document.querySelectorAll('fieldset')]
+    .find(item => item.querySelector('legend')?.textContent?.includes('paragraph 1'))!
+    .querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  expect(support.checked).toBe(false);
+  await act(async () => support.click());
+  expect(button('Preview exact final document').disabled).toBe(false);
+});
+
 it('retains the first edited paragraph while previewing a second edit', async () => {
   const accepted = 'First observed.\n\nSecond observed.\n\nPolicy requirement.';
   evidencePacket = {...packet, topicEvidence: {...packet.topicEvidence!, body: accepted}};
@@ -387,6 +689,25 @@ it('retains the first edited paragraph while previewing a second edit', async ()
     ],
     draft: {
       ...review().draft,
+      paragraphDispositions: {
+        version: 1,
+        entries: [
+          {
+            ordinal: 0,
+            beforeHash: hash,
+            disposition: 'update',
+            supportHandles: [`current:${citationId}`],
+            rationale: 'First source changed.',
+          },
+          {
+            ordinal: 1,
+            beforeHash: hash,
+            disposition: 'revalidate',
+            supportHandles: [`current:${citationId}`],
+            rationale: 'Second source still supports its text.',
+          },
+        ],
+      },
       operations: [
         {
           ordinal: 0,
