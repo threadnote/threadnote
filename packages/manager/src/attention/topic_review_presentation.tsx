@@ -1,6 +1,7 @@
 import React from 'react';
 import {Check, FileCode2, History, Info, Link2, LockKeyhole, Shield, Sparkles} from 'lucide-react';
 import type {TopicMaintenanceDraftV1} from '@threadnote/memory/topic-maintenance-draft';
+import {topicMaintenanceParagraphEligible} from '@threadnote/memory/topic-maintenance-draft';
 import {MemoryExcerpt, ReviewBadge, type ReviewTone} from '../review_presentation.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {ManagerTopicReviewV1} from './topic_contracts.js';
@@ -147,8 +148,10 @@ export function TopicParagraphComparison(props: {
   readonly review: ManagerTopicReviewV1;
   readonly draft?: TopicMaintenanceDraftV1;
   readonly originalParagraphs: readonly string[];
+  readonly disabled: boolean;
   readonly onEditParagraph: (ordinal: number, text: string) => void;
   readonly onEditSupport: (ordinal: number, handleId: string, checked: boolean) => void;
+  readonly onEditDisposition: (ordinal: number, decision: string) => void;
 }): React.ReactElement {
   const {review} = props;
   return (
@@ -163,7 +166,10 @@ export function TopicParagraphComparison(props: {
         const operation = props.draft?.operations.find(item => item.ordinal === ordinal);
         const original = props.originalParagraphs[ordinal] ?? '';
         const proposed = operation?.text ?? original;
-        const preserved = paragraph.role !== 'descriptive';
+        const disposition = props.draft?.paragraphDispositions?.entries.find(item => item.ordinal === ordinal);
+        const eligible = topicMaintenanceParagraphEligible(paragraph);
+        const preserved = paragraph.role !== 'descriptive' || (review.generation.origin === 'model' && !eligible);
+        const selectedSupport = operation?.supportHandles ?? disposition?.supportHandles ?? [];
         return (
           <article
             className={`topic-paragraph${operation ? ' has-proposal' : ''}`}
@@ -186,6 +192,10 @@ export function TopicParagraphComparison(props: {
                   <ReviewBadge tone="protected">
                     <LockKeyhole size={12} aria-hidden="true" /> Preserved
                   </ReviewBadge>
+                ) : eligible &&
+                  review.generation.origin === 'model' &&
+                  (!disposition || disposition.disposition === 'unresolved') ? (
+                  <ReviewBadge tone="warning">{disposition ? 'Unresolved' : 'Needs review'}</ReviewBadge>
                 ) : operation ? (
                   <ReviewBadge tone="proposal">
                     <Sparkles size={12} aria-hidden="true" /> Updated
@@ -201,9 +211,27 @@ export function TopicParagraphComparison(props: {
                 <Link2 size={12} aria-hidden="true" /> {paragraph.support} support
               </span>
             </div>
+            {eligible && review.state === 'pending' && review.generation.origin === 'model' ? (
+              <label className="topic-paragraph-decision">
+                Review decision
+                <select
+                  aria-label={`Review decision for paragraph ${ordinal + 1}`}
+                  value={disposition?.disposition ?? ''}
+                  disabled={props.disabled}
+                  onChange={event => props.onEditDisposition(ordinal, event.target.value)}
+                >
+                  <option value="">Choose a decision</option>
+                  <option value="update" disabled={!operation}>
+                    Use proposed update
+                  </option>
+                  <option value="revalidate">Keep current text with source support</option>
+                  <option value="unresolved">Needs manual review</option>
+                </select>
+              </label>
+            ) : null}
             <div className={operation ? 'topic-text-comparison' : undefined}>
               {operation ? <MemoryExcerpt>{original}</MemoryExcerpt> : null}
-              {paragraph.role === 'descriptive' && review.state === 'pending' ? (
+              {!preserved && review.state === 'pending' ? (
                 <div className={operation ? 'review-proposal' : 'review-current-text'}>
                   <div className="review-content-label">
                     {operation ? <Sparkles size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}
@@ -213,6 +241,7 @@ export function TopicParagraphComparison(props: {
                     aria-label={`Proposed descriptive paragraph ${ordinal + 1}`}
                     rows={Math.max(4, Math.min(12, proposed.split('\n').length + 2))}
                     value={proposed}
+                    disabled={props.disabled}
                     onChange={event => props.onEditParagraph(ordinal, event.target.value)}
                   />
                 </div>
@@ -232,18 +261,24 @@ export function TopicParagraphComparison(props: {
                 </MemoryExcerpt>
               )}
             </div>
-            {paragraph.role === 'descriptive' && operation ? (
-              <fieldset className="topic-support-choices" disabled={review.state !== 'pending'}>
+            {paragraph.role === 'descriptive' && (operation || disposition?.disposition === 'revalidate') ? (
+              <fieldset className="topic-support-choices" disabled={props.disabled || review.state !== 'pending'}>
                 <legend>
                   <Link2 size={13} aria-hidden="true" /> Current source support for paragraph {ordinal + 1}
                 </legend>
                 {review.support
-                  .filter(source => source.variant === 'current')
+                  .filter(
+                    source =>
+                      source.variant === 'current' &&
+                      (!props.draft?.paragraphDispositions ||
+                        paragraph.citationIds.includes(source.citationId) ||
+                        review.additionalDependencies.some(item => item.citationId === source.citationId)),
+                  )
                   .map(source => (
                     <label key={source.handleId} className="review-confirmation">
                       <input
                         type="checkbox"
-                        checked={operation.supportHandles.includes(source.handleId)}
+                        checked={selectedSupport.includes(source.handleId)}
                         onChange={event => props.onEditSupport(ordinal, source.handleId, event.target.checked)}
                       />
                       <span>

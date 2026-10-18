@@ -185,6 +185,13 @@ describe('topic maintenance private draft generation', () => {
         expect(branches.map(branch => branch.properties.operations.minItems ?? 0)).toEqual([1, 0, 0, 0]);
         expect(branches.slice(1).map(branch => branch.properties.operations.maxItems)).toEqual([0, 0, 0]);
         expect(branches[1].properties.reviewedHandles.minItems).toBe(1);
+        for (const branch of branches) {
+          expect(branch.properties.paragraphDispositions.properties.entries).toMatchObject({
+            minItems: count,
+            maxItems: count,
+          });
+          expect(branch.required).toContain('paragraphDispositions');
+        }
         expect(branches.slice(2).map(branch => branch.properties.reviewedHandles.maxItems)).toEqual([0, 0]);
         expect(
           branches[0].properties.operations.items.oneOf.map(
@@ -407,6 +414,18 @@ describe('topic maintenance private draft generation', () => {
               observationRevision: identity.observationRevision,
               packetDigest: identity.packetDigest,
               outcome: 'propose-revalidation',
+              paragraphDispositions: {
+                version: 1,
+                entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
+                  (item: {ordinal: number; beforeHash: string; currentHandles: string[]}) => ({
+                    ordinal: item.ordinal,
+                    beforeHash: item.beforeHash,
+                    disposition: 'revalidate',
+                    supportHandles: item.currentHandles,
+                    rationale: 'Checked unchanged against current evidence.',
+                  }),
+                ),
+              },
               operations: [],
               reviewedHandles: evidence.sources.map((item: {citationId: string}) => `current:${item.citationId}`),
               rationale: 'The scoped claim remains correct after reviewing the changed source.',
@@ -424,6 +443,14 @@ describe('topic maintenance private draft generation', () => {
             return JSON.stringify({
               ...draft,
               outcome: 'propose-update',
+              paragraphDispositions: {
+                version: 1,
+                entries: draft.paragraphDispositions.entries.map((item: {ordinal: number}) =>
+                  item.ordinal === paragraph.ordinal
+                    ? {...item, disposition: 'update', supportHandles: [`current:${citations[0].id}`]}
+                    : item,
+                ),
+              },
               reviewedHandles: [],
               operations: [
                 {
@@ -529,6 +556,15 @@ describe('topic maintenance private draft generation', () => {
           expect(calls).toBe(2);
           expect((yield* request()).revision).toBe(review.revision);
           expect(calls).toBe(2);
+          const conflicted = candidateReviewWithState(review, review.candidates[0].candidateId, 'conflict');
+          yield* saveCandidateReview(home, conflicted);
+          const blockedConflict = yield* request(true).pipe(Effect.result);
+          expect(Result.isFailure(blockedConflict) && blockedConflict.failure).toMatchObject({
+            reason: 'review-conflict',
+            recovery: {reviewId: review.reviewId, state: 'conflict'},
+          });
+          expect(calls).toBe(2);
+          yield* saveCandidateReview(home, review);
           const tampered = {
             ...review,
             maintenance: {
@@ -659,6 +695,11 @@ describe('topic maintenance private draft generation', () => {
               draft.reviewedHandles = [];
               draft.rationale = 'The evidence does not establish a safe replacement.';
               draft.unresolvedQuestions = ['Which policy applies to the changed source?'];
+              const accounting = draft.paragraphDispositions as {entries: Record<string, unknown>[]};
+              draft.paragraphDispositions = {
+                version: 1,
+                entries: accounting.entries.map(item => ({...item, disposition: 'unresolved', supportHandles: []})),
+              };
               return remoteResult(JSON.stringify(draft));
             });
           const abstentionReview = yield* remoteRequest(abstentionGenerator);

@@ -27,6 +27,7 @@ import {resolveLocalMemoryReplacementTarget} from '../replacement_target.js';
 export interface TopicEnrollmentOptions {
   readonly uri: string;
   readonly callerCwd: string;
+  readonly project?: string;
   readonly input: unknown;
 }
 
@@ -160,7 +161,11 @@ const prepareEnrollment = Effect.fn('topicMaintenance.prepareEnrollment')(functi
     return conflict('repository-mismatch', 'The declared evidence belongs to a different repository.');
   if (!(yield* observeCleanRepositoryWorktree(options.callerCwd)))
     return conflict('dirty-source', 'Enrollment requires a coherent committed worktree.');
-  const scope = {kind: 'repository' as const, callerCwd: options.callerCwd};
+  const scope = {
+    kind: 'repository' as const,
+    callerCwd: options.callerCwd,
+    ...(options.project === undefined ? {} : {project: options.project}),
+  };
   const citations = record.metadata.codeCitations!;
   const validations = yield* validateContextHealthMemoryCitations(config, scope, [
     {uri: record.uri, codeCitations: citations},

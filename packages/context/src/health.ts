@@ -5,6 +5,7 @@ import type {
 import {buildCompactPlan} from '@threadnote/memory/hygiene';
 import type {CandidateComparison} from '@threadnote/memory/candidate';
 import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
+import {validateTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
 import {
   analyzeContextHealthSemantics,
   type ContextHealthSemanticCompletenessV2,
@@ -137,7 +138,6 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
   const records = input.records
     .filter(record => record.metadata.status === 'active' && record.metadata.project === input.project)
     .sort(compareRecords);
-  const recordUris = new Set(records.map(record => record.uri));
   const includeFindingCategories =
     input.includeFindingCategories === undefined ? undefined : new Set(input.includeFindingCategories);
   const includeFindingUris = input.includeFindingUris === undefined ? undefined : new Set(input.includeFindingUris);
@@ -150,7 +150,7 @@ export function buildContextHealthReport(input: ContextHealthReportInputV1): Con
     [
       ...validityFindings(records, input.now),
       ...reviewFindings(records, input.now),
-      ...citationFindings(input.citationValidations ?? [], recordUris, input.includeCitationCoverageFindings ?? false),
+      ...citationFindings(input.citationValidations ?? [], records, input.includeCitationCoverageFindings ?? false),
       ...relationFindings(input.relationEvidence ?? [], records),
       ...duplicateFindings(duplicateCorpus, input.project, input.now),
       ...candidateFindings(input.candidateEvidence ?? [], input.project),
@@ -337,14 +337,34 @@ function reviewFindings(records: readonly MemoryRecord[], now: Date): readonly C
 
 function citationFindings(
   validations: readonly ContextBriefMemoryCitationValidationV2[],
-  recordUris: ReadonlySet<string>,
+  records: readonly MemoryRecord[],
   includeCoverageFindings: boolean,
 ): readonly ContextHealthFindingV1[] {
+  const retainedByUri = new Map(records.map(record => [record.uri, retainedTopicCitationIds(record)]));
   return validations
-    .filter(validation => recordUris.has(validation.uri))
+    .filter(validation => retainedByUri.has(validation.uri))
     .flatMap(validation =>
-      validation.receipts.flatMap(receipt => citationFinding(validation.uri, receipt, includeCoverageFindings)),
+      validation.receipts.flatMap(receipt =>
+        (receipt.status === 'changed' || receipt.status === 'deleted') &&
+        retainedByUri.get(validation.uri)!.has(receipt.citationId)
+          ? []
+          : citationFinding(validation.uri, receipt, includeCoverageFindings),
+      ),
     );
+}
+
+/** Retained pins are immutable history; only the reviewed accepted vector claims current support. */
+function retainedTopicCitationIds(record: MemoryRecord): ReadonlySet<string> {
+  const manifest = record.metadata.topicMaintenance;
+  if (manifest?.version !== 2) return new Set();
+  try {
+    const validated = validateTopicMaintenanceManifest(manifest, record);
+    if (validated.version !== 2) return new Set();
+    const active = new Set(validated.acceptedSources.map(source => source.acceptedCitationId));
+    return new Set((record.metadata.codeCitations ?? []).filter(citation => !active.has(citation.id)).map(c => c.id));
+  } catch {
+    return new Set();
+  }
 }
 
 function citationFinding(

@@ -4,6 +4,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphStore} from '@threadnote/graph/store';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -19,7 +20,13 @@ import baseline from '../evaluation/fixtures/topic-maintenance-v1/baseline.json'
 
 const BODY = baseline.paragraphs.map(paragraph => paragraph.text).join('\n\n');
 
-const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* () {
+const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* (
+  settings: {
+    readonly manifestName?: string;
+    readonly scoped?: boolean;
+    readonly multiple?: boolean;
+  } = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-enrollment-'});
@@ -28,6 +35,17 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* () {
   const repository = yield* fs.realPath(repositoryPath);
   for (const source of baseline.sourceFiles)
     yield* fs.writeFileString(path.join(repository, source.path), source.content);
+  if (settings.scoped) {
+    yield* fs.writeFileString(
+      path.join(repository, 'package.json'),
+      JSON.stringify({private: true, workspaces: ['apps/*']}),
+    );
+    yield* fs.makeDirectory(path.join(repository, 'apps/topic'), {recursive: true});
+    yield* fs.writeFileString(
+      path.join(repository, 'apps/topic/package.json'),
+      JSON.stringify({name: '@fixture/topic'}),
+    );
+  }
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
   yield* git(['init', '--quiet']);
   yield* git(['add', '.']);
@@ -36,18 +54,32 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* () {
     account: 'local',
     agentContextHome: home,
     agentId: 'test',
-    manifestPath: path.join(home, 'manifest.yaml'),
+    manifestPath: path.join(home, settings.manifestName ?? 'manifest.yaml'),
     user: 'tester',
+  };
+  const project = {
+    name: 'fixture',
+    path: repository,
+    uri: 'threadnote://resources/repos/fixture',
+    seed: [],
+    ...(settings.scoped
+      ? {graph: {roots: ['apps/topic'], include: ['health.ts', 'config.ts'], closure: 'dependencies' as const}}
+      : {}),
   };
   yield* fs.writeFileString(
     config.manifestPath,
-    'version: 1\nprojects:\n  - name: fixture\n    path: ' +
-      JSON.stringify(repository) +
-      '\n    uri: threadnote://resources/repos/fixture\n    seed: []\n',
+    JSON.stringify({
+      version: 1,
+      projects: [
+        project,
+        ...(settings.multiple ? [{...project, name: 'other', uri: 'threadnote://resources/repos/other'}] : []),
+      ],
+    }),
   );
-  yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
+  yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false, project});
   const citations = yield* captureMemoryCodeCitations(config, {
     callerCwd: repository,
+    ...(settings.multiple ? {project: project.name} : {}),
     refs: ['health.ts', 'config.ts'],
   });
   const uri = 'threadnote://user/tester/memories/durable/projects/fixture/context-health.md';
@@ -87,13 +119,55 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* () {
       citationId: byPath.get(dependency.sourcePath)!,
     })),
   };
-  return {config, options: {uri, callerCwd: repository, input}, content, store, location, fs, path, repository};
+  return {config, options: {uri, callerCwd: repository, input}, content, store, location, fs, path, repository, git};
 });
 
 describe('topic maintenance enrollment', () => {
+  for (const manifestName of ['manifest.yaml', 'seed-manifest.yaml']) {
+    effectIt.effect(`enrolls exact current configured scope using ${manifestName}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({scoped: true, manifestName});
+        const preview = yield* previewTopicEnrollment(f.config, f.options);
+        expect(preview.status).toBe('preview');
+        if (preview.status !== 'preview') throw new Error(JSON.stringify(preview));
+        expect(yield* f.store.read(f.location, f.options.uri)).toBe(f.content);
+        expect(
+          yield* applyTopicEnrollment(f.config, {
+            ...f.options,
+            approved: true,
+            expectedContentHash: preview.proposal.expectedContentHash,
+            revision: preview.proposal.revision,
+          }),
+        ).toMatchObject({status: 'enrolled'});
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect('requires an explicit graph selector for multiple scopes without using the memory project tag', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({scoped: true, multiple: true});
+      yield* (yield* CodeGraphIndexer).index({
+        cwd: f.repository,
+        threadnoteHome: f.config.agentContextHome,
+        ensureVectors: false,
+      });
+      expect(yield* previewTopicEnrollment(f.config, f.options)).toMatchObject({
+        status: 'conflict',
+        code: 'evidence-not-current',
+      });
+      const preview = yield* previewTopicEnrollment(f.config, {...f.options, project: 'fixture'});
+      expect(preview.status).toBe('preview');
+      expect(yield* previewTopicEnrollment(f.config, {...f.options, project: 'other'})).toMatchObject({
+        status: 'conflict',
+        code: 'evidence-not-current',
+      });
+      expect(yield* f.store.read(f.location, f.options.uri)).toBe(f.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('enrolls from the same JSON file through the public CLI', () =>
     Effect.gen(function* () {
-      const f = yield* fixture();
+      const f = yield* fixture({scoped: true, multiple: true});
       const system = yield* SystemInfo;
       const inputFile = f.path.join(f.config.agentContextHome, 'support.json');
       yield* f.fs.writeFileString(inputFile, JSON.stringify(f.options.input));
@@ -112,7 +186,17 @@ describe('topic maintenance enrollment', () => {
           },
           timeoutMs: 60_000,
         });
-      const target = ['--uri', f.options.uri, '--cwd', f.repository, '--input', inputFile, '--json'];
+      const target = [
+        '--uri',
+        f.options.uri,
+        '--cwd',
+        f.repository,
+        '--project',
+        'fixture',
+        '--input',
+        inputFile,
+        '--json',
+      ];
       const preview = JSON.parse((yield* run(['preview', ...target])).stdout);
       expect(preview.status).toBe('preview');
       expect(yield* f.store.read(f.location, f.options.uri)).toBe(f.content);
@@ -132,6 +216,87 @@ describe('topic maintenance enrollment', () => {
       expect(inspected).toMatchObject({status: 'enrolled', body: BODY});
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
+
+  effectIt.effect('refuses dirty, stale and reindexed changed source under a configured scope', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture({scoped: true});
+      yield* f.fs.writeFileString(f.path.join(f.repository, 'config.ts'), 'export const timeoutSeconds = 60;\n');
+      expect(yield* previewTopicEnrollment(f.config, f.options)).toMatchObject({
+        status: 'conflict',
+        code: 'dirty-source',
+      });
+      yield* f.git(['add', '.']);
+      yield* f.git([
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '-qm',
+        'changed source',
+      ]);
+      expect(yield* previewTopicEnrollment(f.config, f.options)).toMatchObject({
+        status: 'conflict',
+        code: 'evidence-not-current',
+      });
+      const manifest = JSON.parse(yield* f.fs.readFileString(f.config.manifestPath));
+      yield* (yield* CodeGraphIndexer).index({
+        cwd: f.repository,
+        threadnoteHome: f.config.agentContextHome,
+        project: manifest.projects[0],
+        ensureVectors: false,
+      });
+      expect(yield* previewTopicEnrollment(f.config, f.options)).toMatchObject({
+        status: 'conflict',
+        code: 'evidence-not-current',
+      });
+      expect(yield* f.store.read(f.location, f.options.uri)).toBe(f.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const change of ['scope', 'source'] as const) {
+    effectIt.effect(`refuses a ${change} change during the final scoped citation observation`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture({scoped: true, multiple: true});
+        const store = yield* CodeGraphStore;
+        let changed = false;
+        const observed = CodeGraphStore.of({
+          ...store,
+          effectiveSnapshotCitationEvidence: (...args) =>
+            store.effectiveSnapshotCitationEvidence(...args).pipe(
+              Effect.tap(() =>
+                Effect.gen(function* () {
+                  if (changed) return;
+                  changed = true;
+                  if (change === 'source')
+                    yield* f.fs.writeFileString(
+                      f.path.join(f.repository, 'health.ts'),
+                      'export const changed = true;\n',
+                    );
+                  else {
+                    const manifest = JSON.parse(yield* f.fs.readFileString(f.config.manifestPath));
+                    yield* f.fs.writeFileString(
+                      f.config.manifestPath,
+                      JSON.stringify({
+                        ...manifest,
+                        projects: manifest.projects.filter((project: {name: string}) => project.name !== 'fixture'),
+                      }),
+                    );
+                  }
+                }).pipe(Effect.orDie),
+              ),
+            ),
+        });
+        expect(
+          yield* previewTopicEnrollment(f.config, {...f.options, project: 'fixture'}).pipe(
+            Effect.provideService(CodeGraphStore, observed),
+          ),
+        ).toMatchObject({status: 'conflict', code: 'evidence-not-current'});
+        expect(changed).toBe(true);
+        expect(yield* f.store.read(f.location, f.options.uri)).toBe(f.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+  }
 
   effectIt.effect(
     'previews without mutation, enrolls the reviewed evidence, and retries without duplicate writes',

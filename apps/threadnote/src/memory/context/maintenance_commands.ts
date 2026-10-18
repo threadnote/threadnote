@@ -1,10 +1,14 @@
-import {Effect, FileSystem} from 'effect';
+import {Effect, FileSystem, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
-import {MAX_TOPIC_MAINTENANCE_DRAFT_BYTES} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
+  topicGenerationDiagnosticSummary,
+} from '@threadnote/memory/topic-maintenance-draft';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {renderContextMaintenanceStatus} from './maintenance_projection.js';
-import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft} from './maintenance_draft.js';
+import {readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
+import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft, TopicDraftError} from './maintenance_draft.js';
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
@@ -49,6 +53,12 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     readonly editedDraftFile?: string;
   },
 ) {
+  if (options.action === 'draft-receipt')
+    return yield* readTopicGenerationReceiptCommand(
+      config.agentContextHome,
+      options.receiptId ?? '',
+      options.json === true,
+    );
   const cwd = options.sourceCwd ?? (yield* SystemInfo).currentDirectory();
   let editedDraftJson: string | undefined;
   if (options.editedDraftFile) {
@@ -67,7 +77,14 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
           backend: options.backend as 'local-ai' | 'effect-ai',
           modelId: options.modelId ?? '',
           regenerate: options.regenerate,
-        })
+        }).pipe(
+          Effect.catch(error =>
+            Effect.gen(function* () {
+              (yield* SystemInfo).setExitCode(1);
+              return projectTopicDraftFailure(error);
+            }),
+          ),
+        )
       : options.action === 'draft-view'
         ? yield* readTopicMaintenanceDraft(config, options.reviewId ?? '')
         : options.action === 'draft-preview'
@@ -115,10 +132,34 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
   yield* writeFinalCliOutput(
     options.json
       ? JSON.stringify(result)
-      : 'projects' in result
-        ? renderContextMaintenanceStatus(result)
-        : 'status' in result
-          ? `Maintenance undo: ${result.status}`
-          : JSON.stringify(result, null, 2),
+      : 'error' in result && typeof result.error === 'string'
+        ? result.error +
+          ('diagnostics' in result && result.diagnostics ? ` Local diagnostics: ${result.diagnostics.receiptId}` : '')
+        : 'projects' in result
+          ? renderContextMaintenanceStatus(result)
+          : 'status' in result
+            ? `Maintenance undo: ${result.status}`
+            : JSON.stringify(result, null, 2),
   );
+});
+
+export function projectTopicDraftFailure(error: unknown) {
+  const diagnostics = Schema.is(TopicDraftError)(error)
+    ? topicGenerationDiagnosticSummary(error.diagnostics)
+    : undefined;
+  return {
+    status: 'failed' as const,
+    code: 'topic-draft-unavailable',
+    error: 'The topic draft could not be generated from this exact case and model.',
+    ...(diagnostics ? {diagnostics} : {}),
+  };
+}
+
+export const readTopicGenerationReceiptCommand = Effect.fn('contextMaintenance.generationReceiptCommand')(function* (
+  home: string,
+  receiptId: string,
+  json: boolean,
+) {
+  const summary = yield* readTopicGenerationSummary(home, receiptId);
+  yield* writeFinalCliOutput(JSON.stringify(summary, undefined, json ? undefined : 2));
 });

@@ -4,9 +4,11 @@
 
 import {appendFile, mkdir, readFile, writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {topicGenerationUsage} from '@threadnote/memory/topic-maintenance-draft';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   topicStudyHash,
+  topicStudyGenerationObservationV1,
   TOPIC_STUDY_COMPARISON_METHOD_V1,
   TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX,
   topicStudyPreconditionFailedV1,
@@ -944,6 +946,7 @@ export async function runTopicStudyNativeAdapter(
     let approved = false;
     let model: TopicStudyObservationV1['model'] = null;
     let promptHash: string | null = null;
+    let generationObservation: TopicStudyObservationV1['generationObservation'];
     let providerInputTokens: number | null = null;
     let providerOutputTokens: number | null = null;
     let providerChargeMicros: number | null = 0;
@@ -963,6 +966,7 @@ export async function runTopicStudyNativeAdapter(
       actualClass,
       model,
       promptHash,
+      ...(generationObservation ? {generationObservation} : {}),
       providerInputTokens,
       providerOutputTokens,
       providerChargeMicros,
@@ -990,6 +994,7 @@ export async function runTopicStudyNativeAdapter(
           reason = 'Evidence packet failed.';
         } else {
           draftAttempted = true;
+          providerChargeMicros = backend === 'local-ai' ? 0 : null;
           const draft = await cli(
             [
               'context',
@@ -1007,40 +1012,86 @@ export async function runTopicStudyNativeAdapter(
             false,
           );
           computeMilliseconds = draft.elapsed;
+          if (draft.exitCode === 0) {
+            producedResponse = true;
+            draftCompleted = true;
+          }
+          let envelope: unknown;
+          try {
+            envelope = JSON.parse(draft.stdout);
+          } catch {
+            envelope = undefined;
+          }
+          const result = (envelope ?? {}) as {
+            reviewId: string;
+            revision: number;
+            candidates?: readonly {candidateId: string}[];
+            maintenance?: {
+              basis?: {targetUri: string; observationRevision: string};
+              proposal?: unknown;
+              generation?: {
+                usage?: {inputTokens?: number; outputTokens?: number; costMicros?: number};
+                model?: string;
+                modelVersion?: string;
+                promptVersion?: string;
+                attempts?: number;
+              };
+            };
+          };
+          if (draft.exitCode === 0) {
+            if (
+              typeof result.reviewId !== 'string' ||
+              !result.reviewId ||
+              !Number.isSafeInteger(result.revision) ||
+              result.revision < 1 ||
+              !Array.isArray(result.candidates) ||
+              result.candidates.length !== 1 ||
+              typeof result.candidates[0]?.candidateId !== 'string' ||
+              !result.candidates[0].candidateId ||
+              !result.maintenance?.basis ||
+              result.maintenance.basis.targetUri !== state.uri
+            )
+              throw new Error(
+                `${TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX}Produced public review identity or exact revision is unavailable.`,
+              );
+            producedReview = {
+              reviewId: result.reviewId,
+              revision: result.revision,
+              candidateId: result.candidates[0].candidateId,
+              basisHash: topicStudyHash('topic-study-review-basis-v1', result.maintenance.basis),
+            };
+            await recordReviewRevision(result.reviewId, result.revision);
+          }
+          generationObservation = topicStudyGenerationObservationV1(envelope, {
+            caseId: state.caseId,
+            agent: backend,
+            model: modelId,
+          });
+          if (generationObservation) {
+            computeMilliseconds = generationObservation.elapsedMilliseconds;
+            const usage = topicGenerationUsage(generationObservation.attempts.map(attempt => attempt.usage));
+            providerInputTokens = usage.status === 'measured' ? usage.inputTokens : null;
+            providerOutputTokens = usage.status === 'measured' ? usage.outputTokens : null;
+            providerChargeMicros = backend === 'local-ai' ? 0 : null;
+            model = {
+              backend,
+              id: generationObservation.model,
+              digest:
+                backend === 'local-ai' && generationObservation.modelVersion?.includes(manifest.verifiedModel.sha256)
+                  ? manifest.verifiedModel.sha256
+                  : null,
+              modelVersion: generationObservation.modelVersion ?? null,
+              settingsHash: generationObservation.modelVersion
+                ? topicStudyHash('topic-study-receipt-settings-v1', generationObservation.modelVersion)
+                : null,
+              promptVersion: generationObservation.promptVersion,
+              attempts: generationObservation.attempts.length || null,
+            };
+          }
           if (draft.exitCode !== 0) {
             status = 'failed';
             reason = 'Draft generation failed.';
           } else {
-            producedResponse = true;
-            const result = JSON.parse(draft.stdout) as {
-              reviewId: string;
-              revision: number;
-              candidates?: readonly {candidateId: string}[];
-              maintenance?: {
-                basis?: {targetUri: string; observationRevision: string};
-                proposal?: unknown;
-                generation?: {
-                  usage?: {inputTokens?: number; outputTokens?: number; costMicros?: number};
-                  model?: string;
-                  modelVersion?: string;
-                  promptVersion?: string;
-                  attempts?: number;
-                };
-              };
-            };
-            draftCompleted = true;
-            producedReview = {
-              reviewId: result.reviewId,
-              revision: result.revision,
-              candidateId:
-                result.candidates?.length === 1 && typeof result.candidates[0].candidateId === 'string'
-                  ? result.candidates[0].candidateId
-                  : null,
-              basisHash: result.maintenance?.basis
-                ? topicStudyHash('topic-study-review-basis-v1', result.maintenance.basis)
-                : null,
-            };
-            await recordReviewRevision(result.reviewId, result.revision);
             const generation = result.maintenance?.generation;
             model = {
               backend,
@@ -1058,10 +1109,14 @@ export async function runTopicStudyNativeAdapter(
               promptVersion: generation?.promptVersion ?? null,
               attempts: generation?.attempts ?? null,
             };
-            // V1 public generation receipts expose versions/settings/attempts, but no actual prompt hashes.
+            // The optional observation declares per-attempt user-prompt hashes without changing this legacy request-hash slot.
             promptHash = null;
-            providerInputTokens = generation?.usage?.inputTokens ?? null;
-            providerOutputTokens = generation?.usage?.outputTokens ?? null;
+            providerInputTokens = generationObservation
+              ? providerInputTokens
+              : (generation?.usage?.inputTokens ?? null);
+            providerOutputTokens = generationObservation
+              ? providerOutputTokens
+              : (generation?.usage?.outputTokens ?? null);
             providerChargeMicros = backend === 'local-ai' ? 0 : null;
             const proposalClass = classifyTopicStudyProposalV1(result.maintenance?.proposal);
             if (
@@ -1579,6 +1634,7 @@ export async function runTopicStudyNativeAdapter(
       downstreamPromptHash,
       retrievalHash,
       promptHash,
+      ...(generationObservation ? {generationObservation} : {}),
       providerInputTokens,
       providerOutputTokens,
       providerChargeMicros,

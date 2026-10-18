@@ -7,6 +7,8 @@ import type {CandidateReview} from '@threadnote/memory/candidate';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {handleManagerTopicReview, projectManagerTopicReview} from '../../src/manager/topic_review.js';
+import {TopicDraftError} from '../../src/memory/context/maintenance_draft.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {TopicReviewError} from '../../src/memory/context/maintenance_review.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 
@@ -107,6 +109,18 @@ const review = {
         rationale: 'Current',
         unresolvedQuestions: [],
         removedClaims: [],
+        paragraphDispositions: {
+          version: 1,
+          entries: [
+            {
+              ordinal: 1,
+              beforeHash: hash,
+              disposition: 'revalidate',
+              supportHandles: [`current:tncc_${'a'.repeat(40)}`],
+              rationale: 'Checked.',
+            },
+          ],
+        },
       },
       body: 'Proposed body',
       finalBodyHash: hash,
@@ -270,6 +284,91 @@ describe('Manager topic review adapter', () => {
       expect(foreign?.status).toBe(409);
       expect(mocks.draft).toHaveBeenCalledTimes(1);
     }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'offers final verification for a legacy prepared review only after exact approved-byte readback',
+    () =>
+      Effect.gen(function* () {
+        const {paragraphDispositions: _accounting, ...legacyDraft} = review.maintenance!.proposal.draft;
+        const legacy = {
+          ...review,
+          revision: 4,
+          candidates: [{...review.candidates[0], state: 'applying' as const}],
+          maintenance: {...review.maintenance!, proposal: {...review.maintenance!.proposal, draft: legacyDraft}},
+          maintenanceApproval: {...review.maintenanceApproval!, stage: 'prepared' as const},
+        };
+        mocks.list.mockReturnValue(Effect.succeed([legacy]));
+        const read = () => call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
+        for (const content of ['Accepted body', 'OTHER DOCUMENT', legacy.maintenanceApproval.preview.content]) {
+          mocks.records.mockReturnValue(
+            Effect.succeed([{uri: targetUri, metadata: {project: 'alpha', memoryId: 'tn_topic'}, content}]),
+          );
+          const response = yield* read();
+          expect(response?.body).toMatchObject({
+            state: 'applying',
+            canApply: false,
+            canFinishVerification: content === legacy.maintenanceApproval.preview.content,
+            paragraphCoverage: {status: 'legacy'},
+          });
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'returns bounded exact-review recovery only after validating review identity, target and project',
+    () =>
+      Effect.gen(function* () {
+        const exactId = `review-${sha256HexSync(`topic-maintenance\0${targetUri}`).slice(0, 24)}`;
+        const blocked = {
+          ...review,
+          reviewId: exactId,
+          candidates: [{...review.candidates[0], state: 'conflict' as const}],
+        };
+        mocks.draft.mockReturnValue(
+          Effect.fail(
+            TopicDraftError.make({
+              message: 'PRIVATE RAW FAILURE',
+              reason: 'review-conflict',
+              recovery: {reviewId: exactId, state: 'conflict'},
+            }),
+          ),
+        );
+        mocks.load.mockReturnValue(Effect.succeed(blocked));
+        const request = () =>
+          call('POST', '/api/attention/topic-review', {
+            action: 'generate',
+            project: 'alpha',
+            caseId,
+            backend: 'local-ai',
+            modelId: 'gemma',
+          });
+        const response = yield* request();
+        expect(response?.status).toBe(409);
+        expect(response?.body).toMatchObject({
+          code: 'topic-draft-review-blocked',
+          reason: 'review-conflict',
+          recovery: {action: 'open-review', reviewId: exactId, state: 'conflict'},
+        });
+        expect(JSON.stringify(response?.body)).not.toContain('PRIVATE RAW FAILURE');
+        for (const invalid of [
+          {...blocked, project: 'other'},
+          {...blocked, reviewId},
+          {...blocked, candidates: [{...blocked.candidates[0], state: 'pending' as const}]},
+          {
+            ...blocked,
+            maintenance: {
+              ...blocked.maintenance!,
+              basis: {...blocked.maintenance!.basis, targetUri: targetUri + '-other'},
+            },
+          },
+        ]) {
+          mocks.load.mockReturnValue(Effect.succeed(invalid));
+          const refused = yield* request();
+          expect(refused?.body).toMatchObject({code: 'topic-draft-unavailable'});
+          expect(refused?.body).not.toHaveProperty('recovery');
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('routes decisions through the persisted review and exact case', () =>

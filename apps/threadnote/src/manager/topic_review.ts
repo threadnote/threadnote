@@ -1,11 +1,15 @@
 import {Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {listCandidateReviews, loadCandidateReview, type CandidateReview} from '@threadnote/memory/candidate';
-import {MAX_TOPIC_MAINTENANCE_DRAFT_BYTES} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
+  topicMaintenanceParagraphCoverage,
+  topicGenerationDiagnosticSummary,
+} from '@threadnote/memory/topic-maintenance-draft';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readContextMaintenancePacket, readContextMaintenanceStatus} from '../memory/context/maintenance.js';
-import {requestTopicMaintenanceDraft} from '../memory/context/maintenance_draft.js';
+import {requestTopicMaintenanceDraft, TopicDraftError} from '../memory/context/maintenance_draft.js';
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
@@ -37,6 +41,7 @@ const exactRevision = (value: unknown): value is number =>
 export interface ManagerTopicReviewCaseIdentity {
   readonly caseId: string;
   readonly observationMatches: boolean;
+  readonly approvedContentMatches?: boolean;
 }
 
 /** No private receipt, source pin, or pre-approval content escapes this projection. */
@@ -49,13 +54,18 @@ export function projectManagerTopicReview(
   if (!maintenance || !candidate || review.candidates.length !== 1) return undefined;
   const approval = review.maintenanceApproval;
   const currentCase = maintenance.generation.origin === 'manual' || identity?.observationMatches === true;
+  const effectiveProposal = approval?.preview.approvedProposal ?? maintenance.proposal;
+  const paragraphCoverage = topicMaintenanceParagraphCoverage(maintenance.basis, effectiveProposal.draft);
+  const canFinishVerification =
+    candidate.state === 'applying' && approval?.stage === 'prepared' && identity?.approvedContentMatches === true;
+  const coverageAllowsApply = maintenance.generation.origin === 'manual' || paragraphCoverage.status === 'complete';
   const canApply =
-    (candidate.state === 'pending' &&
+    coverageAllowsApply &&
+    ((candidate.state === 'pending' &&
       approval?.stage === 'preview' &&
       approval.reviewRevision === review.revision &&
       currentCase) ||
-    (candidate.state === 'applying' && approval?.stage === 'prepared');
-  const effectiveProposal = approval?.preview.approvedProposal ?? maintenance.proposal;
+      (candidate.state === 'applying' && approval?.stage === 'prepared'));
   return {
     version: 1,
     kind: 'topic-maintenance',
@@ -71,12 +81,16 @@ export function projectManagerTopicReview(
     acceptedBody: maintenance.basis.body,
     observationRevision: maintenance.basis.observationRevision,
     coverage: 'declared-only',
+    paragraphCoverage,
     generation: {
       origin: maintenance.generation.origin === 'manual' ? 'manual' : 'model',
       agent: maintenance.generation.agent,
       model: maintenance.generation.model,
       attempts: maintenance.generation.attempts,
       usage: maintenance.generation.usage,
+      ...(maintenance.generation.origin !== 'manual' && maintenance.generation.observation
+        ? {observation: topicGenerationDiagnosticSummary(maintenance.generation.observation)}
+        : {}),
     },
     draft: effectiveProposal.draft,
     proposal: {
@@ -114,17 +128,20 @@ export function projectManagerTopicReview(
         }
       : {}),
     canApply,
+    canFinishVerification,
     ...(canApply
       ? {}
       : {
           blockingReason:
             candidate.state !== 'pending' && candidate.state !== 'applying'
               ? `Review is ${candidate.state}.`
-              : !currentCase && approval?.stage !== 'prepared'
-                ? 'The matching topic case is unavailable. Refresh maintenance.'
-                : approval
-                  ? `Approval is ${approval.stage}.`
-                  : 'Preview the exact draft before accepting.',
+              : !coverageAllowsApply
+                ? 'Paragraph review is incomplete or legacy. Regenerate or explicitly review every eligible paragraph.'
+                : !currentCase && approval?.stage !== 'prepared'
+                  ? 'The matching topic case is unavailable. Refresh maintenance.'
+                  : approval
+                    ? `Approval is ${approval.stage}.`
+                    : 'Preview the exact draft before accepting.',
         }),
   };
 }
@@ -148,14 +165,24 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
   const status = yield* readContextMaintenanceStatus(config, review.project, {caseId}).pipe(
     Effect.orElseSucceed(() => undefined),
   );
+  const approvedContentMatches =
+    review.candidates[0]?.state === 'applying' &&
+    review.maintenanceApproval?.stage === 'prepared' &&
+    target.content === review.maintenanceApproval.preview.content;
   const item = status?.cases[0];
   return item?.caseId === caseId &&
     item.family === 'topic-maintenance' &&
     item.slot === 'declared-support' &&
     item.subjectUri === target.uri &&
     item.project === review.project
-    ? {caseId, observationMatches: item.evidenceRevision === review.maintenance.basis.observationRevision}
-    : undefined;
+    ? {
+        caseId,
+        observationMatches: item.evidenceRevision === review.maintenance.basis.observationRevision,
+        approvedContentMatches,
+      }
+    : approvedContentMatches
+      ? {caseId, observationMatches: false, approvedContentMatches: true}
+      : undefined;
 });
 
 export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(function* (request: {
@@ -275,11 +302,57 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       modelId: body.modelId as string,
       regenerate: action === 'regenerate',
     }).pipe(Effect.result);
-    if (Result.isFailure(outcome))
-      return conflict(
-        'The topic draft could not be generated from this exact case and model. Refresh the case or model selection.',
-        'topic-draft-unavailable',
-      );
+    if (Result.isFailure(outcome)) {
+      const error = outcome.failure;
+      if (Schema.is(TopicDraftError)(error) && error.reason && error.recovery && REVIEW.test(error.recovery.reviewId)) {
+        const expectedReviewId = `review-${sha256HexSync(`topic-maintenance\0${item.subjectUri}`).slice(0, 24)}`;
+        const loaded = yield* loadCandidateReview(request.config.agentContextHome, error.recovery.reviewId).pipe(
+          Effect.result,
+        );
+        const expectedState = {
+          'review-applying': 'applying',
+          'review-conflict': 'conflict',
+          'review-deferred': 'deferred',
+          'review-rejected': 'rejected',
+          'review-preview-pending': 'pending',
+          'review-pending': 'pending',
+        }[error.reason];
+        if (
+          Result.isSuccess(loaded) &&
+          loaded.success.reviewId === expectedReviewId &&
+          error.recovery.reviewId === expectedReviewId &&
+          loaded.success.project === project &&
+          loaded.success.maintenance?.basis.targetUri === item.subjectUri &&
+          loaded.success.candidates.length === 1 &&
+          loaded.success.candidates[0].state === expectedState &&
+          error.recovery.state === expectedState
+        )
+          return {
+            status: 409,
+            body: {
+              code: 'topic-draft-review-blocked',
+              reason: error.reason,
+              error:
+                expectedState === 'conflict'
+                  ? 'This topic has a recoverable review conflict. Open the exact review to resolve it.'
+                  : 'An existing topic review blocks generation. Open the exact review before continuing.',
+              recovery: {action: 'open-review', reviewId: expectedReviewId, state: error.recovery.state},
+            },
+          };
+      }
+      const diagnostics = Schema.is(TopicDraftError)(error)
+        ? topicGenerationDiagnosticSummary(error.diagnostics)
+        : undefined;
+      return {
+        status: 409,
+        body: {
+          code: 'topic-draft-unavailable',
+          error:
+            'The topic draft could not be generated from this exact case and model. Refresh the case or model selection.',
+          ...(diagnostics ? {diagnostics} : {}),
+        },
+      };
+    }
     const identity = yield* managerTopicReviewCaseIdentity(request.config, outcome.success);
     return {status: 200, body: projectManagerTopicReview(outcome.success, identity)!};
   }

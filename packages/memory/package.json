@@ -33,7 +33,8 @@
     "./topic-maintenance": "./src/topic-maintenance.ts",
     "./topic-maintenance-acceptance": "./src/topic-maintenance-acceptance.ts",
     "./topic-maintenance-draft": "./src/topic-maintenance-draft.ts",
-    "./types": "./src/types.ts"
+    "./types": "./src/types.ts",
+    "./candidate-generation": "./src/candidate-generation.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",
