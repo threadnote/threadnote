@@ -2,6 +2,7 @@ import {fcEffectProp, fcProp} from '@threadnote/testing/fast-check-property';
 import {describe, expect, it} from '@effect/vitest';
 import * as FC from 'fast-check';
 import {Effect} from 'effect';
+import {TestClock} from 'effect/testing';
 import type {CodeGraphEmbeddingIndexShape} from '@threadnote/graph/embedding';
 import {
   codeGraphInventoryExclusionReason,
@@ -18,7 +19,7 @@ import {
 import type {CodeGraphLayout} from '@threadnote/graph/layout';
 import {neighborQuery, traversalQuery} from '@threadnote/graph/query';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store';
-import type {CodeGraphEdge, CodeGraphQueryNode} from '@threadnote/graph/types';
+import type {CodeGraphEdge, CodeGraphQueryNode, CodeGraphQueryResult} from '@threadnote/graph/types';
 
 const pathSegmentArbitrary = FC.array(
   FC.constantFrom('a', 'Z', '0', ' ', '.', '-', '_', 'é', '漢', '🙂', '\\', '\t', '\n'),
@@ -411,6 +412,135 @@ describe('native code graph traversal properties', () => {
     {fastCheck: {numRuns: 80}},
   );
 
+  it.effect('reports complete one-hop neighbors at exact node and edge capacities', () =>
+    Effect.gen(function* () {
+      const nodes = [graphNode(0), graphNode(1)];
+      const edges = graphEdges(2, []).slice(0, 1);
+      const result: CodeGraphQuerySelection = yield* neighborQuery(
+        graphStore(nodes, nodes[0], edges),
+        'db',
+        'snapshot',
+        nodes[0].id,
+        'outgoing',
+        2,
+        1,
+        1,
+        ['resolved'],
+      );
+      expect(result.searchCoverage).toMatchObject({
+        status: 'exhaustive',
+        limitsReached: [],
+        visitedNodes: 2,
+        inspectedEdges: 1,
+      });
+      expect(result.nodes.map(node => node.id)).toEqual(nodes.map(node => node.id));
+    }),
+  );
+
+  it.effect('distinguishes incomplete neighbor edge and node budgets', () =>
+    Effect.gen(function* () {
+      const nodes = [graphNode(0), graphNode(1), graphNode(2)];
+      const edges = graphEdges(3, [[0, 2]]);
+      const store = graphStore(nodes, nodes[0], edges);
+      const edgeBounded: CodeGraphQuerySelection = yield* neighborQuery(
+        store,
+        'db',
+        'snapshot',
+        nodes[0].id,
+        'outgoing',
+        3,
+        1,
+        1,
+        ['resolved'],
+      );
+      const nodeBounded: CodeGraphQuerySelection = yield* neighborQuery(
+        store,
+        'db',
+        'snapshot',
+        nodes[0].id,
+        'outgoing',
+        2,
+        5,
+        1,
+        ['resolved'],
+      );
+      expect(edgeBounded.searchCoverage).toMatchObject({status: 'bounded', limitsReached: ['edge-limit']});
+      expect(nodeBounded.searchCoverage).toMatchObject({status: 'bounded', limitsReached: ['node-limit']});
+    }),
+  );
+
+  it.effect('never reports complete neighbors when endpoint hydration or identity is missing', () =>
+    Effect.gen(function* () {
+      const seed = graphNode(0);
+      const edge = graphEdges(2, [])[0];
+      for (const candidate of [edge, {...edge, targetId: undefined}]) {
+        const result: CodeGraphQuerySelection = yield* neighborQuery(
+          graphStore([seed], seed, [candidate]),
+          'db',
+          'snapshot',
+          seed.id,
+          'outgoing',
+          5,
+          5,
+          1,
+          ['resolved'],
+        );
+        expect(result.searchCoverage?.status).toBe('unresolved');
+      }
+    }),
+  );
+
+  it.effect('records neighbor deadline exhaustion with the test clock', () =>
+    Effect.gen(function* () {
+      const seed = graphNode(0);
+      const base = graphStore([seed], seed, []);
+      const store: CodeGraphStoreShape = {
+        ...base,
+        edgesForNodes: (...args) => TestClock.adjust('2 seconds').pipe(Effect.andThen(base.edgesForNodes(...args))),
+      };
+      const result: CodeGraphQuerySelection = yield* neighborQuery(
+        store,
+        'db',
+        'snapshot',
+        seed.id,
+        'outgoing',
+        5,
+        5,
+        1,
+        ['resolved'],
+      );
+      expect(result.searchCoverage).toMatchObject({status: 'timed-out', limitsReached: ['time-budget']});
+    }),
+  );
+
+  fcEffectProp(
+    it,
+    'reports exhaustive one-hop coverage exactly when all requested neighbors fit',
+    {graph: boundedNeighborCaseArbitrary},
+    ({graph}) =>
+      Effect.gen(function* () {
+        const nodes = Array.from({length: graph.nodeCount}, (_, index) => graphNode(index));
+        const seed = nodes[graph.seedIndex % graph.nodeCount];
+        const edges = graphEdges(graph.nodeCount, graph.rawEdges);
+        const result: CodeGraphQuerySelection = yield* neighborQuery(
+          graphStore(nodes, seed, edges),
+          'db',
+          'snapshot',
+          seed.id,
+          graph.direction,
+          nodes.length,
+          Math.max(1, edges.length),
+          1,
+          ['resolved'],
+        );
+        expect(result.searchCoverage).toMatchObject({status: 'exhaustive', limitsReached: []});
+        expect(new Set(result.nodes.map(node => node.id))).toEqual(
+          referenceNeighborReachability(seed.id, edges, graph.direction, 1),
+        );
+      }),
+    {fastCheck: {numRuns: 40}},
+  );
+
   fcEffectProp(
     it,
     'keeps exact-ID neighbor traversal within direction, depth, node, and edge bounds',
@@ -458,6 +588,8 @@ describe('native code graph traversal properties', () => {
     {fastCheck: {numRuns: 120}},
   );
 });
+
+type CodeGraphQuerySelection = Pick<CodeGraphQueryResult, 'nodes' | 'edges' | 'searchCoverage'>;
 
 function normalizeRepositoryPath(value: string): string {
   return value.replace(/^\.\/+/, '');

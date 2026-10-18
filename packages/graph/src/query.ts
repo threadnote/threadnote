@@ -53,6 +53,9 @@ import {
 import {codeGraphScopeAdmitsPath} from './scope/applicability.js';
 import {isCodeGraphCapacityPause} from './disk/capacity.js';
 import {pathQuery, QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS} from './query/path.js';
+import {adjacentNodeIds, exactNodeQuery, neighborQuery} from './query/neighbors.js';
+import {sanitizeSelection} from './query/selection.js';
+export {exactNodeQuery, neighborQuery} from './query/neighbors.js';
 export {pathQuery, QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS} from './query/path.js';
 import {adoptCodeGraphSnapshotAdmission, codeGraphSnapshotAdmissionCurrentForIdentity} from './admission_freshness.js';
 import {
@@ -1775,118 +1778,6 @@ function relationTraversalScore(relation: CodeGraphEdge['relation']): number {
   }
 }
 
-function adjacentNodeIds(
-  edge: CodeGraphEdge,
-  direction: 'both' | 'incoming' | 'outgoing',
-  frontier: ReadonlyMap<string, number>,
-): readonly string[] {
-  if (direction === 'incoming')
-    return edge.targetId && frontier.has(edge.targetId) && edge.sourceId ? [edge.sourceId] : [];
-  if (direction === 'outgoing')
-    return edge.sourceId && frontier.has(edge.sourceId) && edge.targetId ? [edge.targetId] : [];
-  const adjacent: string[] = [];
-  if (edge.sourceId && frontier.has(edge.sourceId) && edge.targetId) adjacent.push(edge.targetId);
-  if (edge.targetId && frontier.has(edge.targetId) && edge.sourceId) adjacent.push(edge.sourceId);
-  return adjacent;
-}
-
-export const exactNodeQuery = Effect.fn('codeGraph.exactNodeQuery')(function* (
-  store: CodeGraphStoreShape,
-  databasePath: string,
-  snapshotId: string,
-  nodeId: string,
-) {
-  const symbols = yield* store.symbolsByIds(databasePath, snapshotId, [nodeId]);
-  const symbol = symbols.find(candidate => candidate.id === nodeId);
-  return symbol
-    ? {edges: [], nodes: [{...symbol, score: 1}], warnings: []}
-    : {edges: [], nodes: [], warnings: [`Code graph node "${nodeId}" was not found in the selected snapshot.`]};
-});
-
-export const neighborQuery = Effect.fn('codeGraph.neighborQuery')(function* (
-  store: CodeGraphStoreShape,
-  databasePath: string,
-  snapshotId: string,
-  nodeId: string,
-  direction: 'both' | 'incoming' | 'outgoing',
-  nodeLimit: number,
-  edgeLimit: number,
-  depth: number,
-  allowedProvenances: readonly CodeGraphProvenance[],
-) {
-  const deadline = (yield* Clock.currentTimeMillis) + QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS;
-  const initial = yield* exactNodeQuery(store, databasePath, snapshotId, nodeId);
-  const seed = initial.nodes[0];
-  if (!seed) return initial;
-
-  const nodes = new Map<string, CodeGraphQueryNode>([[seed.id, seed]]);
-  const edges = new Map<string, CodeGraphEdge>();
-  const visited = new Set<string>([seed.id]);
-  let frontier = [seed.id];
-  let inspectedEdges = 0;
-  let limited = false;
-  let timedOut = false;
-
-  for (let currentDepth = 0; currentDepth < depth && frontier.length > 0; currentDepth += 1) {
-    if (nodes.size >= nodeLimit || inspectedEdges >= edgeLimit) {
-      limited = true;
-      break;
-    }
-    if (yield* deadlineReached(deadline)) {
-      timedOut = true;
-      break;
-    }
-    const remainingEdges = edgeLimit - inspectedEdges;
-    const adjacent = yield* store.edgesForNodes(
-      databasePath,
-      snapshotId,
-      frontier,
-      direction,
-      remainingEdges,
-      allowedProvenances,
-    );
-    inspectedEdges += adjacent.length;
-    if (adjacent.length >= remainingEdges) limited = true;
-    if (yield* deadlineReached(deadline)) {
-      timedOut = true;
-      break;
-    }
-
-    const frontierDepths = new Map(frontier.map(id => [id, currentDepth] as const));
-    const candidateIds = [
-      ...new Set(
-        adjacent.flatMap(edge => adjacentNodeIds(edge, direction, frontierDepths)).filter(id => !visited.has(id)),
-      ),
-    ];
-    const remainingNodes = nodeLimit - nodes.size;
-    if (candidateIds.length > remainingNodes) limited = true;
-    const selectedIds = candidateIds.slice(0, remainingNodes);
-    const hydrated = yield* store.symbolsByIds(databasePath, snapshotId, selectedIds);
-    if (yield* deadlineReached(deadline)) {
-      timedOut = true;
-      break;
-    }
-    const selectedIdSet = new Set(selectedIds);
-    const next = hydrated.filter(symbol => selectedIdSet.has(symbol.id) && !visited.has(symbol.id));
-    for (const symbol of next) {
-      visited.add(symbol.id);
-      nodes.set(symbol.id, {...symbol, score: 1 / (currentDepth + 2)});
-    }
-    const visibleIds = new Set(nodes.keys());
-    for (const edge of adjacent) {
-      if (edge.sourceId && edge.targetId && visibleIds.has(edge.sourceId) && visibleIds.has(edge.targetId)) {
-        edges.set(edge.id, edge);
-      }
-    }
-    frontier = next.map(symbol => symbol.id);
-  }
-
-  const warnings: string[] = [];
-  if (timedOut) warnings.push('Neighbor traversal reached its elapsed-time budget; results are partial.');
-  else if (limited) warnings.push('Neighbor traversal reached a configured result limit.');
-  return {edges: [...edges.values()], nodes: [...nodes.values()], warnings};
-});
-
 export {renderCodeGraphResult, type CodeGraphRenderTarget} from './query/render.js';
 
 /**
@@ -1897,78 +1788,6 @@ export {renderCodeGraphResult, type CodeGraphRenderTarget} from './query/render.
  */
 function isPreWriteSharedReadyAttachFailure(cause: unknown): boolean {
   return Schema.is(CodeGraphStoreBusyError)(cause) || isCodeGraphCapacityPause(cause);
-}
-
-function sanitizeSelection(selection: {
-  readonly edges: readonly CodeGraphEdge[];
-  readonly nodes: readonly CodeGraphQueryNode[];
-  readonly scope?: CodeGraphQueryResult['scope'];
-  readonly searchCoverage?: CodeGraphQueryResult['searchCoverage'];
-  readonly warnings: readonly string[];
-}): {
-  readonly edges: readonly CodeGraphEdge[];
-  readonly nodes: readonly CodeGraphQueryNode[];
-  readonly scope?: CodeGraphQueryResult['scope'];
-  readonly searchCoverage?: CodeGraphQueryResult['searchCoverage'];
-  readonly warnings: readonly string[];
-} {
-  const nodes = selection.nodes.map(node => ({
-    ...node,
-    documentation: node.documentation ? sanitizeText(node.documentation, 2_048) : undefined,
-    id: sanitizeText(node.id, 256),
-    kind: sanitizeText(node.kind, 128),
-    language: sanitizeText(node.language, 128),
-    name: sanitizeText(node.name, 256),
-    packageName: node.packageName ? sanitizeText(node.packageName, 256) : undefined,
-    path: sanitizeText(node.path, 1_024),
-    qualifiedName: sanitizeText(node.qualifiedName, 512),
-    signature: node.signature ? sanitizeText(node.signature, 1_024) : undefined,
-  }));
-  const edges = selection.edges.map(edge => ({
-    ...edge,
-    evidencePath: sanitizeText(edge.evidencePath, 1_024),
-    id: sanitizeText(edge.id, 256),
-    sourceId: edge.sourceId ? sanitizeText(edge.sourceId, 256) : undefined,
-    sourceName: sanitizeText(edge.sourceName, 256),
-    targetId: edge.targetId ? sanitizeText(edge.targetId, 256) : undefined,
-    targetName: sanitizeText(edge.targetName, 256),
-  }));
-  const warnings = selection.warnings.map(warning => sanitizeText(warning, 1_024));
-  const acceptedNodes: CodeGraphQueryNode[] = [];
-  const acceptedEdges: CodeGraphEdge[] = [];
-  let bytes = 0;
-  let truncated = false;
-  for (const node of nodes) {
-    const size = encodedSize(node);
-    if (bytes + size > CODE_GRAPH_RESULT_MAX_BYTES) {
-      truncated = true;
-      break;
-    }
-    bytes += size;
-    acceptedNodes.push(node);
-  }
-  for (const edge of edges) {
-    const size = encodedSize(edge);
-    if (bytes + size > CODE_GRAPH_RESULT_MAX_BYTES) {
-      truncated = true;
-      break;
-    }
-    bytes += size;
-    acceptedEdges.push(edge);
-  }
-  return {
-    edges: acceptedEdges,
-    nodes: acceptedNodes,
-    ...(selection.scope
-      ? {scope: {...selection.scope, packageName: sanitizeText(selection.scope.packageName, 256)}}
-      : {}),
-    ...(selection.searchCoverage ? {searchCoverage: selection.searchCoverage} : {}),
-    warnings: truncated ? [...warnings, 'Graph result reached its output byte budget; results are partial.'] : warnings,
-  };
-}
-
-function encodedSize(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 function required(value: string | undefined, name: string): string {
@@ -1985,7 +1804,6 @@ function boundedInteger(value: number | undefined, fallback: number, minimum: nu
   return value;
 }
 export const QUERY_SEMANTIC_TIME_BUDGET_MILLISECONDS = 10_000;
-const CODE_GRAPH_RESULT_MAX_BYTES = 256 * 1_024;
 const MAX_IMPACT_ANALYSIS_EDGES = 5_000;
 const MAX_IMPACT_SEED_QUERIES = 200;
 const MAX_IMPACT_SEED_SYMBOLS = 200;

@@ -257,16 +257,27 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
   readonly referenceId: string;
   readonly source: CodeGraphCitationEvidenceSourceV1;
   readonly threadnoteHome: string;
+  /** @internal An approved write-ahead intent fixes retention across crash/retry. */
+  readonly retainedAt?: string;
 }) {
   if (!/^[0-9a-f]{64}$/.test(input.checkoutId)) return false;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const now = yield* Clock.currentTimeMillis;
+  const reservedAt = input.retainedAt === undefined ? undefined : Date.parse(input.retainedAt);
+  if (
+    reservedAt !== undefined &&
+    (!Number.isFinite(reservedAt) ||
+      DateTime.formatIso(DateTime.makeUnsafe(reservedAt)) !== input.retainedAt ||
+      reservedAt > now ||
+      now - reservedAt > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumAgeMilliseconds)
+  )
+    return false;
   const capsule = createCodeGraphCitationEvidenceCapsule(
     input.source,
     input.objectFormat,
     input.bytes,
-    DateTime.formatIso(DateTime.makeUnsafe(now)),
+    input.retainedAt ?? DateTime.formatIso(DateTime.makeUnsafe(now)),
     [input.referenceId],
   );
   if (capsule === undefined) return false;
@@ -279,12 +290,32 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
       const directory = yield* capsuleDirectory(input.threadnoteHome, input.checkoutId, true);
       if (directory === undefined) return false;
       const previous = yield* readCapsule(directory, input.source).pipe(Effect.orElseSucceed(() => undefined));
+      if (
+        reservedAt !== undefined &&
+        previous === undefined &&
+        (yield* fs.exists(path.join(directory, `${capsule.id}.json`)))
+      )
+        return false;
+      const previousTime = previous === undefined ? undefined : Date.parse(previous.capsule.retainedAt);
+      if (
+        reservedAt !== undefined &&
+        previousTime !== undefined &&
+        (previousTime > now || now - previousTime > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumAgeMilliseconds)
+      )
+        return false;
+      const retainedCapsule =
+        reservedAt !== undefined && previousTime !== undefined
+          ? {...capsule, retainedAt: DateTime.formatIso(DateTime.makeUnsafe(Math.min(reservedAt, previousTime)))}
+          : capsule;
       const references = [...new Set([...(previous?.capsule.referenceIds ?? []), input.referenceId])]
         .sort()
         .slice(0, 32);
+      if (reservedAt !== undefined && !references.includes(input.referenceId)) return false;
       if (
         previous !== undefined &&
-        now - Date.parse(previous.capsule.retainedAt) < 86_400_000 &&
+        (reservedAt === undefined
+          ? now - Date.parse(previous.capsule.retainedAt) < 86_400_000
+          : previous.capsule.retainedAt === retainedCapsule.retainedAt) &&
         references.every(value => previous.capsule.referenceIds.includes(value))
       )
         return true;
@@ -304,6 +335,7 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
               : [
                   {
                     id: name.slice(0, -5),
+                    regular: info.value.type === 'File',
                     bytes: Number(info.value.size),
                     retainedAt: Option.getOrUndefined(info.value.mtime)?.toISOString() ?? '',
                   },
@@ -311,14 +343,30 @@ export const retainCodeGraphCitationEvidence = Effect.fn('codeGraph.retainCitati
           }),
         {concurrency: 4},
       );
-      const serialized = `${JSON.stringify({...capsule, referenceIds: references})}\n`;
-      const selection = selectCodeGraphCitationCapsuleRetention(
-        [
-          ...entries.flat().filter(value => value.id !== capsule.id),
-          {id: capsule.id, bytes: new TextEncoder().encode(serialized).byteLength, retainedAt: capsule.retainedAt},
-        ],
-        now,
-      );
+      const serialized = `${JSON.stringify({...retainedCapsule, referenceIds: references})}\n`;
+      const physical = [
+        ...entries.flat().filter(value => value.id !== capsule.id),
+        {
+          id: capsule.id,
+          regular: true,
+          bytes: new TextEncoder().encode(serialized).byteLength,
+          retainedAt: retainedCapsule.retainedAt,
+        },
+      ];
+      // Reserved writes never retire history, including logically expired files.
+      // Their complete physical footprint must fit without eviction or renewal.
+      if (
+        reservedAt !== undefined &&
+        (entries.flat().length !== names.length ||
+          physical.some(entry => !entry.regular || !Number.isSafeInteger(entry.bytes) || entry.bytes < 0) ||
+          physical.length > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumCount ||
+          physical.reduce((sum, entry) => sum + entry.bytes, 0) > CODE_GRAPH_CITATION_CAPSULE_RETENTION.maximumBytes)
+      )
+        return false;
+      const selection =
+        reservedAt === undefined
+          ? selectCodeGraphCitationCapsuleRetention(physical, now)
+          : {retain: physical, retire: []};
       if (!selection.retain.some(value => value.id === capsule.id)) return false;
       const crypto = yield* Crypto.Crypto;
       const temporary = path.join(directory, `pending-${yield* crypto.randomUUIDv4()}`);

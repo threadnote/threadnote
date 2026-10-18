@@ -125,9 +125,10 @@ newer schemas rather than silently lose the citation.
 Only cited notes are pinned. The default retention is 90 days; callers may set
 `retentionDays` from 1 to 365. A source accepts at most 256 unexpired pins and
 64 MiB of pinned data; capture fails at capacity rather than evicting a promised
-pin. Expiry makes evidence unavailable immediately. Expired files are removed
-when that source is read or captured; an idle installation may retain the file
-past logical expiry until the next such operation. The memory citation identity
+pin. Expiry makes evidence unavailable immediately. Expired files are eligible
+for cleanup during later provider operations; an idle installation or a
+historical-status read may retain the file past logical expiry. This is an
+access deadline, not a promise of physical or secure deletion. The memory citation identity
 remains after expiry or missing storage, with an explicit unavailable state.
 
 Note identity survives a rename when the filesystem supplies an unambiguous
@@ -139,8 +140,44 @@ historical evidence. Disabling/removing a source, changing its access selection
 or vault, or replacing a removed source ID revokes historical content access;
 removing a source also deletes its pins. Private cited memories cannot be
 published to a shared memory repository until a separate approved evidence
-publication path exists. Derived prose remains private unless deliberately
-published through a supported policy.
+publication path exists. Sharing, exports and vault projections refuse these
+private derived memories, including their nested active evidence.
+
+## Review a changed note without rewriting its history
+
+An already-derived private durable memory can be enrolled as one maintained
+topic. In Manager, open that memory, choose enrollment, and mark each exact
+paragraph as descriptive, policy or historical, with its supporting origin.
+The initial adapter supports one existing note from one source instance. It
+does not combine notes, mix code with imported evidence, or grant descriptive
+source changes authority to rewrite policy or history.
+
+For agents, `context_topic_enrollment` provides inspect, preview and enroll
+actions. Inspect first, supply one explicit paragraph decision per paragraph,
+then approve the exact returned content hash and revision. Notes do not require
+a repository checkout. Enrollment preserves the original retained citation.
+
+When maintenance reports a changed note, open its source packet and inspect
+the current sanitized note. Select the exact supporting fragment and explicitly
+approve **capture**. That approval retains a new private pin; it does not change
+the memory. Repeating the same approved capture returns the same pin with the
+same expiry. Ordinary ticks, packet reads and draft retries never allocate or
+renew note evidence.
+
+Next request a draft, edit it if needed, and review the complete proposed memory.
+Accept only the exact preview revision and approval digest. This second approval
+changes accepted paragraphs and advances the active evidence while preserving
+the immutable root origin and protected paragraphs. Manager and the
+`context_maintenance_capture`, `context_maintenance_draft` and
+`context_maintenance_review` tools use this same sequence. CLI equivalents are
+under `context maintain --action packet|capture|draft|draft-preview|draft-apply`.
+
+Origin availability and active-pin availability are separate statuses. Missing,
+expired or corrupt evidence blocks new drafts; an expired origin is never
+silently renewed. Revoking source access withholds persisted draft text and
+source quotations as well as blocking acceptance. Reject a stale review to
+close it, then explicitly inspect and capture again after restoring access.
+Reusing a path for a replacement note does not restore the original identity.
 
 ## Publish selected Threadnote memories into Obsidian
 

@@ -1866,6 +1866,8 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
                         metadata={memory?.record?.metadata}
                         markdown={markdownPreview}
                         resource={selectedIsResource}
+                        onChanged={() => void refreshAll()}
+                        onPrepareGraph={() => setPanel('graph')}
                       />
                     ) : selectedIsDir ? (
                       <div className="library-empty">

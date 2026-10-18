@@ -10,8 +10,11 @@ import {
   isSharedMemoryUri,
   type MemoryMetadata,
   type MemoryRecord,
+  validMemoryObsidianEvidence,
+  type MemoryObsidianEvidenceV1,
 } from './document.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const TOPIC_MAINTENANCE_VERSION = 1 as const;
 export const TOPIC_MAINTENANCE_ACCEPTED_VERSION = 2 as const;
@@ -65,7 +68,250 @@ export interface TopicMaintenanceManifestV2 extends Omit<TopicMaintenanceManifes
   readonly acceptedSources: readonly TopicMaintenanceAcceptedSourceV2[];
 }
 
-export type TopicMaintenanceManifest = TopicMaintenanceManifestV1 | TopicMaintenanceManifestV2;
+export interface TopicMaintenanceCodeManifestV3 extends Omit<TopicMaintenanceManifestV2, 'version'> {
+  readonly version: 3;
+  readonly sourceKind: 'code';
+  readonly dependencyExpansions?: readonly TopicDependencyExpansionReceiptV1[];
+}
+
+/** A bounded history of explicit metadata-only extensions; ordinary maintenance never discovers sources. */
+export interface TopicDependencyExpansionReceiptV1 {
+  readonly version: 1;
+  readonly revision: string;
+  readonly proofDigest: string;
+  readonly requestDigest: string;
+  readonly previousManifestHash: string;
+  readonly sourceCommit: string;
+  readonly citationIds: readonly string[];
+}
+
+/** The root obsidian_evidence is immutable origin; only this active pin advances. */
+export interface TopicMaintenanceObsidianManifestV3 {
+  readonly version: 3;
+  readonly sourceKind: 'obsidian';
+  readonly memoryId: string;
+  readonly bodyHash: string;
+  readonly coverage: 'declared-only';
+  readonly paragraphs: readonly TopicMaintenanceParagraphV1[];
+  readonly additionalDependencies: readonly [];
+  readonly originCitationId: string;
+  readonly activeEvidence: MemoryObsidianEvidenceV1;
+}
+
+export type TopicMaintenanceCodeManifest =
+  TopicMaintenanceManifestV1 | TopicMaintenanceManifestV2 | TopicMaintenanceCodeManifestV3;
+export type TopicMaintenanceManifestV3 = TopicMaintenanceCodeManifestV3 | TopicMaintenanceObsidianManifestV3;
+export type TopicMaintenanceManifest = TopicMaintenanceCodeManifest | TopicMaintenanceObsidianManifestV3;
+
+export function isCodeTopicMaintenanceManifest(
+  manifest: TopicMaintenanceManifest,
+): manifest is TopicMaintenanceCodeManifest {
+  return manifest.version === 1 || manifest.version === 2 || (manifest.version === 3 && manifest.sourceKind === 'code');
+}
+
+/** Opaque immutable provider pin identity, independent of code citation grammar. */
+export function topicMaintenanceObsidianCitationId(citation: MemoryObsidianEvidenceV1): string {
+  assertTopicMaintenanceObsidianEvidence(citation);
+  return `tnob_${sha256HexSync(
+    JSON.stringify([
+      citation.version,
+      citation.sourceId,
+      citation.sourceInstanceId,
+      citation.vaultHash,
+      citation.accessHash,
+      citation.noteId,
+      citation.relativePath,
+      citation.revisionHash,
+      citation.sanitizerVersion,
+      citation.fragmentHash,
+      citation.fragmentStart,
+      citation.fragmentEnd,
+      citation.pinId,
+      citation.expiresAt,
+    ]),
+  ).slice(0, 40)}`;
+}
+
+export function assertTopicMaintenanceObsidianEvidence(value: unknown): asserts value is MemoryObsidianEvidenceV1 {
+  if (
+    !plainObject(value) ||
+    !exactKeys(value, [
+      'version',
+      'sourceId',
+      'sourceInstanceId',
+      'vaultHash',
+      'accessHash',
+      'noteId',
+      'relativePath',
+      'revisionHash',
+      'sanitizerVersion',
+      'fragmentHash',
+      'fragmentStart',
+      'fragmentEnd',
+      'pinId',
+      'expiresAt',
+    ]) ||
+    !validMemoryObsidianEvidence(value) ||
+    encodedBytes(JSON.stringify(value)) > 4096 ||
+    new Date(value.expiresAt).toISOString() !== value.expiresAt
+  )
+    throw new Error('Topic maintenance has invalid or unsupported Obsidian evidence.');
+}
+
+export function assertTopicMaintenanceSameObsidianNote(
+  origin: MemoryObsidianEvidenceV1,
+  active: MemoryObsidianEvidenceV1,
+): void {
+  assertTopicMaintenanceObsidianEvidence(origin);
+  assertTopicMaintenanceObsidianEvidence(active);
+  if (
+    (['sourceId', 'sourceInstanceId', 'vaultHash', 'accessHash', 'noteId'] as const).some(
+      key => origin[key] !== active[key],
+    )
+  )
+    throw new Error('Topic maintenance Obsidian evidence changed source, access, vault or stable note identity.');
+  if (
+    origin.pinId === active.pinId &&
+    topicMaintenanceObsidianCitationId(origin) !== topicMaintenanceObsidianCitationId(active)
+  )
+    throw new Error('Topic maintenance cannot rewrite immutable metadata for an existing Obsidian pin.');
+}
+
+/** Shared geometry/support validation; admission is decided by the source-specific contract. */
+export function validateTopicMaintenanceParagraphs(
+  body: string,
+  paragraphs: unknown,
+  admittedIds: ReadonlySet<string>,
+): asserts paragraphs is readonly TopicMaintenanceParagraphV1[] {
+  const sections = consolidationSections(body);
+  if (
+    !Array.isArray(paragraphs) ||
+    paragraphs.length !== sections.length ||
+    paragraphs.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
+  )
+    throw new Error('Topic maintenance paragraph count exceeds 64 or differs from the body.');
+  paragraphs.forEach((paragraph: unknown, ordinal: number) => {
+    if (
+      !plainObject(paragraph) ||
+      !exactKeys(paragraph, ['ordinal', 'hash', 'role', 'support', 'citationIds'], ['scope', 'validity'])
+    )
+      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has an invalid shape.`);
+    if (paragraph.ordinal !== ordinal || paragraph.hash !== consolidationRevision(sections[ordinal]))
+      throw new Error(`Topic maintenance paragraph ${ordinal + 1} changed after enrollment.`);
+    if (
+      typeof paragraph.role !== 'string' ||
+      !['descriptive', 'normative', 'historical'].includes(paragraph.role) ||
+      typeof paragraph.support !== 'string' ||
+      !['direct', 'contextual', 'unresolved'].includes(paragraph.support)
+    )
+      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has an invalid role or support.`);
+    if (
+      !Array.isArray(paragraph.citationIds) ||
+      paragraph.citationIds.length > MAX_MEMORY_CODE_CITATIONS ||
+      new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
+      paragraph.citationIds.some((id: unknown) => typeof id !== 'string' || !admittedIds.has(id))
+    )
+      throw new Error(`Topic maintenance paragraph ${ordinal + 1} cites an unknown citation.`);
+    if ((paragraph.support === 'unresolved') !== (paragraph.citationIds.length === 0))
+      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has invalid support coverage.`);
+    for (const value of [paragraph.scope, paragraph.validity])
+      if (
+        value !== undefined &&
+        (typeof value !== 'string' || value.length === 0 || value.length > 512 || /[\r\n]/u.test(value))
+      )
+        throw new Error(`Topic maintenance paragraph ${ordinal + 1} has invalid scope or validity.`);
+  });
+}
+
+function validateObsidianManifest(
+  manifest: Record<string, unknown>,
+  record: MemoryRecord,
+): asserts manifest is Record<string, unknown> & TopicMaintenanceObsidianManifestV3 {
+  if (
+    !exactKeys(manifest, [
+      'version',
+      'sourceKind',
+      'memoryId',
+      'bodyHash',
+      'coverage',
+      'paragraphs',
+      'additionalDependencies',
+      'originCitationId',
+      'activeEvidence',
+    ]) ||
+    manifest.version !== 3 ||
+    manifest.sourceKind !== 'obsidian'
+  )
+    throw new Error('Topic maintenance imported manifest has an invalid shape.');
+  eligibleRecord(record, false, false);
+  const origin = record.metadata.obsidianEvidence;
+  if (
+    !/^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(record.uri) ||
+    record.metadata.visibility === 'shared' ||
+    !origin ||
+    record.metadata.obsidianEvidenceError ||
+    record.metadata.sourceEvidence ||
+    record.metadata.sourceEvidenceError ||
+    record.metadata.codeCitations?.length ||
+    record.metadata.consolidation ||
+    record.metadata.consolidationError ||
+    record.metadata.citationErrors?.length
+  )
+    throw new Error(
+      'Topic maintenance imported evidence requires exactly one private Obsidian origin and no mixed provenance.',
+    );
+  assertTopicMaintenanceObsidianEvidence(origin);
+  assertTopicMaintenanceObsidianEvidence(manifest.activeEvidence);
+  assertTopicMaintenanceSameObsidianNote(origin, manifest.activeEvidence);
+  if (
+    manifest.memoryId !== record.metadata.memoryId ||
+    manifest.originCitationId !== topicMaintenanceObsidianCitationId(origin) ||
+    manifest.bodyHash !== consolidationRevision(record.body) ||
+    manifest.coverage !== 'declared-only' ||
+    !Array.isArray(manifest.additionalDependencies) ||
+    manifest.additionalDependencies.length
+  )
+    throw new Error('Topic maintenance imported identity, body, or declared scope changed.');
+  validateTopicMaintenanceParagraphs(
+    record.body,
+    manifest.paragraphs,
+    new Set([topicMaintenanceObsidianCitationId(origin), topicMaintenanceObsidianCitationId(manifest.activeEvidence)]),
+  );
+  if (encodedBytes(JSON.stringify(manifest)) > MAX_TOPIC_MAINTENANCE_BYTES)
+    throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
+}
+
+/** Pure enrollment for an already-derived record. Runtime access/retention checks belong to the adapter. */
+export function buildTopicMaintenanceObsidianManifest(
+  record: MemoryRecord,
+  input: TopicMaintenanceEnrollmentInput,
+): TopicMaintenanceObsidianManifestV3 {
+  input = validateTopicMaintenanceEnrollmentInput(input);
+  eligibleRecord(record, true, false);
+  if (input.additionalDependencies?.length) throw new Error('Imported topic dependencies are unsupported.');
+  if (hasTopicMaintenanceEnrollment(record)) throw new Error('Topic maintenance is already enrolled.');
+  const origin = record.metadata.obsidianEvidence;
+  if (!origin) throw new Error('Imported topic requires an existing Obsidian origin pin.');
+  const manifest: TopicMaintenanceObsidianManifestV3 = {
+    version: 3,
+    sourceKind: 'obsidian',
+    memoryId: record.metadata.memoryId!,
+    bodyHash: consolidationRevision(record.body),
+    coverage: 'declared-only',
+    paragraphs: consolidationSections(record.body).map((section, ordinal) => ({
+      ...input.paragraphs[ordinal],
+      ordinal,
+      hash: consolidationRevision(section),
+    })),
+    additionalDependencies: [],
+    originCitationId: topicMaintenanceObsidianCitationId(origin),
+    activeEvidence: origin,
+  };
+  if (manifest.paragraphs.length !== input.paragraphs.length)
+    throw new Error('Topic maintenance needs one support decision per exact paragraph.');
+  validateTopicMaintenanceManifest(manifest, record);
+  return manifest;
+}
 
 export interface TopicMaintenanceEnrollmentInput {
   readonly paragraphs: readonly TopicMaintenanceParagraphInput[];
@@ -142,7 +388,74 @@ export function buildTopicMaintenanceManifest(
   return manifest;
 }
 
+function assertCodeManifestV3(
+  manifest: Record<string, unknown>,
+  record: MemoryRecord,
+): asserts manifest is Record<string, unknown> & TopicMaintenanceCodeManifestV3 {
+  if (manifest.sourceKind !== 'code') throw new Error('Topic maintenance source kind is unsupported.');
+  if (
+    !exactKeys(
+      manifest,
+      [
+        'version',
+        'sourceKind',
+        'memoryId',
+        'repositoryId',
+        'bodyHash',
+        'coverage',
+        'paragraphs',
+        'additionalDependencies',
+        'acceptedSources',
+        'originCitationIds',
+      ],
+      ['dependencyExpansions'],
+    )
+  )
+    throw new Error('Topic maintenance code manifest has an invalid shape.');
+  const {sourceKind: _sourceKind, dependencyExpansions, ...legacy} = manifest;
+  validateTopicMaintenanceManifest({...legacy, version: 2}, record);
+  if (dependencyExpansions !== undefined) {
+    if (!Array.isArray(dependencyExpansions) || !dependencyExpansions.length || dependencyExpansions.length > 8)
+      throw new Error('Topic maintenance expansion history is invalid.');
+    const known = new Set(record.metadata.codeCitations!.map(citation => citation.id));
+    for (const receipt of dependencyExpansions) {
+      if (
+        !plainObject(receipt) ||
+        !exactKeys(receipt, [
+          'version',
+          'revision',
+          'proofDigest',
+          'requestDigest',
+          'previousManifestHash',
+          'sourceCommit',
+          'citationIds',
+        ]) ||
+        receipt.version !== 1 ||
+        ![receipt.revision, receipt.proofDigest, receipt.requestDigest, receipt.previousManifestHash].every(
+          value => typeof value === 'string' && HASH.test(value),
+        ) ||
+        typeof receipt.sourceCommit !== 'string' ||
+        !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(receipt.sourceCommit) ||
+        !Array.isArray(receipt.citationIds) ||
+        !receipt.citationIds.length ||
+        receipt.citationIds.length > 8 ||
+        receipt.citationIds.some(
+          (id, index, ids) => typeof id !== 'string' || !known.has(id) || (index > 0 && id <= ids[index - 1]),
+        )
+      )
+        throw new Error('Topic maintenance expansion receipt is malformed or has missing evidence.');
+    }
+  }
+  if (encodedBytes(JSON.stringify(manifest)) > MAX_TOPIC_MAINTENANCE_BYTES)
+    throw new Error('Topic maintenance manifest exceeds the 32 KiB limit.');
+}
+
 export function validateTopicMaintenanceManifest(manifest: unknown, record: MemoryRecord): TopicMaintenanceManifest {
+  if (plainObject(manifest) && manifest.version === 3) {
+    if (manifest.sourceKind === 'obsidian') validateObsidianManifest(manifest, record);
+    else assertCodeManifestV3(manifest, record);
+    return manifest;
+  }
   validEvidence(record);
   if (
     !plainObject(manifest) ||
@@ -167,46 +480,8 @@ export function validateTopicMaintenanceManifest(manifest: unknown, record: Memo
   if (manifest.bodyHash !== consolidationRevision(record.body) || !HASH.test(manifest.bodyHash))
     throw new Error('Topic maintenance body changed after enrollment.');
   if (manifest.coverage !== 'declared-only') throw new Error('Topic maintenance coverage must be declared-only.');
-  const sections = consolidationSections(record.body);
-  if (
-    !Array.isArray(manifest.paragraphs) ||
-    manifest.paragraphs.length !== sections.length ||
-    manifest.paragraphs.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS
-  )
-    throw new Error('Topic maintenance paragraph count exceeds 64 or differs from the body.');
   const citationIds = new Set(record.metadata.codeCitations!.map(citation => citation.id));
-  manifest.paragraphs.forEach((paragraph: unknown, ordinal: number) => {
-    if (
-      !plainObject(paragraph) ||
-      !exactKeys(paragraph, ['ordinal', 'hash', 'role', 'support', 'citationIds'], ['scope', 'validity'])
-    )
-      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has an invalid shape.`);
-    if (paragraph.ordinal !== ordinal || paragraph.hash !== consolidationRevision(sections[ordinal]))
-      throw new Error(`Topic maintenance paragraph ${ordinal + 1} changed after enrollment.`);
-    if (
-      !['descriptive', 'normative', 'historical'].includes(paragraph.role as string) ||
-      !['direct', 'contextual', 'unresolved'].includes(paragraph.support as string)
-    )
-      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has an invalid role or support.`);
-    if (
-      !Array.isArray(paragraph.citationIds) ||
-      paragraph.citationIds.length > MAX_MEMORY_CODE_CITATIONS ||
-      new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
-      paragraph.citationIds.some(
-        (id: unknown) => typeof id !== 'string' || !CITATION_ID.test(id) || !citationIds.has(id),
-      )
-    )
-      throw new Error(`Topic maintenance paragraph ${ordinal + 1} cites an unknown citation.`);
-    if ((paragraph.support === 'unresolved') !== (paragraph.citationIds.length === 0))
-      throw new Error(`Topic maintenance paragraph ${ordinal + 1} has invalid support coverage.`);
-    for (const value of [paragraph.scope, paragraph.validity]) {
-      if (
-        value !== undefined &&
-        (typeof value !== 'string' || value.length === 0 || value.length > 512 || /[\r\n]/u.test(value))
-      )
-        throw new Error(`Topic maintenance paragraph ${ordinal + 1} has invalid scope or validity.`);
-    }
-  });
+  validateTopicMaintenanceParagraphs(record.body, manifest.paragraphs, citationIds);
   if (
     !Array.isArray(manifest.additionalDependencies) ||
     manifest.additionalDependencies.length > MAX_MEMORY_CODE_CITATIONS
@@ -284,13 +559,14 @@ export function topicMaintenanceAcceptedCitation(record: MemoryRecord, citationI
   const manifest = record.metadata.topicMaintenance;
   if (!manifest) throw new Error('Topic maintenance is not enrolled.');
   const validated = validateTopicMaintenanceManifest(manifest, record);
+  if (!isCodeTopicMaintenanceManifest(validated)) throw new Error('Imported evidence cannot be read as code.');
   const declared = new Set([
     ...validated.paragraphs.flatMap(paragraph => paragraph.citationIds),
     ...validated.additionalDependencies.map(dependency => dependency.citationId),
   ]);
   if (!declared.has(citationId)) throw new Error('Topic maintenance citation is not declared.');
   const acceptedId =
-    validated.version === 2
+    validated.version !== 1
       ? validated.acceptedSources.find(source => source.citationId === citationId)!.acceptedCitationId
       : citationId;
   return record.metadata.codeCitations!.find(citation => citation.id === acceptedId)!;
@@ -306,6 +582,17 @@ export function proposeTopicMaintenanceEnrollment(
   readonly content: string;
 } {
   const manifest = buildTopicMaintenanceManifest(record, input);
+  return proposeEnrollmentWithManifest(record, manifest);
+}
+
+export function proposeTopicMaintenanceObsidianEnrollment(
+  record: MemoryRecord,
+  input: TopicMaintenanceEnrollmentInput,
+) {
+  return proposeEnrollmentWithManifest(record, buildTopicMaintenanceObsidianManifest(record, input));
+}
+
+function proposeEnrollmentWithManifest<M extends TopicMaintenanceManifest>(record: MemoryRecord, manifest: M) {
   const raw = canonicalMemoryDocumentContent(record.content);
   const separator = /\r?\n\r?\n/u.exec(raw);
   const header = separator ? raw.slice(0, separator.index) : raw;
@@ -328,7 +615,7 @@ export function proposeTopicMaintenanceEnrollment(
 export function topicMaintenanceReplacementError(
   current: MemoryRecord | undefined,
   next: Pick<MemoryRecord, 'body' | 'metadata'>,
-  enrollment?: TopicMaintenanceManifestV1,
+  enrollment?: TopicMaintenanceManifestV1 | TopicMaintenanceObsidianManifestV3,
 ): string | undefined {
   if (!current) return undefined;
   if (current.metadata.topicMaintenanceError || next.metadata.topicMaintenanceError)
@@ -339,10 +626,13 @@ export function topicMaintenanceReplacementError(
   const sameEvidence =
     current.body === next.body &&
     JSON.stringify(current.metadata.codeCitations ?? []) === JSON.stringify(next.metadata.codeCitations ?? []) &&
+    JSON.stringify(current.metadata.obsidianEvidence ?? null) ===
+      JSON.stringify(next.metadata.obsidianEvidence ?? null) &&
+    JSON.stringify(current.metadata.sourceEvidence ?? null) === JSON.stringify(next.metadata.sourceEvidence ?? null) &&
     JSON.stringify(current.metadata.consolidation ?? null) === JSON.stringify(next.metadata.consolidation ?? null);
   if (!previous && proposed && enrollment && sameEvidence && JSON.stringify(enrollment) === JSON.stringify(proposed)) {
     try {
-      eligibleRecord(current);
+      eligibleRecord(current, true, isCodeTopicMaintenanceManifest(enrollment));
       validateTopicMaintenanceManifest(proposed, {...current, ...next});
       return undefined;
     } catch (error) {
@@ -355,7 +645,7 @@ export function topicMaintenanceReplacementError(
   return undefined;
 }
 
-function eligibleRecord(record: MemoryRecord, checkDocument = true): void {
+function eligibleRecord(record: MemoryRecord, checkDocument = true, code = true): void {
   if (checkDocument) assertMemoryDocumentSchemaWritable(record.content);
   if (
     record.headerTitle !== 'MEMORY' ||
@@ -367,7 +657,7 @@ function eligibleRecord(record: MemoryRecord, checkDocument = true): void {
     throw new Error('Topic maintenance pilot requires one active personal durable record.');
   if (!record.metadata.memoryId || !MEMORY_ID.test(record.metadata.memoryId))
     throw new Error('Topic maintenance requires a stable memory ID.');
-  validEvidence(record);
+  if (code) validEvidence(record);
   if (record.metadata.topicMaintenanceError) throw new Error(record.metadata.topicMaintenanceError);
 }
 

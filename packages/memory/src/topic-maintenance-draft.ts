@@ -6,9 +6,14 @@ import {
 } from './topic-maintenance-generation.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from './code/citation.js';
+import type {MemoryObsidianEvidenceV1} from './document.js';
 import {
   MAX_TOPIC_MAINTENANCE_BYTES,
   MAX_TOPIC_MAINTENANCE_PARAGRAPHS,
+  validateTopicMaintenanceParagraphs,
+  topicMaintenanceObsidianCitationId,
+  assertTopicMaintenanceSameObsidianNote,
+  assertTopicMaintenanceObsidianEvidence,
   type TopicMaintenanceDependencyV1,
   type TopicMaintenanceParagraphV1,
 } from './topic-maintenance.js';
@@ -48,6 +53,16 @@ export interface TopicMaintenanceDraftBasisV1 {
   readonly additionalDependencies: readonly TopicMaintenanceDependencyV1[];
   readonly handles: readonly TopicMaintenanceEvidenceHandleV1[];
 }
+
+export interface TopicMaintenanceObsidianDraftBasisV2 extends Omit<TopicMaintenanceDraftBasisV1, 'version'> {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly originEvidence: MemoryObsidianEvidenceV1;
+  readonly activeEvidence: MemoryObsidianEvidenceV1;
+  /** Already captured with explicit approval; pure parsing never allocates pins. */
+  readonly currentEvidence: MemoryObsidianEvidenceV1;
+}
+export type TopicMaintenanceDraftBasis = TopicMaintenanceDraftBasisV1 | TopicMaintenanceObsidianDraftBasisV2;
 
 export interface TopicMaintenanceReplaceOperationV1 {
   readonly ordinal: number;
@@ -193,6 +208,26 @@ export interface TopicMaintenanceReviewPayloadV1 {
   readonly generation: TopicMaintenanceGenerationReceiptV1;
 }
 
+export interface TopicMaintenanceObsidianReviewEvidenceV2 {
+  readonly sourceKind: 'obsidian';
+  readonly handleId: string;
+  readonly content: string;
+  readonly excerptHash: string;
+  readonly provenance: 'historical-verified' | 'current-verified';
+  readonly supportsCitation: true;
+  readonly truncated: false;
+  readonly citation: MemoryObsidianEvidenceV1;
+}
+export interface TopicMaintenanceObsidianReviewPayloadV2 {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly basis: TopicMaintenanceObsidianDraftBasisV2;
+  readonly proposal: TopicMaintenanceDraftProposalV1;
+  readonly reviewEvidence: readonly TopicMaintenanceObsidianReviewEvidenceV2[];
+  readonly generation: TopicMaintenanceGenerationReceiptV1;
+}
+export type TopicMaintenanceReviewPayload = TopicMaintenanceReviewPayloadV1 | TopicMaintenanceObsidianReviewPayloadV2;
+
 interface ParagraphSpan {
   readonly start: number;
   readonly end: number;
@@ -246,7 +281,20 @@ function paragraphSpans(body: string): readonly ParagraphSpan[] {
   return result;
 }
 
+/** Legacy code-only boundary stays closed for old application callers. */
 export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMaintenanceDraftBasisV1 {
+  const basis = validateTopicMaintenanceBasis(input);
+  if (basis.version !== 1) fail('imported basis requires its provider adapter.');
+  return basis;
+}
+
+export function validateTopicMaintenanceBasis(input: unknown): TopicMaintenanceDraftBasis {
+  assertTopicMaintenanceBasis(input);
+  return input;
+}
+
+function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMaintenanceDraftBasis {
+  const imported = object(input) && input.version === 2 && input.sourceKind === 'obsidian';
   if (
     !object(input) ||
     jsonBytes(input) > MAX_TOPIC_MAINTENANCE_BASIS_BYTES ||
@@ -260,8 +308,9 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
       'paragraphs',
       'additionalDependencies',
       'handles',
+      ...(imported ? ['sourceKind', 'originEvidence', 'activeEvidence', 'currentEvidence'] : []),
     ]) ||
-    input.version !== 1 ||
+    (input.version !== 1 && !imported) ||
     !boundedText(input.targetUri, 1024) ||
     typeof input.targetHash !== 'string' ||
     !HASH.test(input.targetHash) ||
@@ -275,32 +324,30 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
     !Array.isArray(input.handles)
   )
     fail('invalid basis shape or identity.');
-  const spans = paragraphSpans(input.body);
-  if (input.paragraphs.length !== spans.length || input.paragraphs.length > MAX_TOPIC_MAINTENANCE_PARAGRAPHS)
-    fail('basis paragraph count differs from accepted body.');
+  const idPattern = imported ? /^tnob_[a-f0-9]{40}$/u : CITATION_ID;
   const cited = new Set<string>();
-  for (const [ordinal, paragraph] of input.paragraphs.entries()) {
-    if (
-      !object(paragraph) ||
-      !keys(paragraph, ['ordinal', 'hash', 'role', 'support', 'citationIds'], ['scope', 'validity']) ||
-      paragraph.ordinal !== ordinal ||
-      paragraph.hash !== consolidationRevision(spans[ordinal].text) ||
-      !['descriptive', 'normative', 'historical'].includes(paragraph.role as string) ||
-      !['direct', 'contextual', 'unresolved'].includes(paragraph.support as string) ||
-      !Array.isArray(paragraph.citationIds) ||
-      paragraph.citationIds.length > 8 ||
-      new Set(paragraph.citationIds).size !== paragraph.citationIds.length ||
-      paragraph.citationIds.some((id: unknown) => typeof id !== 'string' || !CITATION_ID.test(id)) ||
-      (paragraph.support === 'unresolved') !== (paragraph.citationIds.length === 0) ||
-      [paragraph.scope, paragraph.validity].some(
-        value =>
-          value !== undefined &&
-          (typeof value !== 'string' || value.length === 0 || value.length > 512 || /[\r\n]/u.test(value)),
-      )
-    )
-      fail(`invalid basis paragraph ${ordinal + 1}.`);
-    for (const id of paragraph.citationIds) cited.add(id);
+  const admitted = new Set<string>();
+  if (imported) {
+    assertTopicMaintenanceObsidianEvidence(input.originEvidence);
+    assertTopicMaintenanceObsidianEvidence(input.activeEvidence);
+    assertTopicMaintenanceObsidianEvidence(input.currentEvidence);
+    assertTopicMaintenanceSameObsidianNote(input.originEvidence, input.activeEvidence);
+    assertTopicMaintenanceSameObsidianNote(input.originEvidence, input.currentEvidence);
+    assertTopicMaintenanceSameObsidianNote(input.activeEvidence, input.currentEvidence);
+    admitted.add(topicMaintenanceObsidianCitationId(input.originEvidence));
+    admitted.add(topicMaintenanceObsidianCitationId(input.activeEvidence));
+    if (input.additionalDependencies.length) fail('imported dependencies are unsupported.');
+    // Origin remains required evidence even after all descriptive support advances.
+    cited.add(topicMaintenanceObsidianCitationId(input.originEvidence));
+  } else {
+    for (const paragraph of input.paragraphs) {
+      if (object(paragraph) && Array.isArray(paragraph.citationIds))
+        for (const id of paragraph.citationIds) if (typeof id === 'string' && idPattern.test(id)) admitted.add(id);
+    }
   }
+  paragraphSpans(input.body);
+  validateTopicMaintenanceParagraphs(input.body, input.paragraphs, admitted);
+  for (const paragraph of input.paragraphs) for (const id of paragraph.citationIds) cited.add(id);
   if (input.additionalDependencies.length > 8) fail('basis additional dependencies exceed citation budget.');
   const dependencies = new Set<string>();
   for (const dependency of input.additionalDependencies) {
@@ -309,7 +356,7 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
       !keys(dependency, ['kind', 'citationId']) ||
       !['configuration', 'dependency'].includes(dependency.kind as string) ||
       typeof dependency.citationId !== 'string' ||
-      !CITATION_ID.test(dependency.citationId) ||
+      !idPattern.test(dependency.citationId) ||
       dependencies.has(dependency.citationId)
     )
       fail('invalid or duplicated additional dependency.');
@@ -325,10 +372,10 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
       !keys(handle, ['id', 'citationId', 'variant']) ||
       typeof handle.id !== 'string' ||
       typeof handle.citationId !== 'string' ||
-      !CITATION_ID.test(handle.citationId) ||
+      !idPattern.test(handle.citationId) ||
       !['historical', 'current'].includes(handle.variant as string) ||
       handle.id !== `${handle.variant}:${handle.citationId}` ||
-      !HANDLE_ID.test(handle.id) ||
+      !(imported ? /^(historical|current):tnob_[a-f0-9]{40}$/u : HANDLE_ID).test(handle.id) ||
       seen.has(handle.id)
     )
       fail('basis has unknown or duplicate evidence handles.');
@@ -336,10 +383,9 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
   }
   if ([...cited].some(id => !seen.has(`historical:${id}`) || !seen.has(`current:${id}`)))
     fail('basis omits a declared paragraph citation handle.');
-  return input as unknown as TopicMaintenanceDraftBasisV1;
 }
 
-function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasisV1): TopicMaintenanceDraftV1 {
+function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasis): TopicMaintenanceDraftV1 {
   if (
     !object(input) ||
     !keys(
@@ -473,10 +519,7 @@ function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasisV1): Top
   return input as unknown as TopicMaintenanceDraftV1;
 }
 
-function assemble(
-  basis: TopicMaintenanceDraftBasisV1,
-  draft: TopicMaintenanceDraftV1,
-): TopicMaintenanceDraftProposalV1 {
+function assemble(basis: TopicMaintenanceDraftBasis, draft: TopicMaintenanceDraftV1): TopicMaintenanceDraftProposalV1 {
   const spans = paragraphSpans(basis.body);
   const replacements = new Map(draft.operations.map(operation => [operation.ordinal, operation.text]));
   let cursor = 0;
@@ -500,11 +543,11 @@ function assemble(
 
 /** Strictly interprets one bounded model proposal; it never mutates accepted memory. */
 export function parseTopicMaintenanceDraft(
-  basisInput: TopicMaintenanceDraftBasisV1,
+  basisInput: TopicMaintenanceDraftBasis,
   rawJson: string,
   options: {readonly requireParagraphDispositions?: boolean} = {},
 ): TopicMaintenanceDraftProposalV1 {
-  const basis = validateTopicMaintenanceDraftBasis(basisInput);
+  const basis = validateTopicMaintenanceBasis(basisInput);
   if (!boundedText(rawJson, MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)) fail('model output is empty or oversized.');
   let parsed: unknown;
   try {
@@ -624,11 +667,30 @@ export function validateTopicMaintenanceReviewEvidence(
 }
 
 export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMaintenanceReviewPayloadV1 {
+  const payload = validateTopicMaintenanceReview(input);
+  if (payload.version !== 1) fail('imported review requires its provider adapter.');
+  return payload;
+}
+
+export function validateTopicMaintenanceReview(input: unknown): TopicMaintenanceReviewPayload {
+  assertTopicMaintenanceReview(input);
+  return input;
+}
+
+function assertTopicMaintenanceReview(input: unknown): asserts input is TopicMaintenanceReviewPayload {
+  const imported = object(input) && input.version === 2 && input.sourceKind === 'obsidian';
   if (
     !object(input) ||
     jsonBytes(input) > MAX_TOPIC_MAINTENANCE_REVIEW_BYTES ||
-    !keys(input, ['version', 'basis', 'proposal', 'reviewEvidence', 'generation']) ||
-    input.version !== 1 ||
+    !keys(input, [
+      'version',
+      'basis',
+      'proposal',
+      'reviewEvidence',
+      'generation',
+      ...(imported ? ['sourceKind'] : []),
+    ]) ||
+    (input.version !== 1 && !imported) ||
     !object(input.proposal) ||
     !keys(input.proposal, ['version', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
     input.proposal.version !== 1 ||
@@ -685,7 +747,8 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     ![1, 2].includes(input.generation.attempts as number)
   )
     fail('invalid model generation receipt.');
-  const basis = validateTopicMaintenanceDraftBasis(input.basis);
+  const basis = validateTopicMaintenanceBasis(input.basis);
+  if ((basis.version === 2) !== imported) fail('review and basis source kinds differ.');
   if (observation) {
     const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
     if (
@@ -698,7 +761,8 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     )
       fail('Generation observation differs from its basis or complete usage.');
   }
-  validateTopicMaintenanceReviewEvidence(basis, input.reviewEvidence);
+  if (basis.version === 2) validateTopicMaintenanceObsidianReviewEvidence(basis, input.reviewEvidence);
+  else validateTopicMaintenanceReviewEvidence(basis, input.reviewEvidence);
   const proposal = assemble(basis, validateDraft(input.proposal.draft, basis));
   if (
     input.proposal.body !== proposal.body ||
@@ -708,5 +772,191 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     input.proposal.changedOrdinals.some((ordinal, index) => ordinal !== proposal.changedOrdinals[index])
   )
     fail('private review proposal differs from deterministic assembly.');
-  return input as unknown as TopicMaintenanceReviewPayloadV1;
+}
+
+/** Exact retained fragment proof; access and live revision are rechecked by the application on every reuse. */
+export function validateTopicMaintenanceObsidianReviewEvidence(
+  basisInput: TopicMaintenanceObsidianDraftBasisV2,
+  input: unknown,
+): readonly TopicMaintenanceObsidianReviewEvidenceV2[] {
+  const basis = validateTopicMaintenanceBasis(basisInput);
+  if (
+    basis.version !== 2 ||
+    !Array.isArray(input) ||
+    input.length !== basis.handles.length ||
+    jsonBytes(input) > MAX_TOPIC_MAINTENANCE_REVIEW_BYTES
+  )
+    fail('invalid imported review evidence.');
+  const historical = new Map(
+    [basis.originEvidence, basis.activeEvidence].map(pin => [topicMaintenanceObsidianCitationId(pin), pin]),
+  );
+  const seen = new Set<string>();
+  for (const evidence of input) {
+    if (
+      !object(evidence) ||
+      !keys(evidence, [
+        'sourceKind',
+        'handleId',
+        'content',
+        'excerptHash',
+        'provenance',
+        'supportsCitation',
+        'truncated',
+        'citation',
+      ]) ||
+      evidence.sourceKind !== 'obsidian' ||
+      typeof evidence.handleId !== 'string' ||
+      seen.has(evidence.handleId) ||
+      !boundedText(evidence.content, 8192) ||
+      evidence.excerptHash !== consolidationRevision(evidence.content) ||
+      evidence.supportsCitation !== true ||
+      evidence.truncated !== false
+    )
+      fail('unknown, malformed or duplicate imported fragment proof.');
+    const handle = basis.handles.find(item => item.id === evidence.handleId);
+    if (!handle) fail('imported evidence handle is undeclared.');
+    const expected = handle.variant === 'historical' ? historical.get(handle.citationId) : basis.currentEvidence;
+    if (
+      !expected ||
+      JSON.stringify(evidence.citation) !== JSON.stringify(expected) ||
+      evidence.excerptHash !== expected.fragmentHash ||
+      evidence.content.length !== expected.fragmentEnd - expected.fragmentStart ||
+      evidence.provenance !== (handle.variant === 'historical' ? 'historical-verified' : 'current-verified')
+    )
+      fail('imported review fragment differs from its exact retained pin.');
+    seen.add(evidence.handleId);
+  }
+  return input as readonly TopicMaintenanceObsidianReviewEvidenceV2[];
+}
+
+/** Fixed application intent persisted in the existing private candidate journal before provider allocation. */
+export interface TopicMaintenanceObsidianCaptureReservationV1 {
+  readonly version: 1;
+  readonly operationId: string;
+  readonly pinId: string;
+  readonly capturedAt: string;
+  readonly expiresAt: string;
+  readonly accessHash: string;
+  readonly vaultHash: string;
+  readonly fragmentStart: number;
+  readonly fragmentEnd: number;
+}
+export interface TopicMaintenanceObsidianCaptureIntentV1 {
+  readonly version: 1;
+  readonly sourceKind: 'obsidian';
+  readonly stage: 'reserved' | 'captured';
+  readonly targetUri: string;
+  readonly targetHash: string;
+  readonly observationRevision: string;
+  readonly inspectionDigest: string;
+  readonly input: {
+    readonly sourceId: string;
+    readonly relativePath: string;
+    readonly fragment: string;
+    readonly expectedSourceInstanceId: string;
+    readonly expectedNoteId: string;
+    readonly expectedRevisionHash: string;
+    readonly expectedSanitizerVersion: string;
+    readonly retentionDays: number;
+    readonly reservation: TopicMaintenanceObsidianCaptureReservationV1;
+  };
+  readonly citation?: MemoryObsidianEvidenceV1;
+}
+export function validateTopicMaintenanceObsidianCaptureIntent(value: unknown): TopicMaintenanceObsidianCaptureIntentV1 {
+  assertObsidianCaptureIntent(value);
+  return value;
+}
+function assertObsidianCaptureIntent(value: unknown): asserts value is TopicMaintenanceObsidianCaptureIntentV1 {
+  if (
+    !object(value) ||
+    !keys(
+      value,
+      ['version', 'sourceKind', 'stage', 'targetUri', 'targetHash', 'observationRevision', 'inspectionDigest', 'input'],
+      ['citation'],
+    ) ||
+    value.version !== 1 ||
+    value.sourceKind !== 'obsidian' ||
+    (value.stage !== 'reserved' && value.stage !== 'captured') ||
+    !boundedText(value.targetUri, 1024) ||
+    !/^threadnote:\/\/user\/[^/]+\/memories\/durable\/projects\//u.test(value.targetUri) ||
+    ![value.targetHash, value.observationRevision, value.inspectionDigest].every(
+      hash => typeof hash === 'string' && HASH.test(hash),
+    ) ||
+    !object(value.input) ||
+    !keys(value.input, [
+      'sourceId',
+      'relativePath',
+      'fragment',
+      'expectedSourceInstanceId',
+      'expectedNoteId',
+      'expectedRevisionHash',
+      'expectedSanitizerVersion',
+      'retentionDays',
+      'reservation',
+    ]) ||
+    !boundedText(value.input.fragment, 8192) ||
+    typeof value.input.retentionDays !== 'number' ||
+    !Number.isSafeInteger(value.input.retentionDays) ||
+    value.input.retentionDays < 1 ||
+    value.input.retentionDays > 365 ||
+    !object(value.input.reservation) ||
+    !keys(value.input.reservation, [
+      'version',
+      'operationId',
+      'pinId',
+      'capturedAt',
+      'expiresAt',
+      'accessHash',
+      'vaultHash',
+      'fragmentStart',
+      'fragmentEnd',
+    ])
+  )
+    fail('invalid imported capture intent.');
+  const input = value.input;
+  const reservation = input.reservation;
+  if (!object(reservation)) fail('invalid capture reservation.');
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+  if (
+    reservation.version !== 1 ||
+    typeof reservation.operationId !== 'string' ||
+    !uuid.test(reservation.operationId) ||
+    typeof reservation.capturedAt !== 'string' ||
+    typeof reservation.expiresAt !== 'string' ||
+    !Number.isFinite(Date.parse(reservation.capturedAt)) ||
+    !Number.isFinite(Date.parse(reservation.expiresAt)) ||
+    new Date(reservation.capturedAt).toISOString() !== reservation.capturedAt ||
+    new Date(reservation.expiresAt).toISOString() !== reservation.expiresAt ||
+    Date.parse(reservation.expiresAt) - Date.parse(reservation.capturedAt) !==
+      Number(input.retentionDays) * 86_400_000 ||
+    typeof reservation.fragmentStart !== 'number' ||
+    !Number.isSafeInteger(reservation.fragmentStart) ||
+    reservation.fragmentStart < 0 ||
+    reservation.fragmentEnd !== reservation.fragmentStart + String(input.fragment).length
+  )
+    fail('invalid fixed capture deadline or selection.');
+  const pin = {
+    version: 1,
+    sourceId: input.sourceId,
+    sourceInstanceId: input.expectedSourceInstanceId,
+    noteId: input.expectedNoteId,
+    relativePath: input.relativePath,
+    revisionHash: input.expectedRevisionHash,
+    sanitizerVersion: input.expectedSanitizerVersion,
+    fragmentHash: consolidationRevision(String(input.fragment)),
+    fragmentStart: reservation.fragmentStart,
+    fragmentEnd: reservation.fragmentEnd,
+    accessHash: reservation.accessHash,
+    vaultHash: reservation.vaultHash,
+    pinId: reservation.pinId,
+    expiresAt: reservation.expiresAt,
+  };
+  assertTopicMaintenanceObsidianEvidence(pin);
+  if ((value.stage === 'captured') !== (value.citation !== undefined)) fail('capture stage differs from attached pin.');
+  if (value.citation !== undefined) {
+    assertTopicMaintenanceObsidianEvidence(value.citation);
+    if (topicMaintenanceObsidianCitationId(value.citation) !== topicMaintenanceObsidianCitationId(pin))
+      fail('capture pin differs from its immutable reservation.');
+  }
+  if (jsonBytes(value) > 24 * 1024) fail('capture intent exceeds the private boundary.');
 }

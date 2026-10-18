@@ -1,3 +1,4 @@
+import {SourceConfigurationStore} from '@threadnote/integration-core/config';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path, Result, Layer} from 'effect';
 import {describe, expect, it} from 'vitest';
@@ -69,6 +70,7 @@ function input(choice: 'left' | 'right' | 'both' = 'left', corpus = records) {
 }
 
 const reviewLayer = Layer.mergeAll(
+  Layer.mock(SourceConfigurationStore, {}),
   StandaloneBrokerLayer,
   Layer.mock(LocalModelCatalog, {}),
   Layer.mock(LocalModelStore, {path: () => '/unused'}),

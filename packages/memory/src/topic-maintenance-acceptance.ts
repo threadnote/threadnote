@@ -21,10 +21,21 @@ import {
   parseTopicMaintenanceDraft,
   topicMaintenanceParagraphCoverage,
   validateTopicMaintenanceReviewPayload,
+  validateTopicMaintenanceReview,
+  type TopicMaintenanceObsidianReviewPayloadV2,
+  type TopicMaintenanceReviewPayload,
   type TopicMaintenanceDraftProposalV1,
   type TopicMaintenanceReviewPayloadV1,
 } from './topic-maintenance-draft.js';
-import {validateTopicMaintenanceManifest, type TopicMaintenanceManifestV2} from './topic-maintenance.js';
+import {
+  validateTopicMaintenanceManifest,
+  isCodeTopicMaintenanceManifest,
+  topicMaintenanceObsidianCitationId,
+  type TopicMaintenanceObsidianManifestV3,
+  type TopicMaintenanceManifestV2,
+  type TopicMaintenanceCodeManifestV3,
+  type TopicMaintenanceManifest,
+} from './topic-maintenance.js';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength;
@@ -47,11 +58,24 @@ export interface TopicMaintenanceAcceptancePreviewV1 {
   readonly contentHash: string;
   readonly approvalDigest: string;
   readonly approvedProposal: TopicMaintenanceDraftProposalV1;
-  readonly manifest: TopicMaintenanceManifestV2;
+  readonly manifest: TopicMaintenanceManifestV2 | TopicMaintenanceCodeManifestV3;
   readonly codeCitations: readonly MemoryCodeCitationV1[];
   readonly consolidation?: ConsolidationProvenanceV2;
   readonly metadataDiff: readonly {readonly field: string; readonly beforeHash: string; readonly afterHash: string}[];
 }
+
+export interface TopicMaintenanceObsidianAcceptancePreviewV2 extends Omit<
+  TopicMaintenanceAcceptancePreviewV1,
+  'version' | 'manifest' | 'codeCitations' | 'consolidation'
+> {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly manifest: TopicMaintenanceObsidianManifestV3;
+  readonly codeCitations: readonly [];
+  readonly consolidation?: never;
+}
+export type TopicMaintenanceAcceptancePreview =
+  TopicMaintenanceAcceptancePreviewV1 | TopicMaintenanceObsidianAcceptancePreviewV2;
 
 export interface TopicMaintenanceApprovalReceiptV1 {
   readonly version: 1;
@@ -83,10 +107,15 @@ function checkedTimestamp(value: string): void {
     fail('approval timestamp must be canonical ISO time.');
 }
 
-function approvalDigest(preview: Omit<TopicMaintenanceAcceptancePreviewV1, 'approvalDigest'>): string {
+function approvalDigest(
+  preview:
+    | Omit<TopicMaintenanceAcceptancePreviewV1, 'approvalDigest'>
+    | Omit<TopicMaintenanceObsidianAcceptancePreviewV2, 'approvalDigest'>,
+): string {
   return consolidationRevision(
     JSON.stringify({
       version: preview.version,
+      ...('sourceKind' in preview ? {sourceKind: preview.sourceKind} : {}),
       reviewId: preview.reviewId,
       approvedAt: preview.approvedAt,
       targetUri: preview.targetUri,
@@ -211,7 +240,7 @@ function metadataDiff(before: string, after: string): TopicMaintenanceAcceptance
 }
 
 export function assertTopicMaintenanceAcceptanceCoverage(
-  review: TopicMaintenanceReviewPayloadV1,
+  review: TopicMaintenanceReviewPayload,
   proposal: TopicMaintenanceDraftProposalV1 = review.proposal,
 ): void {
   if (
@@ -247,6 +276,7 @@ function assembleTopicMaintenanceAcceptance(
   if (!old || record.metadata.topicMaintenanceError || record.metadata.citationErrors?.length)
     fail('target is not a valid enrolled topic.');
   validateTopicMaintenanceManifest(old, record);
+  if (!isCodeTopicMaintenanceManifest(old)) fail('imported target requires its provider acceptance path.');
   const before = canonicalMemoryDocumentContent(record.content);
   if (
     review.basis.targetUri !== record.uri ||
@@ -289,7 +319,7 @@ function assembleTopicMaintenanceAcceptance(
     const acceptedCitationId = current?.citation.id ?? (historical ? historical.citation.id : citationId);
     return {citationId, acceptedCitationId};
   });
-  const manifest: TopicMaintenanceManifestV2 = {
+  const legacyManifest: TopicMaintenanceManifestV2 = {
     version: 2,
     memoryId: old.memoryId,
     repositoryId: old.repositoryId,
@@ -303,7 +333,16 @@ function assembleTopicMaintenanceAcceptance(
         : old.originCitationIds,
     acceptedSources,
   };
-  const priorAccepted = new Set(old.version === 2 ? old.acceptedSources.map(item => item.acceptedCitationId) : []);
+  const manifest: TopicMaintenanceManifestV2 | TopicMaintenanceCodeManifestV3 =
+    old.version === 3
+      ? {
+          ...legacyManifest,
+          version: 3,
+          sourceKind: 'code',
+          ...(old.dependencyExpansions ? {dependencyExpansions: old.dependencyExpansions} : {}),
+        }
+      : legacyManifest;
+  const priorAccepted = new Set(old.version !== 1 ? old.acceptedSources.map(item => item.acceptedCitationId) : []);
   const preserved = (record.metadata.codeCitations ?? []).filter(
     citation =>
       manifest.originCitationIds.includes(citation.id) || !priorAccepted.has(citation.id) || declared.has(citation.id),
@@ -338,32 +377,7 @@ function assembleTopicMaintenanceAcceptance(
         observationRevision: review.basis.observationRevision,
       })
     : undefined;
-  const raw = canonicalMemoryDocumentContent(record.content);
-  const separator = /\r?\n\r?\n/u.exec(raw);
-  if (!separator) fail('target document lacks a canonical header/body boundary.');
-  const header = raw.slice(0, separator.index);
-  const body = raw.slice(separator.index + separator[0].length);
-  const patchedBody = rawBodyWithReviewedReplacements(body, record.body, approvedProposal);
-  const replacements = {
-    schema_version: [`schema_version: ${MEMORY_SCHEMA_VERSION}`],
-    code_citation: formatMemoryCodeCitationLines(codeCitations),
-    topic_maintenance: [`topic_maintenance: ${JSON.stringify(manifest)}`],
-    ...(consolidation ? {consolidation: [`consolidation: ${JSON.stringify(consolidation)}`]} : {}),
-    updated_at: [`updated_at: ${options.approvedAt}`],
-    last_reviewed: [`last_reviewed: ${options.approvedAt}`],
-  };
-  const content = `${patchHeader(header, replacements, ['updated_at', 'last_reviewed'])}${separator[0]}${patchedBody}`;
-  const parsed = parseMemoryDocument(record.uri, content);
-  if (
-    !parsed ||
-    parsed.metadata.citationErrors?.length ||
-    parsed.metadata.topicMaintenanceError ||
-    parsed.metadata.consolidationError ||
-    parsed.body !== approvedProposal.body ||
-    JSON.stringify(parsed.metadata.topicMaintenance) !== JSON.stringify(manifest)
-  )
-    fail('prepared document failed exact provenance readback.');
-  validateTopicMaintenanceManifest(manifest, parsed);
+  const content = assembleAcceptanceDocument(record, approvedProposal, options, manifest, codeCitations, consolidation);
   const base = {
     version: 1 as const,
     reviewId: options.reviewId,
@@ -445,7 +459,9 @@ export function validateTopicMaintenanceAcceptancePreview(
   if (
     !parsed ||
     parsed.metadata.citationErrors?.length ||
-    parsed.metadata.topicMaintenance?.version !== 2 ||
+    !parsed.metadata.topicMaintenance ||
+    !isCodeTopicMaintenanceManifest(parsed.metadata.topicMaintenance) ||
+    parsed.metadata.topicMaintenance.version === 1 ||
     parsed.body !== proposal.body ||
     JSON.stringify(parsed.metadata.topicMaintenance) !== JSON.stringify(input.manifest) ||
     JSON.stringify(parsed.metadata.codeCitations) !== JSON.stringify(input.codeCitations) ||
@@ -512,4 +528,246 @@ export function validateApprovedTopicMaintenanceWrite(
   if (canonicalMemoryDocumentContent(beforeContent) !== preview.beforeContent || finalContent !== preview.content)
     fail('target or proposed bytes differ from prepared approval.');
   return preview;
+}
+
+function assembleAcceptanceDocument(
+  record: MemoryRecord,
+  proposal: TopicMaintenanceDraftProposalV1,
+  options: TopicMaintenanceAcceptanceOptionsV1,
+  manifest: TopicMaintenanceManifest,
+  codeCitations?: readonly MemoryCodeCitationV1[],
+  consolidation?: ConsolidationProvenanceV2,
+): string {
+  const raw = canonicalMemoryDocumentContent(record.content);
+  const separator = /\r?\n\r?\n/u.exec(raw);
+  if (!separator) fail('target document lacks a canonical header/body boundary.');
+  const header = raw.slice(0, separator.index);
+  const body = raw.slice(separator.index + separator[0].length);
+  const patchedBody = rawBodyWithReviewedReplacements(body, record.body, proposal);
+  const replacements = {
+    schema_version: [`schema_version: ${MEMORY_SCHEMA_VERSION}`],
+    ...(codeCitations ? {code_citation: formatMemoryCodeCitationLines(codeCitations)} : {}),
+    topic_maintenance: [`topic_maintenance: ${JSON.stringify(manifest)}`],
+    ...(consolidation ? {consolidation: [`consolidation: ${JSON.stringify(consolidation)}`]} : {}),
+    updated_at: [`updated_at: ${options.approvedAt}`],
+    last_reviewed: [`last_reviewed: ${options.approvedAt}`],
+  };
+  const content = `${patchHeader(header, replacements, ['updated_at', 'last_reviewed'])}${separator[0]}${patchedBody}`;
+  const parsed = parseMemoryDocument(record.uri, content);
+  if (
+    !parsed ||
+    parsed.metadata.citationErrors?.length ||
+    parsed.metadata.topicMaintenanceError ||
+    parsed.metadata.consolidationError ||
+    parsed.metadata.obsidianEvidenceError ||
+    parsed.metadata.sourceEvidenceError ||
+    parsed.body !== proposal.body ||
+    JSON.stringify(parsed.metadata.topicMaintenance) !== JSON.stringify(manifest) ||
+    JSON.stringify(parsed.metadata.obsidianEvidence) !== JSON.stringify(record.metadata.obsidianEvidence)
+  )
+    fail('prepared document failed exact provenance readback.');
+  validateTopicMaintenanceManifest(manifest, parsed);
+  return content;
+}
+
+/** Pure imported branch; application admission remains disabled until the complete provider lifecycle is wired. */
+export function prepareTopicMaintenanceObsidianAcceptance(
+  record: MemoryRecord,
+  reviewInput: TopicMaintenanceObsidianReviewPayloadV2,
+  options: TopicMaintenanceAcceptanceOptionsV1,
+): TopicMaintenanceObsidianAcceptancePreviewV2 {
+  const review = validateTopicMaintenanceReview(reviewInput);
+  if (review.version !== 2) fail('expected an imported review.');
+  assertMemoryDocumentSchemaWritable(record.content);
+  checkedTimestamp(options.approvedAt);
+  if (!/^review-[a-z0-9-]{1,80}$/u.test(options.reviewId)) fail('invalid review identity.');
+  const old = validateTopicMaintenanceManifest(record.metadata.topicMaintenance, record);
+  if (isCodeTopicMaintenanceManifest(old) || record.metadata.topicMaintenanceError) fail('expected an imported topic.');
+  const before = canonicalMemoryDocumentContent(record.content);
+  if (
+    review.basis.targetUri !== record.uri ||
+    review.basis.targetHash !== consolidationRevision(before) ||
+    review.basis.body !== record.body ||
+    JSON.stringify(review.basis.paragraphs) !== JSON.stringify(old.paragraphs) ||
+    JSON.stringify(review.basis.additionalDependencies) !== JSON.stringify(old.additionalDependencies) ||
+    JSON.stringify(review.basis.originEvidence) !== JSON.stringify(record.metadata.obsidianEvidence) ||
+    JSON.stringify(review.basis.activeEvidence) !== JSON.stringify(old.activeEvidence)
+  )
+    fail('imported review basis differs from the accepted target and immutable origin.');
+  for (const pin of [review.basis.originEvidence, review.basis.activeEvidence, review.basis.currentEvidence])
+    if (Date.parse(pin.expiresAt) <= Date.parse(options.approvedAt))
+      fail('imported review evidence has expired; explicit fresh approval is required.');
+  const proposal =
+    options.editedDraftJson === undefined
+      ? review.proposal
+      : parseTopicMaintenanceDraft(review.basis, options.editedDraftJson);
+  if (!['propose-update', 'propose-revalidation'].includes(proposal.draft.outcome))
+    fail('review outcome has no acceptable update.');
+  assertTopicMaintenanceAcceptanceCoverage(review, proposal);
+  const id = topicMaintenanceObsidianCitationId(review.basis.currentEvidence);
+  const paragraphs = old.paragraphs.map((paragraph, ordinal) => {
+    const operation = proposal.draft.operations.find(item => item.ordinal === ordinal);
+    const revalidation = proposal.draft.paragraphDispositions?.entries.find(
+      item => item.ordinal === ordinal && item.disposition === 'revalidate',
+    );
+    if (operation && paragraph.support !== 'direct')
+      fail('imported updates require directly supported descriptive paragraphs.');
+    return {
+      ...paragraph,
+      hash: consolidationRevision(consolidationSections(proposal.body)[ordinal]),
+      citationIds: operation || revalidation ? [id] : paragraph.citationIds,
+    };
+  });
+  const manifest: TopicMaintenanceObsidianManifestV3 = {
+    ...old,
+    bodyHash: consolidationRevision(proposal.body),
+    paragraphs,
+    activeEvidence: review.basis.currentEvidence,
+  };
+  const content = assembleAcceptanceDocument(record, proposal, options, manifest);
+  const base = {
+    version: 2 as const,
+    sourceKind: 'obsidian' as const,
+    reviewId: options.reviewId,
+    approvedAt: options.approvedAt,
+    targetUri: record.uri,
+    beforeContent: before,
+    beforeContentHash: consolidationRevision(before),
+    content,
+    contentHash: consolidationRevision(content),
+    approvedProposal: proposal,
+    manifest,
+    codeCitations: [] as const,
+    metadataDiff: metadataDiff(before, content),
+  };
+  const preview = {...base, approvalDigest: approvalDigest(base)};
+  if (utf8Bytes(JSON.stringify(preview)) > MAX_TOPIC_MAINTENANCE_PREVIEW_BYTES)
+    fail('prepared approval preview exceeds the 256 KiB limit.');
+  return preview;
+}
+
+export function validateTopicMaintenanceObsidianAcceptancePreview(
+  input: unknown,
+  review: TopicMaintenanceObsidianReviewPayloadV2,
+): TopicMaintenanceObsidianAcceptancePreviewV2 {
+  if (
+    !exactKeys(input, [
+      'version',
+      'sourceKind',
+      'reviewId',
+      'approvedAt',
+      'targetUri',
+      'beforeContent',
+      'beforeContentHash',
+      'content',
+      'contentHash',
+      'approvalDigest',
+      'approvedProposal',
+      'manifest',
+      'codeCitations',
+      'metadataDiff',
+    ]) ||
+    input.version !== 2 ||
+    input.sourceKind !== 'obsidian' ||
+    typeof input.beforeContent !== 'string' ||
+    typeof input.targetUri !== 'string' ||
+    typeof input.reviewId !== 'string' ||
+    typeof input.approvedAt !== 'string' ||
+    !exactKeys(input.approvedProposal, ['version', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
+    utf8Bytes(JSON.stringify(input)) > MAX_TOPIC_MAINTENANCE_PREVIEW_BYTES
+  )
+    fail('imported approval preview is malformed or oversized.');
+  const prior = parseMemoryDocument(input.targetUri, input.beforeContent);
+  if (!prior) fail('imported approval target is invalid.');
+  const reproduced = prepareTopicMaintenanceObsidianAcceptance(prior, review, {
+    reviewId: input.reviewId,
+    approvedAt: input.approvedAt,
+    editedDraftJson: JSON.stringify(input.approvedProposal.draft),
+  });
+  if (JSON.stringify(reproduced) !== JSON.stringify(input))
+    fail('imported preview differs from the exact reviewed transformation.');
+  return reproduced;
+}
+
+/** Closed source dispatch for adapters; legacy code APIs continue rejecting imported payloads. */
+export function prepareTopicMaintenanceSourceAcceptance(
+  record: MemoryRecord,
+  review: TopicMaintenanceReviewPayload,
+  options: TopicMaintenanceAcceptanceOptionsV1,
+): TopicMaintenanceAcceptancePreview {
+  return review.version === 1
+    ? prepareTopicMaintenanceAcceptance(record, review, options)
+    : prepareTopicMaintenanceObsidianAcceptance(record, review, options);
+}
+
+export function validateTopicMaintenanceSourceAcceptancePreview(
+  input: unknown,
+  review: TopicMaintenanceReviewPayload,
+): TopicMaintenanceAcceptancePreview {
+  return review.version === 1
+    ? validateTopicMaintenanceAcceptancePreview(input, review)
+    : validateTopicMaintenanceObsidianAcceptancePreview(input, review);
+}
+
+export interface TopicMaintenanceObsidianApprovalReceiptV2 extends Omit<
+  TopicMaintenanceApprovalReceiptV1,
+  'version' | 'preview'
+> {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly preview: TopicMaintenanceObsidianAcceptancePreviewV2;
+}
+export type TopicMaintenanceApprovalReceipt =
+  TopicMaintenanceApprovalReceiptV1 | TopicMaintenanceObsidianApprovalReceiptV2;
+export function validateTopicMaintenanceSourceApprovalReceipt(
+  input: unknown,
+  review: TopicMaintenanceReviewPayload,
+  reviewId: string,
+  revision: number,
+): TopicMaintenanceApprovalReceipt {
+  if (review.version === 1) return validateTopicMaintenanceApprovalReceipt(input, review, reviewId, revision);
+  if (
+    !exactKeys(input, ['version', 'sourceKind', 'reviewRevision', 'stage', 'preview']) ||
+    input.version !== 2 ||
+    input.sourceKind !== 'obsidian' ||
+    typeof input.reviewRevision !== 'number' ||
+    !Number.isSafeInteger(input.reviewRevision) ||
+    input.reviewRevision < 1 ||
+    input.reviewRevision > revision ||
+    typeof input.stage !== 'string' ||
+    !['preview', 'parked', 'prepared', 'written', 'conflict'].includes(input.stage)
+  )
+    fail('imported approval receipt is malformed.');
+  const preview = validateTopicMaintenanceObsidianAcceptancePreview(input.preview, review);
+  if (preview.reviewId !== reviewId || (input.stage === 'preview' && input.reviewRevision !== revision))
+    fail('imported approval identity changed.');
+  return {
+    version: 2,
+    sourceKind: 'obsidian',
+    reviewRevision: input.reviewRevision,
+    stage: input.stage as TopicMaintenanceApprovalReceiptV1['stage'],
+    preview,
+  };
+}
+export function validateApprovedTopicMaintenanceSourceWrite(
+  beforeContent: string,
+  finalContent: string,
+  review: {
+    readonly reviewId: string;
+    readonly revision: number;
+    readonly maintenance?: TopicMaintenanceReviewPayload;
+    readonly maintenanceApproval?: TopicMaintenanceApprovalReceipt;
+  },
+): TopicMaintenanceAcceptancePreview {
+  const payload = review.maintenance;
+  const receipt = review.maintenanceApproval;
+  if (!payload || !receipt || receipt.stage !== 'prepared') fail('review has no prepared exact approval proof.');
+  const validated = validateTopicMaintenanceSourceApprovalReceipt(receipt, payload, review.reviewId, review.revision);
+  assertTopicMaintenanceAcceptanceCoverage(payload, validated.preview.approvedProposal);
+  if (
+    canonicalMemoryDocumentContent(beforeContent) !== validated.preview.beforeContent ||
+    finalContent !== validated.preview.content
+  )
+    fail('target or proposed bytes differ from prepared approval.');
+  return validated.preview;
 }

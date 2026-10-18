@@ -1,4 +1,5 @@
 import fc from 'fast-check';
+import * as legacy from '../fixtures/schema10-writer.mjs';
 import {describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
@@ -68,6 +69,36 @@ function decisions() {
 }
 
 describe('topic maintenance manifest', () => {
+  it('round-trips explicit code V3 while the frozen schema10 writer refuses every rewriting boundary', () => {
+    const original = record();
+    const v1 = buildTopicMaintenanceManifest(original, decisions());
+    const manifest = {
+      ...v1,
+      version: 3 as const,
+      sourceKind: 'code' as const,
+      originCitationIds: [citation.id],
+      acceptedSources: [{citationId: citation.id, acceptedCitationId: citation.id}],
+    };
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {...original.metadata, schemaVersion: 10, topicMaintenance: manifest},
+      original.body,
+    );
+    const current = parseMemoryDocument(uri, content)!;
+    expect(current.metadata.topicMaintenance).toEqual(manifest);
+    expect(topicMaintenanceAcceptedCitation(current, citation.id)).toEqual(citation);
+    const old = legacy.parseMemoryDocument(uri, content)!;
+    expect(old.metadata.topicMaintenanceError).toBeDefined();
+    expect(() => legacy.assertMemoryDocumentSchemaWritable(content)).toThrow();
+    expect(() => legacy.formatMemoryDocument('MEMORY', current.metadata, current.body)).toThrow();
+    expect(() => legacy.assertMemoryRecordArchivable(old)).toThrow();
+    expect(() => legacy.formatMemoryDocumentWithKeywords(content, ['changed'])).toThrow();
+    expect(legacy.topicMaintenanceReplacementError(old, old)).toMatch(/malformed/);
+    expect(() => validateTopicMaintenanceManifest({...manifest, sourceKind: 'unknown'}, current)).toThrow(
+      /source kind/,
+    );
+  });
+
   it('detects declarations using the parser header boundary across line endings and whitespace rows', () => {
     const proposal = proposeTopicMaintenanceEnrollment(record(), decisions());
     fc.assert(

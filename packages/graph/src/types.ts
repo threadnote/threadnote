@@ -655,10 +655,22 @@ export interface CodeGraphQueryResult {
   readonly operation: 'explain' | 'impact' | 'neighbors' | 'node' | 'path' | 'query';
   readonly searchCoverage?: {
     readonly status: 'found' | 'exhaustive' | 'bounded' | 'timed-out' | 'unresolved';
-    readonly limitsReached: readonly ('depth' | 'node-limit' | 'edge-limit' | 'time-budget')[];
+    readonly limitsReached: readonly ('depth' | 'node-limit' | 'edge-limit' | 'time-budget' | 'output-bytes')[];
     readonly visitedNodes: number;
     readonly inspectedEdges: number;
     readonly directEdgeChecked: boolean;
+    /** Exhaustive neighbors cover only this requested depth, direction and provenance set. */
+    readonly neighborScope?: {
+      readonly requestedDepth: number;
+      readonly completedDepth: number;
+      readonly direction: 'both' | 'incoming' | 'outgoing';
+      readonly nodeLimit: number;
+      readonly edgeLimit: number;
+      readonly allowedProvenances: readonly CodeGraphProvenance[];
+      readonly omittedNodes: number;
+      readonly missingNodes: number;
+      readonly unresolvedEdges: number;
+    };
   };
   readonly repository: {
     readonly displayName: string;

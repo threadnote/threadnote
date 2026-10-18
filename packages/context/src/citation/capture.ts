@@ -163,6 +163,10 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     readonly project?: string;
     readonly expectedCallerIdentity?: ExpectedMemoryCodeCitationCallerIdentity;
     readonly expectedProjectScope?: MemoryCodeCitationProjectScopeExpectationV1;
+    /** Application-internal preview: derive exact deterministic identities without retaining capsules. */
+    readonly planOnly?: boolean;
+    /** Application-internal fixed capture time from an approved write-ahead intent. */
+    readonly retainedAt?: string;
     readonly omitUnresolved?: boolean;
     readonly refs?: readonly string[];
   },
@@ -236,6 +240,8 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
         group[0].cwd === input.callerCwd ? input.expectedProjectScope : undefined,
         input.omitUnresolved === true,
         group[0].project,
+        input.planOnly === true,
+        input.retainedAt,
       ),
     {concurrency: 4},
   );
@@ -321,6 +327,8 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   expectedProjectScope?: MemoryCodeCitationProjectScopeExpectationV1,
   omitUnresolved = false,
   project?: string,
+  planOnly = false,
+  retainedAt?: string,
 ) {
   const query = yield* CodeGraphQueryService;
   const store = yield* CodeGraphStore;
@@ -504,22 +512,24 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
         );
         const retained =
           bytes !== undefined &&
-          (yield* retainCodeGraphCitationEvidence({
-            bytes,
-            checkoutId: before.identity.checkoutId,
-            objectFormat: before.identity.objectFormat,
-            referenceId: sha256HexSync(citation.id),
-            source: {
-              extractorSet: citation.extractorSet,
-              fileContentHash: citation.fileContentHash.value,
-              path: citation.path,
-              repositoryId: citation.repositoryId,
-              sourceCommit: citation.sourceCommit,
-              sourceDirty: citation.sourceDirty,
-              sourceSnapshotId: citation.sourceSnapshotId,
-            },
-            threadnoteHome: config.agentContextHome,
-          }));
+          (planOnly ||
+            (yield* retainCodeGraphCitationEvidence({
+              bytes,
+              checkoutId: before.identity.checkoutId,
+              objectFormat: before.identity.objectFormat,
+              referenceId: sha256HexSync(citation.id),
+              source: {
+                extractorSet: citation.extractorSet,
+                fileContentHash: citation.fileContentHash.value,
+                path: citation.path,
+                repositoryId: citation.repositoryId,
+                sourceCommit: citation.sourceCommit,
+                sourceDirty: citation.sourceDirty,
+                sourceSnapshotId: citation.sourceSnapshotId,
+              },
+              threadnoteHome: config.agentContextHome,
+              ...(retainedAt === undefined ? {} : {retainedAt}),
+            })));
         retainedTargets.push({
           ...captured,
           citation: assertMemoryCodeCitation({

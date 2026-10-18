@@ -137,6 +137,7 @@ describe('reviewed personal topic acceptance', () => {
           }
           expect(caseId).not.toBe('');
           const packet = readyEvidence(yield* readContextMaintenancePacket(config, caseId));
+          if (packet.version !== 1) throw new Error('Expected code packet fixture.');
           const basis = basisFromPacket(packet);
           const proposal = parseTopicMaintenanceDraft(
             basis,

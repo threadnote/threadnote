@@ -1,9 +1,14 @@
 import {Effect} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  canonicalMemoryDocumentContent,
+  type MemoryObsidianEvidenceV1,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {
   topicMaintenanceAcceptedCitation,
+  isCodeTopicMaintenanceManifest,
   validateTopicMaintenanceManifest,
   type TopicMaintenanceDependencyV1,
   type TopicMaintenanceParagraphV1,
@@ -55,6 +60,8 @@ export interface TopicMaintenanceObservationV1 {
 
 function declaredCitations(record: MemoryRecord) {
   const manifest = validateTopicMaintenanceManifest(record.metadata.topicMaintenance, record);
+  if (!isCodeTopicMaintenanceManifest(manifest))
+    throw new Error('Imported topic maintenance is unavailable until its reviewed adapter is enabled.');
   const ids = new Set([
     ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),
     ...manifest.additionalDependencies.map(dependency => dependency.citationId),
@@ -241,7 +248,10 @@ export const observeTopicMaintenanceEvidence = Effect.fn('topicMaintenance.obser
           prior?.observedPath === receipt.observedPath && prior?.observedNodeId === receipt.observedNodeId;
         let current: MemoryCodeCitationV1 | undefined;
         if (
-          (options?.allowCapture !== false || record.metadata.topicMaintenance?.version === 2) &&
+          (options?.allowCapture !== false ||
+            record.metadata.topicMaintenance?.version === 2 ||
+            (record.metadata.topicMaintenance?.version === 3 &&
+              record.metadata.topicMaintenance.sourceKind === 'code')) &&
           status === 'exact' &&
           now.supportsCitation &&
           baseline.fileContentHash.value === now.source.fileContentHash &&
@@ -316,6 +326,77 @@ export interface TopicMaintenanceEvidencePacketV1 {
   }[];
   readonly truncatedExcerpts?: number;
 }
+
+/** Provider-neutral pure projection; Obsidian I/O is composed by the application. */
+export interface TopicMaintenanceObsidianObservationV2 {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly targetHash: string;
+  readonly revision: string;
+  readonly coverage: 'declared-only';
+  readonly outcome: 'unchanged' | 'review-required' | 'unavailable';
+  readonly canDraft: boolean;
+  readonly inspectionDigest?: string;
+  readonly sources: readonly {
+    readonly citationId: string;
+    readonly status: Status;
+    readonly reason: string;
+    readonly historicalAvailable: boolean;
+    readonly originStatus: string;
+    readonly activeStatus: string;
+  }[];
+}
+export type TopicMaintenanceObservation = TopicMaintenanceObservationV1 | TopicMaintenanceObsidianObservationV2;
+
+export interface TopicMaintenanceObsidianEvidenceReadV2 {
+  readonly citation: MemoryObsidianEvidenceV1;
+  readonly historical: 'available' | 'expired' | 'revoked' | 'missing' | 'corrupt';
+  readonly currentRevision: 'same' | 'changed' | 'removed' | 'unknown';
+  readonly fragment?: string;
+}
+export interface TopicMaintenanceObsidianInspectionV2 {
+  readonly sourceId: string;
+  readonly sourceInstanceId: string;
+  readonly noteId: string;
+  readonly relativePath: string;
+  readonly revisionHash: string;
+  readonly sanitizerVersion: string;
+  readonly accessHash: string;
+  readonly vaultHash: string;
+  readonly inspectionDigest: string;
+  readonly content: string;
+  readonly startOffset: 0;
+  readonly endOffset: number;
+  readonly truncated: boolean;
+}
+export interface TopicMaintenanceObsidianEvidencePacketV2 {
+  readonly version: 2;
+  readonly sourceKind: 'obsidian';
+  readonly outcome: 'ready' | 'unavailable';
+  readonly targetUri: string;
+  readonly targetHash: string;
+  readonly observationRevision: string;
+  readonly coverage: 'declared-only';
+  readonly canDraft: boolean;
+  readonly reason?: string;
+  readonly body?: string;
+  readonly paragraphs?: readonly TopicMaintenanceParagraphV1[];
+  readonly additionalDependencies: readonly [];
+  readonly obsidian: {
+    readonly origin?: TopicMaintenanceObsidianEvidenceReadV2;
+    readonly active?: TopicMaintenanceObsidianEvidenceReadV2;
+    readonly current?: TopicMaintenanceObsidianInspectionV2;
+    readonly capture?: {
+      readonly reviewId: string;
+      readonly revision: number;
+      readonly state: 'reserved' | 'captured';
+      readonly citation?: MemoryObsidianEvidenceV1;
+      readonly fragment?: string;
+    };
+  };
+}
+export type TopicMaintenanceEvidencePacket =
+  TopicMaintenanceEvidencePacketV1 | TopicMaintenanceObsidianEvidencePacketV2;
 
 /** Rejects an oversized packet as a whole; never trims a declared source or accepted paragraph. */
 export function boundTopicMaintenanceEvidencePacket(

@@ -11,7 +11,7 @@ import type {
 import type {ContextHealthReportV1} from '@threadnote/context/health';
 import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import type {MemoryKind} from '@threadnote/memory/types';
-import type {TopicMaintenanceEvidencePacketV1} from '@threadnote/context/topic_maintenance';
+import type {TopicMaintenanceEvidencePacket} from '@threadnote/context/topic_maintenance';
 
 export interface ManagerSemanticReviewInputV1 {
   readonly project: string;
@@ -236,7 +236,7 @@ export interface ManagerContextMaintenanceStatusV2 {
 export interface ManagerContextMaintenancePacketV2 {
   readonly reviewId?: string;
   readonly coverage?: 'declared-only';
-  readonly topicEvidence?: TopicMaintenanceEvidencePacketV1;
+  readonly topicEvidence?: TopicMaintenanceEvidencePacket;
   readonly version: 2;
   readonly caseId: string;
   readonly project: string;

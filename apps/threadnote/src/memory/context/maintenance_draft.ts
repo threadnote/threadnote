@@ -2,18 +2,23 @@ import {TOPIC_GENERATION_LOCK_ID, saveTopicGenerationReceiptUnderLock} from '@th
 import {DateTime, Effect, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import {consolidationSections} from '@threadnote/memory/consolidation';
 import {analyzeContextHealthSemantics} from '@threadnote/context/health_semantic';
-import type {TopicMaintenanceEvidencePacketV1} from '@threadnote/context/topic_maintenance';
+import type {
+  TopicMaintenanceEvidencePacket,
+  TopicMaintenanceEvidencePacketV1,
+} from '@threadnote/context/topic_maintenance';
 import {
   parseTopicMaintenanceDraft,
   validateTopicMaintenanceDraftBasis,
   validateTopicMaintenanceReviewEvidence,
-  validateTopicMaintenanceReviewPayload,
+  validateTopicMaintenanceReview,
+  validateTopicMaintenanceObsidianReviewEvidence,
+  type TopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasisV1,
   type TopicMaintenanceDraftProposalV1,
-  type TopicMaintenanceReviewPayloadV1,
+  type TopicMaintenanceReviewPayload,
   TopicGenerationSummary,
   topicGenerationUsage,
 } from '@threadnote/memory/topic-maintenance-draft';
@@ -42,6 +47,11 @@ import {
   topicDraftGenerationEligible,
   topicDraftGenerationScopeSupported,
 } from '../../manager/topic_draft_schema.js';
+import {
+  topicObsidianBasisFromPacket,
+  topicObsidianReviewEvidenceFromPacket,
+  verifyTopicObsidianReviewSource,
+} from './maintenance_obsidian.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
 import {prepareContextMaintenanceInventory} from './maintenance_inventory.js';
 import {readContextMaintenancePacket} from './maintenance.js';
@@ -80,10 +90,24 @@ export interface TopicDraftRequest {
 }
 
 export function readyEvidence(
-  input: Effect.Success<ReturnType<typeof readContextMaintenancePacket>> | TopicMaintenanceEvidencePacketV1,
+  input: Effect.Success<ReturnType<typeof readContextMaintenancePacket>> | TopicMaintenanceEvidencePacket,
 ) {
   const packet = 'topicEvidence' in input ? input.topicEvidence : input;
+  if (!('outcome' in packet)) throw fail('Select a topic maintenance evidence packet.');
+  if (packet.version === 2 && 'sourceKind' in packet) {
+    if (
+      packet.sourceKind !== 'obsidian' ||
+      packet.outcome !== 'ready' ||
+      !packet.canDraft ||
+      typeof packet.body !== 'string' ||
+      !packet.paragraphs
+    )
+      throw fail('Explicitly capture an inspected note fragment before drafting.');
+    return {...packet, body: packet.body, paragraphs: packet.paragraphs};
+  }
   if (
+    packet.version !== 1 ||
+    'sourceKind' in packet ||
     !('outcome' in packet) ||
     !('body' in packet) ||
     !('paragraphs' in packet) ||
@@ -102,7 +126,11 @@ export function readyEvidence(
   };
 }
 
-export function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMaintenanceDraftBasisV1 {
+type ReadyCodePacket = Extract<ReturnType<typeof readyEvidence>, {version: 1}>;
+export function basisFromPacket(packet: ReadyCodePacket): TopicMaintenanceDraftBasisV1;
+export function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMaintenanceDraftBasis;
+export function basisFromPacket(packet: ReturnType<typeof readyEvidence>): TopicMaintenanceDraftBasis {
+  if (packet.version === 2) return topicObsidianBasisFromPacket(packet);
   const handles = packet.sources.flatMap(source => [
     {id: `historical:${source.citationId}`, citationId: source.citationId, variant: 'historical' as const},
     {id: `current:${source.citationId}`, citationId: source.citationId, variant: 'current' as const},
@@ -120,7 +148,16 @@ export function basisFromPacket(packet: ReturnType<typeof readyEvidence>): Topic
   });
 }
 
-export function reviewEvidenceFromPacket(packet: ReturnType<typeof readyEvidence>) {
+export function reviewEvidenceFromPacket(
+  packet: ReadyCodePacket,
+): readonly import('@threadnote/memory/topic-maintenance-draft').TopicMaintenanceReviewEvidenceV1[];
+export function reviewEvidenceFromPacket(
+  packet: ReturnType<typeof readyEvidence>,
+): TopicMaintenanceReviewPayload['reviewEvidence'];
+export function reviewEvidenceFromPacket(
+  packet: ReturnType<typeof readyEvidence>,
+): TopicMaintenanceReviewPayload['reviewEvidence'] {
+  if (packet.version === 2) return topicObsidianReviewEvidenceFromPacket(packet);
   if (
     packet.sources.some(
       source =>
@@ -162,12 +199,12 @@ export function reviewEvidenceFromPacket(packet: ReturnType<typeof readyEvidence
 }
 
 export function sameRelevantEvidence(
-  left: TopicMaintenanceReviewPayloadV1['reviewEvidence'],
-  right: TopicMaintenanceReviewPayloadV1['reviewEvidence'],
+  left: TopicMaintenanceReviewPayload['reviewEvidence'],
+  right: TopicMaintenanceReviewPayload['reviewEvidence'],
 ) {
-  const relevant = (entries: TopicMaintenanceReviewPayloadV1['reviewEvidence']) =>
+  const relevant = (entries: TopicMaintenanceReviewPayload['reviewEvidence']) =>
     entries.map(entry =>
-      entry.handleId.startsWith('current:')
+      !('sourceKind' in entry) && entry.handleId.startsWith('current:')
         ? {
             ...entry,
             source: {
@@ -181,7 +218,7 @@ export function sameRelevantEvidence(
   return JSON.stringify(relevant(left)) === JSON.stringify(relevant(right));
 }
 
-export function sameRelevantBasis(left: TopicMaintenanceDraftBasisV1, right: TopicMaintenanceDraftBasisV1) {
+export function sameRelevantBasis(left: TopicMaintenanceDraftBasis, right: TopicMaintenanceDraftBasis) {
   return (
     left.version === right.version &&
     left.targetUri === right.targetUri &&
@@ -196,7 +233,7 @@ export function sameRelevantBasis(left: TopicMaintenanceDraftBasisV1, right: Top
 
 export function topicMaintenanceDraftPrompt(
   packet: ReturnType<typeof readyEvidence>,
-  basis: TopicMaintenanceDraftBasisV1,
+  basis: TopicMaintenanceDraftBasis,
   error?: string,
   priorJson?: string,
 ) {
@@ -208,18 +245,39 @@ export function topicMaintenanceDraftPrompt(
     targetUri: packet.targetUri,
     paragraphs: basis.paragraphs.map(paragraph => ({...paragraph, text: acceptedParagraphs[paragraph.ordinal]})),
     additionalDependencies: packet.additionalDependencies ?? [],
-    sources: packet.sources.map(source => ({
-      sourceIndex: dispositionSources.indexOf(`current:${source.citationId}`),
-      citationId: source.citationId,
-      historicalHandle: `historical:${source.citationId}`,
-      currentHandle: `current:${source.citationId}`,
-      historical: {path: source.oldExcerpt.source.path, excerpt: source.oldExcerpt.content},
-      current: {path: source.newExcerpt.source.path, excerpt: source.newExcerpt.content},
-      excerptChanged: source.oldExcerpt.content !== source.newExcerpt.content,
-    })),
+    sources:
+      packet.version === 2
+        ? topicObsidianReviewEvidenceFromPacket(packet)
+            .filter(item => item.handleId.startsWith('current:'))
+            .map((item, sourceIndex) => ({
+              sourceIndex,
+              currentHandle: item.handleId,
+              current: {path: item.citation.relativePath, excerpt: item.content},
+              historical: topicObsidianReviewEvidenceFromPacket(packet)
+                .filter(old => old.handleId.startsWith('historical:'))
+                .map(old => ({path: old.citation.relativePath, excerpt: old.content})),
+            }))
+        : packet.sources.map(source => ({
+            sourceIndex: dispositionSources.indexOf(`current:${source.citationId}`),
+            citationId: source.citationId,
+            historicalHandle: `historical:${source.citationId}`,
+            currentHandle: `current:${source.citationId}`,
+            historical: {path: source.oldExcerpt.source.path, excerpt: source.oldExcerpt.content},
+            current: {path: source.newExcerpt.source.path, excerpt: source.newExcerpt.content},
+            excerptChanged: source.oldExcerpt.content !== source.newExcerpt.content,
+          })),
   };
   const changedSources = new Set(
-    packet.sources
+    (packet.version === 2
+      ? basis.handles
+          .filter(handle => handle.variant === 'current')
+          .map(handle => ({
+            citationId: handle.citationId,
+            oldExcerpt: {content: packet.obsidian.active?.fragment},
+            newExcerpt: {content: packet.obsidian.capture?.fragment},
+          }))
+      : packet.sources
+    )
       .filter(source => source.oldExcerpt.content !== source.newExcerpt.content)
       .map(source => source.citationId),
   );
@@ -243,8 +301,8 @@ export function topicMaintenanceDraftPrompt(
     'paragraphDispositions is {version:1,entries:[{ordinal,disposition,sourceIndices,rationale}]}. Include exactly one disposition for EVERY eligible direct descriptive paragraph, including unchanged claims. Use exact ordinals from the replaceable list; omit beforeHash and supportHandles from disposition entries.',
     'Disposition sourceIndices refer to Packet.sources.sourceIndex, assigned by the stable order of current basis handles. Each index selects exactly that current source handle; hashes are bound from the immutable paragraph basis. update requires a matching operation and identical current support selection. revalidate means explicitly checked unchanged against current declared evidence, with nonempty sourceIndices. unresolved means manual review is needed, no operation and empty sourceIndices; explain the question in rationale. Never silently omit an eligible paragraph. These dispositions account for review, not proof of semantic correctness.',
     'Disposition source indices must select current handles declared for that paragraph or declared additional dependencies. Never use a historical or unrelated paragraph handle.',
-    'Each operation supportHandles uses exact current:tncc_... handles, never bare tncc IDs or historical handles.',
-    'reviewedHandles uses exact current:tncc_... handles, never bare IDs or historical handles.',
+    'Each operation supportHandles uses exact current:<citationId> handles, never bare IDs or historical handles.',
+    'reviewedHandles uses exact current:<citationId> handles, never bare IDs or historical handles.',
     'Outcome: propose-update, propose-revalidation, policy-conflict, or insufficient-evidence.',
     'For no-text-change revalidation, use zero operations and cite at least one current reviewed handle. For update, use only eligible ordinals that need a supported replacement and current support handles.',
     `Identity: ${JSON.stringify({targetHash: basis.targetHash, observationRevision: basis.observationRevision, packetDigest: basis.packetDigest})}`,
@@ -279,7 +337,7 @@ export function topicMaintenanceDraftPrompt(
 
 function sameGeneration(
   review: CandidateReview,
-  basis: TopicMaintenanceDraftBasisV1,
+  basis: TopicMaintenanceDraftBasis,
   identity: {readonly agent: string; readonly model: string; readonly modelVersion: string; readonly settings: string},
 ) {
   const maintenance = review.maintenance;
@@ -296,8 +354,8 @@ function sameGeneration(
 
 export function privateReview(
   prior: CandidateReview | undefined,
-  basis: TopicMaintenanceDraftBasisV1,
-  payload: TopicMaintenanceReviewPayloadV1,
+  basis: TopicMaintenanceDraftBasis,
+  payload: TopicMaintenanceReviewPayload,
   project: string,
   topic: string,
   semanticEvidence: readonly string[],
@@ -323,7 +381,7 @@ export function privateReview(
     topic,
   };
   return {
-    version: 2,
+    version: basis.version === 2 ? 3 : 2,
     reviewId,
     revision,
     createdAt: prior?.createdAt ?? at,
@@ -339,6 +397,7 @@ export function privateReview(
       {action: 'create_review' as const, at, candidateId, reviewId, revision},
     ].slice(-100),
     maintenance: payload,
+    ...(prior?.maintenanceCapture ? {maintenanceCapture: prior.maintenanceCapture} : {}),
     ...(prior?.maintenanceClosedConflict === undefined
       ? {}
       : {maintenanceClosedConflict: prior.maintenanceClosedConflict}),
@@ -404,6 +463,17 @@ export const readTopicMaintenanceDraft = Effect.fn('topicMaintenance.readDraft')
 ) {
   const review = yield* loadCandidateReview(config.agentContextHome, reviewId);
   if (!review.maintenance) return yield* fail('The selected review is not a topic maintenance proposal.');
+  if (review.maintenance.version === 2) {
+    const record = (yield* readMemoryRecordsByUri(config, [review.maintenance.basis.targetUri]))[0];
+    if (!record) return yield* fail('The imported topic is unavailable.');
+    const approval = review.maintenanceApproval;
+    const baseline =
+      approval && record.content === approval.preview.content
+        ? parseMemoryDocument(record.uri, approval.preview.beforeContent)
+        : record;
+    if (!baseline) return yield* fail('The imported review baseline is unavailable.');
+    yield* verifyTopicObsidianReviewSource(config, baseline, review.maintenance);
+  }
   return review;
 });
 
@@ -427,14 +497,19 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
       if (
         !topicDraftGenerationScopeSupported(
           basis,
-          packet.sources.some(source => source.oldExcerpt.content !== source.newExcerpt.content),
+          packet.version === 2
+            ? packet.obsidian.active?.fragment !== packet.obsidian.capture?.fragment
+            : packet.sources.some(source => source.oldExcerpt.content !== source.newExcerpt.content),
         )
       )
         return yield* fail(
           'Changed source excerpts have no direct descriptive paragraph eligible for automatic repair. Review this topic manually.',
         );
       const reviewEvidence = yield* Effect.try({
-        try: () => validateTopicMaintenanceReviewEvidence(basis, reviewEvidenceFromPacket(packet)),
+        try: () =>
+          basis.version === 2
+            ? validateTopicMaintenanceObsidianReviewEvidence(basis, reviewEvidenceFromPacket(packet))
+            : validateTopicMaintenanceReviewEvidence(basis, reviewEvidenceFromPacket(packet)),
         catch: cause => fail(cause instanceof Error ? cause.message : 'Verified topic evidence is unavailable.'),
       });
       const models = yield* availableConsolidationModels(config, backend);
@@ -449,7 +524,8 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
         reviewId,
         loadCandidateReviewOptional(config.agentContextHome, reviewId),
       );
-      if (existing && !existing.maintenance) return yield* fail('The target review identity is already occupied.');
+      if (existing && !existing.maintenance && !(basis.version === 2 && existing.maintenanceCapture))
+        return yield* fail('The target review identity is already occupied.');
       const currentState = existing?.candidates[0]?.state;
       if (currentState === 'applying')
         return yield* blocked(existing!, 'review-applying', 'The topic review is currently applying.');
@@ -485,7 +561,7 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
           'review-preview-pending',
           'A reviewed topic preview is pending. Resolve it before regenerating.',
         );
-      if (existing && currentState === 'pending' && !sameGeneration(existing, basis, identity))
+      if (existing?.maintenance && currentState === 'pending' && !sameGeneration(existing, basis, identity))
         return yield* blocked(
           existing,
           'review-pending',
@@ -571,8 +647,8 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
               return yield* fail('The selected model returned invalid topic JSON after one bounded repair attempt.');
             const payload = yield* Effect.try({
               try: () =>
-                validateTopicMaintenanceReviewPayload({
-                  version: 1,
+                validateTopicMaintenanceReview({
+                  ...(basis.version === 2 ? {version: 2, sourceKind: 'obsidian'} : {version: 1}),
                   basis,
                   proposal,
                   reviewEvidence,

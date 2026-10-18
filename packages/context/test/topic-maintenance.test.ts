@@ -7,7 +7,7 @@ import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {MEMORY_SCHEMA_VERSION, createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
-import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import {isCodeTopicMaintenanceManifest, proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {recordVerifiedCodeGraphLocalAssociation} from '@threadnote/graph/local_provenance';
 import {CodeGraphLanguagePackRegistry, createCodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {codeGraphLayout} from '@threadnote/graph/layout';
@@ -94,6 +94,7 @@ const evidence = (hash: string) => ({
 
 const acceptComparison = (record: MemoryRecord, accepted: MemoryCodeCitationV1) => {
   const manifest = record.metadata.topicMaintenance!;
+  if (!isCodeTopicMaintenanceManifest(manifest)) throw new Error('Expected the code fixture.');
   const declaredIds = [
     ...new Set([
       ...manifest.paragraphs.flatMap(paragraph => paragraph.citationIds),

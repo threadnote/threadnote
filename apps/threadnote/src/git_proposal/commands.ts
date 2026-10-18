@@ -312,7 +312,7 @@ export const buildReviewedKnowledgeDeltaGitProposal = Effect.fn('gitProposal.bui
           `Candidate review revision changed: expected ${options.revision}, current ${review.revision}. Review it again before export.`,
         );
       }
-      if (review.maintenance)
+      if (review.maintenance || review.maintenanceCapture)
         return yield* operationError('Topic maintenance requires the dedicated reviewed Git proposal adapter.');
       if (options.approved !== true)
         return yield* operationError('Git proposal export requires --approved after explicit shared-mutation review.');
@@ -356,6 +356,8 @@ export const buildReviewedGitProposal = Effect.fn('gitProposal.buildReviewedVari
   options: Omit<KnowledgeDeltaGitProposalExportOptionsV1, 'output'>,
 ) {
   const selected = yield* loadCandidateReview(config.agentContextHome, options.reviewId);
+  if (selected.maintenanceCapture || selected.maintenance?.version === 2)
+    return yield* operationError('Private imported topic reviews cannot be exported.');
   if (!selected.maintenance) return yield* buildReviewedKnowledgeDeltaGitProposal(config, options);
   return yield* withCandidateReviewLock(
     config.agentContextHome,

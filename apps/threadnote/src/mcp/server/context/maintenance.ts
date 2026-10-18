@@ -12,7 +12,9 @@ import {
   retireContextMaintenanceAnchor,
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
+import {captureTopicObsidianEvidence} from '../../../memory/context/maintenance_obsidian.js';
 import {readTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
+import {projectTopicReviewDecisionAcknowledgement} from '../../../memory/context/maintenance_review_projection.js';
 import {requestTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
 import {MAX_TOPIC_MAINTENANCE_BYTES} from '@threadnote/memory/topic-maintenance';
 import {MAX_TOPIC_MAINTENANCE_DRAFT_BYTES} from '@threadnote/memory/topic-maintenance-draft';
@@ -22,6 +24,7 @@ import {
   applyTopicEnrollment,
 } from '../../../memory/maintenance/topic_enrollment.js';
 import {managerTopicReviewCaseIdentity, projectManagerTopicReview} from '../../../manager/topic_review.js';
+import {registerTopicDependencyExpansionTools} from './topic_expansion.js';
 
 class InvalidTopicEnrollmentJson extends Schema.TaggedError<InvalidTopicEnrollmentJson>()(
   'InvalidTopicEnrollmentJson',
@@ -34,6 +37,7 @@ import {
 } from '../../../memory/context/maintenance_review.js';
 
 export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, config: RuntimeConfig): void {
+  registerTopicDependencyExpansionTools(server, config);
   server.registerTool(
     'context_topic_enrollment',
     {
@@ -63,8 +67,9 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           const result = yield* inspectTopicEnrollment(config, input.uri);
           return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
         }
-        const cwd = input.callerCwd ?? '';
-        if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('Topic enrollment callerCwd must be absolute.');
+        const cwd = input.callerCwd;
+        if (cwd !== undefined && !(yield* Path.Path).isAbsolute(cwd))
+          return argumentError('Topic enrollment callerCwd must be absolute.');
         if (
           input.project !== undefined &&
           (!input.project.trim() || new TextEncoder().encode(input.project).byteLength > 256)
@@ -100,6 +105,39 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
                 revision: input.revision ?? '',
                 approved: input.approved === true,
               });
+        return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+      }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
+  );
+  server.registerTool(
+    'context_maintenance_capture',
+    {
+      annotations: {readOnlyHint: false, destructiveHint: false, idempotentHint: true},
+      description:
+        'Explicitly approve and retain one exact inspected fragment for a private imported topic. Retry reuses the original retention deadline.',
+      inputSchema: {
+        caseId: McpInput.string('Exact imported maintenance case'),
+        expectedContentHash: McpInput.string('Exact inspected target hash'),
+        observationRevision: McpInput.string('Exact observation revision'),
+        inspectionDigest: McpInput.string('Exact inspected source digest'),
+        fragmentStart: McpInput.integer('UTF16 start offset', {minimum: 0}),
+        fragmentEnd: McpInput.integer('UTF16 end offset', {minimum: 1}),
+        retentionDays: McpInput.integer('Retention days; default 90', {minimum: 1, maximum: 365}),
+        approved: McpInput.boolean('Explicit capture approval'),
+      },
+    },
+    input =>
+      Effect.gen(function* () {
+        const review = yield* captureTopicObsidianEvidence(config, {
+          caseId: input.caseId ?? '',
+          expectedContentHash: input.expectedContentHash ?? '',
+          observationRevision: input.observationRevision ?? '',
+          inspectionDigest: input.inspectionDigest ?? '',
+          fragmentStart: input.fragmentStart ?? -1,
+          fragmentEnd: input.fragmentEnd ?? -1,
+          retentionDays: input.retentionDays,
+          approved: input.approved === true,
+        });
+        const result = {reviewId: review.reviewId, revision: review.revision, state: review.maintenanceCapture?.stage};
         return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),
   );
@@ -219,7 +257,9 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
                     action: input.action,
                     caseId: input.caseId,
                   });
-        const projection = projectManagerTopicReview(result, yield* managerTopicReviewCaseIdentity(config, result));
+        const projection =
+          projectTopicReviewDecisionAcknowledgement(result, input.action, input.caseId) ??
+          projectManagerTopicReview(result, yield* managerTopicReviewCaseIdentity(config, result));
         if (!projection) return argumentError('The selected review is not a topic maintenance proposal.');
         return {content: [{type: 'text' as const, text: JSON.stringify(projection)}], structuredContent: projection};
       }).pipe(Effect.catch(error => Effect.succeed(mcpErrorResult(error)))),

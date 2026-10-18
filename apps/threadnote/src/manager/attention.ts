@@ -18,6 +18,7 @@ import {collectContextHealth} from '../memory/context/health_commands.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
+import {readTopicMaintenanceDraft} from '../memory/context/maintenance_draft.js';
 
 type ManagerAttentionResponse =
   | {readonly body: ManagerContextHealthResponseV1 | ManagerReviewInboxResponseV1; readonly status: 200}
@@ -47,43 +48,55 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
       } satisfies ManagerAttentionResponse;
     }
     const reviews = (yield* listCandidateReviews(request.config.agentContextHome)).filter(
-      review => !project || review.project === project,
+      review => (!project || review.project === project) && !(review.maintenanceCapture && !review.maintenance),
     );
     const pendingCount = reviews.reduce(
       (count, review) => count + review.candidates.filter(candidate => isPending(candidate.state)).length,
       0,
     );
+    const privateAccess = new Set<string>();
+    for (const review of reviews) {
+      if (review.maintenance?.version !== 2) continue;
+      const checked = yield* readTopicMaintenanceDraft(request.config, review.reviewId).pipe(Effect.result);
+      if (Result.isSuccess(checked) && JSON.stringify(checked.success) === JSON.stringify(review))
+        privateAccess.add(review.reviewId);
+    }
     const items = reviews
-      .map(review => ({
-        ...(review.maintenance ? {kind: 'topic-maintenance' as const} : {}),
-        candidates: review.candidates
-          .filter(candidate =>
-            view === 'history'
-              ? !isPending(candidate.state)
-              : view === 'deferred'
-                ? candidate.state === 'deferred'
-                : view === 'pending'
-                  ? candidate.state === 'pending' || candidate.state === 'applying'
-                  : isPending(candidate.state),
-          )
-          .map(candidate => ({
-            candidateId: candidate.candidateId,
-            categories: candidate.categories,
-            comparison: candidate.comparison,
-            confidence: candidate.confidence,
-            proposedText: candidate.proposedText,
-            reason: candidate.reason,
-            recommendation: candidate.recommendation,
-            state: candidate.state,
-            ...(candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
-          })),
-        createdAt: review.createdAt,
-        project: review.project,
-        reviewId: review.reviewId,
-        revision: review.revision,
-        task: review.task,
-        topic: review.topic,
-      }))
+      .map(review => {
+        const withheld = review.maintenance?.version === 2 && !privateAccess.has(review.reviewId);
+        return {
+          ...(review.maintenance ? {kind: 'topic-maintenance' as const} : {}),
+          candidates: review.candidates
+            .filter(candidate =>
+              view === 'history'
+                ? !isPending(candidate.state)
+                : view === 'deferred'
+                  ? candidate.state === 'deferred'
+                  : view === 'pending'
+                    ? candidate.state === 'pending' || candidate.state === 'applying'
+                    : isPending(candidate.state),
+            )
+            .map(candidate => ({
+              candidateId: candidate.candidateId,
+              categories: candidate.categories,
+              comparison: candidate.comparison,
+              confidence: candidate.confidence,
+              proposedText: withheld ? '' : candidate.proposedText,
+              reason: withheld
+                ? 'Source access is unavailable. Refresh source access before opening this update.'
+                : candidate.reason,
+              recommendation: candidate.recommendation,
+              state: candidate.state,
+              ...(withheld || candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
+            })),
+          createdAt: review.createdAt,
+          project: review.project,
+          reviewId: review.reviewId,
+          revision: review.revision,
+          task: withheld ? 'Private topic update' : review.task,
+          topic: withheld ? 'Private topic update' : review.topic,
+        };
+      })
       .filter(review => review.candidates.length > 0)
       .sort(
         (left, right) => right.createdAt.localeCompare(left.createdAt) || left.reviewId.localeCompare(right.reviewId),

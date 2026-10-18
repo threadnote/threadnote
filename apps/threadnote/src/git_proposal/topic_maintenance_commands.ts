@@ -218,6 +218,7 @@ export const buildReviewedTopicMaintenanceGitProposal = Effect.fn('gitProposal.b
 ) {
   if (
     !review.maintenance ||
+    review.maintenance.version !== 1 ||
     review.maintenanceApproval?.stage !== 'preview' ||
     review.maintenanceApproval.reviewRevision !== review.revision ||
     !options.sourceCwd
@@ -235,11 +236,15 @@ export const buildReviewedTopicMaintenanceGitProposal = Effect.fn('gitProposal.b
   const preview = review.maintenanceApproval.preview;
   const reproduced = yield* Effect.try({
     try: () =>
-      prepareTopicMaintenanceAcceptance(baseline.record, review.maintenance!, {
-        reviewId: review.reviewId,
-        approvedAt: preview.approvedAt,
-        editedDraftJson: JSON.stringify(preview.approvedProposal.draft),
-      }),
+      prepareTopicMaintenanceAcceptance(
+        baseline.record,
+        review.maintenance! as import('@threadnote/memory/topic-maintenance-draft').TopicMaintenanceReviewPayloadV1,
+        {
+          reviewId: review.reviewId,
+          approvedAt: preview.approvedAt,
+          editedDraftJson: JSON.stringify(preview.approvedProposal.draft),
+        },
+      ),
     catch: cause => fail(cause instanceof Error ? cause.message : 'The exact shared document cannot be reproduced.'),
   });
   if (canonicalJson(reproduced) !== canonicalJson(preview))

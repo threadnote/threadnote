@@ -5,7 +5,32 @@ import type {
 } from '@threadnote/memory/topic-maintenance-draft';
 import type {TopicMaintenanceParagraphV1, TopicMaintenanceDependencyV1} from '@threadnote/memory/topic-maintenance';
 
+/** Recovery metadata never carries accepted memory, source, proposal or approval text. */
+export interface ManagerTopicReviewRecoveryV1 {
+  readonly version: 1;
+  readonly kind: 'topic-maintenance-recovery';
+  readonly project: string;
+  readonly reviewId: string;
+  readonly revision: number;
+  readonly state: ManagerTopicReviewV1['state'];
+  readonly caseId?: string;
+  readonly recovery?: {readonly action: 'reject'};
+}
+export type ManagerTopicReviewResponseV1 = ManagerTopicReviewV1 | ManagerTopicReviewRecoveryV1;
+
 export type ManagerTopicReviewActionV1 =
+  | {
+      readonly action: 'capture';
+      readonly project: string;
+      readonly caseId: string;
+      readonly expectedContentHash: string;
+      readonly observationRevision: string;
+      readonly inspectionDigest: string;
+      readonly fragmentStart: number;
+      readonly fragmentEnd: number;
+      readonly retentionDays?: number;
+      readonly approved: true;
+    }
   | {
       readonly action: 'generate' | 'regenerate';
       readonly project: string;
@@ -40,6 +65,7 @@ export type ManagerTopicReviewActionV1 =
 export interface ManagerTopicReviewV1 {
   readonly version: 1;
   readonly kind: 'topic-maintenance';
+  readonly sourceKind?: 'code' | 'obsidian';
   readonly project: string;
   readonly reviewId: string;
   readonly revision: number;

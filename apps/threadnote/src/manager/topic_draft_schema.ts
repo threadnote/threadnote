@@ -1,14 +1,14 @@
 import {Schema} from 'effect';
 import {
   topicMaintenanceParagraphEligible,
-  type TopicMaintenanceDraftBasisV1,
+  type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 
-export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasisV1['paragraphs'][number]) {
+export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasis['paragraphs'][number]) {
   return topicMaintenanceParagraphEligible(paragraph);
 }
 
-export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftBasisV1, sourceExcerptChanged: boolean) {
+export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftBasis, sourceExcerptChanged: boolean) {
   return (
     !sourceExcerptChanged ||
     basis.paragraphs.some(topicDraftGenerationEligible) ||
@@ -16,12 +16,12 @@ export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftB
   );
 }
 
-export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasisV1) {
+export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasis) {
   return basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
 }
 
 /** Generation grammar only; the memory-owned validator remains the final authority. */
-export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
+export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
   const currentHandles = topicDraftCurrentSourceHandles(basis);
   const currentHandle = currentHandles.length ? Schema.Literals(currentHandles) : Schema.String;
@@ -98,7 +98,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
   });
 }
 
-export function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input: unknown) {
+export function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasis, input: unknown) {
   const {decision, ...identity} = Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(
     input,
   );

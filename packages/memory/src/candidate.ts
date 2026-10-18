@@ -1,4 +1,9 @@
+import {
+  validateTopicDependencyExpansionJournal,
+  type TopicDependencyExpansionJournal,
+} from './topic-maintenance-expansion.js';
 import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {topicMaintenanceObsidianCitationId} from './topic-maintenance.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {safeChildDirectoryNames, scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
@@ -13,12 +18,14 @@ import {
 } from '@threadnote/memory/code/citation';
 import type {MemoryKind} from '@threadnote/memory/types';
 import {
-  validateTopicMaintenanceReviewPayload,
-  type TopicMaintenanceReviewPayloadV1,
+  validateTopicMaintenanceReview,
+  validateTopicMaintenanceObsidianCaptureIntent,
+  type TopicMaintenanceObsidianCaptureIntentV1,
+  type TopicMaintenanceReviewPayload,
 } from './topic-maintenance-draft.js';
 import {
-  validateTopicMaintenanceApprovalReceipt,
-  type TopicMaintenanceApprovalReceiptV1,
+  validateTopicMaintenanceSourceApprovalReceipt,
+  type TopicMaintenanceApprovalReceipt,
 } from './topic-maintenance-acceptance.js';
 
 export type CandidateCategory = 'decision' | 'handoff' | 'invariant' | 'preference';
@@ -119,12 +126,14 @@ export interface CandidateReview {
   readonly sourceCommit?: string;
   readonly sourceSessionId?: string;
   readonly structuredCloseout?: StructuredCloseoutV1;
-  readonly maintenance?: TopicMaintenanceReviewPayloadV1;
-  readonly maintenanceApproval?: TopicMaintenanceApprovalReceiptV1;
+  readonly maintenance?: TopicMaintenanceReviewPayload;
+  readonly maintenanceCapture?: TopicMaintenanceObsidianCaptureIntentV1;
+  readonly maintenanceApproval?: TopicMaintenanceApprovalReceipt;
   readonly maintenanceClosedConflict?: TopicMaintenanceClosedConflictV1;
   readonly task: string;
   readonly topic: string;
-  readonly version: 2;
+  readonly version: 2 | 3 | 4;
+  readonly dependencyExpansion?: TopicDependencyExpansionJournal;
 }
 
 /** Bounded identity of the latest explicitly closed topic conflict after its full approval is superseded. */
@@ -141,7 +150,7 @@ function validTopicClosedConflict(review: CandidateReview): boolean {
   const closed = review.maintenanceClosedConflict;
   if (closed === undefined) return true;
   if (
-    !review.maintenance ||
+    (!review.maintenance && !review.maintenanceCapture) ||
     typeof closed !== 'object' ||
     closed === null ||
     Object.keys(closed).sort().join(',') !==
@@ -150,7 +159,7 @@ function validTopicClosedConflict(review: CandidateReview): boolean {
     !Number.isSafeInteger(closed.reviewRevision) ||
     closed.reviewRevision < 1 ||
     closed.reviewRevision > review.revision ||
-    closed.targetUri !== review.maintenance.basis.targetUri ||
+    closed.targetUri !== (review.maintenance?.basis.targetUri ?? review.maintenanceCapture?.targetUri) ||
     ![closed.beforeContentHash, closed.contentHash, closed.approvalDigest].every(value => /^[a-f0-9]{64}$/u.test(value))
   )
     return false;
@@ -668,9 +677,16 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
   agentContextHome: string,
   review: CandidateReview,
 ) {
+  assertExpansionReview(review);
+  assertImportedReviewCapture(review);
+  if (review.maintenanceCapture !== undefined)
+    yield* Effect.try({
+      try: () => validateTopicMaintenanceObsidianCaptureIntent(review.maintenanceCapture),
+      catch: cause => CandidateMemoryError.make({message: errorText(cause)}),
+    });
   if (review.maintenance !== undefined)
     yield* Effect.try({
-      try: () => validateTopicMaintenanceReviewPayload(review.maintenance),
+      try: () => validateTopicMaintenanceReview(review.maintenance),
       catch: cause => CandidateMemoryError.make({message: errorText(cause)}),
     });
   if (!validTopicClosedConflict(review))
@@ -679,7 +695,7 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
     yield* Effect.try({
       try: () => {
         if (!review.maintenance) throw new Error('Approval requires a maintenance review.');
-        validateTopicMaintenanceApprovalReceipt(
+        validateTopicMaintenanceSourceApprovalReceipt(
           review.maintenanceApproval,
           review.maintenance,
           review.reviewId,
@@ -1227,6 +1243,8 @@ function pruneCandidateReviews(
 }
 
 function candidateReviewIsTerminal(review: CandidateReview | undefined): boolean {
+  if (review?.dependencyExpansion)
+    return review.dependencyExpansion.stage === 'written' || review.dependencyExpansion.stage === 'conflict';
   return (
     review?.candidates.every(
       candidate => candidate.state === 'applied' || candidate.state === 'conflict' || candidate.state === 'rejected',
@@ -1235,6 +1253,7 @@ function candidateReviewIsTerminal(review: CandidateReview | undefined): boolean
 }
 
 function candidateReviewRetentionPriority(review: CandidateReview | undefined): number {
+  if (review?.dependencyExpansion && !candidateReviewIsTerminal(review)) return 3;
   if (!review || candidateReviewIsTerminal(review)) {
     return 0;
   }
@@ -1252,7 +1271,7 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     typeof value !== 'object' ||
     value === null ||
     !('version' in value) ||
-    (value.version !== 1 && value.version !== 2) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4) ||
     !('reviewId' in value) ||
     typeof value.reviewId !== 'string' ||
     !('revision' in value) ||
@@ -1268,14 +1287,20 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     readonly maintenanceApproval?: unknown;
     readonly maintenanceClosedConflict?: unknown;
     readonly structuredCloseout?: unknown;
-    readonly version: 1 | 2;
+    readonly version: 1 | 2 | 3 | 4;
   };
   let codeCitations: readonly MemoryCodeCitationV1[] = [];
-  if (review.version !== 2 && (review.maintenance !== undefined || review.maintenanceApproval !== undefined))
+  if (
+    review.version !== 2 &&
+    review.version !== 3 &&
+    (review.maintenance !== undefined ||
+      review.maintenanceApproval !== undefined ||
+      review.maintenanceCapture !== undefined)
+  )
     throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
   if (review.maintenanceApproval !== undefined && review.maintenance === undefined)
     throw CandidateMemoryError.make({message: 'maintenance approval requires a review payload'});
-  if (review.version === 2) {
+  if (review.version === 2 || review.version === 3 || review.version === 4) {
     if (!Array.isArray(review.codeCitations)) throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     try {
       codeCitations = review.codeCitations.map(assertMemoryCodeCitation);
@@ -1293,24 +1318,96 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     ...(review.structuredCloseout === undefined
       ? {}
       : {structuredCloseout: parseStructuredCloseout(review.structuredCloseout)}),
-    ...(review.maintenance === undefined
+    ...(review.maintenanceCapture === undefined
       ? {}
-      : {maintenance: validateTopicMaintenanceReviewPayload(review.maintenance)}),
+      : {maintenanceCapture: validateTopicMaintenanceObsidianCaptureIntent(review.maintenanceCapture)}),
+    ...(review.maintenance === undefined ? {} : {maintenance: validateTopicMaintenanceReview(review.maintenance)}),
     ...(review.maintenanceApproval === undefined
       ? {}
       : {
-          maintenanceApproval: validateTopicMaintenanceApprovalReceipt(
+          maintenanceApproval: validateTopicMaintenanceSourceApprovalReceipt(
             review.maintenanceApproval,
             review.maintenance!,
             review.reviewId,
             review.revision,
           ),
         }),
-    version: 2,
+    version: review.version === 4 ? 4 : review.version === 3 ? 3 : 2,
   };
   if (!validTopicClosedConflict(parsed))
     throw CandidateMemoryError.make({message: 'invalid closed topic conflict receipt'});
+  assertExpansionReview(parsed);
+  assertImportedReviewCapture(parsed);
   return parsed;
+}
+
+/** Expansion has no generic candidates; all writes require its exact dedicated approval. */
+function assertExpansionReview(review: CandidateReview): void {
+  if (review.version !== 4 && review.dependencyExpansion === undefined) return;
+  if (
+    review.version !== 4 ||
+    !review.dependencyExpansion ||
+    review.candidates.length ||
+    review.codeCitations.length ||
+    review.maintenance ||
+    review.maintenanceCapture ||
+    review.maintenanceApproval ||
+    review.maintenanceClosedConflict ||
+    review.structuredCloseout
+  )
+    throw CandidateMemoryError.make({
+      message: 'Expansion requires its closed v4 journal envelope and dedicated apply route.',
+    });
+  const allowed = [
+    'version',
+    'reviewId',
+    'revision',
+    'createdAt',
+    'project',
+    'topic',
+    'task',
+    'outcome',
+    'sourceAgentClient',
+    'auditEvents',
+    'candidates',
+    'codeCitations',
+    'dependencyExpansion',
+  ];
+  if (Object.keys(review).some(key => !allowed.includes(key)))
+    throw CandidateMemoryError.make({message: 'Unknown expansion journal field.'});
+  validateTopicDependencyExpansionJournal(review.dependencyExpansion);
+  if (
+    typeof review.createdAt !== 'string' ||
+    !Number.isFinite(Date.parse(review.createdAt)) ||
+    new Date(review.createdAt).toISOString() !== review.createdAt
+  )
+    throw CandidateMemoryError.make({message: 'Expansion capture reservation needs a canonical fixed timestamp.'});
+  if (review.reviewId !== `review-${review.dependencyExpansion.preview.revision.slice(0, 24)}` || review.revision !== 1)
+    throw CandidateMemoryError.make({message: 'Expansion journal approval identity changed.'});
+}
+
+function assertImportedReviewCapture(review: CandidateReview): void {
+  const payload = review.maintenance;
+  if (
+    (review.version === 3 && (!review.maintenanceCapture || payload?.version === 1)) ||
+    (review.version !== 3 && (review.maintenanceCapture || payload?.version === 2))
+  )
+    throw CandidateMemoryError.make({
+      message: 'Imported capture and review data require their closed v3 journal envelope.',
+    });
+  if (payload?.version !== 2) return;
+  const capture = review.maintenanceCapture;
+  if (
+    !capture ||
+    capture.stage !== 'captured' ||
+    !capture.citation ||
+    capture.targetUri !== payload.basis.targetUri ||
+    capture.targetHash !== payload.basis.targetHash ||
+    capture.observationRevision !== payload.basis.observationRevision ||
+    topicMaintenanceObsidianCitationId(capture.citation) !==
+      topicMaintenanceObsidianCitationId(payload.basis.currentEvidence)
+  )
+    throw CandidateMemoryError.make({message: 'Imported review requires its exact approved capture intent.'});
 }
 
 function parseStructuredCloseout(value: unknown): StructuredCloseoutV1 {

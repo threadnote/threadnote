@@ -4,7 +4,7 @@ import {withMemoryUriLocks} from '@threadnote/memory/lock';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import {
   assertTopicMaintenanceAcceptanceCoverage,
-  prepareTopicMaintenanceAcceptance,
+  prepareTopicMaintenanceSourceAcceptance,
 } from '@threadnote/memory/topic-maintenance-acceptance';
 import {
   candidateReviewWithState,
@@ -33,14 +33,14 @@ export interface TopicReviewDecisionInput {
 export interface TopicReviewPrepareInput {
   readonly reviewId: string;
   readonly revision: number;
-  readonly sourceCwd: string;
+  readonly sourceCwd?: string;
   readonly editedDraftJson?: string;
 }
 
 export interface TopicReviewApplyInput {
   readonly reviewId: string;
   readonly revision: number;
-  readonly sourceCwd: string;
+  readonly sourceCwd?: string;
   readonly approvalDigest: string;
   readonly approved: boolean;
 }
@@ -86,7 +86,7 @@ export const prepareTopicMaintenanceReview = Effect.fn('topicMaintenance.prepare
       const approvedAt = DateTime.formatIso(yield* DateTime.now);
       const preview = yield* Effect.try({
         try: () =>
-          prepareTopicMaintenanceAcceptance(target, payload, {
+          prepareTopicMaintenanceSourceAcceptance(target, payload, {
             reviewId: review.reviewId,
             approvedAt,
             editedDraftJson:
@@ -100,7 +100,10 @@ export const prepareTopicMaintenanceReview = Effect.fn('topicMaintenance.prepare
       const updated: CandidateReview = {
         ...review,
         revision: review.revision + 1,
-        maintenanceApproval: {version: 1, reviewRevision: review.revision + 1, stage: 'preview', preview},
+        maintenanceApproval:
+          preview.version === 1
+            ? {version: 1, reviewRevision: review.revision + 1, stage: 'preview', preview}
+            : {version: 2, sourceKind: 'obsidian', reviewRevision: review.revision + 1, stage: 'preview', preview},
       };
       yield* saveCandidateReview(config.agentContextHome, updated);
       return updated;

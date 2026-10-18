@@ -1,3 +1,4 @@
+import {memoryCodeCitationContentSharingBlocker} from '@threadnote/memory/code/citation-policy';
 import {assertImportedMemoryAssociation, validateImportedMemory} from './pack_validation.js';
 import {normalizeReferenceUris} from '@threadnote/memory/references';
 import {Console, Crypto, DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
@@ -1229,10 +1230,21 @@ export const runExportPack = Effect.fn('runExportPack')(function* (config: Runti
     entries.filter(entry => entry.type === 'file'),
     entry =>
       store.read(resourceStoreLocation(config), entry.uri).pipe(
-        Effect.map(content => ({
-          content,
-          relativeUri: entry.uri.slice(sourceUri.replace(/\/+$/, '').length).replace(/^\/+/, ''),
-        })),
+        Effect.flatMap(content => {
+          const blocker = memoryCodeCitationContentSharingBlocker(entry.uri, content);
+          if (
+            blocker === 'private-obsidian-evidence' ||
+            blocker === 'private-source-evidence' ||
+            blocker === 'malformed-citation'
+          )
+            return Effect.fail(
+              MemoryOperationError.make({message: 'Private imported source evidence cannot be exported.'}),
+            );
+          return Effect.succeed({
+            content,
+            relativeUri: entry.uri.slice(sourceUri.replace(/\/+$/, '').length).replace(/^\/+/, ''),
+          });
+        }),
       ),
     {concurrency: 8},
   );
