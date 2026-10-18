@@ -21,7 +21,12 @@ import {
 } from './topic_review_presentation.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
-import type {ManagerTopicReviewActionV1, ManagerTopicReviewV1} from './topic_contracts.js';
+import type {
+  ManagerTopicReviewActionV1,
+  ManagerTopicReviewV1,
+  ManagerTopicReviewResponseV1,
+  ManagerTopicReviewRecoveryV1,
+} from './topic_contracts.js';
 
 interface TopicReviewProps {
   readonly project: string;
@@ -50,7 +55,11 @@ export function TopicReviewDialog(props: TopicReviewProps): React.ReactElement {
 
 export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): React.ReactElement {
   const [packet, setPacket] = useState(props.initialPacket);
+  const [sourceKind, setSourceKind] = useState<'code' | 'obsidian' | undefined>(
+    props.initialPacket?.topicEvidence?.version === 2 ? 'obsidian' : undefined,
+  );
   const [review, setReview] = useState<ManagerTopicReviewV1>();
+  const [redactedReview, setRedactedReview] = useState<ManagerTopicReviewRecoveryV1>();
   const [draft, setDraft] = useState<TopicMaintenanceDraftV1>();
   const [backend, setBackend] = useState<'local-ai' | 'effect-ai'>('local-ai');
   const [error, setError] = useState('');
@@ -74,7 +83,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const localModels = useConsolidationModels('local-ai', backend === 'local-ai', 'topicModel');
   const effectModels = useConsolidationModels('effect-ai', backend === 'effect-ai', 'topicModel');
   const modelSelection = backend === 'local-ai' ? localModels : effectModels;
-  const caseId = props.caseId ?? review?.caseId;
+  const caseId = props.caseId ?? review?.caseId ?? redactedReview?.caseId;
 
   useEffect(() => {
     if (activeSelection.current !== selectionKey) {
@@ -83,18 +92,60 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       mutationInFlight.current = undefined;
       setBusy(false);
       setReview(undefined);
+      setRedactedReview(undefined);
       setDraft(undefined);
       setError('');
       setNotice('');
       setRecovery(undefined);
       setInvalidatedApproval(undefined);
+      setSourceKind(undefined);
     }
     const controller = new AbortController();
     const epoch = operationEpoch.current;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
     setLoading(true);
     setPacket(undefined);
+    // A refresh must discard previously authorized private text before any new read.
+    if (
+      review?.sourceKind === 'obsidian' ||
+      packet?.topicEvidence?.version === 2 ||
+      props.initialPacket?.topicEvidence?.version === 2
+    ) {
+      setReview(undefined);
+      setDraft(undefined);
+    }
     async function load() {
+      let privateLoad =
+        sourceKind === 'obsidian' ||
+        review?.sourceKind === 'obsidian' ||
+        props.initialPacket?.topicEvidence?.version === 2;
+      async function readSelectedReview(selectedReviewId: string) {
+        const result = await api<ManagerTopicReviewResponseV1>(
+          `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(selectedReviewId)}`,
+          undefined,
+          options,
+        );
+        if (
+          result.project !== props.project ||
+          result.reviewId !== selectedReviewId ||
+          (result.kind !== 'topic-maintenance' && result.kind !== 'topic-maintenance-recovery')
+        )
+          throw new Error('The selected topic review changed. Refresh it.');
+        if (result.kind === 'topic-maintenance-recovery') {
+          if (props.caseId && result.caseId !== props.caseId)
+            throw new Error('The selected topic case changed. Refresh it.');
+          if (!controller.signal.aborted && operationEpoch.current === epoch) {
+            learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
+            setReview(undefined);
+            setDraft(undefined);
+            setPacket(undefined);
+            setRedactedReview(result);
+            setSourceKind('obsidian');
+          }
+          return undefined;
+        }
+        return result;
+      }
       try {
         let currentPacket = props.initialPacket;
         let selectedReviewId =
@@ -103,11 +154,9 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           currentPacket?.reviewId;
         let result: ManagerTopicReviewV1 | undefined;
         if (selectedReviewId) {
-          result = await api<ManagerTopicReviewV1>(
-            `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(selectedReviewId)}`,
-            undefined,
-            options,
-          );
+          result = await readSelectedReview(selectedReviewId);
+          if (!result) return;
+          privateLoad ||= result.sourceKind === 'obsidian';
         }
         const needsPacket = !result || (result.state === 'pending' && result.caseObservationMatches);
         if (props.caseId && needsPacket) {
@@ -116,17 +165,24 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             undefined,
             options,
           );
+          privateLoad ||= currentPacket.topicEvidence?.version === 2;
           if (currentPacket.project !== props.project || currentPacket.caseId !== props.caseId)
             throw new Error('The selected topic case changed. Refresh its evidence.');
+          if (currentPacket.topicEvidence?.version === 2 && currentPacket.topicEvidence.outcome === 'unavailable')
+            result = undefined;
           if (!controller.signal.aborted && operationEpoch.current === epoch) setPacket(currentPacket);
+          if (!controller.signal.aborted && operationEpoch.current === epoch)
+            setSourceKind(currentPacket.topicEvidence?.version === 2 ? 'obsidian' : 'code');
         }
         selectedReviewId ??= currentPacket?.reviewId;
         if (selectedReviewId) {
-          result ??= await api<ManagerTopicReviewV1>(
-            `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&reviewId=${encodeURIComponent(selectedReviewId)}`,
-            undefined,
-            options,
-          );
+          if (currentPacket?.topicEvidence?.version === 2 && currentPacket.topicEvidence.outcome === 'unavailable')
+            throw new Error(
+              'Private source access is unavailable. Refresh source access before reviewing this update.',
+            );
+          result ??= await readSelectedReview(selectedReviewId);
+          if (!result) return;
+          privateLoad ||= result.sourceKind === 'obsidian';
           if (
             result.project !== props.project ||
             result.reviewId !== selectedReviewId ||
@@ -136,7 +192,9 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           if (!controller.signal.aborted && operationEpoch.current === epoch) {
             learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
             setReview(result);
+            setRedactedReview(undefined);
             setDraft(result.draft);
+            setSourceKind(result.sourceKind);
           }
           if (!props.caseId && result.caseId && result.state === 'pending' && result.caseObservationMatches) {
             const reviewPacket = await api<ManagerContextMaintenancePacketV2>(
@@ -146,6 +204,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             );
             if (reviewPacket.project !== props.project || reviewPacket.caseId !== result.caseId)
               throw new Error('The topic case changed. Refresh its evidence.');
+            if (reviewPacket.topicEvidence?.version === 2 && reviewPacket.topicEvidence.outcome === 'unavailable')
+              throw new Error(
+                'Private source access is unavailable. Refresh source access before reviewing this update.',
+              );
             if (!controller.signal.aborted && operationEpoch.current === epoch) setPacket(reviewPacket);
           }
         } else if (!controller.signal.aborted && operationEpoch.current === epoch) {
@@ -153,7 +215,14 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           setDraft(undefined);
         }
       } catch (cause) {
-        if (!controller.signal.aborted && operationEpoch.current === epoch) setError(errorMessage(cause));
+        if (!controller.signal.aborted && operationEpoch.current === epoch) {
+          if (privateLoad) {
+            setReview(undefined);
+            setDraft(undefined);
+            setPacket(undefined);
+          }
+          setError(errorMessage(cause));
+        }
       } finally {
         if (!controller.signal.aborted && operationEpoch.current === epoch) setLoading(false);
       }
@@ -227,12 +296,74 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const availableToGenerate =
     !!caseId &&
     !!currentPacket &&
+    (topic?.version !== 2 || topic.canDraft) &&
     !loading &&
     !busy &&
     !!modelSelection.model &&
     (!review || review.state === 'pending');
 
-  async function mutate(action: ManagerTopicReviewActionV1) {
+  async function captureEvidence(start: number, end: number, retentionDays: number) {
+    if (
+      busy ||
+      loading ||
+      mutationInFlight.current !== undefined ||
+      !caseId ||
+      topic?.version !== 2 ||
+      !topic.obsidian.current ||
+      !packet
+    )
+      return;
+    const epoch = ++operationEpoch.current;
+    mutationInFlight.current = epoch;
+    setBusy(true);
+    setError('');
+    setNotice('');
+    const action: ManagerTopicReviewActionV1 = {
+      action: 'capture',
+      project: props.project,
+      caseId,
+      expectedContentHash: packet.expectedContentHash,
+      observationRevision: topic.observationRevision,
+      inspectionDigest: topic.obsidian.current.inspectionDigest,
+      fragmentStart: start,
+      fragmentEnd: end,
+      retentionDays,
+      approved: true,
+    };
+    try {
+      const result = await api<ManagerContextMaintenancePacketV2>('/api/attention/topic-review', action);
+      if (operationEpoch.current !== epoch) return;
+      if (
+        result.project !== props.project ||
+        result.caseId !== caseId ||
+        result.topicEvidence?.version !== 2 ||
+        result.topicEvidence.outcome !== 'ready' ||
+        result.topicEvidence.obsidian.capture?.state !== 'captured'
+      )
+        throw new Error('The selected source changed. Refresh its evidence.');
+      setReview(undefined);
+      setDraft(undefined);
+      setPacket(result);
+      setNotice('The approved private excerpt is retained. Review it before generating a draft.');
+      props.onChanged();
+    } catch (cause) {
+      if (operationEpoch.current === epoch) {
+        if (review?.sourceKind === 'obsidian' || topic?.version === 2) {
+          setReview(undefined);
+          setDraft(undefined);
+          setPacket(undefined);
+        }
+        setError(errorMessage(cause));
+        setLoading(true);
+        setGeneration(value => value + 1);
+      }
+    } finally {
+      if (mutationInFlight.current === epoch) mutationInFlight.current = undefined;
+      if (operationEpoch.current === epoch) setBusy(false);
+    }
+  }
+
+  async function mutate(action: Exclude<ManagerTopicReviewActionV1, {readonly action: 'capture'}>) {
     if (busy || loading || mutationInFlight.current !== undefined) return;
     const epoch = ++operationEpoch.current;
     mutationInFlight.current = epoch;
@@ -241,17 +372,36 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     setNotice('');
     setRecovery(undefined);
     try {
-      const result = await api<ManagerTopicReviewV1>('/api/attention/topic-review', action);
+      const result = await api<ManagerTopicReviewResponseV1>('/api/attention/topic-review', action);
       if (
         operationEpoch.current !== epoch ||
         result.project !== props.project ||
-        result.kind !== 'topic-maintenance' ||
         ('reviewId' in action && result.reviewId !== action.reviewId)
       )
         return;
+      if (result.kind === 'topic-maintenance-recovery') {
+        if (
+          action.action !== 'reject' ||
+          result.state !== 'rejected' ||
+          result.revision !== action.revision + 1 ||
+          (action.caseId && result.caseId !== action.caseId)
+        )
+          throw new Error('The selected topic review changed. Refresh it.');
+        learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
+        setReview(undefined);
+        setDraft(undefined);
+        setPacket(undefined);
+        setRedactedReview(result);
+        setSourceKind('obsidian');
+        setNotice('Review rejected.');
+        props.onChanged();
+        return;
+      }
+      if (result.kind !== 'topic-maintenance') throw new Error('The selected topic review changed. Refresh it.');
       learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
       if (action.action === 'preview') setInvalidatedApproval(undefined);
       setReview(result);
+      setRedactedReview(undefined);
       setDraft(result.draft);
       setLoading(true);
       setGeneration(value => value + 1);
@@ -278,6 +428,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         if ((action.action === 'apply' || action.action === 'preview') && review?.approval?.stage === 'preview')
           setInvalidatedApproval(approvalIdentity(review));
         setError(errorMessage(cause));
+        if (review?.sourceKind === 'obsidian' || topic?.version === 2) {
+          setReview(undefined);
+          setDraft(undefined);
+          setPacket(undefined);
+        }
         setLoading(true);
         setGeneration(value => value + 1);
         props.onChanged();
@@ -388,6 +543,61 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     });
   }
 
+  if (redactedReview)
+    return (
+      <section aria-busy={loading || busy} className="topic-review-content">
+        <header className="health-dialog-section-heading">
+          <h3>Private topic review</h3>
+          <button
+            type="button"
+            disabled={busy || loading}
+            onClick={() => {
+              setError('');
+              setNotice('');
+              setGeneration(value => value + 1);
+            }}
+          >
+            <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
+          </button>
+        </header>
+        <ReviewNotice
+          tone="warning"
+          title={redactedReview.state === 'rejected' ? 'Review closed' : 'Source text is unavailable or changed'}
+        >
+          {redactedReview.state === 'rejected'
+            ? 'The rejected review is closed. Refresh maintenance to review the next source change.'
+            : redactedReview.recovery?.action === 'reject'
+              ? 'This review can no longer display its private text. Discard the exact review to start again. Accepted memory stays as saved.'
+              : 'This review can no longer display its private text. Restore source access and refresh maintenance before continuing.'}
+        </ReviewNotice>
+        {loading ? <p role="status">Loading topic and review…</p> : null}
+        {error ? (
+          <ReviewNotice role="alert" tone="danger" title="Review needs attention">
+            {error}
+          </ReviewNotice>
+        ) : null}
+        {notice ? <p role="status">{notice}</p> : null}
+        {redactedReview.recovery?.action === 'reject' && redactedReview.caseId ? (
+          <button
+            type="button"
+            className="danger"
+            disabled={busy || loading}
+            onClick={() =>
+              void mutate({
+                action: 'reject',
+                project: props.project,
+                reviewId: redactedReview.reviewId,
+                revision: redactedReview.revision,
+                caseId: redactedReview.caseId,
+              })
+            }
+          >
+            {redactedReview.state === 'conflict' ? 'Close conflicted review' : 'Discard stale review'}
+          </button>
+        ) : null}
+      </section>
+    );
+
   return (
     <section aria-busy={loading || busy} className="topic-review-content">
       <header className="health-dialog-section-heading">
@@ -404,7 +614,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
         </button>
       </header>
-      <TopicReviewSummary review={review} draft={draft} />
+      <TopicReviewSummary
+        review={review}
+        draft={draft}
+        sourceKind={topic?.version === 2 ? 'obsidian' : (sourceKind ?? review?.sourceKind)}
+      />
       {loading ? (
         <p role="status" className="muted">
           Loading topic and review…
@@ -437,7 +651,9 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       ) : null}
       {topic?.outcome === 'unavailable' ? (
         <ReviewNotice role="alert" tone="warning" title="Current source evidence is unavailable">
-          {topic.reason ?? 'No verified excerpt was returned'}. Refresh evidence before continuing.
+          {topic.version === 2
+            ? 'The private note or its retained supporting excerpt cannot be verified. Restore source access and refresh before continuing.'
+            : `${topic.reason ?? 'No verified excerpt was returned'}. Refresh evidence before continuing.`}
         </ReviewNotice>
       ) : null}
       {!packet && review?.state === 'pending' && !error ? (
@@ -499,7 +715,15 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             onEditSupport={editSupport}
             onEditDisposition={editDisposition}
           />
-          {topic ? <TopicSourceEvidence topic={topic} /> : null}
+          {topic ? (
+            <TopicSourceEvidence
+              topic={topic}
+              capture={{
+                disabled: busy || loading,
+                onCapture: (start, end, days) => void captureEvidence(start, end, days),
+              }}
+            />
+          ) : null}
           {review.additionalDependencies.length > 0 ? (
             <details>
               <summary>Other declared dependencies</summary>
@@ -576,7 +800,12 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           ) : null}
         </>
       ) : null}
-      {!review && topic ? <TopicSourceEvidence topic={topic} /> : null}
+      {!review && topic ? (
+        <TopicSourceEvidence
+          topic={topic}
+          capture={{disabled: busy || loading, onCapture: (start, end, days) => void captureEvidence(start, end, days)}}
+        />
+      ) : null}
       <details className="review-disclosure topic-generation-settings" open={!review}>
         <summary>Generation settings</summary>
         <div className="topic-generation-controls">

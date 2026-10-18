@@ -2,12 +2,16 @@ import {Effect, Path, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
-import type {TopicMaintenanceReviewPayloadV1} from '@threadnote/memory/topic-maintenance-draft';
+import type {
+  TopicMaintenanceReviewPayloadV1,
+  TopicMaintenanceReviewPayload,
+} from '@threadnote/memory/topic-maintenance-draft';
 import {
   buildTopicMaintenanceEvidencePacket,
   observeTopicMaintenanceEvidence,
   projectTopicMaintenanceObservation,
 } from '@threadnote/context/topic_maintenance';
+import {verifyTopicObsidianReviewSource} from './maintenance_obsidian.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {
@@ -61,10 +65,14 @@ function reviewedObservation(record: MemoryRecord, review: TopicMaintenanceRevie
 export const verifyTopicMaintenanceReviewSource = Effect.fn('topicMaintenance.verifyReviewSource')(function* (
   config: RuntimeConfig,
   originalRecord: MemoryRecord,
-  review: TopicMaintenanceReviewPayloadV1,
-  sourceCwd: string,
+  review: TopicMaintenanceReviewPayload,
+  sourceCwd?: string,
 ) {
-  if (!(yield* Path.Path).isAbsolute(sourceCwd)) return yield* fail('Topic sourceCwd must be absolute.');
+  if (review.version === 2) {
+    yield* verifyTopicObsidianReviewSource(config, originalRecord, review);
+    return {outcome: 'ready' as const, sourceKind: 'obsidian' as const};
+  }
+  if (!sourceCwd || !(yield* Path.Path).isAbsolute(sourceCwd)) return yield* fail('Topic sourceCwd must be absolute.');
   if (
     originalRecord.uri !== review.basis.targetUri ||
     maintenanceContentHash(originalRecord.content) !== review.basis.targetHash

@@ -340,6 +340,7 @@ describe('topic maintenance private draft generation', () => {
           const packet = yield* readContextMaintenancePacket(config, caseId);
           expect('topicEvidence' in packet && packet.topicEvidence.outcome).toBe('ready');
           const ready = readyEvidence(packet);
+          if (ready.version !== 1) throw new Error('Expected code packet fixture.');
           const longClaim = 'Request timeout is 30 seconds. ' + 'x'.repeat(28 * 1024);
           const longBasis = validateTopicMaintenanceDraftBasis({
             ...basisFromPacket(ready),
@@ -565,11 +566,13 @@ describe('topic maintenance private draft generation', () => {
           });
           expect(calls).toBe(2);
           yield* saveCandidateReview(home, review);
+          if (review.maintenance?.version !== 1) throw new Error('Expected code review fixture.');
+          const codeReview = review.maintenance;
           const tampered = {
             ...review,
             maintenance: {
-              ...review.maintenance!,
-              reviewEvidence: review.maintenance!.reviewEvidence.map(item =>
+              ...codeReview,
+              reviewEvidence: codeReview.reviewEvidence.map(item =>
                 item.handleId === `current:${citations[0].id}`
                   ? {
                       ...item,

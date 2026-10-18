@@ -22,12 +22,16 @@ export function memoryCodeCitationSharingBlocker(
     | 'sourceEvidence'
     | 'sourceEvidenceError'
   > &
-    Partial<Pick<MemoryMetadata, 'topicMaintenanceError'>>,
+    Partial<Pick<MemoryMetadata, 'topicMaintenanceError' | 'topicMaintenance'>>,
 ): MemoryCodeCitationSharingBlocker | undefined {
   if (metadata.obsidianEvidenceError || metadata.sourceEvidenceError || metadata.topicMaintenanceError)
     return 'malformed-citation';
   if (metadata.sourceEvidence) return 'private-source-evidence';
-  if (metadata.obsidianEvidence) return 'private-obsidian-evidence';
+  if (
+    metadata.obsidianEvidence ||
+    (metadata.topicMaintenance?.version === 3 && metadata.topicMaintenance.sourceKind === 'obsidian')
+  )
+    return 'private-obsidian-evidence';
   if ((metadata.citationErrors?.length ?? 0) > 0) return 'malformed-citation';
   if (metadata.codeCitations?.some(citation => citation.sourceDirty)) return 'dirty-source';
   if (metadata.codeCitations?.some(citation => citation.repositoryIdentityKind !== 'remote')) {
@@ -66,6 +70,24 @@ export function memoryCodeCitationContentSharingBlocker(
     topicMaintenanceHeader.hasCitationShape
     ? 'malformed-citation'
     : undefined;
+}
+
+/** Private provenance cannot cross a projection boundary, even when its metadata is malformed. */
+export function memoryHasPrivateEvidenceProvenance(uri: string, content: string): boolean {
+  if (
+    inspectEvidenceHeaderShape(content, 'obsidian_evidence').hasCitationShape ||
+    inspectEvidenceHeaderShape(content, 'source_evidence').hasCitationShape
+  )
+    return true;
+  const topicHeader = inspectEvidenceHeaderShape(content, 'topic_maintenance');
+  if (!topicHeader.hasCitationShape) return false;
+  const parsed = parseMemoryDocument(uri, content);
+  return (
+    !parsed ||
+    topicHeader.hasNonCanonical ||
+    !!parsed.metadata.topicMaintenanceError ||
+    (parsed.metadata.topicMaintenance?.version === 3 && parsed.metadata.topicMaintenance.sourceKind === 'obsidian')
+  );
 }
 
 export function memoryCodeCitationSharingBlockerMessage(blocker: MemoryCodeCitationSharingBlocker): string {

@@ -82,6 +82,8 @@ export function projectKnowledgeDeltaV1(
   review: CandidateReview,
   editedPreview?: KnowledgeDeltaEditedPreviewV1,
 ): KnowledgeDeltaV1 {
+  if (review.maintenanceCapture || review.maintenance?.version === 2)
+    throw new Error('Private imported topic reviews require their access-checked review path.');
   if (editedPreview !== undefined) {
     if (editedPreview.revision !== review.revision) {
       throw new Error(

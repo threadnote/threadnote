@@ -218,13 +218,24 @@ export function registerObsidianEvidenceTools(server: EffectMcpServerAdapter, co
         if (!record) return argumentError('Memory is unavailable.');
         if (record.metadata.sourceEvidenceError)
           return argumentError('Memory has malformed source evidence citation metadata.');
+        if (record.metadata.topicMaintenanceError)
+          return argumentError('Memory has malformed topic maintenance evidence metadata.');
         if (record.metadata.obsidianEvidenceError)
           return argumentError('Memory has malformed Obsidian evidence citation metadata.');
         if (!record.metadata.sourceEvidence && !record.metadata.obsidianEvidence)
           return argumentError('Memory has no source evidence citation.');
+        const manifest = record.metadata.topicMaintenance;
+        if (manifest?.version === 3 && manifest.sourceKind === 'obsidian') {
+          const origin = yield* readObsidianEvidence(config, record.metadata.obsidianEvidence!, {
+            preserveExpired: true,
+          });
+          const active = yield* readObsidianEvidence(config, manifest.activeEvidence, {preserveExpired: true});
+          const result = {type: 'threadnote-obsidian-topic-evidence', version: 2, memoryUri: canonical, origin, active};
+          return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+        }
         const evidence = yield* record.metadata.sourceEvidence
           ? readSourceEvidence(resourceStoreLocation(config), record.metadata.sourceEvidence)
-          : readObsidianEvidence(config, record.metadata.obsidianEvidence!);
+          : readObsidianEvidence(config, record.metadata.obsidianEvidence!, {preserveExpired: true});
         const description =
           evidence.historical === 'available'
             ? `Historical supporting fragment (${evidence.currentRevision} current sanitized revision; claim applicability unverified):\n\n${evidence.fragment}`

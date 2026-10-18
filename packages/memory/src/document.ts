@@ -367,9 +367,9 @@ export function parseMemoryDocument(uri: string, content: string): MemoryRecord 
       typeof parsed === 'object' &&
       parsed !== null &&
       'version' in parsed &&
-      parsed.version === 2
+      (parsed.version === 2 || parsed.version === 3)
     )
-      throw new Error('Topic maintenance V2 requires memory schema version 10.');
+      throw new Error('Topic maintenance V2/V3 requires memory schema version 10.');
     topicMaintenance = validateTopicMaintenanceManifest(parsed, record);
   } catch (error) {
     topicMaintenanceError = error instanceof Error ? error.message : 'Invalid topic maintenance manifest.';
@@ -392,7 +392,8 @@ function validateParsedConsolidationV2(record: MemoryRecord): MemoryRecord {
   if (receipt?.version !== 2) return record;
   try {
     const manifest = record.metadata.topicMaintenance;
-    if (manifest?.version !== 2) throw new Error('Consolidation V2 requires a valid topic maintenance V2 manifest.');
+    if (!manifest || manifest.version === 1 || (manifest.version === 3 && manifest.sourceKind !== 'code'))
+      throw new Error('Consolidation V2 requires a valid code V2/V3 manifest.');
     validateConsolidationV2ActiveEvidence(
       receipt,
       manifest,
@@ -426,7 +427,12 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
     )
       throw new Error('Consolidation provenance requires memory schema version 6 through 10.');
     if (metadata.consolidation.version === 2) {
-      if (metadata.schemaVersion !== MEMORY_SCHEMA_VERSION || metadata.topicMaintenance?.version !== 2)
+      if (
+        metadata.schemaVersion !== MEMORY_SCHEMA_VERSION ||
+        !metadata.topicMaintenance ||
+        metadata.topicMaintenance.version === 1 ||
+        (metadata.topicMaintenance.version === 3 && metadata.topicMaintenance.sourceKind !== 'code')
+      )
         throw new Error('Consolidation V2 requires schema 10 and a topic maintenance V2 manifest.');
       const receipt = validateConsolidationProvenanceV2(metadata.consolidation, body.trim());
       validateConsolidationV2ActiveEvidence(
@@ -480,8 +486,8 @@ export function formatMemoryDocument(title: 'MEMORY' | 'HANDOFF', metadata: Memo
   if (metadata.topicMaintenance) {
     if (metadata.schemaVersion !== 9 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
       throw new Error('Topic maintenance requires memory schema version 9 or 10.');
-    if (metadata.topicMaintenance.version === 2 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
-      throw new Error('Topic maintenance V2 requires memory schema version 10.');
+    if (metadata.topicMaintenance.version !== 1 && metadata.schemaVersion !== MEMORY_SCHEMA_VERSION)
+      throw new Error('Topic maintenance V2/V3 requires memory schema version 10.');
     validateTopicMaintenanceManifest(metadata.topicMaintenance, {
       uri: 'threadnote://user/formatter/memories/durable/projects/topic/record.md',
       content: '',

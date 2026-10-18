@@ -1,3 +1,4 @@
+import {validateTopicDependencyExpansionPreview} from '@threadnote/memory/topic-maintenance-expansion';
 import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {DateTime, Effect, FileSystem, Path, Result} from 'effect';
 import {
@@ -66,7 +67,7 @@ import {
 import {isMemoryRelocationUri, readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
 import {resolveLocalMemoryReplacementTarget} from '../../memory/replacement_target.js';
 import {topicMaintenanceReplacementError, type TopicMaintenanceManifestV1} from '@threadnote/memory/topic-maintenance';
-import {validateApprovedTopicMaintenanceWrite} from '@threadnote/memory/topic-maintenance-acceptance';
+import {validateApprovedTopicMaintenanceSourceWrite} from '@threadnote/memory/topic-maintenance-acceptance';
 import type {CandidateReview} from '@threadnote/memory/candidate';
 import {
   canonicalResourceUri,
@@ -1500,13 +1501,18 @@ export function textFromCallToolResult(result: CallToolResult): string {
     .trim();
 }
 
-export function writeMemoryContentWithExpectedHash(
+export function writeMemoryContentWithExpectedHash<E = never, R = never>(
   config: RuntimeConfig,
   ov: string,
   uri: string,
   content: string,
   expectedContent: string,
-  options: {readonly alreadyLocked?: boolean; readonly topicEnrollment?: TopicMaintenanceManifestV1} = {},
+  options: {
+    readonly alreadyLocked?: boolean;
+    readonly topicEnrollment?:
+      TopicMaintenanceManifestV1 | import('@threadnote/memory/topic-maintenance').TopicMaintenanceObsidianManifestV3;
+    readonly sourceCheck?: Effect.Effect<unknown, E, R>;
+  } = {},
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -1538,7 +1544,9 @@ export function writeMemoryContentWithExpectedHash(
       if (currentSchemaError) return argumentError(currentSchemaError.message);
       const maintenanceError = topicMaintenanceReplacementError(current, postcondition, options.topicEnrollment);
       if (maintenanceError) return argumentError(maintenanceError);
-      yield* writeMemoryFile(config, ov, uri, content, 'replace', false, {quiet: true});
+      yield* writeMemoryFileChecked(config, ov, uri, content, 'replace', false, options.sourceCheck ?? Effect.void, {
+        quiet: true,
+      });
       yield* discardDeferredCodeAnchorIntent(config, uri);
       return {content: [{type: 'text' as const, text: `Updated memory: ${uri}`}]};
     });
@@ -1570,7 +1578,7 @@ export function writeApprovedTopicMaintenanceContent<E, R>(
       if (!current || current.content !== beforeContent)
         return yield* McpServerOperationError.make({message: 'The accepted topic changed before its approved write.'});
       yield* Effect.try({
-        try: () => validateApprovedTopicMaintenanceWrite(current.content, preview.content, review),
+        try: () => validateApprovedTopicMaintenanceSourceWrite(current.content, preview.content, review),
         catch: cause =>
           McpServerOperationError.make({
             message: cause instanceof Error ? cause.message : 'The prepared topic proof is invalid.',
@@ -1580,6 +1588,38 @@ export function writeApprovedTopicMaintenanceContent<E, R>(
     }),
     {quiet: true},
   );
+}
+
+/** Dedicated expansion authorization; the ordinary replacement/enrollment guards remain closed. */
+export function writeApprovedTopicDependencyExpansion<E, R>(
+  config: RuntimeConfig,
+  review: CandidateReview,
+  sourceCheck: Effect.Effect<unknown, E, R>,
+) {
+  return Effect.gen(function* () {
+    const journal = review.dependencyExpansion;
+    if (review.version !== 4 || !journal || journal.stage !== 'prepared' || review.candidates.length)
+      return yield* McpServerOperationError.make({message: 'The expansion has no exact prepared approval.'});
+    const preview = yield* Effect.try({
+      try: () => validateTopicDependencyExpansionPreview(journal.preview),
+      catch: () => McpServerOperationError.make({message: 'Invalid expansion proof.'}),
+    });
+    return yield* writeMemoryFileChecked(
+      config,
+      'threadnote-native',
+      preview.targetUri,
+      preview.content,
+      'replace',
+      false,
+      Effect.gen(function* () {
+        const [current] = yield* readMemoryRecordsByUri(config, [preview.targetUri]);
+        if (!current || canonicalMemoryDocumentContent(current.content) !== preview.beforeContent)
+          return yield* McpServerOperationError.make({message: 'The topic changed before its approved expansion.'});
+        yield* sourceCheck;
+      }),
+      {quiet: true},
+    );
+  });
 }
 
 export function forgetResourceWithRetry(

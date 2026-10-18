@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
+import {Clock, DateTime, Effect, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -15,6 +15,7 @@ import {
   inspectObsidianNote,
   obsidianSourceWork,
   readObsidianEvidence,
+  recoverObsidianEvidenceCapture,
   runObsidianSourceAdd,
   runObsidianSourceRemove,
   runObsidianSourceSync,
@@ -45,6 +46,51 @@ const services = Layer.merge(
 const layer = Layer.merge(services, ResourceStore.layer.pipe(Layer.provide(services)));
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
+
+const reservedFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-reserved-evidence-'});
+  const home = path.join(root, 'home');
+  const vault = path.join(root, 'vault');
+  const note = path.join(vault, 'Decision.md');
+  const config: RuntimeConfig = {
+    account: 'local',
+    agentContextHome: home,
+    agentId: 'threadnote',
+    manifestPath: path.join(home, 'manifest.yaml'),
+    user: 'tester',
+  };
+  yield* fs.makeDirectory(vault, {recursive: true});
+  yield* fs.writeFileString(note, 'signal signal');
+  yield* runObsidianSourceAdd(config, {apply: true, id: 'notes', include: ['**/*.md'], vault});
+  yield* runObsidianSourceSync(config, {apply: true, id: 'notes'});
+  const reviewed = yield* inspectObsidianNote(config, 'notes', 'Decision.md');
+  const now = yield* Clock.currentTimeMillis;
+  const input = {
+    sourceId: 'notes',
+    relativePath: 'Decision.md',
+    fragment: 'signal',
+    retentionDays: 1,
+    expectedSourceInstanceId: reviewed.sourceInstanceId,
+    expectedNoteId: reviewed.noteId,
+    expectedRevisionHash: reviewed.revisionHash,
+    expectedSanitizerVersion: reviewed.sanitizerVersion,
+    reservation: {
+      version: 1 as const,
+      operationId: '11111111-1111-4111-8111-111111111111',
+      pinId: '22222222-2222-4222-8222-222222222222',
+      capturedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + 86_400_000)),
+      accessHash: reviewed.accessHash,
+      vaultHash: reviewed.vaultHash,
+      fragmentStart: 7,
+      fragmentEnd: 13,
+    },
+  };
+  const dir = path.join(home, 'threadnote', 'sources', 'obsidian', 'notes', 'evidence');
+  return {fs, path, config, vault, note, reviewed, input, dir};
+});
 
 describe('cited Obsidian evidence', () => {
   effectIt.effect('preserves renamed identity and access checks while a checkpoint retains its missing old path', () =>
@@ -467,5 +513,217 @@ describe('cited Obsidian evidence', () => {
         expect(expired.fragment).toBeUndefined();
         expect(expired.currentRevision).toBe('unknown');
       }).pipe(provide),
+  );
+  effectIt.effect('reconciles a capture-after-rename failure without allocating or renewing a reserved pin', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, input, dir} = yield* reservedFixture;
+      expect(yield* recoverObsidianEvidenceCapture(config, input)).toBeUndefined();
+      expect(yield* fs.exists(dir)).toBe(false);
+      const destination = path.join(dir, `${input.reservation.pinId}.json`);
+      const crashAfterRename = FileSystem.FileSystem.of({
+        ...fs,
+        rename: (from, to) =>
+          fs.rename(from, to).pipe(
+            Effect.andThen(
+              to === destination
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: 'PermissionDenied',
+                      module: 'FileSystem',
+                      method: 'rename',
+                      pathOrDescriptor: to,
+                    }),
+                  )
+                : Effect.void,
+            ),
+          ),
+      });
+      const failed = yield* Effect.result(
+        captureObsidianEvidence(config, input).pipe(Effect.provideService(FileSystem.FileSystem, crashAfterRename)),
+      );
+      expect(failed._tag).toBe('Failure');
+      expect(yield* fs.exists(destination)).toBe(true);
+      const bytes = yield* fs.readFileString(destination);
+      yield* TestClock.adjust('1 hour');
+      const recovered = yield* recoverObsidianEvidenceCapture(config, input);
+      expect(recovered?.pinId).toBe(input.reservation.pinId);
+      expect(recovered?.fragmentStart).toBe(7); // Select the second identical occurrence exactly.
+      expect(recovered?.expiresAt).toBe(input.reservation.expiresAt);
+      expect(yield* captureObsidianEvidence(config, input)).toEqual(recovered);
+      expect(yield* fs.readDirectory(dir)).toEqual([`${input.reservation.pinId}.json`]);
+      expect(yield* fs.readFileString(destination)).toBe(bytes);
+    }).pipe(provide),
+  );
+
+  effectIt.effect(
+    'refuses reservation collisions, altered selections, changed deadlines and operation reuse without mutation',
+    () =>
+      Effect.gen(function* () {
+        const {fs, path, config, input, dir} = yield* reservedFixture;
+        yield* captureObsidianEvidence(config, input);
+        const destination = path.join(dir, `${input.reservation.pinId}.json`);
+        const bytes = yield* fs.readFileString(destination);
+        for (const reservation of [
+          {...input.reservation, operationId: '33333333-3333-4333-8333-333333333333'},
+          {...input.reservation, fragmentStart: 0, fragmentEnd: 6},
+          {
+            ...input.reservation,
+            capturedAt: DateTime.formatIso(DateTime.makeUnsafe(Date.parse(input.reservation.capturedAt) - 1000)),
+            expiresAt: DateTime.formatIso(DateTime.makeUnsafe(Date.parse(input.reservation.expiresAt) - 1000)),
+          },
+          {...input.reservation, pinId: '44444444-4444-4444-8444-444444444444'},
+          {...input.reservation, accessHash: 'a'.repeat(64)},
+        ]) {
+          expect((yield* Effect.result(captureObsidianEvidence(config, {...input, reservation})))._tag).toBe('Failure');
+          expect(yield* fs.readFileString(destination)).toBe(bytes);
+          expect(yield* fs.readDirectory(dir)).toEqual([`${input.reservation.pinId}.json`]);
+        }
+        yield* TestClock.adjust('2 days');
+        expect((yield* Effect.result(captureObsidianEvidence(config, input)))._tag).toBe('Failure');
+        expect((yield* Effect.result(recoverObsidianEvidenceCapture(config, input)))._tag).toBe('Failure');
+        expect(yield* fs.readFileString(destination)).toBe(bytes);
+      }).pipe(provide),
+  );
+
+  effectIt.effect('rechecks stable note identity across rename and path reuse; access denial withholds recovery', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, input, dir, note, vault, reviewed} = yield* reservedFixture;
+      const citation = yield* captureObsidianEvidence(config, input);
+      const bytes = yield* fs.readFileString(path.join(dir, `${citation.pinId}.json`));
+      const renamed = path.join(vault, 'Renamed.md');
+      yield* fs.rename(note, renamed);
+      yield* fs.writeFileString(note, 'different note');
+      yield* runObsidianSourceSync(config, {apply: true, id: 'notes'});
+      const inspected = yield* inspectObsidianNote(config, 'notes', {
+        sourceInstanceId: reviewed.sourceInstanceId,
+        noteId: reviewed.noteId,
+      });
+      expect(inspected.relativePath).toBe('Renamed.md');
+      expect(inspected.noteId).toBe(citation.noteId);
+      expect(yield* recoverObsidianEvidenceCapture(config, input)).toEqual(citation);
+      expect(yield* captureObsidianEvidence(config, input)).toEqual(citation);
+      const canonicalRenamed = path.join(yield* fs.realPath(vault), 'Renamed.md');
+      const guarded = FileSystem.FileSystem.of({
+        ...fs,
+        access: (target, options) =>
+          target === canonicalRenamed
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: 'PermissionDenied',
+                  module: 'FileSystem',
+                  method: 'access',
+                  pathOrDescriptor: target,
+                }),
+              )
+            : fs.access(target, options),
+      });
+      expect(
+        (yield* Effect.result(
+          recoverObsidianEvidenceCapture(config, input).pipe(Effect.provideService(FileSystem.FileSystem, guarded)),
+        ))._tag,
+      ).toBe('Failure');
+      yield* fs.writeFileString(renamed, 'changed revision');
+      expect((yield* Effect.result(recoverObsidianEvidenceCapture(config, input)))._tag).toBe('Failure');
+      expect(yield* fs.readFileString(path.join(dir, `${citation.pinId}.json`))).toBe(bytes);
+      expect(yield* fs.readDirectory(dir)).toEqual([`${citation.pinId}.json`]);
+    }).pipe(provide),
+  );
+
+  effectIt.effect('rejects malformed capture vectors and ambiguous live note identities without allocating pins', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, input, dir, note, vault, reviewed} = yield* reservedFixture;
+      for (const invalid of [
+        {...input, fragment: ''},
+        {...input, fragment: 'β'.repeat(4097)},
+        {...input, fragment: 'absent'},
+        {...input, expectedSanitizerVersion: 'unsupported'},
+        {...input, expectedNoteId: 'unknown'},
+        {...input, expectedSourceInstanceId: 'unknown'},
+        {...input, reservation: {...input.reservation, fragmentStart: 2, fragmentEnd: 8}},
+        {...input, reservation: {...input.reservation, pinId: '../unsafe'}},
+      ])
+        expect((yield* Effect.result(captureObsidianEvidence(config, invalid)))._tag).toBe('Failure');
+      expect(yield* fs.exists(dir)).toBe(false);
+      yield* fs.link(note, path.join(vault, 'Ambiguous.md'));
+      expect((yield* Effect.result(captureObsidianEvidence(config, input)))._tag).toBe('Failure');
+      expect(
+        (yield* Effect.result(
+          inspectObsidianNote(config, 'notes', {sourceInstanceId: reviewed.sourceInstanceId, noteId: reviewed.noteId}),
+        ))._tag,
+      ).toBe('Failure');
+      expect(yield* fs.exists(dir)).toBe(false);
+    }).pipe(provide),
+  );
+
+  effectIt.effect('fails closed on pin corruption or full capacity while preserving every existing pin', () =>
+    Effect.gen(function* () {
+      const {fs, path, config, input, dir} = yield* reservedFixture;
+      const citation = yield* captureObsidianEvidence(config, input);
+      const destination = path.join(dir, `${citation.pinId}.json`);
+      const bytes = yield* fs.readFileString(destination);
+      yield* fs.writeFileString(destination, '{corrupt');
+      expect((yield* Effect.result(captureObsidianEvidence(config, input)))._tag).toBe('Failure');
+      expect((yield* Effect.result(recoverObsidianEvidenceCapture(config, input)))._tag).toBe('Failure');
+      expect(yield* fs.readFileString(destination)).toBe('{corrupt');
+      const freshInput = {
+        ...input,
+        reservation: {
+          ...input.reservation,
+          operationId: '33333333-3333-4333-8333-333333333333',
+          pinId: '44444444-4444-4444-8444-444444444444',
+        },
+      };
+      expect((yield* Effect.result(captureObsidianEvidence(config, freshInput)))._tag).toBe('Failure');
+      yield* fs.writeFileString(destination, bytes);
+      const pin = JSON.parse(bytes);
+      for (let index = 0; index < 255; index += 1) {
+        const pinId = `${index.toString(16).padStart(8, '0')}-0000-4000-8000-000000000000`;
+        yield* fs.writeFileString(
+          path.join(dir, `${pinId}.json`),
+          JSON.stringify({citation: {...pin.citation, pinId}, sanitizedContent: pin.sanitizedContent}),
+        );
+      }
+      const before = (yield* fs.readDirectory(dir)).sort();
+      expect((yield* Effect.result(captureObsidianEvidence(config, freshInput)))._tag).toBe('Failure');
+      expect((yield* fs.readDirectory(dir)).sort()).toEqual(before);
+      expect(yield* fs.readFileString(destination)).toBe(bytes);
+      expect(yield* captureObsidianEvidence(config, input)).toEqual(citation); // Retry consumes no additional capacity.
+      yield* TestClock.adjust('2 days');
+      const now = yield* Clock.currentTimeMillis;
+      const newlyApproved = {
+        ...freshInput,
+        reservation: {
+          ...freshInput.reservation,
+          capturedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + 86_400_000)),
+        },
+      };
+      expect((yield* Effect.result(captureObsidianEvidence(config, newlyApproved)))._tag).toBe('Failure');
+      expect((yield* fs.readDirectory(dir)).sort()).toEqual(before);
+      expect(yield* fs.readFileString(destination)).toBe(bytes);
+    }).pipe(provide),
+  );
+
+  effectIt.effect.prop(
+    'reserved retries never increase pin count, alter bytes or extend expiry (property)',
+    {
+      retries: Schema.Array(Schema.Boolean).check(Schema.isMinLength(1), Schema.isMaxLength(4)),
+    },
+    ({retries}) =>
+      Effect.gen(function* () {
+        const {fs, path, config, input, dir} = yield* reservedFixture;
+        const first = yield* captureObsidianEvidence(config, input);
+        const bytes = yield* fs.readFileString(path.join(dir, `${first.pinId}.json`));
+        for (const recover of retries) {
+          yield* TestClock.adjust('1 minute');
+          const repeated = recover
+            ? yield* recoverObsidianEvidenceCapture(config, input)
+            : yield* captureObsidianEvidence(config, input);
+          expect(repeated).toEqual(first);
+          expect(yield* fs.readDirectory(dir)).toEqual([`${first.pinId}.json`]);
+          expect(yield* fs.readFileString(path.join(dir, `${first.pinId}.json`))).toBe(bytes);
+        }
+      }).pipe(provide),
+    {arbitrary: {runs: 12}},
   );
 });

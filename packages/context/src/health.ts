@@ -356,10 +356,11 @@ function citationFindings(
 /** Retained pins are immutable history; only the reviewed accepted vector claims current support. */
 function retainedTopicCitationIds(record: MemoryRecord): ReadonlySet<string> {
   const manifest = record.metadata.topicMaintenance;
-  if (manifest?.version !== 2) return new Set();
+  if (!manifest || manifest.version === 1 || (manifest.version === 3 && manifest.sourceKind !== 'code'))
+    return new Set();
   try {
     const validated = validateTopicMaintenanceManifest(manifest, record);
-    if (validated.version !== 2) return new Set();
+    if (validated.version === 1 || (validated.version === 3 && validated.sourceKind !== 'code')) return new Set();
     const active = new Set(validated.acceptedSources.map(source => source.acceptedCitationId));
     return new Set((record.metadata.codeCitations ?? []).filter(citation => !active.has(citation.id)).map(c => c.id));
   } catch {

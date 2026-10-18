@@ -1,3 +1,4 @@
+import {SourceConfigurationStore} from '@threadnote/integration-core/config';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Layer, Path} from 'effect';
 import fc from 'fast-check';
@@ -156,6 +157,7 @@ describe('maintenance status semantic checkpoint compatibility', () => {
     }).pipe(
       provideTestLayer(
         Layer.mergeAll(
+          Layer.mock(SourceConfigurationStore, {}),
           StandaloneBrokerLayer,
           Layer.mock(ResourceStore, {}),
           CodeGraphLanguagePackRegistry.layer,

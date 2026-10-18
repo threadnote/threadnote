@@ -387,7 +387,8 @@ export function applyMemoryCandidate(
     options.reviewLockHeld === true,
     Effect.gen(function* () {
       const review = yield* loadCandidateReview(config.agentContextHome, checkedReviewId.value);
-      if (review.maintenance !== undefined) return argumentError('Topic maintenance requires the reviewed apply flow.');
+      if (review.maintenance !== undefined || review.maintenanceCapture !== undefined)
+        return argumentError('Topic maintenance requires the reviewed apply flow.');
       const candidate = review.candidates.find(item => item.candidateId === checkedCandidateId.value);
       if (!candidate) {
         return argumentError(`Candidate ${checkedCandidateId.value} is not part of ${checkedReviewId.value}.`);

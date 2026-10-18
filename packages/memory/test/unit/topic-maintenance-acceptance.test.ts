@@ -277,6 +277,56 @@ function revalidationSupportFixture(initial: 'dependency' | 'narrow') {
 }
 
 describe('topic maintenance accepted document', () => {
+  it.each(['update', 'revalidation'] as const)(
+    'preserves code V3 through ordinary %s acceptance and consolidation validation',
+    outcome => {
+      const original = fixture(undefined, true);
+      const old = original.record.metadata.topicMaintenance!;
+      if (old.version !== 1) throw new Error('Expected V1 fixture.');
+      const record = parseMemoryDocument(
+        uri,
+        formatMemoryDocument(
+          'MEMORY',
+          {
+            ...original.record.metadata,
+            topicMaintenance: {
+              ...old,
+              version: 3,
+              sourceKind: 'code',
+              originCitationIds: [oldCitation.id],
+              acceptedSources: [{citationId: oldCitation.id, acceptedCitationId: oldCitation.id}],
+            },
+          },
+          original.record.body,
+        ),
+      )!;
+      const basis = {
+        ...original.review.basis,
+        targetHash: consolidationRevision(canonicalMemoryDocumentContent(record.content)),
+      };
+      const proposal = parseTopicMaintenanceDraft(
+        basis,
+        JSON.stringify({
+          ...original.review.proposal.draft,
+          targetHash: basis.targetHash,
+          ...(outcome === 'revalidation' ? {outcome: 'propose-revalidation', operations: []} : {}),
+        }),
+      );
+      const review = {...original.review, basis, proposal};
+      const preview = prepareTopicMaintenanceAcceptance(record, review, {
+        reviewId: 'review-v3',
+        approvedAt: '2026-10-18T00:00:00.000Z',
+      });
+      expect(preview.manifest).toMatchObject({version: 3, sourceKind: 'code', originCitationIds: [oldCitation.id]});
+      const parsed = parseMemoryDocument(uri, preview.content)!;
+      expect(parsed.metadata.topicMaintenanceError).toBeUndefined();
+      expect(parsed.metadata.consolidationError).toBeUndefined();
+      expect(parsed.metadata.consolidation?.version).toBe(2);
+      expect(parsed.body).toBe(outcome === 'revalidation' ? record.body : 'New claim.\n\nHistorical note.');
+      expect(preview.manifest.paragraphs[1]).toEqual(old.paragraphs[1]);
+      expect(validateTopicMaintenanceAcceptancePreview(preview, review)).toEqual(preview);
+    },
+  );
   it.each(['dependency', 'narrow'] as const)(
     'persists explicit no-text revalidation support from %s selections',
     initial => {

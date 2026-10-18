@@ -7,7 +7,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   retainedTopicGenerationOutput,
   type TopicGenerationUsageV1,
-  type TopicMaintenanceDraftBasisV1,
+  type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {findExecutable} from '../utils.js';
 import type {ConsolidationAgent} from '../types.js';
@@ -96,7 +96,7 @@ export function runSelectedDraft(
   model: ConsolidationModel | undefined,
   prompt: string,
   purpose: 'consolidation' | 'topic-maintenance',
-  topicBasis?: TopicMaintenanceDraftBasisV1,
+  topicBasis?: TopicMaintenanceDraftBasis,
 ) {
   const topic = purpose === 'topic-maintenance';
   if (topic && new TextEncoder().encode(prompt).byteLength > TOPIC_DRAFT_MAX_PROMPT_BYTES)

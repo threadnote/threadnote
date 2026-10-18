@@ -8,7 +8,10 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {writeFinalCliOutput} from '../../effect/cli/output.js';
 import {renderContextMaintenanceStatus} from './maintenance_projection.js';
 import {readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
+import {loadCandidateReview} from '@threadnote/memory/candidate';
+import {captureTopicObsidianEvidence} from './maintenance_obsidian.js';
 import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft, TopicDraftError} from './maintenance_draft.js';
+import {projectTopicReviewDecisionAcknowledgement} from './maintenance_review_projection.js';
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
@@ -51,6 +54,10 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     readonly approved?: boolean;
     readonly sourceCwd?: string;
     readonly editedDraftFile?: string;
+    readonly inspectionDigest?: string;
+    readonly fragmentStart?: number;
+    readonly fragmentEnd?: number;
+    readonly retentionDays?: number;
   },
 ) {
   if (options.action === 'draft-receipt')
@@ -70,68 +77,100 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     if (new TextEncoder().encode(editedDraftJson).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
       return yield* TopicReviewError.make({message: 'Edited topic draft exceeds 32 KiB.'});
   }
+  if (options.action === 'draft-reject' && options.project !== undefined) {
+    const selected = yield* loadCandidateReview(config.agentContextHome, options.reviewId ?? '');
+    if (selected.project !== options.project)
+      return yield* TopicReviewError.make({message: 'The selected review belongs to another project.'});
+  }
   const result =
-    options.action === 'draft'
-      ? yield* requestTopicMaintenanceDraft(config, {
+    options.action === 'capture'
+      ? yield* captureTopicObsidianEvidence(config, {
           caseId: options.caseId ?? '',
-          backend: options.backend as 'local-ai' | 'effect-ai',
-          modelId: options.modelId ?? '',
-          regenerate: options.regenerate,
+          expectedContentHash: options.expectedContentHash ?? '',
+          observationRevision: options.evidenceRevision ?? '',
+          inspectionDigest: options.inspectionDigest ?? '',
+          fragmentStart: options.fragmentStart ?? -1,
+          fragmentEnd: options.fragmentEnd ?? -1,
+          retentionDays: options.retentionDays,
+          approved: options.approved === true,
         }).pipe(
-          Effect.catch(error =>
-            Effect.gen(function* () {
-              (yield* SystemInfo).setExitCode(1);
-              return projectTopicDraftFailure(error);
-            }),
-          ),
+          Effect.map(review => ({
+            reviewId: review.reviewId,
+            revision: review.revision,
+            state: review.maintenanceCapture?.stage,
+          })),
         )
-      : options.action === 'draft-view'
-        ? yield* readTopicMaintenanceDraft(config, options.reviewId ?? '')
-        : options.action === 'draft-preview'
-          ? yield* prepareTopicMaintenanceReview(config, {
-              reviewId: options.reviewId ?? '',
-              revision: options.revision ?? 0,
-              sourceCwd: cwd,
-              editedDraftJson,
-            })
-          : options.action === 'draft-apply'
-            ? yield* applyTopicMaintenanceReview(config, {
+      : options.action === 'draft'
+        ? yield* requestTopicMaintenanceDraft(config, {
+            caseId: options.caseId ?? '',
+            backend: options.backend as 'local-ai' | 'effect-ai',
+            modelId: options.modelId ?? '',
+            regenerate: options.regenerate,
+          }).pipe(
+            Effect.catch(error =>
+              Effect.gen(function* () {
+                (yield* SystemInfo).setExitCode(1);
+                return projectTopicDraftFailure(error);
+              }),
+            ),
+          )
+        : options.action === 'draft-view'
+          ? yield* readTopicMaintenanceDraft(config, options.reviewId ?? '')
+          : options.action === 'draft-preview'
+            ? yield* prepareTopicMaintenanceReview(config, {
                 reviewId: options.reviewId ?? '',
                 revision: options.revision ?? 0,
                 sourceCwd: cwd,
-                approvalDigest: options.approvalDigest ?? '',
-                approved: options.approved === true,
+                editedDraftJson,
               })
-            : options.action === 'draft-reject' || options.action === 'draft-defer' || options.action === 'draft-resume'
-              ? yield* decideTopicMaintenanceReview(config, {
+            : options.action === 'draft-apply'
+              ? yield* applyTopicMaintenanceReview(config, {
                   reviewId: options.reviewId ?? '',
                   revision: options.revision ?? 0,
-                  action: options.action.slice(6) as 'reject' | 'defer' | 'resume',
-                  caseId: options.caseId,
+                  sourceCwd: cwd,
+                  approvalDigest: options.approvalDigest ?? '',
+                  approved: options.approved === true,
                 })
-              : options.action === 'retire-anchor'
-                ? yield* retireContextMaintenanceAnchor(config, {
-                    caseId: options.caseId ?? '',
-                    evidenceRevision: options.evidenceRevision ?? '',
-                    expectedContentHash: options.expectedContentHash ?? '',
+              : options.action === 'draft-reject' ||
+                  options.action === 'draft-defer' ||
+                  options.action === 'draft-resume'
+                ? yield* decideTopicMaintenanceReview(config, {
+                    reviewId: options.reviewId ?? '',
+                    revision: options.revision ?? 0,
+                    action: options.action.slice(6) as 'reject' | 'defer' | 'resume',
+                    caseId: options.caseId,
                   })
-                : options.action === 'packet'
-                  ? yield* readContextMaintenancePacket(config, options.caseId ?? '', options)
-                  : options.action === 'status'
-                    ? yield* readContextMaintenanceStatus(config, options.project, options)
-                    : options.action === 'pause' || options.action === 'resume'
-                      ? yield* setContextMaintenancePaused(config, options.action === 'pause')
-                      : options.action === 'undo'
-                        ? yield* undoContextMaintenance(config, options.receiptId ?? '')
-                        : yield* runContextMaintenance(config, {
-                            cwd: (yield* SystemInfo).currentDirectory(),
-                            project: options.project,
-                            maxRecords: options.maxRecords,
-                            caseId: options.caseId,
-                          });
+                : options.action === 'retire-anchor'
+                  ? yield* retireContextMaintenanceAnchor(config, {
+                      caseId: options.caseId ?? '',
+                      evidenceRevision: options.evidenceRevision ?? '',
+                      expectedContentHash: options.expectedContentHash ?? '',
+                    })
+                  : options.action === 'packet'
+                    ? yield* readContextMaintenancePacket(config, options.caseId ?? '', options)
+                    : options.action === 'status'
+                      ? yield* readContextMaintenanceStatus(config, options.project, options)
+                      : options.action === 'pause' || options.action === 'resume'
+                        ? yield* setContextMaintenancePaused(config, options.action === 'pause')
+                        : options.action === 'undo'
+                          ? yield* undoContextMaintenance(config, options.receiptId ?? '')
+                          : yield* runContextMaintenance(config, {
+                              cwd: (yield* SystemInfo).currentDirectory(),
+                              project: options.project,
+                              maxRecords: options.maxRecords,
+                              caseId: options.caseId,
+                            });
+  const output =
+    'candidates' in result && 'maintenance' in result && result.maintenance?.version === 2
+      ? (projectTopicReviewDecisionAcknowledgement(
+          result,
+          options.action === 'draft-reject' ? 'reject' : '',
+          options.caseId,
+        ) ?? (yield* readTopicMaintenanceDraft(config, result.reviewId)))
+      : result;
   yield* writeFinalCliOutput(
     options.json
-      ? JSON.stringify(result)
+      ? JSON.stringify(output)
       : 'error' in result && typeof result.error === 'string'
         ? result.error +
           ('diagnostics' in result && result.diagnostics ? ` Local diagnostics: ${result.diagnostics.receiptId}` : '')
@@ -139,7 +178,7 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
           ? renderContextMaintenanceStatus(result)
           : 'status' in result
             ? `Maintenance undo: ${result.status}`
-            : JSON.stringify(result, null, 2),
+            : JSON.stringify(output, null, 2),
   );
 });
 

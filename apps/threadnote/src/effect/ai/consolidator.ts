@@ -12,7 +12,7 @@ import {
   TopicGenerationUsage,
   retainedTopicGenerationOutput,
   type TopicGenerationUsageV1,
-  type TopicMaintenanceDraftBasisV1,
+  type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
   decodeTopicDraftModelOutput,
@@ -49,7 +49,7 @@ export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraft
   },
 ) {}
 
-function decodeTopicDraftProviderOutput(basis: TopicMaintenanceDraftBasisV1, output: unknown) {
+function decodeTopicDraftProviderOutput(basis: TopicMaintenanceDraftBasis, output: unknown) {
   try {
     return JSON.stringify(decodeTopicDraftModelOutput(basis, output));
   } catch {
@@ -188,7 +188,7 @@ export function runEffectAiTopicDraft(
   prompt: string,
   config: EffectAiConfiguration,
   schema: ReturnType<typeof topicDraftModelSchema>,
-  basis: TopicMaintenanceDraftBasisV1,
+  basis: TopicMaintenanceDraftBasis,
 ) {
   return Effect.scoped(
     Layer.build(effectAiLanguageModelLayer(config, 4000)).pipe(
@@ -297,7 +297,7 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
   prompt: string,
   modelId: string,
   schema: ReturnType<typeof topicDraftModelSchema>,
-  basis: TopicMaintenanceDraftBasisV1,
+  basis: TopicMaintenanceDraftBasis,
 ) {
   const output = yield* runNativeAiObject(
     config,

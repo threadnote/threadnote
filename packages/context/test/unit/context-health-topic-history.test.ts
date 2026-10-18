@@ -29,7 +29,7 @@ const current = citation('c');
 const policy = citation('d', 'src/policy.ts');
 const retained = [original, previous];
 
-function topic(): MemoryRecord {
+function topic(version: 2 | 3 = 2): MemoryRecord {
   const source = parseMemoryDocument(
     uri,
     formatMemoryDocument(
@@ -58,6 +58,8 @@ function topic(): MemoryRecord {
       ],
     }).content,
   )!;
+  const manifest = enrolled.metadata.topicMaintenance;
+  if (manifest?.version !== 1) throw new Error('Expected a code V1 enrollment fixture.');
   return parseMemoryDocument(
     uri,
     formatMemoryDocument(
@@ -65,8 +67,8 @@ function topic(): MemoryRecord {
       {
         ...enrolled.metadata,
         topicMaintenance: {
-          ...enrolled.metadata.topicMaintenance!,
-          version: 2,
+          ...manifest,
+          ...(version === 3 ? {version: 3 as const, sourceKind: 'code' as const} : {version: 2 as const}),
           originCitationIds: [original.id, policy.id].sort(),
           acceptedSources: [original, current, policy]
             .map(item => ({citationId: item.id, acceptedCitationId: item.id === original.id ? current.id : item.id}))
@@ -113,9 +115,9 @@ function report(record: MemoryRecord, receipts: readonly ContextBriefCitationVal
 const citationFindings = (value: ReturnType<typeof report>) =>
   value.findings.filter(finding => finding.category.startsWith('citation-'));
 
-describe('accepted topic citation health', () => {
+describe.each([2, 3] as const)('accepted code V%s topic citation health', version => {
   it('does not reopen accepted prose for drift of original or previously accepted retained pins', () => {
-    const record = topic();
+    const record = topic(version);
     const receipts = [
       receipt(original.id, 'changed'),
       receipt(previous.id, 'deleted'),
@@ -138,7 +140,7 @@ describe('accepted topic citation health', () => {
         fc.tuple(fc.constantFrom('exact' as const, 'changed' as const, 'deleted' as const), fc.boolean()),
         fc.boolean(),
         (activeStatus, [retainedStatus, reverse], omitActive) => {
-          const record = topic();
+          const record = topic(version);
           const receipts = [
             ...retained.map(item => receipt(item.id, retainedStatus)),
             ...(!omitActive ? [receipt(current.id, activeStatus)] : []),
@@ -155,7 +157,7 @@ describe('accepted topic citation health', () => {
   });
 
   it('preserves unknown historical evidence as coverage rather than making it current', () => {
-    const result = report(topic(), [receipt(original.id, 'unknown'), receipt(current.id, 'exact')]);
+    const result = report(topic(version), [receipt(original.id, 'unknown'), receipt(current.id, 'exact')]);
     expect(citationFindings(result)).toEqual([
       expect.objectContaining({category: 'citation-unknown', classification: 'coverage'}),
     ]);
@@ -163,7 +165,7 @@ describe('accepted topic citation health', () => {
   });
 
   it('still reports drift of identity-mapped policy support alongside the accepted descriptive pin', () => {
-    const result = report(topic(), [
+    const result = report(topic(version), [
       receipt(original.id, 'changed'),
       receipt(previous.id, 'deleted'),
       receipt(current.id, 'changed'),
@@ -178,13 +180,15 @@ describe('accepted topic citation health', () => {
   });
 
   it('does not suppress drift for V1, ordinary records, invalid manifests or foreign receipt identities', () => {
-    const record = topic();
+    const record = topic(version);
     const {topicMaintenance: manifest, ...plainMetadata} = record.metadata;
-    if (manifest?.version !== 2) throw new Error('Expected accepted V2 topic fixture');
+    if (!manifest || manifest.version === 1 || (manifest.version === 3 && manifest.sourceKind !== 'code'))
+      throw new Error('Expected accepted code topic fixture');
     const {originCitationIds: _origins, acceptedSources: _accepted, ...common} = manifest;
+    const legacy = 'sourceKind' in common ? (({sourceKind: _kind, ...rest}) => rest)(common) : common;
     const records: MemoryRecord[] = [
       {...record, metadata: plainMetadata},
-      {...record, metadata: {...record.metadata, topicMaintenance: {...common, version: 1}}},
+      {...record, metadata: {...record.metadata, topicMaintenance: {...legacy, version: 1}}},
       {...record, body: record.body + '\n\nAn unreviewed paragraph.'},
     ];
     for (const item of records) {

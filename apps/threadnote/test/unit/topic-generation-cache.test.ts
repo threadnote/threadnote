@@ -100,6 +100,8 @@ function fixture() {
     truncated: false,
   };
   const packet = readyEvidence({
+    version: 1,
+    coverage: 'declared-only',
     outcome: 'ready',
     targetUri: 'threadnote://user/tester/memories/durable/policy.md',
     targetHash: maintenanceContentHash(body),
@@ -118,6 +120,7 @@ function fixture() {
       },
     ],
   } as never);
+  if (packet.version !== 1) throw new Error('Expected code packet fixture.');
   const basis = basisFromPacket(packet);
   const identity = {
     agent: 'local-ai',

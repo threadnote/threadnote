@@ -36,6 +36,8 @@ import type {ManagerSemanticReviewInputV1} from '@threadnote/manager/attention/c
 import {SemanticReviewError} from '../memory/context/semantic_review_state.js';
 import {ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-store';
 import {handleManagerTopicReview, managerTopicPacketReviewId} from './topic_review.js';
+import {handleManagerTopicEnrollment} from './topic_enrollment.js';
+import {handleManagerTopicExpansion} from './topic_expansion.js';
 
 const CITATION_FINDING_CATEGORIES = ['citation-changed', 'citation-missing', 'citation-unknown'] as const;
 const MAXIMUM_MANAGER_BULK_CITATION_REPAIRS = 100;
@@ -69,6 +71,10 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   readonly url: URL;
 }) {
   const route = request.url.pathname;
+  const expansion = yield* handleManagerTopicExpansion(request);
+  if (expansion !== undefined) return expansion;
+  const enrollment = yield* handleManagerTopicEnrollment(request);
+  if (enrollment !== undefined) return enrollment;
   const topicReview = yield* handleManagerTopicReview(request);
   if (topicReview !== undefined) return topicReview;
   if (route === '/api/attention/context-maintenance') {
@@ -86,12 +92,17 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
           (maximumLines !== null && !/^(?:[1-9]|1[0-9]|2[0-4])$/u.test(maximumLines))
         )
           return invalid('Choose a positive source line and 1 to 24 excerpt lines.');
-        const packet = yield* readContextMaintenancePacket(request.config, caseId, {
+        const result = yield* readContextMaintenancePacket(request.config, caseId, {
           citationId: request.url.searchParams.get('citationId') ?? undefined,
           memoryUri: request.url.searchParams.get('memoryUri') ?? undefined,
           ...(startLine === null ? {} : {startLine: Number(startLine)}),
           ...(maximumLines === null ? {} : {maximumLines: Number(maximumLines)}),
-        });
+        }).pipe(Effect.result);
+        if (Result.isFailure(result))
+          return conflict(
+            'The selected source evidence changed or is unavailable. Refresh maintenance and source access.',
+          );
+        const packet = result.success;
         if (project !== undefined && packet.project !== project)
           return invalid('This case belongs to another project.');
         const reviewId =
@@ -223,7 +234,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
           if (review.reviewId !== reviewId)
             return conflict('The stored review identity changed. Refresh the review inbox.');
           if (review.project !== project) return invalid('This review belongs to another project.');
-          if (review.maintenance)
+          if (review.maintenance || review.maintenanceCapture)
             return conflict(
               'Open this topic in the maintenance review. Use /api/attention/topic-review.',
               'topic-review-route-required',
@@ -280,7 +291,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
       return {status: 404, body: {error: 'This review is unavailable. Refresh the review inbox.'}};
     const review = loaded.success;
     if (review.project !== project) return invalid('This review belongs to another project.');
-    if (review.maintenance)
+    if (review.maintenance || review.maintenanceCapture)
       return conflict(
         'Open this topic in the maintenance review. Use /api/attention/topic-review.',
         'topic-review-route-required',

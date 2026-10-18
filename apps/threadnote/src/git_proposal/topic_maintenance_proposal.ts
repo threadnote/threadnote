@@ -67,7 +67,12 @@ export function buildTopicMaintenanceGitProposal(input: {
   readonly access: 'read-write';
 }): GitProposalBuild & {readonly proposal: TopicMaintenanceGitProposalV2} {
   const {record, review, prepared} = input;
-  if (!review.maintenance || review.candidates.length !== 1 || review.candidates[0]?.state !== 'pending')
+  if (
+    !review.maintenance ||
+    review.maintenance.version !== 1 ||
+    review.candidates.length !== 1 ||
+    review.candidates[0]?.state !== 'pending'
+  )
     fail('Shared maintenance requires one pending private maintenance review.');
   if (
     record.uri !== review.maintenance.basis.targetUri ||

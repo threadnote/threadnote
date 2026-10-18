@@ -14,7 +14,7 @@ import {
   type MemoryCodeCitationV1,
 } from './code/citation.js';
 import type {MemoryKind, MemoryStatus} from './types.js';
-import type {TopicMaintenanceManifestV2} from './topic-maintenance.js';
+import type {TopicMaintenanceManifestV2, TopicMaintenanceCodeManifestV3} from './topic-maintenance.js';
 
 export interface ConsolidationSource {
   readonly uri: string;
@@ -383,7 +383,7 @@ export function buildConsolidationProvenanceV2(
   previous: ConsolidationReceipt,
   previousBody: string,
   body: string,
-  manifest: TopicMaintenanceManifestV2,
+  manifest: TopicMaintenanceManifestV2 | TopicMaintenanceCodeManifestV3,
   acceptance: Omit<ConsolidationProvenanceV2['acceptance'], 'paragraphs'>,
 ): ConsolidationProvenanceV2 {
   const origin = previous.version === 1 ? previous : previous.origin;
@@ -473,7 +473,7 @@ export function validateConsolidationProvenanceV2(value: unknown, body: string):
 
 export function validateConsolidationV2ActiveEvidence(
   receipt: ConsolidationProvenanceV2,
-  manifest: TopicMaintenanceManifestV2,
+  manifest: TopicMaintenanceManifestV2 | TopicMaintenanceCodeManifestV3,
   citations: readonly MemoryCodeCitationV1[],
   relations: readonly MemoryRelation[],
 ): void {

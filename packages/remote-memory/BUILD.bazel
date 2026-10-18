@@ -162,6 +162,7 @@ bun_test(
         "//packages/memory:src/remote/revisions.ts",
         "//packages/memory:src/topic-maintenance-acceptance.ts",
         "//packages/memory:src/topic-maintenance-draft.ts",
+        "//packages/memory:src/topic-maintenance-expansion.ts",
         "//packages/memory:src/topic-maintenance-generation.ts",
         "//packages/memory:src/topic-maintenance.ts",
         "//packages/memory:src/types.ts",

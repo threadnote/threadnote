@@ -5,6 +5,7 @@ import {topicMaintenanceParagraphEligible} from '@threadnote/memory/topic-mainte
 import {MemoryExcerpt, ReviewBadge, type ReviewTone} from '../review_presentation.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {ManagerTopicReviewV1} from './topic_contracts.js';
+import {TopicObsidianEvidence, type TopicCaptureControls} from './topic_obsidian_evidence.js';
 
 const statePresentation = {
   pending: {label: 'Awaiting review', tone: 'warning'},
@@ -18,12 +19,16 @@ const statePresentation = {
 export function TopicReviewSummary(props: {
   readonly review?: ManagerTopicReviewV1;
   readonly draft?: TopicMaintenanceDraftV1;
+  readonly sourceKind?: 'code' | 'obsidian';
 }): React.ReactElement {
   const state = props.review ? statePresentation[props.review.state] : undefined;
   const changes = props.draft?.operations.length ?? 0;
   return (
     <div className="topic-review-summary">
       <div className="review-badge-row">
+        <ReviewBadge tone="info">
+          {(props.sourceKind ?? props.review?.sourceKind) === 'obsidian' ? 'Obsidian note' : 'Code sources'}
+        </ReviewBadge>
         {state ? <ReviewBadge tone={state.tone}>{state.label}</ReviewBadge> : null}
         {props.draft ? (
           <ReviewBadge tone="proposal">
@@ -102,9 +107,18 @@ export function TopicReviewNotes({review}: {readonly review: ManagerTopicReviewV
 
 export function TopicSourceEvidence(props: {
   readonly topic: NonNullable<ManagerContextMaintenancePacketV2['topicEvidence']>;
+  readonly capture?: TopicCaptureControls;
 }): React.ReactElement | null {
   const {topic} = props;
   if (topic.outcome !== 'ready') return null;
+  if (topic.version === 2)
+    return (
+      <TopicObsidianEvidence
+        key={`${topic.obsidian.current?.inspectionDigest}:${topic.obsidian.capture?.revision}`}
+        topic={topic}
+        capture={props.capture}
+      />
+    );
   return (
     <section aria-label="Source evidence" className="topic-source-evidence">
       <header className="review-section-heading">

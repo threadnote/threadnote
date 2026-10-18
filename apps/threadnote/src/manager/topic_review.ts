@@ -9,7 +9,12 @@ import {
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readContextMaintenancePacket, readContextMaintenanceStatus} from '../memory/context/maintenance.js';
-import {requestTopicMaintenanceDraft, TopicDraftError} from '../memory/context/maintenance_draft.js';
+import {
+  readTopicMaintenanceDraft,
+  requestTopicMaintenanceDraft,
+  TopicDraftError,
+} from '../memory/context/maintenance_draft.js';
+import {captureTopicObsidianEvidence} from '../memory/context/maintenance_obsidian.js';
 import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
@@ -17,6 +22,10 @@ import {
   type TopicReviewDecisionInput,
 } from '../memory/context/maintenance_review.js';
 import {topicMaintenanceCaseId} from '../memory/context/maintenance_topic.js';
+import {
+  projectTopicReviewRecovery,
+  projectTopicReviewDecisionAcknowledgement,
+} from '../memory/context/maintenance_review_projection.js';
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
 import {managerAttentionProjectRoot} from './attention.js';
 
@@ -42,6 +51,8 @@ export interface ManagerTopicReviewCaseIdentity {
   readonly caseId: string;
   readonly observationMatches: boolean;
   readonly approvedContentMatches?: boolean;
+  /** Supplied only after the checked async reader reauthorizes this exact private review. */
+  readonly importedAccess?: {readonly reviewId: string; readonly revision: number};
 }
 
 /** No private receipt, source pin, or pre-approval content escapes this projection. */
@@ -52,6 +63,11 @@ export function projectManagerTopicReview(
   const maintenance = review.maintenance;
   const candidate = review.candidates[0];
   if (!maintenance || !candidate || review.candidates.length !== 1) return undefined;
+  if (
+    maintenance.version === 2 &&
+    (identity?.importedAccess?.reviewId !== review.reviewId || identity.importedAccess.revision !== review.revision)
+  )
+    return undefined;
   const approval = review.maintenanceApproval;
   const currentCase = maintenance.generation.origin === 'manual' || identity?.observationMatches === true;
   const effectiveProposal = approval?.preview.approvedProposal ?? maintenance.proposal;
@@ -69,6 +85,7 @@ export function projectManagerTopicReview(
   return {
     version: 1,
     kind: 'topic-maintenance',
+    sourceKind: maintenance.version === 2 ? 'obsidian' : 'code',
     project: review.project,
     reviewId: review.reviewId,
     revision: review.revision,
@@ -108,7 +125,7 @@ export function projectManagerTopicReview(
               handleId: handle.id,
               citationId: handle.citationId,
               variant: handle.variant,
-              path: evidence.source.path,
+              path: 'sourceKind' in evidence ? evidence.citation.relativePath : evidence.source.path,
               provenance: evidence.provenance,
             },
           ]
@@ -151,6 +168,12 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
   review: CandidateReview,
 ) {
   if (!review.maintenance) return undefined;
+  const imported = review.maintenance.version === 2;
+  if (imported) {
+    const checked = yield* readTopicMaintenanceDraft(config, review.reviewId).pipe(Effect.result);
+    if (Result.isFailure(checked) || JSON.stringify(checked.success) !== JSON.stringify(review)) return undefined;
+  }
+  const importedAccess = imported ? {reviewId: review.reviewId, revision: review.revision} : undefined;
   const target = (yield* readMemoryRecordsByUri(config, [review.maintenance.basis.targetUri]).pipe(
     Effect.orElseSucceed(() => []),
   ))[0];
@@ -179,10 +202,48 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
         caseId,
         observationMatches: item.evidenceRevision === review.maintenance.basis.observationRevision,
         approvedContentMatches,
+        ...(importedAccess ? {importedAccess} : {}),
       }
     : approvedContentMatches
-      ? {caseId, observationMatches: false, approvedContentMatches: true}
-      : undefined;
+      ? {caseId, observationMatches: false, approvedContentMatches: true, ...(importedAccess ? {importedAccess} : {})}
+      : importedAccess
+        ? {caseId, observationMatches: false, importedAccess}
+        : undefined;
+});
+
+const topicReviewResponse = Effect.fn('managerTopicReview.response')(function* (
+  config: RuntimeConfig,
+  review: CandidateReview,
+) {
+  const identity = yield* managerTopicReviewCaseIdentity(config, review);
+  const projected = projectManagerTopicReview(review, identity);
+  if (projected) return {status: 200, body: projected};
+  if (review.maintenance?.version !== 2) return missing();
+  // Resolve the persisted case independently of permission to render its old private text.
+  const target = (yield* readMemoryRecordsByUri(config, [review.maintenance.basis.targetUri]).pipe(
+    Effect.orElseSucceed(() => []),
+  ))[0];
+  if (
+    !target ||
+    target.uri !== review.maintenance.basis.targetUri ||
+    target.metadata.project !== review.project ||
+    !target.metadata.memoryId
+  )
+    return missing();
+  const caseId = topicMaintenanceCaseId(target);
+  const status = yield* readContextMaintenanceStatus(config, review.project, {caseId}).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+  const item = status?.cases[0];
+  if (
+    item?.caseId !== caseId ||
+    item.project !== review.project ||
+    item.family !== 'topic-maintenance' ||
+    item.slot !== 'declared-support' ||
+    item.subjectUri !== review.maintenance.basis.targetUri
+  )
+    return missing();
+  return {status: 200, body: projectTopicReviewRecovery(review, caseId)!};
 });
 
 export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(function* (request: {
@@ -205,11 +266,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       item => item.reviewId === reviewId,
     );
     if (!review || review.project !== project || !review.maintenance) return missing();
-    const identity = yield* managerTopicReviewCaseIdentity(request.config, review);
-    return {
-      status: 200,
-      body: projectManagerTopicReview(review, identity)!,
-    };
+    return yield* topicReviewResponse(request.config, review);
   }
   if (request.method !== 'POST') return undefined;
   const body = yield* request.body;
@@ -218,6 +275,64 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
   const project = body.project;
   if (typeof project !== 'string' || !PROJECT.test(project)) return invalid('Select a valid project.');
   const action = body.action;
+  if (action === 'capture') {
+    if (
+      !keys(
+        body,
+        [
+          'action',
+          'project',
+          'caseId',
+          'expectedContentHash',
+          'observationRevision',
+          'inspectionDigest',
+          'fragmentStart',
+          'fragmentEnd',
+          'approved',
+        ],
+        ['retentionDays'],
+      ) ||
+      typeof body.caseId !== 'string' ||
+      !CASE.test(body.caseId) ||
+      ![body.expectedContentHash, body.observationRevision, body.inspectionDigest].every(
+        value => typeof value === 'string' && HASH.test(value),
+      ) ||
+      !Number.isSafeInteger(body.fragmentStart) ||
+      !Number.isSafeInteger(body.fragmentEnd) ||
+      (body.fragmentStart as number) < 0 ||
+      (body.fragmentEnd as number) <= (body.fragmentStart as number) ||
+      body.approved !== true ||
+      (body.retentionDays !== undefined &&
+        (!Number.isSafeInteger(body.retentionDays) ||
+          (body.retentionDays as number) < 1 ||
+          (body.retentionDays as number) > 365))
+    )
+      return invalid('Select a current source excerpt and approve its retention.');
+    const packet = yield* readContextMaintenancePacket(request.config, body.caseId).pipe(Effect.result);
+    if (
+      Result.isFailure(packet) ||
+      packet.success.project !== project ||
+      !('topicEvidence' in packet.success) ||
+      packet.success.topicEvidence.version !== 2
+    )
+      return conflict('The selected source changed. Refresh its evidence.');
+    const captured = yield* captureTopicObsidianEvidence(request.config, {
+      caseId: body.caseId,
+      expectedContentHash: body.expectedContentHash as string,
+      observationRevision: body.observationRevision as string,
+      inspectionDigest: body.inspectionDigest as string,
+      fragmentStart: body.fragmentStart as number,
+      fragmentEnd: body.fragmentEnd as number,
+      ...(body.retentionDays === undefined ? {} : {retentionDays: body.retentionDays as number}),
+      approved: true,
+    }).pipe(Effect.result);
+    if (Result.isFailure(captured))
+      return conflict('The source excerpt could not be retained. Refresh evidence before trying again.');
+    const refreshed = yield* readContextMaintenancePacket(request.config, body.caseId).pipe(Effect.result);
+    if (Result.isFailure(refreshed) || refreshed.success.project !== project)
+      return conflict('Refresh the source evidence to check the retained excerpt.');
+    return {status: 200, body: refreshed.success};
+  }
   const isGenerate = action === 'generate' || action === 'regenerate';
   const isPreview = action === 'preview';
   const isApply = action === 'apply';
@@ -269,12 +384,6 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       return invalid('Select an exact topic maintenance case.');
   }
   if (isGenerate) {
-    const root = yield* managerAttentionProjectRoot(request.config, project);
-    if (root.state === 'unavailable')
-      return conflict(
-        'Repository evidence is unavailable for this project. Refresh its local checkout.',
-        'topic-source-unavailable',
-      );
     const caseId = body.caseId as string;
     const status = yield* readContextMaintenanceStatus(request.config, project, {caseId}).pipe(Effect.result);
     if (Result.isFailure(status)) return conflict('The selected topic case changed. Refresh maintenance.');
@@ -296,6 +405,14 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
       packet.success.memoryUri !== item.subjectUri
     )
       return conflict('Topic evidence is unavailable or changed. Refresh maintenance.');
+    if (packet.success.topicEvidence.version !== 2) {
+      const root = yield* managerAttentionProjectRoot(request.config, project);
+      if (root.state === 'unavailable')
+        return conflict(
+          'Repository evidence is unavailable for this project. Refresh its local checkout.',
+          'topic-source-unavailable',
+        );
+    }
     const outcome = yield* requestTopicMaintenanceDraft(request.config, {
       caseId,
       backend: body.backend as 'local-ai' | 'effect-ai',
@@ -353,8 +470,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         },
       };
     }
-    const identity = yield* managerTopicReviewCaseIdentity(request.config, outcome.success);
-    return {status: 200, body: projectManagerTopicReview(outcome.success, identity)!};
+    return yield* topicReviewResponse(request.config, outcome.success);
   }
   const reviewId = body.reviewId as string;
   const loaded = yield* loadCandidateReview(request.config.agentContextHome, reviewId).pipe(Effect.result);
@@ -368,9 +484,11 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
   const review = loaded.success;
   const maintenance = review.maintenance;
   if (!maintenance) return missing();
-  const identity = yield* managerTopicReviewCaseIdentity(request.config, review);
+  const importedRejection = maintenance.version === 2 && action === 'reject';
+  const identity = importedRejection ? undefined : yield* managerTopicReviewCaseIdentity(request.config, review);
+  if (maintenance.version === 2 && !identity?.importedAccess && !importedRejection) return missing();
   if (isDecision) {
-    if (maintenance.generation.origin !== 'manual') {
+    if (maintenance.generation.origin !== 'manual' || importedRejection) {
       if (typeof body.caseId !== 'string') return conflict('Select the exact topic case for this decision.');
       const selected = yield* readContextMaintenanceStatus(request.config, project, {caseId: body.caseId}).pipe(
         Effect.result,
@@ -411,8 +529,9 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         return conflict('The topic review or case changed. Reload the review and try again.');
       const replay = yield* decideTopicMaintenanceReview(request.config, selection).pipe(Effect.result);
       if (Result.isSuccess(replay)) {
-        const currentIdentity = yield* managerTopicReviewCaseIdentity(request.config, replay.success);
-        return {status: 200, body: projectManagerTopicReview(replay.success, currentIdentity)!};
+        const acknowledgement = projectTopicReviewDecisionAcknowledgement(replay.success, action, selection.caseId);
+        if (acknowledgement) return {status: 200, body: acknowledgement};
+        return yield* topicReviewResponse(request.config, replay.success);
       }
       return {
         status: 409,
@@ -422,7 +541,9 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         },
       };
     }
-    return {status: 200, body: projectManagerTopicReview(decided.success, identity)!};
+    const acknowledgement = projectTopicReviewDecisionAcknowledgement(decided.success, action, selection.caseId);
+    if (acknowledgement) return {status: 200, body: acknowledgement};
+    return yield* topicReviewResponse(request.config, decided.success);
   }
   if (
     maintenance.generation.origin !== 'manual' &&
@@ -430,8 +551,8 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     (isPreview || (isApply && review.candidates[0]?.state === 'pending'))
   )
     return conflict('The selected topic case changed. Refresh maintenance before preview or acceptance.');
-  const root = yield* managerAttentionProjectRoot(request.config, project);
-  if (root.state === 'unavailable')
+  const root = maintenance.version === 2 ? undefined : yield* managerAttentionProjectRoot(request.config, project);
+  if (root?.state === 'unavailable')
     return conflict(
       'Repository evidence is unavailable for this project. Refresh its local checkout.',
       'topic-source-unavailable',
@@ -440,19 +561,19 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     ? yield* prepareTopicMaintenanceReview(request.config, {
         reviewId,
         revision: body.revision as number,
-        sourceCwd: root.cwd,
+        ...(root?.state === 'available' ? {sourceCwd: root.cwd} : {}),
         ...(body.editedDraftJson === undefined ? {} : {editedDraftJson: body.editedDraftJson as string}),
       }).pipe(Effect.result)
     : yield* applyTopicMaintenanceReview(request.config, {
         reviewId,
         revision: body.revision as number,
-        sourceCwd: root.cwd,
+        ...(root?.state === 'available' ? {sourceCwd: root.cwd} : {}),
         approvalDigest: body.approvalDigest as string,
         approved: true,
       }).pipe(Effect.result);
   if (Result.isFailure(result))
     return conflict('The topic review, target, approval, or source changed. Reload the review and preview again.');
-  return {status: 200, body: projectManagerTopicReview(result.success, identity)!};
+  return yield* topicReviewResponse(request.config, result.success);
 });
 
 /** Link an existing private proposal to its exact maintenance packet without changing either store. */

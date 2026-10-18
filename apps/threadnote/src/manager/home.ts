@@ -121,7 +121,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
     : [];
   const pendingCount = Result.isSuccess(reviewsResult)
     ? reviewsResult.success
-        .filter(review => review.project === project)
+        .filter(review => review.project === project && !(review.maintenanceCapture && !review.maintenance))
         .flatMap(review => review.candidates)
         .filter(
           candidate =>
@@ -203,6 +203,7 @@ const collectAllProjectsHome = Effect.fn('managerHome.collectAllProjects')(funct
     : undefined;
   const pendingCount = Result.isSuccess(reviews)
     ? reviews.success
+        .filter(review => !(review.maintenanceCapture && !review.maintenance))
         .flatMap(review => review.candidates)
         .filter(
           candidate =>

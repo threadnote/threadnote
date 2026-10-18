@@ -7,6 +7,7 @@
     "./attention-view": "./src/attention_view.tsx",
     "./attention/contracts": "./src/attention/contracts.ts",
     "./attention/topic-contracts": "./src/attention/topic_contracts.ts",
+    "./attention/topic-expansion-contracts": "./src/attention/topic_expansion_contracts.ts",
     "./attention/maintenance": "./src/attention/maintenance.ts",
     "./attention/maintenance-view": "./src/attention/maintenance_view.tsx",
     "./attention_view": "./src/attention_view.tsx",

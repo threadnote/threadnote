@@ -3,17 +3,23 @@ import {FileText, LockKeyhole, UserRound, Users} from 'lucide-react';
 import type {MemoryMetadata, TreeNode} from './ui/contracts.js';
 import {MarkdownViewer} from './ui/controls.js';
 import {libraryItemTitle} from './library_model.js';
+import {TopicEnrollmentPanel} from './attention/topic_enrollment.js';
+import {TopicExpansionPanel} from './attention/topic_expansion.js';
 
 export function LibraryArticle({
   node,
   metadata,
   markdown,
   resource,
+  onChanged,
+  onPrepareGraph,
 }: {
   readonly node: TreeNode;
   readonly metadata?: MemoryMetadata;
   readonly markdown: string;
   readonly resource: boolean;
+  readonly onChanged?: () => void;
+  readonly onPrepareGraph?: () => void;
 }): React.ReactElement {
   const author = metadata?.sourceAgentClient;
   const timestamp = metadata?.timestamp;
@@ -28,6 +34,32 @@ export function LibraryArticle({
       </div>
       <h2>{libraryItemTitle(node)}</h2>
       <MarkdownViewer markdown={markdown} />
+      {!resource &&
+      !node.isShared &&
+      !node.isSystem &&
+      metadata?.kind === 'durable' &&
+      metadata.status === 'active' &&
+      metadata.project ? (
+        <TopicEnrollmentPanel key={node.uri} uri={node.uri} onChanged={onChanged} />
+      ) : null}
+      {!resource &&
+      !node.isShared &&
+      !node.isSystem &&
+      metadata?.kind === 'durable' &&
+      metadata.status === 'active' &&
+      metadata.project &&
+      metadata.topicMaintenance &&
+      (metadata.topicMaintenance.version === 1 ||
+        metadata.topicMaintenance.version === 2 ||
+        (metadata.topicMaintenance.version === 3 && metadata.topicMaintenance.sourceKind === 'code')) ? (
+        <TopicExpansionPanel
+          key={`${node.uri}:${metadata.project}`}
+          uri={node.uri}
+          project={metadata.project}
+          onChanged={onChanged}
+          onPrepareGraph={onPrepareGraph}
+        />
+      ) : null}
       <footer className="memory-document-footer">
         {resource ? <FileText /> : <UserRound />}
         <span>

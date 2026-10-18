@@ -38,6 +38,7 @@ export type ManagerMemoryKind = 'durable' | 'handoff' | 'incident' | 'preference
 export type ManagerMemoryStatus = 'active' | 'archived' | 'expired' | 'superseded';
 
 export interface MemoryMetadata {
+  readonly topicMaintenance?: {readonly version: number; readonly sourceKind?: 'code' | 'obsidian'};
   readonly consolidation?: ConsolidationProvenance;
   readonly consolidationError?: string;
   readonly archivedFrom?: string;

@@ -145,6 +145,7 @@ const EVIDENCE_MAX_FRAGMENT_BYTES = 8_192;
 interface PinnedObsidianEvidence {
   readonly citation: MemoryObsidianEvidenceV1;
   readonly sanitizedContent: string;
+  readonly reservation?: ObsidianEvidenceCaptureReservationV1;
 }
 
 export interface ObsidianEvidenceRead {
@@ -158,9 +159,9 @@ export interface ObsidianEvidenceRead {
 export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
   config: RuntimeConfig,
   sourceId: string,
-  relativePath: string,
+  selection: string | {readonly sourceInstanceId: string; readonly noteId: string},
 ) {
-  assertSafeSourceRelativePath(relativePath);
+  if (typeof selection === 'string') assertSafeSourceRelativePath(selection);
   const fs = yield* FileSystem.FileSystem;
   const statePath = yield* sourceStatePath(config, sourceId);
   return yield* withSourceLock(
@@ -171,14 +172,43 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
       `${statePath}.lock`,
       SOURCE_LOCK_OPTIONS,
       Effect.gen(function* () {
-        const source = requireObsidianSource(yield* readObsidianConfiguration(config), sourceId);
-        if (!source.enabled || !sourcePathMatches(relativePath, source.include, source.exclude)) {
+        const configuration = yield* readObsidianConfiguration(config);
+        const source = yield* Effect.try({
+          try: () => requireObsidianSource(configuration, sourceId),
+          catch: () => ObsidianSourceError.make({message: 'The selected Obsidian source is unavailable.'}),
+        });
+        if (!source.enabled) {
           return yield* ObsidianSourceError.make({
             message: 'Obsidian note is outside the current source access policy.',
           });
         }
         const state = yield* readSourceState(statePath, sourceId);
-        const entry = state.files[relativePath];
+        const inventory = yield* buildObsidianInventory(config, source);
+        const matches =
+          typeof selection === 'string'
+            ? []
+            : Object.entries(state.files).filter(([, entry]) => entry.noteId === selection.noteId);
+        const identities = new Set(matches.map(([, entry]) => entry.fileIdentity).filter(Boolean));
+        const liveMatches = inventory.safeNotes.filter(note =>
+          typeof selection === 'string' ? note.relativePath === selection : identities.has(note.fileIdentity),
+        );
+        if (
+          liveMatches.length !== 1 ||
+          (typeof selection !== 'string' && state.sourceInstanceId !== selection.sourceInstanceId)
+        )
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note identity is missing, replaced or ambiguous; sync and inspect it again.',
+          });
+        const live = liveMatches[0];
+        const relativePath = live.relativePath;
+        const entry =
+          state.files[relativePath] ?? matches.find(([, file]) => file.fileIdentity === live.fileIdentity)?.[1];
+        if (typeof selection !== 'string' && (identities.size !== 1 || entry?.noteId !== selection.noteId))
+          return yield* ObsidianSourceError.make({message: 'Obsidian stable note identity is ambiguous or replaced.'});
+        if (!sourcePathMatches(relativePath, source.include, source.exclude))
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note is outside the current source access policy.',
+          });
         if (
           !state.sourceInstanceId ||
           !entry?.noteId ||
@@ -188,11 +218,12 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
         ) {
           return yield* ObsidianSourceError.make({message: 'Apply source sync before reviewing this Obsidian note.'});
         }
+        if (!(yield* sourceEvidenceReadable(yield* canonicalDirectory(source.vault, 'Obsidian vault'), relativePath)))
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note access is unavailable; inspection is refused.',
+          });
         const store = yield* ResourceStore;
         const sanitizedContent = yield* store.read(resourceStoreLocation(config), entry.uri);
-        const live = (yield* buildObsidianInventory(config, source)).safeNotes.find(
-          note => note.relativePath === relativePath,
-        );
         if (
           (yield* sha256Hex(sanitizedContent)) !== entry.sanitizedHash ||
           !live ||
@@ -210,6 +241,8 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
           relativePath,
           revisionHash: entry.sanitizedHash,
           sanitizerVersion: OBSIDIAN_SANITIZER_VERSION,
+          accessHash: yield* sourceAccessHash(source),
+          vaultHash: yield* sha256Hex(yield* canonicalDirectory(source.vault, 'Obsidian vault')),
           sanitizedContent,
         };
       }),
@@ -217,20 +250,49 @@ export const inspectObsidianNote = Effect.fn('obsidian.inspectNote')(function* (
   );
 });
 
+/** Application-internal write-ahead intent. Persist the full capture input before calling the provider. */
+export type ObsidianEvidenceCaptureReservationV1 =
+  import('@threadnote/memory/topic-maintenance-draft').TopicMaintenanceObsidianCaptureReservationV1;
+
+export interface ObsidianEvidenceCaptureInput {
+  readonly sourceId: string;
+  readonly relativePath: string;
+  readonly fragment: string;
+  readonly expectedSourceInstanceId: string;
+  readonly expectedNoteId: string;
+  readonly expectedRevisionHash: string;
+  readonly expectedSanitizerVersion: string;
+  readonly retentionDays?: number;
+  readonly reservation?: ObsidianEvidenceCaptureReservationV1;
+}
+
 export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(function* (
   config: RuntimeConfig,
-  input: {
-    readonly sourceId: string;
-    readonly relativePath: string;
-    readonly fragment: string;
-    readonly expectedSourceInstanceId: string;
-    readonly expectedNoteId: string;
-    readonly expectedRevisionHash: string;
-    readonly expectedSanitizerVersion: string;
-    readonly retentionDays?: number;
-  },
+  input: ObsidianEvidenceCaptureInput,
 ) {
-  const source = requireObsidianSource(yield* readObsidianConfiguration(config), input.sourceId);
+  const citation = yield* captureOrRecoverObsidianEvidence(config, input, false);
+  if (!citation) return yield* ObsidianSourceError.make({message: 'Obsidian capture did not produce a pin.'});
+  return citation;
+});
+
+/** Read-only reconciliation of a journaled operation after an atomic pin rename or process crash. */
+export const recoverObsidianEvidenceCapture = Effect.fn('obsidian.recoverEvidenceCapture')(function* (
+  config: RuntimeConfig,
+  input: ObsidianEvidenceCaptureInput & {readonly reservation: ObsidianEvidenceCaptureReservationV1},
+) {
+  return yield* captureOrRecoverObsidianEvidence(config, input, true);
+});
+
+const captureOrRecoverObsidianEvidence = Effect.fn('obsidian.captureOrRecoverEvidence')(function* (
+  config: RuntimeConfig,
+  input: ObsidianEvidenceCaptureInput,
+  recoverOnly: boolean,
+) {
+  const configuration = yield* readObsidianConfiguration(config);
+  const source = yield* Effect.try({
+    try: () => requireObsidianSource(configuration, input.sourceId),
+    catch: () => ObsidianSourceError.make({message: 'The selected Obsidian source is unavailable.'}),
+  });
   if (!source.enabled) return yield* ObsidianSourceError.make({message: 'Obsidian source access is disabled.'});
   assertSafeSourceRelativePath(input.relativePath);
   const retentionDays = input.retentionDays ?? 90;
@@ -240,6 +302,13 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
   if (!input.fragment || new TextEncoder().encode(input.fragment).byteLength > EVIDENCE_MAX_FRAGMENT_BYTES) {
     return yield* ObsidianSourceError.make({message: 'Obsidian evidence fragment must be 1–8192 UTF-8 bytes.'});
   }
+  const reservation = input.reservation;
+  if (reservation && !validCaptureReservation(reservation, retentionDays))
+    return yield* ObsidianSourceError.make({
+      message: 'Obsidian capture reservation is malformed or has a different fixed retention policy.',
+    });
+  if (!reservation && recoverOnly)
+    return yield* ObsidianSourceError.make({message: 'Recovery requires a journaled capture reservation.'});
   const fs = yield* FileSystem.FileSystem;
   const statePath = yield* sourceStatePath(config, source.id);
   return yield* withSourceLock(
@@ -250,17 +319,38 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
       `${statePath}.lock`,
       SOURCE_LOCK_OPTIONS,
       Effect.gen(function* () {
-        const currentSource = requireObsidianSource(yield* readObsidianConfiguration(config), source.id);
-        if (
-          !currentSource.enabled ||
-          !sourcePathMatches(input.relativePath, currentSource.include, currentSource.exclude)
-        ) {
+        const currentConfiguration = yield* readObsidianConfiguration(config);
+        const currentSource = yield* Effect.try({
+          try: () => requireObsidianSource(currentConfiguration, source.id),
+          catch: () => ObsidianSourceError.make({message: 'The selected Obsidian source is unavailable.'}),
+        });
+        if (!currentSource.enabled) {
           return yield* ObsidianSourceError.make({
             message: 'Obsidian note is outside the current source access policy.',
           });
         }
         const state = yield* readSourceState(statePath, source.id);
-        const entry = state.files[input.relativePath];
+        const matches = Object.entries(state.files).filter(([, file]) => file.noteId === input.expectedNoteId);
+        // A checkpoint can temporarily contain both old and renamed paths. Require one live identity below.
+        const inventory = yield* buildObsidianInventory(config, currentSource);
+        const identities = new Set(matches.map(([, file]) => file.fileIdentity).filter(Boolean));
+        const liveMatches = reservation
+          ? inventory.safeNotes.filter(note => identities.has(note.fileIdentity))
+          : inventory.safeNotes.filter(note => note.relativePath === input.relativePath);
+        if (liveMatches.length !== 1 || (reservation && identities.size !== 1))
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note identity is missing or ambiguous; sync and inspect it again.',
+          });
+        const live = liveMatches[0];
+        const resolvedPath = reservation ? live.relativePath : input.relativePath;
+        const matchingEntries = matches.filter(([, file]) => file.fileIdentity === live.fileIdentity);
+        const entry = reservation
+          ? (matchingEntries.find(([relativePath]) => relativePath === resolvedPath)?.[1] ?? matchingEntries[0]?.[1])
+          : state.files[resolvedPath];
+        if (!sourcePathMatches(resolvedPath, currentSource.include, currentSource.exclude))
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note is outside the current source access policy.',
+          });
         if (
           !state.sourceInstanceId ||
           !entry?.noteId ||
@@ -280,6 +370,15 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
             message: 'Reviewed Obsidian note identity or sanitized revision changed; inspect and review it again.',
           });
         }
+        if (
+          !(yield* sourceEvidenceReadable(
+            yield* canonicalDirectory(currentSource.vault, 'Obsidian vault'),
+            resolvedPath,
+          ))
+        )
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian note access is unavailable; capture and recovery are refused.',
+          });
         const store = yield* ResourceStore;
         const sanitizedContent = yield* store.read(resourceStoreLocation(config), entry.uri);
         if ((yield* sha256Hex(sanitizedContent)) !== entry.sanitizedHash) {
@@ -287,23 +386,39 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
             message: 'Synced note revision changed during evidence capture; sync again.',
           });
         }
-        const live = (yield* buildObsidianInventory(config, currentSource)).safeNotes.find(
-          note => note.relativePath === input.relativePath,
-        );
-        if (!live || live.fileIdentity !== entry.fileIdentity || live.sanitizedHash !== entry.sanitizedHash) {
+        if (
+          live.fileIdentity !== entry.fileIdentity ||
+          live.sanitizedHash !== entry.sanitizedHash ||
+          matchingEntries.some(
+            ([, file]) =>
+              file.noteId !== entry.noteId ||
+              file.sanitizedHash !== entry.sanitizedHash ||
+              file.sanitizerVersion !== entry.sanitizerVersion,
+          )
+        ) {
           return yield* ObsidianSourceError.make({
             message: 'Live note differs from the synced sanitized revision; apply source sync and review it again.',
           });
         }
-        const fragmentStart = sanitizedContent.indexOf(input.fragment);
-        if (fragmentStart < 0) {
+        if (new TextDecoder().decode(new TextEncoder().encode(input.fragment)) !== input.fragment)
+          return yield* ObsidianSourceError.make({message: 'Select a complete UTF-8 fragment.'});
+        const fragmentStart = reservation?.fragmentStart ?? sanitizedContent.indexOf(input.fragment);
+        if (
+          fragmentStart < 0 ||
+          (reservation && reservation.fragmentEnd !== fragmentStart + input.fragment.length) ||
+          sanitizedContent.slice(fragmentStart, fragmentStart + input.fragment.length) !== input.fragment
+        ) {
           return yield* ObsidianSourceError.make({
             message: 'Evidence fragment is absent from the exact sanitized imported revision.',
           });
         }
         const crypto = yield* Crypto.Crypto;
         const now = yield* Clock.currentTimeMillis;
-        const pinId = yield* crypto.randomUUIDv4();
+        if (reservation && (Date.parse(reservation.capturedAt) > now || Date.parse(reservation.expiresAt) <= now))
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian capture reservation is future-dated or expired; obtain fresh explicit approval.',
+          });
+        const pinId = reservation?.pinId ?? (yield* crypto.randomUUIDv4());
         const citation: MemoryObsidianEvidenceV1 = {
           version: 1,
           sourceId: source.id,
@@ -318,11 +433,35 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
           fragmentStart,
           fragmentEnd: fragmentStart + input.fragment.length,
           pinId,
-          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + retentionDays * 86_400_000)),
+          expiresAt:
+            reservation?.expiresAt ?? DateTime.formatIso(DateTime.makeUnsafe(now + retentionDays * 86_400_000)),
         };
+        if (
+          reservation &&
+          (reservation.accessHash !== citation.accessHash || reservation.vaultHash !== citation.vaultHash)
+        )
+          return yield* ObsidianSourceError.make({
+            message: 'Obsidian capture reservation access or vault identity changed.',
+          });
         const dir = yield* evidenceDirectory(config, source.id);
-        yield* fs.makeDirectory(dir, {recursive: true});
         const path = yield* Path.Path;
+        const destination = path.join(dir, `${pinId}.json`);
+        if (reservation && (yield* fs.exists(destination))) {
+          const pin = parseJsonOrUndefined(yield* fs.readFileString(destination));
+          if (
+            !validPinnedObsidianEvidence(pin) ||
+            JSON.stringify(pin.citation) !== JSON.stringify(citation) ||
+            JSON.stringify(pin.reservation) !== JSON.stringify(reservation) ||
+            pin.sanitizedContent !== sanitizedContent
+          )
+            return yield* ObsidianSourceError.make({
+              message:
+                'Reserved Obsidian pin already exists with mismatching or corrupt evidence; it was not overwritten.',
+            });
+          return pin.citation;
+        }
+        if (recoverOnly) return undefined;
+        yield* fs.makeDirectory(dir, {recursive: true});
         const names = (yield* fs.readDirectory(dir)).filter(name => /^[a-f0-9-]{36}\.json$/u.test(name));
         let retainedBytes = 0;
         let retainedCount = 0;
@@ -330,15 +469,25 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
           const candidatePath = path.join(dir, name);
           const raw = yield* fs.readFileString(candidatePath);
           const parsed = parseJsonOrUndefined(raw);
-          const candidate = parsed as Partial<PinnedObsidianEvidence> | undefined;
-          if (candidate?.citation?.expiresAt && Date.parse(candidate.citation.expiresAt) <= now) {
+          if (!validPinnedObsidianEvidence(parsed) || name !== `${parsed.citation.pinId}.json`)
+            return yield* ObsidianSourceError.make({
+              message:
+                'Obsidian evidence retention contains a corrupt pin; capture refused without changing existing pins.',
+            });
+          const candidate = parsed;
+          if (reservation && candidate.reservation?.operationId === reservation.operationId)
+            return yield* ObsidianSourceError.make({
+              message: 'Obsidian capture operation already owns a different pin; capture refused.',
+            });
+          if (Date.parse(candidate.citation.expiresAt) <= now && !reservation) {
             yield* fs.remove(candidatePath, {force: true});
           } else {
+            // Preserved expired pins still consume the fixed capacity; a failed reservation never deletes them.
             retainedBytes += new TextEncoder().encode(raw).byteLength;
             retainedCount += 1;
           }
         }
-        const pin: PinnedObsidianEvidence = {citation, sanitizedContent};
+        const pin: PinnedObsidianEvidence = {citation, sanitizedContent, ...(reservation ? {reservation} : {})};
         const serialized = `${JSON.stringify(pin)}\n`;
         if (
           retainedCount >= EVIDENCE_MAX_PINS ||
@@ -348,7 +497,6 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
             message: 'Obsidian evidence retention capacity reached; existing unexpired pins remain available.',
           });
         }
-        const destination = path.join(dir, `${pinId}.json`);
         const temporary = `${destination}.tmp`;
         yield* fs.writeFileString(temporary, serialized, {mode: PRIVATE_FILE_MODE});
         yield* fs
@@ -361,9 +509,107 @@ export const captureObsidianEvidence = Effect.fn('obsidian.captureEvidence')(fun
   );
 });
 
+function validCaptureReservation(
+  value: unknown,
+  retentionDays?: number,
+): value is ObsidianEvidenceCaptureReservationV1 {
+  if (!value || typeof value !== 'object') return false;
+  const fields = [
+    'version',
+    'operationId',
+    'pinId',
+    'capturedAt',
+    'expiresAt',
+    'accessHash',
+    'vaultHash',
+    'fragmentStart',
+    'fragmentEnd',
+  ];
+  if (
+    Object.keys(value).length !== fields.length ||
+    !fields.every(key => Object.hasOwn(value, key)) ||
+    !('version' in value) ||
+    value.version !== 1 ||
+    !('operationId' in value) ||
+    typeof value.operationId !== 'string' ||
+    !('pinId' in value) ||
+    typeof value.pinId !== 'string' ||
+    !('capturedAt' in value) ||
+    typeof value.capturedAt !== 'string' ||
+    !('expiresAt' in value) ||
+    typeof value.expiresAt !== 'string' ||
+    !('accessHash' in value) ||
+    typeof value.accessHash !== 'string' ||
+    !('vaultHash' in value) ||
+    typeof value.vaultHash !== 'string' ||
+    !('fragmentStart' in value) ||
+    typeof value.fragmentStart !== 'number' ||
+    !('fragmentEnd' in value) ||
+    typeof value.fragmentEnd !== 'number'
+  )
+    return false;
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
+  const captured = Date.parse(value.capturedAt);
+  const expiry = Date.parse(value.expiresAt);
+  const days = (expiry - captured) / 86_400_000;
+  return (
+    uuid.test(value.operationId) &&
+    uuid.test(value.pinId) &&
+    /^[a-f0-9]{64}$/u.test(value.accessHash) &&
+    /^[a-f0-9]{64}$/u.test(value.vaultHash) &&
+    Number.isFinite(captured) &&
+    Number.isFinite(expiry) &&
+    DateTime.formatIso(DateTime.makeUnsafe(captured)) === value.capturedAt &&
+    DateTime.formatIso(DateTime.makeUnsafe(expiry)) === value.expiresAt &&
+    Number.isSafeInteger(days) &&
+    days >= 1 &&
+    days <= 365 &&
+    (retentionDays === undefined || days === retentionDays) &&
+    Number.isSafeInteger(value.fragmentStart) &&
+    value.fragmentStart >= 0 &&
+    Number.isSafeInteger(value.fragmentEnd) &&
+    value.fragmentEnd > value.fragmentStart
+  );
+}
+
+function validPinnedObsidianEvidence(value: unknown): value is PinnedObsidianEvidence {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Object.keys(value).some(key => !['citation', 'sanitizedContent', 'reservation'].includes(key)) ||
+    !('citation' in value) ||
+    !('sanitizedContent' in value) ||
+    !validMemoryObsidianEvidence(value.citation) ||
+    typeof value.sanitizedContent !== 'string'
+  )
+    return false;
+  const {citation, sanitizedContent} = value;
+  if ('reservation' in value) {
+    const reservation = value.reservation;
+    if (
+      !validCaptureReservation(reservation) ||
+      reservation.pinId !== citation.pinId ||
+      reservation.accessHash !== citation.accessHash ||
+      reservation.vaultHash !== citation.vaultHash ||
+      reservation.expiresAt !== citation.expiresAt ||
+      reservation.fragmentStart !== citation.fragmentStart ||
+      reservation.fragmentEnd !== citation.fragmentEnd
+    )
+      return false;
+  }
+  const fragment = sanitizedContent.slice(citation.fragmentStart, citation.fragmentEnd);
+  return (
+    citation.fragmentEnd <= sanitizedContent.length &&
+    new TextEncoder().encode(fragment).byteLength <= EVIDENCE_MAX_FRAGMENT_BYTES &&
+    sha256HexSync(sanitizedContent) === citation.revisionHash &&
+    sha256HexSync(fragment) === citation.fragmentHash
+  );
+}
+
 export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function* (
   config: RuntimeConfig,
   citation: MemoryObsidianEvidenceV1,
+  options: {readonly preserveExpired?: boolean} = {},
 ) {
   const candidate: unknown = citation;
   if (!validMemoryObsidianEvidence(candidate)) {
@@ -383,7 +629,7 @@ export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function*
         const path = yield* Path.Path;
         const pinPath = path.join(yield* evidenceDirectory(config, citation.sourceId), `${citation.pinId}.json`);
         if (Date.parse(citation.expiresAt) <= now) {
-          yield* fs.remove(pinPath, {force: true});
+          if (options.preserveExpired !== true) yield* fs.remove(pinPath, {force: true});
           return {citation, historical: 'expired' as const, currentRevision: 'unknown' as const};
         }
         const configuration = yield* readObsidianConfiguration(config);
@@ -417,11 +663,7 @@ export const readObsidianEvidence = Effect.fn('obsidian.readEvidence')(function*
         const raw = yield* fs.readFileString(pinPath);
         const pin = parseJsonOrUndefined(raw);
         if (
-          !pin ||
-          typeof pin !== 'object' ||
-          !('citation' in pin) ||
-          !('sanitizedContent' in pin) ||
-          typeof pin.sanitizedContent !== 'string' ||
+          !validPinnedObsidianEvidence(pin) ||
           JSON.stringify(pin.citation) !== JSON.stringify(citation) ||
           (yield* sha256Hex(pin.sanitizedContent)) !== citation.revisionHash ||
           citation.fragmentEnd > pin.sanitizedContent.length

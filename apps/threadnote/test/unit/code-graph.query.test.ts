@@ -822,7 +822,7 @@ describe('code graph query budgets', () => {
         {
           direction: 'incoming',
           ids: [stableSeed.id],
-          limit: 10,
+          limit: 11,
           provenances: ['declared', 'resolved'],
         },
       ]);

@@ -2,7 +2,7 @@ import {isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document'
 import {validateTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
 import {contextHealthCaseIdV2} from '@threadnote/context/health_maintenance';
 import {assertMemoryCodeCitation} from '@threadnote/memory/code/citation';
-import type {TopicMaintenanceObservationV1} from '@threadnote/context/topic_maintenance';
+import type {TopicMaintenanceObservation, TopicMaintenanceObservationV1} from '@threadnote/context/topic_maintenance';
 import {
   observeTopicMaintenanceEvidence,
   buildTopicMaintenanceEvidencePacket,
@@ -16,6 +16,7 @@ import {withMaintenancePacketRevision} from './maintenance_packet.js';
 import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MaintenanceWorkSchedule} from './maintenance_decisions.js';
+import {isObsidianTopic, inspectTopicObsidianState, readTopicObsidianPacket} from './maintenance_obsidian.js';
 
 export const TOPIC_MAINTENANCE_FAMILY = 'topic-maintenance';
 export const TOPIC_MAINTENANCE_SLOT = 'declared-support';
@@ -33,8 +34,8 @@ export interface TopicMaintenanceCheckpoint {
   readonly coverage: 'declared-only';
   readonly suppressedRevision?: string;
   readonly suppressedDecision?: 'reject' | 'defer';
-  readonly observation?: TopicMaintenanceObservationV1;
-  readonly recoveryObservation?: TopicMaintenanceObservationV1;
+  readonly observation?: TopicMaintenanceObservation;
+  readonly recoveryObservation?: TopicMaintenanceObservation;
   readonly deferredAt?: string;
   readonly overflowReason?: 'topic-observation-overflow';
 }
@@ -45,7 +46,7 @@ function checkpointFits(value: TopicMaintenanceCheckpoint): boolean {
 
 function compactCheckpoint(
   candidate: TopicMaintenanceCheckpoint,
-  recovery: TopicMaintenanceObservationV1 | undefined,
+  recovery: TopicMaintenanceObservation | undefined,
 ): TopicMaintenanceCheckpoint {
   const base: TopicMaintenanceCheckpoint = {
     targetHash: candidate.targetHash,
@@ -64,7 +65,7 @@ function compactCheckpoint(
 
 /** A valid observation may exceed the private checkpoint budget; retain only bounded recovery data. */
 export function boundedTopicMaintenanceCheckpoint(
-  observation: TopicMaintenanceObservationV1,
+  observation: TopicMaintenanceObservation,
   checkedAt: string,
   previous?: TopicMaintenanceCheckpoint,
   suppressedRevision?: string,
@@ -272,6 +273,75 @@ function validObservation(
   value: unknown,
   targetHash: unknown,
   revision: unknown,
+): value is TopicMaintenanceObservation {
+  if (typeof value === 'object' && value !== null && 'version' in value && value.version === 2) {
+    if (
+      Object.keys(value).some(
+        key =>
+          ![
+            'version',
+            'sourceKind',
+            'targetHash',
+            'revision',
+            'coverage',
+            'outcome',
+            'canDraft',
+            'inspectionDigest',
+            'sources',
+          ].includes(key),
+      ) ||
+      !('sourceKind' in value) ||
+      value.sourceKind !== 'obsidian' ||
+      !('targetHash' in value) ||
+      value.targetHash !== targetHash ||
+      !('revision' in value) ||
+      value.revision !== revision ||
+      !('coverage' in value) ||
+      value.coverage !== 'declared-only' ||
+      !('outcome' in value) ||
+      typeof value.outcome !== 'string' ||
+      !['unchanged', 'review-required', 'unavailable'].includes(value.outcome) ||
+      !('canDraft' in value) ||
+      value.canDraft !== false ||
+      ('inspectionDigest' in value &&
+        (typeof value.inspectionDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(value.inspectionDigest))) ||
+      !('sources' in value) ||
+      !Array.isArray(value.sources) ||
+      value.sources.length !== 1
+    )
+      return false;
+    return value.sources.every(
+      (source: unknown) =>
+        typeof source === 'object' &&
+        source !== null &&
+        Object.keys(source).sort().join(',') ===
+          'activeStatus,citationId,historicalAvailable,originStatus,reason,status' &&
+        'citationId' in source &&
+        typeof source.citationId === 'string' &&
+        /^tnob_[a-f0-9]{40}$/u.test(source.citationId) &&
+        'historicalAvailable' in source &&
+        typeof source.historicalAvailable === 'boolean' &&
+        'status' in source &&
+        typeof source.status === 'string' &&
+        ['exact', 'relocated', 'changed', 'deleted', 'unknown'].includes(source.status) &&
+        'reason' in source &&
+        typeof source.reason === 'string' &&
+        source.reason.length <= 256 &&
+        'originStatus' in source &&
+        typeof source.originStatus === 'string' &&
+        ['available', 'expired', 'revoked', 'missing', 'corrupt'].includes(source.originStatus) &&
+        'activeStatus' in source &&
+        typeof source.activeStatus === 'string' &&
+        ['available', 'expired', 'revoked', 'missing', 'corrupt'].includes(source.activeStatus),
+    );
+  }
+  return validCodeObservation(value, targetHash, revision);
+}
+
+function validCodeObservation(
+  value: unknown,
+  targetHash: unknown,
+  revision: unknown,
 ): value is TopicMaintenanceObservationV1 {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const item = value as Record<string, unknown>;
@@ -379,23 +449,32 @@ export const observeTopicMaintenanceCase = Effect.fn('contextMaintenance.observe
   caseMap: Map<string, ContextMaintenanceCaseV2>,
 ) {
   const caseId = topicMaintenanceCaseId(selected);
-  const openingEpoch = yield* readContextMaintenanceSourceEpoch(config, root);
+  const imported = isObsidianTopic(selected);
+  const openingEpoch = imported ? undefined : yield* readContextMaintenanceSourceEpoch(config, root);
   const current = (yield* readMemoryRecordsByUri(config, [selected.uri]))[0];
   if (!current || !enrolledTopicRecord(current) || maintenanceContentHash(current.content) !== expectedContentHash)
     return undefined;
   const previousCheckpoint = checkpoints[caseId];
-  const observed = yield* observeTopicMaintenanceEvidence(
-    config,
-    current,
-    root,
-    previousCheckpoint?.observation ?? previousCheckpoint?.recoveryObservation,
-  );
+  const priorObservation = previousCheckpoint?.observation ?? previousCheckpoint?.recoveryObservation;
+  const observed = imported
+    ? (yield* inspectTopicObsidianState(config, current)).observation
+    : yield* observeTopicMaintenanceEvidence(
+        config,
+        current,
+        root,
+        priorObservation?.version === 1 ? priorObservation : undefined,
+      );
   const closing = (yield* readMemoryRecordsByUri(config, [selected.uri]))[0];
   if (
     !closing ||
     !enrolledTopicRecord(closing) ||
-    maintenanceContentHash(closing.content) !== maintenanceContentHash(current.content) ||
-    (yield* readContextMaintenanceSourceEpoch(config, root)) !== openingEpoch
+    maintenanceContentHash(closing.content) !== maintenanceContentHash(current.content)
+  )
+    return undefined;
+  if (
+    imported
+      ? (yield* inspectTopicObsidianState(config, closing)).observation.revision !== observed.revision
+      : (yield* readContextMaintenanceSourceEpoch(config, root)) !== openingEpoch
   )
     return undefined;
   const previous = caseMap.get(caseId);
@@ -442,7 +521,9 @@ export const observeTopicMaintenanceCase = Effect.fn('contextMaintenance.observe
     lastSeen: now,
     subjectUri: current.uri,
     subjectContentHashes: [{uri: current.uri, hash: maintenanceContentHash(current.content)}],
-    sourceSnapshot: {cwd: root, generation: openingEpoch, revision: observed.revision},
+    ...(openingEpoch === undefined
+      ? {}
+      : {sourceSnapshot: {cwd: root, generation: openingEpoch, revision: observed.revision}}),
   };
   return {caseId, item, checkpoint};
 });
@@ -546,6 +627,51 @@ export function readTopicMaintenanceCasePacket<E, R>(
   assertCaseCurrent: Effect.Effect<void, E, R>,
 ) {
   return Effect.gen(function* () {
+    if (isObsidianTopic(record)) {
+      if (
+        item.slot !== TOPIC_MAINTENANCE_SLOT ||
+        !checkpoint ||
+        checkpoint.observation?.version !== 2 ||
+        checkpoint.deferredAt ||
+        checkpoint.overflowReason ||
+        checkpoint.revision !== item.evidenceRevision ||
+        Object.values(selection).some(value => value !== undefined)
+      )
+        return yield* topicFail('The imported topic observation changed. Refresh maintenance.');
+      const guard = Effect.gen(function* () {
+        yield* assertCaseCurrent;
+        const current = (yield* readMemoryRecordsByUri(config, [record.uri]))[0];
+        if (
+          !current ||
+          maintenanceContentHash(current.content) !== checkpoint.targetHash ||
+          (yield* inspectTopicObsidianState(config, current)).observation.revision !== item.evidenceRevision
+        )
+          return yield* topicFail('The imported source or target changed. Refresh maintenance.');
+      });
+      const topicEvidence = yield* withMaintenancePacketRevision(guard, readTopicObsidianPacket(config, record));
+      return {
+        version: 2 as const,
+        caseId: item.caseId,
+        project: item.project,
+        memoryUri: record.uri,
+        memoryId: item.memoryId,
+        evidenceRevision: item.evidenceRevision,
+        expectedContentHash: checkpoint.targetHash,
+        disposition: item.disposition,
+        reason: item.reason,
+        coverage: 'declared-only' as const,
+        topicEvidence,
+        evidenceCounts: {
+          declared: 1,
+          unavailable: topicEvidence.outcome === 'unavailable' ? 1 : 0,
+          historicalUnavailable: topicEvidence.obsidian.origin?.historical === 'available' ? 0 : 1,
+          truncated: topicEvidence.obsidian.current?.truncated ? 1 : 0,
+        },
+        choices: ['Inspect and explicitly capture the selected current note fragment', 'Review a bounded topic update'],
+        allowedOperations: ['read_context_maintenance_packet', 'context_maintenance_capture'],
+        instructions: 'Capture and review exact private note evidence before accepting a topic update.',
+      };
+    }
     if (
       item.slot !== TOPIC_MAINTENANCE_SLOT ||
       !enrolledTopicRecord(record) ||
@@ -558,6 +684,7 @@ export function readTopicMaintenanceCasePacket<E, R>(
       checkpoint.deferredAt !== undefined ||
       checkpoint.overflowReason !== undefined ||
       !checkpoint.observation ||
+      checkpoint.observation.version !== 1 ||
       checkpoint.observation.revision !== item.evidenceRevision
     )
       return yield* topicFail('The enrolled topic observation changed. Refresh maintenance.');

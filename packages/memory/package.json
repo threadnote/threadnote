@@ -30,6 +30,7 @@
     "./remote/repository": "./src/remote/repository.ts",
     "./remote/revisions": "./src/remote/revisions.ts",
     "./test/helpers/remote-memory-document": "./test/helpers/remote-memory-document.ts",
+    "./topic-maintenance-expansion": "./src/topic-maintenance-expansion.ts",
     "./topic-maintenance": "./src/topic-maintenance.ts",
     "./topic-maintenance-acceptance": "./src/topic-maintenance-acceptance.ts",
     "./topic-maintenance-draft": "./src/topic-maintenance-draft.ts",

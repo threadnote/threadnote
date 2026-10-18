@@ -11,6 +11,7 @@ import {TopicDraftError} from '../../src/memory/context/maintenance_draft.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {TopicReviewError} from '../../src/memory/context/maintenance_review.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
+import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -23,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
   apply: vi.fn(),
   decide: vi.fn(),
+  read: vi.fn(),
+  capture: vi.fn(),
 }));
 vi.mock('@threadnote/memory/candidate', async original => ({
   ...(await original<typeof import('@threadnote/memory/candidate')>()),
@@ -39,7 +42,9 @@ vi.mock('../../src/memory/context/maintenance.js', async original => ({
 vi.mock('../../src/memory/context/maintenance_draft.js', async original => ({
   ...(await original<typeof import('../../src/memory/context/maintenance_draft.js')>()),
   requestTopicMaintenanceDraft: mocks.draft,
+  readTopicMaintenanceDraft: mocks.read,
 }));
+vi.mock('../../src/memory/context/maintenance_obsidian.js', () => ({captureTopicObsidianEvidence: mocks.capture}));
 vi.mock('../../src/memory/context/maintenance_review.js', async original => ({
   ...(await original<typeof import('../../src/memory/context/maintenance_review.js')>()),
   prepareTopicMaintenanceReview: mocks.preview,
@@ -181,9 +186,186 @@ beforeEach(() => {
   mocks.preview.mockReturnValue(Effect.succeed(review));
   mocks.apply.mockReturnValue(Effect.succeed(review));
   mocks.decide.mockReturnValue(Effect.succeed(review));
+  mocks.read.mockReturnValue(Effect.succeed(review));
+  mocks.capture.mockReturnValue(Effect.succeed(review));
 });
 
 describe('Manager topic review adapter', () => {
+  const importedReview = () =>
+    ({
+      ...review,
+      maintenance: {...review.maintenance!, version: 2, sourceKind: 'obsidian'},
+    }) as unknown as CandidateReview;
+
+  effectIt.effect('reauthorizes imported review text and skips checkout selection for preview and apply', () =>
+    Effect.gen(function* () {
+      const imported = importedReview();
+      mocks.list.mockReturnValue(Effect.succeed([imported]));
+      mocks.load.mockReturnValue(Effect.succeed(imported));
+      mocks.read.mockReturnValue(Effect.succeed(imported));
+      mocks.preview.mockReturnValue(Effect.succeed(imported));
+      mocks.apply.mockReturnValue(Effect.succeed(imported));
+      const result = yield* call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
+      expect(result?.status).toBe(200);
+      expect(mocks.read).toHaveBeenCalledWith(config, reviewId);
+      const prepared = yield* call('POST', '/api/attention/topic-review', {
+        action: 'preview',
+        project: 'alpha',
+        reviewId,
+        revision: 3,
+      });
+      expect(prepared?.status).toBe(200);
+      expect(mocks.preview).toHaveBeenCalledWith(config, {reviewId, revision: 3});
+      const applied = yield* call('POST', '/api/attention/topic-review', {
+        action: 'apply',
+        project: 'alpha',
+        reviewId,
+        revision: 3,
+        approvalDigest: hash,
+        approved: true,
+      });
+      expect(applied?.status).toBe(200);
+      expect(mocks.apply).toHaveBeenCalledWith(config, {reviewId, revision: 3, approvalDigest: hash, approved: true});
+      expect(mocks.root).not.toHaveBeenCalled();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('withholds accepted, proposed and approved imported text after access is revoked', () =>
+    Effect.gen(function* () {
+      const imported = importedReview();
+      mocks.list.mockReturnValue(Effect.succeed([imported]));
+      mocks.load.mockReturnValue(Effect.succeed(imported));
+      mocks.read.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'source denied'})));
+      const result = yield* call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
+      expect(result?.status).toBe(200);
+      expect(result?.body).toMatchObject({
+        kind: 'topic-maintenance-recovery',
+        reviewId,
+        revision: 3,
+        caseId,
+        recovery: {action: 'reject'},
+      });
+      expect(JSON.stringify(result?.body)).not.toMatch(/Accepted body|Proposed body|FINAL DOCUMENT|PRIVATE BASELINE/u);
+      const action = yield* call('POST', '/api/attention/topic-review', {
+        action: 'preview',
+        project: 'alpha',
+        reviewId,
+        revision: 3,
+      });
+      expect(action?.status).toBe(404);
+      expect(mocks.preview).not.toHaveBeenCalled();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('retains a generic inbox entry while withholding every imported text field after revocation', () =>
+    Effect.gen(function* () {
+      const imported = importedReview();
+      const privateEntry = {
+        ...imported,
+        topic: 'PRIVATE_TOPIC',
+        task: 'PRIVATE_TASK',
+        candidates: [{...imported.candidates[0], proposedText: 'PRIVATE_PROPOSAL', reason: 'PRIVATE_REASON'}],
+      } as CandidateReview;
+      mocks.list.mockReturnValue(Effect.succeed([privateEntry]));
+      mocks.read.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'source denied'})));
+      const result = yield* handleManagerAttentionRequest({
+        config,
+        method: 'GET',
+        url: new URL('http://manager.test/api/reviews?project=alpha'),
+      });
+      expect(result?.status).toBe(200);
+      expect(JSON.stringify(result?.body)).not.toMatch(/PRIVATE_|topic\.md|Accepted body|FINAL DOCUMENT/u);
+      expect(result?.body).toMatchObject({
+        pendingCount: 1,
+        items: [{reviewId, revision: 3, topic: 'Private topic update', candidates: [{proposedText: ''}]}],
+      });
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('keeps capture-only journals out of inboxes and every generic review response', () =>
+    Effect.gen(function* () {
+      const {maintenance: _maintenance, maintenanceApproval: _approval, ...base} = review;
+      const journal = {
+        ...base,
+        maintenanceCapture: {input: {fragment: 'PRIVATE_CAPTURE'}},
+      } as unknown as CandidateReview;
+      mocks.list.mockReturnValue(Effect.succeed([journal]));
+      mocks.load.mockReturnValue(Effect.succeed(journal));
+      const inbox = yield* handleManagerAttentionRequest({
+        config,
+        method: 'GET',
+        url: new URL('http://manager.test/api/reviews?project=alpha'),
+      });
+      expect(inbox?.body).toMatchObject({pendingCount: 0, items: []});
+      for (const route of ['/api/reviews/preview', '/api/reviews/decide', '/api/reviews/refresh-safety']) {
+        const result = yield* handleManagerAttentionAction({
+          config,
+          method: 'POST',
+          url: new URL(`http://manager.test${route}`),
+          body: Effect.succeed({project: 'alpha', reviewId, revision: 3, candidateId: `${reviewId}-1`}),
+        });
+        expect(result?.status).toBe(409);
+        expect(JSON.stringify(result?.body)).not.toContain('PRIVATE_CAPTURE');
+      }
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('captures only explicitly approved exact imported selections before generation', () =>
+    Effect.gen(function* () {
+      mocks.packet.mockReturnValue(
+        Effect.succeed({
+          caseId,
+          project: 'alpha',
+          memoryUri: targetUri,
+          topicEvidence: {version: 2, sourceKind: 'obsidian', outcome: 'ready'},
+        }),
+      );
+      const action = {
+        action: 'capture',
+        project: 'alpha',
+        caseId,
+        expectedContentHash: hash,
+        observationRevision: hash,
+        inspectionDigest: hash,
+        fragmentStart: 2,
+        fragmentEnd: 18,
+        retentionDays: 30,
+        approved: true,
+      };
+      expect((yield* call('POST', '/api/attention/topic-review', {...action, approved: false}))?.status).toBe(400);
+      expect(mocks.capture).not.toHaveBeenCalled();
+      expect((yield* call('POST', '/api/attention/topic-review', action))?.status).toBe(200);
+      const {action: _action, project: _project, ...input} = action;
+      expect(mocks.capture).toHaveBeenCalledWith(config, input);
+      expect(mocks.draft).not.toHaveBeenCalled();
+      expect(mocks.root).not.toHaveBeenCalled();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('never projects arbitrary imported text without exact current access authorization', () =>
+    Effect.sync(() =>
+      fc.assert(
+        fc.property(fc.string({minLength: 1, maxLength: 200}), text => {
+          const imported = importedReview();
+          const payload = {
+            ...imported,
+            topic: text,
+            maintenance: {...imported.maintenance!, basis: {...imported.maintenance!.basis, body: text}},
+          } as CandidateReview;
+          expect(projectManagerTopicReview(payload, {caseId, observationMatches: true})).toBeUndefined();
+          expect(
+            projectManagerTopicReview(payload, {
+              caseId,
+              observationMatches: true,
+              importedAccess: {reviewId, revision: payload.revision + 1},
+            }),
+          ).toBeUndefined();
+        }),
+        {numRuns: 30},
+      ),
+    ),
+  );
+
   effectIt.effect('reads a bounded review without generating, previewing, or writing', () =>
     Effect.gen(function* () {
       const response = yield* call('GET', `/api/attention/topic-review?project=alpha&reviewId=${reviewId}`);
@@ -650,6 +832,8 @@ describe('Manager topic review adapter', () => {
 describe('topic projection invariant', () => {
   effectIt.effect('projects the persisted approved proposal while preserving the generated draft', () =>
     Effect.sync(() => {
+      const approval = review.maintenanceApproval;
+      if (approval?.version !== 1) throw new Error('Expected a code review approval fixture.');
       const editedDraft = {
         ...review.maintenance!.proposal.draft,
         rationale: 'First edit',
@@ -665,8 +849,8 @@ describe('topic projection invariant', () => {
       const withApproval = {
         ...review,
         maintenanceApproval: {
-          ...review.maintenanceApproval!,
-          preview: {...review.maintenanceApproval!.preview, approvedProposal},
+          ...approval,
+          preview: {...approval.preview, approvedProposal},
         },
       };
       const projected = projectManagerTopicReview(withApproval, {caseId, observationMatches: true})!;
@@ -682,6 +866,8 @@ describe('topic projection invariant', () => {
   );
   effectIt.effect('omits arbitrary private before-content and source pins at every approval stage', () =>
     Effect.sync(() => {
+      const approval = review.maintenanceApproval;
+      if (approval?.version !== 1) throw new Error('Expected a code review approval fixture.');
       fc.assert(
         fc.property(
           fc.constantFrom('preview', 'prepared', 'written', 'conflict' as const),
@@ -691,9 +877,9 @@ describe('topic projection invariant', () => {
             const value = projectManagerTopicReview({
               ...review,
               maintenanceApproval: {
-                ...review.maintenanceApproval!,
+                ...approval,
                 stage,
-                preview: {...review.maintenanceApproval!.preview, beforeContent: privateBaseline},
+                preview: {...approval.preview, beforeContent: privateBaseline},
               },
             })!;
             const serialized = JSON.stringify(value);
