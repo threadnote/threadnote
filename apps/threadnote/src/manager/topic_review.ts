@@ -4,6 +4,7 @@ import {listCandidateReviews, loadCandidateReview, type CandidateReview} from '@
 import {
   MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
   topicMaintenanceParagraphCoverage,
+  topicGenerationDiagnosticSummary,
 } from '@threadnote/memory/topic-maintenance-draft';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -87,6 +88,9 @@ export function projectManagerTopicReview(
       model: maintenance.generation.model,
       attempts: maintenance.generation.attempts,
       usage: maintenance.generation.usage,
+      ...(maintenance.generation.origin !== 'manual' && maintenance.generation.observation
+        ? {observation: topicGenerationDiagnosticSummary(maintenance.generation.observation)}
+        : {}),
     },
     draft: effectiveProposal.draft,
     proposal: {
@@ -336,10 +340,18 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
             },
           };
       }
-      return conflict(
-        'The topic draft could not be generated from this exact case and model. Refresh the case or model selection.',
-        'topic-draft-unavailable',
-      );
+      const diagnostics = Schema.is(TopicDraftError)(error)
+        ? topicGenerationDiagnosticSummary(error.diagnostics)
+        : undefined;
+      return {
+        status: 409,
+        body: {
+          code: 'topic-draft-unavailable',
+          error:
+            'The topic draft could not be generated from this exact case and model. Refresh the case or model selection.',
+          ...(diagnostics ? {diagnostics} : {}),
+        },
+      };
     }
     const identity = yield* managerTopicReviewCaseIdentity(request.config, outcome.success);
     return {status: 200, body: projectManagerTopicReview(outcome.success, identity)!};

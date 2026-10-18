@@ -1132,7 +1132,7 @@ function candidateReviewPath(pathService: Path.Path, agentContextHome: string, r
   return pathService.join(agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews', `${safeReviewId}.json`);
 }
 
-function writePrivateFileAtomically(
+export function writePrivateFileAtomically(
   fs: FileSystem.FileSystem,
   path: string,
   content: string,

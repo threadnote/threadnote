@@ -1,13 +1,24 @@
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {OpenAiClient, OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {Context, Effect, Layer, Redacted, Schema} from 'effect';
-import {LanguageModel} from 'effect/ai';
+import {AiError, LanguageModel} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {generateWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
-import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../manager/topic_draft_schema.js';
+import {
+  RetainedTopicGenerationOutput,
+  TopicGenerationUsage,
+  retainedTopicGenerationOutput,
+  type TopicGenerationUsageV1,
+  type TopicMaintenanceDraftBasisV1,
+} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  decodeTopicDraftModelOutput,
+  topicDraftModelSchema,
+  topicDraftNativeJsonSchema,
+} from '../../manager/topic_draft_schema.js';
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
 export const EFFECT_AI_API_KEY_ENV = 'THREADNOTE_EFFECT_AI_API_KEY';
@@ -28,6 +39,35 @@ export class AiConsolidationFailed extends Schema.TaggedError<AiConsolidationFai
   cause: Schema.Defect(),
   message: Schema.String,
 }) {}
+
+export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraftProviderOutputError>()(
+  'TopicDraftProviderOutputError',
+  {
+    message: Schema.String,
+    output: RetainedTopicGenerationOutput,
+    usage: Schema.optionalKey(TopicGenerationUsage),
+  },
+) {}
+
+function decodeTopicDraftProviderOutput(basis: TopicMaintenanceDraftBasisV1, output: unknown) {
+  try {
+    return JSON.stringify(decodeTopicDraftModelOutput(basis, output));
+  } catch {
+    throw TopicDraftProviderOutputError.make({
+      message: 'AI returned a malformed topic maintenance object.',
+      output: retainedTopicGenerationOutput(1, JSON.stringify(output), 'decoded-json'),
+    });
+  }
+}
+
+export function topicDraftProviderUsage(inputTokens: unknown, outputTokens: unknown): TopicGenerationUsageV1 {
+  return Number.isSafeInteger(inputTokens) &&
+    (inputTokens as number) >= 0 &&
+    Number.isSafeInteger(outputTokens) &&
+    (outputTokens as number) >= 0
+    ? {status: 'measured', inputTokens: inputTokens as number, outputTokens: outputTokens as number}
+    : {status: 'unavailable'};
+}
 
 const ConsolidationDraft = Schema.Struct({draft: Schema.String});
 
@@ -148,15 +188,38 @@ export function runEffectAiTopicDraft(
   prompt: string,
   config: EffectAiConfiguration,
   schema: ReturnType<typeof topicDraftModelSchema>,
+  basis: TopicMaintenanceDraftBasisV1,
 ) {
   return Effect.scoped(
     Layer.build(effectAiLanguageModelLayer(config, 4000)).pipe(
       Effect.flatMap(context =>
         Effect.gen(function* () {
           const model = yield* LanguageModel.LanguageModel;
-          const response = yield* model.generateObject({objectName: 'threadnote_topic_maintenance', prompt, schema});
-          const {decision, ...identity} = response.value;
-          return JSON.stringify({...identity, ...decision});
+          const response = yield* model
+            .generateObject({objectName: 'threadnote_topic_maintenance', prompt, schema})
+            .pipe(
+              Effect.mapError(error =>
+                AiError.isAiError(error) && Schema.is(AiError.StructuredOutputError)(error.reason)
+                  ? TopicDraftProviderOutputError.make({
+                      message: 'AI returned malformed topic maintenance output.',
+                      output: retainedTopicGenerationOutput(1, error.reason.responseText, 'provider-text'),
+                      usage: topicDraftProviderUsage(
+                        error.reason.usage?.promptTokens,
+                        error.reason.usage?.completionTokens,
+                      ),
+                    })
+                  : error,
+              ),
+            );
+          const text = yield* Effect.try({
+            try: () => decodeTopicDraftProviderOutput(basis, response.value),
+            catch: error => error as TopicDraftProviderOutputError,
+          });
+          return {
+            text,
+            usage: topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total),
+            outputRepresentation: 'decoded-json' as const,
+          };
         }).pipe(Effect.provide(context)),
       ),
     ),
@@ -234,6 +297,7 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
   prompt: string,
   modelId: string,
   schema: ReturnType<typeof topicDraftModelSchema>,
+  basis: TopicMaintenanceDraftBasisV1,
 ) {
   const output = yield* runNativeAiObject(
     config,
@@ -247,11 +311,13 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
       cause: modelId,
       message: 'No local topic generation model is installed.',
     });
-  const parsed = yield* Schema.decodeUnknownEffect(schema, {onExcessProperty: 'error'})(output).pipe(
-    Effect.mapError(cause =>
-      AiConsolidationFailed.make({cause, message: 'Native AI returned a malformed topic maintenance object.'}),
-    ),
-  );
-  const {decision, ...identity} = parsed;
-  return JSON.stringify({...identity, ...decision});
+  const text = yield* Effect.try({
+    try: () => decodeTopicDraftProviderOutput(basis, output),
+    catch: error => error as TopicDraftProviderOutputError,
+  });
+  return {
+    text,
+    usage: {status: 'unavailable' as const},
+    outputRepresentation: 'decoded-json' as const,
+  };
 });

@@ -1,3 +1,9 @@
+export * from './topic-maintenance-generation.js';
+import {
+  validateTopicGenerationSummary,
+  topicGenerationUsage,
+  type TopicGenerationSummaryV1,
+} from './topic-maintenance-generation.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from './code/citation.js';
 import {
@@ -163,6 +169,7 @@ export type TopicMaintenanceGenerationReceiptV1 =
       readonly modelVersion?: string;
       readonly promptVersion: string;
       readonly attempts: 1 | 2;
+      readonly observation?: TopicGenerationSummaryV1;
       readonly usage:
         | {readonly status: 'unavailable'}
         | {readonly status: 'measured'; readonly inputTokens: number; readonly outputTokens: number};
@@ -626,7 +633,11 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     !keys(input.proposal, ['version', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
     input.proposal.version !== 1 ||
     !object(input.generation) ||
-    !keys(input.generation, ['agent', 'model', 'promptVersion', 'attempts', 'usage'], ['modelVersion', 'origin']) ||
+    !keys(
+      input.generation,
+      ['agent', 'model', 'promptVersion', 'attempts', 'usage'],
+      ['modelVersion', 'origin', 'observation'],
+    ) ||
     !boundedText(input.generation.agent, 64) ||
     !boundedText(input.generation.model, 256) ||
     (input.generation.modelVersion !== undefined && !boundedText(input.generation.modelVersion, 256)) ||
@@ -634,6 +645,20 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
     !object(input.generation.usage)
   )
     fail('invalid or oversized private review payload.');
+  const observation =
+    input.generation.observation === undefined
+      ? undefined
+      : validateTopicGenerationSummary(input.generation.observation);
+  if (observation !== undefined) {
+    if (
+      observation.state !== 'completed' ||
+      observation.agent !== input.generation.agent ||
+      observation.model !== input.generation.model ||
+      observation.attempts.length !== input.generation.attempts ||
+      observation.promptVersion !== input.generation.promptVersion
+    )
+      fail('Invalid generation observation identity.');
+  }
   const usage = input.generation.usage;
   if (
     (usage.status === 'unavailable' && !keys(usage, ['status'])) ||
@@ -661,6 +686,18 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
   )
     fail('invalid model generation receipt.');
   const basis = validateTopicMaintenanceDraftBasis(input.basis);
+  if (observation) {
+    const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
+    if (
+      observation.targetHash !== basis.targetHash ||
+      observation.observationRevision !== basis.observationRevision ||
+      observation.packetDigest !== basis.packetDigest ||
+      usage.status !== measured.status ||
+      (measured.status === 'measured' &&
+        (usage.inputTokens !== measured.inputTokens || usage.outputTokens !== measured.outputTokens))
+    )
+      fail('Generation observation differs from its basis or complete usage.');
+  }
   validateTopicMaintenanceReviewEvidence(basis, input.reviewEvidence);
   const proposal = assemble(basis, validateDraft(input.proposal.draft, basis));
   if (

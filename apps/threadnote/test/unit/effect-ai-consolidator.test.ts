@@ -10,6 +10,7 @@ import {
   EFFECT_AI_ENABLED_ENV,
   EFFECT_AI_MODEL_ENV,
   effectAiConfiguration,
+  topicDraftProviderUsage,
 } from '@threadnote/threadnote/effect/ai/consolidator';
 
 describe('Effect AI consolidator', () => {
@@ -26,6 +27,18 @@ describe('Effect AI consolidator', () => {
         [EFFECT_AI_MODEL_ENV]: 'local-model',
       }),
     ).toEqual({apiKey: 'test-key', apiUrl: 'http://localhost:11434/v1', model: 'local-model'});
+  });
+
+  it('reports provider totals only when both counters were actually supplied', () => {
+    expect(topicDraftProviderUsage(12, 3)).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
+    for (const counters of [
+      [undefined, 3],
+      [12, undefined],
+      [-1, 3],
+      [12, NaN],
+      [1.5, 2],
+    ])
+      expect(topicDraftProviderUsage(...(counters as [unknown, unknown]))).toEqual({status: 'unavailable'});
   });
 
   it.effect('keeps application code provider-independent', () =>

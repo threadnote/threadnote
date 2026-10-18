@@ -1,5 +1,6 @@
 import type {
   TopicMaintenanceDraftV1,
+  TopicGenerationSummaryV1,
   TopicMaintenanceParagraphCoverageV1,
 } from '@threadnote/memory/topic-maintenance-draft';
 import type {TopicMaintenanceParagraphV1, TopicMaintenanceDependencyV1} from '@threadnote/memory/topic-maintenance';
@@ -55,6 +56,7 @@ export interface ManagerTopicReviewV1 {
   readonly paragraphCoverage?: TopicMaintenanceParagraphCoverageV1;
   readonly generation: {
     readonly origin: 'model' | 'manual';
+    readonly observation?: TopicGenerationSummaryV1;
     readonly agent: string;
     readonly model: string;
     readonly attempts: number;

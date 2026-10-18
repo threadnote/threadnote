@@ -1,3 +1,7 @@
+import {
+  validateTopicGenerationSummary,
+  type TopicGenerationSummaryV1,
+} from '@threadnote/memory/topic-maintenance-draft';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const TOPIC_STUDY_VERSION = 1 as const;
@@ -109,6 +113,7 @@ export interface TopicStudyObservationV1 {
   readonly downstreamPromptHash: string | null;
   readonly retrievalHash: string | null;
   readonly promptHash: string | null;
+  readonly generationObservation?: TopicGenerationSummaryV1;
   readonly providerInputTokens: number | null;
   readonly providerOutputTokens: number | null;
   readonly providerChargeMicros: number | null;
@@ -339,6 +344,7 @@ export function assertTopicStudyLedgerV1(input: string, corpusInput: unknown): r
 }
 
 function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyObservationV1 {
+  const hasGeneration = input !== null && typeof input === 'object' && Object.hasOwn(input, 'generationObservation');
   const hasReviewer = input !== null && typeof input === 'object' && Object.hasOwn(input, 'reviewerExpectation');
   const source = record(input, 'observation', [
     'status',
@@ -377,6 +383,7 @@ function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyO
     'probes',
     'adjudication',
     ...(hasReviewer ? ['reviewerExpectation'] : []),
+    ...(hasGeneration ? ['generationObservation'] : []),
   ]);
   const status = member(source.status, ['observed', 'failed', 'unavailable'] as const);
   const parseModel = (input: unknown): TopicStudyObservationV1['model'] => {
@@ -443,6 +450,7 @@ function parseObservation(input: unknown, event: TopicStudyEventV1): TopicStudyO
     downstreamPromptHash: nullableHash(source.downstreamPromptHash),
     retrievalHash: nullableHash(source.retrievalHash),
     promptHash: nullableHash(source.promptHash),
+    ...(hasGeneration ? {generationObservation: validateTopicGenerationSummary(source.generationObservation)} : {}),
     providerInputTokens: nullableCount(source.providerInputTokens),
     providerOutputTokens: nullableCount(source.providerOutputTokens),
     providerChargeMicros: nullableCount(source.providerChargeMicros),
@@ -1331,7 +1339,10 @@ function validateGateMeasurements(
         !pinned(obs.downstreamModel) ||
         obs.downstreamPromptHash === null ||
         obs.retrievalHash === null ||
-        (obs.draftAttempted && (!obs.draftCompleted || !pinned(obs.model) || obs.promptHash === null)),
+        (obs.draftAttempted &&
+          (!obs.draftCompleted ||
+            !pinned(obs.model) ||
+            (obs.promptHash === null && obs.generationObservation?.state !== 'completed'))),
     )
   )
     reasons.push('required preservation or model/prompt/runtime observations missing');
@@ -1704,4 +1715,18 @@ export function topicStudyPreconditionFailedV1(observation: TopicStudyObservatio
   return (
     observation.status === 'failed' && observation.reason?.startsWith(TOPIC_STUDY_PRECONDITION_FAILURE_PREFIX) === true
   );
+}
+
+export function topicStudyGenerationObservationV1(
+  input: unknown,
+  expected: {readonly caseId: string; readonly agent: string; readonly model: string},
+): TopicGenerationSummaryV1 | undefined {
+  if (typeof input !== 'object' || input === null) return undefined;
+  const envelope = input as {diagnostics?: unknown; maintenance?: {generation?: {observation?: unknown}}};
+  const value = envelope.diagnostics ?? envelope.maintenance?.generation?.observation;
+  if (value === undefined) return undefined;
+  const summary = validateTopicGenerationSummary(value);
+  if (summary.caseId !== expected.caseId || summary.agent !== expected.agent || summary.model !== expected.model)
+    fail('generation observation identity mismatch');
+  return summary;
 }

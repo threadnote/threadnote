@@ -4,7 +4,11 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {SystemInfo} from '@threadnote/platform/system';
 import {errorMessage} from '@threadnote/platform/errors';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import type {TopicMaintenanceDraftBasisV1} from '@threadnote/memory/topic-maintenance-draft';
+import {
+  retainedTopicGenerationOutput,
+  type TopicGenerationUsageV1,
+  type TopicMaintenanceDraftBasisV1,
+} from '@threadnote/memory/topic-maintenance-draft';
 import {findExecutable} from '../utils.js';
 import type {ConsolidationAgent} from '../types.js';
 import type {ConsolidationModel} from './consolidation_models.js';
@@ -18,10 +22,11 @@ import {
   runEffectAiTopicDraft,
   runNativeAiConsolidation,
   runNativeAiTopicDraft,
+  TopicDraftProviderOutputError,
 } from '../effect/ai/consolidator.js';
 import {topicDraftModelSchema} from './topic_draft_schema.js';
 
-export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v5';
+export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v6';
 export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
 export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
 export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;
@@ -31,12 +36,14 @@ export interface SelectedDraftResult {
   readonly backendIdentity: string;
   readonly modelIdentity: string;
   readonly modelVersion?: string;
-  readonly usage: {readonly status: 'unavailable'};
+  readonly usage: TopicGenerationUsageV1;
+  readonly outputRepresentation?: 'provider-text' | 'decoded-json';
   readonly settings: {readonly maxOutputTokens: 4000; readonly seed?: 0};
 }
 
 export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError>()('SelectedDraftError', {
   message: Schema.String,
+  reason: Schema.optionalKey(Schema.Literal('deadline')),
 }) {}
 const fail = (message: string) => SelectedDraftError.make({message});
 function remoteModelVersion(apiUrl: string | undefined): string {
@@ -107,19 +114,18 @@ export function runSelectedDraft(
           message: 'Choose a model before generating a consolidation draft.',
         });
       const manifest = topic ? yield* (yield* LocalModelCatalog).get(model.id) : undefined;
-      const native = yield* topicSchema
-        ? runNativeAiTopicDraft(config, prompt, model.id, topicSchema)
+      const native = yield* topicSchema && topicBasis
+        ? runNativeAiTopicDraft(config, prompt, model.id, topicSchema, topicBasis)
         : runNativeAiConsolidation(config, prompt, model.id);
       if (native === undefined)
         return yield* ManagerOperationError.make({
           message: 'No generation model is installed. Install one with `threadnote models` and reload model choices.',
         });
       return {
-        text: native,
+        ...(typeof native === 'string' ? {text: native, usage: {status: 'unavailable' as const}} : native),
         backendIdentity: 'local-ai',
         modelIdentity: model.id,
         ...(manifest ? {modelVersion: `${manifest.revision}:${manifest.sha256}`} : {}),
-        usage: {status: 'unavailable' as const},
         settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
       };
     }
@@ -134,15 +140,14 @@ export function runSelectedDraft(
           message: 'This model is no longer available. Reload model choices and select a model again.',
         });
       yield* ensureEffectAiReady(config, resolved);
-      const text = yield* topicSchema
-        ? runEffectAiTopicDraft(prompt, resolved.configuration, topicSchema)
+      const text = yield* topicSchema && topicBasis
+        ? runEffectAiTopicDraft(prompt, resolved.configuration, topicSchema, topicBasis)
         : runEffectAiConsolidation(prompt, resolved.configuration);
       return {
-        text,
+        ...(typeof text === 'string' ? {text, usage: {status: 'unavailable' as const}} : text),
         backendIdentity: resolved.configuration.apiUrl ?? 'effect-ai',
         modelIdentity: resolved.configuration.model,
         modelVersion: remoteModelVersion(resolved.configuration.apiUrl),
-        usage: {status: 'unavailable' as const},
         settings: {maxOutputTokens: 4000 as const},
       };
     }
@@ -168,14 +173,26 @@ export function runSelectedDraft(
       ? run.pipe(
           Effect.timeoutOrElse({
             duration: TOPIC_DRAFT_MAX_DURATION_MS,
-            orElse: () => Effect.fail(fail('Topic maintenance generation exceeded the 120-second deadline.')),
+            orElse: () =>
+              Effect.fail(
+                SelectedDraftError.make({
+                  message: 'Topic maintenance generation exceeded the 120-second deadline.',
+                  reason: 'deadline',
+                }),
+              ),
           }),
         )
       : run
   ).pipe(
+    Effect.map((result): SelectedDraftResult => result),
     Effect.tap(result =>
       topic && new TextEncoder().encode(result.text).byteLength > TOPIC_DRAFT_MAX_OUTPUT_BYTES
-        ? Effect.fail(fail('Topic maintenance draft exceeds the 32 KiB output boundary.'))
+        ? Effect.fail(
+            TopicDraftProviderOutputError.make({
+              message: 'Topic maintenance draft exceeds the 32 KiB output boundary.',
+              output: retainedTopicGenerationOutput(1, result.text, result.outputRepresentation ?? 'provider-text'),
+            }),
+          )
         : Effect.void,
     ),
   );

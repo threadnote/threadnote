@@ -16,10 +16,14 @@ export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftB
   );
 }
 
+export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasisV1) {
+  return basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+}
+
 /** Generation grammar only; the memory-owned validator remains the final authority. */
 export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
-  const currentHandles = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+  const currentHandles = topicDraftCurrentSourceHandles(basis);
   const currentHandle = currentHandles.length ? Schema.Literals(currentHandles) : Schema.String;
   const operationVariants = descriptive.map(paragraph =>
     Schema.Struct({
@@ -31,12 +35,12 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
     }),
   );
   const operation = Schema.Union(operationVariants.length ? operationVariants : [Schema.String]);
+  const sourceIndex = currentHandles.length ? Schema.Literals(currentHandles.map((_, index) => index)) : Schema.Int;
   const dispositionVariants = descriptive.map(paragraph =>
     Schema.Struct({
       ordinal: Schema.Literal(paragraph.ordinal),
-      beforeHash: Schema.Literal(paragraph.hash),
       disposition: Schema.Literals(['update', 'revalidate', 'unresolved']),
-      supportHandles: Schema.Array(currentHandle),
+      sourceIndices: Schema.Array(sourceIndex).check(Schema.isMaxLength(currentHandles.length)),
       rationale: Schema.String.check(Schema.isMinLength(1)),
     }),
   );
@@ -92,6 +96,35 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasisV1) {
     packetDigest: Schema.Literal(basis.packetDigest),
     decision,
   });
+}
+
+export function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input: unknown) {
+  const {decision, ...identity} = Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(
+    input,
+  );
+  const current = topicDraftCurrentSourceHandles(basis);
+  return {
+    ...identity,
+    ...decision,
+    paragraphDispositions: {
+      version: 1 as const,
+      entries: decision.paragraphDispositions.entries.map(entry => {
+        if (typeof entry === 'string' || !basis.paragraphs[entry.ordinal])
+          throw new Error('Invalid topic disposition ordinal.');
+        return {
+          ordinal: entry.ordinal,
+          beforeHash: basis.paragraphs[entry.ordinal].hash,
+          disposition: entry.disposition,
+          supportHandles: entry.sourceIndices.map(index => {
+            if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
+              throw new Error('Invalid topic disposition source index.');
+            return current[index];
+          }),
+          rationale: entry.rationale,
+        };
+      }),
+    },
+  };
 }
 
 function nativeDisjointUnions(value: unknown): unknown {
