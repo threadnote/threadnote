@@ -356,8 +356,8 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
         maximumLines: McpInput.integer('Bounded excerpt lines', {minimum: 1, maximum: 24}),
       },
     },
-    input =>
-      readContextMaintenancePacket(config, input.caseId ?? '', input).pipe(
+    ({caseId, ...selection}) =>
+      readContextMaintenancePacket(config, caseId ?? '', selection).pipe(
         Effect.map(result => ({
           content: [{type: 'text' as const, text: JSON.stringify(result)}],
           structuredContent: result,

@@ -9,6 +9,55 @@ import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {runObsidianSourceRemove} from '@threadnote/integration-obsidian/source';
 import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
 import {topicObsidianReviewId} from '../../src/memory/context/maintenance_obsidian.js';
+import type {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
+
+effectIt.effect(
+  'registered MCP reads imported packets before and after explicit capture without treating case identity as an excerpt selector',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* managerImportedTopicFixture();
+      type ToolResult = {readonly isError?: boolean; readonly structuredContent?: unknown};
+      const handlers = new Map<string, (input: Record<string, unknown>) => Effect.Effect<ToolResult>>();
+      const server = {
+        registerTool: (name: string, _definition: unknown, handler: unknown) => {
+          handlers.set(name, handler as (input: Record<string, unknown>) => Effect.Effect<ToolResult>);
+        },
+      } as unknown as EffectMcpServerAdapter;
+      registerContextMaintenanceTools(server, f.config);
+      const packet = handlers.get('context_maintenance_packet')!;
+      const pinDirectory = f.path.join(f.home, 'threadnote', 'sources', 'obsidian', 'notes', 'evidence');
+      const before = yield* f.store.read(f.location, f.uri);
+      const pins = yield* f.fs.readDirectory(pinDirectory);
+      const first = yield* packet({caseId: f.caseId});
+      expect(first.isError).not.toBe(true);
+      expect(first.structuredContent).toMatchObject({
+        caseId: f.caseId,
+        topicEvidence: {sourceKind: 'obsidian', outcome: 'ready', canDraft: false},
+      });
+      for (const selection of [
+        {citationId: 'tnob_unselected'},
+        {memoryUri: f.uri},
+        {startLine: 1},
+        {maximumLines: 24},
+      ]) {
+        expect((yield* packet({caseId: f.caseId, ...selection})).isError).toBe(true);
+      }
+      expect(yield* f.fs.readDirectory(pinDirectory)).toEqual(pins);
+      expect(yield* f.store.read(f.location, f.uri)).toBe(before);
+      const captured = yield* handlers.get('context_maintenance_capture')!(f.captureInput);
+      expect(captured.isError).not.toBe(true);
+      const afterCapture = yield* f.fs.readDirectory(pinDirectory);
+      expect(afterCapture).toHaveLength(2);
+      const current = yield* packet({caseId: f.caseId});
+      expect(current.isError).not.toBe(true);
+      expect(current.structuredContent).toMatchObject({
+        topicEvidence: {sourceKind: 'obsidian', outcome: 'ready', canDraft: true},
+      });
+      expect(yield* f.fs.readDirectory(pinDirectory)).toEqual(afterCapture);
+      expect(yield* f.store.read(f.location, f.uri)).toBe(before);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+);
 
 effectIt.effect(
   'enrolls and captures through real Manager adapters without a checkout, then withholds revoked evidence',
