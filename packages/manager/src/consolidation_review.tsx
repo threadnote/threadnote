@@ -1,4 +1,6 @@
 import React, {useState} from 'react';
+import {Sparkles} from 'lucide-react';
+import {MemoryExcerpt} from './review_presentation.js';
 import {
   ConsolidationModelPicker,
   consolidationFailureGuidance,
@@ -73,18 +75,23 @@ export function ConsolidationDraftReview(props: {
         <h4>2. Edit and review</h4>
         <p>Read the draft below and edit it as needed. Then choose how each paragraph is supported.</p>
       </div>
-      <textarea
-        aria-label="Consolidation draft"
-        aria-busy={props.busy}
-        placeholder={props.busy ? 'Generating draft...' : 'Draft preview'}
-        readOnly={props.disabled}
-        value={props.draft}
-        spellCheck={false}
-        onChange={event => {
-          props.onDraftChange(event.target.value);
-          props.onReviewChange([]);
-        }}
-      />
+      <div className="review-proposal">
+        <div className="review-content-label">
+          <Sparkles size={14} aria-hidden="true" /> Proposed draft
+        </div>
+        <textarea
+          aria-label="Consolidation draft"
+          aria-busy={props.busy}
+          placeholder={props.busy ? 'Generating draft...' : 'Draft preview'}
+          readOnly={props.disabled}
+          value={props.draft}
+          spellCheck={false}
+          onChange={event => {
+            props.onDraftChange(event.target.value);
+            props.onReviewChange([]);
+          }}
+        />
+      </div>
       {sections.length ? (
         <div className="consolidation-support-guide">
           <div className="consolidation-review-progress">
@@ -180,7 +187,9 @@ export function ConsolidationDraftReview(props: {
                             />
                             Use this passage
                           </label>
-                          <pre style={{whiteSpace: 'pre-wrap'}}>{fragment}</pre>
+                          <MemoryExcerpt label={`Source ${sourceIndex + 1} · passage ${fragmentIndex + 1}`}>
+                            {fragment}
+                          </MemoryExcerpt>
                           {support ? (
                             <div>
                               <p>

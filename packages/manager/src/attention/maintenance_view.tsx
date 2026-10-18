@@ -16,6 +16,7 @@ import {
   mergeMaintenanceStatusPage,
 } from './maintenance.js';
 import {HealthDetail} from '../attention_details.js';
+import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialogs.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 
@@ -645,12 +646,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             <header>
               <div>
                 <h3>{group.preview?.title ?? maintenanceMemoryTitle(group.uri)}</h3>
-                <p>{group.preview?.excerpt ?? maintenanceDecisionExplanation(group.cases[0]?.reason ?? '')}</p>
+                {group.preview?.excerpt ? (
+                  <MemoryExcerpt label="Saved memory">{group.preview.excerpt}</MemoryExcerpt>
+                ) : (
+                  <p>{maintenanceDecisionExplanation(group.cases[0]?.reason ?? '')}</p>
+                )}
               </div>
-              <span className="attention-count">
+              <ReviewBadge tone="warning">
                 {group.findings.length + group.cases.length} supporting{' '}
                 {group.findings.length + group.cases.length === 1 ? 'check' : 'checks'}
-              </span>
+              </ReviewBadge>
             </header>
             {group.uri ? (
               <button type="button" className="health-quiet-action" onClick={() => props.onOpenLibrary(group.uri)}>

@@ -3,6 +3,7 @@ import {TopicReviewContent} from './topic_review.js';
 import {Copy, ExternalLink, RefreshCw} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
+import {MemoryExcerpt} from '../review_presentation.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, errorMessage} from '../ui/support.js';
 import type {
@@ -332,7 +333,9 @@ function CaseMemory(props: {readonly uri: string; readonly refresh: number}): Re
       ) : content === undefined ? (
         <p role="status">Loading memory…</p>
       ) : (
-        <MemoryBody content={memoryDocumentParts(content).body} />
+        <MemoryExcerpt label="Stored memory">
+          <MemoryBody content={memoryDocumentParts(content).body} />
+        </MemoryExcerpt>
       )}
     </section>
   );

@@ -6,6 +6,14 @@ import type {
 } from '@threadnote/memory/topic-maintenance-draft';
 import {ConsolidationModelPicker, useConsolidationModels} from '../consolidation_models.js';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
+import {RefreshCw} from 'lucide-react';
+import {ReviewNotice} from '../review_presentation.js';
+import {
+  TopicParagraphComparison,
+  TopicReviewNotes,
+  TopicReviewSummary,
+  TopicSourceEvidence,
+} from './topic_review_presentation.js';
 import {api, errorMessage} from '../ui/support.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {ManagerTopicReviewActionV1, ManagerTopicReviewV1} from './topic_contracts.js';
@@ -288,9 +296,6 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
 
   return (
     <section aria-busy={loading || busy} className="topic-review-content">
-      {loading ? <p role="status">Loading topic and review…</p> : null}
-      {error ? <p role="alert">{error}</p> : null}
-      {notice ? <p role="status">{notice}</p> : null}
       <header className="health-dialog-section-heading">
         <h3>{review?.topic ?? 'Topic and source evidence'}</h3>
         <button
@@ -302,67 +307,56 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             setGeneration(value => value + 1);
           }}
         >
-          Refresh evidence
+          <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
         </button>
       </header>
-      <p>Source checks cover declared references only. Other claims may need separate review.</p>
-      {topic?.outcome === 'unavailable' ? (
-        <p role="alert">
-          Current source evidence is unavailable: {topic.reason ?? 'no verified excerpt was returned'}.
+      <TopicReviewSummary review={review} draft={draft} />
+      {loading ? (
+        <p role="status" className="muted">
+          Loading topic and review…
         </p>
       ) : null}
-      {!packet && review?.state === 'pending' ? (
-        <p className="muted">The source case is unavailable. Refresh it before accepting this update.</p>
+      {error ? (
+        <ReviewNotice role="alert" tone="danger" title="Review needs attention">
+          {error}
+        </ReviewNotice>
       ) : null}
-      {review?.generation.origin !== 'manual' && review && !review.caseObservationMatches ? (
-        <p role="status">Source evidence changed since this draft. Review the updated case before continuing.</p>
+      {notice ? (
+        <ReviewNotice tone="proposal" title="Review updated">
+          {notice}
+        </ReviewNotice>
       ) : null}
-      {topic?.outcome === 'ready' ? (
-        <section aria-label="Source evidence">
-          <h4>What changed in the source</h4>
-          {topic.sources?.map(source => (
-            <article key={source.citationId} className="health-code-preview">
-              <p>
-                {source.current.path} · {source.status.replaceAll('-', ' ')}
-              </p>
-              <div className="health-evidence-comparison">
-                <section>
-                  <h5>Original source</h5>
-                  <pre>{source.oldExcerpt.content}</pre>
-                </section>
-                <section>
-                  <h5>Current source</h5>
-                  <pre>{source.newExcerpt.content}</pre>
-                </section>
-              </div>
-            </article>
-          ))}
-          {!topic.sources?.length ? <p>No bounded source excerpts are available.</p> : null}
-          {!!topic.truncatedExcerpts && <p>Some source excerpts were omitted because of the view limit.</p>}
-        </section>
+      {topic?.outcome === 'unavailable' ? (
+        <ReviewNotice role="alert" tone="warning" title="Current source evidence is unavailable">
+          {topic.reason ?? 'No verified excerpt was returned'}. Refresh evidence before continuing.
+        </ReviewNotice>
+      ) : null}
+      {!packet && review?.state === 'pending' && !error ? (
+        <ReviewNotice tone="warning" title="Refresh source evidence">
+          The source case is unavailable. Refresh it before accepting this update.
+        </ReviewNotice>
+      ) : null}
+      {packet &&
+      topic?.outcome !== 'unavailable' &&
+      review?.generation.origin !== 'manual' &&
+      review &&
+      !review.caseObservationMatches ? (
+        <ReviewNotice tone="warning" title="This draft needs fresh evidence">
+          Source evidence changed since this draft. Review the updated case before continuing.
+        </ReviewNotice>
       ) : null}
       {review ? (
         <>
-          <p className="muted">
-            Review {review.state.replaceAll('-', ' ')} · checked revision {review.revision} · generated with{' '}
-            {review.generation.agent} / {review.generation.model}
-          </p>
-          <p className="muted">
-            {review.generation.usage.status === 'measured'
-              ? `${review.generation.usage.inputTokens} input and ${review.generation.usage.outputTokens} output tokens measured`
-              : 'Model usage unavailable'}{' '}
-            · {review.generation.attempts} generation {review.generation.attempts === 1 ? 'attempt' : 'attempts'}
-          </p>
-          {review.warnings.map((warning, index) => (
-            <p key={index} role="status">
-              {warning}
-            </p>
-          ))}
+          <TopicReviewNotes review={review} />
           {review.draft.unresolvedQuestions.map((question, index) => (
-            <p key={`q${index}`}>Unresolved: {question}</p>
+            <ReviewNotice key={`q${index}`} tone="warning" title="Unresolved question">
+              {question}
+            </ReviewNotice>
           ))}
           {review.draft.removedClaims.map((claim, index) => (
-            <p key={`r${index}`}>Claim removed from proposal: {claim}</p>
+            <ReviewNotice key={`r${index}`} tone="warning" title="Claim removed from proposal">
+              {claim}
+            </ReviewNotice>
           ))}
           {review.draft.outcome === 'policy-conflict' ? (
             <p role="alert">
@@ -373,67 +367,14 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
               The available source does not support a decision yet. Refresh evidence or defer this review.
             </p>
           ) : null}
-          <section aria-label="Focused topic comparison">
-            <h4>Review proposed changes</h4>
-            {review.paragraphs.map((paragraph, ordinal) => {
-              const operation = draft?.operations.find(item => item.ordinal === ordinal);
-              const original = originalParagraphs[ordinal] ?? '';
-              const proposed = operation?.text ?? original;
-              return (
-                <article key={`${ordinal}:${paragraph.hash}`} className="health-code-preview">
-                  <h5>
-                    Paragraph {ordinal + 1}:{' '}
-                    {paragraph.role === 'descriptive'
-                      ? 'Observed behavior'
-                      : paragraph.role === 'normative'
-                        ? 'Policy requirement'
-                        : 'Historical decision'}
-                  </h5>
-                  <p className="muted">
-                    {paragraph.scope ? `Scope: ${paragraph.scope}. ` : ''}Support: {paragraph.support}.{' '}
-                    {paragraph.role !== 'descriptive' ? 'This paragraph is preserved.' : ''}
-                  </p>
-                  {paragraph.role === 'descriptive' && operation ? (
-                    <>
-                      <strong>Accepted</strong>
-                      <pre>{original}</pre>
-                      <strong>Proposed</strong>
-                    </>
-                  ) : null}
-                  {paragraph.role === 'descriptive' && review.state === 'pending' ? (
-                    <textarea
-                      aria-label={`Proposed descriptive paragraph ${ordinal + 1}`}
-                      rows={Math.max(4, Math.min(12, proposed.split('\n').length + 2))}
-                      value={proposed}
-                      onChange={event => editParagraph(ordinal, event.target.value)}
-                    />
-                  ) : (
-                    <pre>{proposed}</pre>
-                  )}
-                  {paragraph.role === 'descriptive' && operation ? (
-                    <fieldset disabled={review.state !== 'pending'}>
-                      <legend>Current source support for paragraph {ordinal + 1}</legend>
-                      {review.support
-                        .filter(source => source.variant === 'current')
-                        .map(source => (
-                          <label key={source.handleId} className="review-confirmation">
-                            <input
-                              type="checkbox"
-                              checked={operation.supportHandles.includes(source.handleId)}
-                              onChange={event => editSupport(ordinal, source.handleId, event.target.checked)}
-                            />
-                            {source.path}
-                            {paragraph.citationIds.includes(source.citationId)
-                              ? ' · declared for this paragraph'
-                              : ' · other declared source'}
-                          </label>
-                        ))}
-                    </fieldset>
-                  ) : null}
-                </article>
-              );
-            })}
-          </section>
+          <TopicParagraphComparison
+            review={review}
+            draft={draft}
+            originalParagraphs={originalParagraphs}
+            onEditParagraph={editParagraph}
+            onEditSupport={editSupport}
+          />
+          {topic ? <TopicSourceEvidence topic={topic} /> : null}
           {review.additionalDependencies.length > 0 ? (
             <details>
               <summary>Other declared dependencies</summary>
@@ -449,7 +390,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
             <MemoryBody content={review.proposal.body} />
           </details>
           {approval && !changedDraft ? (
-            <section aria-label="Exact final document" className="health-code-preview">
+            <section aria-label="Exact final document" className="review-final-document">
               <h4>
                 {approval.stage === 'written'
                   ? 'Saved final document'
@@ -486,8 +427,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
               This draft needs supported descriptive text or a supported unchanged review before preview.
             </p>
           ) : null}
-          {review.blockingReason && !canApply ? (
-            <p role="status">Acceptance paused: {review.blockingReason}. Refresh evidence or prepare a new preview.</p>
+          {review.state === 'pending' && review.blockingReason && !canApply ? (
+            <ReviewNotice tone="warning" title="Before you accept">
+              Acceptance paused: {review.blockingReason}. Refresh evidence or prepare a new preview.
+            </ReviewNotice>
           ) : null}
           {review.state === 'applying' && approval?.stage === 'prepared' ? (
             <p role="status">
@@ -503,51 +446,57 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           ) : null}
         </>
       ) : null}
-      <footer>
+      {!review && topic ? <TopicSourceEvidence topic={topic} /> : null}
+      <details className="review-disclosure topic-generation-settings" open={!review}>
+        <summary>Generation settings</summary>
+        <div className="topic-generation-controls">
+          <label>
+            Generate with
+            <select
+              aria-label="Topic generation provider"
+              disabled={busy || loading}
+              value={backend}
+              onChange={event => setBackend(event.target.value === 'effect-ai' ? 'effect-ai' : 'local-ai')}
+            >
+              <option value="local-ai">Local AI</option>
+              <option value="effect-ai">Configured AI provider</option>
+            </select>
+          </label>
+          <ConsolidationModelPicker
+            selection={modelSelection}
+            disabled={busy || loading}
+            label="Topic generation model"
+          />
+          {modelSelection.error ? <p role="alert">{modelSelection.error}</p> : null}
+          {!modelSelection.loading && !modelSelection.models.length ? (
+            <p>No generation model is available for this provider.</p>
+          ) : null}
+          {caseId && (
+            <button
+              type="button"
+              disabled={!availableToGenerate}
+              onClick={() =>
+                modelSelection.model &&
+                void mutate({
+                  action: review ? 'regenerate' : 'generate',
+                  project: props.project,
+                  caseId,
+                  backend,
+                  modelId: modelSelection.model,
+                })
+              }
+            >
+              {review ? 'Regenerate draft' : 'Generate draft'}
+            </button>
+          )}
+        </div>
+      </details>
+      <footer className="topic-review-actions">
         {review?.targetUri ? (
           <button type="button" onClick={() => props.onOpenLibrary(review.targetUri)}>
             Open accepted topic
           </button>
         ) : null}
-        <label>
-          Generate with
-          <select
-            aria-label="Topic generation provider"
-            disabled={busy || loading}
-            value={backend}
-            onChange={event => setBackend(event.target.value === 'effect-ai' ? 'effect-ai' : 'local-ai')}
-          >
-            <option value="local-ai">Local AI</option>
-            <option value="effect-ai">Configured AI provider</option>
-          </select>
-        </label>
-        <ConsolidationModelPicker
-          selection={modelSelection}
-          disabled={busy || loading}
-          label="Topic generation model"
-        />
-        {modelSelection.error ? <p role="alert">{modelSelection.error}</p> : null}
-        {!modelSelection.loading && !modelSelection.models.length ? (
-          <p>No generation model is available for this provider.</p>
-        ) : null}
-        {caseId && (
-          <button
-            type="button"
-            disabled={!availableToGenerate}
-            onClick={() =>
-              modelSelection.model &&
-              void mutate({
-                action: review ? 'regenerate' : 'generate',
-                project: props.project,
-                caseId,
-                backend,
-                modelId: modelSelection.model,
-              })
-            }
-          >
-            {review ? 'Regenerate draft' : 'Generate draft'}
-          </button>
-        )}
         {review?.state === 'pending' ? (
           <>
             <button
