@@ -12,6 +12,8 @@ import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-inva
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {formatMemoryDocument} from '@threadnote/memory/document';
+import {canonicalResourceUri} from '@threadnote/store/resource-id';
+import {uriSegment} from '@threadnote/store/resource-segment';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
   contextMaintenanceInventoryAuthorityLimits,
@@ -103,6 +105,101 @@ const settle = (f: Effect.Success<ReturnType<typeof fixture>>, budget: number, n
   });
 
 describe('maintenance inventory authority and fairness', () => {
+  effectIt.effect('retains a named project through complete and resumed inventory without mixing colliding slugs', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([]);
+      const projects = ['RFC756 Pilot', 'rfc756-pilot', 'RFC756 PILOT'];
+      const expected = new Map<string, string>();
+      for (const [index, project] of projects.entries()) {
+        const uri = canonicalResourceUri('user', [
+          'tester',
+          'memories',
+          'durable',
+          'projects',
+          uriSegment(project),
+          `named-${index}.md`,
+        ]);
+        yield* f.store.write(
+          f.location,
+          uri,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              schemaVersion: 10,
+              memoryId: `tn_named_${index}`,
+              project,
+              sourceAgentClient: 'test',
+              timestamp: '2026-10-03T15:00:00.000Z',
+            },
+            'Synthetic named-project topic.',
+          ),
+          {mode: 'create'},
+        );
+        expected.set(project, uri);
+      }
+      for (const project of projects) {
+        for (const budget of [1, 100]) {
+          let snapshot;
+          for (let tick = 0; tick < 64; tick++) {
+            snapshot = yield* prepareContextMaintenanceInventory(f.config, project, budget);
+            if (snapshot.complete) break;
+          }
+          expect(snapshot?.complete).toBe(true);
+          expect(snapshot?.records.map(record => record.uri)).toEqual([expected.get(project)]);
+          expect(snapshot?.records.map(record => record.metadata.project)).toEqual([project]);
+        }
+      }
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'preserves project identity when display names normalize to storage slugs',
+    {suffix: fc.array(fc.constantFrom('a', 'B', 'c', '.', '_', '-'), {minLength: 1, maxLength: 12})},
+    ({suffix}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture([]);
+        const project = `Pilot ${suffix.join('')} end`;
+        const target = canonicalResourceUri('user', [
+          'tester',
+          'memories',
+          'durable',
+          'projects',
+          uriSegment(project),
+          'topic.md',
+        ]);
+        yield* f.store.write(
+          f.location,
+          target,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              schemaVersion: 10,
+              memoryId: 'tn_named_project',
+              project,
+              sourceAgentClient: 'test',
+              timestamp: '2026-10-03T15:00:00.000Z',
+            },
+            'Synthetic named-project topic.',
+          ),
+          {mode: 'create'},
+        );
+        for (let tick = 0; tick < 64; tick++) {
+          const snapshot = yield* prepareContextMaintenanceInventory(f.config, project, 100);
+          if (!snapshot.complete) continue;
+          expect(snapshot.records.map(record => record.uri)).toEqual([target]);
+          expect(snapshot.records[0].metadata.project).toBe(project);
+          return;
+        }
+        throw new Error('Named-project inventory did not establish authority');
+      }).pipe(TestClock.withLive, provide),
+    {fastCheck: {numRuns: 12}, timeout: 30_000},
+  );
+
   for (const relative of ['agent-artifacts/skills/claude/review-pr', 'shared/default/agent-artifacts/packs/team'])
     for (const failure of ['permission', 'catalog'] as const)
       effectIt.effect(`drops resumed tooling pages before enumeration (${relative}, ${failure})`, () =>

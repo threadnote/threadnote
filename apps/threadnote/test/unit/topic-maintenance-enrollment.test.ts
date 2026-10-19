@@ -25,6 +25,7 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* (
     readonly manifestName?: string;
     readonly scoped?: boolean;
     readonly multiple?: boolean;
+    readonly filename?: string;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -82,7 +83,7 @@ const fixture = Effect.fn('topicEnrollmentTest.fixture')(function* (
     ...(settings.multiple ? {project: project.name} : {}),
     refs: ['health.ts', 'config.ts'],
   });
-  const uri = 'threadnote://user/tester/memories/durable/projects/fixture/context-health.md';
+  const uri = `threadnote://user/tester/memories/durable/projects/fixture/${settings.filename ?? 'context-health.md'}`;
   const content = formatMemoryDocument(
     'MEMORY',
     {
@@ -165,9 +166,13 @@ describe('topic maintenance enrollment', () => {
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('enrolls from the same JSON file through the public CLI', () =>
+  effectIt.effect('enrolls a sentence-named topic ending in a period through the public CLI', () =>
     Effect.gen(function* () {
-      const f = yield* fixture({scoped: true, multiple: true});
+      const f = yield* fixture({
+        scoped: true,
+        multiple: true,
+        filename: 'how-source-backed-topic-updates-are-drafted-reviewed-and-safely-accepted..md',
+      });
       const system = yield* SystemInfo;
       const inputFile = f.path.join(f.config.agentContextHome, 'support.json');
       yield* f.fs.writeFileString(inputFile, JSON.stringify(f.options.input));

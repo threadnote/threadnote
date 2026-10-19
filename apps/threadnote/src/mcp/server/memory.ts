@@ -50,6 +50,7 @@ import {
   memoryCodeCitationSharingBlockerMessage,
 } from '@threadnote/memory/code/citation-policy';
 import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {localMemoryPathForUri, localUserMemoriesRoot} from '@threadnote/memory/local-path';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   MemoryRelationWriteError,
@@ -461,27 +462,6 @@ function compactMemoryDirectoryParts(kind: CompactableMemoryKind, projectSegment
       return ['incidents', 'active', projectSegment];
   }
 }
-
-const localMemoryPathForUri = Effect.fn('mcpServer.localMemoryPathForUri')(function* (
-  config: RuntimeConfig,
-  uri: string,
-) {
-  const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!uri.startsWith(prefix)) {
-    return undefined;
-  }
-  const relative = uri.slice(prefix.length);
-  if (relative.includes('..') || relative.startsWith('/')) {
-    return undefined;
-  }
-  const path = yield* Path.Path;
-  return path.join(yield* localUserMemoriesRoot(config), ...relative.split('/'));
-});
-
-const localUserMemoriesRoot = Effect.fn('mcpServer.localUserMemoriesRoot')(function* (config: RuntimeConfig) {
-  const path = yield* Path.Path;
-  return path.join(config.agentContextHome, 'data', config.account, 'user', uriSegment(config.user), 'memories');
-});
 
 const readTextIfExists = Effect.fn('mcpServer.readTextIfExists')(function* (path: string) {
   const fs = yield* FileSystem.FileSystem;

@@ -5,6 +5,7 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/hygiene';
 import {MemoryOperationError, migrateMemoryDocumentV4ToV5} from '@threadnote/memory/migrations';
+import {localMemoryPathForUri, localUserMemoriesRoot} from '@threadnote/memory/local-path';
 import {
   assertMemoryDocumentSchemaWritable,
   formatMemoryDocument,
@@ -73,6 +74,7 @@ interface ProjectMemoryLocation {
 }
 
 export {MemoryOperationError, migrateMemoryDocumentV4ToV5};
+export {localMemoryPathForUri, localUserMemoriesRoot};
 
 export const attemptSync = <A>(evaluate: () => A) =>
   Effect.try({
@@ -821,22 +823,6 @@ function projectMemoryLocations(): readonly ProjectMemoryLocation[] {
   ];
 }
 
-export const localMemoryPathForUri = Effect.fn('memory.localMemoryPathForUri')(function* (
-  config: RuntimeConfig,
-  uri: string,
-) {
-  const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
-  if (!uri.startsWith(prefix)) {
-    return undefined;
-  }
-  const relative = uri.slice(prefix.length);
-  if (relative.includes('..') || relative.startsWith('/')) {
-    return undefined;
-  }
-  const path = yield* Path.Path;
-  return path.join(yield* localUserMemoriesRoot(config), ...relative.split('/'));
-});
-
 export const writeDurableMemoryFile = Effect.fn('memory.writeDurableMemoryFile')(function* (
   ov: string,
   config: RuntimeConfig,
@@ -1240,11 +1226,6 @@ function legacySourceLabel(candidate: LegacyMemoryCandidate): string {
 const localDataRoot = Effect.fn('memory.localDataRoot')(function* (config: RuntimeConfig) {
   const path = yield* Path.Path;
   return path.join(config.agentContextHome, 'data');
-});
-
-export const localUserMemoriesRoot = Effect.fn('memory.localUserMemoriesRoot')(function* (config: RuntimeConfig) {
-  const path = yield* Path.Path;
-  return path.join(yield* localDataRoot(config), config.account, 'user', uriSegment(config.user), 'memories');
 });
 
 function uniqueStrings(values: readonly string[]): readonly string[] {
