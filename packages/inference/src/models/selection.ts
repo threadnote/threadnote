@@ -15,15 +15,30 @@ export interface ModelSelection {
 
 const EMPTY_SELECTION: ModelSelection = {roles: {}, version: MODEL_SELECTION_VERSION};
 
-export const readModelSelection = Effect.fn('models.readSelection')(function* (home: string) {
+export type ModelSelectionInspection =
+  | {readonly status: 'missing'}
+  | {readonly status: 'malformed'}
+  | {readonly status: 'valid'; readonly selection: ModelSelection};
+
+/** Strict inspection for choice-sensitive callers; the legacy reader still tolerates invalid files. */
+export function parseModelSelection(raw: string): ModelSelectionInspection {
+  const parsed = Result.try(() => JSON.parse(raw) as unknown);
+  return Result.isFailure(parsed) || !isModelSelection(parsed.success)
+    ? {status: 'malformed'}
+    : {selection: parsed.success, status: 'valid'};
+}
+
+export const inspectModelSelection = Effect.fn('models.inspectSelection')(function* (home: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = path.join(home, 'models', 'selection.json');
-  if (!(yield* fs.exists(file))) return EMPTY_SELECTION;
-  const raw = yield* fs.readFileString(file);
-  const parsed = Result.try(() => JSON.parse(raw) as unknown);
-  if (Result.isFailure(parsed) || !isModelSelection(parsed.success)) return EMPTY_SELECTION;
-  return parsed.success;
+  if (!(yield* fs.exists(file))) return {status: 'missing'} as const;
+  return parseModelSelection(yield* fs.readFileString(file));
+});
+
+export const readModelSelection = Effect.fn('models.readSelection')(function* (home: string) {
+  const inspected = yield* inspectModelSelection(home);
+  return inspected.status === 'valid' ? inspected.selection : EMPTY_SELECTION;
 });
 
 export const writeModelSelection = Effect.fn('models.writeSelection')(function* (
@@ -74,9 +89,15 @@ export const clearLocalModelSelection = Effect.fn('models.clearSelection')(funct
 });
 
 function isModelSelection(value: unknown): value is ModelSelection {
-  if (typeof value !== 'object' || value === null) return false;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (Object.keys(value).some(key => key !== 'version' && key !== 'roles')) return false;
   const candidate = value as Partial<ModelSelection>;
-  if (candidate.version !== MODEL_SELECTION_VERSION || typeof candidate.roles !== 'object' || !candidate.roles) {
+  if (
+    candidate.version !== MODEL_SELECTION_VERSION ||
+    typeof candidate.roles !== 'object' ||
+    !candidate.roles ||
+    Array.isArray(candidate.roles)
+  ) {
     return false;
   }
   return Object.entries(candidate.roles).every(

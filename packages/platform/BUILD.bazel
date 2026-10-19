@@ -1562,6 +1562,7 @@ bun_test(
         "//packages/inference:src/models/catalog.ts",
         "//packages/inference:src/models/inference.ts",
         "//packages/inference:src/models/selection.ts",
+        "//packages/inference:src/models/setup.ts",
         "//packages/inference:src/models/store.ts",
         "//packages/inference:src/vector-search.ts",
         "//packages/integration-core:package.json",
