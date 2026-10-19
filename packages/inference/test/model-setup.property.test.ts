@@ -88,7 +88,7 @@ describe('model setup domain properties', () => {
   it('matches an independent intent/owner model and makes stale completions inert through arbitrary command sequences', () => {
     FC.assert(
       FC.property(
-        FC.array(FC.constantFrom('off', 'on', 'restart', 'claim', 'verify', 'ready', 'stale', 'failure'), {
+        FC.array(FC.constantFrom('off', 'on', 'restart', 'claim', 'verify', 'ready', 'stale', 'failure', 'drain'), {
           maxLength: 80,
         }),
         actions => {
@@ -96,6 +96,7 @@ describe('model setup domain properties', () => {
           let epoch = 0;
           let allowed = true;
           let attempts = 0;
+          let draining = false;
           let phase: ModelSetupPhase = 'pending';
           const historical: ModelSetupFence[] = [];
           for (const action of actions) {
@@ -105,6 +106,7 @@ describe('model setup domain properties', () => {
             if (action === 'off' || action === 'on') {
               const nextAllowed = action === 'on';
               if (allowed !== nextAllowed) {
+                if (phase === 'downloading' || phase === 'verifying') draining = true;
                 epoch += 1;
                 attempts = 0;
                 phase = nextAllowed ? 'pending' : 'off';
@@ -113,17 +115,21 @@ describe('model setup domain properties', () => {
               state = transitionModelSetup(state, {type: 'policy', policy: allowed ? 'automatic' : 'off'});
             } else if (action === 'restart') {
               if (allowed) {
+                if (phase === 'downloading' || phase === 'verifying') draining = true;
                 epoch += 1;
                 phase = 'pending';
               }
               state = transitionModelSetup(state, {type: 'request', job, restart: true});
             } else if (action === 'claim') {
-              if (allowed && phase === 'pending') {
+              if (allowed && phase === 'pending' && !draining) {
                 phase = 'downloading';
                 attempts += 1;
                 historical.push(fence);
               }
               state = transitionModelSetup(state, {type: 'claim', ...fence});
+            } else if (action === 'drain') {
+              draining = false;
+              state = transitionModelSetup(state, {type: 'drained', intentEpoch: epoch, owner});
             } else if (action === 'verify') {
               if (phase === 'downloading') phase = 'verifying';
               state = transitionModelSetup(state, {type: 'verifying', fence});
@@ -146,12 +152,44 @@ describe('model setup domain properties', () => {
             expect(state.policy).toBe(allowed ? 'automatic' : 'off');
             expect(state.phase).toBe(phase);
             expect(state.attempts).toBe(attempts);
+            expect(state.drainingOwner !== undefined).toBe(draining);
             expect(parseModelSetup(JSON.stringify(state))).toEqual({status: 'valid', state});
             expect(previous).toEqual(previousSnapshot);
           }
         },
       ),
       {numRuns: 150},
+    );
+  });
+
+  it('grants one bounded startup reservation and rejects superseded queued child claims', () => {
+    FC.assert(
+      FC.property(FC.array(FC.nat(60_000), {minLength: 1, maxLength: 30}), deltas => {
+        let state = initialModelSetupState(job);
+        let now = 0;
+        let expectedNonce: string | undefined;
+        let expiresAt = 0;
+        const oldReservations: Array<{nonce: string; epoch: number}> = [];
+        for (const [index, delta] of deltas.entries()) {
+          now += delta;
+          const nonce = `reservation-${index}`;
+          const expectedNew = expectedNonce === undefined || now >= expiresAt;
+          state = transitionModelSetup(state, {type: 'reserve', job, nonce, now, expiresAt: now + 30_000});
+          if (expectedNew) {
+            expectedNonce = nonce;
+            expiresAt = now + 30_000;
+          }
+          expect(state.reservation?.nonce).toBe(expectedNonce);
+          for (const old of oldReservations.filter(old => old.nonce !== expectedNonce)) {
+            expect(
+              transitionModelSetup(state, {type: 'claim', job, intentEpoch: old.epoch, nonce: old.nonce, owner, now}),
+            ).toBe(state);
+          }
+          oldReservations.push({nonce, epoch: state.intentEpoch});
+          expect(parseModelSetup(JSON.stringify(state))).toEqual({status: 'valid', state});
+        }
+      }),
+      {numRuns: 100},
     );
   });
 

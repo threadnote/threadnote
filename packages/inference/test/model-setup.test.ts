@@ -155,6 +155,7 @@ describe('home-scoped model setup policy', () => {
         const stale = yield* updateModelSetup(f.home, manifest, {type: 'ready', fence: currentFence, receipt});
         expect(stale.status === 'valid' && stale.state).toEqual(disabled.status === 'valid' && disabled.state);
         expect(disabled.status === 'valid' && disabled.supersededOwner).toEqual(f.owner);
+        expect(disabled.status === 'valid' && disabled.state.drainingOwner).toEqual(f.owner);
         expect(stale.status === 'valid' && stale.state.intentEpoch).toBe(current.state.intentEpoch + 1);
         expect(yield* f.resolve()).toBeUndefined();
       }).pipe(provideTestLayer(platform)),
@@ -248,6 +249,23 @@ describe('home-scoped model setup policy', () => {
       expect(yield* f.fs.exists(f.setupFile)).toBe(false);
       yield* f.fs.remove(f.home, {recursive: true});
       expect(yield* updateModelSetup(f.home, manifest, {type: 'ready', fence, receipt})).toEqual({status: 'missing'});
+      expect(yield* f.fs.exists(f.home)).toBe(false);
+    }).pipe(provideTestLayer(platform)),
+  );
+
+  effectIt.effect('does not recreate a home erased between the worker precheck and state-lock acquisition', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* updateModelSetup(f.home, manifest, {type: 'request', job: f.job});
+      const fs = {
+        ...f.fs,
+        realPath: (target: string) =>
+          f.fs.realPath(target).pipe(Effect.tap(() => f.fs.remove(f.home, {recursive: true}))),
+      };
+      yield* updateModelSetup(f.home, manifest, {type: 'claim', intentEpoch: 0, job: f.job, owner: f.owner}).pipe(
+        Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.result,
+      );
       expect(yield* f.fs.exists(f.home)).toBe(false);
     }).pipe(provideTestLayer(platform)),
   );
