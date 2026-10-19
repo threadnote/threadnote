@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {Effect, Result, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {listCandidateReviews, loadCandidateReview, type CandidateReview} from '@threadnote/memory/candidate';
@@ -29,7 +30,6 @@ import {
 import {readMemoryRecordsByUri} from '../mcp/server/memory.js';
 import {managerAttentionProjectRoot} from './attention.js';
 
-const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const REVIEW = /^review-[a-f0-9]{24}$/u;
 const CASE = /^health-case-[a-f0-9]{40}$/u;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -257,7 +257,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
     const project = request.url.searchParams.get('project') ?? '';
     const reviewId = request.url.searchParams.get('reviewId') ?? '';
     if (
-      !PROJECT.test(project) ||
+      !isManagerProjectName(project) ||
       !REVIEW.test(reviewId) ||
       [...request.url.searchParams.keys()].some(key => key !== 'project' && key !== 'reviewId')
     )
@@ -273,7 +273,7 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
   if (bytes(JSON.stringify(body)) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES + 4096)
     return invalid('Topic review request exceeds the 36 KiB boundary.');
   const project = body.project;
-  if (typeof project !== 'string' || !PROJECT.test(project)) return invalid('Select a valid project.');
+  if (typeof project !== 'string' || !isManagerProjectName(project)) return invalid('Select a valid project.');
   const action = body.action;
   if (action === 'capture') {
     if (

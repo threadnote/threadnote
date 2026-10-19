@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {Effect, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -41,7 +42,6 @@ const fail = () =>
       'The selected topic or scoped source evidence is unavailable, incomplete or changed, or required evidence cannot be retained. Inspect the scope again; prepare its project graph manually if needed.',
   });
 const HASH = /^[a-f0-9]{64}$/u;
-const PROJECT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const privateUri = (uri: unknown): uri is string =>
   typeof uri === 'string' &&
   uri.length <= 4096 &&
@@ -254,7 +254,7 @@ export const handleManagerTopicExpansion = Effect.fn('managerTopicExpansion.hand
   if (
     !privateUri(uri) ||
     typeof project !== 'string' ||
-    !PROJECT.test(project) ||
+    !isManagerProjectName(project) ||
     !['inspect', 'discover', 'preview', 'apply', 'restart'].includes(action as string)
   )
     return invalid();

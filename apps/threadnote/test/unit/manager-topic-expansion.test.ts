@@ -50,6 +50,18 @@ const safe = (body: unknown, f: Fixture) => {
   expect(json).not.toMatch(/callerCwd|scopeReceiptJson|sourceFenceDigest/u);
 };
 
+effectIt.effect('inspects and previews a configured spaced project without changing the accepted memory', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const project = 'Example Project';
+    const f = yield* makeTopicExpansionFixture({project});
+    const before = yield* fs.readFileString(f.memoryPath);
+    expect(yield* request(f, 'inspect', {project})).toMatchObject({status: 200, body: {project}});
+    expect((yield* request(f, 'preview', {project}))?.status).toBe(200);
+    expect(yield* fs.readFileString(f.memoryPath)).toBe(before);
+  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+);
+
 effectIt.effect(
   'Manager exposes explicit safe choices and exact full preview, then applies and replays without rewriting body or origins',
   () =>

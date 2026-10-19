@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {Effect, Result} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -32,7 +33,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   if (request.method !== 'GET') return undefined;
   if (request.url.pathname !== '/api/reviews' && request.url.pathname !== '/api/context-health') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if ((!project && request.url.pathname !== '/api/reviews') || (project && !isProject(project))) {
+  if ((!project && request.url.pathname !== '/api/reviews') || (project && !isManagerProjectName(project))) {
     return {
       body: {code: 'invalid-project', error: 'Select a valid project to inspect its attention queue.'},
       status: 400,
@@ -274,8 +275,4 @@ function unavailableContextHealth(
 
 function isPending(state: string): boolean {
   return state === 'pending' || state === 'deferred' || state === 'applying';
-}
-
-function isProject(project: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project);
 }
