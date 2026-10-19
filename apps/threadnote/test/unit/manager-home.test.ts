@@ -26,6 +26,45 @@ const config: RuntimeConfig = {
 
 describe('Manager home API', () => {
   effectIt.effect.prop(
+    'preserves internal spaces and exact project isolation through every home source',
+    {letters: Schema.Array(Schema.Literals(['a', 'Z', '2', '-', '_', '.'])).check(Schema.isMaxLength(20))},
+    ({letters}) =>
+      Effect.gen(function* () {
+        const project = `Example ${letters.join('')} Project`;
+        const defaults = testSources();
+        const [template] = yield* defaults.records(config);
+        const selected = {...template, metadata: {...template.metadata, project}};
+        const neighbor = {
+          ...selected,
+          uri: `${selected.uri}.neighbor`,
+          metadata: {...selected.metadata, project: project.replaceAll(' ', '-')},
+        };
+        const records = [selected, neighbor];
+        const before = JSON.stringify(records);
+        const response = yield* collectManagerHomeResponse(
+          {config, method: 'GET', url: new URL(`http://manager.test/api/home?project=${encodeURIComponent(project)}`)},
+          testSources({
+            records: () => Effect.succeed(records),
+            root: (...args) =>
+              Effect.sync(() => expect(args[1]).toBe(project)).pipe(Effect.andThen(defaults.root(...args))),
+            value: (...args) =>
+              Effect.sync(() => expect(args[1].project).toBe(project)).pipe(Effect.andThen(defaults.value(...args))),
+            maintenance: (...args) =>
+              Effect.sync(() => expect(args[1]).toBe(project)).pipe(Effect.andThen(defaults.maintenance(...args))),
+            health: (...args) =>
+              Effect.sync(() => {
+                expect(args[1]).toBe(project);
+                expect(args[2]).toEqual([selected]);
+              }).pipe(Effect.andThen(defaults.health(...args))),
+          }),
+        );
+        expect(response).toMatchObject({status: 200, body: {project, stats: {memories: 1}}});
+        expect(JSON.stringify(records)).toBe(before);
+      }),
+    {arbitrary: {runs: 40}},
+  );
+
+  effectIt.effect.prop(
     'aggregates All without project scans, preserves provenance, and orders bounded handoffs independently of corpus order',
     {
       inputs: Schema.Array(
@@ -433,7 +472,7 @@ describe('Manager home API', () => {
       expect(response).toEqual({
         body: {
           code: 'invalid-project',
-          error: 'Select a project with letters, numbers, dots, underscores, or hyphens.',
+          error: 'Select a project with letters, numbers, spaces, dots, underscores, or hyphens.',
         },
         status: 400,
       });

@@ -316,6 +316,7 @@ bun_test(
         "//apps/threadnote:src/manager/processes.ts",
         "//apps/threadnote:src/manager/project/graph_scope.ts",
         "//apps/threadnote:src/manager/project/manifest_values.ts",
+        "//apps/threadnote:src/manager/project/name.ts",
         "//apps/threadnote:src/manager/project/roots.ts",
         "//apps/threadnote:src/manager/selected_draft.ts",
         "//apps/threadnote:src/manager/server.ts",

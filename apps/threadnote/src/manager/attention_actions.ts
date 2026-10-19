@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {errorMessage} from '@threadnote/platform/errors';
@@ -80,8 +81,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   if (route === '/api/attention/context-maintenance') {
     if (request.method === 'GET') {
       const project = request.url.searchParams.get('project') ?? undefined;
-      if (project !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project))
-        return invalid('Select a valid project.');
+      if (project !== undefined && !isManagerProjectName(project)) return invalid('Select a valid project.');
       const caseId = request.url.searchParams.get('caseId');
       if (caseId !== null && request.url.searchParams.get('view') !== 'status') {
         if (project !== undefined) yield* readContextMaintenanceStatus(request.config, project, {caseId});
@@ -141,7 +141,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
   }
   if (route === '/api/context-health/citations/jobs' && request.method === 'GET') {
     const project = request.url.searchParams.get('project') ?? '';
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project)) return invalid('Select a valid project.');
+    if (!isManagerProjectName(project)) return invalid('Select a valid project.');
     return {
       status: 200,
       body: {job: latestCitationRepairJob(citationRepairRegistry(request), project)?.job ?? null},
@@ -166,7 +166,7 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     return undefined;
   const body = yield* request.body;
   const project = typeof body.project === 'string' ? body.project : '';
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project)) return invalid('Select a valid project.');
+  if (!isManagerProjectName(project)) return invalid('Select a valid project.');
   if (route === '/api/context-health/semantic/preview') {
     if (body.choice !== 'left' && body.choice !== 'right' && body.choice !== 'both')
       return invalid('Choose which memory to keep, or keep both.');
