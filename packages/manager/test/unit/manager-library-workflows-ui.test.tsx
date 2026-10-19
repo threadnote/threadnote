@@ -149,10 +149,11 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   await act(async () => button('New memory').click());
   expect(container.querySelector<HTMLInputElement>('input[placeholder="project"]')?.value).toBe('project');
   await fill(container.querySelector<HTMLInputElement>('[aria-label="Memory title"]')!, 'New memory');
-  await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, '# Saved body');
+  const savedBody = '# Saved body\n\n```mermaid\nflowchart LR\n A-->B\n```';
+  await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, savedBody);
   await act(async () => button('Save memory').click());
   expect(posts.find(post => post.path === '/api/memory/save')?.body).toMatchObject({
-    text: '# Saved body',
+    text: savedBody,
     topic: 'New memory',
     project: 'project',
     sourceAgentClient: 'user',

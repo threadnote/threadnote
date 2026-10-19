@@ -64,6 +64,12 @@ export const MANAGER_STATIC_FILES: Readonly<
     sourceDirectory: 'node_modules/@mdxeditor/editor/dist',
   },
   '/app.js': {contentType: 'text/javascript; charset=utf-8', path: 'app.js', sourceDirectory: 'dist/manager'},
+  '/mermaid.js': {contentType: 'text/javascript; charset=utf-8', path: 'mermaid.js', sourceDirectory: 'dist/manager'},
+  '/mermaid.html': {
+    contentType: 'text/html; charset=utf-8',
+    path: 'mermaid.html',
+    sourceDirectory: 'packages/manager/static',
+  },
   '/favicon.svg': {
     contentType: 'image/svg+xml; charset=utf-8',
     directory: 'assets/brand',

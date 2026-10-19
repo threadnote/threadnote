@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import {ManagerAutocompleteInput} from '@threadnote/manager/dialog';
 import {isMemoryKind, isMemoryStatus} from './support.js';
 import type {MemoryMetadata, SelectId, TargetForm, TreeNode} from '@threadnote/manager/ui/contracts';
+import {MermaidBlock} from '../mermaid_block.js';
 
 interface DropdownOption {
   readonly disabled?: boolean;
@@ -130,10 +131,30 @@ export function DropdownSelect(props: {
 export function MarkdownViewer(props: {readonly markdown: string}): React.ReactElement {
   return (
     <article className="markdown-viewer">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{props.markdown || '_No content_'}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{pre: MarkdownCodeBlock}}>
+        {props.markdown || '_No content_'}
+      </ReactMarkdown>
     </article>
   );
 }
+
+const MarkdownCodeBlock: NonNullable<React.ComponentProps<typeof ReactMarkdown>['components']>['pre'] = ({
+  node,
+  children,
+  ...props
+}) => {
+  const code = node?.children[0];
+  if (
+    code?.type === 'element' &&
+    code.tagName === 'code' &&
+    Array.isArray(code.properties.className) &&
+    code.properties.className.some(value => String(value).toLowerCase() === 'language-mermaid')
+  ) {
+    const source = code.children.map(child => (child.type === 'text' ? child.value : '')).join('');
+    return <MermaidBlock source={source} />;
+  }
+  return <pre {...props}>{children}</pre>;
+};
 
 export function Metadata(props: {readonly metadata?: MemoryMetadata; readonly node?: TreeNode}): React.ReactElement {
   const rows: Array<[string, string | undefined]> = [
