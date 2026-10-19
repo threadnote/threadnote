@@ -116,6 +116,25 @@ export function MaintenanceCaseDialog(props: {
   const semanticReview = packet?.semanticEvidence !== undefined || item?.family === 'semantic-contradiction';
   const topicReview =
     (packet?.family ?? item?.family) === 'topic-maintenance' && (packet?.slot ?? item?.slot) === 'declared-support';
+  const reviewWithAgent = (
+    <button
+      type="button"
+      onClick={() =>
+        props.onTask(
+          healthDecisionTask(
+            props.project,
+            [{caseId}],
+            semanticReview
+              ? 'Compare both memories and their applicability before proposing any change'
+              : 'Review this memory and propose a supported change',
+            uri,
+          ),
+        )
+      }
+    >
+      <Copy size={14} aria-hidden="true" /> Review with agent…
+    </button>
+  );
   if (topicReview)
     return (
       <DetailModal title="Review topic update" onClose={props.onClose} className="topic-review-dialog">
@@ -208,6 +227,8 @@ export function MaintenanceCaseDialog(props: {
                   props.onClose();
                 }}
                 onRefresh={() => setRefresh(value => value + 1)}
+                secondaryAction={reviewWithAgent}
+                ownerInstructions={packet.ownerProposal?.publication.instructions}
               />
             ) : null}
             <div className="health-evidence-comparison">
@@ -243,7 +264,7 @@ export function MaintenanceCaseDialog(props: {
                 </ul>
               </>
             ) : null}
-            {packet.ownerProposal ? (
+            {packet.ownerProposal && !packet.semanticEvidence ? (
               <section aria-label="Shared owner proposal">
                 <h4>Proposed changes for the team owner</h4>
                 {packet.ownerProposal.selectedEdits.map((edit, index) => (
@@ -278,30 +299,16 @@ export function MaintenanceCaseDialog(props: {
           </details>
         ) : null}
       </section>
-      <footer>
-        {uri && (!semanticReview || !packet?.semanticEvidence) ? (
-          <button type="button" className="primary" onClick={() => props.onOpenLibrary(uri)}>
-            <ExternalLink size={14} aria-hidden="true" /> Edit or archive in Library
-          </button>
-        ) : null}
-        <button
-          type="button"
-          onClick={() =>
-            props.onTask(
-              healthDecisionTask(
-                props.project,
-                [{caseId}],
-                semanticReview
-                  ? 'Compare both memories and their applicability before proposing any change'
-                  : 'Review this memory and propose a supported change',
-                uri,
-              ),
-            )
-          }
-        >
-          <Copy size={14} aria-hidden="true" /> Review with agent…
-        </button>
-      </footer>
+      {!packet?.semanticEvidence ? (
+        <footer>
+          {uri && (!semanticReview || !packet?.semanticEvidence) ? (
+            <button type="button" className="primary" onClick={() => props.onOpenLibrary(uri)}>
+              <ExternalLink size={14} aria-hidden="true" /> Edit or archive in Library
+            </button>
+          ) : null}
+          {reviewWithAgent}
+        </footer>
+      ) : null}
     </DetailModal>
   );
 }

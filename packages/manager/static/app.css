@@ -5848,7 +5848,8 @@ dd {
   align-self: center;
   color: var(--muted);
 }
-.health-case-dialog footer {
+.health-case-dialog .detail-modal-body > footer,
+.semantic-resolution-footer {
   background: var(--panel-raised);
   border-top: 1px solid var(--line);
   bottom: -24px;
@@ -6043,6 +6044,23 @@ dd {
   gap: 12px;
   margin-top: 18px;
 }
+.detail-modal-body .semantic-resolution-footer {
+  align-items: center;
+  justify-content: space-between;
+  margin-inline: -24px;
+  padding: 16px 24px;
+  z-index: 1;
+}
+.semantic-resolution-footer .semantic-resolution-actions {
+  margin-top: 0;
+}
+.semantic-selection-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+.semantic-review-dialog .detail-modal-body {
+  scroll-padding-block: 24px 120px;
+}
 .semantic-resolution-actions .muted {
   font-size: 12px;
 }
@@ -6129,6 +6147,11 @@ dd {
   }
   .semantic-review-dialog > header > button {
     flex-shrink: 0;
+  }
+  .detail-modal-body .semantic-resolution-footer {
+    bottom: -18px;
+    margin-inline: -18px;
+    padding: 14px 18px;
   }
 }
 .review-safety-state {
