@@ -338,18 +338,32 @@ export class ModelSetupStateInvalid extends Schema.TaggedError<ModelSetupStateIn
   message: Schema.String,
 }) {}
 
+export class ModelSetupConflict extends Schema.TaggedError<ModelSetupConflict>()('ModelSetupConflict', {
+  message: Schema.String,
+}) {
+  static stale(): ModelSetupConflict {
+    return ModelSetupConflict.make({message: 'Model setup changed. Refresh its status and try again.'});
+  }
+}
+
 /** Only bounded state transitions run under this lock: no callback, store lock, network, or hashing. */
 export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
   home: string,
   manifest: LocalModelManifest,
   command: ModelSetupCommand,
+  options: {readonly expectedEpoch?: number} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const directory = path.join(home, 'models');
-  const initializes = command.type === 'policy' || (command.type === 'request' && command.expectedEpoch === undefined);
-  if (!initializes && !(yield* fs.exists(directory))) return {status: 'missing'} as const;
+  const initializes =
+    (options.expectedEpoch === undefined || options.expectedEpoch === 0) &&
+    (command.type === 'policy' || (command.type === 'request' && command.expectedEpoch === undefined));
+  if (!(yield* fs.exists(directory))) {
+    if (options.expectedEpoch !== undefined && options.expectedEpoch !== 0) return yield* ModelSetupConflict.stale();
+    if (!initializes) return {status: 'missing'} as const;
+  }
   if (initializes) {
     yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
     yield* fs.chmod(directory, 0o700);
@@ -367,9 +381,16 @@ export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
     },
     Effect.gen(function* () {
       const current = yield* readModelSetup(canonicalHome);
-      if (current.status === 'malformed' || (current.status === 'missing' && !initializes)) return current;
+      if (current.status === 'malformed') return current;
+      if (current.status === 'missing') {
+        if (options.expectedEpoch !== undefined && options.expectedEpoch !== 0)
+          return yield* ModelSetupConflict.stale();
+        if (!initializes) return current;
+      }
       const state =
         current.status === 'valid' ? current.state : initialModelSetupState(modelSetupJob(canonicalHome, manifest));
+      if (options.expectedEpoch !== undefined && options.expectedEpoch !== state.intentEpoch)
+        return yield* ModelSetupConflict.stale();
       // A copied receipt must never authorize a different data home.
       if (state.job.home !== canonicalHome || ('job' in command && command.job.home !== canonicalHome))
         return malformed;

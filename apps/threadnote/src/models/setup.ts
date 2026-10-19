@@ -11,6 +11,7 @@ import {InsufficientDiskSpace, ModelChecksumMismatch, ModelDownloadFailed} from 
 import {inspectModelSelection} from '@threadnote/inference/models/selection';
 import {
   modelSetupFileIdentity,
+  ModelSetupConflict,
   modelSetupJob,
   readModelSetup,
   sameModelSetupFile,
@@ -54,8 +55,8 @@ const PUBLIC_REASONS = new Set([
 export class ModelSetupError extends Schema.TaggedError<ModelSetupError>()('ModelSetupError', {
   message: Schema.String,
 }) {}
-export function modelSetupPublicError(cause: unknown): ModelSetupError {
-  return Schema.is(ModelSetupError)(cause)
+export function modelSetupPublicError(cause: unknown): ModelSetupError | ModelSetupConflict {
+  return Schema.is(ModelSetupError)(cause) || Schema.is(ModelSetupConflict)(cause)
     ? cause
     : ModelSetupError.make({
         message: 'Model setup could not access its private state. Check home permissions and retry.',
@@ -66,6 +67,7 @@ class SetupCancelled extends Schema.TaggedError<SetupCancelled>()('SetupCancelle
 
 export interface ModelSetupStatus {
   readonly version: 1;
+  readonly intentEpoch: number;
   readonly modelId: string;
   readonly totalBytes: number;
   readonly policy: 'automatic' | 'off';
@@ -82,6 +84,7 @@ export interface ModelSetupStatus {
 function baseStatus(manifest: LocalModelManifest, environmentOff: boolean): ModelSetupStatus {
   return {
     version: 1,
+    intentEpoch: 0,
     modelId: manifest.id,
     totalBytes: manifest.size,
     policy: 'automatic',
@@ -142,6 +145,7 @@ export const readModelSetupStatus = Effect.fn('models.setup.status')(function* (
     return {
       ...base,
       policy: state.policy,
+      intentEpoch: state.intentEpoch,
       phase: state.phase,
       bytes: state.bytes ?? (artifactReady ? manifest.size : 0),
       attempts: state.attempts,
@@ -288,10 +292,13 @@ const finishDrain = Effect.fn('models.setup.finishDrain')(function* (
   });
 });
 
-export const stopModelSetup = Effect.fn('models.setup.stop')(function* (home: string) {
+export const stopModelSetup = Effect.fn('models.setup.stop')(function* (
+  home: string,
+  options: {readonly expectedEpoch?: number} = {},
+) {
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(CORE_GENERATION_MODEL_ID);
-  const mutation = yield* updateModelSetup(home, manifest, {type: 'policy', policy: 'off'});
+  const mutation = yield* updateModelSetup(home, manifest, {type: 'policy', policy: 'off'}, options);
   if (mutation.status !== 'valid')
     return yield* ModelSetupError.make({
       message: 'Cannot safely stop setup with invalid state; preserve the home and repair models/setup.json first.',
@@ -301,7 +308,7 @@ export const stopModelSetup = Effect.fn('models.setup.stop')(function* (home: st
 
 export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   home: string,
-  options: {readonly retry?: boolean; readonly automatic?: boolean} = {},
+  options: {readonly retry?: boolean; readonly automatic?: boolean; readonly expectedEpoch?: number} = {},
 ) {
   const system = yield* SystemInfo;
   if (system.environment().THREADNOTE_MODEL_SETUP === 'off' || (options.automatic && !automaticRuntimeAllowed(system)))
@@ -309,10 +316,13 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   const fs = yield* FileSystem.FileSystem;
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(CORE_GENERATION_MODEL_ID);
-  yield* fs.makeDirectory(home, {recursive: true, mode: 0o700});
+  if (options.expectedEpoch !== undefined && options.expectedEpoch !== 0 && !(yield* fs.exists(home)))
+    return yield* ModelSetupConflict.stale();
+  if (options.expectedEpoch === undefined || options.expectedEpoch === 0)
+    yield* fs.makeDirectory(home, {recursive: true, mode: 0o700});
   const canonicalHome = yield* fs.realPath(home);
   const job = modelSetupJob(canonicalHome, manifest);
-  let mutation = yield* updateModelSetup(canonicalHome, manifest, {type: 'request', job});
+  const mutation = yield* updateModelSetup(canonicalHome, manifest, {type: 'request', job}, options);
   if (mutation.status !== 'valid' || mutation.state.policy === 'off') return yield* readModelSetupStatus(canonicalHome);
   let state = mutation.state;
   const now = yield* Clock.currentTimeMillis;
@@ -326,14 +336,19 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
     return yield* readModelSetupStatus(canonicalHome);
   if (state.phase === 'action-required' && !options.retry) return yield* readModelSetupStatus(canonicalHome);
   if (state.phase !== 'pending') {
-    mutation = yield* updateModelSetup(canonicalHome, manifest, {
-      type: 'request',
-      job,
-      restart: true,
-      expectedEpoch: state.intentEpoch,
-    });
-    if (mutation.status !== 'valid') return yield* readModelSetupStatus(canonicalHome);
-    state = mutation.state;
+    const restarted = yield* updateModelSetup(
+      canonicalHome,
+      manifest,
+      {type: 'request', job, restart: true, expectedEpoch: state.intentEpoch},
+      {expectedEpoch: state.intentEpoch},
+    ).pipe(
+      Effect.catchIf(
+        cause => options.expectedEpoch === undefined && Schema.is(ModelSetupConflict)(cause),
+        () => succeedUndefined,
+      ),
+    );
+    if (restarted?.status !== 'valid') return yield* readModelSetupStatus(canonicalHome);
+    state = restarted.state;
   }
   yield* finishDrain(canonicalHome, manifest, state);
   const reason = yield* eligibilityReason(manifest);
@@ -344,14 +359,18 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   const crypto = yield* Crypto.Crypto;
   const nonce = yield* crypto.randomUUIDv4();
   const reservationNow = yield* Clock.currentTimeMillis;
-  const reservation = yield* updateModelSetup(canonicalHome, manifest, {
-    type: 'reserve',
-    job,
-    nonce,
-    now: reservationNow,
-    expiresAt: reservationNow + RESERVATION_MILLISECONDS,
-  });
-  if (reservation.status !== 'valid' || reservation.state.reservation?.nonce !== nonce)
+  const reservation = yield* updateModelSetup(
+    canonicalHome,
+    manifest,
+    {type: 'reserve', job, nonce, now: reservationNow, expiresAt: reservationNow + RESERVATION_MILLISECONDS},
+    {expectedEpoch: state.intentEpoch},
+  ).pipe(
+    Effect.catchIf(
+      cause => options.expectedEpoch === undefined && Schema.is(ModelSetupConflict)(cause),
+      () => succeedUndefined,
+    ),
+  );
+  if (reservation?.status !== 'valid' || reservation.state.reservation?.nonce !== nonce)
     return yield* readModelSetupStatus(canonicalHome);
   const executableName = system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
   const args = [
@@ -379,16 +398,21 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   return yield* readModelSetupStatus(canonicalHome);
 }, Effect.mapError(modelSetupPublicError));
 
-export const setModelSetupPolicy = Effect.fn('models.setup.policy')(function* (home: string, enabled: boolean) {
+export const setModelSetupPolicy = Effect.fn('models.setup.policy')(function* (
+  home: string,
+  enabled: boolean,
+  options: {readonly expectedEpoch?: number} = {},
+) {
   if (!enabled) {
-    yield* stopModelSetup(home);
+    yield* stopModelSetup(home, options);
     return yield* readModelSetupStatus(home);
   }
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(CORE_GENERATION_MODEL_ID);
-  const mutation = yield* updateModelSetup(home, manifest, {type: 'policy', policy: 'automatic'});
-  if (mutation.status === 'valid') yield* finishDrain(home, manifest, mutation.state);
-  return yield* requestModelSetup(home, {retry: true});
+  const mutation = yield* updateModelSetup(home, manifest, {type: 'policy', policy: 'automatic'}, options);
+  if (mutation.status !== 'valid') return yield* readModelSetupStatus(home);
+  yield* finishDrain(home, manifest, mutation.state);
+  return yield* requestModelSetup(home, {retry: true, expectedEpoch: mutation.state.intentEpoch});
 }, Effect.mapError(modelSetupPublicError));
 
 function failureReason(error: LocalModelStoreError | unknown): {readonly reason: string; readonly retryable: boolean} {
