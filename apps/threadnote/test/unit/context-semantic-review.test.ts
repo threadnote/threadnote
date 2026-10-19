@@ -313,6 +313,100 @@ describe('explicit semantic review', () => {
     }));
     expect(buildSemanticReviewPreview(input('left', future), future, 'tester').mode).toBe('review-only');
   });
+  effectIt.effect('records keep-both locally for shared sources without changing or publishing them', () =>
+    Effect.gen(function* () {
+      const corpus = records.map(record =>
+        parseMemoryDocument(
+          record.uri.replace('/durable/projects/', '/shared/default/durable/projects/'),
+          formatMemoryDocument('MEMORY', {...record.metadata, visibility: 'shared'}, record.body),
+        )!,
+      );
+      const {config, store, location} = yield* fixture(corpus);
+      const preview = yield* previewSemanticReview(config, input('both', corpus));
+      expect(preview.mode).toBe('keep-both');
+      expect(preview.constraints.join(' ')).toContain('local');
+      const approval = {
+        project: 'threadnote',
+        previewId: preview.previewId,
+        revision: preview.revision,
+        approved: true,
+      };
+      expect((yield* applySemanticReview(config, approval)).status).toBe('applied');
+      expect((yield* applySemanticReview(config, approval)).status).toBe('already-applied');
+      expect(yield* reviewedSemanticContradictionIds(config, 'threadnote', corpus)).toEqual([
+        input('both', corpus).contradictionId,
+      ]);
+      const state = yield* readSemanticReviewState(config);
+      expect(state.entries[0].archiveUri).toBeUndefined();
+      expect(state.entries[0].archiveContent).toBeUndefined();
+      for (const record of corpus) expect(yield* store.read(location, record.uri)).toBe(record.content);
+      for (const choice of ['left', 'right'] as const) {
+        const blocked = yield* previewSemanticReview(config, input(choice, corpus));
+        expect(blocked.mode).toBe('review-only');
+        expect(blocked.constraints).toEqual([...new Set(blocked.constraints)]);
+        expect(blocked.constraints).not.toContain(blocked.reason);
+        expect(
+          Result.isFailure(
+            yield* applySemanticReview(config, {
+              ...approval,
+              previewId: blocked.previewId,
+              revision: blocked.revision,
+            }).pipe(Effect.result),
+          ),
+        ).toBe(true);
+      }
+      yield* store.write(location, corpus[0].uri, `${corpus[0].content}\nSource changed.`, {mode: 'replace'});
+      expect(yield* reviewedSemanticContradictionIds(config, 'threadnote', corpus)).toEqual([]);
+      expect(Result.isFailure(yield* applySemanticReview(config, approval).pipe(Effect.result))).toBe(true);
+    }).pipe(provideTestLayer(reviewLayer)),
+  );
+  it('keeps source-preserving review independent of ownership while preserving project, lifecycle and revision checks', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('personal', 'shared', 'other-owner'), {minLength: 2, maxLength: 2}),
+        kinds => {
+          const corpus = records.map((record, index) =>
+            parseMemoryDocument(
+              kinds[index] === 'shared'
+                ? record.uri.replace('/durable/projects/', '/shared/default/durable/projects/')
+                : kinds[index] === 'other-owner'
+                  ? record.uri.replace('/tester/', '/someone-else/')
+                  : record.uri,
+              formatMemoryDocument(
+                'MEMORY',
+                {
+                  ...record.metadata,
+                  ...(kinds[index] === 'shared' ? {visibility: 'shared' as const} : {}),
+                },
+                record.body,
+              ),
+            )!,
+          );
+          const request = input('both', corpus);
+          const snapshot = JSON.stringify(corpus);
+          expect(buildSemanticReviewPreview(request, corpus, 'tester').mode).toBe('keep-both');
+          expect(JSON.stringify(corpus)).toBe(snapshot);
+          for (const patch of [{project: 'another-project'}, {status: 'archived'}]) {
+            expect(() =>
+              buildSemanticReviewPreview(
+                request,
+                [{...corpus[0], metadata: {...corpus[0].metadata, ...patch}}, corpus[1]] as MemoryRecord[],
+                'tester',
+              ),
+            ).toThrow(/changed|active/iu);
+          }
+          expect(() =>
+            buildSemanticReviewPreview(
+              request,
+              [{...corpus[0], content: corpus[0].content + '\n'}, corpus[1]],
+              'tester',
+            ),
+          ).toThrow(/changed/iu);
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
   it('swapping the presented pair and reversing the choice keeps the same memory', () => {
     fc.assert(
       fc.property(fc.boolean(), keepLeft => {

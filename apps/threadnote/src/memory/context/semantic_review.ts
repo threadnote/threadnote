@@ -81,33 +81,43 @@ export function buildSemanticReviewPreview(
   );
   if (!evidence) throw semanticReviewError('The semantic comparison changed. Refresh both source claims.', 'stale');
   const personal = `threadnote://user/${uriSegment(user)}/memories/durable/projects/${uriSegment(input.project)}/`;
-  const blockers = pair.flatMap(record => {
-    const reasons: string[] = [];
-    if (
-      !record.uri.startsWith(personal) ||
-      record.uri.slice(personal.length).includes('/') ||
-      !/^[A-Za-z0-9._-]+\.md$/u.test(record.uri.slice(personal.length)) ||
-      record.metadata.kind !== 'durable' ||
-      record.metadata.visibility === 'shared'
-    )
-      reasons.push(
-        'Only canonical personal durable memories in this project can be changed. Open the source for manual review.',
-      );
-    if ((record.metadata.citationErrors?.length ?? 0) > 0)
-      reasons.push('Repair malformed citation metadata before changing this memory.');
-    const consolidation = consolidationEvidenceRepairBlocker(record);
-    if (consolidation) reasons.push(consolidation);
-    try {
-      assertMemoryDocumentSchemaWritable(record.content);
-    } catch {
-      reasons.push('This memory schema requires manual review before changing it.');
-    }
-    return reasons;
-  });
+  // Keeping both writes only a local, revision-bound review receipt, never either source.
+  const blockers =
+    input.choice === 'both'
+      ? []
+      : [
+          ...new Set(
+            pair.flatMap(record => {
+              const reasons: string[] = [];
+              if (
+                !record.uri.startsWith(personal) ||
+                record.uri.slice(personal.length).includes('/') ||
+                !/^[A-Za-z0-9._-]+\.md$/u.test(record.uri.slice(personal.length)) ||
+                record.metadata.kind !== 'durable' ||
+                record.metadata.visibility === 'shared'
+              )
+                reasons.push(
+                  'Only personal durable memories in this project can be moved to history. Choose both to save a local review without changing either source, or review changes with the source owner.',
+                );
+              if ((record.metadata.citationErrors?.length ?? 0) > 0)
+                reasons.push('Repair malformed citation metadata before changing this memory.');
+              const consolidation = consolidationEvidenceRepairBlocker(record);
+              if (consolidation) reasons.push(consolidation);
+              try {
+                assertMemoryDocumentSchemaWritable(record.content);
+              } catch {
+                reasons.push('This memory schema requires manual review before changing it.');
+              }
+              return reasons;
+            }),
+          ),
+        ];
   const constraints = [
     'This is your explicit decision; the analyzer does not choose which memory is correct.',
     ...(input.choice === 'both'
-      ? ['Both memories remain byte-for-byte unchanged. This reviewed decision reopens if either source changes.']
+      ? [
+          'This decision is local to this device and is not published. Both memories remain byte-for-byte unchanged. This reviewed decision reopens if either source changes.',
+        ]
       : [
           'The entire other memory, including every claim and its metadata, moves to preserved history. Confirm that the entire other memory is outdated.',
         ]),
@@ -121,7 +131,6 @@ export function buildSemanticReviewPreview(
           'Applicability or interpretation needs context. Confirm your decision after reviewing both full source memories.',
         ]
       : []),
-    ...blockers,
   ];
   const kept = input.choice === 'right' ? pair[1] : pair[0];
   const other = input.choice === 'right' ? pair[0] : pair[1];

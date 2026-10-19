@@ -195,6 +195,8 @@ export function SemanticResolutionReview(props: {
   readonly onOpenLibrary: (uri: string) => void;
   readonly onResolved: () => void;
   readonly onRefresh: () => void;
+  readonly secondaryAction?: React.ReactNode;
+  readonly ownerInstructions?: string;
 }): React.ReactElement {
   const [choice, setChoice] = useState<SemanticResolutionChoice>();
   const [preview, setPreview] = useState<ManagerSemanticReviewPreviewV1>();
@@ -203,6 +205,7 @@ export function SemanticResolutionReview(props: {
   const [error, setError] = useState('');
   const [stale, setStale] = useState(false);
   const request = useRef<AbortController | undefined>(undefined);
+  const review = useRef<HTMLElement>(null);
   const {evidence} = props;
   useEffect(() => {
     setChoice(undefined);
@@ -218,6 +221,9 @@ export function SemanticResolutionReview(props: {
     evidence.left.recordContentFingerprint,
     evidence.right.recordContentFingerprint,
   ]);
+  useEffect(() => {
+    if (preview || error) review.current?.focus();
+  }, [preview, error]);
   const archiveReady =
     preview?.mode === 'archive-other' &&
     choice !== 'both' &&
@@ -315,15 +321,15 @@ export function SemanticResolutionReview(props: {
         onOpenLibrary={props.onOpenLibrary}
         selection={{choice, onChoose: choose, disabled: busy || stale}}
       />
-      <section className="semantic-resolution" aria-label="Review your choice" aria-busy={busy}>
+      <section
+        ref={review}
+        tabIndex={-1}
+        className="semantic-resolution"
+        aria-label="Review your choice"
+        aria-busy={busy}
+      >
         {error ? <p role="alert">{error}</p> : null}
-        {stale ? (
-          <div className="semantic-resolution-actions">
-            <button type="button" onClick={props.onRefresh}>
-              Refresh comparison
-            </button>
-          </div>
-        ) : preview ? (
+        {preview ? (
           <>
             <h3>{preview.mode === 'review-only' ? 'Review the source advice' : 'Review before confirming'}</h3>
             <p>{preview.summary}</p>
@@ -365,14 +371,44 @@ export function SemanticResolutionReview(props: {
               </>
             ) : preview.mode === 'keep-both' ? (
               <p>
-                Both memories stay current. Your reviewed decision applies to these exact versions; future edits need a
-                new review.
+                Both memories stay current. This saves your decision locally without changing or publishing either
+                source. Your review applies to these exact versions; future edits need a new review.
               </p>
             ) : (
-              <p>Open memory A or B above to edit the advice in Library. This preview offers no automatic change.</p>
+              <>
+                <p>
+                  This choice cannot change these sources here. Open memory A or B to review its ownership and full
+                  context.
+                </p>
+                {props.ownerInstructions ? (
+                  <details className="semantic-source-details">
+                    <summary>How to review shared changes</summary>
+                    <p>{props.ownerInstructions}</p>
+                  </details>
+                ) : null}
+              </>
             )}
-            {preview.mode !== 'review-only' ? (
-              <div className="semantic-resolution-actions">
+          </>
+        ) : null}
+      </section>
+      <footer className="semantic-resolution-footer" aria-label="Conflict resolution actions">
+        <span className="semantic-selection-status" role="status">
+          {stale
+            ? 'Refresh this comparison to continue.'
+            : !choice
+              ? 'Choose memory A, memory B, or both to continue.'
+              : choice === 'both'
+                ? 'Both memories selected'
+                : `Memory ${choice === 'left' ? 'A' : 'B'} selected`}
+        </span>
+        <div className="semantic-resolution-actions">
+          {stale ? (
+            <button type="button" className="primary" onClick={props.onRefresh}>
+              Refresh comparison
+            </button>
+          ) : (
+            <>
+              {preview && preview.mode !== 'review-only' ? (
                 <button type="button" className="primary" disabled={!canConfirm} onClick={() => void confirm()}>
                   {busy
                     ? 'Confirming…'
@@ -380,19 +416,20 @@ export function SemanticResolutionReview(props: {
                       ? 'Confirm both apply'
                       : `Confirm and move memory ${choice === 'left' ? 'B' : 'A'} to history`}
                 </button>
-              </div>
-            ) : null}
-          </>
-        ) : null}
-        {!stale ? (
-          <div className="semantic-resolution-actions">
-            <button type="button" disabled={!choice || busy} onClick={() => void prepare()}>
-              {busy ? 'Checking current memories…' : preview ? 'Refresh my preview' : 'Preview my choice'}
-            </button>
-            {!choice ? <span className="muted">Choose memory A, memory B, or both to continue.</span> : null}
-          </div>
-        ) : null}
-      </section>
+              ) : null}
+              <button
+                type="button"
+                className={preview ? undefined : 'primary'}
+                disabled={!choice || busy}
+                onClick={() => void prepare()}
+              >
+                {busy ? 'Checking current memories…' : preview ? 'Refresh my preview' : 'Preview my choice'}
+              </button>
+            </>
+          )}
+          {props.secondaryAction}
+        </div>
+      </footer>
     </>
   );
 }

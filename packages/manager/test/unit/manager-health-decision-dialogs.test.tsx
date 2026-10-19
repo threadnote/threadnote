@@ -4,6 +4,8 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from '../../src/attention/maintenance_dialogs.js';
 import type {ManagerContextMaintenanceCaseV2} from '../../src/attention/contracts.js';
+import {buildContextHealthReport} from '@threadnote/context/health';
+import type {MemoryRecord} from '@threadnote/memory/document';
 
 let root: Root;
 const memoryUri = 'threadnote://user/tester/memories/durable/projects/threadnote/runtime-boundaries.md';
@@ -153,6 +155,85 @@ it('keeps case errors inside the open review and recovers after refreshing evide
   await click('Refresh evidence');
   expect(document.querySelector('dialog [role="alert"]')).toBeNull();
   expect(document.querySelector('dialog')?.textContent).toContain('current declaration');
+});
+
+it('keeps preview and confirmation with the agent action in one conflict-resolution footer', async () => {
+  const memory = (name: string, body: string): MemoryRecord => ({
+    uri: `threadnote://memory/${name}`,
+    body,
+    content: body,
+    headerTitle: 'MEMORY',
+    metadata: {
+      kind: 'durable',
+      project: 'threadnote',
+      status: 'active',
+      sourceAgentClient: 'test',
+      timestamp: '2026-01-01',
+    },
+  });
+  const evidence = buildContextHealthReport({
+    project: 'threadnote',
+    records: [memory('a', 'Timeout is 60 seconds.'), memory('b', 'Timeout must be 30 seconds.')],
+    now: new Date('2026-06-01'),
+  }).findings[0].semanticEvidence!;
+  const semanticCase = {...item, family: 'semantic-contradiction'};
+  const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path.endsWith('/preview')) {
+      expect(JSON.parse(init!.body as string).choice).toBe('both');
+      return response({
+        preview: {
+          previewId: 'preview',
+          revision: 'exact-revision',
+          choice: 'both',
+          mode: 'keep-both',
+          summary: 'Both memories stay current.',
+        },
+      });
+    }
+    if (path.endsWith('/apply')) {
+      expect(JSON.parse(init!.body as string)).toEqual({
+        project: 'threadnote',
+        previewId: 'preview',
+        revision: 'exact-revision',
+        approved: true,
+      });
+      return response({result: {status: 'applied'}});
+    }
+    if (path.includes('view=status')) return response({version: 2, cases: [semanticCase]});
+    return response({
+      ...packet,
+      family: semanticCase.family,
+      semanticEvidence: evidence,
+      evidence: undefined,
+      ownerProposal: {selectedEdits: [], publication: {instructions: 'The shared owner must review canonical edits.'}},
+    });
+  });
+  vi.stubGlobal('fetch', fetch);
+  const changed = vi.fn();
+  const close = vi.fn();
+  const task = vi.fn();
+  await render(
+    <MaintenanceCaseDialog {...base} initialCase={semanticCase} onChanged={changed} onClose={close} onTask={task} />,
+  );
+  const footer = document.querySelector('dialog footer');
+  expect(document.querySelectorAll('dialog footer')).toHaveLength(1);
+  expect(footer?.getAttribute('aria-label')).toBe('Conflict resolution actions');
+  expect(footer?.querySelector<HTMLButtonElement>('button.primary')?.textContent).toBe('Preview my choice');
+  expect(footer?.querySelector<HTMLButtonElement>('button.primary')?.disabled).toBe(true);
+  await act(async () => document.querySelector<HTMLInputElement>('input[value="both"]')!.click());
+  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  expect(footer?.querySelector('[role="status"]')?.textContent).toBe('Both memories selected');
+  await click('Preview my choice');
+  expect(document.activeElement?.getAttribute('aria-label')).toBe('Review your choice');
+  expect(document.querySelector('dialog')?.textContent).not.toContain('The shared owner must review canonical edits.');
+  expect(footer?.querySelector<HTMLButtonElement>('button.primary')?.textContent).toBe('Confirm both apply');
+  await click('Review with agent…');
+  expect(task).toHaveBeenCalledWith(expect.stringContaining('Compare both memories'));
+  expect(changed).not.toHaveBeenCalled();
+  await click('Confirm both apply');
+  expect(changed).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/apply'))).toHaveLength(1);
 });
 
 it('reviews the chosen memory in a case spanning several subjects and preserves that choice in its task', async () => {
