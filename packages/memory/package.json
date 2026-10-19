@@ -12,6 +12,7 @@
     "./hygiene/provenance": "./src/hygiene/provenance.ts",
     "./identity-alias": "./src/identity-alias.ts",
     "./knowledge_delta": "./src/knowledge_delta.ts",
+    "./local-path": "./src/local-path.ts",
     "./lock": "./src/lock.ts",
     "./maintenance/metadata": "./src/maintenance/metadata.ts",
     "./migrations": "./src/migrations.ts",
@@ -44,6 +45,7 @@
     "effect": "4.0.3"
   },
   "devDependencies": {
+    "@effect/platform-bun": "4.0.3",
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.0.3",
     "vitest": "5.0.3",

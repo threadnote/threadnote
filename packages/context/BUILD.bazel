@@ -1518,6 +1518,7 @@ bun_test(
         "//packages/memory:src/hygiene/provenance.ts",
         "//packages/memory:src/identity-alias.ts",
         "//packages/memory:src/knowledge_delta.ts",
+        "//packages/memory:src/local-path.ts",
         "//packages/memory:src/lock.ts",
         "//packages/memory:src/maintenance/metadata.ts",
         "//packages/memory:src/migrations.ts",

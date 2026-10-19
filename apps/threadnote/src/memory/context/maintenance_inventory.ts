@@ -151,7 +151,7 @@ function inProject(path: Path.Path, root: string, candidate: string, project: st
     project === undefined ||
     projectAt < 0 ||
     segments[projectAt + 1] === undefined ||
-    segments[projectAt + 1] === project
+    segments[projectAt + 1] === uriSegment(project)
   );
 }
 const checkAuthority = (
