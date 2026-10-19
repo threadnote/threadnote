@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "description": "Reviewed source input hashes before first-party import and portability adaptation. Source identifiers are bundle-relative, without author filesystem paths.",
+  "skills": {
+    "dev-spec": {
+      "source": "dev-spec",
+      "files": {
+        "SKILL.md": "94cc2b85ac4bf9364960ab84122bdcbad8554ca522ed5cc3ab757964f8297435",
+        "references/sources.md": "7bf5dbc8953861311fa546f62a44197c8ef338054d55df9ac5d7ecd09e7621bd",
+        "references/workflow.md": "cdca95f8ba6db8a91c1b28cdc17465a541baeb984cc1f9945523b14c19b8ff4d",
+        "references/contract.md": "6b054bbede74c5abf39f4c2ddb324c7bcbf8d34e94ac6fff9be1311f6aa7673d",
+        "references/review.md": "5c4d9844c2b6bc5ac435785b2ccbc2711ee83ec8bc9c3c3f0f18ceeeed5530bc",
+        "agents/openai.yaml": "36a923429866ff96d7f793f26fc790d150c1ff84e0969ab18a6846dc35fc7ee3",
+        "scripts/test_dev_spec.py": "862242e7a4135bf0ab2dea1be04becb51df64f19a01bb24422abb019dbd715eb",
+        "scripts/support.py": "2005cb6242aaf2c659dbd84d9b74cb010103fe719a602b954c899fdc123aada4",
+        "scripts/dev_spec.py": "260cac5aa0518122b7a57475567201f78a82ca9d278826760d63efb9ed6f9959",
+        "scripts/spec_closeout.py": "e8df2d4b77defe7c1228864a267498c3ee7fe2ff8588d598e5a20ff89e67aef9"
+      }
+    },
+    "dev-plan": {
+      "source": "dev-plan",
+      "files": {
+        "SKILL.md": "69791b10c273016520b7bd1c4a84e0904da8e436cb1ebe03d4aad10eee64d916",
+        "references/sources.md": "fa0d04e83b45e789477832aca20cfdc3ee934086dc98dfa69ea271fc75784dcf",
+        "references/contract.md": "15bff16cfaa29d45d05d720bec270d3cd72fad3a683fdbdfb81941b35923fa48",
+        "references/review.md": "032cdc96587f4860e1a7f818cefa0c46fd62193b7361a5bd1b5c937e91eedebc",
+        "agents/openai.yaml": "8e340909d125731deaaab6bdf8fb0ba76e735b61a310559d5e8fcaa58fadb6e7",
+        "scripts/dev_plan.py": "921953e34619ac6ffc31cf59163b54708432a404b316214e1b1fe089bdd7abc4",
+        "scripts/test_dev_plan.py": "bd7557cd94e6b449d2d5c720162af03712be603b0e5fb86d972e4f1339afe0e5",
+        "scripts/closeout.py": "de7b5f7ed45194a83641ceaeb98cc22c7860ce54ec82119ee9177935b0cea6bc",
+        "scripts/workflow.py": "78aa9b914f917f1158fa3663589a540a62d13f854206e905b2ae07c5e119dc8c"
+      }
+    },
+    "dev-cycle": {
+      "source": "dev-cycle",
+      "files": {
+        "SKILL.md": "5ec9f7eae37e1916938689445ae1432108a089b2b325fb5201f0c1dbb2ab285f",
+        "references/feature-memory.md": "fa3700006fa906e86c16edc6e13c2621bc898669012a8b11476d433f41d90361",
+        "references/closeout.md": "68961e3ba8a111a1f4d84968d3a53423707dc2f24c047fc82eab8e34140628c4",
+        "references/phases.md": "665fdd92d5bb93a98309d60c050f2172a42de537b186cba1cfd97606dc1d3467",
+        "references/delegation.md": "76d79cc251326eebe48a39e4e18c6df8e6fe84b0231afa6369d90ad94377f5e6",
+        "references/state-and-snapshots.md": "f4a4ff3675048d5798d92b6f2541cf6d59aaa06a620bcde1380608a3b4265f79",
+        "references/review.md": "16be1ce0cedec720e022a9ecd40e90af97844ed9c38b27cea718c426d13efe4f",
+        "references/learning-records.md": "f8c1b7bcbc4c28f873506d1802c0dea3b0f67acbe4475fa3be93c19aaa20fa87",
+        "agents/openai.yaml": "35483ea6beb91200b0d18da72f49438bddd209dcbc8ed8f7c044d12663ad1bcb",
+        "scripts/phase_state.py": "a95196e88017f06339b30047b32945577b8ceae397039824186a5ed6b4882dfd",
+        "scripts/dev_cycle.py": "1ca03d7d5e42845af854a2fcffb1c91be7568df27198b4290d61f5c8012580e5",
+        "scripts/test_phase_state.py": "f61c9b71b2f03526220b01dd5c805a8bb52766d2fb5c42b2361ed0d1908c4714",
+        "scripts/test_dev_cycle.py": "2ce4141043929b7d37655507b1ff94fa7faec924a08f0478c36d102396b6b984",
+        "skills/dev-cycle-implementation/SKILL.md": "f6cde4ac00e7c303e6e9f977605c6f36375d65111d2a60eb280e7cca796c06de",
+        "skills/dev-cycle-delivery/SKILL.md": "ddf762e8e726c939454974dd9123d698029481df99ffb8bf2d2108e07201580a",
+        "skills/dev-cycle-learning/SKILL.md": "da229bbd3b0a08454d5b3e08ab12f418100afc82b685c051cb374948ffe2c0e4"
+      }
+    },
+    "watch-pr": {
+      "source": "watch-pr",
+      "files": {
+        "SKILL.md": "a6d7ec8acc95243167e8053d4f602b52da7b913e80b0537c87ba1236b8c77a90",
+        "references/background-worker.md": "98c04ee59b9d0610d37c4324e4ea8ea4d59ff805ba48a8f1ef65c3ee0e1081ff",
+        "agents/openai.yaml": "c7882ec3ae3eaeddbb256f24f3f9ef7f51ac694179e2ccd7d4bd56b12c9105d6",
+        "scripts/test_watch_pr.py": "b1005e7d94d06c4c563314a7fa813541a37d25c133bc917aaddb96e6f78ce4ab",
+        "scripts/watch_pr.py": "6dd3b54c7d13d424892454f233a4c1f07f64d753f56a3fbca079a37ed499f0d4"
+      }
+    }
+  },
+  "adaptations": [
+    "Relocated offline tests outside the shipped payload; imports resolve only first-party product script directories.",
+    "Portable process-scoped POSIX/Windows exclusive locks; serialized watcher startup and platform-native detach options.",
+    "UTF-8 file/CLI boundaries, canonical POSIX artifact paths and immutable generation bytecode suppression.",
+    "Installed resource root markers, flat/directory entrypoint guidance and host-advertised collaboration APIs."
+  ],
+  "bundledFiles": {
+    "dev-cycle/SKILL.md": "dd593b5d5ae43c7b338f3a86b2c18f476477d147e2208395adf0288fd43e179d",
+    "dev-cycle/agents/openai.yaml": "52eacb8954e969b0639b62e38c78bfab82ad172b61bcdce0dc3e7a65aab77864",
+    "dev-cycle/references/closeout.md": "a9086b49f9cd7318fbc6336366d874cf73f7393654b6d1000f71503e1f0a0d73",
+    "dev-cycle/references/delegation.md": "6fbf20e1d29f9db295a7d48666f2af3942d8c0568009bb61969b4b2ab8ba176f",
+    "dev-cycle/references/feature-memory.md": "fa3700006fa906e86c16edc6e13c2621bc898669012a8b11476d433f41d90361",
+    "dev-cycle/references/learning-records.md": "1f89f92003d0f22dc634a3bfe9b210454fdf4a98d33bc5c9c919ca02264dac47",
+    "dev-cycle/references/phases.md": "8f9486639e1287b20269277410e514246e90d9a189a5bf1633678a2350fbff37",
+    "dev-cycle/references/review.md": "2bc825c578516f281f4aed3849f8d7adabf36ac823011c8615f3452797109b22",
+    "dev-cycle/references/state-and-snapshots.md": "f4a4ff3675048d5798d92b6f2541cf6d59aaa06a620bcde1380608a3b4265f79",
+    "dev-cycle/scripts/dev_cycle.py": "4f3b68685673128b5905868dd838a440110b7f3f3f3e7e65a678e166c72b8b22",
+    "dev-cycle/scripts/phase_state.py": "956a281aeaf61c30289f60ad002672d204d09ca4957f3c7d2c92673dce227bc9",
+    "dev-cycle/skills/dev-cycle-delivery/SKILL.md": "d783c919d720d279aaa3ccdb9a669960ce510018d338823b7acebb353fc53e1a",
+    "dev-cycle/skills/dev-cycle-implementation/SKILL.md": "f6cde4ac00e7c303e6e9f977605c6f36375d65111d2a60eb280e7cca796c06de",
+    "dev-cycle/skills/dev-cycle-learning/SKILL.md": "da229bbd3b0a08454d5b3e08ab12f418100afc82b685c051cb374948ffe2c0e4",
+    "dev-plan/SKILL.md": "7ec483effc45d9f378ede56425c2d5250b9a2342abe3233e0c46c5a2c7e7b7bf",
+    "dev-plan/agents/openai.yaml": "a3292026884e7094439b029c7c77298221ecbfa0f9aec50f2c637674abdb0df5",
+    "dev-plan/references/contract.md": "ff28d8091dfbe30293d02f218a84227df2b136144585b1bb8bf0b21b206ac466",
+    "dev-plan/references/review.md": "032cdc96587f4860e1a7f818cefa0c46fd62193b7361a5bd1b5c937e91eedebc",
+    "dev-plan/references/sources.md": "9d75e56897d1ad3f7838de181334f44471c75926ffe69b447d7076c5f652fd56",
+    "dev-plan/scripts/closeout.py": "fbeb181caa83b48e3f1309f403411033d1c543b946d9715960a683024396b555",
+    "dev-plan/scripts/dev_plan.py": "340262b85538e1d9ad62d59f850db7cc71512f51060447580f71652b61921713",
+    "dev-plan/scripts/portable_lock.py": "7e3d8171301c3cff5c87a46c5221b8e0d5f7f39af49ba89ac07dba35140b8f20",
+    "dev-plan/scripts/workflow.py": "96cbffb77c17ce35951138c712d33280755e7cc22d15f7939631a6b684f4c9db",
+    "dev-spec/SKILL.md": "8f09d7004bf65a8a12c2cfb3f856bb14f8b95bca8bf6369ad15f90423d802057",
+    "dev-spec/agents/openai.yaml": "f42ce106f91fdb4ae444ba7dbccdb9153681d858f083dd146f017854df86ee02",
+    "dev-spec/references/contract.md": "88fd3630e03655333a119a36524ce447560992858d4a745ca26a83e41038b220",
+    "dev-spec/references/review.md": "5c4d9844c2b6bc5ac435785b2ccbc2711ee83ec8bc9c3c3f0f18ceeeed5530bc",
+    "dev-spec/references/sources.md": "edfd71784cd07f9793662bdadd64f7d6b8882aaa19b75d9ee1220da8b24f0f0a",
+    "dev-spec/references/workflow.md": "27b2a51482cbf2b28b56841de33c0490f35e46b2f03a3a6e0f08cf8d242f8e21",
+    "dev-spec/scripts/dev_spec.py": "cd65c26810e0e79e2d34b36808abb58a666f2b54819e7146815fae5119cbf322",
+    "dev-spec/scripts/portable_lock.py": "7e3d8171301c3cff5c87a46c5221b8e0d5f7f39af49ba89ac07dba35140b8f20",
+    "dev-spec/scripts/spec_closeout.py": "a6d59d3094d7bfe421dadb0c57aff53e05458423c6981a5fc482290d1f860dbc",
+    "dev-spec/scripts/support.py": "a99f3d8c3cc9e1d23b0a9377ad65cb3092162f5ba6bad2a9611fde94e1b056bb",
+    "watch-pr/SKILL.md": "de8dceb47aaeb13c34c5e121392ab9f528d4391c71386a9ac4318ba0e8540693",
+    "watch-pr/agents/openai.yaml": "2c8888ac1c20edece3a39b612597c76c30bb0942eacb690fd553cbe633bbab72",
+    "watch-pr/references/background-worker.md": "c8d6c3adc6558032b99b4640880575a6afa31d958aaf88133f405b95ffe03f08",
+    "watch-pr/scripts/portable_lock.py": "7e3d8171301c3cff5c87a46c5221b8e0d5f7f39af49ba89ac07dba35140b8f20",
+    "watch-pr/scripts/watch_pr.py": "04ec425620907a612fe49baa127f09dbf635c64693bb2b0cc87b7347f6a03e61"
+  }
+}
