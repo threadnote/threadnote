@@ -20,6 +20,7 @@ import {normalizeContextHealthSelector} from '../memory/context/health_selector.
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
 import {readTopicMaintenanceDraft} from '../memory/context/maintenance_draft.js';
+import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
 
 type ManagerAttentionResponse =
   | {readonly body: ManagerContextHealthResponseV1 | ManagerReviewInboxResponseV1; readonly status: 200}
@@ -196,6 +197,7 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
           );
         return [
           {
+            contentHash: maintenanceContentHash(record.content),
             code,
             excerpt: memoryExcerpt(record.body),
             kind: record.metadata.kind,

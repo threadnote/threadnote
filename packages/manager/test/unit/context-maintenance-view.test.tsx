@@ -6,6 +6,7 @@ import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
+import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {
   ManagerContextHealthResponseV1,
   ManagerContextMaintenanceStatusV2,
@@ -123,6 +124,229 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it.each([false, true])(
+    'reconciles only a confirmed topic apply while stale polls are pending (failure: %s)',
+    async failed => {
+      vi.useFakeTimers();
+      const hash = 'a'.repeat(64);
+      const uri = 'threadnote://memory/topic';
+      const citationId = `tncc_${'1'.repeat(40)}`;
+      const healthReport: ManagerContextHealthResponseV1 = {
+        ...report(),
+        findings: [
+          {
+            id: 'enrolled-source-changed',
+            category: 'citation-changed',
+            classification: 'actionable',
+            confidence: 'high',
+            severity: 'high',
+            summary: 'Enrolled source changed',
+            repairability: 'reviewable',
+            uris: [uri],
+            repair: {
+              kind: 'repair-citation',
+              subjectUri: uri,
+              targetUri: `${uri}#${citationId}`,
+              summary: 'Review source',
+            },
+          },
+        ],
+        recordPreviews: [
+          {
+            uri,
+            title: 'Enrolled topic',
+            kind: 'durable',
+            excerpt: 'Saved claim.',
+            code: [{citationId, path: 'src/topic.ts', findingIds: ['enrolled-source-changed']}],
+            contentHash: hash,
+          },
+        ],
+        maintenance: {...report().maintenance!, affectedMemories: 1, actionableFindings: 1},
+      };
+      const item = {
+        caseId: 'topic-case',
+        project: 'threadnote',
+        memoryId: 'topic-memory',
+        subjectUri: uri,
+        family: 'topic-maintenance',
+        slot: 'declared-support',
+        evidenceRevision: hash,
+        disposition: 'needs-decision' as const,
+        reason: 'source-changed',
+        firstSeen: 'now',
+        lastSeen: 'now',
+        lastChecked: 'now',
+        attemptCount: 1,
+        events: [],
+      };
+      let snapshot: ManagerContextMaintenanceStatusV2 = {
+        ...status(),
+        cases: [item],
+        counts: {decisionMemories: 1, 'needs-decision': 1},
+      };
+      const packet = {
+        version: 2,
+        project: 'threadnote',
+        caseId: item.caseId,
+        reviewId: 'topic-review',
+        memoryUri: uri,
+        evidenceRevision: hash,
+        expectedContentHash: hash,
+        family: item.family,
+        slot: item.slot,
+        reason: item.reason,
+        choices: [],
+        allowedOperations: [],
+        instructions: '',
+        topicEvidence: {
+          version: 1,
+          outcome: 'ready',
+          targetUri: uri,
+          targetHash: hash,
+          observationRevision: hash,
+          coverage: 'declared-only',
+          body: 'Saved claim.',
+          paragraphs: [],
+          additionalDependencies: [],
+          sources: [],
+        },
+      };
+      let current: ManagerTopicReviewV1 = {
+        version: 1,
+        kind: 'topic-maintenance',
+        project: 'threadnote',
+        reviewId: 'topic-review',
+        revision: 1,
+        state: 'pending',
+        topic: 'Topic',
+        caseId: item.caseId,
+        caseObservationMatches: true,
+        targetUri: uri,
+        targetHash: hash,
+        acceptedBody: 'Saved claim.',
+        observationRevision: hash,
+        coverage: 'declared-only',
+        generation: {origin: 'manual', agent: 'user', model: 'manual', attempts: 0, usage: {status: 'unavailable'}},
+        draft: {
+          version: 1,
+          targetHash: hash,
+          observationRevision: hash,
+          packetDigest: hash,
+          outcome: 'propose-revalidation',
+          operations: [],
+          reviewedHandles: ['current:source'],
+          rationale: 'Reviewed source.',
+          unresolvedQuestions: [],
+          removedClaims: [],
+        },
+        proposal: {body: 'Saved claim.', finalBodyHash: hash, changedOrdinals: []},
+        paragraphs: [],
+        additionalDependencies: [],
+        support: [],
+        warnings: [],
+        canApply: false,
+      };
+      const late = Promise.withResolvers<Response>();
+      let deferPoll = false;
+      const response = (value: unknown, code = 200) => new Response(JSON.stringify(value), {status: code});
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (path: string, init?: RequestInit) => {
+          const url = new URL(path, 'http://manager.test');
+          if (url.pathname === '/api/consolidation-models') return response({models: []});
+          if (url.pathname === '/api/attention/topic-review') {
+            if (init?.method === 'POST') {
+              const action = JSON.parse(String(init.body));
+              if (action.action === 'preview')
+                current = {
+                  ...current,
+                  revision: 2,
+                  canApply: true,
+                  approval: {
+                    stage: 'preview',
+                    reviewRevision: 2,
+                    approvalDigest: hash,
+                    content: 'Saved claim.',
+                    contentHash: hash,
+                    metadataDiff: [],
+                  },
+                };
+              if (action.action === 'apply') {
+                if (failed) return response({error: 'The exact source changed. Refresh the review.'}, 409);
+                current = {
+                  ...current,
+                  state: 'applied',
+                  revision: 4,
+                  canApply: false,
+                  approval: {...current.approval!, stage: 'written'},
+                  resolvedCitationIds: [citationId],
+                };
+              }
+            }
+            return response(current);
+          }
+          if (url.pathname === '/api/context-health') {
+            if (current.state === 'applied') return healthRefresh.promise;
+            return response(healthReport);
+          }
+          if (url.searchParams.has('caseId'))
+            return response(url.searchParams.get('view') === 'status' ? snapshot : packet);
+          if (deferPoll) {
+            deferPoll = false;
+            return late.promise;
+          }
+          return response(snapshot);
+        }),
+      );
+      const healthRefresh = Promise.withResolvers<Response>();
+      await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+      const click = async (label: string) => {
+        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+          value => value.textContent?.trim() === label,
+        );
+        expect(button, label).toBeDefined();
+        await act(async () => button!.click());
+      };
+      await click('Review memory and evidence');
+      await click('Preview exact final document');
+      deferPoll = true;
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      await click('Confirm unchanged');
+      if (failed) {
+        expect(document.querySelector('dialog[open]')).not.toBeNull();
+        expect(document.querySelector('dialog [role="alert"]')?.textContent).toContain('exact source changed');
+        expect(document.body.textContent).toContain('1 memory needs your decision');
+        expect(document.body.textContent).not.toContain('Topic update saved and verified.');
+      } else {
+        expect(document.querySelector('dialog')).toBeNull();
+        expect(document.body.textContent).toContain('Topic update saved and verified.');
+        expect(document.body.textContent).not.toContain('1 memory needs your decision');
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(0);
+      }
+      await act(async () => late.resolve(response(snapshot)));
+      expect(document.querySelectorAll('.health-decision-card')).toHaveLength(failed ? 1 : 0);
+      if (!failed) {
+        await act(async () => healthRefresh.resolve(response({error: 'Health refresh unavailable'}, 503)));
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(0);
+        expect(document.body.textContent).not.toContain('1 memory needs your decision');
+        // A new source revision and another case on the same memory must remain actionable.
+        snapshot = {
+          ...snapshot,
+          generation: 'new',
+          page: {generation: 'new'},
+          cases: [
+            {...item, evidenceRevision: 'b'.repeat(64)},
+            {...item, caseId: 'another-case'},
+          ],
+          counts: {decisionMemories: 1, 'needs-decision': 2},
+        };
+        await act(async () => vi.advanceTimersByTimeAsync(30_000));
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(1);
+        expect(document.body.textContent).toContain('3 supporting checks');
+        expect(document.body.textContent).toContain('1 memory needs your decision');
+      }
+    },
+  );
   it('opens a persisted semantic case with both quotes, context, reason, and evidence revisions', async () => {
     const memory = (name: string, body: string): MemoryRecord => ({
       body,
