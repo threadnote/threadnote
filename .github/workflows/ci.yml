@@ -202,6 +202,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.10'
+      - name: Install workflow inspection prerequisite
+        run: choco install ripgrep --no-progress --yes
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -218,6 +223,8 @@ jobs:
           apps/threadnote/test/unit/local-ai.test.ts
           apps/threadnote/test/unit/update.test.ts
           apps/threadnote/test/unit/mcp.test.ts
+          apps/threadnote/test/dev-skills/bundle.test.ts
+          apps/threadnote/test/dev-skills/python-workflows.test.ts
       - name: Graph repair quarantine smoke
         run: >-
           bun --bun vitest run
