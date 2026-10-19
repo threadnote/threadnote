@@ -936,6 +936,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           key={`${props.project}:${selected.caseId ?? selected.id}`}
           project={props.project}
           finding={selected}
+          memoryPreview={props.report.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
           repairsAvailable={props.report.repositoryEvidence.state === 'available'}
           onClose={() => setSelected(undefined)}
           onChanged={refreshAfterDecision}
