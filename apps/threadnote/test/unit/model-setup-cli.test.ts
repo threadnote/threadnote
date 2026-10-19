@@ -50,7 +50,7 @@ async function until(check: () => Promise<boolean>, timeout = 8_000) {
 }
 
 const harnessSource = (home: string, entry: string, gate: string, entered: string) => `
-import {Effect, Layer} from 'effect';
+import {Console, Effect, Layer} from 'effect';
 import {BunServices, BunRuntime} from '@effect/platform-bun';
 import {FileSystem} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -87,7 +87,7 @@ const store = LocalModelStore.layer.pipe(Layer.provide(Layer.merge(base,http.pip
 const layers=Layer.merge(base,store);
 const args=process.argv.slice(2);
 const parsed=args[0]==='model-setup-worker'?parseModelSetupWorkerArguments(args.slice(1)):undefined;
-const program=parsed?runModelSetupWorker(parsed.home,parsed.intentEpoch,parsed.nonce):requestModelSetup(home).pipe(Effect.tap(status=>Effect.sync(()=>console.log(JSON.stringify(status)))),Effect.asVoid);
+const program=parsed?runModelSetupWorker(parsed.home,parsed.intentEpoch,parsed.nonce):requestModelSetup(home).pipe(Effect.tap(status=>Console.log(JSON.stringify(status))),Effect.asVoid);
 BunRuntime.runMain(program.pipe(Effect.provide(layers)),{disableErrorReporting:true});
 `;
 
