@@ -653,6 +653,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         <HealthDetail
           key={`${props.project}:${selected.id}`}
           finding={selected}
+          memoryPreview={report?.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
           project={props.project}
           repairsAvailable={report?.repositoryEvidence.state === 'available'}
           onClose={() => setSelected(undefined)}

@@ -7,6 +7,7 @@ export function DetailModal(props: {
   readonly onClose: () => void;
   readonly children: React.ReactNode;
   readonly className?: string;
+  readonly footer?: React.ReactNode;
 }): React.ReactElement {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -37,6 +38,7 @@ export function DetailModal(props: {
         </button>
       </header>
       <div className="detail-modal-body">{props.children}</div>
+      {props.footer ? <footer className="detail-modal-actions">{props.footer}</footer> : null}
     </dialog>
   );
 }
