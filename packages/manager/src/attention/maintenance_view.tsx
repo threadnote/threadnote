@@ -30,6 +30,7 @@ interface Props {
   readonly onProjectChange: (project: string) => void;
   readonly onOpenLibrary: (uri?: string) => void;
   readonly onChanged: () => void;
+  readonly onDecisionCountChange?: (project: string, count: number | undefined) => void;
   readonly nextCursor?: string;
   readonly loadingMore: boolean;
   readonly onLoadMore: () => void;
@@ -131,7 +132,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         if (!result.paused && result.state !== 'failed')
           timer = window.setTimeout(() => void poll(), result.state === 'running' ? 1_000 : 30_000);
       } catch (cause) {
-        if (!cancelled && mutationEpoch.current === epoch) setError(errorMessage(cause));
+        if (!cancelled && mutationEpoch.current === epoch) {
+          setError(errorMessage(cause));
+          timer = window.setTimeout(() => void poll(), 30_000);
+        }
       }
     };
     void poll();
@@ -244,6 +248,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         .map(item => item.memoryId) ?? [],
     ).size,
   );
+  const onDecisionCountChange = props.onDecisionCountChange;
+  const completeDecisionCount = status?.counts?.decisionMemories === undefined ? undefined : decisionCount;
+  useEffect(() => {
+    onDecisionCountChange?.(props.project, completeDecisionCount);
+  }, [onDecisionCountChange, props.project, completeDecisionCount]);
+  useEffect(() => () => onDecisionCountChange?.(props.project, undefined), [onDecisionCountChange, props.project]);
   const citation = summary?.citationCoverage;
   const semantic = summary?.semanticCoverage ?? report.semanticCompleteness;
   const semanticProgress = status?.semanticCoverage?.find(item => item.project === props.project);

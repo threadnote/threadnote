@@ -19,6 +19,7 @@ interface AttentionPanelProps {
   readonly project: string;
   readonly projects: readonly string[];
   readonly refreshGeneration: number;
+  readonly onDecisionCountChange?: (project: string, count: number | undefined) => void;
 }
 
 interface CitationRepairPreview {
@@ -502,6 +503,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         onProjectChange={props.onProjectChange}
         onOpenLibrary={props.onOpenLibrary}
         onChanged={() => setGeneration(value => value + 1)}
+        onDecisionCountChange={props.onDecisionCountChange}
         nextCursor={nextCursor}
         loadingMore={loadingMore}
         onLoadMore={loadMore}

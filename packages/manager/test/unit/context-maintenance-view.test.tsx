@@ -5,6 +5,7 @@ import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
+import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {
@@ -254,6 +255,7 @@ describe('context maintenance view', () => {
         vi.fn(async (path: string, init?: RequestInit) => {
           const url = new URL(path, 'http://manager.test');
           if (url.pathname === '/api/consolidation-models') return response({models: []});
+          if (url.pathname === '/api/shares/conflicts') return response({conflicts: []});
           if (url.pathname === '/api/attention/topic-review') {
             if (init?.method === 'POST') {
               const action = JSON.parse(String(init.body));
@@ -291,6 +293,11 @@ describe('context maintenance view', () => {
           }
           if (url.searchParams.has('caseId'))
             return response(url.searchParams.get('view') === 'status' ? snapshot : packet);
+          if (url.searchParams.get('limit') === '1') return response(snapshot);
+          if (fullPollFailures > 0) {
+            fullPollFailures -= 1;
+            return response({error: 'Maintenance status unavailable'}, 503);
+          }
           if (deferPoll) {
             deferPoll = false;
             return late.promise;
@@ -298,8 +305,35 @@ describe('context maintenance view', () => {
           return response(snapshot);
         }),
       );
+      let fullPollFailures = 0;
       const healthRefresh = Promise.withResolvers<Response>();
-      await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+      function HealthWorkspace() {
+        const [decisionCount, onDecisionCountChange] = useContextHealthDecisionCount();
+        return (
+          <>
+            <ManagerNavigation
+              panel="context-health"
+              project="threadnote"
+              refreshGeneration={0}
+              connected
+              disabled={false}
+              onSelect={() => undefined}
+              width={200}
+              onResizeKeyDown={() => undefined}
+              onResizePointerDown={() => undefined}
+              contextHealthDecisionCount={decisionCount}
+            />
+            <ContextHealthPanel
+              {...props}
+              project="threadnote"
+              refreshGeneration={0}
+              onDecisionCountChange={onDecisionCountChange}
+            />
+          </>
+        );
+      }
+      await render(<HealthWorkspace />);
+      expect(document.querySelector('[aria-label="1 memory needs attention in threadnote"]')).not.toBeNull();
       const click = async (label: string) => {
         const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
           value => value.textContent?.trim() === label,
@@ -323,12 +357,18 @@ describe('context maintenance view', () => {
         expect(document.body.textContent).not.toContain('1 memory needs your decision');
         expect(document.querySelectorAll('.health-decision-card')).toHaveLength(0);
       }
+      expect(document.querySelector('[aria-label="1 memory needs attention in threadnote"]') === null).toBe(!failed);
       await act(async () => late.resolve(response(snapshot)));
       expect(document.querySelectorAll('.health-decision-card')).toHaveLength(failed ? 1 : 0);
       if (!failed) {
         await act(async () => healthRefresh.resolve(response({error: 'Health refresh unavailable'}, 503)));
         expect(document.querySelectorAll('.health-decision-card')).toHaveLength(0);
         expect(document.body.textContent).not.toContain('1 memory needs your decision');
+        expect(document.querySelector('[aria-label="1 memory needs attention in threadnote"]')).toBeNull();
+        fullPollFailures = 1;
+        await act(async () => vi.advanceTimersByTimeAsync(30_000));
+        expect(fullPollFailures).toBe(0);
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(0);
         // A new source revision and another case on the same memory must remain actionable.
         snapshot = {
           ...snapshot,
@@ -343,6 +383,7 @@ describe('context maintenance view', () => {
         await act(async () => vi.advanceTimersByTimeAsync(30_000));
         expect(document.querySelectorAll('.health-decision-card')).toHaveLength(1);
         expect(document.body.textContent).toContain('3 supporting checks');
+        expect(document.querySelector('[aria-label="1 memory needs attention in threadnote"]')).not.toBeNull();
         expect(document.body.textContent).toContain('1 memory needs your decision');
       }
     },
@@ -801,6 +842,7 @@ describe('context maintenance view', () => {
   });
 
   it('shows full aggregate recovery and history when decision details are truncated', async () => {
+    const onDecisionCountChange = vi.fn();
     const snapshot: ManagerContextMaintenanceStatusV2 = {
       ...status(),
       cases: Array.from({length: 30}, (_, index) => ({
@@ -835,13 +877,24 @@ describe('context maintenance view', () => {
       'fetch',
       vi.fn(async () => new Response(JSON.stringify(snapshot))),
     );
-    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    await render(
+      <ContextMaintenanceView
+        {...props}
+        project="threadnote"
+        report={report()}
+        onDecisionCountChange={onDecisionCountChange}
+      />,
+    );
     expect(document.body.textContent).toContain('55 memories need your decision');
+    expect(onDecisionCountChange).toHaveBeenLastCalledWith('threadnote', 55);
     expect(document.body.textContent).toContain('18 affected memories');
     expect(document.body.textContent).toContain('7 retired');
     expect(document.body.textContent).toContain('18 waiting for evidence');
     expect(document.body.textContent).toContain('50 additional case details');
     expect(document.body.textContent).not.toContain('No blocked recovery groups');
+    await act(async () => root?.unmount());
+    root = undefined;
+    expect(onDecisionCountChange).toHaveBeenLastCalledWith('threadnote', undefined);
   });
 
   it('loads remaining decisions directly in the decision queue without requiring History', async () => {
