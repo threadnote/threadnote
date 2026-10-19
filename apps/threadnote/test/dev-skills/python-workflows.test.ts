@@ -17,6 +17,8 @@ const suites = [
   'apps/threadnote/test/dev-skills/python/dev-cycle/test_phase_state.py',
   'apps/threadnote/test/dev-skills/python/watch-pr/test_watch_pr.py',
   'apps/threadnote/test/dev-skills/python/test_portability.py',
+  'apps/threadnote/test/dev-skills/python/test_workflow_transport.py',
+  'apps/threadnote/test/dev-skills/python/test_personal_cloud_workflow.py',
 ];
 
 describe('bundled development workflow Python contracts', () => {

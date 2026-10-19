@@ -126,7 +126,7 @@ def make_packet(plan, phase_id, memories):
         require(hashlib.sha256(memories[uri].encode()).hexdigest() == hashes.get(uri),
                 "Plan memory changed or is not pinned: " + uri)
     return {"schemaVersion": 1, "planHash": definition_hash(plan), "phase": dict(phase), "readUris": uris,
-            **{key: plan[key] for key in ("featureId", "spec", "completion") if key in plan}}
+            **{key: plan[key] for key in ("featureId", "spec", "completion", "workflowContext") if key in plan}}
 
 
 def check_scope(plan, packet, files):

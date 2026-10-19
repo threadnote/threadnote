@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 from portable_lock import lock_exclusive
+import workflow_transport as wt
 import argparse, contextlib, hashlib, json, os, re, shutil, subprocess, tempfile, uuid
 from pathlib import Path
 
@@ -132,17 +133,27 @@ def load_record(body):
 
 
 class Threadnote:
-    def __init__(self, repo=None, home=None):
+    def __init__(self, repo=None, home=None, **workflow_options):
         self.repo, self.home = repo, home
+        self.workflow_options = workflow_options
+        self.workflow = None
+        wt.attach_explicit(self)
 
     def call(self, command, args, text=None):
+        wt.require(self.workflow is None and not self.workflow_options.get("workflow_context"), "Structured workflows require an existing pinned context and do not execute human read/remember/archive commands")
+        wt.require_desktop_legacy(self.home)
         return run(["threadnote", command] + (["--home", self.home] if self.home else []) + args,
                    cwd=self.repo, text=text)
 
     def read(self, uri):
+        if self.workflow is not None:
+            return self.workflow.read(uri)["body"]
         return canonical(self.call("read", [uri]))
 
     def peek(self, uri):
+        if self.workflow is not None:
+            observed = self.workflow.read(uri, missing=True)
+            return observed["body"] if observed is not None else None
         try:
             return self.read(uri)
         except CommandError as error:
@@ -155,9 +166,13 @@ class Threadnote:
             raise
 
     def active(self, uri):
+        if self.workflow is not None:
+            return self.workflow.read(uri)["state"] == "active"
         return bool(re.search(r"^status: active$", self.call("read", [uri]), re.M))
 
     def remember(self, record, topic, replace=None, preview=False):
+        if self.workflow is not None:
+            return self.workflow.write(record, topic, memory_text(record), record.get("relations", []), replace, record.get("deferred", False), preview)
         args = ["--kind", record["memoryKind"], "--project", record["project"], "--topic", topic,
                 "--status", "active", "--keyword", "dev-spec", "--keyword", record["featureId"],
                 "--keyword", record["kind"], "--stdin"]
@@ -174,6 +189,14 @@ class Threadnote:
         pattern = r"Would (?:create|replace) native resource: (threadnote://[^\s]+)" if preview else r"Stored memory: (threadnote://[^\s]+)"
         match = re.search(pattern, output)
         require(match, "Unrecognized native write response; reconcile before retrying")
+        return match.group(1)
+
+    def archive(self, uri):
+        if self.workflow is not None:
+            return self.workflow.archive(uri)
+        output = self.call("archive", [uri])
+        match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
+        require(match, "Archive did not return its exact destination")
         return match.group(1)
 
 
@@ -210,9 +233,13 @@ class Store:
             return
         if pending["operation"] == "archive":
             target = uri or pending.get("uri")
+            if target is None and getattr(self.client, "workflow", None) is not None:
+                target = self.client.archive(pending["source"])
             if target:
+                archived = (self.client.workflow.read(target)["state"] == "archived"
+                            if getattr(self.client, "workflow", None) is not None else not self.client.active(target))
                 require(digest(load_record(self.client.read(target))) == pending["hash"]
-                        and not self.client.active(target), "Archive recovery mismatch")
+                        and archived, "Archive recovery mismatch")
                 self.state["archives"][pending["source"]] = target
             else:
                 original = self.client.peek(pending["source"])
@@ -271,10 +298,14 @@ class Store:
         require(digest(load_record(self.client.read(uri))) == fingerprint, "Artifact changed before retirement")
         self.state["pending"] = {"operation": "archive", "source": uri, "hash": fingerprint}
         self.flush()
-        result = self.client.call("archive", [uri])
-        match = re.search(r"Stored memory: (threadnote://[^\s]+)", result)
-        require(match, "Unknown archive outcome; recover actual returned URI")
-        self.state["pending"]["uri"] = match.group(1)
+        if hasattr(self.client, "archive"):
+            archived_uri = self.client.archive(uri)
+        else:
+            result = self.client.call("archive", [uri])
+            match = re.search(r"Stored memory: (threadnote://[^\s]+)", result)
+            require(match, "Unknown archive outcome; recover actual returned URI")
+            archived_uri = match.group(1)
+        self.state["pending"]["uri"] = archived_uri
         self.flush()
         self.recover()
         return self.state["archives"][uri]

@@ -1,4 +1,5 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
+import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
 import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
@@ -1960,6 +1961,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('archive', archive),
   registerTopLevelCommand('forget', forget),
   registerTopLevelCommand('cloud', cloud),
+  registerTopLevelCommand('workflow-memory', makeWorkflowMemoryCommand(withRuntimeEffect)),
   registerTopLevelCommand('share', share, {
     productionLog: {
       subcommands: {

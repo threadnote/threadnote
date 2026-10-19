@@ -455,8 +455,7 @@ class Specs(unittest.TestCase):
         complete = self.finish(cycle, directory)
         for uri in (complete["verifiedSpecUri"], complete["implementedArchitectureUri"]):
             self.assertTrue(self.sc.active(uri))
-            metadata = self.sc.call("read", [uri]).split("\n\n", 1)[0]
-            citations = [json.loads(line.split(": ", 1)[1]) for line in metadata.splitlines() if line.startswith("code_citation: ")]
+            citations = self.sc.workflow.read(uri)["codeCitations"]
             self.assertEqual({c["path"] for c in citations}, {"src/cache.py", "src/expiry.py"})
             self.assertTrue(all(c["sourceCommit"] == scope["head"] and not c["sourceDirty"] for c in citations))
         final = support.load_record(self.sc.read(complete["verifiedSpecUri"]))

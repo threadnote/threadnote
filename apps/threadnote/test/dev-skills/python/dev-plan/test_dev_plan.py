@@ -371,9 +371,7 @@ class Plans(unittest.TestCase):
         self.assertEqual(final["data"]["codeRefs"], ["src/cache.py", "src/expiry.py"])
         self.assertEqual(final["data"]["closeoutStatus"], "complete")
         self.assertTrue(client.is_active(completed["implementedUri"]))
-        metadata = client.call("read", [completed["implementedUri"]]).split("\n\n", 1)[0]
-        citations = [json.loads(line.split(": ", 1)[1]) for line in metadata.splitlines()
-                     if line.startswith("code_citation: ")]
+        citations = client.workflow.read(completed["implementedUri"])["codeCitations"]
         self.assertEqual({c["path"] for c in citations}, {"src/cache.py", "src/expiry.py"})
         graph = json.loads(dp.run(["threadnote", "graph", "status", "--home", native_home,
                                   "--cwd", str(self.repo), "--json"]))
