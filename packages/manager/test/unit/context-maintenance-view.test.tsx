@@ -689,6 +689,54 @@ describe('context maintenance view', () => {
     expect(requests.some(url => url.includes('/attention/context-maintenance'))).toBe(true);
   });
 
+  it('carries the saved excerpt from the active health view into the citation dialog', async () => {
+    const source = report();
+    const uri = 'threadnote://memory/quoted-source';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(status()))),
+    );
+    await render(
+      <ContextMaintenanceView
+        {...props}
+        project="threadnote"
+        report={{
+          ...source,
+          repositoryEvidence: {state: 'available'},
+          findings: [
+            {
+              category: 'citation-changed',
+              id: 'finding-quote',
+              classification: 'actionable',
+              confidence: 'high',
+              severity: 'high',
+              repairability: 'reviewable',
+              summary: 'Source changed',
+              uris: [uri],
+              repair: {
+                kind: 'repair-citation',
+                subjectUri: uri,
+                targetUri: `${uri}#citation`,
+                summary: 'Review source',
+              },
+            },
+          ],
+          recordPreviews: [
+            {uri, title: 'Review source', excerpt: 'Review the source before applying.', kind: 'durable', code: []},
+          ],
+        }}
+      />,
+    );
+    const compare = Array.from(document.querySelectorAll('button')).find(
+      item => item.textContent === 'Compare evidence and preview change',
+    );
+    expect(compare).toBeDefined();
+    await act(async () => compare?.click());
+    expect(document.querySelector('dialog .memory-excerpt blockquote')?.textContent).toBe(
+      'Review the source before applying.',
+    );
+  });
+
   it('combines multiple supported checks into one memory decision with a scoped agent task', async () => {
     const source = report();
     const findings = ['citation-changed', 'semantic-contradiction'].map((category, index) => ({
