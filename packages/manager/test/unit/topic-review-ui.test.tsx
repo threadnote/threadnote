@@ -210,7 +210,7 @@ beforeEach(() => {
               stage: 'preview',
               reviewRevision: revision,
               approvalDigest: hash,
-              content: `# Topic\n\n${body}`,
+              content: `MEMORY\nkind: durable\nmemory_id: tn_preview_fixture\n\n# Topic\n\n${body}`,
               contentHash: hash,
               metadataDiff: [],
             },
@@ -589,6 +589,11 @@ it('keeps an inbox review open through preview and shows its exact final documen
   expect(document.querySelector('dialog[open]')).toBeTruthy();
   expect(document.body.textContent).toContain('Exact final document to save');
   expect(document.body.textContent).toContain('Updated behavior.');
+  const finalDocument = document.querySelector('[aria-label="Exact final document"]')!;
+  expect(finalDocument.querySelector('article')?.textContent).toContain('Updated behavior.');
+  expect(finalDocument.querySelector('article')?.textContent).not.toContain('memory_id:');
+  expect(finalDocument.querySelector('details')?.open).toBe(false);
+  expect(finalDocument.querySelector('details pre')?.textContent).toBe(current.approval?.content);
   expect(button('Accept update').disabled).toBe(false);
   await act(async () => {
     document.querySelector('dialog')!.dispatchEvent(new Event('cancel', {cancelable: true}));

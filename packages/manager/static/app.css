@@ -10220,6 +10220,12 @@ h4 {
   color: var(--muted);
   font-size: 12px;
 }
+.review-final-document pre {
+  max-height: 320px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .topic-generation-controls {
   align-items: end;
   display: flex;

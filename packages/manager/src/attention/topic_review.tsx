@@ -20,6 +20,7 @@ import {
   TopicSourceEvidence,
 } from './topic_review_presentation.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {memoryDocumentParts} from '../library_model.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {
   ManagerTopicReviewActionV1,
@@ -823,7 +824,7 @@ export function TopicReviewContent(
                     ? 'Review this full document and its metadata before accepting.'
                     : 'This preview is retained for reference. Prepare a fresh preview before accepting.'}
               </p>
-              <MemoryBody content={approval.content} />
+              <MemoryBody content={memoryDocumentParts(approval.content).body} />
               <details>
                 <summary>Metadata and provenance changes</summary>
                 {approval.metadataDiff.length ? (
@@ -836,6 +837,8 @@ export function TopicReviewContent(
                   <p>No metadata fields changed.</p>
                 )}
                 <p>Final content checksum: {approval.contentHash}</p>
+                <h5>Full stored document</h5>
+                <pre>{approval.content}</pre>
               </details>
             </section>
           ) : null}
