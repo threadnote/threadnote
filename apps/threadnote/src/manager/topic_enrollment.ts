@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {Effect, Result} from 'effect';
 import {consolidationSections} from '@threadnote/memory/consolidation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -44,7 +45,7 @@ export const handleManagerTopicEnrollment = Effect.fn('managerTopicEnrollment.ha
   if (
     !privateTopicUri(inspection.targetUri) ||
     typeof inspection.project !== 'string' ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(inspection.project)
+    !isManagerProjectName(inspection.project)
   )
     return unavailable();
   if (request.method === 'GET') {

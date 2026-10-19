@@ -191,6 +191,83 @@ beforeEach(() => {
 });
 
 describe('Manager topic review adapter', () => {
+  effectIt.effect('keeps a spaced project name through read, generation, preview and approval', () =>
+    Effect.gen(function* () {
+      const project = 'Example Project';
+      const selected = {...review, project};
+      mocks.list.mockReturnValue(Effect.succeed([selected]));
+      for (const mock of [mocks.load, mocks.read, mocks.draft, mocks.preview, mocks.apply])
+        mock.mockReturnValue(Effect.succeed(selected));
+      mocks.records.mockReturnValue(Effect.succeed([{uri: targetUri, metadata: {project, memoryId: 'tn_topic'}}]));
+      mocks.status.mockReturnValue(
+        Effect.succeed({
+          cases: [
+            {
+              caseId,
+              project,
+              family: 'topic-maintenance',
+              slot: 'declared-support',
+              subjectUri: targetUri,
+              evidenceRevision: hash,
+            },
+          ],
+        }),
+      );
+      mocks.packet.mockReturnValue(
+        Effect.succeed({caseId, project, memoryUri: targetUri, topicEvidence: {outcome: 'ready'}}),
+      );
+      expect(
+        (yield* call('GET', `/api/attention/topic-review?project=${encodeURIComponent(project)}&reviewId=${reviewId}`))
+          ?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'generate',
+          project,
+          caseId,
+          backend: 'local-ai',
+          modelId: 'synthetic-model',
+        }))?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'preview',
+          project,
+          reviewId,
+          revision: 3,
+        }))?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'apply',
+          project,
+          reviewId,
+          revision: 3,
+          approvalDigest: hash,
+          approved: true,
+        }))?.status,
+      ).toBe(200);
+      expect(mocks.root).toHaveBeenCalledWith(config, project);
+      expect(mocks.apply).toHaveBeenCalledWith(config, {
+        reviewId,
+        revision: 3,
+        sourceCwd: '/selected/alpha',
+        approvalDigest: hash,
+        approved: true,
+      });
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'apply',
+          project: 'Example-Project',
+          reviewId,
+          revision: 3,
+          approvalDigest: hash,
+          approved: true,
+        }))?.status,
+      ).toBe(404);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   const importedReview = () =>
     ({
       ...review,

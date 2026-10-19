@@ -110,6 +110,7 @@ bun_test(
         "//apps/threadnote:src/manager/consolidation_agent.ts",
         "//apps/threadnote:src/manager/consolidation_models.ts",
         "//apps/threadnote:src/manager/operation_error.ts",
+        "//apps/threadnote:src/manager/project/name.ts",
         "//apps/threadnote:src/manager/project/roots.ts",
         "//apps/threadnote:src/manager/selected_draft.ts",
         "//apps/threadnote:src/manager/topic_draft_schema.ts",
