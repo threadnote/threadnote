@@ -15629,6 +15629,7 @@ bun_test(
         "//:.github/release-notes/v5.3.0-beta.3.md",
         "//:.github/release-notes/v5.3.0-beta.4.md",
         "//:.github/release-notes/v5.3.0-beta.5.md",
+        "//:.github/release-notes/v5.3.0-beta.6.md",
         "//:.github/workflows/benchmarks.yml",
         "//:.github/workflows/ci.yml",
         "//:.github/workflows/code-graph-production-ratchet.yml",
