@@ -110,6 +110,8 @@ export interface ManagerContextHealthCodePreviewV1 {
 }
 
 export interface ManagerContextHealthRecordPreviewV1 {
+  /** Canonical full-record hash; absent older projections cannot authorize local reconciliation. */
+  readonly contentHash?: string;
   readonly code: readonly ManagerContextHealthCodePreviewV1[];
   readonly excerpt: string;
   readonly kind: MemoryKind;

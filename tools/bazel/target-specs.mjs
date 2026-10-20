@@ -73,6 +73,8 @@ const recallQualityEntries = [
   'scripts/prepare-matched-token-efficiency-study.ts',
 ];
 const windowsSmokeEntries = [
+  'apps/threadnote/test/dev-skills/bundle.test.ts',
+  'apps/threadnote/test/dev-skills/python-workflows.test.ts',
   'apps/threadnote/test/unit/windows-support.test.ts',
   'apps/threadnote/test/unit/command-shim.test.ts',
   'apps/threadnote/test/unit/effect-command.test.ts',

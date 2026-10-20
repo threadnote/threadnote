@@ -23,6 +23,13 @@ import {
   type TopicReviewDecisionInput,
 } from '../memory/context/maintenance_review.js';
 import {topicMaintenanceCaseId} from '../memory/context/maintenance_topic.js';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {
+  isCodeTopicMaintenanceManifest,
+  topicMaintenanceAcceptedCitation,
+  validateTopicMaintenanceManifest,
+} from '@threadnote/memory/topic-maintenance';
+import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
 import {
   projectTopicReviewRecovery,
   projectTopicReviewDecisionAcknowledgement,
@@ -55,6 +62,55 @@ export interface ManagerTopicReviewCaseIdentity {
   readonly importedAccess?: {readonly reviewId: string; readonly revision: number};
 }
 
+/** Receipt-only projection: a retained old citation alone does not establish refreshed current support. */
+function resolvedTopicCitationIds(review: CandidateReview): readonly string[] | undefined {
+  const maintenance = review.maintenance;
+  const approval = review.maintenanceApproval;
+  if (maintenance?.version !== 1 || approval?.stage !== 'written' || review.candidates[0]?.state !== 'applied')
+    return undefined;
+  try {
+    const uri = maintenance.basis.targetUri;
+    const before = parseMemoryDocument(uri, approval.preview.beforeContent);
+    const after = parseMemoryDocument(uri, approval.preview.content);
+    if (
+      !before ||
+      !after ||
+      maintenanceContentHash(before.content) !== maintenance.basis.targetHash ||
+      maintenanceContentHash(before.content) !== approval.preview.beforeContentHash ||
+      maintenanceContentHash(after.content) !== approval.preview.contentHash ||
+      approval.preview.targetUri !== uri
+    )
+      return undefined;
+    const old = validateTopicMaintenanceManifest(before.metadata.topicMaintenance, before);
+    const next = validateTopicMaintenanceManifest(after.metadata.topicMaintenance, after);
+    if (!isCodeTopicMaintenanceManifest(old) || !isCodeTopicMaintenanceManifest(next)) return undefined;
+    const declared = (manifest: typeof old) => [
+      ...new Set([
+        ...manifest.paragraphs.flatMap(item => item.citationIds),
+        ...manifest.additionalDependencies.map(item => item.citationId),
+      ]),
+    ];
+    const activeAfter = new Set(declared(next).map(id => topicMaintenanceAcceptedCitation(after, id).id));
+    const resolved = declared(old).flatMap(id => {
+      const current = maintenance.reviewEvidence.find(item => item.handleId === `current:${id}`);
+      return current &&
+        !('sourceKind' in current) &&
+        current.provenance === 'current-verified' &&
+        current.supportsCitation &&
+        !current.truncated &&
+        maintenance.basis.handles.some(
+          handle => handle.id === current.handleId && handle.variant === 'current' && handle.citationId === id,
+        ) &&
+        activeAfter.has(current.citation.id)
+        ? [topicMaintenanceAcceptedCitation(before, id).id]
+        : [];
+    });
+    return [...new Set(resolved)].sort();
+  } catch {
+    return undefined;
+  }
+}
+
 /** No private receipt, source pin, or pre-approval content escapes this projection. */
 export function projectManagerTopicReview(
   review: CandidateReview,
@@ -75,6 +131,7 @@ export function projectManagerTopicReview(
   const canFinishVerification =
     candidate.state === 'applying' && approval?.stage === 'prepared' && identity?.approvedContentMatches === true;
   const coverageAllowsApply = maintenance.generation.origin === 'manual' || paragraphCoverage.status === 'complete';
+  const resolvedCitationIds = resolvedTopicCitationIds(review);
   const canApply =
     coverageAllowsApply &&
     ((candidate.state === 'pending' &&
@@ -97,6 +154,7 @@ export function projectManagerTopicReview(
     targetHash: maintenance.basis.targetHash,
     acceptedBody: maintenance.basis.body,
     observationRevision: maintenance.basis.observationRevision,
+    ...(resolvedCitationIds === undefined ? {} : {resolvedCitationIds}),
     coverage: 'declared-only',
     paragraphCoverage,
     generation: {
