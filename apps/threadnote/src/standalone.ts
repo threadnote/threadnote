@@ -23,6 +23,7 @@ import {
 const executableName = process.execPath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
 const arguments_ = process.argv.slice(2);
 const isModelSetupWorker = arguments_[0] === 'model-setup-worker';
+const isModelSetupRequest = arguments_[0] === 'model-setup-request';
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
 const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
@@ -89,37 +90,40 @@ if (
   );
   runSignalTransparentMain(nativeWorkerProgram, {disableErrorReporting: true});
 } else {
-  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> = isModelSetupWorker
-    ? await modelSetupWorkerProgram(arguments_.slice(1))
-    : isIntegrationSyncWorker
-      ? await integrationSyncWorkerProgram(arguments_.slice(1))
-      : isRemoteMemoryService
-        ? await remoteMemoryServiceProgram()
-        : isOAuthM2MGraphCredentialHelper
-          ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
-          : isOAuthM2MRegistryCredentialHelper
-            ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
-            : isOAuthM2MPublisherRegistryCredentialHelper
-              ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
-              : isOAuthUserRegistryCredentialHelper
-                ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
-                : isGraphOAuthUserHelper
-                  ? await graphOAuthHelperProgram(arguments_.slice(1))
-                  : isRemoteMemoryOperator
-                    ? await remoteMemoryOperatorProgram(arguments_.slice(1))
-                    : isLocalModelWorker
-                      ? await localModelWorkerProgram(arguments_)
-                      : isCodeGraphParserWorker
-                        ? await codeGraphParserWorkerProgram(arguments_)
-                        : isGitWorktreeRegistrationWorker
-                          ? await gitWorktreeRegistrationWorkerProgram()
-                          : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
+  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> = isModelSetupRequest
+    ? await automaticModelSetupProgram(arguments_.slice(1))
+    : isModelSetupWorker
+      ? await modelSetupWorkerProgram(arguments_.slice(1))
+      : isIntegrationSyncWorker
+        ? await integrationSyncWorkerProgram(arguments_.slice(1))
+        : isRemoteMemoryService
+          ? await remoteMemoryServiceProgram()
+          : isOAuthM2MGraphCredentialHelper
+            ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
+            : isOAuthM2MRegistryCredentialHelper
+              ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
+              : isOAuthM2MPublisherRegistryCredentialHelper
+                ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
+                : isOAuthUserRegistryCredentialHelper
+                  ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
+                  : isGraphOAuthUserHelper
+                    ? await graphOAuthHelperProgram(arguments_.slice(1))
+                    : isRemoteMemoryOperator
+                      ? await remoteMemoryOperatorProgram(arguments_.slice(1))
+                      : isLocalModelWorker
+                        ? await localModelWorkerProgram(arguments_)
+                        : isCodeGraphParserWorker
+                          ? await codeGraphParserWorkerProgram(arguments_)
+                          : isGitWorktreeRegistrationWorker
+                            ? await gitWorktreeRegistrationWorkerProgram()
+                            : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
   );
 
   BunRuntime.runMain(program, {
     disableErrorReporting:
+      isModelSetupRequest ||
       isModelSetupWorker ||
       isLocalModelWorker ||
       isIntegrationSyncWorker ||
@@ -129,6 +133,13 @@ if (
       isOAuthUserRegistryCredentialHelper ||
       (!isMcpServer && !isMcpBroker),
   });
+}
+
+async function automaticModelSetupProgram(arguments_: readonly string[]) {
+  const [setup, runtime] = await Promise.all([import('./models/setup_lifecycle.js'), import('./effect/runtime.js')]);
+  return setup
+    .runAutomaticModelSetupChild(arguments_)
+    .pipe(Effect.provide(Layer.merge(runtime.ModelSetupWorkerLayer, runtime.StandaloneBrokerLayer)));
 }
 
 async function modelSetupWorkerProgram(arguments_: readonly string[]) {

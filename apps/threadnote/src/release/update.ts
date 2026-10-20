@@ -8,6 +8,7 @@ import {
   warning,
   withSpinnerEffect,
 } from '../cli_ui.js';
+import {queueAutomaticModelSetup} from '../models/setup_lifecycle.js';
 import {installCommandShim} from '../command-shim.js';
 import {extractGzipTar} from '../effect/archive.js';
 import {runCommandEffect, runStreamingCommandEffect} from '@threadnote/platform/command';
@@ -264,21 +265,30 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   }
 
   if (!info.isUpdateAvailable && options.force !== true) {
-    if (info.installedVersion !== undefined) {
-      const refresh = yield* withStandaloneInstallationLock(
-        Effect.gen(function* () {
-          const path = yield* Path.Path;
-          const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
-          const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
-          yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
-          return options.dryRun === true
-            ? undefined
-            : yield* prepareReleaseDevSkills(config, activeReleaseRoot, mutationInstalledVersion);
-        }),
-        options.dryRun === true,
-      );
-      if (refresh) yield* refreshReleaseDevSkills(config, refresh);
-    }
+    const current =
+      info.installedVersion === undefined
+        ? {executable: system.executablePath, refresh: undefined}
+        : yield* withStandaloneInstallationLock(
+            Effect.gen(function* () {
+              const path = yield* Path.Path;
+              const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
+              const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
+              yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
+              return {
+                executable: path.join(activeReleaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
+                refresh:
+                  options.dryRun === true
+                    ? undefined
+                    : yield* prepareReleaseDevSkills(config, activeReleaseRoot, mutationInstalledVersion),
+              };
+            }),
+            options.dryRun === true,
+          );
+    const workflowResult = current.refresh
+      ? yield* Effect.result(refreshReleaseDevSkills(config, current.refresh))
+      : undefined;
+    yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable: current.executable});
+    if (workflowResult !== undefined && Result.isFailure(workflowResult)) return yield* workflowResult.failure;
     yield* Console.log(success('Threadnote is up to date.'));
     yield* Console.log(
       'Managed launchers are current. If an MCP host still uses the legacy direct server command, run `threadnote repair`, then restart that host once.',
@@ -320,6 +330,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
     : undefined;
   const path = yield* Path.Path;
   const threadnoteCommand = path.join(releaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
+  yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable: threadnoteCommand});
   const postUpdateArgs = [
     'post-update',
     '--from-version',

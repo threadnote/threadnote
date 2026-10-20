@@ -1074,6 +1074,7 @@ bun_test(
         "//apps/threadnote:src/models/core-embedding-asset.ts",
         "//apps/threadnote:src/models/core-embedding.ts",
         "//apps/threadnote:src/models/setup.ts",
+        "//apps/threadnote:src/models/setup_lifecycle.ts",
         "//apps/threadnote:src/omp_hooks.ts",
         "//apps/threadnote:src/onboarding.ts",
         "//apps/threadnote:src/procedure/commands.ts",

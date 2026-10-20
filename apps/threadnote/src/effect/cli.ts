@@ -267,6 +267,7 @@ const doctor = Command.make(
 const install = Command.make(
   'install',
   {
+    modelSetup: negatedBoolean('model-setup', 'Skip background Gemma setup for this installation'),
     dryRun: boolean('dry-run', 'Print the actions without making changes'),
     force: boolean('force', 'Re-assert the Threadnote-owned layout and configuration'),
     start: negatedBoolean('start', 'Skip the local runtime readiness message'),
@@ -350,6 +351,7 @@ const reportIssue = Command.make(
 const update = Command.make(
   'update',
   {
+    modelSetup: negatedBoolean('model-setup', 'Skip background Gemma setup for this update'),
     allowUntrustedSource: boolean('allow-untrusted-source', 'Allow a non-default release API source'),
     auto: optionalChoice('auto', ['on', 'off'], 'Persist automatic updates as on or off'),
     beta: boolean('beta', 'Follow the beta channel: install the newest stable or prerelease release'),

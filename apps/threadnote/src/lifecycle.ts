@@ -1,3 +1,4 @@
+import {queueAutomaticModelSetup} from './models/setup_lifecycle.js';
 import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
 import {Console, Effect, FileSystem, Path, Result, Schema} from 'effect';
@@ -444,6 +445,7 @@ export const runInstall = Effect.fn('lifecycle.install')(function* (config: Runt
   if (releaseRoot !== undefined) {
     yield* withStandaloneInstallationLock(pruneStandaloneReleases(releaseRoot, dryRun), dryRun);
   }
+  yield* queueAutomaticModelSetup(config.agentContextHome, {dryRun, modelSetup: options.modelSetup});
   return embedding;
 });
 
@@ -453,6 +455,7 @@ export const runRepair = Effect.fn('lifecycle.repair')(function* (config: Runtim
   const embedding = yield* runInstall(config, {
     dryRun,
     printNextSteps: false,
+    modelSetup: false,
     skipRecallIndexes: true,
     skipReleaseLifecycle: options.skipReleaseLifecycle,
     start: false,

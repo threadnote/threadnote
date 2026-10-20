@@ -51,10 +51,14 @@ vi.mock('@threadnote/workspace/runtime-version', async importOriginal => {
 
 // This suite isolates archive, signature, launcher and migration orchestration.
 // Real workflow service/child boundaries are covered by dev-skills/update-refresh.test.ts.
+const workflowRefreshState = vi.hoisted(() => ({pending: false}));
 vi.mock('../../src/release/dev_skills_update.js', () => ({
   prepareReleaseDevSkills: (_config: RuntimeConfig, releaseRoot: string, releaseVersion: string) =>
     Effect.succeed({intentId: 'fixture-intent', release: {releaseRoot, releaseVersion}}),
-  refreshReleaseDevSkills: () => Effect.void,
+  refreshReleaseDevSkills: () =>
+    workflowRefreshState.pending
+      ? Effect.fail(TestError.make({message: 'Workflow refresh fixture needs retry.'}))
+      : Effect.void,
 }));
 
 import {
@@ -88,6 +92,7 @@ let isolatedInstallationRoot: string | undefined;
 let previousInstallationRoot: string | undefined;
 
 beforeEach(async () => {
+  workflowRefreshState.pending = false;
   previousInstallationRoot = process.env.THREADNOTE_INSTALL_ROOT;
   isolatedInstallationRoot = await mkdtemp(join(tmpdir(), 'threadnote-update-installation-'));
   process.env.THREADNOTE_INSTALL_ROOT = isolatedInstallationRoot;
@@ -986,7 +991,7 @@ describe('standalone updater', () => {
     }),
   );
 
-  effectIt.effect('repairs a managed launcher when the active installation is already current', () =>
+  effectIt.effect('repairs a current launcher and queues Gemma even when workflow refresh needs retry', () =>
     Effect.gen(function* () {
       const latestVersion = '4.0.0-beta.30';
       vi.mocked(utils.currentPackageVersion).mockReturnValue(Effect.succeed(latestVersion));
@@ -999,6 +1004,27 @@ describe('standalone updater', () => {
           const installRoot = path.join(temporaryRoot, 'install');
           const binRoot = path.join(temporaryRoot, 'bin');
           const releaseRoot = path.join(installRoot, 'versions', latestVersion);
+          const home = path.join(temporaryRoot, 'home');
+          yield* fs.makeDirectory(home);
+          const setupRequests: {executable: string; args: readonly string[]; home?: string; lockHeld: boolean}[] = [];
+          const baseCommands = yield* CommandExecutor;
+          const commands = {
+            ...baseCommands,
+            spawnDetached: (
+              executable: string,
+              args: readonly string[],
+              options?: Parameters<NonNullable<typeof baseCommands.spawnDetached>>[2],
+            ) =>
+              Effect.gen(function* () {
+                setupRequests.push({
+                  executable,
+                  args,
+                  home: options?.env?.THREADNOTE_HOME,
+                  lockHeld: yield* fs.exists(path.join(installRoot, '.installation.lock')).pipe(Effect.orDie),
+                });
+                return true;
+              }),
+          };
           yield* fs.makeDirectory(releaseRoot, {recursive: true});
           yield* fs.writeFileString(
             path.join(releaseRoot, 'release.json'),
@@ -1006,8 +1032,15 @@ describe('standalone updater', () => {
           );
           const testSystem = SystemInfo.of({
             ...baseSystem,
+            executablePath: '/fixture/threadnote',
             environment: () => ({
               ...baseSystem.environment(),
+              CI: undefined,
+              VITEST: undefined,
+              NODE_ENV: 'production',
+              THREADNOTE_TOOLSET: undefined,
+              THREADNOTE_MCP_TOOLSET: 'full',
+              THREADNOTE_MODEL_SETUP: undefined,
               THREADNOTE_BIN_DIR: binRoot,
               THREADNOTE_INSTALL_ROOT: installRoot,
             }),
@@ -1028,15 +1061,46 @@ describe('standalone updater', () => {
             getText: () => Effect.die('not used'),
           });
           const captured = yield* captureConsole(
-            runUpdate(runtimeConfig(path.join(temporaryRoot, 'home')), {beta: true}).pipe(
+            runUpdate(runtimeConfig(home), {beta: true}).pipe(
+              Effect.provideService(CommandExecutor, commands),
               Effect.provideService(HttpService, http),
               Effect.provideService(SystemInfo, testSystem),
             ),
           );
-          return {captured, launcher: yield* fs.readFileString(launcher)};
+          workflowRefreshState.pending = true;
+          const pending = yield* runUpdate(runtimeConfig(home), {beta: true}).pipe(
+            Effect.provideService(CommandExecutor, commands),
+            Effect.provideService(HttpService, http),
+            Effect.provideService(SystemInfo, testSystem),
+            Effect.result,
+          );
+          return {
+            captured,
+            pending,
+            launcher: yield* fs.readFileString(launcher),
+            setupRequests,
+            expectedSetupExecutable: path.join(
+              releaseRoot,
+              baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote',
+            ),
+            canonicalHome: yield* fs.realPath(home),
+          };
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
+      expect(result.pending).toMatchObject({
+        _tag: 'Failure',
+        failure: {message: 'Workflow refresh fixture needs retry.'},
+      });
+      expect(result.setupRequests).toHaveLength(2);
+      for (const request of result.setupRequests) {
+        expect(request).toMatchObject({
+          executable: result.expectedSetupExecutable,
+          home: result.canonicalHome,
+          lockHeld: false,
+        });
+        expect(request.args.slice(0, 3)).toEqual(['model-setup-request', '--home', result.canonicalHome]);
+      }
       expect(result.captured.output).toContain('Threadnote is up to date.');
       expect(result.captured.output).toContain('Wrote command launcher:');
       expect(result.launcher).toContain(latestVersion);
@@ -1067,6 +1131,8 @@ describe('standalone updater', () => {
           const release = releaseResponse(RELEASE_VERSION, false, artifactName);
           const http = updateHttpService(fs, archivePath, checksum, artifactName, [release]);
           const signatureCommands: string[] = [];
+          const setupRequests: {executable: string; args: readonly string[]; home?: string; lockHeld: boolean}[] = [];
+          yield* fs.makeDirectory(config.agentContextHome, {recursive: true});
           const commandExecutor = CommandExecutor.of({
             execute: (executable, args) =>
               Effect.sync(() => {
@@ -1078,11 +1144,28 @@ describe('standalone updater', () => {
                 };
               }),
             executeStreaming: () => Effect.die('not used'),
+            spawnDetached: (executable, args, options) =>
+              Effect.gen(function* () {
+                setupRequests.push({
+                  executable,
+                  args,
+                  home: options?.env?.THREADNOTE_HOME,
+                  lockHeld: yield* fs.exists(path.join(installRoot, '.installation.lock')).pipe(Effect.orDie),
+                });
+                return true;
+              }),
           });
           const testSystem = SystemInfo.of({
             ...baseSystem,
+            executablePath: '/fixture/threadnote',
             environment: () => ({
               ...baseSystem.environment(),
+              CI: undefined,
+              VITEST: undefined,
+              NODE_ENV: 'production',
+              THREADNOTE_TOOLSET: undefined,
+              THREADNOTE_MCP_TOOLSET: 'full',
+              THREADNOTE_MODEL_SETUP: undefined,
               GH_TOKEN: 'fixture-token',
               LOCALAPPDATA: path.join(temporaryRoot, 'local-app-data'),
               THREADNOTE_BIN_DIR: binRoot,
@@ -1122,10 +1205,20 @@ describe('standalone updater', () => {
             platform: baseSystem.platform,
             releaseMetadata: yield* fs.readFileString(path.join(releaseRoot, 'release.json')),
             signatureCommands,
+            setupRequests,
+            canonicalHome: yield* fs.realPath(config.agentContextHome),
+            expectedSetupExecutable: path.join(releaseRoot, executableName),
           };
         }),
       ).pipe(provideTestLayer(ApplicationLayer));
 
+      expect(result.setupRequests).toHaveLength(1);
+      expect(result.setupRequests[0]).toMatchObject({
+        executable: result.expectedSetupExecutable,
+        home: result.canonicalHome,
+        lockHeld: false,
+      });
+      expect(result.setupRequests[0].args.slice(0, 3)).toEqual(['model-setup-request', '--home', result.canonicalHome]);
       expect(result.executableExists).toBe(true);
       expect(result.grammarAssetsExist).toBe(true);
       expect(result.corruptContentsExist).toBe(false);
