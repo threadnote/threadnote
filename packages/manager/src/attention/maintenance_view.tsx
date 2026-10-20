@@ -3,6 +3,7 @@ import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
 import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceStatusV2} from './contracts.js';
+import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 import {
   groupMaintenanceCauses,
   healthDecisionGroups,
@@ -14,6 +15,8 @@ import {
   maintenanceStatusLabel,
   maintenanceUndoConflictMessage,
   mergeMaintenanceStatusPage,
+  reconcileAppliedMaintenanceCases,
+  reconcileAppliedHealthReport,
 } from './maintenance.js';
 import {HealthDetail} from '../attention_details.js';
 import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
@@ -27,6 +30,7 @@ interface Props {
   readonly onProjectChange: (project: string) => void;
   readonly onOpenLibrary: (uri?: string) => void;
   readonly onChanged: () => void;
+  readonly onDecisionCountChange?: (project: string, count: number | undefined) => void;
   readonly nextCursor?: string;
   readonly loadingMore: boolean;
   readonly onLoadMore: () => void;
@@ -49,6 +53,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [task, setTask] = useState('');
   const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [appliedCases, setAppliedCases] = useState<readonly ManagerTopicReviewAppliedV1[]>([]);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
   if (activeProject.current !== props.project) {
@@ -61,7 +66,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const onChanged = useRef(props.onChanged);
   onChanged.current = props.onChanged;
   const lastReportRevision = useRef<string | undefined>(undefined);
-  const status = snapshot?.project === props.project ? snapshot.status : undefined;
+  const status =
+    snapshot?.project === props.project ? reconcileAppliedMaintenanceCases(snapshot.status, appliedCases) : undefined;
+  const report = reconcileAppliedHealthReport(props.report, appliedCases, status);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -125,7 +132,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         if (!result.paused && result.state !== 'failed')
           timer = window.setTimeout(() => void poll(), result.state === 'running' ? 1_000 : 30_000);
       } catch (cause) {
-        if (!cancelled && mutationEpoch.current === epoch) setError(errorMessage(cause));
+        if (!cancelled && mutationEpoch.current === epoch) {
+          setError(errorMessage(cause));
+          timer = window.setTimeout(() => void poll(), 30_000);
+        }
       }
     };
     void poll();
@@ -221,9 +231,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     }
   }
 
-  const summary = props.report.maintenance;
+  const summary = report.maintenance;
   const cases = (status?.cases ?? []).filter(item => item.project === props.project);
-  const groups = healthDecisionGroups(props.report, cases);
+  const groups = healthDecisionGroups(report, cases);
   const moreDecisionCases =
     status?.page?.caseNextCursor !== undefined &&
     (status.counts?.['needs-decision'] ?? Infinity) >
@@ -238,8 +248,14 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         .map(item => item.memoryId) ?? [],
     ).size,
   );
+  const onDecisionCountChange = props.onDecisionCountChange;
+  const completeDecisionCount = status?.counts?.decisionMemories === undefined ? undefined : decisionCount;
+  useEffect(() => {
+    onDecisionCountChange?.(props.project, completeDecisionCount);
+  }, [onDecisionCountChange, props.project, completeDecisionCount]);
+  useEffect(() => () => onDecisionCountChange?.(props.project, undefined), [onDecisionCountChange, props.project]);
   const citation = summary?.citationCoverage;
-  const semantic = summary?.semanticCoverage ?? props.report.semanticCompleteness;
+  const semantic = summary?.semanticCoverage ?? report.semanticCompleteness;
   const semanticProgress = status?.semanticCoverage?.find(item => item.project === props.project);
   const semanticState = semanticProgress?.state ?? semantic.state;
   const semanticScanComplete =
@@ -252,7 +268,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         : 'partial';
   const projectProgress = status?.projects.find(item => item.project === props.project);
   const emptyProject =
-    projectProgress === undefined && status?.preparation?.complete === true && props.report.recordsScanned === 0;
+    projectProgress === undefined && status?.preparation?.complete === true && report.recordsScanned === 0;
   const scanComplete =
     semanticScanComplete &&
     (emptyProject ||
@@ -603,7 +619,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             semantic correctness. Comparisons with missing context require review.
           </p>
         )}
-        {props.report.repositoryEvidence.state === 'unavailable' ? (
+        {report.repositoryEvidence.state === 'unavailable' ? (
           <p>
             Current repository evidence is unavailable. Memory and relation checks remain useful; local evidence
             recovery continues when a verified source becomes available.
@@ -615,7 +631,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             <p>Inventory check: {status.preparation.incompleteReason.replaceAll('-', ' ')}. Progress is preserved.</p>
           ) : null}
           <p>
-            {props.report.recordsScanned.toLocaleString()} records scanned.{' '}
+            {report.recordsScanned.toLocaleString()} records scanned.{' '}
             {projectProgress
               ? `${projectProgress.checked} of ${projectProgress.eligible} maintenance tasks checked.`
               : 'No completed maintenance checkpoint yet.'}
@@ -920,6 +936,22 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           title={inspectedCase.title}
           onClose={() => setInspectedCase(undefined)}
           onChanged={refreshAfterDecision}
+          onApplied={result => {
+            if (result.project !== activeProject.current) return;
+            mutationEpoch.current += 1;
+            setAppliedCases(previous => [
+              ...previous.filter(
+                item =>
+                  item.project !== result.project ||
+                  item.caseId !== result.caseId ||
+                  item.evidenceRevision !== result.evidenceRevision,
+              ),
+              result,
+            ]);
+            setNotice(
+              'Topic update saved and verified. The resolved source change has been removed from your decisions.',
+            );
+          }}
           onOpenLibrary={uri => {
             setInspectedCase(undefined);
             props.onOpenLibrary(uri);
@@ -936,8 +968,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           key={`${props.project}:${selected.caseId ?? selected.id}`}
           project={props.project}
           finding={selected}
-          memoryPreview={props.report.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
-          repairsAvailable={props.report.repositoryEvidence.state === 'available'}
+          memoryPreview={report.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
+          repairsAvailable={report.repositoryEvidence.state === 'available'}
           onClose={() => setSelected(undefined)}
           onChanged={refreshAfterDecision}
           onRefresh={refreshEvidence}

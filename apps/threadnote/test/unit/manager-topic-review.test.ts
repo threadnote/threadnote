@@ -12,6 +12,9 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {TopicReviewError} from '../../src/memory/context/maintenance_review.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -907,6 +910,136 @@ describe('Manager topic review adapter', () => {
 });
 
 describe('topic projection invariant', () => {
+  effectIt.effect(
+    'projects only old accepted slots whose reviewed current citation is active after the written approval',
+    () =>
+      Effect.sync(() => {
+        const receiptUri = 'threadnote://user/tester/memories/durable/projects/alpha/topic.md';
+        const citation = (value: string) =>
+          createMemoryCodeCitation({
+            version: 1,
+            evidenceRetention: 'capsule-retained',
+            repositoryId: '1'.repeat(64),
+            repositoryIdentityKind: 'local',
+            sourceCommit: '2'.repeat(40),
+            sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+            sourceDirty: false,
+            extractorSet: 'test',
+            path: 'source.ts',
+            fileContentHash: {algorithm: 'sha256', value: value.repeat(64)},
+            target: {kind: 'file'},
+          });
+        const origin = citation('4');
+        const previous = citation('5');
+        const current = citation('6');
+        const base = parseMemoryDocument(
+          receiptUri,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              project: 'alpha',
+              memoryId: 'tn_projection',
+              schemaVersion: 9,
+              sourceAgentClient: 'test',
+              timestamp: '2026-10-01T00:00:00.000Z',
+              codeCitations: [origin],
+            },
+            'Accepted body',
+          ),
+        )!;
+        const enrolled = parseMemoryDocument(
+          receiptUri,
+          proposeTopicMaintenanceEnrollment(base, {
+            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [origin.id]}],
+          }).content,
+        )!;
+        const manifest = enrolled.metadata.topicMaintenance;
+        if (manifest?.version !== 1) throw new Error('Expected a code enrollment fixture.');
+        const content = (acceptedCitationId: string) =>
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              ...enrolled.metadata,
+              codeCitations: [origin, previous, current],
+              topicMaintenance: {
+                ...manifest,
+                version: 2,
+                originCitationIds: [origin.id],
+                acceptedSources: [{citationId: origin.id, acceptedCitationId}],
+              },
+            },
+            enrolled.body,
+          );
+        const beforeContent = content(previous.id);
+        const afterContent = content(current.id);
+        const contentHash = (value: string) => sha256HexSync(canonicalMemoryDocumentContent(value));
+        const fixture = {
+          ...review,
+          candidates: [{...review.candidates[0], state: 'applied'}],
+          maintenance: {
+            ...review.maintenance!,
+            basis: {
+              ...review.maintenance!.basis,
+              targetUri: receiptUri,
+              targetHash: contentHash(beforeContent),
+              handles: [{id: `current:${origin.id}`, citationId: origin.id, variant: 'current'}],
+            },
+            reviewEvidence: [
+              {
+                handleId: `current:${origin.id}`,
+                citation: current,
+                source: {path: current.path},
+                provenance: 'current-verified',
+                supportsCitation: true,
+                truncated: false,
+              },
+            ],
+          },
+          maintenanceApproval: {
+            ...review.maintenanceApproval!,
+            stage: 'written',
+            preview: {
+              ...review.maintenanceApproval!.preview,
+              targetUri: receiptUri,
+              beforeContent,
+              beforeContentHash: contentHash(beforeContent),
+              content: afterContent,
+              contentHash: contentHash(afterContent),
+            },
+          },
+        } as unknown as CandidateReview;
+        const value = projectManagerTopicReview(fixture)!;
+        expect(value.resolvedCitationIds).toEqual([previous.id]);
+        expect(JSON.stringify(value)).not.toContain(beforeContent);
+        const retainedOnly = {
+          ...fixture,
+          maintenanceApproval: {
+            ...fixture.maintenanceApproval!,
+            preview: {
+              ...fixture.maintenanceApproval!.preview,
+              content: beforeContent,
+              contentHash: contentHash(beforeContent),
+            },
+          },
+        } as CandidateReview;
+        expect(projectManagerTopicReview(retainedOnly)!.resolvedCitationIds).toEqual([]);
+        const malformed = {
+          ...fixture,
+          maintenanceApproval: {
+            ...fixture.maintenanceApproval!,
+            preview: {...fixture.maintenanceApproval!.preview, beforeContent: 'unavailable'},
+          },
+        } as CandidateReview;
+        expect(projectManagerTopicReview(malformed)!.resolvedCitationIds).toBeUndefined();
+        const unwritten = {
+          ...fixture,
+          candidates: [{...fixture.candidates[0], state: 'applying' as const}],
+        } as CandidateReview;
+        expect(projectManagerTopicReview(unwritten)!.resolvedCitationIds).toBeUndefined();
+      }),
+  );
   effectIt.effect('projects the persisted approved proposal while preserving the generated draft', () =>
     Effect.sync(() => {
       const approval = review.maintenanceApproval;

@@ -19,6 +19,7 @@ interface AttentionPanelProps {
   readonly project: string;
   readonly projects: readonly string[];
   readonly refreshGeneration: number;
+  readonly onDecisionCountChange?: (project: string, count: number | undefined) => void;
 }
 
 interface CitationRepairPreview {
@@ -75,9 +76,11 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
   const [inbox, setInbox] = useState<ManagerReviewInboxResponseV1>();
   const returnFocus = useRef<{reviewId: string; candidateId: string} | undefined>(undefined);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     setSelected(undefined);
+    setNotice('');
   }, [props.project, view]);
   useEffect(() => {
     if (selected || !returnFocus.current) return;
@@ -120,6 +123,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
 
   return (
     <section aria-busy={loading} className="panel attention-panel is-active">
+      {notice ? <p role="status">{notice}</p> : null}
       <div className="workspace-tabs" role="tablist" aria-label="Review sections">
         {(['pending', 'deferred', 'history'] as const).map(value => (
           <button
@@ -245,6 +249,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
             setSelected(undefined);
           }}
           onChanged={() => setGeneration(value => value + 1)}
+          onApplied={() => setNotice('Topic update saved and verified.')}
           onOpenLibrary={uri => props.onOpenLibrary(uri)}
         />
       ) : activeSelection ? (
@@ -498,6 +503,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         onProjectChange={props.onProjectChange}
         onOpenLibrary={props.onOpenLibrary}
         onChanged={() => setGeneration(value => value + 1)}
+        onDecisionCountChange={props.onDecisionCountChange}
         nextCursor={nextCursor}
         loadingMore={loadingMore}
         onLoadMore={loadMore}
