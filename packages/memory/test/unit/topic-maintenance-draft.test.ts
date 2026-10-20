@@ -93,6 +93,31 @@ describe('topic maintenance draft contract', () => {
     },
   });
 
+  it('rejects unchanged replacements with a precise diagnostic while preserving supported revalidation', () => {
+    fc.assert(
+      fc.property(fc.stringMatching(/^[a-z]{1,40}$/u), text => {
+        const basis = basisFor(text);
+        const original = accounted(basis);
+        const draft = {...original, operations: [{...original.operations[0], text}]};
+        const before = JSON.stringify({basis, draft});
+        expect(() => parse(basis, draft)).toThrow('paragraph 0 replacement repeats accepted text');
+        expect(JSON.stringify({basis, draft})).toBe(before);
+        expect(
+          parse(basis, {
+            ...draft,
+            outcome: 'propose-revalidation',
+            operations: [],
+            paragraphDispositions: {
+              version: 1,
+              entries: [{...draft.paragraphDispositions.entries[0], disposition: 'revalidate'}],
+            },
+          }).body,
+        ).toBe(text);
+      }),
+      {numRuns: 32},
+    );
+  });
+
   it('rejects a cap-only update silently omitting the eligibility paragraph', () => {
     const basis = basisFor('Draft cap is 32 KiB.\n\nOnly direct descriptive paragraphs are eligible.');
     const draft = accounted(basis);

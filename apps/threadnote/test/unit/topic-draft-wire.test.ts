@@ -26,6 +26,122 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown) {
 }
 
 describe('single-decision compact topic wire', () => {
+  it('separates actionable generation from open questions without changing canonical compatibility', () => {
+    fc.assert(
+      fc.property(fc.array(fc.stringMatching(/^[a-z]{1,24}$/u), {minLength: 1, maxLength: 8}), questions => {
+        const basis = basisFor(2);
+        const revalidation = wireFor(basis);
+        const update = wireFor(basis);
+        update.decision.outcome = 'propose-update';
+        Object.assign(update.decision.paragraphDispositions.entries[0], {
+          disposition: 'update',
+          text: 'Updated claim.',
+        });
+        for (const wire of [update, revalidation]) {
+          const saved = canonical(basis, wire).draft;
+          // Existing canonical reviews may contain advisory questions; only generation is restricted.
+          expect(
+            parseTopicMaintenanceDraft(basis, JSON.stringify({...saved, unresolvedQuestions: questions})).draft
+              .unresolvedQuestions,
+          ).toEqual(questions);
+          const questioned = {...wire, decision: {...wire.decision, unresolvedQuestions: questions}};
+          const before = JSON.stringify({basis, questioned});
+          expect(() => decodeTopicDraftModelOutput(basis, questioned)).toThrow();
+          expect(JSON.stringify({basis, questioned})).toBe(before);
+        }
+        const conflict = wireFor(basis, 'unresolved');
+        conflict.decision.outcome = 'policy-conflict';
+        expect(() => canonical(basis, conflict)).toThrow();
+        expect(
+          canonical(basis, {...conflict, decision: {...conflict.decision, unresolvedQuestions: questions}}).draft
+            .outcome,
+        ).toBe('policy-conflict');
+        const noEligible = basisFor(1, {protectedOrdinal: 0});
+        const checked = wireFor(noEligible);
+        expect(canonical(noEligible, checked).draft.reviewedHandles).not.toHaveLength(0);
+        expect(() =>
+          canonical(noEligible, {...checked, decision: {...checked.decision, unresolvedQuestions: questions}}),
+        ).toThrow();
+      }),
+      {numRuns: 24},
+    );
+  });
+
+  it('retains genuine updates when a repeated-text replacement is repaired to unchanged', () => {
+    const basis = basisFor(2);
+    const wire = wireFor(basis);
+    wire.decision.outcome = 'propose-update';
+    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: 'Updated claim.'});
+    const repeated = wire.decision.paragraphDispositions.entries[1];
+    Object.assign(repeated, {disposition: 'update', text: 'Claim 1.'});
+    const invalid = JSON.stringify(decodeTopicDraftModelOutput(basis, wire));
+    let error = '';
+    try {
+      canonical(basis, wire);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : '';
+    }
+    expect(error).toContain('paragraph 1 replacement repeats accepted text');
+    const prompt = topicMaintenanceDraftPrompt(
+      {coverage: 'declared-only', targetUri: basis.targetUri, additionalDependencies: [], sources: []} as never,
+      basis,
+      error,
+      invalid,
+    );
+    expect(prompt).toContain(
+      'use unchanged with current sourceIndices and no text only if the claim is still supported',
+    );
+    repeated.disposition = 'unchanged';
+    delete repeated.text;
+    const repaired = canonical(basis, wire);
+    expect(repaired.body).toBe('Updated claim.\n\nClaim 1.');
+    expect(repaired.changedOrdinals).toEqual([0]);
+    expect(repaired.draft.paragraphDispositions?.entries[1].disposition).toBe('revalidate');
+  });
+
+  it('does not infer current truth when a stale claim repeats the accepted text', () => {
+    const basis = basisFor(1, {sourceCount: 1, firstParagraph: 'The limit is 32.'});
+    const wire = wireFor(basis);
+    wire.decision.outcome = 'propose-update';
+    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: basis.body});
+    let error = '';
+    try {
+      canonical(basis, wire);
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : '';
+    }
+    expect(error).toContain('paragraph 0 replacement repeats accepted text');
+    for (const currentValue of [32, 48]) {
+      const prompt = topicMaintenanceDraftPrompt(
+        {
+          coverage: 'declared-only',
+          targetUri: basis.targetUri,
+          additionalDependencies: [],
+          sources: [
+            {
+              citationId: basis.paragraphs[0].citationIds[0],
+              oldExcerpt: {source: {path: 'src/limit.ts'}, content: 'export const limit = 32;'},
+              newExcerpt: {source: {path: 'src/limit.ts'}, content: `export const limit = ${currentValue};`},
+            },
+          ],
+        } as never,
+        basis,
+        error,
+        JSON.stringify(decodeTopicDraftModelOutput(basis, wire)),
+      );
+      const packet = JSON.parse(
+        prompt
+          .split('\n')
+          .find(line => line.startsWith('Packet: '))!
+          .slice(8),
+      );
+      expect(packet.sources[0].current.excerpt).toBe(`export const limit = ${currentValue};`);
+      expect(prompt).toContain('if stale, supply a corrected supported replacement; otherwise mark it unresolved');
+      expect(prompt).toContain('Text identity alone does not establish current truth.');
+      expect(prompt).not.toContain('The reported paragraph is unchanged.');
+    }
+  });
+
   it('hydrates 64 explicit decisions in wire order without changing basis or wire', () => {
     fc.assert(
       fc.property(
@@ -317,7 +433,7 @@ describe('single-decision compact topic wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v13');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v14');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>

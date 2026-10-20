@@ -67,10 +67,23 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       removedClaims: Schema.Array(Schema.String),
     };
   };
-  const revalidation = {rationale, outcome: Schema.Literal('propose-revalidation'), ...common(false)};
+  const noQuestions = Schema.Array(Schema.String).check(Schema.isMaxLength(0));
+  const revalidation = {
+    rationale,
+    outcome: Schema.Literal('propose-revalidation'),
+    ...common(false),
+    unresolvedQuestions: noQuestions,
+  };
   const decision = Schema.Union([
     ...(descriptive.length
-      ? [Schema.Struct({rationale, outcome: Schema.Literal('propose-update'), ...common(true)})]
+      ? [
+          Schema.Struct({
+            rationale,
+            outcome: Schema.Literal('propose-update'),
+            ...common(true),
+            unresolvedQuestions: noQuestions,
+          }),
+        ]
       : []),
     descriptive.length
       ? Schema.Struct(revalidation)
@@ -81,7 +94,12 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
             Schema.isMaxLength(currentHandles.length),
           ),
         }),
-    Schema.Struct({rationale, outcome: Schema.Literal('policy-conflict'), ...common(false)}),
+    Schema.Struct({
+      rationale,
+      outcome: Schema.Literal('policy-conflict'),
+      ...common(false),
+      unresolvedQuestions: Schema.Array(rationale).check(Schema.isMinLength(1)),
+    }),
     Schema.Struct({rationale, outcome: Schema.Literal('insufficient-evidence'), ...common(false)}),
   ]);
   return Schema.Struct({
