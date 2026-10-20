@@ -24,6 +24,7 @@ import {
   TopicDraftProviderOutputError,
 } from '../../src/effect/ai/consolidator.js';
 import {topicDraftModelSchema} from '../../src/manager/topic_draft_schema.js';
+import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
 import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
@@ -84,7 +85,7 @@ function observationIdentity(basis: TopicMaintenanceDraftBasisV1) {
     packetDigest: basis.packetDigest,
     agent: 'effect-ai' as const,
     model: 'fixture',
-    promptVersion: 'topic-maintenance-draft-v6',
+    promptVersion: TOPIC_DRAFT_PROMPT_VERSION,
   };
 }
 

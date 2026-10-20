@@ -2,6 +2,9 @@ import {Schema} from 'effect';
 import {
   topicMaintenanceParagraphEligible,
   type TopicMaintenanceDraftBasis,
+  type TopicMaintenanceDraftV1,
+  type TopicMaintenanceParagraphDispositionV1,
+  type TopicMaintenanceReplaceOperationV1,
 } from '@threadnote/memory/topic-maintenance-draft';
 
 export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasis['paragraphs'][number]) {
@@ -24,86 +27,65 @@ export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasis
 export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
   const currentHandles = topicDraftCurrentSourceHandles(basis);
-  const currentHandle = currentHandles.length ? Schema.Literals(currentHandles) : Schema.String;
-  const operationVariants = descriptive.map(paragraph =>
-    Schema.Struct({
-      ordinal: Schema.Literal(paragraph.ordinal),
-      beforeHash: Schema.Literal(paragraph.hash),
-      text: Schema.String.check(Schema.isMinLength(1)),
-      supportHandles: Schema.Array(currentHandle).check(Schema.isMinLength(1)),
-      rationale: Schema.String.check(Schema.isMinLength(1)),
-    }),
-  );
-  const operation = Schema.Union(operationVariants.length ? operationVariants : [Schema.String]);
-  const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
-  const dispositionVariants = descriptive.flatMap(paragraph => {
-    const allowed = new Set([...paragraph.citationIds, ...dependencies].map(id => `current:${id}`));
-    const indices = currentHandles.flatMap((handle, index) => (allowed.has(handle) ? [index] : []));
-    const sourceIndex = indices.length ? Schema.Literals(indices) : Schema.Int;
-    const dispositions = indices.length ? (['update', 'revalidate', 'unresolved'] as const) : (['unresolved'] as const);
-    return dispositions.map(disposition =>
-      Schema.Struct({
-        ordinal: Schema.Literal(paragraph.ordinal),
-        disposition: Schema.Literal(disposition),
-        sourceIndices: Schema.Array(sourceIndex).check(
-          Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
-          Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
-        ),
-        rationale: Schema.String.check(Schema.isMinLength(1)),
-      }),
-    );
-  });
-  const disposition = Schema.Union(dispositionVariants.length ? dispositionVariants : [Schema.String]);
+  if (!currentHandles.length) throw new Error('Topic generation requires current evidence.');
   const rationale = Schema.String.check(Schema.isMinLength(1));
-  const common = {
-    paragraphDispositions: Schema.Struct({
-      version: Schema.Literal(1),
-      entries: Schema.Array(disposition).check(
-        Schema.isMinLength(descriptive.length),
-        Schema.isMaxLength(descriptive.length),
-      ),
-    }),
-    unresolvedQuestions: Schema.Array(Schema.String),
-    removedClaims: Schema.Array(Schema.String),
+  const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
+  const common = (allowUpdate: boolean) => {
+    const variants = descriptive.flatMap(paragraph => {
+      const allowed = new Set([...paragraph.citationIds, ...dependencies].map(id => `current:${id}`));
+      const indices = currentHandles.flatMap((handle, index) => (allowed.has(handle) ? [index] : []));
+      const sourceIndex = indices.length ? Schema.Literals(indices) : Schema.Int;
+      const dispositions = indices.length
+        ? allowUpdate
+          ? (['update', 'unchanged', 'unresolved'] as const)
+          : (['unchanged', 'unresolved'] as const)
+        : (['unresolved'] as const);
+      return dispositions.map(disposition => {
+        const fields = {
+          ordinal: Schema.Literal(paragraph.ordinal),
+          disposition: Schema.Literal(disposition),
+          sourceIndices: Schema.Array(sourceIndex).check(
+            Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
+            Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
+          ),
+          rationale,
+        };
+        return disposition === 'update'
+          ? Schema.Struct({...fields, disposition: Schema.Literal('update'), text: rationale})
+          : Schema.Struct({...fields, disposition: Schema.Literal(disposition)});
+      });
+    });
+    return {
+      paragraphDispositions: Schema.Struct({
+        version: Schema.Literal(1),
+        entries: Schema.Array(Schema.Union(variants.length ? variants : [Schema.String])).check(
+          Schema.isMinLength(descriptive.length),
+          Schema.isMaxLength(descriptive.length),
+        ),
+      }),
+      unresolvedQuestions: Schema.Array(Schema.String),
+      removedClaims: Schema.Array(Schema.String),
+    };
   };
-  const noOperations = Schema.Array(operation).check(Schema.isMaxLength(0));
-  const noReviewedHandles = Schema.Array(currentHandle).check(Schema.isMaxLength(0));
+  const revalidation = {rationale, outcome: Schema.Literal('propose-revalidation'), ...common(false)};
   const decision = Schema.Union([
     ...(descriptive.length
-      ? [
-          Schema.Struct({
-            rationale,
-            outcome: Schema.Literal('propose-update'),
-            ...common,
-            operations: Schema.Array(operation).check(Schema.isMinLength(1)),
-            reviewedHandles: noReviewedHandles,
-          }),
-        ]
+      ? [Schema.Struct({rationale, outcome: Schema.Literal('propose-update'), ...common(true)})]
       : []),
-    Schema.Struct({
-      rationale,
-      outcome: Schema.Literal('propose-revalidation'),
-      ...common,
-      operations: noOperations,
-      reviewedHandles: Schema.Array(currentHandle).check(Schema.isMinLength(1)),
-    }),
-    Schema.Struct({
-      rationale,
-      outcome: Schema.Literal('policy-conflict'),
-      ...common,
-      operations: noOperations,
-      reviewedHandles: noReviewedHandles,
-    }),
-    Schema.Struct({
-      rationale,
-      outcome: Schema.Literal('insufficient-evidence'),
-      ...common,
-      operations: noOperations,
-      reviewedHandles: noReviewedHandles,
-    }),
+    descriptive.length
+      ? Schema.Struct(revalidation)
+      : Schema.Struct({
+          ...revalidation,
+          reviewedSourceIndices: Schema.Array(Schema.Literals(currentHandles.map((_, index) => index))).check(
+            Schema.isMinLength(1),
+            Schema.isMaxLength(currentHandles.length),
+          ),
+        }),
+    Schema.Struct({rationale, outcome: Schema.Literal('policy-conflict'), ...common(false)}),
+    Schema.Struct({rationale, outcome: Schema.Literal('insufficient-evidence'), ...common(false)}),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(1),
+    version: Schema.Literal(2),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
@@ -111,32 +93,49 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   });
 }
 
-export function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasis, input: unknown) {
+export function decodeTopicDraftModelOutput(
+  basis: TopicMaintenanceDraftBasis,
+  input: unknown,
+): TopicMaintenanceDraftV1 {
   const {decision, ...identity} = Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(
     input,
   );
   const current = topicDraftCurrentSourceHandles(basis);
+  const currentHandle = (index: number) => {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
+      throw new Error('Invalid topic disposition source index.');
+    return current[index];
+  };
+  const entries: TopicMaintenanceParagraphDispositionV1[] = [];
+  const operations: TopicMaintenanceReplaceOperationV1[] = [];
+  for (const entry of decision.paragraphDispositions.entries) {
+    if (typeof entry === 'string' || !basis.paragraphs[entry.ordinal])
+      throw new Error('Invalid topic disposition ordinal.');
+    const fields = {
+      ordinal: entry.ordinal,
+      beforeHash: basis.paragraphs[entry.ordinal].hash,
+      supportHandles: entry.sourceIndices.map(currentHandle),
+      rationale: entry.rationale,
+    };
+    entries.push({...fields, disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition});
+    if (entry.disposition === 'update') operations.push({...fields, text: entry.text});
+  }
+  const reviewed =
+    decision.outcome === 'propose-revalidation'
+      ? 'reviewedSourceIndices' in decision
+        ? decision.reviewedSourceIndices.map(currentHandle)
+        : entries.filter(entry => entry.disposition === 'revalidate').flatMap(entry => entry.supportHandles)
+      : [];
   return {
     ...identity,
-    ...decision,
-    paragraphDispositions: {
-      version: 1 as const,
-      entries: decision.paragraphDispositions.entries.map(entry => {
-        if (typeof entry === 'string' || !basis.paragraphs[entry.ordinal])
-          throw new Error('Invalid topic disposition ordinal.');
-        return {
-          ordinal: entry.ordinal,
-          beforeHash: basis.paragraphs[entry.ordinal].hash,
-          disposition: entry.disposition,
-          supportHandles: entry.sourceIndices.map(index => {
-            if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
-              throw new Error('Invalid topic disposition source index.');
-            return current[index];
-          }),
-          rationale: entry.rationale,
-        };
-      }),
-    },
+    version: 1,
+    outcome: decision.outcome,
+    rationale: decision.rationale,
+    unresolvedQuestions: decision.unresolvedQuestions,
+    removedClaims: decision.removedClaims,
+    operations,
+    reviewedHandles: [...new Set(reviewed)],
+    paragraphDispositions: {version: 1, entries},
   };
 }
 

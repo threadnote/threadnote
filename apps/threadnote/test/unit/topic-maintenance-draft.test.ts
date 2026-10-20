@@ -86,7 +86,6 @@ describe('topic maintenance private draft generation', () => {
             additionalDependencies: [],
             handles: ids.map(id => ({id: `current:${id}`, citationId: id, variant: 'current' as const})),
           };
-          const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
           const expected = paragraphs.filter(
             paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct',
           );
@@ -94,18 +93,24 @@ describe('topic maintenance private draft generation', () => {
           expect(topicDraftGenerationScopeSupported(basis, true)).toBe(
             expected.length > 0 || combinations.every(paragraph => paragraph.role !== 'descriptive'),
           );
+          if (!ids.length) {
+            expect(() => topicDraftModelSchema(basis)).toThrow('Topic generation requires current evidence.');
+            expect(JSON.stringify(paragraphs)).toBe(before);
+            return;
+          }
+          const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
           expect(branches.some(branch => branch.properties.outcome.enum[0] === 'propose-update')).toBe(
             expected.length > 0,
           );
           if (expected.length)
             expect(
-              branches[0].properties.operations.items.oneOf.map(
-                (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => [
-                  variant.properties.ordinal.enum[0],
-                  variant.properties.beforeHash.enum[0],
-                ],
-              ),
-            ).toEqual(expected.map(paragraph => [paragraph.ordinal, paragraph.hash]));
+              branches[0].properties.paragraphDispositions.properties.entries.items.oneOf
+                .filter(
+                  (variant: {properties: {disposition: {enum: string[]}}}) =>
+                    variant.properties.disposition.enum[0] === 'update',
+                )
+                .map((variant: {properties: {ordinal: {enum: number[]}}}) => variant.properties.ordinal.enum[0]),
+            ).toEqual(expected.map(paragraph => paragraph.ordinal));
           expect(JSON.stringify(paragraphs)).toBe(before);
         },
       ),
@@ -149,7 +154,7 @@ describe('topic maintenance private draft generation', () => {
     ]);
   });
 
-  it('keeps every native outcome exclusive with operation cardinality across bounded evidence sets', () => {
+  it('keeps every native outcome exclusive with update decisions only in update outcomes', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 8}), count => {
         const ids = Array.from({length: count}, (_, index) => `tncc_${index.toString(16).padStart(40, '0')}`);
@@ -182,30 +187,30 @@ describe('topic maintenance private draft generation', () => {
           'policy-conflict',
           'insufficient-evidence',
         ]);
-        expect(branches.map(branch => branch.properties.operations.minItems ?? 0)).toEqual([1, 0, 0, 0]);
-        expect(branches.slice(1).map(branch => branch.properties.operations.maxItems)).toEqual([0, 0, 0]);
-        expect(branches[1].properties.reviewedHandles.minItems).toBe(1);
         for (const branch of branches) {
+          expect(branch.properties).not.toHaveProperty('operations');
+          expect(branch.properties).not.toHaveProperty('reviewedHandles');
           expect(branch.properties.paragraphDispositions.properties.entries).toMatchObject({
             minItems: count,
             maxItems: count,
           });
           expect(branch.required).toContain('paragraphDispositions');
+          const variants = branch.properties.paragraphDispositions.properties.entries.items.oneOf;
+          const updates = variants.filter(
+            (variant: {properties: {disposition: {enum: string[]}}}) =>
+              variant.properties.disposition.enum[0] === 'update',
+          );
+          expect(
+            updates.map((variant: {properties: {ordinal: {enum: number[]}}}) => variant.properties.ordinal.enum[0]),
+          ).toEqual(branch.properties.outcome.enum[0] === 'propose-update' ? basis.paragraphs.map(p => p.ordinal) : []);
+          for (const variant of variants) {
+            const update = variant.properties.disposition.enum[0] === 'update';
+            expect(variant.required.includes('text')).toBe(update);
+            expect(Object.hasOwn(variant.properties, 'text')).toBe(update);
+            expect(variant.properties).not.toHaveProperty('beforeHash');
+            expect(variant.properties).not.toHaveProperty('supportHandles');
+          }
         }
-        expect(branches.slice(2).map(branch => branch.properties.reviewedHandles.maxItems)).toEqual([0, 0]);
-        expect(
-          branches[0].properties.operations.items.oneOf.map(
-            (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => ({
-              ordinal: variant.properties.ordinal.enum[0],
-              beforeHash: variant.properties.beforeHash.enum[0],
-            }),
-          ),
-        ).toEqual(
-          basis.paragraphs.map(paragraph => ({
-            ordinal: paragraph.ordinal,
-            beforeHash: paragraph.hash,
-          })),
-        );
         expect(JSON.stringify(schema)).not.toContain('"anyOf"');
       }),
       {numRuns: 16},
@@ -439,7 +444,7 @@ describe('topic maintenance private draft generation', () => {
             const paragraph = evidence.paragraphs[0];
             expect(paragraph.text).toBe('Request timeout is 30 seconds.');
             expect(evidence.paragraphs[1].text).toBe('This topic describes runtime configuration.');
-            expect(prompt).toContain('including still-stale accepted claims from earlier events');
+            expect(prompt).toContain('including claims still stale from earlier events');
             return JSON.stringify({
               ...draft,
               outcome: 'propose-update',

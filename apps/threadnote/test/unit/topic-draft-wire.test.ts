@@ -25,7 +25,7 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown) {
   });
 }
 
-describe('v6 compact paragraph disposition wire', () => {
+describe('single-decision compact topic wire', () => {
   it('hydrates 64 explicit decisions in wire order without changing basis or wire', () => {
     fc.assert(
       fc.property(
@@ -53,7 +53,7 @@ describe('v6 compact paragraph disposition wire', () => {
             wire.decision.paragraphDispositions.entries.map(entry => ({
               ordinal: entry.ordinal,
               beforeHash: basis.paragraphs[entry.ordinal].hash,
-              disposition: entry.disposition,
+              disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition,
               supportHandles: indices.map(index => current[current.length - 1 - index].id),
               rationale: entry.rationale,
             })),
@@ -65,7 +65,7 @@ describe('v6 compact paragraph disposition wire', () => {
     );
     for (const count of [1, 8, 16, 32, 64])
       for (const sourceCount of [1, 8])
-        for (const disposition of ['revalidate', 'unresolved'] as const) {
+        for (const disposition of ['unchanged', 'unresolved'] as const) {
           const basis = basisFor(count, {sourceCount});
           const wire = wireFor(basis, disposition);
           expect(canonical(basis, wire).draft.paragraphDispositions?.entries).toHaveLength(count);
@@ -78,14 +78,20 @@ describe('v6 compact paragraph disposition wire', () => {
     const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
     const variant =
       schema.properties.decision.oneOf[0].properties.paragraphDispositions.properties.entries.items.oneOf[0];
-    expect(variant.required).toEqual(['ordinal', 'disposition', 'sourceIndices', 'rationale']);
+    expect(variant.required).toEqual(['ordinal', 'disposition', 'sourceIndices', 'rationale', 'text']);
     expect(variant.additionalProperties).toBe(false);
     expect(variant.properties).not.toHaveProperty('beforeHash');
     expect(variant.properties).not.toHaveProperty('supportHandles');
     const wire = wireFor(basis);
     wire.decision.outcome = 'propose-update';
-    wire.decision.reviewedHandles = [];
-    wire.decision.operations = [
+    wire.decision.paragraphDispositions.entries[0] = {
+      ordinal: 0,
+      disposition: 'update',
+      text: 'Updated claim.',
+      sourceIndices: [1],
+      rationale: 'Changed.',
+    };
+    expect(canonical(basis, wire).draft.operations).toEqual([
       {
         ordinal: 0,
         beforeHash: basis.paragraphs[0].hash,
@@ -93,15 +99,87 @@ describe('v6 compact paragraph disposition wire', () => {
         supportHandles: [topicDraftCurrentSourceHandles(basis)[1]],
         rationale: 'Changed.',
       },
-    ];
+    ]);
+    expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('operations');
+    expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
+    for (const outcome of ['propose-revalidation', 'policy-conflict', 'insufficient-evidence'])
+      expect(() => decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, outcome}})).toThrow();
+    expect(JSON.stringify(schema)).not.toContain('"anyOf"');
+  });
+
+  it('projects one generated decision into matching operations and dispositions without losing edits', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('update', 'unchanged', 'unresolved'), {minLength: 1, maxLength: 64}),
+        fc.integer({min: 1, max: 8}),
+        (decisions, sourceCount) => {
+          const basis = basisFor(decisions.length, {sourceCount});
+          const wire = wireFor(basis);
+          wire.decision.outcome = decisions.includes('update')
+            ? 'propose-update'
+            : decisions.includes('unchanged')
+              ? 'propose-revalidation'
+              : 'insufficient-evidence';
+          wire.decision.paragraphDispositions.entries = decisions.map((disposition, ordinal) => ({
+            ordinal,
+            disposition,
+            sourceIndices: disposition === 'unresolved' ? [] : [ordinal % sourceCount],
+            rationale: `Decision ${ordinal}.`,
+            ...(disposition === 'update' ? {text: `Updated claim ${ordinal}.`} : {}),
+          }));
+          const before = JSON.stringify({basis, wire});
+          const result = canonical(basis, wire);
+          expect(result.draft.version).toBe(1);
+          expect(result.draft.operations).toHaveLength(decisions.filter(value => value === 'update').length);
+          expect(result.body.split('\n\n')).toEqual(
+            decisions.map((value, ordinal) => (value === 'update' ? `Updated claim ${ordinal}.` : `Claim ${ordinal}.`)),
+          );
+          for (const operation of result.draft.operations) {
+            const entry = result.draft.paragraphDispositions!.entries.find(
+              value => value.ordinal === operation.ordinal,
+            )!;
+            expect(entry.disposition).toBe('update');
+            expect(operation.beforeHash).toBe(entry.beforeHash);
+            expect(operation.supportHandles).toEqual(entry.supportHandles);
+            expect(operation.rationale).toBe(entry.rationale);
+          }
+          expect(new Set(result.draft.reviewedHandles).size).toBe(result.draft.reviewedHandles.length);
+          expect(JSON.stringify({basis, wire})).toBe(before);
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+
+  it('cannot hide replacement text behind unchanged or override its derived operation', () => {
+    const basis = basisFor(1);
+    const wire = wireFor(basis);
+    wire.decision.outcome = 'propose-update';
     wire.decision.paragraphDispositions.entries[0] = {
       ordinal: 0,
       disposition: 'update',
-      sourceIndices: [1],
-      rationale: 'Changed.',
+      sourceIndices: [0],
+      text: 'Replacement requires descriptive direct support and project scope.',
+      rationale: 'Added scope.',
     };
-    expect(canonical(basis, wire).draft.operations).toEqual(wire.decision.operations);
-    expect(JSON.stringify(schema)).not.toContain('"anyOf"');
+    expect(canonical(basis, wire).body).toBe(wire.decision.paragraphDispositions.entries[0].text);
+    wire.decision.paragraphDispositions.entries[0].disposition = 'unchanged';
+    expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+    delete wire.decision.paragraphDispositions.entries[0].text;
+    Object.assign(wire.decision, {operations: []});
+    expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+  });
+
+  it('requires explicit current source review when no paragraph is eligible', () => {
+    const basis = basisFor(1, {protectedOrdinal: 0});
+    const wire = wireFor(basis);
+    const result = canonical(basis, wire);
+    expect(result.body).toBe(basis.body);
+    expect(result.draft.operations).toEqual([]);
+    expect(result.draft.paragraphDispositions?.entries).toEqual([]);
+    expect(result.draft.reviewedHandles).toEqual(topicDraftCurrentSourceHandles(basis));
+    delete wire.decision.reviewedSourceIndices;
+    expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
   });
 
   it('explains and selects the global outcome before paragraph edits without requiring JSON key order on decode', () => {
@@ -124,6 +202,10 @@ describe('v6 compact paragraph disposition wire', () => {
 
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
+    expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version: 1})).toThrow();
+    const oldTag = wireFor(basis);
+    Object.assign(oldTag.decision.paragraphDispositions.entries[0], {disposition: 'revalidate'});
+    expect(() => decodeTopicDraftModelOutput(basis, oldTag)).toThrow();
     for (const index of [-1, 3, 1.5, NaN]) {
       const wire = wireFor(basis);
       wire.decision.paragraphDispositions.entries[0].sourceIndices = [index];
@@ -188,7 +270,6 @@ describe('v6 compact paragraph disposition wire', () => {
     const basis = basisFor(2, {protectedOrdinal: 1});
     const wire = wireFor(basis);
     wire.decision.outcome = 'insufficient-evidence';
-    wire.decision.reviewedHandles = [];
     wire.decision.paragraphDispositions.entries[0] = {
       ordinal: 0,
       disposition: 'unresolved',
@@ -236,7 +317,7 @@ describe('v6 compact paragraph disposition wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v11');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v12');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
@@ -256,28 +337,19 @@ describe('v6 compact paragraph disposition wire', () => {
           variants.map(
             (variant: {properties: {disposition: {enum: string[]}}}) => variant.properties.disposition.enum[0],
           ),
-        ).toEqual(['update', 'revalidate', 'unresolved']);
-        for (const disposition of ['update', 'revalidate', 'unresolved'] as const) {
-          const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'revalidate');
+        ).toEqual(['update', 'unchanged', 'unresolved']);
+        for (const disposition of ['update', 'unchanged', 'unresolved'] as const) {
+          const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'unchanged');
           wire.decision.paragraphDispositions.entries[0].disposition = disposition;
           if (disposition === 'update') {
             wire.decision.outcome = 'propose-update';
-            wire.decision.reviewedHandles = [];
-            wire.decision.operations = [
-              {
-                ordinal: 0,
-                beforeHash: basis.paragraphs[0].hash,
-                text: 'Updated claim.',
-                supportHandles: [topicDraftCurrentSourceHandles(basis)[0]],
-                rationale: 'Changed.',
-              },
-            ];
+            wire.decision.paragraphDispositions.entries[0].text = 'Updated claim.';
           }
           expect(() => canonical(basis, wire)).not.toThrow();
           wire.decision.paragraphDispositions.entries[0].sourceIndices = disposition === 'unresolved' ? [0] : [];
           expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
         }
-        expect(native.properties.decision.oneOf[0].properties.reviewedHandles.maxItems).toBe(0);
+        expect(native.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
       }),
       {numRuns: 24},
     );

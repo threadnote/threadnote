@@ -5,6 +5,14 @@ import {
 } from '@threadnote/memory/topic-maintenance-draft';
 import {topicDraftCurrentSourceHandles, topicDraftGenerationEligible} from '../../src/manager/topic_draft_schema.js';
 
+interface ParagraphDecision {
+  ordinal: number;
+  disposition: 'update' | 'unchanged' | 'unresolved';
+  sourceIndices: number[];
+  rationale: string;
+  text?: string;
+}
+
 export function makeTopicDraftWireBasis(
   count: number,
   options: {sourceCount?: number; protectedOrdinal?: number; firstParagraph?: string} = {},
@@ -47,26 +55,28 @@ export function makeTopicDraftWireBasis(
 
 export function makeTopicDraftWireFixture(
   basis: TopicMaintenanceDraftBasisV1,
-  disposition: 'revalidate' | 'unresolved' = 'revalidate',
+  disposition: 'unchanged' | 'unresolved' = 'unchanged',
 ) {
   const unresolved = disposition === 'unresolved';
+  const eligible = basis.paragraphs.filter(topicDraftGenerationEligible);
   return {
-    version: 1,
+    version: 2,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
     decision: {
       outcome: unresolved ? 'insufficient-evidence' : 'propose-revalidation',
-      operations: [] as unknown[],
-      reviewedHandles: unresolved ? [] : topicDraftCurrentSourceHandles(basis),
       rationale: unresolved ? 'Manual review.' : 'Checked.',
       unresolvedQuestions: [],
       removedClaims: [],
+      ...(!eligible.length && !unresolved
+        ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)}
+        : {}),
       paragraphDispositions: {
         version: 1,
-        entries: basis.paragraphs.filter(topicDraftGenerationEligible).map(paragraph => ({
+        entries: eligible.map<ParagraphDecision>(paragraph => ({
           ordinal: paragraph.ordinal,
-          disposition: disposition as 'update' | 'revalidate' | 'unresolved',
+          disposition,
           sourceIndices: unresolved ? [] : [0],
           rationale: unresolved ? 'Manual review.' : 'Checked.',
         })),
