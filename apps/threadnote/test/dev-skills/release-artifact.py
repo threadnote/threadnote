@@ -143,7 +143,12 @@ def manager_checks(root, binary, environment, checks):
                 before = {name: inventory(root / name) for name in ("user", "data", "runtime")}
                 preview = request("/api/dev-skills/preview", {"action": action, "selector": selector})
                 require(preview["canApply"], "Manager preview blocked: " + json.dumps(preview["issues"]))
-                require(before == {name: inventory(root / name) for name in before}, "Manager preview changed files")
+                after = {name: inventory(root / name) for name in before}
+                changed = [name + "/" + path for name in before
+                           for path in sorted(before[name].keys() | after[name].keys())
+                           if before[name].get(path) != after[name].get(path)]
+                require(before == after, "Manager " + action + " preview changed files (" + str(len(changed))
+                        + "): " + json.dumps(changed[:30]))
                 result = request("/api/dev-skills/apply", {"action": action, "selector": selector,
                                  "previewDigest": preview["previewDigest"], "confirm": True})
                 require(result["result"]["applied"] == (action != "update"), "Unexpected Manager apply result")
