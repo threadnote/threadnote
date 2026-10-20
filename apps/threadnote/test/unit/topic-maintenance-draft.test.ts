@@ -311,7 +311,6 @@ describe('topic maintenance private draft generation', () => {
           yield* fs.makeDirectory(path.dirname(memory), {recursive: true});
           yield* fs.writeFileString(memory, enrolled.content);
           const accepted = yield* fs.readFileString(memory);
-          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
           yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
           yield* git(['add', '.']);
           yield* git([
