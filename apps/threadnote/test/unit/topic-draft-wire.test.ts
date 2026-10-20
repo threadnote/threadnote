@@ -231,12 +231,43 @@ describe('v6 compact paragraph disposition wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v8');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v9');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
       Schema.decodeUnknownSync(topicDraftModelSchema(basisFor(64)), {onExcessProperty: 'error'})(wire),
     ).not.toThrow();
+  });
+
+  it('binds candidate indices to their handles while presenting protected requirements first', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 2, max: 64}), fc.integer({min: 1, max: 8}), (count, sourceCount) => {
+        const original = basisFor(count, {sourceCount, protectedOrdinal: count - 1});
+        const basis = {...original, handles: [...original.handles].reverse()};
+        const packet = {
+          coverage: 'declared-only',
+          targetUri: basis.targetUri,
+          sources: [],
+        } as never;
+        const before = JSON.stringify({basis, packet});
+        const prompt = topicMaintenanceDraftPrompt(packet, basis);
+        const candidates = JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]);
+        const current = topicDraftCurrentSourceHandles(basis);
+        for (const candidate of candidates) {
+          expect(candidate.sourceIndices.map((index: number) => current[index])).toEqual(candidate.currentHandles);
+          expect(candidate.currentHandles).toEqual(
+            basis.paragraphs[candidate.ordinal].citationIds.map(id => `current:${id}`),
+          );
+        }
+        const paragraphs = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs;
+        expect(paragraphs[0].ordinal).toBe(count - 1);
+        expect(
+          paragraphs.map((paragraph: {ordinal: number}) => paragraph.ordinal).sort((a: number, b: number) => a - b),
+        ).toEqual(Array.from({length: count}, (_, ordinal) => ordinal));
+        expect(JSON.stringify({basis, packet})).toBe(before);
+      }),
+      {numRuns: 32},
+    );
   });
 
   it('keeps repair output and validation errors inside single JSON string records', () => {
