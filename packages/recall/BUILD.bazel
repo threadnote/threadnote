@@ -29,6 +29,7 @@ bun_test(
         "//packages/inference:src/engine/node-llama-cpp.ts",
         "//packages/inference:src/engine/reranker.ts",
         "//packages/inference:src/engine/structured-generator.ts",
+        "//packages/inference:src/models/artifact_identity.ts",
         "//packages/inference:src/models/builtin.ts",
         "//packages/inference:src/models/bundled-model-source.ts",
         "//packages/inference:src/models/catalog.ts",

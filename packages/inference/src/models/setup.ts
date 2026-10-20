@@ -1,6 +1,13 @@
 import {Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
-import {runtimeStat} from '@threadnote/platform/system';
-import {fromPromise} from '@threadnote/platform/errors';
+import {
+  type ModelArtifactFileIdentity as ModelSetupFileIdentity,
+  validModelArtifactFileIdentity as validFileIdentity,
+} from './artifact_identity.js';
+export {
+  modelArtifactFileIdentity as modelSetupFileIdentity,
+  sameModelArtifactFile as sameModelSetupFile,
+} from './artifact_identity.js';
+export type {ModelArtifactFileIdentity as ModelSetupFileIdentity} from './artifact_identity.js';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {LocalModelManifest} from './catalog.js';
@@ -18,19 +25,15 @@ export interface ModelSetupJob {
   readonly sha256: string;
 }
 
+export interface ModelSetupReservation {
+  readonly nonce: string;
+  readonly expiresAt: number;
+}
+
 export interface ModelSetupOwner {
   readonly token: string;
   readonly processId: number;
   readonly processStartIdentity: string;
-}
-
-/** A stat receipt is an invalidation fence, not a replacement for store.verify's full digest check. */
-export interface ModelSetupFileIdentity {
-  readonly size: string;
-  readonly device: string;
-  readonly inode: string;
-  readonly modifiedAtNs: string;
-  readonly changedAtNs: string;
 }
 
 export interface ModelSetupReceipt {
@@ -46,6 +49,8 @@ export interface ModelSetupState {
   readonly phase: ModelSetupPhase;
   readonly attempts: number;
   readonly owner?: ModelSetupOwner;
+  readonly reservation?: ModelSetupReservation;
+  readonly drainingOwner?: ModelSetupOwner;
   readonly receipt?: ModelSetupReceipt;
   readonly bytes?: number;
   /** Bounded reason code only; never raw process/network output or paths. */
@@ -66,6 +71,8 @@ function mutationResult(state: ModelSetupState, supersededOwner?: ModelSetupOwne
   return {status: 'valid', state, ...(supersededOwner ? {supersededOwner} : {})};
 }
 
+const OwnerSchema = Schema.Struct({token: Schema.String, processId: Schema.Int, processStartIdentity: Schema.String});
+
 const StateSchema = Schema.Struct({
   version: Schema.Literal(MODEL_SETUP_VERSION),
   policy: Schema.Literals(['automatic', 'off']),
@@ -73,13 +80,9 @@ const StateSchema = Schema.Struct({
   job: Schema.Struct({home: Schema.String, modelId: Schema.String, revision: Schema.String, sha256: Schema.String}),
   phase: Schema.Literals(phases),
   attempts: Schema.Int,
-  owner: Schema.optionalKey(
-    Schema.Struct({
-      token: Schema.String,
-      processId: Schema.Int,
-      processStartIdentity: Schema.String,
-    }),
-  ),
+  reservation: Schema.optionalKey(Schema.Struct({nonce: Schema.String, expiresAt: Schema.Int})),
+  owner: Schema.optionalKey(OwnerSchema),
+  drainingOwner: Schema.optionalKey(OwnerSchema),
   receipt: Schema.optionalKey(
     Schema.Struct({
       sha256: Schema.String,
@@ -115,31 +118,32 @@ export function parseModelSetup(raw: string): ModelSetupInspection {
     !/^[a-f0-9]{64}$/.test(state.job.sha256) ||
     (state.policy === 'off') !== (state.phase === 'off') ||
     running !== (state.owner !== undefined) ||
+    (state.reservation !== undefined &&
+      (state.phase !== 'pending' ||
+        !/^[a-zA-Z0-9-]{1,128}$/.test(state.reservation.nonce) ||
+        !Number.isSafeInteger(state.reservation.expiresAt) ||
+        state.reservation.expiresAt < 0)) ||
     (state.phase === 'ready') !== (state.receipt !== undefined) ||
     (state.phase === 'retry-wait') !== (state.nextAttemptAt !== undefined) ||
     (state.phase === 'retry-wait' || state.phase === 'action-required') !== (state.reason !== undefined) ||
     (state.reason !== undefined && !/^[a-z0-9][a-z0-9-]{0,79}$/.test(state.reason)) ||
     (state.bytes !== undefined && (!Number.isSafeInteger(state.bytes) || state.bytes < 0)) ||
     (state.nextAttemptAt !== undefined && (!Number.isSafeInteger(state.nextAttemptAt) || state.nextAttemptAt < 0)) ||
-    (state.owner !== undefined &&
-      (!state.owner.token ||
-        state.owner.token.length > 256 ||
-        !Number.isSafeInteger(state.owner.processId) ||
-        state.owner.processId <= 0 ||
-        !state.owner.processStartIdentity ||
-        state.owner.processStartIdentity.length > 256)) ||
+    [state.owner, state.drainingOwner].some(
+      owner =>
+        owner !== undefined &&
+        (!owner.token ||
+          owner.token.length > 256 ||
+          !Number.isSafeInteger(owner.processId) ||
+          owner.processId <= 0 ||
+          !owner.processStartIdentity ||
+          owner.processStartIdentity.length > 256),
+    ) ||
     (state.receipt !== undefined &&
       (state.receipt.sha256 !== state.job.sha256 || !validFileIdentity(state.receipt.fileIdentity)))
   )
     return malformed;
   return {status: 'valid', state};
-}
-
-function validFileIdentity(identity: ModelSetupFileIdentity): boolean {
-  return (
-    [identity.size, identity.device, identity.inode].every(value => /^(0|[1-9][0-9]*)$/.test(value)) &&
-    [identity.modifiedAtNs, identity.changedAtNs].every(value => /^-?(0|[1-9][0-9]*)$/.test(value))
-  );
 }
 
 export function modelSetupJob(home: string, manifest: LocalModelManifest): ModelSetupJob {
@@ -168,8 +172,35 @@ export interface ModelSetupFence {
 export type ModelSetupCommand =
   | {readonly type: 'policy'; readonly policy: ModelSetupPolicy}
   | {readonly type: 'request'; readonly job: ModelSetupJob; readonly restart?: boolean; readonly expectedEpoch?: number}
-  | {readonly type: 'claim'; readonly intentEpoch: number; readonly job: ModelSetupJob; readonly owner: ModelSetupOwner}
-  | {readonly type: 'progress'; readonly fence: ModelSetupFence; readonly bytes: number}
+  | {readonly type: 'drained'; readonly intentEpoch: number; readonly owner: ModelSetupOwner}
+  | {
+      readonly type: 'reserve';
+      readonly job: ModelSetupJob;
+      readonly nonce: string;
+      readonly now: number;
+      readonly expiresAt: number;
+    }
+  | {
+      readonly type: 'blocked';
+      readonly intentEpoch: number;
+      readonly reason: string;
+      readonly nonce?: string;
+      readonly nextAttemptAt?: number;
+    }
+  | {
+      readonly type: 'claim';
+      readonly intentEpoch: number;
+      readonly job: ModelSetupJob;
+      readonly owner: ModelSetupOwner;
+      readonly nonce?: string;
+      readonly now?: number;
+    }
+  | {
+      readonly type: 'progress';
+      readonly fence: ModelSetupFence;
+      readonly bytes: number;
+      readonly phase?: 'downloading' | 'verifying';
+    }
   | {readonly type: 'verifying'; readonly fence: ModelSetupFence}
   | {readonly type: 'ready'; readonly fence: ModelSetupFence; readonly receipt: ModelSetupReceipt}
   | {
@@ -194,7 +225,19 @@ function transition(state: ModelSetupState, command: ModelSetupCommand): ModelSe
       policy: command.policy,
       intentEpoch: nextEpoch(state.intentEpoch),
       phase: command.policy === 'off' ? 'off' : 'pending',
+      ...((state.owner ?? state.drainingOwner) ? {drainingOwner: state.owner ?? state.drainingOwner} : {}),
     };
+  }
+  if (command.type === 'drained') {
+    if (
+      state.intentEpoch !== command.intentEpoch ||
+      state.drainingOwner?.token !== command.owner.token ||
+      state.drainingOwner.processId !== command.owner.processId ||
+      state.drainingOwner.processStartIdentity !== command.owner.processStartIdentity
+    )
+      return state;
+    const {drainingOwner: _drainingOwner, ...drained} = state;
+    return drained;
   }
   if (state.policy === 'off') return state;
   if (command.type === 'request') {
@@ -205,16 +248,53 @@ function transition(state: ModelSetupState, command: ModelSetupCommand): ModelSe
       ...initialModelSetupState(command.job),
       intentEpoch: nextEpoch(state.intentEpoch),
       attempts: sameJob ? state.attempts : 0,
+      ...((state.owner ?? state.drainingOwner) ? {drainingOwner: state.owner ?? state.drainingOwner} : {}),
+    };
+  }
+  if (command.type === 'reserve') {
+    if (
+      state.phase !== 'pending' ||
+      state.drainingOwner ||
+      !sameModelSetupJob(state.job, command.job) ||
+      (state.reservation && state.reservation.expiresAt > command.now) ||
+      command.expiresAt <= command.now
+    )
+      return state;
+    return {
+      ...state,
+      intentEpoch: nextEpoch(state.intentEpoch),
+      reservation: {nonce: command.nonce, expiresAt: command.expiresAt},
+    };
+  }
+  if (command.type === 'blocked') {
+    if (
+      state.phase !== 'pending' ||
+      state.intentEpoch !== command.intentEpoch ||
+      (state.reservation && state.reservation.nonce !== command.nonce)
+    )
+      return state;
+    const {reservation: _reservation, ...unreserved} = state;
+    return {
+      ...unreserved,
+      phase: command.nextAttemptAt === undefined ? 'action-required' : 'retry-wait',
+      reason: command.reason,
+      ...(command.nextAttemptAt === undefined ? {} : {nextAttemptAt: command.nextAttemptAt}),
     };
   }
   if (command.type === 'claim') {
     if (
       state.phase !== 'pending' ||
+      state.drainingOwner !== undefined ||
       state.intentEpoch !== command.intentEpoch ||
-      !sameModelSetupJob(state.job, command.job)
+      !sameModelSetupJob(state.job, command.job) ||
+      (state.reservation !== undefined &&
+        (state.reservation.nonce !== command.nonce ||
+          command.now === undefined ||
+          command.now > state.reservation.expiresAt))
     )
       return state;
-    return {...state, phase: 'downloading', owner: command.owner, attempts: state.attempts + 1};
+    const {reservation: _reservation, ...unreserved} = state;
+    return {...unreserved, phase: 'downloading', owner: command.owner, attempts: state.attempts + 1};
   }
   const fence = command.fence;
   if (
@@ -226,7 +306,7 @@ function transition(state: ModelSetupState, command: ModelSetupCommand): ModelSe
     state.owner.processStartIdentity !== fence.owner.processStartIdentity
   )
     return state;
-  if (command.type === 'progress') return state.phase === 'downloading' ? {...state, bytes: command.bytes} : state;
+  if (command.type === 'progress') return {...state, bytes: command.bytes, phase: command.phase ?? state.phase};
   if (command.type === 'verifying') return state.phase === 'downloading' ? {...state, phase: 'verifying'} : state;
   if (command.type === 'ready' && (state.phase !== 'verifying' || command.receipt.sha256 !== state.job.sha256))
     return state;
@@ -270,13 +350,16 @@ export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
   const directory = path.join(home, 'models');
   const initializes = command.type === 'policy' || (command.type === 'request' && command.expectedEpoch === undefined);
   if (!initializes && !(yield* fs.exists(directory))) return {status: 'missing'} as const;
-  yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
-  yield* fs.chmod(directory, 0o700);
+  if (initializes) {
+    yield* fs.makeDirectory(directory, {recursive: true, mode: 0o700});
+    yield* fs.chmod(directory, 0o700);
+  }
   const canonicalHome = yield* fs.realPath(home);
   return yield* withExclusiveFileLock(
     fs,
     path.join(directory, 'setup.lock'),
     {
+      createParentDirectory: initializes,
       retryIntervalMilliseconds: 10,
       staleAfterMilliseconds: 30_000,
       waitTimeoutMilliseconds: 1_000,
@@ -313,29 +396,3 @@ export const updateModelSetup = Effect.fn('models.updateSetup')(function* (
     }),
   );
 });
-
-/** Capture only after a successful LocalModelStore.verify/install; never hashes in foreground resolution. */
-export const modelSetupFileIdentity = Effect.fn('models.setupFileIdentity')(function* (file: string) {
-  // Effect FileInfo omits ctime. Reuse the platform's exact native stat boundary so
-  // same-length writes with restored mtime still invalidate the verification receipt.
-  const info = yield* fromPromise('models.setupFileIdentity', () => runtimeStat(file));
-  if (!info.isFile()) return undefined;
-  const identity: ModelSetupFileIdentity = {
-    size: String(info.size),
-    device: String(info.dev),
-    inode: String(info.ino),
-    modifiedAtNs: String(info.mtimeNs),
-    changedAtNs: String(info.ctimeNs),
-  };
-  return validFileIdentity(identity) ? identity : undefined;
-});
-
-export function sameModelSetupFile(left: ModelSetupFileIdentity, right: ModelSetupFileIdentity): boolean {
-  return (
-    left.size === right.size &&
-    left.device === right.device &&
-    left.inode === right.inode &&
-    left.modifiedAtNs === right.modifiedAtNs &&
-    left.changedAtNs === right.changedAtNs
-  );
-}
