@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mermaid diagram</title>
+    <style>
+      html {
+        background: white;
+        color: #17191c;
+        color-scheme: light;
+      }
+      html[data-theme='dark'] {
+        background: #10151b;
+        color: #e1e3e6;
+        color-scheme: dark;
+      }
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        padding: 8px;
+        font-family: Arial, sans-serif;
+      }
+      svg {
+        max-width: 100%;
+        height: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="diagram"></div>
+    <script src="/mermaid.js"></script>
+  </body>
+</html>

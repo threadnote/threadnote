@@ -14,7 +14,7 @@ it('renders headings, lists and code without normalizing the stored document on 
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
   const change = vi.fn();
   const content =
-    'MEMORY\nkind: durable\nmemory_id: stable\n\n# A decision\n\n- Keep [context](threadnote://memory/example)\n\n```ts\nconst stable = true;\n```';
+    'MEMORY\nkind: durable\nmemory_id: stable\n\n# A decision\n\n- Keep [context](threadnote://memory/example)\n\n```ts\nconst stable = true;\n```\n\n```mermaid\nflowchart LR\n A-->B\n```';
   const container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
@@ -23,6 +23,9 @@ it('renders headings, lists and code without normalizing the stored document on 
   expect(container.querySelector('li')?.textContent).toContain('Keep context');
   expect(container.textContent).not.toContain('memory_id');
   expect(change).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Mermaid');
+  expect(container.textContent).toContain('A-->B');
+  expect(container.querySelector('iframe')).toBeNull();
   expect(container.querySelector('[aria-label="Source mode"]')).not.toBeNull();
 });
 

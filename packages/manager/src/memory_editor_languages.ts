@@ -11,4 +11,5 @@ export const MEMORY_EDITOR_LANGUAGES = {
   sql: 'SQL',
   go: 'Go',
   rust: 'Rust',
+  mermaid: 'Mermaid',
 };
