@@ -8,15 +8,17 @@ import {parseHistoricalDevSkillsManifest} from './manifest.js';
 
 export interface Enrollment extends DevSkillsConsumer {
   readonly state: 'enrolled' | 'removed';
+  readonly enabled: boolean;
+  readonly createdBy?: string;
 }
 export interface HomeIndex {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly home: string;
   readonly installationRoot: string;
   readonly targets: Readonly<Record<string, Enrollment>>;
 }
 export interface RuntimeIndex {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly installationRoot: string;
   readonly enrollments: Readonly<Record<string, Enrollment>>;
 }
@@ -65,7 +67,7 @@ function parseConsumer(value: unknown): DevSkillsConsumer {
   );
   return {home: value.home, installationRoot: value.installationRoot, target: parseTarget(value.target)};
 }
-function parseEnrollments(value: unknown): Record<string, Enrollment> {
+function parseEnrollments(value: unknown, version: 1 | 2): Record<string, Enrollment> {
   requireValue(isRecord(value) && Object.keys(value).length <= 1024, 'Invalid enrollment index.');
   const result: Record<string, Enrollment> = {};
   for (const [key, entry] of Object.entries(value)) {
@@ -74,35 +76,56 @@ function parseEnrollments(value: unknown): Record<string, Enrollment> {
       isRecord(entry) && ['enrolled', 'removed'].includes(String(entry.state)) && key === consumerId(consumer),
       'Invalid enrollment identity.',
     );
-    result[key] = {...consumer, state: entry.state as Enrollment['state']};
+    requireValue(
+      (version === 1 && entry.enabled === undefined) ||
+        (version === 2 && typeof entry.enabled === 'boolean' && (entry.state !== 'removed' || !entry.enabled)),
+      'Invalid enrollment enablement.',
+    );
+    requireValue(
+      entry.createdBy === undefined ||
+        (version === 2 &&
+          typeof entry.createdBy === 'string' &&
+          /^[a-f0-9]{64}$/u.test(entry.createdBy) &&
+          entry.state === 'enrolled'),
+      'Invalid setup ownership checkpoint.',
+    );
+    result[key] = {
+      ...consumer,
+      state: entry.state as Enrollment['state'],
+      enabled: version === 1 ? entry.state === 'enrolled' : (entry.enabled as boolean),
+      ...(entry.createdBy ? {createdBy: entry.createdBy} : {}),
+    };
   }
   return result;
 }
 export function parseHomeIndex(value: unknown): HomeIndex {
   requireValue(
-    isRecord(value) && value.schemaVersion === 1 && absolute(value.home) && absolute(value.installationRoot),
+    isRecord(value) &&
+      (value.schemaVersion === 1 || value.schemaVersion === 2) &&
+      absolute(value.home) &&
+      absolute(value.installationRoot),
     'Invalid home enrollment index.',
   );
-  const targets = parseEnrollments(value.targets);
+  const targets = parseEnrollments(value.targets, value.schemaVersion);
   requireValue(
     Object.values(targets).every(
       entry => entry.home === value.home && entry.installationRoot === value.installationRoot,
     ),
     'Enrollment home/runtime identity differs.',
   );
-  return {schemaVersion: 1, home: value.home, installationRoot: value.installationRoot, targets};
+  return {schemaVersion: 2, home: value.home, installationRoot: value.installationRoot, targets};
 }
 export function parseRuntimeIndex(value: unknown): RuntimeIndex {
   requireValue(
-    isRecord(value) && value.schemaVersion === 1 && absolute(value.installationRoot),
+    isRecord(value) && (value.schemaVersion === 1 || value.schemaVersion === 2) && absolute(value.installationRoot),
     'Invalid runtime enrollment index.',
   );
-  const enrollments = parseEnrollments(value.enrollments);
+  const enrollments = parseEnrollments(value.enrollments, value.schemaVersion);
   requireValue(
     Object.values(enrollments).every(entry => entry.installationRoot === value.installationRoot),
     'Enrollment runtime identity differs.',
   );
-  return {schemaVersion: 1, installationRoot: value.installationRoot, enrollments};
+  return {schemaVersion: 2, installationRoot: value.installationRoot, enrollments};
 }
 export function entrypointPath(layout: DevSkillsTarget['layout'], id: string) {
   return layout === 'flat' ? `${id}.md` : `${id}/SKILL.md`;
@@ -179,7 +202,7 @@ export const enrollmentContext = Effect.fn('devSkills.enrollmentContext')(functi
   const runtimeContent = yield* readOptional(runtimeIndexPath(path, root));
   const runtime =
     runtimeContent === null
-      ? {schemaVersion: 1 as const, installationRoot: root, enrollments: {}}
+      ? {schemaVersion: 2 as const, installationRoot: root, enrollments: {}}
       : yield* decode(runtimeContent, parseRuntimeIndex);
   if (runtime.installationRoot !== root) return yield* fail('invalid-state', 'Pinned runtime identity differs.');
   return {
@@ -187,7 +210,7 @@ export const enrollmentContext = Effect.fn('devSkills.enrollmentContext')(functi
     root,
     homeContent: homeRead.content,
     runtimeContent,
-    homeIndex: homeRead.index ?? {schemaVersion: 1 as const, home, installationRoot: root, targets: {}},
+    homeIndex: homeRead.index ?? {schemaVersion: 2 as const, home, installationRoot: root, targets: {}},
     runtimeIndex: runtime,
   };
 });

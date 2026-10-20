@@ -1,4 +1,5 @@
 import {Schema} from 'effect';
+import type {DevSkillsMutationLease} from './lease.js';
 
 export class DevSkillsError extends Schema.TaggedError<DevSkillsError>()('DevSkillsError', {
   code: Schema.String,
@@ -108,7 +109,7 @@ export interface DevSkillsResult extends DevSkillsPlan {
   readonly recovered: boolean;
   readonly retainedPaths: readonly string[];
 }
-export interface DevSkillsStatus {
+export interface DevSkillsStatus extends DevSkillsEnrollmentStatus {
   readonly target: DevSkillsTarget;
   readonly consumerId: string;
   readonly installationState: DevSkillsInstallationState;
@@ -117,4 +118,84 @@ export interface DevSkillsStatus {
   readonly issues: readonly DevSkillsIssue[];
   readonly consumers: readonly DevSkillsConsumer[];
   readonly readiness?: DevSkillsReadiness;
+}
+
+export interface DevSkillsInstalled {
+  readonly releaseVersion: string;
+  readonly digest: string;
+  readonly workflowProtocol: number;
+  readonly stateSchema: number;
+  readonly minimumRuntime: string;
+}
+export interface DevSkillsRefreshOutcome {
+  readonly intentId: string;
+  readonly requestedReleaseVersion: string;
+  readonly requestedBundleDigest: string;
+  readonly state: 'current' | 'pending' | 'skipped';
+  readonly attemptedAt: string;
+  readonly completedAt?: string;
+  readonly issues: readonly DevSkillsIssue[];
+}
+export interface DevSkillsEnrollmentStatus {
+  readonly enrollmentState: 'unregistered' | 'enrolled' | 'removed';
+  readonly enabled: boolean;
+  readonly installed?: DevSkillsInstalled;
+  readonly lastRefresh?: DevSkillsRefreshOutcome;
+}
+export interface DevSkillsRuntimeCapabilities {
+  readonly schemaVersion: 1;
+  readonly runtimeVersion: string;
+  readonly workflowProtocols: readonly number[];
+  readonly stateSchemas: readonly number[];
+  readonly enrollmentSchemas: readonly number[];
+}
+export interface DevSkillsReleaseIdentity {
+  readonly installationRoot: string;
+  readonly releaseRoot: string;
+  readonly releaseVersion: string;
+  readonly bundleDigest: string;
+}
+export interface DevSkillsRefreshTarget {
+  readonly consumerId: string;
+  readonly home: string;
+  readonly target: DevSkillsTarget;
+  readonly enabled: boolean;
+  readonly enrollmentState: 'enrolled' | 'removed';
+  readonly installed?: DevSkillsInstalled;
+  readonly issues: readonly DevSkillsIssue[];
+}
+export interface DevSkillsRefreshPlan {
+  readonly schemaVersion: 1;
+  readonly release: DevSkillsReleaseIdentity;
+  readonly targets: readonly DevSkillsRefreshTarget[];
+  readonly compatibility: 'compatible' | 'incompatible' | 'unknown';
+  readonly issues: readonly DevSkillsIssue[];
+  readonly previewDigest: string;
+}
+export interface DevSkillsRefreshResult {
+  readonly schemaVersion: 1;
+  readonly issues?: readonly DevSkillsIssue[];
+  readonly intentId: string;
+  readonly release: DevSkillsReleaseIdentity;
+  readonly targets: readonly {
+    readonly consumerId: string;
+    readonly target: DevSkillsTarget;
+    readonly outcome: DevSkillsRefreshOutcome;
+  }[];
+  readonly repairRequired: boolean;
+}
+export type DevSkillsEnsureOptions =
+  | {
+      readonly mode: 'setup';
+      readonly choice: 'default' | 'disabled';
+      readonly operationId: string;
+      readonly lease?: DevSkillsMutationLease;
+    }
+  | {readonly mode: 'maintenance'; readonly lease?: DevSkillsMutationLease};
+export interface DevSkillsEnsureResult {
+  readonly state: 'installed' | 'current' | 'disabled' | 'pending' | 'setup-needed';
+  readonly createdConsumer: boolean;
+  readonly operationId?: string;
+  readonly result?: DevSkillsResult;
+  readonly issues: readonly DevSkillsIssue[];
 }

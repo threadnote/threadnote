@@ -17,6 +17,7 @@ export interface SetupPlanInput {
   readonly scope?: 'user' | 'project' | 'local';
   readonly task: string;
   readonly threadnoteVersion: string;
+  readonly workflows?: {readonly bundleDigest: string; readonly disabled: boolean};
 }
 
 interface OperationDefinition {
@@ -52,7 +53,7 @@ export const createSetupPlan = Effect.fn('setup.createPlan')(function* (input: S
       scopes: input.adapter.catalog.scopes,
     }),
   );
-  const definitions = setupOperationDefinitions(input.adapter);
+  const definitions = setupOperationDefinitions(input.adapter, input.workflows !== undefined);
   const operations: SetupPlanOperationV1[] = [];
   for (const operation of definitions) {
     operations.push({
@@ -68,11 +69,13 @@ export const createSetupPlan = Effect.fn('setup.createPlan')(function* (input: S
           surfaceId: input.adapter.catalog.id,
           taskHash: operation.kind === 'context-brief.verify' ? taskHash : undefined,
           threadnoteVersion: input.threadnoteVersion,
+          ...(operation.kind === 'dev-skills.ensure' ? {workflows: input.workflows, profile: 'desktop'} : {}),
         }),
       ),
     });
   }
   const base = {
+    ...(input.workflows ? {workflows: input.workflows} : {}),
     adapterContractHash,
     manifestPath: input.manifestPath,
     operations,
@@ -88,7 +91,7 @@ export const createSetupPlan = Effect.fn('setup.createPlan')(function* (input: S
   return {...base, planHash: yield* sha256Hex(JSON.stringify(base))} satisfies SetupPlanV1;
 });
 
-export function setupOperationDefinitions(adapter: AgentAdapter): readonly OperationDefinition[] {
+export function setupOperationDefinitions(adapter: AgentAdapter, workflows = false): readonly OperationDefinition[] {
   const operations: OperationDefinition[] = [
     {dependsOn: [], id: 'core', kind: 'core.ensure', reversible: false},
     {dependsOn: ['core'], id: 'manifest', kind: 'manifest.ensure', reversible: true},
@@ -109,6 +112,13 @@ export function setupOperationDefinitions(adapter: AgentAdapter): readonly Opera
       reversible: true,
     });
   }
+  if (workflows)
+    operations.push({
+      dependsOn: [operations.at(-1)!.id],
+      id: 'dev-skills',
+      kind: 'dev-skills.ensure',
+      reversible: true,
+    });
   const graphDependencies = ['seed', operations.at(-1)!.id];
   operations.push(
     {dependsOn: graphDependencies, id: 'graph', kind: 'graph.index', reversible: false},

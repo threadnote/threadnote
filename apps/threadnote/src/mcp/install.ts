@@ -1,3 +1,4 @@
+import {composeWorkflowSetup, setupWorkflowSelector} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
   installAgentIntegration,
@@ -100,9 +101,25 @@ export function runMcpInstall(config: RuntimeConfig, agent: AgentClient, options
     });
     return yield* options.apply === true ? withAgentIntegrationLock(config, install) : install;
   });
-  return options.apply !== true || options.setupLockHeld === true
-    ? operation
-    : withSetupMutationLock(config.agentContextHome, operation);
+  // Nested setup and core repair already own their home lock; only public installs compose enrollment.
+  if (options.setupLockHeld === true) return operation;
+  return Effect.gen(function* () {
+    const attach = yield* Effect.try({
+      try: () => resolveComposerAttach(options),
+      catch: cause =>
+        Schema.is(ComposerAttachError)(cause)
+          ? cause
+          : McpOperationError.make({message: 'Invalid organization attach options.'}),
+    });
+    if (attach)
+      return yield* options.apply === true ? withSetupMutationLock(config.agentContextHome, operation) : operation;
+    return yield* composeWorkflowSetup(
+      config,
+      setupWorkflowSelector(agent, options.project ? 'project' : options.scope, options.project ?? options.cwd),
+      {apply: options.apply === true, noDevSkills: options.noDevSkills, key: `mcp:${agent}`},
+      () => operation,
+    );
+  });
 }
 
 const runMcpInstallInTransaction = Effect.fn('mcp.runInstallInTransaction')(function* (

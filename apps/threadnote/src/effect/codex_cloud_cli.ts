@@ -30,6 +30,7 @@ export function makeCodexCloudCommand(withRuntime: CliRuntimeRunner) {
       agentId: optionalString('agent-id', 'Stable agent identity; defaults to codex-cloud'),
       cwd: cwd(),
       dryRun: boolean('dry-run', 'Preview without changing local or remote state'),
+      noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
       remote: requiredString('remote', 'Credential-free private Git memory repository URL'),
       team: team(),
       user: optionalString('user', 'Stable memory owner; defaults to codex-cloud'),

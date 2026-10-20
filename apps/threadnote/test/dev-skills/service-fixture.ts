@@ -3,7 +3,7 @@ import {Effect, FileSystem, Layer, Path} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
-import {DevSkillsSource} from '../../src/dev_skills/manifest.js';
+import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
 
 export const devSkillsTestLayer = Layer.mergeAll(
   BunServices.layer,
@@ -88,4 +88,39 @@ export const snapshot = Effect.fn('test.devSkills.snapshot')(function* (root: st
     } else if (info.type === 'File') result[relative] = Buffer.from(yield* fs.readFile(absolute)).toString('base64');
   }
   return Object.fromEntries(Object.entries(result).sort(([a], [b]) => a.localeCompare(b)));
+});
+/** Two-release updater fixtures use real enriched manifests and versioned metadata. */
+export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(function* (
+  f: Effect.Success<ReturnType<typeof fixture>>,
+  version: string,
+  staged = false,
+) {
+  const bundle = yield* loadDevSkillsBundleAt(f.source, version, false);
+  const releaseRoot = f.path.join(f.runtime, 'versions', version);
+  const bundleRoot = staged ? f.path.join(f.runtime, 'versions', '.threadnote-update-fixture', 'release') : releaseRoot;
+  for (const [relative, content] of Object.entries(bundle.files)) {
+    const file = f.path.join(bundleRoot, 'config', 'agent-skills', relative);
+    yield* f.fs.makeDirectory(f.path.dirname(file), {recursive: true});
+    yield* f.fs.writeFile(file, Buffer.from(content, 'base64'));
+  }
+  yield* f.fs.writeFileString(f.path.join(bundleRoot, 'config/dev-skills.json'), JSON.stringify(bundle.manifest));
+  yield* f.fs.writeFileString(f.path.join(bundleRoot, 'release.json'), JSON.stringify({version}));
+  yield* f.fs.writeFileString(f.path.join(bundleRoot, 'threadnote'), 'fixture executable metadata only');
+  const capabilities = {
+    schemaVersion: 1 as const,
+    runtimeVersion: version,
+    workflowProtocols: [1],
+    stateSchemas: [1],
+    enrollmentSchemas: [1, 2],
+  };
+  const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    effect.pipe(
+      Effect.provideService(SystemInfo, {...f.system, executablePath: f.path.join(releaseRoot, 'threadnote')}),
+      Effect.provideService(DevSkillsSource, {root: releaseRoot, runtimeVersion: version}),
+    );
+  const activate = f.fs.writeFileString(
+    f.path.join(f.runtime, 'active-release.json'),
+    JSON.stringify({version, releaseRoot}),
+  );
+  return {releaseRoot, releaseVersion: version, bundleRoot, bundle, capabilities, run, activate};
 });

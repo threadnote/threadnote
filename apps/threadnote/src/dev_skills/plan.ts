@@ -24,7 +24,9 @@ import {
   runtimeIndexPath,
   type PhysicalReceipt,
 } from './registry.js';
-import {hash, json, readOptional, statOptional} from './files.js';
+import {restoreJournalPath} from './maintenance.js';
+import {enablementJournalPath} from './enablement.js';
+import {hash, json, readOptional, statOptional, stableJson} from './files.js';
 import {generationRoot, inspectDuplicates, inspectOwned, renderEntrypoints} from './inspection.js';
 import {devSkillsCompatibility, devSkillsRuntimeVersion} from './manifest.js';
 
@@ -60,12 +62,15 @@ export interface PlannedMutation {
   readonly changes: readonly FileChange[];
   readonly generation: DevSkillsBundle | null;
   readonly retainedPaths: readonly string[];
+  readonly enabled?: boolean;
+  readonly createdBy?: string;
 }
 export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   config: RuntimeConfig,
   bundle: DevSkillsBundle,
   action: DevSkillsAction,
   selector: DevSkillsSelector,
+  options: {readonly createdBy?: string} = {},
 ) {
   const path = yield* Path.Path;
   const target = yield* selectDevSkillsTarget(config, selector);
@@ -74,7 +79,16 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   const receipt = physical.receipt;
   const consumer: DevSkillsConsumer = {home: context.home, installationRoot: context.root, target};
   const id = consumerId(consumer);
-  const pending = yield* readOptional(journalPath(path, target.skillRoot));
+  const createdBy =
+    action === 'install'
+      ? options.createdBy
+      : action === 'update'
+        ? context.homeIndex.targets[id]?.createdBy
+        : undefined;
+  const pending =
+    (yield* readOptional(journalPath(path, target.skillRoot))) ??
+    (yield* readOptional(enablementJournalPath(path, context.home))) ??
+    (yield* readOptional(restoreJournalPath(path, target.skillRoot)));
   const inspected = yield* inspectOwned(target, receipt);
   const obsolete = new Set(
     Object.keys(receipt?.entrypoints ?? {}).filter(
@@ -113,7 +127,10 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   const compatibility = active ? devSkillsCompatibility(receipt.manifest, yield* devSkillsRuntimeVersion()) : [];
   issues.push(...compatibility);
   const enrolled = context.homeIndex.targets[id]?.state === 'enrolled';
-  if (enrolled !== Boolean(receipt?.consumers[id]))
+  if (
+    enrolled !== Boolean(receipt?.consumers[id]) ||
+    stableJson(context.homeIndex.targets[id]) !== stableJson(context.runtimeIndex.enrollments[id])
+  )
     issues.push({
       code: 'incomplete',
       message: 'Home enrollment and physical ownership disagree; preserve state and recover its original transaction.',
@@ -209,7 +226,25 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
       };
       changes.push({path: receiptPath(path, target.skillRoot), before: physical.content, after: json(updated)});
     }
-    const entry = {...consumer, state: action === 'remove' ? ('removed' as const) : ('enrolled' as const)};
+    const entry = {
+      ...consumer,
+      ...(createdBy ? {createdBy} : {}),
+      state: action === 'remove' ? ('removed' as const) : ('enrolled' as const),
+      enabled: action === 'install' || (action === 'update' && context.homeIndex.targets[id]?.enabled === true),
+    };
+    changes.push({
+      path: homeIndexPath(path, context.home),
+      before: context.homeContent,
+      after: json({...context.homeIndex, targets: {...context.homeIndex.targets, [id]: entry}}),
+    });
+    changes.push({
+      path: runtimeIndexPath(path, context.root),
+      before: context.runtimeContent,
+      after: json({...context.runtimeIndex, enrollments: {...context.runtimeIndex.enrollments, [id]: entry}}),
+    });
+  }
+  if (canApply && action === 'remove' && !enrolled) {
+    const entry = {...consumer, state: 'removed' as const, enabled: false};
     changes.push({
       path: homeIndexPath(path, context.home),
       before: context.homeContent,
@@ -222,6 +257,8 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     });
   }
   const effective = changes.filter(change => change.before !== change.after);
+  const ownership = changes.find(change => change.path === receiptPath(path, target.skillRoot));
+  if (effective.length && ownership && !effective.includes(ownership)) effective.push(ownership);
   const planBase = {
     schemaVersion: 1 as const,
     action,
@@ -255,5 +292,7 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
     changes: effective,
     generation,
     retainedPaths: [...new Set(retainedPaths)],
+    enabled: action === 'install' || (action === 'update' && context.homeIndex.targets[id]?.enabled === true),
+    createdBy,
   } satisfies PlannedMutation;
 });

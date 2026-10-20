@@ -13,6 +13,8 @@ Invoke a skill using your agent host's skill picker or supported invocation synt
 
 ## Install and manage
 
+Standard agent setup installs these workflows by default, including personal Codex and Cursor cloud bootstrap on supported platforms. Pass `--no-dev-skills` during setup to keep them disabled. Repeating setup or repairing an integration respects that choice; explicit `dev-skills install` enables them again.
+
 ```sh
 threadnote dev-skills list
 threadnote dev-skills install --agent codex --dry-run
@@ -26,7 +28,7 @@ The mutation verbs apply immediately. Add `--dry-run` to inspect an action witho
 
 Use `--scope project --cwd /path/to/repository` for a host that declares project skill support. Unsupported scope or platform combinations report a reason. A recorded installation keeps its original destination even if a host environment variable later changes. Select the recorded scope and project when several installations match.
 
-Installation uses the bundle in the current Threadnote release and works offline without a sharing team. Repeating installation for the same generation is a no-op. If a newer bundled generation is available, use `dev-skills update`; that command uses the installed Threadnote payload and does not download a separate skill release.
+Installation uses the bundle in the current Threadnote release and works offline without a sharing team. Repeating installation for the same generation is a no-op. `threadnote update` refreshes enabled workflow installations with the new release. Use `dev-skills update` to refresh one target from the currently installed payload without downloading a separate skill release.
 
 ## Readiness
 
@@ -45,11 +47,17 @@ threadnote dev-skills install --agent cursor --profile cursor-cloud-personal
 
 Use these commands inside the corresponding supported cloud environment. Configuration readiness uses the existing personal profile; file installation does not bootstrap it. Corporate and remote-hybrid profiles are outside this workflow's support.
 
+Personal bootstrap installs the workflows by default. A personal agent's start command maintains its existing enabled enrollment, including after an image update. Missing enrollment requires setup; start never silently re-enrolls a removed or disabled target. Run the update inside each cloud environment: updating a laptop does not update a different machine or provider image.
+
 Cloud spec and plan drafts stay private to the task. They may be lost when an ephemeral workspace disappears. Durable closeout publishes approved, sanitized knowledge to the configured personal Git share and verifies the final graph before retiring drafts. A denied approval, unavailable credentials or failed publication keeps the drafts and reports closeout pending.
 
 ## Ownership, updates and removal
 
 Each host target has a recorded owner and a complete copied helper generation. Shared targets list every consumer affected by an update. Existing runs retain their original helper generation; new invocations use the newly selected generation. Old generations are retained.
+
+Manual and automatic Threadnote updates refresh recorded targets across data homes. Workflow refresh runs independently of optional local integration repair and post-update migration prompts. An edited or inaccessible target remains pending while other targets can finish. Status distinguishes the active Threadnote version from each workflow target's installed generation and last refresh result. Resolve the reported conflict and run `threadnote update` again, even when the active version is already current.
+
+`threadnote update --check` and `--dry-run` do not write homes, caches, locks or refresh intents. Candidate workflow compatibility remains unchecked until the verified release is available during apply. Known incompatible runtime replacements are rejected before activation; inaccessible ownership remains explicitly unverified and pending.
 
 Edited files, extra files, symlinked paths and unowned copies are preserved and reported. Legacy manual or team-pack copies with the same skill names require an explicit migration: inspect the reported paths, move the old copies outside the host's discovery roots, then retry. Threadnote does not adopt matching files or remove team packs automatically.
 

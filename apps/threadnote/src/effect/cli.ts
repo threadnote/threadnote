@@ -163,18 +163,15 @@ import {runKnowledgeDeltaGitProposalExport, runKnowledgeDeltaGitProposalMaterial
 import {makeShareMemoryCommands, publishFlags} from './share/memory_cli.js';
 import {runSharedTopicProposal} from '../git_proposal/topic_maintenance_commands.js';
 import {initializeAutoUpdatePolicy, runAutoUpdateWorker, runThreadnoteUpdateCommand} from '../release/auto_update.js';
-import {
-  cursorCloudRuntimeConfig,
-  runCursorCloudBootstrap,
-  runCursorCloudConfig,
-  runCursorCloudVerify,
-} from '../cursor/cloud.js';
+import {cursorCloudRuntimeConfig, runCursorCloudBootstrap, runCursorCloudConfig} from '../cursor/cloud.js';
 import {runCursorAttestationCommand} from '../cursor/cloud_attestation.js';
 import {
   makeCursorCloudAttestCommand,
   makeCursorCloudIdentityFlags,
   makeCursorCloudModeFlag,
   makeCursorCloudRemoteConfigFlags,
+  makeCursorCloudStartCommand,
+  makeCursorCloudVerifyCommand,
 } from './cursor_cloud_cli.js';
 import {
   makeCliInvocationInspector,
@@ -1221,6 +1218,7 @@ const mcpInstall = Command.make(
       Argument.withDescription('codex, claude, cursor, copilot, or omp'),
     ),
     apply: boolean('apply', 'Actually modify the selected agent config'),
+    noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
     ...makeComposerAttachFlags(),
     name: defaultString('name', 'MCP server name', THREADNOTE_MCP_NAME),
     project: optionalString('project', 'Write Cursor/Copilot/omp MCP into this repository config'),
@@ -1583,17 +1581,19 @@ const cursorCloudBootstrap = Command.make(
     ...cursorCloudIdentityFlags,
     cwd: optionalString('cwd', 'Absolute checkout path prepared for local graph inspection'),
     dryRun: boolean('dry-run', 'Preview configuration without changing or synchronizing the share'),
+    noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
     endpoint: optionalString('endpoint', 'Managed remote Streamable HTTP MCP endpoint'),
     mode: cursorCloudMode,
     remote: optionalString('remote', 'Credential-free Git URL for the shared memory repository'),
     shareId: optionalString('share-id', 'Opaque managed remote memory share identifier'),
     sync: negatedBoolean('sync', 'Configure the share without synchronizing it immediately'),
   },
-  ({agentId, cwd, dryRun, endpoint, mode, remote, shareId, sync, team, user}) =>
+  ({agentId, cwd, dryRun, noDevSkills, endpoint, mode, remote, shareId, sync, team, user}) =>
     withRuntimeEffect(config =>
       runCursorCloudBootstrap(cursorCloudRuntime(config, agentId, user), {
         cwd,
         dryRun,
+        noDevSkills,
         endpoint,
         mode,
         remote,
@@ -1604,22 +1604,9 @@ const cursorCloudBootstrap = Command.make(
     ),
 ).pipe(Command.withDescription('Idempotently prepare one writable Personal Cursor Cloud memory share'));
 
-const cursorCloudVerify = Command.make(
-  'verify',
-  {
-    ...cursorCloudBaseIdentityFlags,
-    cwd: requiredString('cwd', 'Absolute Cursor Cloud checkout path used for local code-graph inspection'),
-    endpoint: optionalString('endpoint', 'Managed remote Streamable HTTP MCP endpoint'),
-    json: boolean('json', 'Print a machine-readable verification receipt'),
-    mode: cursorCloudMode,
-    shareId: optionalString('share-id', 'Opaque managed remote memory share identifier'),
-    teams: repeatedString('team', 'Personal Git memory share; repeat to verify one MCP share set'),
-  },
-  ({agentId, cwd, endpoint, json, mode, shareId, teams, user}) =>
-    withRuntimeEffect(config =>
-      runCursorCloudVerify(cursorCloudRuntime(config, agentId, user), {cwd, endpoint, json, mode, shareId, teams}),
-    ),
-).pipe(Command.withDescription('Verify the Cursor Cloud runtime, share, and local graph checkout'));
+const cursorCloudStart = makeCursorCloudStartCommand(withRuntimeEffect);
+
+const cursorCloudVerify = makeCursorCloudVerifyCommand(withRuntimeEffect);
 
 const cursorCloudAttest = makeCursorCloudAttestCommand({boolean, requiredString}, options =>
   withRuntimeEffect(() => runCursorAttestationCommand(options)),
@@ -1627,7 +1614,13 @@ const cursorCloudAttest = makeCursorCloudAttestCommand({boolean, requiredString}
 
 const cursorCloud = Command.make('cursor').pipe(
   Command.withDescription('Configure Threadnote for Cursor Cloud Agents'),
-  Command.withSubcommands([cursorCloudConfig, cursorCloudBootstrap, cursorCloudVerify, cursorCloudAttest]),
+  Command.withSubcommands([
+    cursorCloudConfig,
+    cursorCloudBootstrap,
+    cursorCloudStart,
+    cursorCloudVerify,
+    cursorCloudAttest,
+  ]),
 );
 
 const cloud = Command.make('cloud').pipe(

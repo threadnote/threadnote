@@ -1,3 +1,4 @@
+import {composeWorkflowSetup, maintainPersonalWorkflows} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
@@ -126,7 +127,13 @@ const prepareCodexCloudGraph = Effect.fn('codexCloud.prepareGraph')(function* (c
 
 export const runCodexCloudBootstrap = Effect.fn('codexCloud.bootstrap')(function* (
   config: RuntimeConfig,
-  options: {readonly remote: string; readonly team?: string; readonly dryRun: boolean; readonly cwd?: string},
+  options: {
+    readonly remote: string;
+    readonly team?: string;
+    readonly dryRun: boolean;
+    readonly cwd?: string;
+    readonly noDevSkills?: boolean;
+  },
 ) {
   yield* assertCodexCloudIdentity(config);
   const cwd = yield* codexCloudGraphCwd(options.cwd);
@@ -140,26 +147,43 @@ export const runCodexCloudBootstrap = Effect.fn('codexCloud.bootstrap')(function
     yield* Console.log(`Would ${plan.action} Codex Cloud share "${team}"; selected shares: ${selected.join(', ')}.`);
     if (preview.output) yield* Console.log(preview.output);
     if (cwd !== undefined) yield* Console.log('Would prepare the checkout code graph without vector materialization.');
+    yield* composeWorkflowSetup(
+      config,
+      {agent: 'codex-cloud', profile: 'codex-cloud-personal'},
+      {apply: false, noDevSkills: options.noDevSkills, key: 'bootstrap:codex-personal'},
+      () => Effect.void,
+    );
     yield* Console.log('Dry run complete; no profile, artifacts, graph, Git share, or remote was changed.');
     return;
   }
-  yield* withSharedRepositoryLock(
+  yield* composeWorkflowSetup(
     config,
-    Effect.gen(function* () {
-      const current = yield* readCodexCloudProfile(config.agentContextHome);
-      const teams = normalizeCodexCloudShares([...(current?.teams ?? []), team]);
-      const currentPlan = planCursorCloudBootstrap(yield* readTeamsFile(config), options.remote, team, 'Codex Cloud');
-      if (currentPlan.action === 'initialize') {
-        yield* runShareInit(config, currentPlan.remote, {push: true, readOnly: false, setDefault: false, team});
-      } else {
-        yield* Console.log(`Codex Cloud share "${team}" is already configured read-write; reusing it.`);
-      }
-      yield* runShareSync(config, {push: true, team});
-      const ingest = yield* codexCloudShareIngestCheck(config, team);
-      if (ingest.status === 'fail') return yield* CodexCloudError.make({message: ingest.detail});
-      yield* installCodexCloudAgentIntegration(config, false);
-      yield* persistCodexCloudProfile(config, teams);
-    }),
+    {agent: 'codex-cloud', profile: 'codex-cloud-personal'},
+    {apply: true, noDevSkills: options.noDevSkills, key: 'bootstrap:codex-personal'},
+    () =>
+      withSharedRepositoryLock(
+        config,
+        Effect.gen(function* () {
+          const current = yield* readCodexCloudProfile(config.agentContextHome);
+          const teams = normalizeCodexCloudShares([...(current?.teams ?? []), team]);
+          const currentPlan = planCursorCloudBootstrap(
+            yield* readTeamsFile(config),
+            options.remote,
+            team,
+            'Codex Cloud',
+          );
+          if (currentPlan.action === 'initialize') {
+            yield* runShareInit(config, currentPlan.remote, {push: true, readOnly: false, setDefault: false, team});
+          } else {
+            yield* Console.log(`Codex Cloud share "${team}" is already configured read-write; reusing it.`);
+          }
+          yield* runShareSync(config, {push: true, team});
+          const ingest = yield* codexCloudShareIngestCheck(config, team);
+          if (ingest.status === 'fail') return yield* CodexCloudError.make({message: ingest.detail});
+          yield* installCodexCloudAgentIntegration(config, false);
+          yield* persistCodexCloudProfile(config, teams);
+        }),
+      ),
   );
   yield* prepareCodexCloudGraph(config, cwd);
   yield* Console.log(`Codex Cloud memory root: ${cursorCloudMemoryRoot(config.user, team)}/`);
@@ -267,6 +291,11 @@ export const runCodexCloudStart = Effect.fn('codexCloud.start')(function* (
   const profile = yield* requireCodexCloudProfile(config);
   yield* codexCloudMemoryScope(config);
   const cwd = yield* codexCloudGraphCwd(graphCwd);
+  const workflows = yield* maintainPersonalWorkflows(config, {agent: 'codex-cloud', profile: 'codex-cloud-personal'});
+  if (workflows.state === 'pending' || workflows.state === 'setup-needed')
+    yield* Console.error(
+      `Development workflows: ${workflows.state}. ${workflows.issues.map(issue => issue.message).join(' ')}`,
+    );
   const restored = yield* captureConsoleWithoutProgress(installCodexCloudAgentIntegration(config, false));
   if (restored.output) yield* Console.error(restored.output);
   const refreshed = yield* captureConsoleWithoutProgress(

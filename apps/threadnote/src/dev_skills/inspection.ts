@@ -42,11 +42,11 @@ export const verifyGeneration = Effect.fn('devSkills.verifyGeneration')(function
     if (hash(yield* fs.readFile(path.join(root, file))) !== manifest.hashes[file])
       return yield* fail('generation-conflict', `Immutable generation bytes changed: ${path.join(root, file)}`);
 });
-export const verifyHistoricalProjection = Effect.fn('devSkills.verifyHistoricalProjection')(function* (
+export const verifyReceiptProjection = Effect.fn('devSkills.verifyReceiptProjection')(function* (
   target: DevSkillsTarget,
   receipt: PhysicalReceipt,
 ) {
-  if (!hasHistoricalDevSkillsMembers(receipt.manifest) || !Object.keys(receipt.consumers).length) return;
+  if (!Object.keys(receipt.consumers).length) return;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = generationRoot(path, target.skillRoot, receipt.manifest.digest);
@@ -70,6 +70,8 @@ export const verifyHistoricalProjection = Effect.fn('devSkills.verifyHistoricalP
       'Historical entrypoint ownership differs from its verified rendering.',
     );
 });
+export const verifyHistoricalProjection = (target: DevSkillsTarget, receipt: PhysicalReceipt) =>
+  hasHistoricalDevSkillsMembers(receipt.manifest) ? verifyReceiptProjection(target, receipt) : Effect.void;
 export const inspectOwned = Effect.fn('devSkills.inspectOwned')(function* (
   target: DevSkillsTarget,
   receipt?: PhysicalReceipt,

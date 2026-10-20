@@ -136,6 +136,7 @@ export interface SeedOptions {
 }
 
 export interface McpInstallOptions {
+  readonly noDevSkills?: boolean;
   readonly apply?: boolean;
   readonly composerClientId?: string;
   readonly composerOAuthScopes?: readonly string[];

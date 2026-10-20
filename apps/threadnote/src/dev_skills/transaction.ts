@@ -34,6 +34,8 @@ interface Journal {
   readonly previewDigest: string;
   readonly generation: DevSkillsBundle | null;
   readonly changes: readonly FileChange[];
+  readonly enabled: boolean;
+  readonly createdBy?: string;
 }
 function parseBundle(value: unknown): DevSkillsBundle | null {
   if (value === null) return null;
@@ -117,7 +119,13 @@ function assertTransition(journal: Journal, path: Path.Path) {
       const newEntries = entries(change.after);
       requireValue(
         stableJson(others(oldEntries)) === stableJson(others(newEntries)) &&
-          stableJson(newEntries[id]) === stableJson({...consumer, state: generation ? 'enrolled' : 'removed'}),
+          stableJson(newEntries[id]) ===
+            stableJson({
+              ...consumer,
+              state: generation ? 'enrolled' : 'removed',
+              enabled: journal.enabled,
+              ...(journal.createdBy ? {createdBy: journal.createdBy} : {}),
+            }),
         'A transaction cannot rewrite foreign enrollment or omit its own tombstone.',
       );
     }
@@ -207,7 +215,23 @@ function parseJournal(value: unknown, path: Path.Path): Journal {
     new Set(changes.map(change => change.path)).size === changes.length,
     'Duplicate transaction destination.',
   );
-  const journal: Journal = {schemaVersion: 1, consumer, previewDigest: value.previewDigest, generation, changes};
+  requireValue(value.enabled === undefined || typeof value.enabled === 'boolean', 'Invalid transaction enablement.');
+  const enabled = value.enabled === undefined ? generation !== null : value.enabled;
+  requireValue(generation !== null || !enabled, 'Removed ownership cannot be enabled.');
+  requireValue(
+    value.createdBy === undefined ||
+      (generation !== null && typeof value.createdBy === 'string' && /^[a-f0-9]{64}$/u.test(value.createdBy)),
+    'Invalid setup ownership marker.',
+  );
+  const journal: Journal = {
+    schemaVersion: 1,
+    consumer,
+    previewDigest: value.previewDigest,
+    generation,
+    changes,
+    enabled,
+    ...(value.createdBy ? {createdBy: value.createdBy} : {}),
+  };
   assertTransition(journal, path);
   return journal;
 }
@@ -216,7 +240,12 @@ const assertJournalCoverage = Effect.fn('devSkills.assertJournalCoverage')(funct
   const path = yield* Path.Path;
   const {consumer, changes, generation} = journal;
   const id = consumerId(consumer);
-  const expected = {...consumer, state: generation ? 'enrolled' : 'removed'};
+  const expected = {
+    ...consumer,
+    state: generation ? 'enrolled' : 'removed',
+    enabled: journal.enabled,
+    ...(journal.createdBy ? {createdBy: journal.createdBy} : {}),
+  };
   for (const kind of ['home', 'runtime'] as const) {
     const file =
       kind === 'home' ? homeIndexPath(path, consumer.home) : runtimeIndexPath(path, consumer.installationRoot);
@@ -318,6 +347,8 @@ export const commitMutation = Effect.fn('devSkills.commitMutation')(function* (m
     previewDigest: mutation.plan.previewDigest,
     generation: mutation.generation,
     changes: mutation.changes,
+    enabled: mutation.enabled ?? mutation.generation !== null,
+    ...(mutation.createdBy ? {createdBy: mutation.createdBy} : {}),
   };
   const content = json(journal);
   if (Buffer.byteLength(content) > 8_000_000)
@@ -329,4 +360,11 @@ export const commitMutation = Effect.fn('devSkills.commitMutation')(function* (m
   yield* compareWrite(journalPath(path, journal.consumer.target.skillRoot), null, content);
   yield* executeJournal(journal, content);
   return true;
+});
+
+/** Read-only original-owner routing; validation is identical to actual recovery. */
+export const readTransactionConsumer = Effect.fn('devSkills.transactionConsumer')(function* (root: string) {
+  const path = yield* Path.Path;
+  const content = yield* readOptional(journalPath(path, root));
+  return content === null ? undefined : (yield* decode(content, value => parseJournal(value, path))).consumer;
 });

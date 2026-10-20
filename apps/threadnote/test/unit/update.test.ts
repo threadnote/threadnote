@@ -49,6 +49,14 @@ vi.mock('@threadnote/workspace/runtime-version', async importOriginal => {
   };
 });
 
+// This suite isolates archive, signature, launcher and migration orchestration.
+// Real workflow service/child boundaries are covered by dev-skills/update-refresh.test.ts.
+vi.mock('../../src/release/dev_skills_update.js', () => ({
+  prepareReleaseDevSkills: (_config: RuntimeConfig, releaseRoot: string, releaseVersion: string) =>
+    Effect.succeed({intentId: 'fixture-intent', release: {releaseRoot, releaseVersion}}),
+  refreshReleaseDevSkills: () => Effect.void,
+}));
+
 import {
   fetchLatestVersion,
   isUpdateTargetAllowed,
@@ -608,6 +616,7 @@ describe('standalone updater', () => {
         requestedChannel: 'latest',
         source: OFFICIAL_RELEASE_SOURCE,
         type: 'threadnote-update-check',
+        workflowCompatibility: 'unchecked',
         usedCache: false,
         version: 1,
       });

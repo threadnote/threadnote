@@ -46,6 +46,7 @@ export interface AutoUpdateSuccess {
   readonly fromVersion: string;
   readonly notification: SystemNotificationDelivery;
   readonly repairRequired: boolean;
+  readonly repairScope?: 'workflows';
   readonly toVersion: string;
 }
 
@@ -188,7 +189,12 @@ export const runAutoUpdateStatusCommand = Effect.fn('autoUpdate.statusCommand')(
       `Last update: v${status.lastSuccess.fromVersion} -> v${status.lastSuccess.toVersion} · ${status.lastSuccess.completedAt}`,
     );
     yield* Console.log(`System notification: ${status.lastSuccess.notification}`);
-    if (status.lastSuccess.repairRequired) yield* Console.log('Local setup repair still requires attention.');
+    if (status.lastSuccess.repairRequired)
+      yield* Console.log(
+        status.lastSuccess.repairScope === 'workflows'
+          ? 'Development workflow refresh requires attention. Run threadnote update to retry.'
+          : 'Local setup repair still requires attention.',
+      );
   } else {
     yield* Console.log('No automatic update has completed yet.');
   }
@@ -415,6 +421,9 @@ function runOwnedAutoUpdate(config: RuntimeConfig) {
         terminalAutoUpdateState(state, {
           lastCheckAt: yield* nowIso(),
           lastFailure: undefined,
+          ...(state.lastSuccess?.repairScope === 'workflows' && state.lastSuccess.toVersion === toVersion
+            ? {lastSuccess: {...state.lastSuccess, repairRequired: false, repairScope: undefined}}
+            : {}),
           policy: state.policy,
         }),
       );
@@ -423,12 +432,20 @@ function runOwnedAutoUpdate(config: RuntimeConfig) {
 
     if (toVersion !== fromVersion) {
       const repairRequired = Exit.isFailure(update);
+      const workflowOnly =
+        Exit.isFailure(update) &&
+        update.cause.reasons.length > 0 &&
+        update.cause.reasons.every(
+          reason =>
+            Cause.isFailReason(reason) && isJsonObject(reason.error) && reason.error._tag === 'DevSkillsUpdatePending',
+        );
       const completedAt = yield* nowIso();
       const pending = {
         completedAt,
         fromVersion,
         notification: 'unavailable' as const,
         repairRequired,
+        ...(workflowOnly ? {repairScope: 'workflows' as const} : {}),
         toVersion,
       } satisfies AutoUpdateSuccess;
       yield* writeAutoUpdateState(
@@ -450,7 +467,7 @@ function runOwnedAutoUpdate(config: RuntimeConfig) {
       );
       const notification = yield* sendSystemNotification({
         body: repairRequired
-          ? `Version ${toVersion} is active, but local setup repair needs attention. Run threadnote update --status.`
+          ? `Version ${toVersion} is active, but ${workflowOnly ? 'development workflow refresh' : 'local setup repair'} needs attention. Run threadnote update --status.`
           : `Updated from ${fromVersion}. New CLI invocations and the next MCP request will use version ${toVersion}.`,
         title: repairRequired ? 'Threadnote updated — action required' : `Threadnote updated to v${toVersion}`,
       });
@@ -624,8 +641,20 @@ function parseSuccess(value: unknown): AutoUpdateSuccess | undefined {
   const fromVersion = versionString(value.fromVersion);
   const toVersion = versionString(value.toVersion);
   const notification = notificationDelivery(value.notification);
-  return completedAt && fromVersion && toVersion && notification && typeof value.repairRequired === 'boolean'
-    ? {completedAt, fromVersion, notification, repairRequired: value.repairRequired, toVersion}
+  return completedAt &&
+    fromVersion &&
+    toVersion &&
+    notification &&
+    typeof value.repairRequired === 'boolean' &&
+    (value.repairScope === undefined || value.repairScope === 'workflows')
+    ? {
+        completedAt,
+        fromVersion,
+        notification,
+        repairRequired: value.repairRequired,
+        toVersion,
+        ...(value.repairScope === 'workflows' ? {repairScope: 'workflows' as const} : {}),
+      }
     : undefined;
 }
 

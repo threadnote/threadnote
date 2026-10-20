@@ -46,7 +46,16 @@ async function fixture(options: {runtimeCodexHome?: boolean} = {}) {
       },
       maxBuffer: 2 * 1024 * 1024,
     });
-  const run = (args: readonly string[], targetHome = home) => cli(['cloud', 'codex', ...args], targetHome);
+  const run = (args: readonly string[], targetHome = home) =>
+    cli(
+      [
+        'cloud',
+        'codex',
+        ...args,
+        ...(process.platform !== 'linux' && args[0] === 'bootstrap' ? ['--no-dev-skills'] : []),
+      ],
+      targetHome,
+    );
   const bootstrap = (targetHome = home, team = 'personal', url = remote) =>
     run(['bootstrap', '--remote', url, '--team', team], targetHome);
   return {root, home, userHome, codexHome, remote, otherRemote, run, bootstrap, cli};

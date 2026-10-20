@@ -2,13 +2,15 @@ import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {listDevSkillsTargets} from '../agent_integration/skill_targets.js';
 import type {DevSkillsAction, DevSkillsPlan, DevSkillsResult, DevSkillsSelector, DevSkillsStatus} from './contract.js';
+import {applyCapturedDevSkills} from './mutation.js';
 import {loadDevSkillsBundle} from './manifest.js';
-import {planMutation, selectDevSkillsTarget} from './plan.js';
+import {planMutation} from './plan.js';
 import {enrollmentContext, readReceipt} from './registry.js';
-import {fail} from './files.js';
-import {commitMutation, recoverTransaction} from './transaction.js';
-import {validateLease, withDevSkillsMutationLease, withPhysicalLock, type DevSkillsMutationLease} from './lease.js';
+import {withDevSkillsMutationLease, type DevSkillsMutationLease} from './lease.js';
 import {devSkillsReadiness} from './readiness.js';
+import {readDevSkillsRefresh as readRefresh} from './refresh_state.js';
+import {installedSummary} from './capabilities.js';
+export {readDevSkillsRuntimeCapabilities} from './capabilities.js';
 
 export {withDevSkillsMutationLease};
 export type {DevSkillsMutationLease};
@@ -48,6 +50,7 @@ export const statusDevSkills = Effect.fn('devSkills.status')(function* (
         scope: entry.target.scope,
         cwd: entry.target.cwd,
       }));
+  const refresh = yield* readRefresh(config).pipe(Effect.result);
   const targets: DevSkillsStatus[] = [];
   for (const selected of selectors) {
     const mutation = yield* planMutation(config, bundle, 'install', selected);
@@ -57,8 +60,30 @@ export const statusDevSkills = Effect.fn('devSkills.status')(function* (
       consumerId: mutation.plan.consumerId,
       installationState: mutation.plan.installationState,
       enrolled: context.homeIndex.targets[mutation.plan.consumerId]?.state === 'enrolled',
+      enrollmentState: context.homeIndex.targets[mutation.plan.consumerId]?.state ?? 'unregistered',
+      enabled: context.homeIndex.targets[mutation.plan.consumerId]?.enabled ?? false,
+      ...(receipt?.consumers[mutation.plan.consumerId] &&
+      !mutation.plan.issues.some(issue =>
+        ['generation-conflict', 'historical-ownership-conflict', 'incomplete'].includes(issue.code),
+      )
+        ? {installed: installedSummary(receipt.manifest)}
+        : {}),
       ...(receipt && Object.keys(receipt.consumers).length ? {installedDigest: receipt.manifest.digest} : {}),
-      issues: mutation.plan.issues.filter(issue => issue.code !== 'explicit-update-required'),
+      ...(refresh._tag === 'Success' &&
+      refresh.success?.targets.find(item => item.consumerId === mutation.plan.consumerId)
+        ? {lastRefresh: refresh.success.targets.find(item => item.consumerId === mutation.plan.consumerId)!.outcome}
+        : {}),
+      issues: [
+        ...mutation.plan.issues.filter(issue => issue.code !== 'explicit-update-required'),
+        ...(refresh._tag === 'Failure'
+          ? [
+              {
+                code: 'refresh-state-invalid',
+                message: 'Installation refresh status could not be read; no success is inferred.',
+              },
+            ]
+          : []),
+      ],
       consumers: mutation.plan.consumers,
       readiness: yield* devSkillsReadiness(
         config,
@@ -75,51 +100,8 @@ export const applyDevSkills = Effect.fn('devSkills.apply')(function* (
   selector: DevSkillsSelector,
   options: {readonly expectedDigest?: string; readonly lease?: DevSkillsMutationLease} = {},
 ) {
-  // Capture the complete release before acquiring mutation locks. Staging never reopens release files.
   const bundle = yield* loadDevSkillsBundle();
-  const initial = yield* planMutation(config, bundle, action, selector);
-  if (options.expectedDigest && initial.plan.previewDigest !== options.expectedDigest)
-    return yield* fail('stale-preview', 'Development skills changed since preview. Preview the operation again.');
-  if (!initial.plan.canApply && initial.plan.installationState !== 'recovery-needed')
-    return yield* fail('installation-conflict', initial.plan.issues.map(issue => issue.message).join(' '));
-  const apply = (lease: DevSkillsMutationLease) =>
-    Effect.gen(function* () {
-      const held = yield* validateLease(config, lease);
-      const target = yield* selectDevSkillsTarget(config, selector);
-      if (target.skillRoot !== initial.plan.target.skillRoot)
-        return yield* fail('stale-preview', 'The selected physical target changed. Preview again.');
-      return yield* withPhysicalLock(
-        target.skillRoot,
-        Effect.gen(function* () {
-          const locked = yield* planMutation(config, bundle, action, selector);
-          if (locked.consumer.installationRoot !== held.root)
-            return yield* fail('invalid-lease', 'Enrollment coordinator changed.');
-          if (options.expectedDigest && locked.plan.previewDigest !== options.expectedDigest)
-            return yield* fail(
-              'stale-preview',
-              'Development skills changed while acquiring the mutation lease. Preview again.',
-            );
-          const recovered = yield* recoverTransaction(locked.consumer);
-          const mutation = recovered ? yield* planMutation(config, bundle, action, selector) : locked;
-          if (!mutation.plan.canApply)
-            return yield* fail('installation-conflict', mutation.plan.issues.map(issue => issue.message).join(' '));
-          const applied = yield* commitMutation(mutation);
-          const receipt = (yield* readReceipt(target)).receipt;
-          return {
-            ...mutation.plan,
-            applied,
-            recovered,
-            retainedPaths: mutation.retainedPaths,
-            readiness: yield* devSkillsReadiness(
-              config,
-              target,
-              receipt && Object.keys(receipt.consumers).length ? receipt.manifest : undefined,
-            ),
-          } satisfies DevSkillsResult;
-        }),
-      );
-    });
-  return yield* options.lease ? apply(options.lease) : withDevSkillsMutationLease(config, apply);
+  return yield* applyCapturedDevSkills(config, bundle, action, selector, {...options, readiness: true});
 });
 export const removeOwnedDevSkills = Effect.fn('devSkills.removeOwned')(function* (
   config: RuntimeConfig,
@@ -145,3 +127,11 @@ export const removeOwnedDevSkills = Effect.fn('devSkills.removeOwned')(function*
   }
   return results;
 });
+export {ensureDevSkills, undoDevSkillsEnsure} from './composition.js';
+export {
+  previewDevSkillsRefresh,
+  prepareDevSkillsRefresh,
+  runDevSkillsRefresh,
+  readDevSkillsRefresh,
+} from './refresh.js';
+export type {DevSkillsRefreshCandidate} from './refresh.js';

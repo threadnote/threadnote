@@ -1,6 +1,13 @@
 import {Console, Effect} from 'effect';
 import {Command} from 'effect/cli';
-import {applyDevSkills, listDevSkills, previewDevSkills, statusDevSkills} from '../dev_skills/index.js';
+import {
+  applyDevSkills,
+  listDevSkills,
+  previewDevSkills,
+  readDevSkillsRuntimeCapabilities,
+  runDevSkillsRefresh,
+  statusDevSkills,
+} from '../dev_skills/index.js';
 import {
   DevSkillsError,
   type DevSkillsPlan,
@@ -23,6 +30,22 @@ const selectionFlags = () => ({
 });
 
 export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
+  const refresh = Command.make(
+    'refresh-enrolled',
+    {intent: requiredString('intent', 'Prepared update intent'), json: boolean('json', 'Print the refresh result')},
+    ({intent}) =>
+      withRuntime(config =>
+        runDevSkillsRefresh(config, intent).pipe(Effect.flatMap(result => Console.log(JSON.stringify(result)))),
+      ),
+  ).pipe(Command.withDescription('Resume the active release’s prepared workflow refresh'));
+  const capabilities = Command.make(
+    'runtime-capabilities',
+    {json: boolean('json', 'Print the runtime compatibility declaration')},
+    () =>
+      withRuntime(() =>
+        readDevSkillsRuntimeCapabilities().pipe(Effect.flatMap(result => Console.log(JSON.stringify(result)))),
+      ),
+  ).pipe(Command.withDescription('Report workflow compatibility for the Threadnote updater'));
   const list = Command.make(
     'list',
     {json: boolean('json', 'Print bundle and supported agent targets as JSON')},
@@ -69,7 +92,7 @@ export function makeDevSkillsCommand(withRuntime: CliRuntimeRunner) {
   );
   return Command.make('dev-skills').pipe(
     Command.withDescription('Install and manage Threadnote development workflows for your agent host'),
-    Command.withSubcommands([list, status, ...actions]),
+    Command.withSubcommands([list, status, ...actions, capabilities, refresh]),
   );
 }
 

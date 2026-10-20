@@ -81,9 +81,6 @@ describe('runtime development bundle manifest', () => {
       };
       const consumer = {home, installationRoot, target};
       const id = consumerId(consumer);
-      const enrollment = {...consumer, state: 'enrolled'};
-      const homeIndex = {schemaVersion: 1, home, installationRoot, targets: {[id]: enrollment}};
-      const runtimeIndex = {schemaVersion: 1, installationRoot, enrollments: {[id]: enrollment}};
       const receipt = {
         schemaVersion: 1,
         skillRoot,
@@ -93,8 +90,22 @@ describe('runtime development bundle manifest', () => {
         consumers: {[id]: consumer},
         entrypoints: Object.fromEntries(bundle.manifest.skills.map(skill => [`${skill.id}/SKILL.md`, 'owned content'])),
       };
-      expect(parseHomeIndex(JSON.parse(JSON.stringify(homeIndex)))).toEqual(homeIndex);
-      expect(parseRuntimeIndex(JSON.parse(JSON.stringify(runtimeIndex)))).toEqual(runtimeIndex);
+      for (const state of ['enrolled', 'removed'] as const) {
+        const enrollment = {...consumer, state};
+        const homeIndex = {schemaVersion: 1, home, installationRoot, targets: {[id]: enrollment}};
+        const runtimeIndex = {schemaVersion: 1, installationRoot, enrollments: {[id]: enrollment}};
+        const beforeHome = JSON.stringify(homeIndex);
+        const beforeRuntime = JSON.stringify(runtimeIndex);
+        const normalizedEnrollment = {...enrollment, enabled: state === 'enrolled'};
+        const expectedHome = {...homeIndex, schemaVersion: 2, targets: {[id]: normalizedEnrollment}};
+        const expectedRuntime = {...runtimeIndex, schemaVersion: 2, enrollments: {[id]: normalizedEnrollment}};
+        expect(parseHomeIndex(homeIndex)).toEqual(expectedHome);
+        expect(parseRuntimeIndex(runtimeIndex)).toEqual(expectedRuntime);
+        expect(JSON.stringify(homeIndex)).toBe(beforeHome);
+        expect(JSON.stringify(runtimeIndex)).toBe(beforeRuntime);
+        expect(parseHomeIndex(JSON.parse(JSON.stringify(expectedHome)))).toEqual(expectedHome);
+        expect(parseRuntimeIndex(JSON.parse(JSON.stringify(expectedRuntime)))).toEqual(expectedRuntime);
+      }
       expect(parseReceipt(JSON.parse(JSON.stringify(receipt)))).toEqual(receipt);
     }).pipe(provideTestLayer(devSkillsTestLayer)),
   );
