@@ -270,12 +270,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15, macos-15-intel, windows-latest]
+        include:
+          - {os: ubuntu-latest, target: linux-x64}
+          - {os: ubuntu-24.04-arm, target: linux-arm64}
+          - {os: macos-15, target: darwin-arm64}
+          - {os: macos-15-intel, target: darwin-x64}
+          - {os: windows-latest, target: windows-x64}
+          - {os: windows-11-arm, target: windows-arm64}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - name: Linux workflow prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: macOS workflow prerequisites
+        if: runner.os == 'macOS'
+        run: command -v rg || brew install ripgrep
+      - name: Windows workflow prerequisites
+        if: runner.os == 'Windows'
+        run: choco install ripgrep --no-progress --yes
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -286,6 +307,22 @@ jobs:
       - run: bun run test:smoke:self-contained
       - name: Installed release E2E
         run: bun run test:e2e:local-bins
+      - name: Archive the native release
+        run: bun run archive:release
+        env:
+          THREADNOTE_RELEASE_TARGET: ${{ matrix.target }}
+      - name: Extracted release and installed workflow lifecycle
+        run: bun --bun vitest run apps/threadnote/test/dev-skills/release-artifact.test.ts
+        env:
+          THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ matrix.target }}.tar.gz
+          THREADNOTE_TEST_PYTHON: python
+      - name: Preserve bounded release evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-skills-release-${{ matrix.target }}
+          path: .context/release-artifact/
+          if-no-files-found: ignore
 
   test:
     name: Unit and integration tests

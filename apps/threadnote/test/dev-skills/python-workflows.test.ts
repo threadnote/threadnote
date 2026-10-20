@@ -9,6 +9,7 @@ const payloads = [
   'config/agent-skills/dev-plan',
   'config/agent-skills/dev-cycle',
   'config/agent-skills/watch-pr',
+  'apps/threadnote/test/dev-skills/python/product_skills_fixture.py',
 ];
 const suites = [
   'apps/threadnote/test/dev-skills/python/dev-spec/test_dev_spec.py',
@@ -19,6 +20,7 @@ const suites = [
   'apps/threadnote/test/dev-skills/python/test_portability.py',
   'apps/threadnote/test/dev-skills/python/test_workflow_transport.py',
   'apps/threadnote/test/dev-skills/python/test_personal_cloud_workflow.py',
+  'apps/threadnote/test/dev-skills/python/test_product_skills_fixture.py',
 ];
 
 describe('bundled development workflow Python contracts', () => {

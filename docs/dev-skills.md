@@ -30,6 +30,14 @@ Use `--scope project --cwd /path/to/repository` for a host that declares project
 
 Installation uses the bundle in the current Threadnote release and works offline without a sharing team. Repeating installation for the same generation is a no-op. `threadnote update` refreshes enabled workflow installations with the new release. Use `dev-skills update` to refresh one target from the currently installed payload without downloading a separate skill release.
 
+Restart or reload your agent host after installation or an update, then open its skill picker. A running workflow keeps its original helpers until that run finishes; reloading the host makes the new generation available for new tasks.
+
+## Manager
+
+Run `threadnote manage` and open **Development workflows**. Choose the host/profile and scope; project scopes require an exact registered project or an existing installation. Review the destination, installed generation, enrollment and readiness before choosing **Preview install**, **Preview update** or **Preview remove**.
+
+The preview lists the file changes and shared consumers. Confirm that preview to apply it. Changing the target or changing files on disk invalidates the preview; inspect the new state and preview again. Canceling a preview changes no workflow files. Installation can succeed while prerequisites remain missing, and the page reports those separately.
+
 ## Readiness
 
 Installation status and workflow readiness are separate. Planning requires Python 3.10 or newer, Git, ripgrep and the host's core Threadnote integration. PR operations also require GitHub CLI and working repository credentials. Status reports missing prerequisites; installing workflows does not silently configure MCP, hooks or agent instructions.
@@ -56,6 +64,8 @@ Cloud spec and plan drafts stay private to the task. They may be lost when an ep
 Each host target has a recorded owner and a complete copied helper generation. Shared targets list every consumer affected by an update. Existing runs retain their original helper generation; new invocations use the newly selected generation. Old generations are retained.
 
 Manual and automatic Threadnote updates refresh recorded targets across data homes. Workflow refresh runs independently of optional local integration repair and post-update migration prompts. An edited or inaccessible target remains pending while other targets can finish. Status distinguishes the active Threadnote version from each workflow target's installed generation and last refresh result. Resolve the reported conflict and run `threadnote update` again, even when the active version is already current.
+
+The first public release with default workflow installation also includes the refresh stage. An updater from before this feature cannot run code it does not contain. If an unpublished development installation crosses that first upgrade with both legacy post-update actions disabled, run the newly active `threadnote update` again to refresh its workflows. In a personal cloud task, the profile's start command can also restore its existing enabled enrollment.
 
 `threadnote update --check` and `--dry-run` do not write homes, caches, locks or refresh intents. Candidate workflow compatibility remains unchecked until the verified release is available during apply. Known incompatible runtime replacements are rejected before activation; inaccessible ownership remains explicitly unverified and pending.
 

@@ -2,8 +2,9 @@
 """Behavioral invariants and isolated native checks for the three-skill handoff."""
 import sys
 from pathlib import Path
-PRODUCT_SKILLS = Path(__file__).resolve().parents[6] / "config/agent-skills"
-sys.path[:0] = [str(PRODUCT_SKILLS / skill / "scripts") for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+PRODUCT_SKILLS = configure_product_skills(__file__, 6)
 import copy
 import hashlib
 import json
@@ -26,6 +27,8 @@ sys.path[:0] = [str(PLAN), str(CYCLE)]
 import dev_plan as dp
 import workflow
 import phase_state as ps
+
+assert_product_provenance(PRODUCT_SKILLS, "dev-spec-imports")
 
 
 class Backend:
@@ -94,6 +97,7 @@ class PlanClient(SpecClient):
 
 class Specs(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(assert_product_provenance, PRODUCT_SKILLS, self.id())
         self.tmp = tempfile.TemporaryDirectory(prefix="dev-spec-test-")
         self.directory = Path(self.tmp.name)
         self.repo = self.directory / "repo"

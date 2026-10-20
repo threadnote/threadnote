@@ -789,6 +789,9 @@ export const staticTargets = [
     lane: 'release_matrix',
     dependsOn: ['//:release_check', '//:threadnote_build'],
     inputs: [
+      ...filesBelow('apps/threadnote/test/dev-skills').filter(
+        path => !path.includes('/__pycache__/') && !/\.py[co]$/u.test(path),
+      ),
       ...filesBelow('apps/threadnote/src'),
       ...filesBelow('packages').filter(path => path.includes('/src/')),
       ...filesBelow('assets'),

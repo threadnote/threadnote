@@ -18,9 +18,8 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-ROOT = Path(__file__).resolve().parents[5]
-SKILLS = ROOT / "config/agent-skills"
-sys.path[:0] = [str(SKILLS / name / "scripts") for name in ("dev-spec", "dev-plan", "dev-cycle")]
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+SKILLS = configure_product_skills(__file__, 5)
 import cloud_closeout
 import dev_plan
 import dev_spec
@@ -34,12 +33,14 @@ fixture_spec = importlib.util.spec_from_file_location(
     "personal_cloud_spec_builders", Path(__file__).parent / "dev-spec/test_dev_spec.py")
 fixtures = importlib.util.module_from_spec(fixture_spec)
 fixture_spec.loader.exec_module(fixtures)
+assert_product_provenance(SKILLS, "personal-cloud-imports")
 
 
 @unittest.skipUnless(os.environ.get("DEV_WORKFLOW_CLOUD_NATIVE") == "1",
                      "Opt-in actual personal-cloud CLI/Git lifecycle")
 class PersonalCloudNative(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(assert_product_provenance, SKILLS, self.id())
         self.assertIsNotNone(shutil.which("threadnote"), "Place the intended native/source CLI on PATH")
         self.assertIsNotNone(shutil.which("git"), "Native fixture requires Git")
         self.assertIsNotNone(shutil.which("rg"), "Workflow inspection requires ripgrep")
@@ -52,7 +53,8 @@ class PersonalCloudNative(unittest.TestCase):
         # An allowlist prevents ambient credentials, cloud identities, Git settings,
         # model configuration, or user data roots from entering the child processes.
         environment = {key: os.environ[key] for key in
-                       ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC")
+                       ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC",
+                        "DEV_WORKFLOW_INSTALLED_SKILLS", "DEV_WORKFLOW_PROVENANCE_DIR")
                        if key in os.environ}
         environment.update({
             "HOME": str(self.user_home), "USERPROFILE": str(self.user_home),
@@ -209,6 +211,21 @@ class PersonalCloudNative(unittest.TestCase):
 
         cloud_closeout.approve(cycle, directory, phase_state, self.fixture.pc, preview["approvalDigest"],
                                "approve", "Isolated fixture owner approves the exact digest and temporary personal Git destination.")
+        # The configured destination itself is unavailable, independently of Git's
+        # pre-receive policy. Preserve the exact approval/binding and both drafts.
+        unavailable = self.remote.with_name("personal-memory-unavailable.git")
+        self.remote.rename(unavailable)
+        try:
+            with self.assertRaises(wt.WorkflowError) as offline:
+                self.fixture.finish(cycle, directory)
+            self.assertEqual(offline.exception.code, "pending-publication")
+            self.assert_drafts_active(roots, directory)
+            offline_journal = self.publication_journal(binding["bindingId"])
+            self.assertEqual(offline_journal["approvalDigest"], preview["approvalDigest"])
+            self.assertEqual(wt.read_json(context_path)["binding"], binding)
+        finally:
+            unavailable.rename(self.remote)
+        self.assertEqual(self.remote_git("rev-parse", "main"), remote_before)
         hook = self.remote / "hooks/pre-receive"
         hook.write_text("#!/bin/sh\necho 'native fixture push rejected' >&2\nexit 1\n", encoding="utf-8")
         hook.chmod(0o755)
@@ -222,6 +239,7 @@ class PersonalCloudNative(unittest.TestCase):
         self.assert_drafts_active(roots, directory)
         self.assertEqual(self.remote_git("rev-parse", "main"), remote_before)
         failed_journal = self.publication_journal(binding["bindingId"])
+        self.assertEqual(failed_journal["intent"], offline_journal["intent"])
         self.assertEqual(failed_journal["approvalDigest"], preview["approvalDigest"])
         self.assertTrue(any(item.get("committed") for item in failed_journal["progress"].values()),
                         "The rejection must exercise a committed-but-unpushed native publication")
