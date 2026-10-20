@@ -38,6 +38,7 @@ function nativeLayer(output: unknown, capture: (request: LocalGenerationRequest)
   return Layer.mergeAll(
     FileSystem.layerNoop({}),
     Path.layer,
+    TestSystemInfoLayer,
     LocalModelCatalog.layer([manifest]),
     Layer.succeed(LocalModelStore, {
       install: unexpected,

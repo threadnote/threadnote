@@ -8,11 +8,13 @@ import type {RuntimeUpdates} from '../../src/update_contracts.js';
 let root: Root;
 let state: RuntimeUpdates;
 let calls: {url: string; body?: Record<string, unknown>}[];
+let setupCalls: {url: string; body?: Record<string, unknown>}[];
 const onChanged = vi.fn();
 beforeEach(() => {
   (globalThis as typeof globalThis & {IS_REACT_ACT_ENVIRONMENT: boolean}).IS_REACT_ACT_ENVIRONMENT = true;
   vi.useFakeTimers();
   calls = [];
+  setupCalls = [];
   state = {
     installedVersion: '5.1.0',
     runningVersion: '5.1.0',
@@ -31,6 +33,24 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url: string, init: RequestInit) => {
       const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      if (url === '/api/models/setup') {
+        setupCalls.push({url, body});
+        return new Response(
+          JSON.stringify({
+            version: 1,
+            intentEpoch: 0,
+            modelId: 'gemma-fixture',
+            totalBytes: 4_590_807_392,
+            policy: 'automatic',
+            phase: 'not-requested',
+            bytes: 0,
+            attempts: 0,
+            artifactReady: false,
+            effectiveDefault: false,
+            environmentOff: false,
+          }),
+        );
+      }
       calls.push({url, body});
       if (body?.action === 'policy') state = {...state, policy: body.policy as 'automatic' | 'notify'};
       if (body?.action === 'update') state = {...state, job: {status: 'running', message: 'Installing…'}};
@@ -60,13 +80,14 @@ it('shows both release notes and persists an explicit automatic-update choice', 
   await render();
   expect(document.body.textContent).toContain('Existing capability');
   expect(document.body.textContent).toContain('New capability');
-  const toggle = document.querySelector('[role=switch]') as HTMLButtonElement;
+  const toggle = document.querySelector('[role=switch][aria-label="Automatic updates"]') as HTMLButtonElement;
   expect(toggle.getAttribute('aria-checked')).toBe('true');
   await act(async () => toggle.click());
   expect(toggle.getAttribute('aria-checked')).toBe('false');
   expect(calls[1]?.body).toEqual({action: 'policy', policy: 'notify', confirm: true});
   await act(async () => button('Check for updates').click());
   expect(calls[2]?.body?.action).toBe('check');
+  expect(setupCalls).toEqual([{url: '/api/models/setup', body: undefined}]);
 });
 it('polls local job status until completion, then shows restart guidance and stops polling', async () => {
   await render();
@@ -105,7 +126,9 @@ it('exposes check failures without a false up-to-date badge and disables managed
   expect(document.body.textContent).not.toContain('Up to date');
   expect(button('Check for updates').disabled).toBe(false);
   expect(button('Update Threadnote').disabled).toBe(true);
-  expect((document.querySelector('[role=switch]') as HTMLButtonElement).disabled).toBe(true);
+  expect((document.querySelector('[role=switch][aria-label="Automatic updates"]') as HTMLButtonElement).disabled).toBe(
+    true,
+  );
 });
 it('renders release-note Markdown without executing embedded HTML', async () => {
   state = {

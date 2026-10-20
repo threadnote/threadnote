@@ -42,7 +42,28 @@ it.each([true, false])('offers local generation with actionable model choices (i
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
   const catalogs: string[] = [];
   vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
-    const agent = new URL(String(input), 'http://localhost').searchParams.get('agent')!;
+    const url = new URL(String(input), 'http://localhost');
+    if (url.pathname === '/api/models/setup')
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            version: 1,
+            modelId: 'gemma-4-e4b-it-q4',
+            intentEpoch: 0,
+            totalBytes: 4_590_807_392,
+            policy: 'off',
+            phase: 'off',
+            bytes: 0,
+            attempts: 0,
+            artifactReady: false,
+            effectiveDefault: false,
+            environmentOff: false,
+          }),
+          {headers: {'content-type': 'application/json'}},
+        ),
+      );
+    if (url.pathname !== '/api/consolidation-models') throw new Error(`Unexpected request: ${url.pathname}`);
+    const agent = url.searchParams.get('agent')!;
     catalogs.push(agent);
     return Promise.resolve(
       new Response(

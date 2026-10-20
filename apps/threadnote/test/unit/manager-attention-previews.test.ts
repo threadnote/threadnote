@@ -4,7 +4,7 @@ import {describe, expect, vi} from 'vitest';
 import {managerContextHealthRecordPreviews} from '@threadnote/threadnote/manager/attention';
 import type {ManagerContextHealthResponseV1} from '@threadnote/manager/attention/contracts';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
-import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 
 const evidence = vi.hoisted(() => ({calls: 0}));
 vi.mock('@threadnote/context/citation_validation', async importOriginal => {
@@ -70,6 +70,9 @@ describe('Manager Context Health list previews', () => {
       expect(evidence.calls).toBe(0);
       expect(previews).toEqual([
         {
+          contentHash: new Bun.CryptoHasher('sha256')
+            .update(canonicalMemoryDocumentContent(record.content))
+            .digest('hex'),
           uri,
           title: 'Synthetic heading',
           excerpt: 'Supporting statement.',

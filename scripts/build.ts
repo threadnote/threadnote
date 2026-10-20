@@ -6,6 +6,7 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {javascriptStringLiteral, optionalNativePackageFallbackModule} from './effect/javascript.js';
 import {isDevelopmentBuildVersion} from './development-runtime.js';
+import {sha256Hex} from '@threadnote/platform/digest';
 
 interface PackageManifest {
   readonly dependencies?: Readonly<Record<string, string>>;
@@ -52,6 +53,7 @@ const build = Effect.gen(function* () {
   assertNativeTargetMatchesHost(target);
   const executableName = target.includes('windows') ? 'threadnote.exe' : 'threadnote';
   const executablePath = path.join(outputRoot, executableName);
+  const devSkills = yield* buildDevSkillsManifest(root, version);
 
   yield* fs.makeDirectory(outputRoot, {recursive: true});
   for (const directory of FORBIDDEN_RELEASE_DIRECTORIES) {
@@ -61,8 +63,19 @@ const build = Effect.gen(function* () {
     }
   }
   for (const directory of RELEASE_DIRECTORIES) {
+    if (directory === 'config' && (yield* fs.exists(path.join(outputRoot, directory)))) {
+      yield* fs.remove(path.join(outputRoot, directory), {recursive: true});
+    }
     yield* fs.copy(path.join(root, directory), path.join(outputRoot, directory), {overwrite: true});
   }
+  const stagedDevSkills = yield* buildDevSkillsManifest(outputRoot, version);
+  if (stagedDevSkills.digest !== devSkills.digest) {
+    return yield* ScriptError.make({message: 'Development workflows changed while the release was staged.'});
+  }
+  yield* fs.writeFileString(
+    path.join(outputRoot, 'config', 'dev-skills.json'),
+    `${JSON.stringify(devSkills, null, 2)}\n`,
+  );
   yield* fs.copy(path.join(root, 'packages', 'manager', 'static'), path.join(outputRoot, 'manager'), {
     overwrite: true,
   });
@@ -192,6 +205,7 @@ const build = Effect.gen(function* () {
         },
         codeSignature: target.includes('windows') ? 'unsigned' : target.includes('darwin') ? 'developer-id' : 'none',
         executable: executableName,
+        devSkills: {digest: devSkills.digest, manifest: 'config/dev-skills.json', protocol: devSkills.workflowProtocol},
         nativeRuntime: `runtime/${NATIVE_RUNTIME_PACKAGE}.js`,
         nativeRuntimePackage: nativePackage,
         runtime: `bun-${Bun.version}`,
@@ -357,4 +371,120 @@ function nativePackageForTarget(target: Bun.Build.CompileTarget): string {
   throw ScriptError.make({message: `No prebuilt native local-AI package is mapped for ${target}.`});
 }
 
-BunRuntime.runMain(provideScriptLayer(build, BunServices.layer));
+interface DevSkillMember {
+  readonly id: string;
+  readonly role: 'primary' | 'support';
+  readonly files: readonly string[];
+}
+
+/** A single portable relative payload path, never a destination supplied by a caller. */
+export function validDevSkillPath(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[A-Za-z0-9_./-]+$/u.test(value) &&
+    value
+      .split('/')
+      .every(
+        part => part !== '' && !part.endsWith('.') && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(part),
+      ) &&
+    !value.split('/').some(part => ['__pycache__', '.DS_Store', '.context', '.git'].includes(part)) &&
+    !value.endsWith('.pyc')
+  );
+}
+
+/** Validate the exact release closure and bind its content to this runtime release. */
+export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(function* (root: string, version: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const canonicalRoot = yield* fs.realPath(root);
+  const manifestPath = path.join(canonicalRoot, 'config', 'dev-skills.json');
+  if ((yield* fs.realPath(manifestPath)) !== manifestPath) {
+    return yield* ScriptError.make({message: 'Development bundle manifest symlinks are forbidden.'});
+  }
+  const value: unknown = yield* fs.readFileString(manifestPath).pipe(
+    Effect.flatMap(content =>
+      Effect.try({
+        try: () => JSON.parse(content) as unknown,
+        catch: cause => ScriptError.make({message: 'Invalid development workflow manifest.', cause}),
+      }),
+    ),
+  );
+  if (
+    !isRecord(value) ||
+    value.schemaVersion !== 1 ||
+    value.workflowProtocol !== 1 ||
+    value.stateSchema !== 1 ||
+    typeof value.minimumRuntime !== 'string' ||
+    !EXACT_PACKAGE_VERSION.test(value.minimumRuntime) ||
+    !Array.isArray(value.skills)
+  ) {
+    return yield* ScriptError.make({message: 'Unsupported development workflow manifest contract.'});
+  }
+  const members: DevSkillMember[] = [];
+  for (const skill of value.skills) {
+    if (
+      !isRecord(skill) ||
+      typeof skill.id !== 'string' ||
+      !/^[a-z][a-z-]+$/u.test(skill.id) ||
+      (skill.role !== 'primary' && skill.role !== 'support') ||
+      !Array.isArray(skill.files) ||
+      !skill.files.every(validDevSkillPath) ||
+      new Set(skill.files.map(file => file.toLowerCase())).size !== skill.files.length ||
+      !skill.files.includes('SKILL.md')
+    ) {
+      return yield* ScriptError.make({message: 'Invalid development skill member or escaping payload path.'});
+    }
+    members.push({id: skill.id, role: skill.role, files: [...skill.files].sort()});
+  }
+  members.sort((left, right) => left.id.localeCompare(right.id));
+  if (
+    members.map(member => member.id).join(',') !== 'dev-cycle,dev-plan,dev-spec,watch-pr' ||
+    members.some(member => member.role !== (member.id === 'watch-pr' ? 'support' : 'primary'))
+  ) {
+    return yield* ScriptError.make({
+      message: 'The development bundle must contain all three workflows and watch-pr exactly once.',
+    });
+  }
+  const files: Record<string, string> = {};
+  for (const member of members) {
+    const directory = path.join(canonicalRoot, 'config', 'agent-skills', member.id);
+    const pending = [''];
+    const discovered: string[] = [];
+    while (pending.length > 0) {
+      const relative = pending.pop()!;
+      const absolute = path.join(directory, relative);
+      if ((yield* fs.realPath(absolute)) !== absolute) {
+        return yield* ScriptError.make({
+          message: `Development bundle symlinks are forbidden: ${member.id}/${relative}`,
+        });
+      }
+      const stat = yield* fs.stat(absolute);
+      if (stat.type === 'Directory') {
+        for (const child of yield* fs.readDirectory(absolute)) pending.push(relative ? `${relative}/${child}` : child);
+      } else if (stat.type === 'File' && validDevSkillPath(relative)) {
+        discovered.push(relative);
+      } else {
+        return yield* ScriptError.make({message: `Invalid development bundle file: ${member.id}/${relative}`});
+      }
+    }
+    if (JSON.stringify(discovered.sort()) !== JSON.stringify(member.files)) {
+      return yield* ScriptError.make({message: `Development bundle file inventory differs: ${member.id}`});
+    }
+    for (const relative of member.files) {
+      files[`${member.id}/${relative}`] = yield* sha256Hex(yield* fs.readFile(path.join(directory, relative)));
+    }
+  }
+  const manifest = {
+    schemaVersion: 1 as const,
+    workflowProtocol: 1 as const,
+    stateSchema: 1 as const,
+    minimumRuntime: value.minimumRuntime,
+    releaseVersion: version,
+    prerequisites: {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']},
+    skills: members,
+    hashes: files,
+  };
+  return {...manifest, digest: yield* sha256Hex(JSON.stringify(manifest))};
+});
+
+if (import.meta.main) BunRuntime.runMain(provideScriptLayer(build, BunServices.layer));

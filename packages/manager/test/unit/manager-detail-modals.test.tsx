@@ -345,6 +345,13 @@ it('distinguishes a citation target from its existing source memory', async () =
       {...base}
       repairsAvailable={true}
       onOpenLibrary={onOpenLibrary}
+      memoryPreview={{
+        code: [],
+        excerpt: 'Keep `ownership` explicit.\n  Preserve the source claim.',
+        kind: 'durable',
+        title: 'Runtime boundaries',
+        uri: sourceUri,
+      }}
       finding={{
         id: 'finding-1',
         category: 'citation-changed',
@@ -359,6 +366,10 @@ it('distinguishes a citation target from its existing source memory', async () =
   );
   expect(document.body.textContent).toContain('Preview a recapture');
   expect(document.body.textContent).toContain('Stored code reference');
+  expect(document.querySelector('.memory-excerpt blockquote')?.textContent).toBe(
+    'Keep `ownership` explicit.\n  Preserve the source claim.',
+  );
+  expect(document.querySelector('dialog > footer button.primary')?.textContent).toContain('Preview repair');
   expect([...document.querySelectorAll('button')].filter(item => item.textContent?.includes('Library'))).toHaveLength(
     1,
   );
@@ -373,6 +384,7 @@ it('distinguishes a citation target from its existing source memory', async () =
   expect(document.body.textContent).toContain(replacement.sourceCommit);
   expect(document.body.textContent).toContain('HealthDetail');
   expect(document.body.textContent).toContain('206:1–321:2');
+  expect(document.querySelector('dialog > footer button.primary')?.textContent).toContain('Recapture citation');
 });
 it('reads the canonical handoff only on opening its dialog', async () => {
   fetchMock.mockResolvedValue(response({content: '# Full handoff\nAll next steps.'}));

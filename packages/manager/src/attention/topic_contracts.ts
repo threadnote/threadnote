@@ -18,6 +18,16 @@ export interface ManagerTopicReviewRecoveryV1 {
 }
 export type ManagerTopicReviewResponseV1 = ManagerTopicReviewV1 | ManagerTopicReviewRecoveryV1;
 
+/** The exact source observation accepted by a server-confirmed completed write. */
+export interface ManagerTopicReviewAppliedV1 {
+  readonly project: string;
+  readonly caseId?: string;
+  readonly evidenceRevision: string;
+  readonly targetUri?: string;
+  readonly targetHash?: string;
+  readonly resolvedCitationIds?: readonly string[];
+}
+
 export type ManagerTopicReviewActionV1 =
   | {
       readonly action: 'capture';
@@ -78,6 +88,8 @@ export interface ManagerTopicReviewV1 {
   readonly targetHash: string;
   readonly acceptedBody: string;
   readonly observationRevision: string;
+  /** Old accepted citation slots refreshed by this exact written approval. */
+  readonly resolvedCitationIds?: readonly string[];
   readonly coverage: 'declared-only';
   readonly paragraphCoverage?: TopicMaintenanceParagraphCoverageV1;
   readonly generation: {

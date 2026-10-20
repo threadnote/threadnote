@@ -22,6 +22,7 @@ import {
 
 const executableName = process.execPath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase();
 const arguments_ = process.argv.slice(2);
+const isModelSetupWorker = arguments_[0] === 'model-setup-worker';
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
 const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
@@ -88,8 +89,9 @@ if (
   );
   runSignalTransparentMain(nativeWorkerProgram, {disableErrorReporting: true});
 } else {
-  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> =
-    isIntegrationSyncWorker
+  const selectedProgram: Effect.Effect<void, unknown, ChildEnvironmentPolicy | RuntimeEntrypoint> = isModelSetupWorker
+    ? await modelSetupWorkerProgram(arguments_.slice(1))
+    : isIntegrationSyncWorker
       ? await integrationSyncWorkerProgram(arguments_.slice(1))
       : isRemoteMemoryService
         ? await remoteMemoryServiceProgram()
@@ -118,6 +120,7 @@ if (
 
   BunRuntime.runMain(program, {
     disableErrorReporting:
+      isModelSetupWorker ||
       isLocalModelWorker ||
       isIntegrationSyncWorker ||
       isCodeGraphParserWorker ||
@@ -126,6 +129,16 @@ if (
       isOAuthUserRegistryCredentialHelper ||
       (!isMcpServer && !isMcpBroker),
   });
+}
+
+async function modelSetupWorkerProgram(arguments_: readonly string[]) {
+  const [setup, runtime] = await Promise.all([import('./models/setup.js'), import('./effect/runtime.js')]);
+  const parsed = setup.parseModelSetupWorkerArguments(arguments_);
+  return parsed === undefined
+    ? Effect.void
+    : setup
+        .runModelSetupWorker(parsed.home, parsed.intentEpoch, parsed.nonce)
+        .pipe(Effect.provide(runtime.ModelSetupWorkerLayer));
 }
 
 async function oauthM2MGraphCredentialHelperProgram(arguments_: readonly string[]) {
@@ -566,6 +579,12 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     return Effect.scoped(withCliOutputConsole(withPilotDiagnostics(cliEffect(arguments_)))).pipe(
       Effect.provide(runtime.ApplicationLayer),
     );
+  }
+  const {isModelSetupCommand} = await import('./models/setup.js');
+  if (isModelSetupCommand(arguments_) || invocation.operation === 'uninstall') {
+    return processLease
+      .withStandaloneProcessLease(withCliOutputConsole(cliEffect(arguments_)))
+      .pipe(Effect.provide(runtime.ApplicationLayer));
   }
   const cliOperation = invocation.operation;
   const processRole = cliOperation === 'manage' ? 'manager' : 'cli';

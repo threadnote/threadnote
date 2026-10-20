@@ -1,5 +1,6 @@
+import {stopModelSetup} from '../models/setup.js';
 import {Console, Effect, Predicate, Schema} from 'effect';
-import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
+import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {runModelInstall, runModelSelect} from '../models/commands.js';
 import {resolveSelectedLocalModel, type SelectedLocalModel} from '@threadnote/inference/models/inference';
@@ -117,6 +118,7 @@ export const runLocalAiDisable = Effect.fn('localAi.compat.disable')(function* (
     yield* Console.log('Would clear the selected generation model; installed GGUF files would remain.');
     return;
   }
+  yield* stopModelSetup(config.agentContextHome);
   yield* clearLocalModelSelection(config.agentContextHome, 'generation');
   yield* Console.log('Cleared the selected generation model; installed GGUF files were preserved.');
 });
@@ -172,19 +174,22 @@ export const runLocalAiUninstall = Effect.fn('localAi.compat.uninstall')(functio
   config: RuntimeConfig,
   options: LocalAiUninstallOptions,
 ) {
+  if (!options.dryRun) yield* stopModelSetup(config.agentContextHome);
   const selected = yield* resolveSelectedLocalModel(config.agentContextHome, 'generation');
   if (options.dryRun) {
     yield* Console.log(
-      options.eraseModel && selected
-        ? `Would clear generation selection and remove ${selected.manifest.id}.`
+      options.eraseModel
+        ? `Would clear generation selection and remove ${selected?.manifest.id ?? CORE_GENERATION_MODEL_ID}.`
         : 'Would clear generation selection and preserve installed GGUF files.',
     );
     return;
   }
   yield* clearLocalModelSelection(config.agentContextHome, 'generation');
-  if (options.eraseModel && selected) {
+  if (options.eraseModel) {
     const store = yield* LocalModelStore;
-    yield* store.remove(config.agentContextHome, selected.manifest);
+    const catalog = yield* LocalModelCatalog;
+    const manifest = selected?.manifest ?? (yield* catalog.get(CORE_GENERATION_MODEL_ID));
+    yield* store.remove(config.agentContextHome, manifest);
   }
   yield* Console.log('Removed deprecated local-ai configuration state.');
 });

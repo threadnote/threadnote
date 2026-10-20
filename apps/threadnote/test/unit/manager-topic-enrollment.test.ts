@@ -22,6 +22,17 @@ const config = {
   agentId: 'threadnote',
 } as RuntimeConfig;
 const input = {paragraphs: [{role: 'descriptive', support: 'direct', citationIds: ['tnob_test']}]};
+const inspection = {
+  status: 'not-enrolled',
+  sourceKind: 'obsidian',
+  targetUri: uri,
+  project: 'notes',
+  contentHash: hash,
+  body: 'First claim.\n\nSecond claim.',
+  originCitationId: 'tnob_test',
+  originEvidence: {relativePath: 'Decision.md', pinId: 'PRIVATE_PIN'},
+  citations: [],
+};
 const call = (method: string, body: Record<string, unknown> = {}) =>
   handleManagerAttentionAction({
     config,
@@ -33,19 +44,7 @@ const call = (method: string, body: Record<string, unknown> = {}) =>
   });
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.inspect.mockReturnValue(
-    Effect.succeed({
-      status: 'not-enrolled',
-      sourceKind: 'obsidian',
-      targetUri: uri,
-      project: 'notes',
-      contentHash: hash,
-      body: 'First claim.\n\nSecond claim.',
-      originCitationId: 'tnob_test',
-      originEvidence: {relativePath: 'Decision.md', pinId: 'PRIVATE_PIN'},
-      citations: [],
-    }),
-  );
+  mocks.inspect.mockReturnValue(Effect.succeed(inspection));
   mocks.preview.mockReturnValue(
     Effect.succeed({
       status: 'preview',
@@ -55,6 +54,17 @@ beforeEach(() => {
   );
   mocks.apply.mockReturnValue(Effect.succeed({status: 'enrolled', targetUri: uri}));
 });
+effectIt.effect('retains spaced project identity through imported enrollment inspection and preview', () =>
+  Effect.gen(function* () {
+    const project = 'Example Project';
+    mocks.inspect.mockReturnValue(Effect.succeed({...inspection, project}));
+    expect(yield* call('GET')).toMatchObject({status: 200, body: {project}});
+    expect((yield* call('POST', {action: 'preview', uri, project, input}))?.status).toBe(200);
+    expect(mocks.preview).toHaveBeenCalledWith(config, {uri, project, input});
+    expect((yield* call('POST', {action: 'preview', uri, project: 'Example-Project', input}))?.status).toBe(400);
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
+
 effectIt.effect('projects checked imported enrollment annotations and sends exact approval to the common writer', () =>
   Effect.gen(function* () {
     const inspected = yield* call('GET');

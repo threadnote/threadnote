@@ -136,6 +136,24 @@ beforeEach(() => {
 });
 
 describe('Manager reviewed action adapters', () => {
+  effectIt.effect('forwards spaced project names to maintenance, citation jobs and repair preview', () =>
+    Effect.gen(function* () {
+      const project = 'Example Project';
+      mocks.maintenanceStatus.mockReturnValue(Effect.succeed({version: 2, cases: [], receipts: [], projects: []}));
+      const status = yield* handleManagerAttentionAction({
+        config,
+        method: 'GET',
+        body: Effect.succeed({}),
+        url: new URL(`http://manager.test/api/attention/context-maintenance?project=${encodeURIComponent(project)}`),
+      });
+      expect(status?.status).toBe(200);
+      expect(mocks.maintenanceStatus).toHaveBeenCalledWith(config, project, expect.any(Object));
+      expect((yield* readCitationRepairJob(project))?.status).toBe(200);
+      expect((yield* request('/api/context-health/preview', {project, findingId: 'finding-1'}))?.status).toBe(200);
+      expect(mocks.root).toHaveBeenCalledWith(config, project);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('routes project-safe retained status pages and exact packets through the GET adapter', () =>
     Effect.gen(function* () {
       const status = {version: 2, cases: [], receipts: [], projects: [], page: {generation: 'bound'}};

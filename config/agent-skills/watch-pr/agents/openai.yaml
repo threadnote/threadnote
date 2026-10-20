@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Watch PR'
+  short_description: 'Background PR signals with durable delivery'
+  default_prompt: 'Use $watch-pr in the background to monitor this PR while development continues.'
