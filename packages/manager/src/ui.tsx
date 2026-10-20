@@ -34,6 +34,7 @@ import {createRoot} from 'react-dom/client';
 import type {CodeGraphLocalDiagnosticsReport} from '@threadnote/graph/diagnostics';
 import {ContextPanel} from './context/view.js';
 import {ManagerDialogProvider, useManagerDialogs} from '@threadnote/manager/dialog';
+import {DevSkillsPanel} from './dev_skills/view.js';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 import {ManagerProcessesProvider} from './process/live.js';
@@ -1585,15 +1586,11 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
             </section>
           ) : null}
 
-          {panel === 'worksets' ? (
+          {['dev-skills', 'worksets', 'processes'].includes(panel) ? (
             <section className="panel is-active">
-              <WorksetsPanel />
-            </section>
-          ) : null}
-
-          {panel === 'processes' ? (
-            <section className="panel is-active">
-              <ProcessesPanel />
+              {panel === 'dev-skills' ? <DevSkillsPanel /> : null}
+              {panel === 'worksets' ? <WorksetsPanel /> : null}
+              {panel === 'processes' ? <ProcessesPanel /> : null}
             </section>
           ) : null}
 
