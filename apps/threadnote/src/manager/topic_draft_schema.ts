@@ -45,6 +45,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     }),
   );
   const disposition = Schema.Union(dispositionVariants.length ? dispositionVariants : [Schema.String]);
+  const rationale = Schema.String.check(Schema.isMinLength(1));
   const common = {
     paragraphDispositions: Schema.Struct({
       version: Schema.Literal(1),
@@ -53,7 +54,6 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
         Schema.isMaxLength(descriptive.length),
       ),
     }),
-    rationale: Schema.String.check(Schema.isMinLength(1)),
     unresolvedQuestions: Schema.Array(Schema.String),
     removedClaims: Schema.Array(Schema.String),
   };
@@ -63,28 +63,32 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     ...(descriptive.length
       ? [
           Schema.Struct({
-            ...common,
+            rationale,
             outcome: Schema.Literal('propose-update'),
+            ...common,
             operations: Schema.Array(operation).check(Schema.isMinLength(1)),
             reviewedHandles: Schema.Array(currentHandle),
           }),
         ]
       : []),
     Schema.Struct({
-      ...common,
+      rationale,
       outcome: Schema.Literal('propose-revalidation'),
+      ...common,
       operations: noOperations,
       reviewedHandles: Schema.Array(currentHandle).check(Schema.isMinLength(1)),
     }),
     Schema.Struct({
-      ...common,
+      rationale,
       outcome: Schema.Literal('policy-conflict'),
+      ...common,
       operations: noOperations,
       reviewedHandles: noReviewedHandles,
     }),
     Schema.Struct({
-      ...common,
+      rationale,
       outcome: Schema.Literal('insufficient-evidence'),
+      ...common,
       operations: noOperations,
       reviewedHandles: noReviewedHandles,
     }),

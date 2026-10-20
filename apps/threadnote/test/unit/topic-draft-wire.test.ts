@@ -103,6 +103,24 @@ describe('v6 compact paragraph disposition wire', () => {
     expect(JSON.stringify(schema)).not.toContain('"anyOf"');
   });
 
+  it('explains and selects the global outcome before paragraph edits without requiring JSON key order on decode', () => {
+    for (const basis of [basisFor(1), basisFor(1, {protectedOrdinal: 0})]) {
+      const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
+      for (const variant of schema.properties.decision.oneOf)
+        expect(Object.keys(variant.properties).slice(0, 2)).toEqual(['rationale', 'outcome']);
+    }
+    const basis = basisFor(2);
+    const wire = wireFor(basis);
+    const expected = canonical(basis, wire);
+    const entries = Object.entries(wire.decision);
+    fc.assert(
+      fc.property(fc.shuffledSubarray(entries, {minLength: entries.length, maxLength: entries.length}), ordered => {
+        expect(canonical(basis, {...wire, decision: Object.fromEntries(ordered)})).toEqual(expected);
+      }),
+      {numRuns: 32},
+    );
+  });
+
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
     for (const index of [-1, 3, 1.5, NaN]) {
@@ -213,7 +231,7 @@ describe('v6 compact paragraph disposition wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v7');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v8');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
