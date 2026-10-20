@@ -685,41 +685,41 @@ The body remains ordinary **Markdown**.
     expect(source).not.toMatch(/\b(?:TODO|TBD)\b|publication placeholder|\{\{[^}]+}}|<insert\b/i);
   });
 
-  it('publishes the GraphMem continuation study as the latest evidence article', async () => {
+  it('retains the GraphMem continuation study and its evidence as new articles are added', async () => {
     const articles = await loadWebsiteArticles(root);
-    const latest = articles[0];
+    const study = articles.find(article => article.slug === 'graphmem-agent-continuation-study');
     const landingSource = await readFile(join(root, 'apps', 'website', 'src', 'pages', 'LandingPage.tsx'), 'utf8');
 
-    expect(latest).toMatchObject({
+    expect(study).toMatchObject({
       publishedAt: '2026-10-03T12:30:00Z',
       slug: 'graphmem-agent-continuation-study',
       title: 'How much do coding agents spend rediscovering a codebase?',
     });
-    expect(latest?.summary).toContain('65.62% fewer lifecycle tokens per verified completion');
-    expect(latest?.body).toContain('## Same checkpoint, different starting context');
-    expect(latest?.body).toContain('## Count finished work, including the cost of failure');
-    expect(latest?.body).toContain('## Fewer tokens in every task pair');
-    expect(latest?.body).toContain('## Time to completion: about 2m34s versus 4m45s');
-    expect(latest?.body).toContain('## Result quality: did the patches actually work?');
-    expect(latest?.body).toContain('## What this study does not settle');
-    expect(latest?.body).toContain('57.02%');
-    expect(latest?.body).toContain('5.1.0-beta.2');
-    expect(latest?.body).toContain('baseline had **no handoff**');
-    expect(latest?.body).toContain('not a claim of equivalent dollar savings');
-    expect(latest?.body).toContain('do not claim an established completion-rate advantage');
-    expect(latest?.body).toContain('50.80% to 81.56%');
-    expect(latest?.body).toContain('25.25% to 73.38%');
-    expect(latest?.body).toContain('32.68% reduction in total measured time');
-    expect(latest?.body).toContain('not time to a working fix');
-    expect(latest?.body).toContain('738/1,000 for Threadnote versus 404/1,000 for files-only');
-    expect(latest?.body).toContain('minimum judge-score');
-    expect(latest?.body).toContain('threshold to zero');
-    expect(latest?.body).toContain('separate uncertainty analysis');
-    expect(latest?.body.replace(/\s+/g, ' ')).toContain(
+    expect(study?.summary).toContain('65.62% fewer lifecycle tokens per verified completion');
+    expect(study?.body).toContain('## Same checkpoint, different starting context');
+    expect(study?.body).toContain('## Count finished work, including the cost of failure');
+    expect(study?.body).toContain('## Fewer tokens in every task pair');
+    expect(study?.body).toContain('## Time to completion: about 2m34s versus 4m45s');
+    expect(study?.body).toContain('## Result quality: did the patches actually work?');
+    expect(study?.body).toContain('## What this study does not settle');
+    expect(study?.body).toContain('57.02%');
+    expect(study?.body).toContain('5.1.0-beta.2');
+    expect(study?.body).toContain('baseline had **no handoff**');
+    expect(study?.body).toContain('not a claim of equivalent dollar savings');
+    expect(study?.body).toContain('do not claim an established completion-rate advantage');
+    expect(study?.body).toContain('50.80% to 81.56%');
+    expect(study?.body).toContain('25.25% to 73.38%');
+    expect(study?.body).toContain('32.68% reduction in total measured time');
+    expect(study?.body).toContain('not time to a working fix');
+    expect(study?.body).toContain('738/1,000 for Threadnote versus 404/1,000 for files-only');
+    expect(study?.body).toContain('minimum judge-score');
+    expect(study?.body).toContain('threshold to zero');
+    expect(study?.body).toContain('separate uncertainty analysis');
+    expect(study?.body.replace(/\s+/g, ' ')).toContain(
       "The judge's own completion verdict was also stricter: 2/5 for Threadnote and 1/5 for files-only",
     );
     for (const seconds of [179.619, 122.845, 230.997, 161.289, 204.802, 156.835, 286.463, 216.087, 239.619, 111.454]) {
-      expect(latest?.body).toContain(seconds.toFixed(3));
+      expect(study?.body).toContain(seconds.toFixed(3));
     }
     for (const [repository, filesVerified, filesScore, threadnoteScore] of [
       ['Click', 'Pass', '400', '650'],
@@ -728,23 +728,23 @@ The body remains ordinary **Markdown**.
       ['Gin', 'Pass', '720', '1,000'],
       ['Echo', 'Pass', '350', '1,000'],
     ]) {
-      expect(latest?.body).toMatch(
+      expect(study?.body).toMatch(
         new RegExp(
           `\\| ${repository} +\\| ${filesVerified} +\\| Pass +\\| +${filesScore} +\\| +${threadnoteScore} +\\|`,
         ),
       );
     }
-    expect(latest?.body).toContain('2b9ede3e031790f9798517504027870dacbc0f74');
-    expect(latest?.body).not.toMatch(/github\.com\/threadnote\/threadnote\/(?:blob|tree)\/(?:main|codex\/)/);
+    expect(study?.body).toContain('2b9ede3e031790f9798517504027870dacbc0f74');
+    expect(study?.body).not.toMatch(/github\.com\/threadnote\/threadnote\/(?:blob|tree)\/(?:main|codex\/)/);
     const chart = await readFile(join(root, 'apps', 'website', 'public', 'graphmem-continuation-tokens.svg'), 'utf8');
-    expect(latest?.body).toContain('](/graphmem-continuation-tokens.svg)');
+    expect(study?.body).toContain('](/graphmem-continuation-tokens.svg)');
     expect(chart).toContain('aria-labelledby="title description"');
     expect(chart).toContain('zero-based scale from 0 to 700,000 tokens');
     for (const tokens of [560404, 209818, 621988, 319182, 526224, 201392, 657529, 390933, 649521, 174715]) {
       expect(chart).toContain(`data-tokens="${tokens}"`);
-      expect(latest?.body).toContain(tokens.toLocaleString('en-US'));
+      expect(study?.body).toContain(tokens.toLocaleString('en-US'));
     }
-    expect(latest?.body).not.toMatch(/\b(?:TODO|TBD)\b|publication placeholder|\{\{[^}]+}}|<insert\b/i);
+    expect(study?.body).not.toMatch(/\b(?:TODO|TBD)\b|publication placeholder|\{\{[^}]+}}|<insert\b/i);
     expect(landingSource).toContain("import articles from 'virtual:threadnote-articles'");
     expect(landingSource).toContain("import latestRelease from 'virtual:threadnote-latest-release'");
     expect(landingSource).toContain('whatsNewArticleHref(latestArticle.slug)');
