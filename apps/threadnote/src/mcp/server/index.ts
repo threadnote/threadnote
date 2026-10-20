@@ -1,3 +1,4 @@
+import {startAutomaticModelSetupScheduler} from '../../models/setup_lifecycle.js';
 import {Console, Effect, Logger, Schema} from 'effect';
 import {MCP_PROCESS_LIFECYCLE_PROBE_ENV} from '../../constants.js';
 import {
@@ -147,6 +148,7 @@ export const mcpServerEffect = withAnonymousTelemetry(
           yield* runtime.diagnostics.pipe(Effect.catch(() => Effect.void));
         }
         if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {
+          yield* startAutomaticModelSetupScheduler(config.agentContextHome);
           yield* Effect.forkScoped(runContextMaintenanceScheduler(config));
         }
         if (!memoryScope && toolset !== CURSOR_CLOUD_LOCAL_MCP_TOOLSET) {

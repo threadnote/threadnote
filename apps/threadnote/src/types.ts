@@ -42,6 +42,7 @@ export interface MappedCommand {
 }
 
 export interface InstallOptions {
+  readonly modelSetup?: boolean;
   readonly dryRun?: boolean;
   readonly force?: boolean;
   readonly printNextSteps?: boolean;
@@ -83,6 +84,7 @@ export interface UninstallOptions {
 }
 
 export interface UpdateOptions {
+  readonly modelSetup?: boolean;
   readonly allowUntrustedSource?: boolean;
   readonly auto?: 'off' | 'on';
   readonly beta?: boolean;

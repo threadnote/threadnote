@@ -8,6 +8,7 @@ import {
   warning,
   withSpinnerEffect,
 } from '../cli_ui.js';
+import {queueAutomaticModelSetup} from '../models/setup_lifecycle.js';
 import {installCommandShim} from '../command-shim.js';
 import {extractGzipTar} from '../effect/archive.js';
 import {runCommandEffect, runStreamingCommandEffect} from '@threadnote/platform/command';
@@ -257,17 +258,20 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   }
 
   if (!info.isUpdateAvailable && options.force !== true) {
+    let executable = system.executablePath;
     if (info.installedVersion !== undefined) {
-      yield* withStandaloneInstallationLock(
+      executable = yield* withStandaloneInstallationLock(
         Effect.gen(function* () {
           const path = yield* Path.Path;
           const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
           const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
           yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
+          return path.join(activeReleaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
         }),
         options.dryRun === true,
       );
     }
+    yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable});
     yield* Console.log(success('Threadnote is up to date.'));
     yield* Console.log(
       'Managed launchers are current. If an MCP host still uses the legacy direct server command, run `threadnote repair`, then restart that host once.',
@@ -303,6 +307,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   const {currentVersion: effectiveCurrentVersion, releaseRoot} = mutation;
   const path = yield* Path.Path;
   const threadnoteCommand = path.join(releaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
+  yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable: threadnoteCommand});
   const postUpdateArgs = [
     'post-update',
     '--from-version',
