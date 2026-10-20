@@ -3,6 +3,7 @@
 import sys
 sys.dont_write_bytecode = True
 from portable_lock import lock_exclusive
+import workflow_transport as wt
 
 import argparse
 import hashlib
@@ -324,19 +325,29 @@ def canonical(raw):
 
 
 class Threadnote:
-    def __init__(self, repo=None, home=None):
+    def __init__(self, repo=None, home=None, **workflow_options):
         self.repo, self.home = repo, home
+        self.workflow_options = workflow_options
+        self.workflow = None
+        wt.attach_explicit(self)
 
     def call(self, command, args, text=None):
+        wt.require(self.workflow is None and not self.workflow_options.get("workflow_context"), "Structured workflows require an existing pinned context and do not execute human read/remember/archive commands")
+        wt.require_desktop_legacy(self.home)
         argv = ["threadnote", command]
         if self.home:
             argv += ["--home", self.home]
         return run(argv + args, cwd=self.repo, text=text)
 
     def read(self, uri):
+        if self.workflow is not None:
+            return self.workflow.read(uri)["body"]
         return canonical(self.call("read", [uri]))
 
     def peek(self, uri):
+        if self.workflow is not None:
+            observed = self.workflow.read(uri, missing=True)
+            return observed["body"] if observed is not None else None
         try:
             return self.read(uri)
         except CommandError as error:
@@ -349,9 +360,13 @@ class Threadnote:
             raise
 
     def is_active(self, uri):
+        if self.workflow is not None:
+            return self.workflow.read(uri)["state"] == "active"
         return bool(re.search(r"^status: active$", self.call("read", [uri]), re.M))
 
     def remember(self, record, topic, relations, replace=None, deferred=False, dry_run=False):
+        if self.workflow is not None:
+            return self.workflow.write(record, topic, memory_text(record), [{"type": kind, "uri": uri} for kind, uri in relations], replace, deferred, dry_run)
         args = ["--kind", record.get("memoryKind", "handoff"), "--project", record["project"], "--topic", topic,
                 "--status", "active", "--keyword", "dev-plan", "--keyword", record["planId"],
                 "--keyword", record["kind"], "--stdin"]
@@ -376,9 +391,21 @@ class Threadnote:
         return match.group(1)
 
     def preflight(self, record, topic, relations, replace=None, deferred=False):
+        if self.workflow is not None:
+            preview = self.workflow.prepare(record, topic, memory_text(record), [{"type": kind, "uri": uri} for kind, uri in relations], replace, deferred)
+            before = self.peek(preview["canonicalUri"])
+            return {"expectedUri": preview["canonicalUri"], "beforeHash": digest(before) if before is not None else None}
         uri = self.remember(record, topic, relations, replace, deferred, dry_run=True)
         before = self.peek(uri)
         return {"expectedUri": uri, "beforeHash": digest(before) if before is not None else None}
+
+    def archive(self, uri):
+        if self.workflow is not None:
+            return self.workflow.archive(uri)
+        output = self.call("archive", [uri])
+        match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
+        require(match, "Archive did not return its exact destination")
+        return match.group(1)
 
 
 def reconcile_write(pending, client, uri=None):
@@ -509,6 +536,7 @@ def verify_sources(plan, client):
 
 
 def save(plan, state_path, client, review=None, draft=False, deferred=False):
+    wt.configure(client, state_path, plan["project"], plan["id"], plan["scope"]["repo"])
     require(not deferred or draft, "Deferred citations can only be saved as draft")
     validate(plan, ready=not draft, review=review)
     verify_sources(plan, client)
@@ -523,6 +551,8 @@ def save(plan, state_path, client, review=None, draft=False, deferred=False):
             "schemaVersion": 1, "planId": plan["id"], "project": plan["project"],
             "repo": plan["scope"]["repo"], "runId": uuid.uuid4().hex[:12],
             "receipts": {}, "history": {}}
+        wt.receipt_context(client, state)
+        write_json(state_path, state)
         require((state["planId"], state["project"], state["repo"]) ==
                 (plan["id"], plan["project"], plan["scope"]["repo"]), "Receipt file belongs to another plan")
         require(not state.get("pending"), "A write outcome is unresolved; run recover to reconcile its destination")
@@ -765,6 +795,7 @@ def export_cycle(uri, client, delivery, bindings):
     return ({"objective": plan["objective"], "delivery": delivery, "planMemoryUris": [uri],
              "memoryHashes": {key: hashlib.sha256(value.encode()).hexdigest() for key, value in contents.items()},
              "featureId": plan["id"], "spec": plan.get("spec"),
+             **({"workflowContext": wt.locator(client)} if wt.locator(client) else {}),
              "phases": phases, "completion": {"skill": "dev-plan", "rootUri": uri,
                 "specRootUri": plan.get("spec", {}).get("rootUri"),
                 "required": "Bind verified current code refs to implemented architecture before retiring baseline"}},
@@ -813,9 +844,10 @@ def verify_spec_input(packet, client, feature_id, project):
 
 def from_spec(packet, scope, client):
     """Import approved obligations; leave architecture and phase design unfinished."""
+    wt.attach_inherited(client, packet.get("workflowContext"), scope["repo"])
     from types import SimpleNamespace
     require(packet.get("kind") == "dev-spec-plan-input" and packet.get("schemaVersion") == 1, "Unsupported spec packet")
-    require(packet.get("packetHash") == digest({k: v for k, v in packet.items() if k != "packetHash"}), "Spec packet changed")
+    require(packet.get("packetHash") == digest({k: v for k, v in packet.items() if k not in {"packetHash", "workflowContext"}}), "Spec packet changed")
     sources = []
     for uri, expected in packet["memoryHashes"].items():
         require(client.is_active(uri), "Spec input is inactive")
@@ -846,6 +878,7 @@ def from_spec(packet, scope, client):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threadnote-home", help="Isolated Threadnote store; normally omit")
+    wt.add_arguments(parser)
     commands = parser.add_subparsers(dest="command", required=True)
     cmd = commands.add_parser("inspect")
     cmd.add_argument("--repo", required=True)
@@ -896,7 +929,7 @@ def main():
     cmd.add_argument("--out", required=True)
     args = parser.parse_args()
     plan = read_json(args.plan) if hasattr(args, "plan") else None
-    client = Threadnote(plan["scope"]["repo"] if plan else None, args.threadnote_home)
+    client = Threadnote(plan["scope"]["repo"] if plan else None, args.threadnote_home, **wt.options(args))
     review = read_json(args.review) if getattr(args, "review", None) else None
     if args.command == "inspect":
         result = inspect(args.repo, args.path)
@@ -909,8 +942,15 @@ def main():
         require(not Path(args.out).exists(), "Plan draft exists; reconcile instead of overwriting")
         scope = read_json(args.scope)
         client.repo = scope["repo"]
-        result = from_spec(read_json(args.packet), scope, client)
+        packet = read_json(args.packet)
+        context = packet.get("workflowContext")
+        if context:
+            wt.require(Path(context).is_file(), "Upstream workflow context is missing")
+            wt.require(not args.workflow_context or Path(args.workflow_context).resolve() == Path(context).resolve(), "Explicit context conflicts with approved spec handoff")
+            client = Threadnote(scope["repo"], args.threadnote_home, **{**wt.options(args), "workflow_context": context})
+        result = from_spec(packet, scope, client)
         write_json(args.out, result)
+        wt.carry(client, args.out)
         result = {"draft": args.out, "ready": False, "featureId": result["id"]}
     elif args.command == "pin":
         result = pin(client, args.uri)
@@ -927,10 +967,12 @@ def main():
                              "scope": "Read-only review; final JSON artifact only; use references/review.md"})
         result = {"packet": args.out, "planHash": digest(plan)}
     elif args.command == "save":
+        wt.configure(client, args.state, plan["project"], plan["id"], plan["scope"]["repo"], wt.inherit(args.plan))
         result = save(plan, args.state, client, review, args.draft, args.defer_code_refs)
     elif args.command == "recover":
         state = read_json(args.state)
-        result = recover(args.state, args.uri, Threadnote(state["repo"], args.threadnote_home))
+        wt.configure(client, args.state, state["project"], state["planId"], state["repo"])
+        result = recover(args.state, args.uri, client)
     elif args.command == "load":
         plan, record = load_plan(args.root, client)
         receipts = {"root": {"uri": args.root, "hash": digest(record)}}
@@ -948,7 +990,8 @@ def main():
         write_json(args.out, plan)
         write_json(args.state, {"schemaVersion": 1, "planId": plan["id"], "project": plan["project"],
                                "repo": plan["scope"]["repo"], "rootUri": args.root, "receipts": receipts,
-                               "runId": record["runId"], "history": record["data"].get("priorArtifacts", {})})
+                               "runId": record["runId"], "history": record["data"].get("priorArtifacts", {}),
+                               **({"workflowContext": wt.locator(client)} if wt.locator(client) else {})})
         result = {"draft": args.out, "state": args.state}
     elif args.command == "diff":
         result = differences(read_json(args.before), read_json(args.after))
@@ -960,12 +1003,12 @@ def main():
         write_json(directory / "plan.json", exported)
         write_json(directory / "memory-content.json", contents)
         result = {"plan": str(directory / "plan.json"), "memories": str(directory / "memory-content.json")}
-    print(json.dumps(result, ensure_ascii=True, indent=2))
+    print(json.dumps(wt.result_context(client, result), ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":
     try:
         main()
     except (PlanError, KeyError, ValueError, OSError, subprocess.TimeoutExpired) as error:
-        print(json.dumps({"error": str(error)}, ensure_ascii=True), file=sys.stderr)
+        print(json.dumps(wt.cli_error(error), ensure_ascii=True), file=sys.stderr)
         sys.exit(1)

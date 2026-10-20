@@ -2,6 +2,7 @@
 """Author, validate, persist and hand off an interactive behavioral specification."""
 import sys
 sys.dont_write_bytecode = True
+import workflow_transport as wt
 
 import argparse
 import copy
@@ -206,11 +207,14 @@ def verify_pins(spec, client):
 
 
 def save(spec, path, client, confirmation=None, review=None, draft=False, deferred=False, recover_uri=None):
+    wt.configure(client, path, spec["project"], spec["id"], spec["callerCwd"])
     require(not deferred or draft, "Deferred citations cannot produce a ready spec")
     validate(spec, ready=not draft, confirmation=confirmation, review=review)
     verify_pins(spec, client)
     with locked(path):
         store = Store(path, client, {"feature": spec["id"], "project": spec["project"], "cwd": spec["callerCwd"]})
+        wt.receipt_context(client, store.state)
+        store.flush()
         store.recover(recover_uri)
         saved_input = digest([spec, confirmation, review, draft, deferred])
         if store.state.get("savedInput") == saved_input:
@@ -280,7 +284,10 @@ def export_plan(uri, client):
               "requirements": [{"id": r["id"], "behavior": r["behavior"]} for r in spec["requirements"]],
               "scenarios": spec["scenarios"], "constraints": spec["constraints"], "outOfScope": spec["outOfScope"],
               "confirmation": root["data"]["confirmation"]}
-    return {**packet, "packetHash": digest(packet)}
+    result = {**packet, "packetHash": digest(packet)}
+    if wt.locator(client):
+        result["workflowContext"] = wt.locator(client)
+    return result
 
 
 def diff(before, after):
@@ -297,6 +304,7 @@ def diff(before, after):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threadnote-home")
+    wt.add_arguments(parser)
     sub = parser.add_subparsers(dest="command", required=True)
     cmd = sub.add_parser("init")
     for key in ("id", "project", "title", "objective", "cwd", "focus", "out"):
@@ -326,7 +334,7 @@ def main():
     cmd.add_argument("--before", required=True); cmd.add_argument("--after", required=True)
     args = parser.parse_args()
     spec = read_json(args.spec) if hasattr(args, "spec") else None
-    client = Threadnote(spec["callerCwd"] if spec else None, args.threadnote_home)
+    client = Threadnote(spec["callerCwd"] if spec else None, args.threadnote_home, **wt.options(args))
     confirmation = read_json(args.confirmation) if getattr(args, "confirmation", None) else None
     review = read_json(args.review) if getattr(args, "review", None) else None
     if args.command == "init":
@@ -379,15 +387,15 @@ def main():
         write_json(args.out, spec)
         write_json(args.state, {"identity": {"feature": spec["id"], "project": spec["project"], "cwd": spec["callerCwd"]},
                                "runId": root["data"]["runId"], "receipts": receipts, "history": root["data"]["history"],
-                               "archives": {}, "rootUri": args.root})
+                               "archives": {}, "rootUri": args.root, **({"workflowContext": wt.locator(client)} if wt.locator(client) else {})})
         result = {"draft": args.out, "receipts": args.state}
     else:
         result = export_plan(args.root, client); write_json(args.out, result)
-    print(json.dumps(result, ensure_ascii=True, indent=2))
+    print(json.dumps(wt.result_context(client, result), ensure_ascii=True, indent=2))
 
 
 if __name__ == "__main__":
     try:
         main()
     except (PlanError, KeyError, ValueError, OSError, subprocess.TimeoutExpired) as error:
-        print(json.dumps({"error": str(error)}), file=sys.stderr); sys.exit(1)
+        print(json.dumps(wt.cli_error(error)), file=sys.stderr); sys.exit(1)

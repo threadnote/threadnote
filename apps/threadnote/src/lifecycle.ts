@@ -20,7 +20,8 @@ import {startProgress, withProgressLine} from './cli_ui.js';
 import {commandShimCheck, installCommandShim, removeCommandShim} from './command-shim.js';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {hasManagedClaudeHooks, runHooksInstall} from './hooks.js';
-import {withSetupMutationLock} from './setup/lock.js';
+import {removeOwnedDevSkills, withDevSkillsRemovalLease} from './dev_skills/index.js';
+import type {DevSkillsMutationLease} from './dev_skills/index.js';
 import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -757,15 +758,17 @@ export const runUninstall = Effect.fn('lifecycle.uninstall')(function* (
   options: UninstallOptions,
 ) {
   const dryRun = options.dryRun === true;
-  const uninstall = runUninstallInTransaction(config, options);
   yield* dryRun
-    ? uninstall
-    : withSetupMutationLock(config.agentContextHome, withAgentIntegrationLock(config, uninstall));
+    ? runUninstallInTransaction(config, options)
+    : withDevSkillsRemovalLease(config, lease =>
+        withAgentIntegrationLock(config, runUninstallInTransaction(config, options, lease)),
+      );
 });
 
 const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(function* (
   config: RuntimeConfig,
   options: UninstallOptions,
+  lease?: DevSkillsMutationLease,
 ) {
   const dryRun = options.dryRun === true;
   if (options.eraseMemories === true && options.preserveMemories === true) {
@@ -823,6 +826,14 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
     });
   }
   yield* removeRegisteredAgentAdaptersInTransaction(config, dryRun, true);
+  const workflows = yield* removeOwnedDevSkills(config, {dryRun, lease});
+  for (const workflow of workflows) {
+    yield* Console.log(
+      `${dryRun ? 'Would remove' : 'Removed enrollment for'} development workflows: ${workflow.target.surfaceId} (${workflow.target.skillRoot})`,
+    );
+    if ('retainedPaths' in workflow && workflow.retainedPaths.length > 0)
+      yield* Console.log(`Preserved modified workflow files: ${workflow.retainedPaths.join(', ')}`);
+  }
   yield* removeCommandShim(dryRun);
   yield* removeAgentIntegrationsInTransaction(config, dryRun);
   if (options.eraseMemories === true) {

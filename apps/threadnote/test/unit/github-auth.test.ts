@@ -16,6 +16,46 @@ import {
 import {fetchThreadnoteReleaseNotes} from '@threadnote/threadnote/release/notes';
 import {fetchLatestVersion} from '@threadnote/threadnote/release/update';
 
+for (const token of [undefined, 'existing-token']) {
+  effectIt.effect(
+    `observational release requests never invoke a credential command (token: ${token !== undefined})`,
+    () =>
+      Effect.gen(function* () {
+        const baseSystem = yield* SystemInfo;
+        const system = SystemInfo.of({...baseSystem, environment: () => (token ? {GH_TOKEN: token} : {})});
+        const requests: Array<string | undefined> = [];
+        const command = CommandExecutor.of({
+          execute: () => Effect.die('observational requests must not run gh'),
+          executeStreaming: () => Effect.die('observational requests must not run gh'),
+        });
+        const http = HttpService.of({
+          downloadToFile: () => Effect.die('not used'),
+          getJson: (_url, options) =>
+            Effect.sync(() => {
+              requests.push(options?.headers?.authorization);
+              return {
+                body: [{assets: [], draft: false, immutable: true, prerelease: false, tag_name: 'v5.4.0'}],
+                status: 200,
+              };
+            }),
+          getStatus: () => Effect.die('not used'),
+          getText: () => Effect.die('not used'),
+        });
+        const [version, notes] = yield* Effect.all([
+          fetchLatestVersion(GITHUB_RELEASES_URL, 'latest', {allowCredentialCommand: false}),
+          fetchThreadnoteReleaseNotes({allowCredentialCommand: false}),
+        ]).pipe(
+          Effect.provideService(SystemInfo, system),
+          Effect.provideService(CommandExecutor, command),
+          Effect.provideService(HttpService, http),
+        );
+        expect(version).toBe('5.4.0');
+        expect(notes.map(note => note.version)).toEqual(['5.4.0']);
+        expect(requests).toEqual(Array(2).fill(token ? `Bearer ${token}` : undefined));
+      }).pipe(provideTestLayer(TestSystemInfoLayer)),
+  );
+}
+
 effectIt.effect('prefers GH_TOKEN over GITHUB_TOKEN without starting gh', () =>
   Effect.gen(function* () {
     const baseSystem = yield* SystemInfo;

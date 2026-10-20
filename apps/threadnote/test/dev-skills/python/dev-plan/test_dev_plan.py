@@ -2,8 +2,9 @@
 """Behavioral checks; all persistence uses a fake client or an isolated Threadnote home."""
 import sys
 from pathlib import Path
-PRODUCT_SKILLS = Path(__file__).resolve().parents[6] / "config/agent-skills"
-sys.path[:0] = [str(PRODUCT_SKILLS / skill / "scripts") for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+PRODUCT_SKILLS = configure_product_skills(__file__, 6)
 
 import copy
 import json
@@ -17,6 +18,8 @@ import unittest
 
 import dev_plan as dp
 import closeout
+
+assert_product_provenance(PRODUCT_SKILLS, "dev-plan-imports")
 
 
 class MemoryClient:
@@ -72,6 +75,7 @@ class MemoryClient:
 
 class Plans(unittest.TestCase):
     def setUp(self):
+        self.addCleanup(assert_product_provenance, PRODUCT_SKILLS, self.id())
         self.tmp = tempfile.TemporaryDirectory(prefix="dev-plan-test-")
         self.directory = Path(self.tmp.name)
         self.repo = self.directory / "repo"
@@ -371,9 +375,7 @@ class Plans(unittest.TestCase):
         self.assertEqual(final["data"]["codeRefs"], ["src/cache.py", "src/expiry.py"])
         self.assertEqual(final["data"]["closeoutStatus"], "complete")
         self.assertTrue(client.is_active(completed["implementedUri"]))
-        metadata = client.call("read", [completed["implementedUri"]]).split("\n\n", 1)[0]
-        citations = [json.loads(line.split(": ", 1)[1]) for line in metadata.splitlines()
-                     if line.startswith("code_citation: ")]
+        citations = client.workflow.read(completed["implementedUri"])["codeCitations"]
         self.assertEqual({c["path"] for c in citations}, {"src/cache.py", "src/expiry.py"})
         graph = json.loads(dp.run(["threadnote", "graph", "status", "--home", native_home,
                                   "--cwd", str(self.repo), "--json"]))

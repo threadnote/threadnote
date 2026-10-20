@@ -5,6 +5,7 @@ import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 
 import {exists, formatShellCommand, isDirectory, isFile, maybeRun, requiredExecutable, runCommand} from '../utils.js';
 
@@ -165,7 +166,7 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
       {allowFailure: true},
     );
     if (staged.exitCode !== 0) {
-      throw ShareOperationError.make({
+      return yield* ShareOperationError.make({
         message: `Could not inspect staged shared changes: ${staged.stderr.trim() || staged.stdout.trim() || 'git diff failed'}`,
       });
     }
@@ -183,7 +184,7 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
         if (/nothing to commit|no changes added/i.test(detail)) {
           messages.push('git commit: nothing to commit (file already in tree)');
         } else {
-          throw ShareOperationError.make({message: `git commit failed: ${detail || 'unknown error'}`});
+          return yield* ShareOperationError.make({message: `git commit failed: ${detail || 'unknown error'}`});
         }
       } else {
         messages.push(`git commit: ${commitResult.stdout.trim().split('\n').slice(0, 2).join(' ')}`);
@@ -205,6 +206,233 @@ export const publishShareGitChange = Effect.fn('share.publishShareGitChange')(fu
     messages.push(`git push: ${pushResult.stdout.trim() || pushResult.stderr.trim() || 'ok'}`);
   }
   return messages;
+});
+
+export interface ShareGitCommitReceipt {
+  readonly version: 1;
+  readonly commit: string;
+  readonly remote: string;
+  readonly branch: string;
+  readonly path: string;
+  readonly contentHash: string;
+}
+
+export interface ShareGitPublicationReceipt extends ShareGitCommitReceipt {
+  readonly remoteCommit: string;
+  readonly verified: true;
+}
+
+export interface VerifiedShareGitPublication {
+  readonly content: string;
+  readonly expectedContent?: string;
+  readonly expectedRemote: string;
+  readonly expectedBranch: string;
+  readonly committed?: ShareGitCommitReceipt;
+  /** Persist before push; failure leaves the exact commit safely retryable. */
+  readonly onCommitted?: (receipt: ShareGitCommitReceipt) => Effect.Effect<void, unknown>;
+}
+
+export const assertShareGitPublicationTarget = Effect.fn('share.assertGitPublicationTarget')(function* (
+  worktree: string,
+  expectedRemote: string,
+  expectedBranch: string,
+) {
+  const git = yield* requiredExecutable('git');
+  const checked = (args: readonly string[]) =>
+    runGitCommand(false, git, ['-C', worktree, ...args], 'Shared publication verification failed').pipe(
+      Effect.map(result => result!.stdout.trim()),
+    );
+  yield* checked(['check-ref-format', `refs/heads/${expectedBranch}`]);
+  if ((yield* checked(['symbolic-ref', '--quiet', '--short', 'HEAD'])) !== expectedBranch)
+    return yield* ShareOperationError.make({message: 'Shared publication branch changed.'});
+  for (const direction of [[], ['--push']]) {
+    const urls = yield* checked(['remote', 'get-url', ...direction, '--all', DEFAULT_GIT_REMOTE_NAME]);
+    if (!expectedRemote || urls !== expectedRemote)
+      return yield* ShareOperationError.make({message: 'Shared publication remote changed.'});
+  }
+  if (yield* isShareGitOperationInProgress(git, worktree))
+    return yield* ShareOperationError.make({message: 'Shared publication has an unfinished Git operation.'});
+});
+
+/** Validate exact before/after images before changing either native or Git state. */
+export const assertShareGitPublicationImages = Effect.fn('share.assertGitPublicationImages')(function* (
+  worktree: string,
+  relativePath: string,
+  expectedContent: string | undefined,
+  desiredContent: string,
+  resume: boolean,
+) {
+  const safePath = assertSafeShareRelativePath(relativePath);
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const filename = path.join(worktree, ...safePath.split('/'));
+  if (!(yield* fs.exists(filename))) {
+    if (expectedContent !== undefined)
+      return yield* ShareOperationError.make({message: 'Shared publication worktree preimage is missing.'});
+  } else {
+    if ((yield* fs.realPath(filename)) !== path.join(yield* fs.realPath(worktree), ...safePath.split('/')))
+      return yield* ShareOperationError.make({message: 'Shared publication path is an alias or symbolic link.'});
+  }
+  yield* assertSharedWorktreeFileReady(
+    worktree,
+    safePath,
+    expectedContent,
+    false,
+    (left, right) => left === right,
+    resume ? {exactRetryContent: desiredContent} : {},
+  );
+  const git = yield* requiredExecutable('git');
+  for (const revision of ['HEAD', '']) {
+    const entry = yield* runGitCommand(
+      false,
+      git,
+      [
+        '-C',
+        worktree,
+        ...(revision === 'HEAD'
+          ? ['ls-tree', '-z', 'HEAD', '--', safePath]
+          : ['ls-files', '--stage', '-z', '--', safePath]),
+      ],
+      'Shared publication index inspection failed',
+    );
+    if (entry!.stdout) {
+      const current = yield* runGitCommand(
+        false,
+        git,
+        ['-C', worktree, 'show', `${revision}:${safePath}`],
+        'Shared publication preimage read failed',
+      );
+      if (current!.stdout !== expectedContent && !(resume && current!.stdout === desiredContent))
+        return yield* ShareOperationError.make({message: 'Shared publication committed or staged content changed.'});
+    } else if (expectedContent !== undefined) {
+      return yield* ShareOperationError.make({message: 'Shared publication preimage is missing.'});
+    }
+  }
+});
+
+/** Caller holds the shared-repository lock. Never takes another shared lock. */
+export const publishShareGitChangeVerified = Effect.fn('share.publishShareGitChangeVerified')(function* (
+  worktree: string,
+  relativePath: string,
+  commitMessage: string,
+  options: VerifiedShareGitPublication,
+) {
+  const path = assertSafeShareRelativePath(relativePath);
+  const git = yield* requiredExecutable('git');
+  const checked = (args: readonly string[]) =>
+    runGitCommand(false, git, ['-C', worktree, ...args], 'Shared publication verification failed').pipe(
+      Effect.map(result => result!.stdout.trim()),
+    );
+  const validateBinding = assertShareGitPublicationTarget(worktree, options.expectedRemote, options.expectedBranch);
+  yield* validateBinding;
+  const fs = yield* FileSystem.FileSystem;
+  const filename = yield* pathJoin(worktree, ...path.split('/'));
+  yield* assertShareGitPublicationImages(
+    worktree,
+    path,
+    options.committed ? options.content : options.expectedContent,
+    options.content,
+    true,
+  );
+  yield* assertSharedWorktreeFileReady(worktree, path, options.content, false, (left, right) => left === right);
+  if ((yield* fs.readFileString(filename)) !== options.content)
+    return yield* ShareOperationError.make({message: 'Shared publication worktree content changed.'});
+  const contentHash = sha256HexSync(options.content);
+  const readCommitPath = (commit: string) =>
+    runGitCommand(false, git, ['-C', worktree, 'show', `${commit}:${path}`], 'Shared commit readback failed').pipe(
+      Effect.map(result => result!.stdout),
+    );
+  let receipt = options.committed;
+  if (receipt !== undefined) {
+    if (
+      receipt.version !== 1 ||
+      !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(receipt.commit) ||
+      receipt.path !== path ||
+      receipt.remote !== options.expectedRemote ||
+      receipt.branch !== options.expectedBranch ||
+      receipt.contentHash !== contentHash ||
+      (yield* readCommitPath(receipt.commit)) !== options.content
+    )
+      return yield* ShareOperationError.make({message: 'Shared publication commit receipt does not match intent.'});
+    yield* checked(['merge-base', '--is-ancestor', receipt.commit, 'HEAD']);
+  } else {
+    // A previous invocation may have committed before its journal callback returned.
+    yield* publishShareGitChange(worktree, path, commitMessage, {push: false});
+    const commit = yield* checked(['rev-parse', '--verify', 'HEAD']);
+    if ((yield* readCommitPath(commit)) !== options.content)
+      return yield* ShareOperationError.make({message: 'Shared publication commit content changed.'});
+    receipt = {version: 1, commit, remote: options.expectedRemote, branch: options.expectedBranch, path, contentHash};
+  }
+  yield* options.onCommitted?.(receipt) ?? Effect.void;
+  yield* validateBinding;
+  yield* assertShareGitPublicationImages(worktree, path, options.content, options.content, true);
+  const committed = receipt;
+  const readRemote = Effect.gen(function* () {
+    yield* validateBinding;
+    yield* checked(['fetch', '--no-tags', DEFAULT_GIT_REMOTE_NAME, `refs/heads/${committed.branch}`]);
+    const remoteCommit = yield* checked(['rev-parse', '--verify', 'FETCH_HEAD']);
+    const ancestry = yield* runCommand(
+      git,
+      ['-C', worktree, 'merge-base', '--is-ancestor', committed.commit, remoteCommit],
+      {allowFailure: true},
+    );
+    if (ancestry.exitCode !== 0 && ancestry.exitCode !== 1)
+      return yield* ShareOperationError.make({message: 'Shared publication remote ancestry cannot be verified.'});
+    if (ancestry.exitCode === 0 && (yield* readCommitPath(remoteCommit)) !== options.content)
+      return yield* ShareOperationError.make({
+        message: 'Shared publication remote head no longer has the approved content.',
+      });
+    return {remoteCommit, containsCommit: ancestry.exitCode === 0};
+  });
+  const previous = yield* readRemote;
+  if (previous.containsCommit)
+    return {...receipt, remoteCommit: previous.remoteCommit, verified: true} satisfies ShareGitPublicationReceipt;
+  // A push sends the receipt's entire ancestry. Each approved workflow stage
+  // is pushed before the next starts, so only this one exact document commit
+  // may be unpublished. Preserve other pending commits for their own owner.
+  const parents = (yield* checked(['rev-list', '--parents', '--max-count=1', receipt.commit])).split(' ');
+  if (parents.length !== 2 || parents[0] !== receipt.commit || parents[1] !== previous.remoteCommit)
+    return yield* ShareOperationError.make({
+      message:
+        'Shared publication has other unpublished or divergent commits. Resolve their approval and publication before retrying this exact document.',
+    });
+  const changes = yield* runGitCommand(
+    false,
+    git,
+    [
+      '-C',
+      worktree,
+      'diff-tree',
+      '--no-commit-id',
+      '--name-only',
+      '--no-renames',
+      '-r',
+      '-z',
+      previous.remoteCommit,
+      receipt.commit,
+    ],
+    'Shared publication commit scope verification failed',
+  );
+  const changedPaths = changes!.stdout.split('\0').filter(Boolean);
+  if (changedPaths.length !== 1 || changedPaths[0] !== path)
+    return yield* ShareOperationError.make({
+      message: 'Shared publication commit includes changes outside the exact approved document.',
+    });
+  // Push this exact commit, never whichever branch HEAD happened to become.
+  // A lost push acknowledgement is resolved by the same authenticated readback.
+  yield* runCommand(
+    git,
+    ['-C', worktree, 'push', DEFAULT_GIT_REMOTE_NAME, `${receipt.commit}:refs/heads/${receipt.branch}`],
+    {allowFailure: true},
+  );
+  const published = yield* readRemote;
+  if (!published.containsCommit)
+    return yield* ShareOperationError.make({
+      message: 'Shared publication commit is not present on the configured remote.',
+    });
+  // A rejected/redundant push is successful only when the readback above proves
+  // both our commit and the exact current remote document.
+  return {...receipt, remoteCommit: published.remoteCommit, verified: true} satisfies ShareGitPublicationReceipt;
 });
 
 export const writeSharedWorktreeFile = Effect.fn('share.writeSharedWorktreeFile')(function* (
@@ -332,6 +560,12 @@ export function assertSharedWorktreeFileReady(
       return yield* ShareOperationError.make({message: `Shared worktree target is not a regular file: ${targetPath}`});
     }
     const currentContent = yield* fs.readFileString(targetPath);
+    if (
+      options.allowCleanTrackedReplacement !== true &&
+      options.exactRetryContent !== undefined &&
+      currentContent === options.exactRetryContent
+    )
+      return;
     if (options.exactRetryContent !== undefined && options.allowCleanTrackedReplacement === true) {
       if (tracked && !dirty) return;
       if (tracked && dirty) {
@@ -367,7 +601,7 @@ const runGitCommand = Effect.fn('share.runGitCommand')(function* (
   }
   const result = yield* runCommand(git, args, {allowFailure: true});
   if (result.exitCode !== 0) {
-    throw ShareOperationError.make({
+    return yield* ShareOperationError.make({
       message: `${failureLabel}: ${result.stderr.trim() || result.stdout.trim() || 'unknown error'}`,
     });
   }

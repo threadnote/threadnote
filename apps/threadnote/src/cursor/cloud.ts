@@ -1,3 +1,4 @@
+import {composeWorkflowSetup, maintainPersonalWorkflows} from '../setup/workflows.js';
 import {Console, Effect, FileSystem, Path, Schema} from 'effect';
 import {
   ORG_CLOUD_ACCESS_HEADER,
@@ -11,11 +12,12 @@ import type {ShareTeamConfig, ShareTeamsFile} from '../types.js';
 import {runShareInit, runShareSync} from '../share/index.js';
 import {normalizeTeamName, readTeamsFile, shareTeamAccess} from '../share/index.js';
 import {withSharedRepositoryLock} from '../effect/share/lock.js';
+import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {canonicalResourceUri, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '../mcp/server/common.js';
 import {installCursorCloudAgentIntegration} from '../agent_integration/index.js';
-import {persistCursorCloudIdentityProfile} from './profile.js';
+import {persistCursorCloudIdentityProfile, readCursorCloudIdentityProfile} from './profile.js';
 import {
   ORG_COMPOSER_POLICY,
   THREADNOTE_ORG_MCP_NAME,
@@ -135,6 +137,7 @@ export interface CursorCloudMemoryScope {
 }
 
 export interface CursorCloudBootstrapOptions {
+  readonly noDevSkills?: boolean;
   readonly cwd?: string;
   readonly dryRun?: boolean;
   readonly endpoint?: string;
@@ -552,33 +555,74 @@ export const runCursorCloudBootstrap = Effect.fn('cursorCloud.bootstrap')(functi
     throw CursorCloudOperationError.make({message: 'Personal Cursor Cloud bootstrap requires --remote.'});
   }
   const remote = options.remote;
-  yield* withSharedRepositoryLock(
+  const core = Effect.gen(function* () {
+    if (options.dryRun !== true) {
+      yield* persistCursorCloudIdentityProfile(config);
+    }
+    const plan = planCursorCloudBootstrap(yield* readTeamsFile(config), remote, options.team);
+    if (plan.action === 'initialize') {
+      yield* runShareInit(config, plan.remote, {
+        dryRun: options.dryRun,
+        push: true,
+        readOnly: false,
+        setDefault: true,
+        team: plan.team,
+      });
+    } else {
+      yield* Console.log(`Cursor Cloud memory team "${plan.team}" is already configured read-write; reusing it.`);
+    }
+    if (options.dryRun === true) {
+      yield* Console.log('Dry run complete; the memory share was not changed or synchronized.');
+    } else if (options.sync !== false) {
+      yield* runShareSync(config, {push: true, team: plan.team});
+    }
+    yield* Console.log(`Cursor Cloud memory root: ${cursorCloudMemoryRoot(config.user, plan.team)}/`);
+    yield* installCursorCloudAgentIntegration(config, options.dryRun === true);
+  });
+  yield* composeWorkflowSetup(
     config,
-    Effect.gen(function* () {
-      if (options.dryRun !== true) {
-        yield* persistCursorCloudIdentityProfile(config);
-      }
-      const plan = planCursorCloudBootstrap(yield* readTeamsFile(config), remote, options.team);
-      if (plan.action === 'initialize') {
-        yield* runShareInit(config, plan.remote, {
-          dryRun: options.dryRun,
-          push: true,
-          readOnly: false,
-          setDefault: true,
-          team: plan.team,
-        });
-      } else {
-        yield* Console.log(`Cursor Cloud memory team "${plan.team}" is already configured read-write; reusing it.`);
-      }
-      if (options.dryRun === true) {
-        yield* Console.log('Dry run complete; the memory share was not changed or synchronized.');
-      } else if (options.sync !== false) {
-        yield* runShareSync(config, {push: true, team: plan.team});
-      }
-      yield* Console.log(`Cursor Cloud memory root: ${cursorCloudMemoryRoot(config.user, plan.team)}/`);
-      yield* installCursorCloudAgentIntegration(config, options.dryRun === true);
-    }),
+    {agent: 'cursor-cloud-personal', profile: 'cursor-cloud-personal'},
+    {apply: options.dryRun !== true, noDevSkills: options.noDevSkills, key: 'bootstrap:cursor-personal'},
+    () => (options.dryRun ? core : withSharedRepositoryLock(config, core)),
   );
+});
+
+/** Personal task-start maintenance never creates enrollment or a missing identity profile. */
+export const runCursorCloudStart = Effect.fn('cursorCloud.start')(function* (
+  config: RuntimeConfig,
+  options: {readonly cwd: string; readonly json?: boolean; readonly teams?: readonly string[]},
+) {
+  const profile = yield* readCursorCloudIdentityProfile(config.agentContextHome);
+  if (
+    !profile ||
+    profile.account !== config.account ||
+    profile.user !== config.user ||
+    profile.agentId !== config.agentId
+  )
+    return yield* CursorCloudOperationError.make({
+      message: 'Run personal Cursor bootstrap with this saved identity before start.',
+    });
+  const teamsFile = yield* readTeamsFile(config);
+  const teams = normalizeCursorCloudTeams(options.teams ?? [teamsFile.defaultTeam ?? DEFAULT_CURSOR_CLOUD_IDENTITY]);
+  yield* assertCursorCloudMemoryTeamsReady(config, teams);
+  const workflows = yield* maintainPersonalWorkflows(config, {
+    agent: 'cursor-cloud-personal',
+    profile: 'cursor-cloud-personal',
+  });
+  if (workflows.state === 'pending' || workflows.state === 'setup-needed')
+    yield* Console.error(
+      `Development workflows: ${workflows.state}. ${workflows.issues.map(issue => issue.message).join(' ')}`,
+    );
+  const restored = yield* captureConsoleWithoutProgress(installCursorCloudAgentIntegration(config, false));
+  if (restored.output) yield* Console.error(restored.output);
+  const refreshed = yield* captureConsoleWithoutProgress(
+    withSharedRepositoryLock(
+      config,
+      Effect.forEach(teams, team => runShareSync(config, {push: false, autoCommit: false, team}), {discard: true}),
+    ),
+  );
+  if (refreshed.output) yield* Console.error(refreshed.output);
+  yield* runCursorCloudVerify(config, {...options, teams, mode: 'personal'});
 });
 
 export const runCursorCloudVerify = Effect.fn('cursorCloud.verify')(function* (

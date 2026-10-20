@@ -22,6 +22,16 @@ export interface AgentIntegration {
   readonly caveats: readonly string[];
   readonly setup: readonly string[];
   readonly verification: string;
+  readonly devSkills:
+    | Readonly<{status: 'unsupported'; reason: string}>
+    | Readonly<{
+        status: 'managed';
+        profile: 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
+        scopes: readonly string[];
+        platforms: readonly string[];
+        layout: 'directory' | 'flat';
+        scopeReason?: string;
+      }>;
 }
 
 interface AgentIntegrationCatalog {

@@ -331,7 +331,16 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
         tickets.push({key, generation});
       }
       return tickets;
-    }).pipe(sql.withTransaction, Effect.mapError(fail));
+    }).pipe(
+      sql.withTransaction,
+      // Retry the whole rolled-back transaction, never an individual write.
+      Effect.retry({
+        times: 20,
+        schedule: Schedule.spaced(25),
+        while: error => isSqlError(error) && error.reason._tag === 'LockTimeoutError',
+      }),
+      Effect.mapError(fail),
+    );
   return {
     sql,
     queue,

@@ -7,13 +7,13 @@ import {
 } from '../constants.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
-import {mcpAdapterCommand} from '../mcp/install.js';
+import {mcpAdapterCommand} from '../mcp/adapter-command.js';
 import {MCP_TOOLSET_ENV} from '../mcp/toolset.js';
 import type {McpToolset} from '../mcp/toolset.js';
 import type {JsonObject} from '@threadnote/platform/json';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {toolRoot} from '@threadnote/workspace/installation';
-import type {AgentAdapter} from './adapters/contract.js';
+import type {AgentAdapter, AgentSkillRootPaths, JsonAgentStrategy} from './adapters/contract.js';
 import type {AgentArtifact} from './index.js';
 import type {AgentSurfaceReceipt} from './registry.js';
 import {AgentSurfaceError} from './surfaces.js';
@@ -29,39 +29,25 @@ export interface SurfaceInstallOptions {
   readonly scope?: 'user' | 'project' | 'local';
 }
 
-export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
-  config: RuntimeConfig,
-  adapter: AgentAdapter,
-  options: SurfaceInstallOptions = {},
-  previous?: AgentSurfaceReceipt,
+/** Resolve only host/skill paths; no filesystem, MCP document or template reads. */
+export const resolveJsonAgentSkillPaths = Effect.fn('agentSurfaces.resolveSkillPaths')(function* (
+  strategy: JsonAgentStrategy,
+  scope: 'user' | 'project' | 'local',
+  options: Pick<SurfaceInstallOptions, 'cwd'> = {},
+  previous?: AgentSkillRootPaths,
 ) {
-  if (!adapter.json)
-    return yield* AgentSurfaceError.make({
-      message: `No managed JSON installer for ${adapter.catalog.id}; consult threadnote agents list.`,
-    });
-  const strategy = adapter.json;
   const system = yield* SystemInfo;
   const path = yield* Path.Path;
-  const fs = yield* FileSystem.FileSystem;
-  const scope = previous?.scope ?? options.scope ?? strategy.defaultScope ?? 'user';
-  if (!adapter.catalog.scopes.includes(scope) || (previous && options.scope && options.scope !== scope))
-    return yield* AgentSurfaceError.make({
-      message: `Unsupported or conflicting scope for ${adapter.catalog.id}. Remove the recorded installation before changing scope.`,
-    });
   const requestedCwd = scope === 'user' || options.cwd === undefined ? undefined : path.resolve(options.cwd);
   if (previous?.cwd !== undefined && requestedCwd !== undefined && previous.cwd !== requestedCwd)
     return yield* AgentSurfaceError.make({
-      message: `The recorded ${adapter.catalog.id} ${scope} installation belongs to another repository. Remove it before changing repositories.`,
+      message: `The recorded ${scope} installation belongs to another repository. Remove it before changing repositories.`,
     });
   const cwd = previous?.cwd ?? requestedCwd ?? (scope === 'user' ? undefined : path.resolve(system.currentDirectory()));
   const environment = system.environment();
   const configuredRoot = strategy.rootEnvironment === undefined ? undefined : environment[strategy.rootEnvironment];
   if (!previous && scope === 'user' && configuredRoot && !path.isAbsolute(configuredRoot))
     return yield* AgentSurfaceError.make({message: `${strategy.rootEnvironment} must be absolute.`});
-  const configuredMcpRoot =
-    strategy.mcpRootEnvironment === undefined ? undefined : environment[strategy.mcpRootEnvironment];
-  if (!previous && scope === 'user' && configuredMcpRoot && !path.isAbsolute(configuredMcpRoot))
-    return yield* AgentSurfaceError.make({message: `${strategy.mcpRootEnvironment} must be absolute.`});
   const xdg = environment.XDG_CONFIG_HOME;
   if (!previous && scope === 'user' && strategy.xdg && xdg && !path.isAbsolute(xdg))
     return yield* AgentSurfaceError.make({message: 'XDG_CONFIG_HOME must be absolute.'});
@@ -98,6 +84,34 @@ export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
       : strategy.skillRoot === 'shared'
         ? path.join(scope === 'user' ? system.homeDirectory : cwd!, '.agents', 'skills')
         : path.join(root, scope === 'user' ? 'skills' : (strategy.projectSkillRoot ?? 'skills')));
+  return {root, skillRoot, cwd};
+});
+
+export const planAgentSurface = Effect.fn('agentSurfaces.plan')(function* (
+  config: RuntimeConfig,
+  adapter: AgentAdapter,
+  options: SurfaceInstallOptions = {},
+  previous?: AgentSurfaceReceipt,
+) {
+  if (!adapter.json)
+    return yield* AgentSurfaceError.make({
+      message: `No managed JSON installer for ${adapter.catalog.id}; consult threadnote agents list.`,
+    });
+  const strategy = adapter.json;
+  const system = yield* SystemInfo;
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const scope = previous?.scope ?? options.scope ?? strategy.defaultScope ?? 'user';
+  if (!adapter.catalog.scopes.includes(scope) || (previous && options.scope && options.scope !== scope))
+    return yield* AgentSurfaceError.make({
+      message: `Unsupported or conflicting scope for ${adapter.catalog.id}. Remove the recorded installation before changing scope.`,
+    });
+  const {root, skillRoot, cwd} = yield* resolveJsonAgentSkillPaths(strategy, scope, options, previous);
+  const environment = system.environment();
+  const configuredMcpRoot =
+    strategy.mcpRootEnvironment === undefined ? undefined : environment[strategy.mcpRootEnvironment];
+  if (!previous && scope === 'user' && configuredMcpRoot && !path.isAbsolute(configuredMcpRoot))
+    return yield* AgentSurfaceError.make({message: `${strategy.mcpRootEnvironment} must be absolute.`});
   const mcpRoot =
     previous?.mcp.root ?? (scope === 'user' ? (configuredMcpRoot ?? path.join(root, strategy.mcpRoot ?? '')) : root);
   const defaultMcpFile =

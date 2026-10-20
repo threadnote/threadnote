@@ -31,6 +31,20 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".agents/skills",
+          "discoveryPaths": [".agents/skills", ".codex/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -74,7 +88,21 @@
         "Run threadnote cloud codex bootstrap --remote <credential-free-url> --team <name> --cwd <absolute-checkout> in the Install script.",
         "Use the installed threadnote-start-skill.md as the Start skill and publish the environment."
       ],
-      "verification": "Run cloud codex start --cwd <absolute-checkout> and verify --cwd <absolute-checkout> --json in a fresh task; confirm three skills load, query the local structural graph, and recall/read a durable write from a second fresh task."
+      "verification": "Run cloud codex start --cwd <absolute-checkout> and verify --cwd <absolute-checkout> --json in a fresh task; confirm three skills load, query the local structural graph, and recall/read a durable write from a second fresh task.",
+      "devSkills": {
+        "status": "managed",
+        "profile": "codex-cloud-personal",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["linux"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".agents/skills",
+          "discoveryPaths": [".agents/skills", ".codex/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
+      }
     },
     {
       "id": "claude-code",
@@ -106,6 +134,20 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "CLAUDE.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".claude/skills",
+          "discoveryPaths": [".claude/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -138,6 +180,20 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".cursor/rules/threadnote.mdc"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".cursor/skills",
+          "discoveryPaths": [".cursor/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -176,6 +232,20 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".github/instructions/threadnote.instructions.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".copilot/skills",
+          "discoveryPaths": [".copilot/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -208,6 +278,18 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".omp/AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "omp-profile"
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -244,6 +326,20 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "cursor-cloud-personal",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "home-relative",
+          "path": ".cursor/skills",
+          "discoveryPaths": [".cursor/skills"]
+        },
+        "scopeReason": "Only user-scope native workflow discovery is declared; MCP and instruction scopes do not imply skill support."
       }
     },
     {
@@ -280,6 +376,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     },
     {
@@ -321,6 +421,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "GEMINI.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -361,6 +472,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "QWEN.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -407,6 +529,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user", "project"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -454,6 +587,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -495,6 +639,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     },
     {
@@ -536,6 +684,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -576,6 +735,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": "AGENTS.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -616,6 +786,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     },
     {
@@ -658,6 +832,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     },
     {
@@ -701,6 +879,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".clinerules/threadnote.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -744,6 +933,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".kiro/steering/threadnote.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user", "project"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -786,6 +986,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".devin/global_rules.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user", "project", "local"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -828,6 +1039,17 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Project guidance needs precedence-aware dynamic target selection before automation."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user", "project"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -871,6 +1093,17 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Project guidance needs first-match dynamic target selection before automation."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -913,6 +1146,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".roo/rules/threadnote.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["project"],
+        "defaultScope": "project",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -956,6 +1200,10 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".continue/rules/threadnote-guidance.md"
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No verified native skills discovery contract; project rules provide the bootstrap."
       }
     },
     {
@@ -996,6 +1244,17 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Automatic global instruction discovery is not verified for the CLI; use the managed skills."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "flat",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -1035,6 +1294,17 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Project guidance needs a verified on-disk activation fixture before automation."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -1075,6 +1345,17 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Rules require instructions-array registration; ownership of that separate array is not yet implemented."
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -1111,6 +1392,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     },
     {
@@ -1150,6 +1435,17 @@
       "projectGuidance": {
         "status": "managed",
         "targetPath": ".windsurf/rules/threadnote.md"
+      },
+      "devSkills": {
+        "status": "managed",
+        "profile": "desktop",
+        "scopes": ["user"],
+        "defaultScope": "user",
+        "platforms": ["darwin", "linux", "win32"],
+        "layout": "directory",
+        "root": {
+          "kind": "json-strategy"
+        }
       }
     },
     {
@@ -1186,6 +1482,10 @@
       "projectGuidance": {
         "status": "unsupported",
         "reason": "Use upstream documentation for manual setup."
+      },
+      "devSkills": {
+        "status": "unsupported",
+        "reason": "No managed skill installation."
       }
     }
   ]

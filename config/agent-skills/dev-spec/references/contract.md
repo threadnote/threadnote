@@ -52,6 +52,20 @@ python3 "$SPEC_DIR/scripts/dev_spec.py" save --spec "$RUN/spec.json" --state "$R
 
 Resume also reads the saved root's confirmation/review data when reusing unchanged decisions; `load` restores spec and receipts, not separate approval files. Draft persistence permits unresolved decisions but still requires meaningful requirements/scenarios, scope provenance, recall and review classification. Local incomplete drafts need not be persisted as ready memories.
 
+## Profile binding and resume
+
+New `save --state FILE` runs automatically create `FILE.workflow-context.json` unless a context is explicitly selected or inherited. The runtime binds identity, repository, home, profile and workflow run; satellites use structured `threadnote workflow-memory` JSON for preflight, read, create/replace, archive and recovery. Operation IDs, exact intent and expected native revisions are journaled before mutations; readback verifies the result. Receipts and exported handoffs carry `workflowContext` outside reviewed artifact/intent hashes. Keep that file and the receipts in private writable run state, outside immutable installed resources.
+
+Desktop keeps its existing private storage semantics and supports old unbound desktop receipts. Personal Codex/Cursor cloud planning artifacts use native private task-local handoffs, including factual baselines; they are not durable across a lost ephemeral workspace and are never published as raw records. Only approved verified projections go to the configured authorized Git share. Org/corporate and remote-hybrid profiles are unsupported; do not fall back to desktop or a local durable store.
+
+Use the recorded context for later reads, with global options **before** the subcommand:
+
+```sh
+python3 "$SPEC_DIR/scripts/dev_spec.py" --workflow-context "$WORKFLOW_CONTEXT" load --root "$SPEC_URI" --out "$RUN/spec.json" --state "$RUN/receipts.json"
+```
+
+`--workflow-profile desktop|codex-cloud-personal|cursor-cloud-personal` and `--workflow-team TEAM` select only an initial binding when needed; normally let runtime configuration resolve them. The context pins the immutable helper generation. Resume using that generation's resource roots, preserving the locator through spec/plan/cycle exports. `--workflow-generation` is a checked pin, not a way to migrate a run. Missing bound context/native binding, changed identity or mismatched generation blocks resume. Restore the original context if available; never delete receipts or bind a fresh run to pretend lost state survived.
+
 ## Threadnote mechanics
 
 Each artifact links directly to its relevant read-and-pinned prior memories. Native relations are limited to 16 per memory, code anchors to eight. Reserve one relation for final implemented architecture. Root child links consume relation capacity; narrow an oversized feature rather than dropping meaningful provenance. The dev-plan importer accepts at most thirteen upstream artifact memories (root included) to leave room for planning relations. Save uses private handoff memories, immutable child versions, child-first/root-last writes and exact readback. No local preview overrides Threadnote.
@@ -60,4 +74,4 @@ Receipts record run ownership, hashes, destinations and retired URI maps. Keep t
 
 The structured payload is embedded with a version marker; the human-readable body must match it. Edit through `load` and `save`. Normalized native envelopes and the known archived-body prefix do not change payload identity. Current citations are strict on ready/verified output; deferred citations remain draft-only. Graph maintenance uses the installed Threadnote workflow, never fake hashes.
 
-At closeout the coordinator creates verified durable behavior/domain artifacts, binds current code and links implemented architecture, then archives only owned drafts/history. Native relations target active memories; archived history uses body links and URI maps. Verification preserves approved intent; deviations must be resolved or explicitly agreed before completion. Optional general lessons/policy promotion retain their separate approval path.
+At desktop closeout the coordinator creates verified private durable behavior/domain artifacts, binds current code and links implemented architecture, then archives only owned drafts/history. Personal cloud instead publishes the approved sanitized behavior/domain projection and architecture to the selected Git share and verifies every final node before either draft set is retired; use [the publication commands](workflow.md#personal-cloud-publication). Native relations target active memories; archived history uses body links and URI maps. Verification preserves approved intent; deviations must be resolved or explicitly agreed before completion. Optional general lessons/policy promotion retain their separate approval path.

@@ -1,3 +1,4 @@
+import {composeWorkflowSetup, setupWorkflowSelector} from '../setup/workflows.js';
 import {Clock, Console, DateTime, Effect} from 'effect';
 import {Argument, Command} from 'effect/cli';
 import {AGENT_ADAPTERS, getAgentAdapter} from '../agent_integration/adapters.js';
@@ -28,8 +29,16 @@ export const runAgentCliAction = Effect.fn('agents.cliAction')(function* (
   action: AgentAdapterAction,
   apply: boolean,
   scope?: 'user' | 'project' | 'local',
+  noDevSkills = false,
 ) {
-  const result = yield* runAgentAdapterAction(config, adapter, action, apply, scope);
+  const result = yield* action === 'install'
+    ? composeWorkflowSetup(
+        config,
+        setupWorkflowSelector(adapter.catalog.id, scope),
+        {apply, noDevSkills, key: `agents:${adapter.catalog.id}`},
+        lease => runAgentAdapterAction(config, adapter, action, apply, scope, undefined, lease !== undefined),
+      )
+    : runAgentAdapterAction(config, adapter, action, apply, scope);
   if (action === 'install' && apply && isAgentSetupCompletion(result)) {
     const timestamp = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
     yield* recordSetupCompletionValueEvent(config.agentContextHome, {
@@ -78,13 +87,14 @@ export function makeAgentsCommand(
       {
         surface: Argument.String('surface'),
         apply: boolean('apply', 'Apply the plan; otherwise only preview paths'),
+        noDevSkills: boolean('no-dev-skills', 'Persist disabled workflow enrollment during installation'),
         scope: optionalChoice(
           'scope',
           ['user', 'project', 'local'],
           'Installation scope; repair and removal use the receipt',
         ),
       },
-      ({surface, apply, scope}) =>
+      ({surface, apply, scope, noDevSkills}) =>
         withRuntime(
           Effect.fn(function* (config: RuntimeConfig) {
             const adapter = getAgentAdapter(surface);
@@ -97,7 +107,7 @@ export function makeAgentsCommand(
                 message:
                   '--scope is supported only by managed surface installation; repair and removal use the receipt.',
               });
-            yield* runAgentCliAction(config, adapter, action, apply, scope);
+            yield* runAgentCliAction(config, adapter, action, apply, scope, noDevSkills);
           }),
         ),
     ),

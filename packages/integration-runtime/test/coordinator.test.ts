@@ -157,6 +157,69 @@ effectLayer(base)('durable integration coordinator', effectIt => {
     }),
   );
 
+  effectIt.effect('yields until a temporary writer releases, publishing exactly one generation', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const store = yield* openCoordinatorStore(current);
+      const paths = yield* coordinatorPaths(current);
+      const blocker = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const database = new Database(paths.database);
+          database.run('BEGIN IMMEDIATE');
+          return database;
+        }),
+        database => Effect.sync(() => database.close()),
+      );
+      const publishing = yield* store.enqueue(current, [descriptor('one')], 'explicit').pipe(Effect.forkScoped);
+      yield* TestClock.adjust(75);
+      expect(publishing.pollUnsafe()).toBeUndefined();
+      yield* Effect.sync(() => blocker.run('COMMIT'));
+      yield* TestClock.adjust(25);
+      const tickets = yield* Fiber.join(publishing);
+      expect(tickets).toHaveLength(1);
+      expect((yield* store.pending).map(row => ({generation: row.generation, state: row.state}))).toEqual([
+        {generation: 1, state: 'pending'},
+      ]);
+      expect(yield* store.enqueue(current, [descriptor('one')], 'explicit')).toEqual(tickets);
+    }),
+  );
+
+  effectIt.effect('bounds demand contention and leaves no partial generation before recovery', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const store = yield* openCoordinatorStore(current);
+      const paths = yield* coordinatorPaths(current);
+      const blocker = yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const database = new Database(paths.database);
+          database.run('BEGIN IMMEDIATE');
+          return database;
+        }),
+        database => Effect.sync(() => database.close()),
+      );
+      const publishing = yield* store
+        .enqueue(current, [descriptor('one')], 'explicit')
+        .pipe(Effect.result, Effect.forkScoped);
+      yield* TestClock.adjust(475);
+      expect(publishing.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust(25);
+      expect(yield* Fiber.join(publishing)).toMatchObject({_tag: 'Failure', failure: {_tag: 'SourceCoordinatorError'}});
+      yield* Effect.sync(() => blocker.run('COMMIT'));
+      expect(yield* store.pending).toEqual([]);
+      expect((yield* store.enqueue(current, [descriptor('one')], 'explicit'))[0].generation).toBe(1);
+    }),
+  );
+
+  effectIt.effect('does not retry invalid demand', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const store = yield* openCoordinatorStore(current);
+      expect(
+        yield* store.enqueue(current, [descriptor('invalid/source')], 'explicit').pipe(Effect.result),
+      ).toMatchObject({_tag: 'Failure', failure: {_tag: 'SourceCoordinatorError'}});
+      expect(yield* store.pending).toEqual([]);
+    }),
+  );
   effectIt.effect.prop(
     'coalesces repeated pending demand into one generation per source',
     {count: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 30}))},

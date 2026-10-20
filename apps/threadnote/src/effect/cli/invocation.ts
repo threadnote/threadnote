@@ -14,6 +14,8 @@ interface CliCommandRegistration {
 
 export interface CliInvocationInspection {
   readonly offline?: true;
+  /** Release previews must run before process, lease, cache or telemetry writes. */
+  readonly observationalUpdate?: true;
   /** CI reserves exit 1 for actionable findings, including when parsing fails before its handler. */
   readonly failureExitCode?: 2;
   readonly homeOverride?: string;
@@ -59,6 +61,11 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
     const selectedName = scanned.positionals[0];
     const operation = selectedName === undefined ? undefined : (operationByName.get(selectedName) ?? 'unknown');
     const offlinePilot = operation === 'value' && scanned.positionals[1] === 'pilot';
+    const observationalUpdate =
+      operation === 'update' &&
+      scanned.positionals.length === 1 &&
+      !scanned.invalidBooleanValue &&
+      (scanned.booleanValues.get('--check') === true || scanned.booleanValues.get('--dry-run') === true);
     const telemetryOperation =
       operation === undefined
         ? undefined
@@ -70,6 +77,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       registration?.productionLog.mode ??
       'always';
     const writeProductionLog =
+      !observationalUpdate &&
       operation !== undefined &&
       mode !== 'never' &&
       scanned.booleanValues.get('--dry-run') !== true &&
@@ -78,6 +86,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       !(mode === 'requires-apply' && scanned.booleanValues.get('--apply') !== true) &&
       !(mode === 'skips-on-preview' && scanned.booleanValues.get('--preview') === true);
     const writeAnonymousTelemetry =
+      !observationalUpdate &&
       !offlinePilot &&
       operation !== undefined &&
       operation !== 'telemetry' &&
@@ -85,6 +94,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       !scanned.flags.has('-h');
     return {
       ...(offlinePilot ? {offline: true as const} : {}),
+      ...(observationalUpdate ? {observationalUpdate: true as const} : {}),
       ...(operation === 'context' && scanned.positionals[1] === 'check' ? {failureExitCode: 2 as const} : {}),
       ...(scanned.homeOverride === undefined ? {} : {homeOverride: scanned.homeOverride}),
       ...(operation === undefined ? {} : {operation}),
@@ -100,6 +110,7 @@ function scanCliArguments(arguments_: readonly string[]) {
   const flags = new Set<string>();
   const positionals: string[] = [];
   let homeOverride: string | undefined;
+  let invalidBooleanValue = false;
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index] ?? '';
     const equalsIndex = argument.indexOf('=');
@@ -120,6 +131,7 @@ function scanCliArguments(arguments_: readonly string[]) {
     if (booleanFlagNames.has(flagName)) {
       const inlineValue = equalsIndex > 0 ? parseCliBoolean(argument.slice(equalsIndex + 1)) : undefined;
       const followingValue = equalsIndex < 0 ? parseCliBoolean(arguments_[index + 1]) : undefined;
+      if (equalsIndex > 0 && inlineValue === undefined) invalidBooleanValue = true;
       booleanValues.set(flagName, inlineValue ?? followingValue ?? true);
       if (followingValue !== undefined) {
         index += 1;
@@ -132,7 +144,7 @@ function scanCliArguments(arguments_: readonly string[]) {
       positionals.push(argument);
     }
   }
-  return {booleanValues, flags, homeOverride, positionals};
+  return {booleanValues, flags, homeOverride, invalidBooleanValue, positionals};
 }
 
 function parseCliBoolean(value: string | undefined): boolean | undefined {

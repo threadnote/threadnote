@@ -69,7 +69,7 @@ export function ManagerNavigation(props: {
           {(
             [
               {label: 'Knowledge', items: ['home', 'memory', 'context', 'reviews', 'context-health', 'graph']},
-              {label: 'Workspace', items: ['worksets', 'shares', 'integrations']},
+              {label: 'Workspace', items: ['worksets', 'dev-skills', 'shares', 'integrations']},
               {label: 'System', items: ['processes', 'doctor']},
             ] as const
           ).map(group => (

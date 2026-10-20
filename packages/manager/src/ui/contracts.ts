@@ -24,6 +24,7 @@ export interface ConsolidationJobResponse {
 export type PanelName =
   | 'context'
   | 'context-health'
+  | 'dev-skills'
   | 'doctor'
   | 'graph'
   | 'home'

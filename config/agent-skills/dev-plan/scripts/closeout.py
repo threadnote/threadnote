@@ -2,6 +2,7 @@
 """Bind implemented architecture to current code, then retire obsolete planning artifacts."""
 import sys
 sys.dont_write_bytecode = True
+import workflow_transport as wt
 from portable_lock import lock_exclusive
 
 import argparse
@@ -57,6 +58,7 @@ def evidence_check(plan, root, implemented, evidence):
 
 
 def complete(root_uri, implemented, evidence, state_path, client, recover_uri=None):
+    wt.block_cloud_finish(client)
     state_path = Path(state_path)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     with open(str(state_path) + ".lock", "a+b") as lock:
@@ -103,6 +105,8 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
             pending = state["pending"]
             if pending["operation"] == "archive":
                 uri = recover_uri or pending.get("uri")
+                if uri is None and getattr(client, "workflow", None) is not None:
+                    uri = client.archive(pending["source"])
                 if not uri:
                     original = client.peek(pending["source"])
                     require(original is not None and digest(load_record(original)) == pending["hash"]
@@ -111,8 +115,11 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
                 else:
                     require(digest(load_record(client.read(uri))) == pending["hash"],
                             "Recovered archive differs from the intended artifact")
-                    raw = client.call("read", [uri])
-                    require(re.search(r"^status: archived$", raw, re.M), "Recovery URI has not been archived")
+                    if getattr(client, "workflow", None) is not None:
+                        require(client.workflow.read(uri)["state"] == "archived", "Recovery URI has not been archived")
+                    else:
+                        raw = client.call("read", [uri])
+                        require(re.search(r"^status: archived$", raw, re.M), "Recovery URI has not been archived")
                     state["archiveMap"][pending["source"]] = uri
             else:
                 uri = reconcile_write(pending, client, recover_uri)
@@ -167,10 +174,13 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
                     "Planning artifact changed during closeout; reconcile before retirement")
             state["pending"] = {"operation": "archive", "source": uri, "hash": digest(record)}
             write_json(state_path, state)
-            output = client.call("archive", [uri])
-            match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
-            require(match, "Unknown archive outcome; recover the returned archived URI before retrying")
-            archived = match.group(1)
+            if hasattr(client, "archive"):
+                archived = client.archive(uri)
+            else:
+                output = client.call("archive", [uri])
+                match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
+                require(match, "Unknown archive outcome; recover the returned archived URI before retrying")
+                archived = match.group(1)
             state["pending"]["uri"] = archived
             write_json(state_path, state)
             require(digest(load_record(client.read(archived))) == digest(record), "Archive readback mismatch")
@@ -188,11 +198,12 @@ def main():
     for name in ("root", "implemented", "evidence", "state"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--threadnote-home")
+    wt.add_arguments(parser)
     parser.add_argument("--recover-uri")
     args = parser.parse_args()
     implemented = read_json(args.implemented)
     result = complete(args.root, implemented, read_json(args.evidence), args.state,
-                      Threadnote(implemented["scope"]["repo"], args.threadnote_home), args.recover_uri)
+                      Threadnote(implemented["scope"]["repo"], args.threadnote_home, **wt.options(args)), args.recover_uri)
     print(json.dumps(result, ensure_ascii=True, indent=2))
 
 
@@ -200,5 +211,5 @@ if __name__ == "__main__":
     try:
         main()
     except (PlanError, KeyError, ValueError, OSError, subprocess.TimeoutExpired) as error:
-        print(json.dumps({"error": str(error)}, ensure_ascii=True), file=sys.stderr)
+        print(json.dumps(wt.cli_error(error), ensure_ascii=True), file=sys.stderr)
         sys.exit(1)

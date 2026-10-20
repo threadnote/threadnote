@@ -2,7 +2,14 @@ import {it as effectIt} from '@effect/vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {runEffect} from '../helpers/effect-runtime.js';
 import {withoutOmpPathSelectors} from '@threadnote/testing/omp-environment';
-import {chmod, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {
+  chmod,
+  mkdtemp as makeTempDirectory,
+  realpath,
+  readFile,
+  rm,
+  writeFile,
+} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {delimiter, join} from '@threadnote/testing/node-path';
 import {Effect, FileSystem, Path} from 'effect';
@@ -22,7 +29,7 @@ import {mcpToolCapabilities, parseMcpToolset} from '@threadnote/threadnote/mcp/t
 import {runOmpHooksInstall} from '@threadnote/threadnote/omp_hooks';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
-function runtime(agentContextHome = '/tmp/threadnote-test'): RuntimeConfig {
+function runtime(agentContextHome: string): RuntimeConfig {
   return {
     account: 'local',
     agentContextHome,
@@ -32,12 +39,21 @@ function runtime(agentContextHome = '/tmp/threadnote-test'): RuntimeConfig {
   };
 }
 
+const fixtureRuntime = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-runtime-'}));
+  return runtime(path.join(root, 'home'));
+});
+
 function dryRunOutput(toolset?: 'core' | 'full') {
-  return captureConsole(runMcpInstall(runtime(), 'codex', {toolset})).pipe(
-    Effect.map(result => result.output),
-    provideTestLayer(ApplicationLayer),
-  );
+  return Effect.gen(function* () {
+    const config = yield* fixtureRuntime;
+    return (yield* captureConsole(runMcpInstall(config, 'codex', {toolset}))).output;
+  }).pipe(provideTestLayer(ApplicationLayer));
 }
+
+const mkdtemp = async (prefix: string) => realpath(await makeTempDirectory(prefix));
 
 const originalPath = process.env.PATH;
 const originalThreadnoteBinDirectory = process.env.THREADNOTE_BIN_DIR;
@@ -105,9 +121,11 @@ describe('MCP toolsets', () => {
     Effect.gen(function* () {
       const baseSystem = yield* SystemInfo;
       const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-render-'}));
       const binDirectory = '/opt/threadnote/bin';
       const brokerLauncher = path.join(binDirectory, 'threadnote-mcp-server');
-      const userHome = '/tmp/threadnote-mcp-host-user';
+      const userHome = path.join(root, 'user');
       const testRuntime = runtime(path.join(userHome, '.threadnote'));
       const testSystem = SystemInfo.of({
         ...baseSystem,
@@ -142,13 +160,13 @@ describe('MCP toolsets', () => {
   effectIt.effect('uses the owning repair command instead of advertising an unsupported apply flag', () =>
     Effect.gen(function* () {
       const result = yield* captureConsole(
-        runMcpInstall(runtime(), 'codex', {
+        runMcpInstall(yield* fixtureRuntime, 'codex', {
           dryRunApplyCommand: 'threadnote repair',
         }),
-      ).pipe(provideTestLayer(ApplicationLayer));
+      );
       expect(result.output).toContain('Run `threadnote repair` without `--dry-run`');
       expect(result.output).not.toContain('Re-run with --apply');
-    }),
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   it('rejects unsupported toolsets', () => {
@@ -222,7 +240,7 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-current-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-current-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const broker = path.join(bin, 'threadnote-mcp-server');
@@ -296,7 +314,7 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const broker = path.join(bin, 'threadnote-mcp-server');
@@ -368,7 +386,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-disabled-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-disabled-'}),
+        );
         const bin = path.join(root, 'bin');
         for (const scenario of ['denylist', 'entry', 'both'] as const) {
           const user = path.join(root, scenario, 'user');
@@ -412,7 +432,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-enabled-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-enabled-'}),
+        );
         const user = path.join(root, 'user');
         const configPath = path.join(user, '.omp', 'agent', 'mcp.json');
         const testRuntime = runtime(path.join(user, '.threadnote'));
@@ -445,7 +467,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-agent-dir-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-agent-dir-'}),
+        );
         const user = path.join(root, 'user');
         const agentRoot = path.join(root, 'active-agent');
         const testSystem = SystemInfo.of({
@@ -474,7 +498,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-available-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-available-'}),
+        );
         const user = path.join(root, 'user');
         const agentRoot = path.join(root, 'custom-agent');
         const testSystem = SystemInfo.of({
@@ -505,7 +531,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-profile-move-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-profile-move-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const testRuntime = runtime(path.join(user, '.threadnote'));
@@ -551,7 +579,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-project-profile-move-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-project-profile-move-'}),
+        );
         const user = path.join(root, 'user');
         const project = path.join(root, 'project');
         const bin = path.join(root, 'bin');
@@ -591,7 +621,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-project-repair-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-project-repair-'}),
+        );
         const user = path.join(root, 'user');
         const project = path.join(root, 'project');
         const configPath = path.join(project, '.omp', 'mcp.json');
@@ -632,7 +664,7 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-drift-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-drift-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const broker = path.join(bin, 'threadnote-mcp-server');
@@ -687,7 +719,7 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-drift-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-drift-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const broker = path.join(bin, 'threadnote-mcp-server');
@@ -760,7 +792,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-custom-mcp-uninstall-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-custom-mcp-uninstall-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -800,7 +834,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cursor-cloud-uninstall-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cursor-cloud-uninstall-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -839,7 +875,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-fresh-cursor-install-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-fresh-cursor-install-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const testRuntime = runtime(path.join(user, '.threadnote'));
@@ -871,7 +909,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-install-uninstall-race-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-install-uninstall-race-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -915,7 +955,7 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-custom-mcp-retry-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-custom-mcp-retry-'}));
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -961,7 +1001,9 @@ describe('JSON MCP host configuration', () => {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-omitted-uninstall-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-omitted-uninstall-'}),
+        );
         const user = path.join(root, 'user');
         const bin = path.join(root, 'bin');
         const cursorPath = path.join(user, '.cursor', 'mcp.json');
@@ -1215,7 +1257,10 @@ describe('MCP agent executable resolution', () => {
     const resolution = await resolveMcpClients('codex', 'repair').pipe(captureConsole, runEffect);
     expect(resolution.value).toEqual([]);
     expect(resolution.output).toMatch(/codex command.*not working/i);
-    await expect(runEffect(runMcpInstall(runtime(), 'codex', {apply: true}))).rejects.toThrow(
+    const root = await mkdtemp(join(tmpdir(), 'threadnote-broken-codex-'));
+    temporaryDirectories.push(root);
+    const config = runtime(join(root, 'home'));
+    await expect(runEffect(runMcpInstall(config, 'codex', {apply: true}))).rejects.toThrow(
       /repair or reinstall codex.*threadnote mcp-install codex --apply/i,
     );
   });

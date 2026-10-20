@@ -1626,6 +1626,28 @@ body.is-resizing-sidebar * {
   padding: 22px;
 }
 
+.mermaid-block {
+  position: relative;
+  min-width: 0;
+  margin-block: 1rem;
+}
+.mermaid-frame {
+  display: block;
+  width: 100%;
+  border: 0;
+}
+.mermaid-frame.is-loading {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+}
+.mermaid-block summary {
+  cursor: pointer;
+}
+.mermaid-block pre {
+  overflow-x: auto;
+}
+
 .markdown-viewer > :first-child {
   margin-top: 0;
 }

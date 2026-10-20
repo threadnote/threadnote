@@ -33,7 +33,12 @@ import {
 import {hasLegacyLifecycleHandoffCandidates, hasProjectNameMigrationCandidates} from '../memory/index.js';
 import {isLegacyHomeMigrationPending, isThreadnoteHomeMigrationPending} from '../migration/home.js';
 import {whatsNewLinesForVersionRange} from './notes.js';
-import {GITHUB_RELEASES_URL, githubReleaseHeaders, isOfficialGitHubReleasesUrl} from './github_auth.js';
+import {
+  GITHUB_RELEASES_URL,
+  githubReleaseHeaders,
+  isOfficialGitHubReleasesUrl,
+  type ReleaseAuthenticationOptions,
+} from './github_auth.js';
 import {redactSensitiveText} from '@threadnote/platform/scrubber';
 import {sendSystemNotification} from '../system_notification.js';
 import {readTelemetryConsentRenewal} from '../telemetry/config.js';
@@ -53,6 +58,7 @@ import {
 } from '../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
+import {prepareReleaseDevSkills, refreshReleaseDevSkills} from './dev_skills_update.js';
 
 class UpdateOperationError extends Schema.TaggedError<UpdateOperationError>()('UpdateOperationError', {
   cause: Schema.optionalKey(Schema.Defect()),
@@ -183,7 +189,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   const info = yield* withSpinnerEffect(
     'Checking GitHub for the latest standalone Threadnote release',
     getUpdateInfo(config, {
-      allowCacheWrite: options.dryRun !== true,
+      allowCacheWrite: options.dryRun !== true && options.check !== true,
       preferFresh: true,
       preferInstalledVersion: true,
       source,
@@ -209,6 +215,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
         requestedChannel: requestedChannel ?? null,
         source: info.source,
         type: 'threadnote-update-check',
+        workflowCompatibility: 'unchecked',
         usedCache: info.usedCache,
         version: 1,
       }),
@@ -246,7 +253,7 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
             ? 'threadnote update --stable'
             : 'threadnote update';
       yield* Console.log(warning(`${info.isChannelSwitch ? 'Channel switch' : 'Update'} available. Run: ${command}`));
-      yield* printWhatsNewIfAvailable(info);
+      yield* printWhatsNewIfAvailable(info, false);
     } else {
       yield* Console.log(
         compareVersions(info.currentVersion, latestVersion) > 0
@@ -258,20 +265,30 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   }
 
   if (!info.isUpdateAvailable && options.force !== true) {
-    let executable = system.executablePath;
-    if (info.installedVersion !== undefined) {
-      executable = yield* withStandaloneInstallationLock(
-        Effect.gen(function* () {
-          const path = yield* Path.Path;
-          const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
-          const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
-          yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
-          return path.join(activeReleaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
-        }),
-        options.dryRun === true,
-      );
-    }
-    yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable});
+    const current =
+      info.installedVersion === undefined
+        ? {executable: system.executablePath, refresh: undefined}
+        : yield* withStandaloneInstallationLock(
+            Effect.gen(function* () {
+              const path = yield* Path.Path;
+              const mutationInstalledVersion = (yield* activeInstalledVersion()) ?? info.installedVersion!;
+              const activeReleaseRoot = path.join(installationRoot(path, system), 'versions', mutationInstalledVersion);
+              yield* installCommandShim(options.dryRun === true, activeReleaseRoot, config.agentContextHome);
+              return {
+                executable: path.join(activeReleaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote'),
+                refresh:
+                  options.dryRun === true
+                    ? undefined
+                    : yield* prepareReleaseDevSkills(config, activeReleaseRoot, mutationInstalledVersion),
+              };
+            }),
+            options.dryRun === true,
+          );
+    const workflowResult = current.refresh
+      ? yield* Effect.result(refreshReleaseDevSkills(config, current.refresh))
+      : undefined;
+    yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable: current.executable});
+    if (workflowResult !== undefined && Result.isFailure(workflowResult)) return yield* workflowResult.failure;
     yield* Console.log(success('Threadnote is up to date.'));
     yield* Console.log(
       'Managed launchers are current. If an MCP host still uses the legacy direct server command, run `threadnote repair`, then restart that host once.',
@@ -293,18 +310,24 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
         return yield* updateDowngradeError(currentVersion, latestVersion);
       }
       const installed = yield* installStandaloneRelease({
+        config,
         dryRun,
         force: options.force === true,
         source,
         version: latestVersion,
       });
-      yield* installCommandShim(dryRun, installed, config.agentContextHome);
-      yield* activateStandaloneRelease(installed, dryRun);
-      return {currentVersion, releaseRoot: installed};
+      yield* installCommandShim(dryRun, installed.releaseRoot, config.agentContextHome);
+      yield* activateStandaloneRelease(installed.releaseRoot, dryRun);
+      return {currentVersion, ...installed};
     }),
     dryRun,
   );
   const {currentVersion: effectiveCurrentVersion, releaseRoot} = mutation;
+  // Independent of optional integration repair and migration prompts. A partial
+  // refresh remains durable while the other maintenance stages still run.
+  const workflowResult = mutation.refresh
+    ? yield* Effect.result(refreshReleaseDevSkills(config, mutation.refresh))
+    : undefined;
   const path = yield* Path.Path;
   const threadnoteCommand = path.join(releaseRoot, system.platform === 'win32' ? 'threadnote.exe' : 'threadnote');
   yield* queueAutomaticModelSetup(config.agentContextHome, {...options, executable: threadnoteCommand});
@@ -347,13 +370,16 @@ export const runUpdate = Effect.fn('runUpdate')(function* (config: RuntimeConfig
   if (postUpdateResult !== undefined && Result.isFailure(postUpdateResult)) {
     return yield* postUpdateResult.failure;
   }
+  if (workflowResult !== undefined && Result.isFailure(workflowResult)) {
+    return yield* workflowResult.failure;
+  }
   yield* Console.log(
     shouldRepair
       ? 'Update complete. Brokered MCP sessions will use the new version on their next request. Legacy direct-server sessions migrated by repair require one host restart.'
       : 'Update complete. Brokered MCP sessions will use the new version on their next request. Hosts still using the legacy direct server command must run `threadnote repair` and restart once.',
   );
-  yield* printWhatsNewIfAvailable(info);
-});
+  yield* printWhatsNewIfAvailable(info, !dryRun);
+}, Effect.asVoid);
 
 function updateDowngradeError(currentVersion: string, targetVersion: string): UpdateOperationError {
   return UpdateOperationError.make({
@@ -362,6 +388,7 @@ function updateDowngradeError(currentVersion: string, targetVersion: string): Up
 }
 
 const installStandaloneRelease = Effect.fn('update.installStandaloneRelease')(function* (options: {
+  readonly config: RuntimeConfig;
   readonly dryRun: boolean;
   readonly force: boolean;
   readonly source: string;
@@ -372,7 +399,7 @@ const installStandaloneRelease = Effect.fn('update.installStandaloneRelease')(fu
   const system = yield* SystemInfo;
   const releaseRoot = path.join(installationRoot(path, system), 'versions', options.version);
   const artifactName = releaseArtifactName(system);
-  const releases = yield* fetchAvailableReleases(options.source);
+  const releases = yield* fetchAvailableReleases(options.source, {allowCredentialCommand: !options.dryRun});
   const release = releases.find(candidate => compareVersions(candidate.version, options.version) === 0);
   if (!release) {
     return yield* UpdateOperationError.make({message: `GitHub release ${options.version} is no longer available.`});
@@ -387,7 +414,8 @@ const installStandaloneRelease = Effect.fn('update.installStandaloneRelease')(fu
   if (options.dryRun) {
     yield* Console.log(`Would download verified release artifact: ${archiveAsset.url}`);
     yield* Console.log(`Would install standalone Threadnote to: ${releaseRoot}`);
-    return releaseRoot;
+    yield* Console.log('Workflow compatibility is unchecked until the verified candidate is available during update.');
+    return {releaseRoot, refresh: undefined};
   }
 
   yield* fs.makeDirectory(path.dirname(releaseRoot), {recursive: true, mode: 0o700});
@@ -421,9 +449,10 @@ const installStandaloneRelease = Effect.fn('update.installStandaloneRelease')(fu
       yield* extractGzipTar(archivePath, extractedRoot);
       yield* validateExtractedRelease(fs, path, extractedRoot, options.version, system.platform);
       yield* verifyOfficialPlatformSignature(fs, path, extractedRoot, options.source, system);
+      const refresh = yield* prepareReleaseDevSkills(options.config, releaseRoot, options.version, extractedRoot);
       yield* promoteReleaseDirectory(fs, path, extractedRoot, releaseRoot, options.force, system.processId);
       yield* Console.log(`Installed standalone Threadnote ${options.version}: ${releaseRoot}`);
-      return releaseRoot;
+      return {releaseRoot, refresh};
     }),
   );
 });
@@ -661,7 +690,7 @@ export const promoteReleaseDirectory = Effect.fn('update.promoteReleaseDirectory
   yield* promoteStandaloneReleaseDirectory(fs, path, stagedRoot, releaseRoot, processId, faultInjection);
 });
 
-function printWhatsNewIfAvailable(info: UpdateInfo) {
+function printWhatsNewIfAvailable(info: UpdateInfo, allowCredentialCommand: boolean) {
   if (!info.isVersionUpgrade || info.latestVersion === undefined) {
     return Effect.void;
   }
@@ -671,6 +700,7 @@ function printWhatsNewIfAvailable(info: UpdateInfo) {
     const whatsNew = yield* withSpinnerEffect(
       'Fetching GitHub release notes',
       whatsNewLinesForVersionRange(info.currentVersion, latestVersion, {
+        allowCredentialCommand,
         includePrereleases: info.channel === 'beta',
       }),
     );
@@ -799,7 +829,11 @@ function getUpdateInfo(
     const inferredChannel = selectUpdateChannel(currentVersion);
     const channel = selectUpdateChannel(currentVersion, options.requestedChannel);
     const cached = options.preferFresh ? undefined : yield* readFreshCache(config, options.source, channel);
-    const latestVersion = cached?.latestVersion ?? (yield* fetchLatestVersion(options.source, channel));
+    const latestVersion =
+      cached?.latestVersion ??
+      (yield* fetchLatestVersion(options.source, channel, {
+        allowCredentialCommand: options.allowCacheWrite,
+      }));
     if (!cached && latestVersion !== undefined && options.allowCacheWrite) {
       yield* writeUpdateCache(config, {
         channel,
@@ -882,14 +916,18 @@ export {currentPackageVersion};
 export const fetchLatestVersion = Effect.fn('fetchLatestVersion')(function* (
   source: string = DEFAULT_RELEASE_SOURCE,
   channel: UpdateChannel = 'latest',
+  options: ReleaseAuthenticationOptions = {},
 ) {
-  const releases = yield* fetchAvailableReleases(source);
+  const releases = yield* fetchAvailableReleases(source, options);
   const candidates = channel === 'beta' ? releases : releases.filter(release => !release.prerelease);
   return candidates.sort((left, right) => compareVersions(right.version, left.version))[0]?.version;
 });
 
-const fetchAvailableReleases = Effect.fn('update.fetchAvailableReleases')(function* (source: string) {
-  const headers = yield* githubReleaseHeaders(source);
+const fetchAvailableReleases = Effect.fn('update.fetchAvailableReleases')(function* (
+  source: string,
+  options: ReleaseAuthenticationOptions = {},
+) {
+  const headers = yield* githubReleaseHeaders(source, options);
   const response = yield* getJsonEffect(source, {
     headers,
     timeoutMs: 5000,

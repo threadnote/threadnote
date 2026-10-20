@@ -2,6 +2,7 @@
 """Connect dev-cycle verification to dev-plan and dev-spec knowledge closeout."""
 import sys
 sys.dont_write_bytecode = True
+import workflow_transport as wt
 from portable_lock import lock_exclusive
 
 import argparse
@@ -124,6 +125,11 @@ def prepare(cycle, scope, directory, phase_state, spec_module, plan_client, spec
 
 
 def finish(cycle, directory, phase_state, spec_module, spec_closeout, plan_client, spec_client, recover_uri=None):
+    if getattr(plan_client, "workflow", None) is not None and plan_client.workflow.cloud:
+        from cloud_closeout import finish as finish_cloud
+        return finish_cloud(cycle, directory, phase_state, plan_client, spec_client)
+    wt.block_cloud_finish(plan_client)
+    wt.block_cloud_finish(spec_client)
     directory = Path(directory)
     definition = dp.read_json(directory / "workflow.json")
     dp.require(definition["cycleHash"] == phase_state.definition_hash(cycle), "Implementation plan changed after closeout preparation")
@@ -211,7 +217,7 @@ def finish(cycle, directory, phase_state, spec_module, spec_closeout, plan_clien
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["validation-input", "prepare", "finish"])
+    parser.add_argument("command", choices=["validation-input", "prepare", "publication-preview", "publication-approve", "finish"])
     parser.add_argument("--cycle-plan", required=True)
     parser.add_argument("--cycle-scripts", required=True)
     parser.add_argument("--spec-scripts", required=True)
@@ -219,13 +225,21 @@ def main():
     parser.add_argument("--scope")
     parser.add_argument("--validation", help="Current combined feature validation; required if no phase receipt covers all acceptance on this tree")
     parser.add_argument("--threadnote-home")
+    wt.add_arguments(parser)
     parser.add_argument("--recover-uri")
+    parser.add_argument("--approval-digest")
+    parser.add_argument("--decision", choices=["approve", "defer", "reject"])
+    parser.add_argument("--approval-evidence", help="Actual explicit user decision on the concrete publication preview")
     args = parser.parse_args()
     phase_state, spec_module, spec_closeout = modules(args.cycle_scripts, args.spec_scripts)
     cycle = dp.read_json(args.cycle_plan)
     scope = dp.read_json(args.scope) if args.scope else dp.read_json(Path(args.directory) / "implemented.json")["scope"]
-    plan_client = dp.Threadnote(scope["repo"], args.threadnote_home)
-    spec_client = spec_module.Threadnote(scope["repo"], args.threadnote_home)
+    context = cycle.get("workflowContext")
+    wt.require(not context or Path(context).is_file(), "Pinned workflow context was lost; cannot resume")
+    wt.require(not context or not args.workflow_context or Path(context).resolve() == Path(args.workflow_context).resolve(), "Cycle context conflicts with explicit context")
+    client_options = {**wt.options(args), "workflow_context": context or args.workflow_context}
+    plan_client = dp.Threadnote(scope["repo"], args.threadnote_home, **client_options)
+    spec_client = spec_module.Threadnote(scope["repo"], args.threadnote_home, **client_options)
     if args.command == "validation-input":
         path = Path(args.directory) / "combined-input.json"
         dp.require(not path.exists(), "Combined validation draft exists; reconcile it rather than overwrite evidence")
@@ -234,6 +248,12 @@ def main():
     elif args.command == "prepare":
         result = prepare(cycle, scope, args.directory, phase_state, spec_module, plan_client, spec_client,
                          dp.read_json(args.validation) if args.validation else None)
+    elif args.command == "publication-preview":
+        from cloud_closeout import preview
+        result = preview(cycle, args.directory, phase_state, spec_module, spec_closeout, plan_client, spec_client)
+    elif args.command == "publication-approve":
+        from cloud_closeout import approve
+        result = approve(cycle, args.directory, phase_state, plan_client, args.approval_digest, args.decision, args.approval_evidence)
     else:
         result = finish(cycle, args.directory, phase_state, spec_module, spec_closeout, plan_client, spec_client, args.recover_uri)
         dp.write_json(args.cycle_plan, cycle)
@@ -244,4 +264,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(json.dumps({"error": str(error)}), file=sys.stderr); sys.exit(1)
+        print(json.dumps(wt.cli_error(error)), file=sys.stderr); sys.exit(1)

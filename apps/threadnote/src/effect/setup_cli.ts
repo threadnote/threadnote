@@ -12,6 +12,7 @@ export function makeSetupCommand(withRuntime: CliRuntimeRunner) {
     'setup',
     {
       apply: boolean('apply', 'Execute the setup plan; otherwise preview it'),
+      noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
       cwd: optionalString('cwd', 'Repository path; defaults to the current working directory'),
       scope: optionalChoice('scope', ['user', 'project', 'local'], 'Managed JSON surface installation scope'),
       surface: Argument.String('surface').pipe(Argument.withDescription('Agent surface from `threadnote agents list`')),

@@ -32,7 +32,7 @@ const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-omp-project-isolation-'});
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-omp-project-isolation-'}));
   const user = path.join(root, 'user');
   const project = path.join(root, 'project');
   const home = path.join(root, 'home');
@@ -93,6 +93,20 @@ const refusesDestinationConflict = (conflict: string, apply: boolean, note = '')
   }).pipe(provideTestLayer(ApplicationLayer));
 
 describe('OMP project isolation', () => {
+  effectIt.effect('project MCP apply truthfully skips unsupported workflows without personal enrollment', () =>
+    Effect.gen(function* () {
+      const {fs, path, user, project, home, testSystem} = yield* fixture;
+      const before = yield* snapshot(user);
+      const result = yield* captureConsole(
+        runMcpInstall(runtime(home), 'omp', {apply: true, project}).pipe(Effect.provideService(SystemInfo, testSystem)),
+      );
+      expect(yield* snapshot(user)).toEqual(before);
+      expect(yield* fs.exists(path.join(project, '.omp', 'mcp.json'))).toBe(true);
+      expect(yield* fs.exists(path.join(home, 'dev-skills'))).toBe(false);
+      expect(result.output).toContain('unsupported project scope');
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('CLI refuses isolated setup without creating the fallback manifest', () =>
     Effect.gen(function* () {
       const {home, project, testSystem, root} = yield* fixture;

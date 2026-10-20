@@ -128,7 +128,15 @@ const build = Effect.gen(function* () {
     target: 'browser',
   });
 
-  // Bun emits imported editor styles alongside the UI entry. Keep app styles last in the cascade.
+  yield* runBunBuild({
+    entrypoints: [path.join(root, 'packages', 'manager', 'src', 'mermaid_frame.ts')],
+    format: 'iife',
+    minify: true,
+    naming: 'mermaid.[ext]',
+    outdir: path.join(outputRoot, 'manager'),
+    target: 'browser',
+  });
+
   yield* fs.rename(path.join(outputRoot, 'manager', 'app.css'), path.join(outputRoot, 'manager', 'style.css'));
   yield* fs.copyFile(
     path.join(root, 'packages', 'manager', 'static', 'app.css'),

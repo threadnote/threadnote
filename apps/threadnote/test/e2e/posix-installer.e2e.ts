@@ -12,7 +12,7 @@ const execute = promisify(execFile);
 const posixIt = process.platform === 'win32' ? it.skip : it;
 
 posixIt('POSIX bootstrap verifies and installs the standalone Bun release without Node or Bun in PATH', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'threadnote-posix-bootstrap-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-posix-bootstrap-')));
   const packageManifest = (await Bun.file(join(process.cwd(), 'package.json')).json()) as {readonly version: string};
   const platform = process.platform === 'darwin' ? 'darwin' : 'linux';
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';

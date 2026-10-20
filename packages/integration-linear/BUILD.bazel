@@ -460,6 +460,7 @@ bun_test(
         "//packages/manager:src/integration_catalog.tsx",
         "//packages/manager:src/integration_registration.tsx",
         "//packages/manager:src/integrations_view.tsx",
+        "//packages/manager:src/mermaid_block.tsx",
         "//packages/manager:src/relative_time.ts",
         "//packages/manager:src/ui/contracts.ts",
         "//packages/manager:src/ui/controls.tsx",
