@@ -231,6 +231,7 @@ export function threadnoteUpdateCommandMode(options: UpdateOptions): ThreadnoteU
     options.check ||
     (options.dryRun && !policyMode) ||
     options.force ||
+    options.modelSetup === false ||
     options.postUpdate === false ||
     options.repair === false ||
     options.source ||

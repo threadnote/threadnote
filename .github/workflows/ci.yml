@@ -283,6 +283,30 @@ jobs:
       - name: Platform process identity smoke
         run: bun --bun vitest run apps/threadnote/test/unit/effect-system.test.ts
       - run: bun run test:smoke:self-contained
+      - name: Real predecessor upgrade and model setup admission
+        if: matrix.os == 'macos-15'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THREADNOTE_QUALIFY_OLD_UPGRADE: ephemeral-macos-real-predecessor
+          THREADNOTE_UPGRADE_RECEIPT_DIR: ${{ runner.temp }}/threadnote-upgrade-receipts
+        run: |
+          test "$THREADNOTE_QUALIFY_OLD_UPGRADE" = ephemeral-macos-real-predecessor
+          predecessor_root="$(mktemp -d "$RUNNER_TEMP/threadnote-beta4.XXXXXX")"
+          chmod 700 "$predecessor_root"
+          mkdir -p "$THREADNOTE_UPGRADE_RECEIPT_DIR"
+          gh api repos/threadnote/threadnote/releases/tags/v5.3.0-beta.4 > "$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json"
+          jq -e '.immutable == true and .draft == false and .tag_name == "v5.3.0-beta.4"' "$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json"
+          gh release download v5.3.0-beta.4 --repo threadnote/threadnote --pattern threadnote-darwin-arm64.tar.gz --dir "$predecessor_root"
+          THREADNOTE_OLD_RELEASE_ARCHIVE="$predecessor_root/threadnote-darwin-arm64.tar.gz" \
+          THREADNOTE_OLD_RELEASE_METADATA="$THREADNOTE_UPGRADE_RECEIPT_DIR/predecessor-release-api.json" \
+            bun --bun vitest run --config vitest.e2e.config.ts apps/threadnote/test/e2e/model-setup-upgrade.e2e.ts
+      - name: Preserve predecessor upgrade receipts
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@v7
+        with:
+          name: model-setup-predecessor-upgrade
+          path: ${{ runner.temp }}/threadnote-upgrade-receipts
+          if-no-files-found: error
       - name: Installed release E2E
         run: bun run test:e2e:local-bins
 

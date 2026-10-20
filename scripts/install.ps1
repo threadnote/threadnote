@@ -4,6 +4,7 @@ param(
   [switch]$DryRun,
   [switch]$Force,
   [switch]$NoStart,
+  [switch]$NoModelSetup,
   [switch]$WithHooks,
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]]$ThreadnoteArgs
@@ -599,6 +600,7 @@ try {
   if ($DryRun) { $installArgs += '--dry-run' }
   if ($Force) { $installArgs += '--force' }
   if ($NoStart) { $installArgs += '--no-start' }
+  if ($NoModelSetup) { $installArgs += '--no-model-setup' }
   if ($WithHooks) { $installArgs += '--with-hooks' }
   if ($ThreadnoteArgs) { $installArgs += $ThreadnoteArgs }
 
