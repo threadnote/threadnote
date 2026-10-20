@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import * as FC from 'fast-check';
@@ -13,6 +13,7 @@ import {inspectModelSelection, readModelSelection} from '@threadnote/inference/m
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {
   modelSetupFileIdentity,
+  ModelSetupConflict,
   modelSetupJob,
   parseModelSetup,
   readModelSetup,
@@ -98,6 +99,56 @@ const fixture = Effect.gen(function* () {
 });
 
 describe('home-scoped model setup policy', () => {
+  effectIt.effect('atomically rejects stale simultaneous actions, including a now-identical policy', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* updateModelSetup(f.home, manifest, {type: 'request', job: f.job}, {expectedEpoch: 0});
+      const outcomes = yield* Effect.forEach(
+        [1, 2],
+        () =>
+          updateModelSetup(f.home, manifest, {type: 'policy', policy: 'off'}, {expectedEpoch: 0}).pipe(Effect.result),
+        {concurrency: 'unbounded'},
+      ).pipe(TestClock.withLive);
+      expect(outcomes.filter(result => result._tag === 'Success')).toHaveLength(1);
+      const conflict = outcomes.find(result => result._tag === 'Failure');
+      expect(conflict?._tag === 'Failure' && Schema.is(ModelSetupConflict)(conflict.failure)).toBe(true);
+      const before = yield* f.fs.readFileString(f.setupFile);
+      const stale = yield* updateModelSetup(f.home, manifest, {type: 'policy', policy: 'off'}, {expectedEpoch: 0}).pipe(
+        Effect.result,
+      );
+      expect(stale._tag === 'Failure' && Schema.is(ModelSetupConflict)(stale.failure)).toBe(true);
+      expect(yield* f.fs.readFileString(f.setupFile)).toBe(before);
+      yield* f.fs.remove(`${f.home}/models`, {recursive: true});
+      const erased = yield* updateModelSetup(
+        f.home,
+        manifest,
+        {type: 'policy', policy: 'off'},
+        {expectedEpoch: 1},
+      ).pipe(Effect.result);
+      expect(erased._tag === 'Failure' && Schema.is(ModelSetupConflict)(erased.failure)).toBe(true);
+      expect(yield* f.fs.exists(`${f.home}/models`)).toBe(false);
+    }).pipe(provideTestLayer(platform)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'a mismatched public epoch preserves every state byte regardless of requested action',
+    {delta: FC.integer({min: 1, max: 100}), off: FC.boolean()},
+    ({delta, off}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* updateModelSetup(f.home, manifest, {type: 'request', job: f.job});
+        const before = yield* f.fs.readFileString(f.setupFile);
+        const command = off
+          ? {type: 'policy' as const, policy: 'off' as const}
+          : {type: 'request' as const, job: f.job, restart: true};
+        const result = yield* updateModelSetup(f.home, manifest, command, {expectedEpoch: delta}).pipe(Effect.result);
+        expect(result._tag === 'Failure' && Schema.is(ModelSetupConflict)(result.failure)).toBe(true);
+        expect(yield* f.fs.readFileString(f.setupFile)).toBe(before);
+      }).pipe(provideTestLayer(platform)),
+    {fastCheck: {numRuns: 25}},
+  );
+
   effectIt.effect('distinguishes absent, empty and malformed selection while preserving the legacy reader', () =>
     Effect.gen(function* () {
       const f = yield* fixture;
@@ -266,6 +317,26 @@ describe('home-scoped model setup policy', () => {
         Effect.provideService(FileSystem.FileSystem, fs),
         Effect.result,
       );
+      expect(yield* f.fs.exists(f.home)).toBe(false);
+    }).pipe(provideTestLayer(platform)),
+  );
+
+  effectIt.effect('a guarded public policy action never recreates a concurrently erased home', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* updateModelSetup(f.home, manifest, {type: 'policy', policy: 'off'});
+      const fs = {
+        ...f.fs,
+        realPath: (target: string) =>
+          f.fs.realPath(target).pipe(Effect.tap(() => f.fs.remove(f.home, {recursive: true}))),
+      };
+      const result = yield* updateModelSetup(
+        f.home,
+        manifest,
+        {type: 'policy', policy: 'automatic'},
+        {expectedEpoch: 1},
+      ).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.result);
+      expect(result._tag).toBe('Failure');
       expect(yield* f.fs.exists(f.home)).toBe(false);
     }).pipe(provideTestLayer(platform)),
   );

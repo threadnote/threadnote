@@ -1,6 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
 import {BunCrypto, BunFileSystem, BunPath} from '@effect/platform-bun';
-import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Stream} from 'effect';
+import {Clock, Context, Crypto, Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema, Stream} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import * as FC from 'fast-check';
@@ -12,7 +12,7 @@ import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {FileLockTimeout} from '@threadnote/platform/file/lock';
 import {LocalModelStore, ModelStoreIoFailed} from '@threadnote/inference/models/store';
-import {modelSetupJob, readModelSetup, updateModelSetup} from '@threadnote/inference/models/setup';
+import {ModelSetupConflict, modelSetupJob, readModelSetup, updateModelSetup} from '@threadnote/inference/models/setup';
 import {
   modelSetupWorkerEnvironment,
   requestModelSetup,
@@ -237,6 +237,103 @@ const fixture = (options: FixtureOptions = {}) =>
   });
 
 describe('background model setup worker', () => {
+  effectIt.effect('simultaneous unguarded triggers return one job without exposing internal conflicts', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const allEntered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let entered = 0;
+      const system = {
+        ...f.system,
+        hardwareInfo: Effect.gen(function* () {
+          entered += 1;
+          if (entered === 4) yield* Deferred.succeed(allEntered, undefined);
+          yield* Deferred.await(release);
+          return yield* f.system.hardwareInfo;
+        }),
+      };
+      const requests = yield* Effect.forEach(
+        [1, 2, 3, 4],
+        () => requestModelSetup(f.home).pipe(Effect.provideService(SystemInfo, system), f.provide, Effect.result),
+        {concurrency: 'unbounded'},
+      ).pipe(TestClock.withLive, Effect.forkScoped);
+      yield* Deferred.await(allEntered);
+      yield* Deferred.succeed(release, undefined);
+      const results = yield* Fiber.join(requests);
+      expect(results.every(result => result._tag === 'Success')).toBe(true);
+      expect(f.launches).toHaveLength(1);
+    }).pipe(provideTestLayer(platform)),
+  );
+
+  effectIt.effect(
+    'an explicit action superseded during eligibility reports conflict without reserving or spawning',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const system = {
+          ...f.system,
+          hardwareInfo: Effect.gen(function* () {
+            yield* Deferred.succeed(entered, undefined);
+            yield* Deferred.await(release);
+            return yield* f.system.hardwareInfo;
+          }),
+        };
+        const request = yield* requestModelSetup(f.home, {expectedEpoch: 0}).pipe(
+          Effect.provideService(SystemInfo, system),
+          f.provide,
+          Effect.result,
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(entered);
+        yield* stopModelSetup(f.home).pipe(f.provide);
+        const file = f.path.join(f.home, 'models', 'setup.json');
+        const before = yield* f.fs.readFileString(file);
+        yield* Deferred.succeed(release, undefined);
+        const result = yield* Fiber.join(request);
+        expect(result._tag === 'Failure' && Schema.is(ModelSetupConflict)(result.failure)).toBe(true);
+        expect(yield* f.fs.readFileString(file)).toBe(before);
+        expect(f.launches).toEqual([]);
+        expect(f.signals).toEqual([]);
+        expect(f.offsets).toEqual([]);
+      }).pipe(provideTestLayer(platform)),
+  );
+
+  effectIt.effect('stale public actions cannot stop, drain, reserve or spawn even when policy already matches', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const initial = yield* readModelSetupStatus(f.home).pipe(f.provide);
+      expect(initial.intentEpoch).toBe(0);
+      const accepted = yield* requestModelSetup(f.home, {expectedEpoch: 0}).pipe(f.provide);
+      expect(accepted.intentEpoch).toBeGreaterThan(0);
+      const current = yield* readModelSetup(f.home).pipe(f.provide);
+      if (current.status !== 'valid') return yield* Effect.die('Expected reserved state');
+      yield* updateModelSetup(f.home, f.manifest, {
+        type: 'claim',
+        intentEpoch: current.state.intentEpoch,
+        job: current.state.job,
+        owner: {token: 'current-owner', processId: process.pid, processStartIdentity: 'parent'},
+        nonce: current.state.reservation?.nonce,
+        now: yield* Clock.currentTimeMillis,
+      }).pipe(f.provide);
+      const stateFile = f.path.join(f.home, 'models', 'setup.json');
+      const before = yield* f.fs.readFileString(stateFile);
+      for (const action of [
+        requestModelSetup(f.home, {retry: true, expectedEpoch: 0}),
+        setModelSetupPolicy(f.home, false, {expectedEpoch: 0}),
+        setModelSetupPolicy(f.home, true, {expectedEpoch: 0}),
+      ]) {
+        const result = yield* action.pipe(f.provide, Effect.result);
+        expect(result._tag === 'Failure' && Schema.is(ModelSetupConflict)(result.failure)).toBe(true);
+        expect(yield* f.fs.readFileString(stateFile)).toBe(before);
+      }
+      expect(f.launches).toHaveLength(1);
+      expect(f.signals).toEqual([]);
+      expect(f.offsets).toEqual([]);
+    }).pipe(provideTestLayer(platform)),
+  );
+
   effectIt.effect(
     'suppresses duplicate canonical-home/symlink triggers, isolates homes, and keeps requests responsive',
     () =>

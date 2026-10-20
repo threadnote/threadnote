@@ -9584,6 +9584,31 @@ h4 {
   gap: 16px;
   flex-wrap: wrap;
 }
+.model-setup-card {
+  min-width: 0;
+}
+.model-setup-card p,
+.model-setup-card details {
+  overflow-wrap: anywhere;
+}
+.model-setup-card progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.model-setup-indicator {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.consolidation-agent-model > .model-setup-indicator {
+  grid-column: 1 / -1;
+  order: 1;
+}
+.topic-generation-controls > .model-setup-indicator {
+  flex-basis: 100%;
+  order: 1;
+}
+
 .runtime-release-heading {
   display: flex;
   align-items: center;
