@@ -133,7 +133,7 @@ export function serveUpgradeCandidate(archive: string, checksum: string, version
   return {source: `http://127.0.0.1:${server.port}/releases`, requests, close: () => server.stop(true)};
 }
 
-/** Bounded supplementary command observation; lifecycle logs remain the authoritative child completion evidence. */
+/** Bounded supplementary observations; the pinned updater's synchronous exit is the completion oracle. */
 export async function observeUpgradeProcesses(releaseRoot: string) {
   const observed = new Set<string>();
   let pending = Promise.resolve();

@@ -1348,6 +1348,20 @@ export function parseWindowsAvailableDiskBytes(output: string): number | undefin
   return Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : undefined;
 }
 
+export function parseLinuxHardwareInfo(
+  cpuInfo: string,
+  memoryInfo: string,
+  architecture: string,
+): Pick<SystemHardwareInfo, 'cpuModel' | 'memoryBytes'> {
+  const cpuModel = /^(?:model name|Hardware)[\t ]*:[\t ]*(\S[^\r\n]*)/m.exec(cpuInfo)?.[1]?.trim();
+  const memoryKibibytes = Number(/^MemTotal:[\t ]+(\d+)[\t ]+kB[\t ]*\r?$/m.exec(memoryInfo)?.[1]);
+  const memoryBytes = memoryKibibytes * KIBIBYTE_BYTES;
+  if (!Number.isSafeInteger(memoryBytes) || memoryBytes <= 0) {
+    throw SystemOperationError.make({message: 'Linux memory metadata is invalid.'});
+  }
+  return {cpuModel: cpuModel ?? `unknown (${architecture})`, memoryBytes};
+}
+
 function readSystemHardwareInfo(
   platform: NodeJS.Platform,
   environment: NodeJS.ProcessEnv,
@@ -1360,12 +1374,7 @@ function readSystemHardwareInfo(
           Bun.file('/proc/cpuinfo').text(),
           Bun.file('/proc/meminfo').text(),
         ]);
-        const cpuModel = /^(?:model name|Hardware)\s*:\s*(.+)$/m.exec(cpuInfo)?.[1]?.trim();
-        const memoryKibibytes = Number(/^MemTotal:\s+(\d+)\s+kB$/m.exec(memoryInfo)?.[1]);
-        if (!cpuModel || !Number.isSafeInteger(memoryKibibytes) || memoryKibibytes <= 0) {
-          throw SystemOperationError.make({message: 'Linux hardware metadata is incomplete.'});
-        }
-        const memoryBytes = memoryKibibytes * KIBIBYTE_BYTES;
+        const {cpuModel, memoryBytes} = parseLinuxHardwareInfo(cpuInfo, memoryInfo, runtimeArchitecture);
         const effectiveMemoryBytes = await readLinuxEffectiveMemoryBytes(memoryBytes);
         const operatingSystem = spawnText(['uname', '-sr'], environment, sanitizeExternal);
         return {cpuModel, effectiveMemoryBytes, memoryBytes, operatingSystem};
