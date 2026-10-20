@@ -19,6 +19,7 @@ import {
 import * as Base64Url from 'effect/encoding/Base64Url';
 import * as HttpServer from 'effect/http/HttpServer';
 import * as HttpServerResponse from 'effect/http/HttpServerResponse';
+import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
@@ -28,6 +29,7 @@ import {
   type ConsolidationSource,
 } from '@threadnote/memory/consolidation';
 import {startManagerContextSchedulers} from './context_runtime.js';
+import {handleManagerModelSetupRequest, readManagerModelSetupBody} from './model_setup.js';
 import {ManagerOperationError} from './operation_error.js';
 import {assertManagerSourceAssets} from './source_assets.js';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -385,7 +387,12 @@ export function createManagerServer(context: ApiContext) {
   return createManagerHttpServer(request =>
     Effect.gen(function* () {
       const response: ManagerResponseSink = {};
-      yield* handleRequestEffect(context, request, response);
+      const incoming = yield* HttpServerRequest.HttpServerRequest;
+      const boundedRequest =
+        new URL(request.url, 'http://127.0.0.1').pathname === '/api/models/setup'
+          ? {...request, body: readManagerModelSetupBody(incoming)}
+          : request;
+      yield* handleRequestEffect(context, boundedRequest, response);
       return response.response;
     }),
   );
@@ -466,6 +473,12 @@ function handleRequestEffect(context: ApiContext, request: ManagerRequest, respo
       const authorized = isAuthorized(context, request);
       writeJson(response, authorized ? 200 : 401, authorized ? {status: 'ok'} : {error: 'Unauthorized'});
     });
+  } else if (url.pathname === '/api/models/setup') {
+    requestEffect = handleManagerModelSetupRequest(
+      context.config.agentContextHome,
+      request,
+      isAuthorized(context, request),
+    ).pipe(Effect.map(result => writeJson(response, result.status, result.body)));
   } else if (request.method === 'GET' && url.pathname === '/api/state') {
     requestEffect = Effect.gen(function* () {
       if (!isAuthorized(context, request)) {

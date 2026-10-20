@@ -37,6 +37,8 @@
     "./manifest-projects-view": "./src/manifest_projects_view.tsx",
     "./manifest_projects_view": "./src/manifest_projects_view.tsx",
     "./memory/contracts": "./src/memory/contracts.ts",
+    "./model-setup": "./src/model_setup.tsx",
+    "./model-setup-contracts": "./src/model_setup_contracts.ts",
     "./process/contracts": "./src/process/contracts.ts",
     "./processes-view": "./src/processes_view.tsx",
     "./processes_view": "./src/processes_view.tsx",

@@ -116,6 +116,9 @@ let generationRecovery: unknown;
 let preparedAfterWrite = false;
 let deferredReadGate: Promise<void> | undefined;
 let previewGate: Promise<void> | undefined;
+let generationGate: Promise<void> | undefined;
+let packetFailure = false;
+let mismatchedApplyDigest = false;
 let inboxRefreshFailure = false;
 let inboxReads = 0;
 const posted: Record<string, unknown>[] = [];
@@ -129,6 +132,9 @@ beforeEach(() => {
   preparedAfterWrite = false;
   deferredReadGate = undefined;
   previewGate = undefined;
+  generationGate = undefined;
+  packetFailure = false;
+  mismatchedApplyDigest = false;
   inboxRefreshFailure = false;
   inboxReads = 0;
   posted.length = 0;
@@ -147,6 +153,13 @@ beforeEach(() => {
       if (url.pathname === '/api/consolidation-models')
         result = {models: [{id: 'local-model', label: 'Local model', isDefault: true}]};
       else if (url.pathname === '/api/attention/context-maintenance') {
+        if (packetFailure)
+          return new Response(
+            JSON.stringify({
+              error: 'The selected source evidence changed or is unavailable. Refresh maintenance and source access.',
+            }),
+            {status: 409},
+          );
         if (rejectTerminalPacket && current.state === 'applied')
           return new Response(JSON.stringify({error: 'The subject case is stale after acceptance.'}), {
             status: 409,
@@ -156,6 +169,7 @@ beforeEach(() => {
       } else if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
         const action = JSON.parse(String(init.body)) as Record<string, unknown>;
         posted.push(action);
+        if (action.action === 'generate' || action.action === 'regenerate') await generationGate;
         if ((action.action === 'generate' || action.action === 'regenerate') && generationRecovery)
           return new Response(
             JSON.stringify({
@@ -196,7 +210,7 @@ beforeEach(() => {
               stage: 'preview',
               reviewRevision: revision,
               approvalDigest: hash,
-              content: `# Topic\n\n${body}`,
+              content: `MEMORY\nkind: durable\nmemory_id: tn_preview_fixture\n\n# Topic\n\n${body}`,
               contentHash: hash,
               metadataDiff: [],
             },
@@ -207,7 +221,11 @@ beforeEach(() => {
             revision: current.revision + 1,
             state: 'applied',
             canApply: false,
-            approval: {...current.approval!, stage: 'written'},
+            approval: {
+              ...current.approval!,
+              stage: 'written',
+              ...(mismatchedApplyDigest ? {approvalDigest: 'b'.repeat(64)} : {}),
+            },
             warnings: preparedAfterWrite ? ['The approved document was already written.'] : [],
           });
         if (action.action === 'defer')
@@ -328,12 +346,15 @@ async function edit(ordinal: number, value: string) {
 }
 
 it('previews a closed edited draft and applies only its exact revision and digest', async () => {
+  const onClose = vi.fn();
+  const onApplied = vi.fn();
   await render(
     <TopicReviewDialog
       project="threadnote"
       caseId="case-1"
       onChanged={() => undefined}
-      onClose={() => undefined}
+      onClose={onClose}
+      onApplied={onApplied}
       onOpenLibrary={() => undefined}
     />,
   );
@@ -356,6 +377,115 @@ it('previews a closed edited draft and applies only its exact revision and diges
     approvalDigest: hash,
     approved: true,
   });
+  expect(onClose).toHaveBeenCalledOnce();
+  expect(onApplied).toHaveBeenCalledWith({
+    project: 'threadnote',
+    caseId: 'case-1',
+    evidenceRevision: hash,
+    targetUri: 'threadnote://memory/topic',
+    targetHash: hash,
+  });
+});
+
+it('shows primary generation progress for the pending request without starting another draft', async () => {
+  const gate = Promise.withResolvers<void>();
+  generationGate = gate.promise;
+  evidencePacket = {...packet, reviewId: undefined};
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  const generate = button('Generate draft');
+  expect(generate.classList.contains('primary')).toBe(true);
+  await act(async () => generate.click());
+  expect(button('Generating draft…').disabled).toBe(true);
+  expect(document.querySelector('.topic-review-progress[role="status"]')?.textContent).toContain(
+    'Waiting for the model',
+  );
+  expect(document.querySelector('.topic-review-progress .spinner')).not.toBeNull();
+  expect(posted).toHaveLength(1);
+  await act(async () => gate.resolve());
+  expect(document.querySelector('.topic-review-progress')).toBeNull();
+  expect(document.body.textContent).toContain('Draft ready to review.');
+  expect(posted).toHaveLength(1);
+});
+
+it('keeps a failed apply open and never acknowledges a resolved case', async () => {
+  const onClose = vi.fn();
+  const onApplied = vi.fn();
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={onClose}
+      onApplied={onApplied}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Preview exact final document');
+  applyFailure = true;
+  await click('Accept update');
+  expect(document.querySelector('dialog[open]')).not.toBeNull();
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('The source changed');
+  expect(onClose).not.toHaveBeenCalled();
+  expect(onApplied).not.toHaveBeenCalled();
+  expect(button('Refresh evidence').disabled).toBe(false);
+});
+
+it('recovers a failed post-generation evidence read explicitly without another model request', async () => {
+  const gate = Promise.withResolvers<void>();
+  generationGate = gate.promise;
+  evidencePacket = {...packet, reviewId: undefined};
+  const onClose = vi.fn();
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={onClose}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await act(async () => button('Generate draft').click());
+  packetFailure = true;
+  await act(async () => gate.resolve());
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('selected source evidence changed');
+  expect(document.querySelector('dialog[open]')).not.toBeNull();
+  expect(button('Accept update').disabled).toBe(true);
+  expect(posted.map(item => item.action)).toEqual(['generate']);
+  packetFailure = false;
+  await click('Refresh evidence');
+  expect(document.querySelector('[role="alert"]')).toBeNull();
+  expect(button('Preview exact final document').disabled).toBe(false);
+  expect(posted.map(item => item.action)).toEqual(['generate']);
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it('refuses to close or clear a case when the returned written approval digest differs', async () => {
+  const onClose = vi.fn();
+  const onApplied = vi.fn();
+  await render(
+    <TopicReviewDialog
+      project="threadnote"
+      caseId="case-1"
+      onChanged={() => undefined}
+      onClose={onClose}
+      onApplied={onApplied}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  await click('Preview exact final document');
+  mismatchedApplyDigest = true;
+  await click('Accept update');
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('does not match this exact approval');
+  expect(onClose).not.toHaveBeenCalled();
+  expect(onApplied).not.toHaveBeenCalled();
 });
 
 it('freezes paragraph decisions, text and support while an exact preview is pending', async () => {
@@ -459,6 +589,11 @@ it('keeps an inbox review open through preview and shows its exact final documen
   expect(document.querySelector('dialog[open]')).toBeTruthy();
   expect(document.body.textContent).toContain('Exact final document to save');
   expect(document.body.textContent).toContain('Updated behavior.');
+  const finalDocument = document.querySelector('[aria-label="Exact final document"]')!;
+  expect(finalDocument.querySelector('article')?.textContent).toContain('Updated behavior.');
+  expect(finalDocument.querySelector('article')?.textContent).not.toContain('memory_id:');
+  expect(finalDocument.querySelector('details')?.open).toBe(false);
+  expect(finalDocument.querySelector('details pre')?.textContent).toBe(current.approval?.content);
   expect(button('Accept update').disabled).toBe(false);
   await act(async () => {
     document.querySelector('dialog')!.dispatchEvent(new Event('cancel', {cancelable: true}));

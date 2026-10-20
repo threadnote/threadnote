@@ -6,7 +6,7 @@ import {SystemInfo} from '@threadnote/platform/system';
 import type {ConsolidationModelOption} from '@threadnote/manager/ui/contracts';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {readModelSelection} from '@threadnote/inference/models/selection';
+import {resolveSelectedLocalModel} from '@threadnote/inference/models/inference';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {findExecutable} from '../utils.js';
 import {resolveEffectAiConfiguration} from '../effect/ai/consolidator.js';
@@ -78,12 +78,12 @@ export const discoverLocalConsolidationModels = Effect.fn('manager.discoverLocal
 ) {
   const catalog = yield* LocalModelCatalog;
   const store = yield* LocalModelStore;
-  const selection = yield* readModelSelection(home);
+  const selected = yield* resolveSelectedLocalModel(home, 'generation').pipe(Effect.orElseSucceed(() => undefined));
   const manifests = yield* catalog.list('generation');
   const models: ConsolidationModel[] = [];
   for (const manifest of manifests) {
     if (!(yield* store.status(home, manifest)).installed) continue;
-    models.push({id: manifest.id, label: manifest.id, isDefault: selection.roles.generation === manifest.id});
+    models.push({id: manifest.id, label: manifest.id, isDefault: selected?.manifest.id === manifest.id});
   }
   return models;
 });

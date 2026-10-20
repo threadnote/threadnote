@@ -1,9 +1,9 @@
-import {Effect, Path} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {SystemInfo} from '@threadnote/platform/system';
 import {installationRoot} from '../process/standalone_lease.js';
 import type {DevSkillsConsumer, DevSkillsManifest, DevSkillsTarget} from './contract.js';
-import {decode, fail, hash, isRecord, readOptional, requireValue} from './files.js';
+import {decode, fail, hash, isRecord, readOptional, requireValue, statOptional} from './files.js';
 import {parseHistoricalDevSkillsManifest} from './manifest.js';
 
 export interface Enrollment extends DevSkillsConsumer {
@@ -185,6 +185,18 @@ export const runtimeIndexPath = (path: Path.Path, root: string) => path.join(roo
 export const physicalDirectory = (path: Path.Path, root: string) => path.join(root, '.threadnote-dev-skills');
 export const receiptPath = (path: Path.Path, root: string) => path.join(physicalDirectory(path, root), 'receipt.json');
 export const journalPath = (path: Path.Path, root: string) => path.join(physicalDirectory(path, root), 'journal.json');
+/** Only genuine absence permits legacy uninstall; even dangling or empty state requires normal ownership checks. */
+export const hasDevSkillsHomeState = Effect.fn('devSkills.hasHomeState')(function* (config: RuntimeConfig) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = path.dirname(homeIndexPath(path, path.resolve(config.agentContextHome)));
+  const link = yield* fs.readLink(directory).pipe(Effect.result);
+  if (link._tag === 'Success') return true;
+  if (!['NotFound', 'InvalidArgument', 'Unknown'].includes(link.failure.reason._tag)) return yield* link.failure;
+  if (yield* statOptional(directory)) return true;
+  if (link.failure.reason._tag !== 'NotFound') return yield* link.failure;
+  return false;
+});
 export const readHomeIndex = Effect.fn('devSkills.homeIndex')(function* (config: RuntimeConfig) {
   const path = yield* Path.Path;
   const home = path.resolve(config.agentContextHome);

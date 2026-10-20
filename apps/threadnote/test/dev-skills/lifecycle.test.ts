@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Schema} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, PlatformError, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -10,6 +10,7 @@ import {
   removeOwnedDevSkills,
   statusDevSkills,
   withDevSkillsMutationLease,
+  withDevSkillsRemovalLease,
   type DevSkillsMutationLease,
 } from '../../src/dev_skills/index.js';
 import {loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
@@ -17,11 +18,137 @@ import {generationRoot, renderEntrypoints} from '../../src/dev_skills/inspection
 import {homeIndexPath, receiptPath} from '../../src/dev_skills/registry.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {withSetupMutationLock} from '../../src/setup/lock.js';
 
 const selector = {agent: 'codex'};
 const testLayer = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer));
 describe('development skills lifecycle', () => {
+  effectIt.effect('F019 workflow presence errors never authorize legacy uninstall', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const directory = f.path.dirname(homeIndexPath(f.path, f.home));
+      const before = yield* snapshot(f.root);
+      for (const [method, reason] of [
+        ['readLink', 'PermissionDenied'],
+        ['stat', 'PermissionDenied'],
+        ['readLink', 'Unknown'],
+        ['readLink', 'BadArgument'],
+      ] as const) {
+        const denied =
+          reason === 'BadArgument'
+            ? PlatformError.badArgument({module: 'FileSystem', method})
+            : PlatformError.systemError({_tag: reason, module: 'FileSystem', method, pathOrDescriptor: directory});
+        const guarded = FileSystem.FileSystem.of({
+          ...f.fs,
+          [method]: (file: string) => (file === directory ? Effect.fail(denied) : f.fs[method](file)),
+        });
+        let invoked = false;
+        const removal = withDevSkillsRemovalLease(f.config, () =>
+          Effect.sync(() => {
+            invoked = true;
+          }),
+        );
+        for (const operation of [removal, removeOwnedDevSkills(f.config, {dryRun: false})])
+          expect(
+            yield* f.run(operation).pipe(Effect.provideService(FileSystem.FileSystem, guarded), Effect.result),
+          ).toMatchObject({_tag: 'Failure', failure: {reason: {_tag: reason}}});
+        expect(invoked).toBe(false);
+        expect(yield* snapshot(f.root)).toEqual(before);
+      }
+    }).pipe(testLayer),
+  );
+  effectIt.effect('F019 state appearing under the setup lock retries through a genuine workflow lease', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.run(applyDevSkills(f.config, 'install', selector));
+      const indexFile = homeIndexPath(f.path, f.home);
+      const directory = f.path.dirname(indexFile);
+      const saved = yield* f.fs.readFileString(indexFile);
+      yield* f.fs.remove(directory, {recursive: true});
+      const absentObserved = yield* Deferred.make<void>();
+      let observed = false;
+      const observing = FileSystem.FileSystem.of({
+        ...f.fs,
+        stat: file => {
+          const result = f.fs.stat(file);
+          if (file !== directory || observed) return result;
+          observed = true;
+          return result.pipe(Effect.ensuring(Deferred.succeed(absentObserved, undefined)));
+        },
+      });
+      const pending = yield* withSetupMutationLock(
+        f.home,
+        Effect.gen(function* () {
+          const child = yield* f
+            .run(
+              withDevSkillsRemovalLease(f.config, lease => {
+                expect(lease).toBeDefined();
+                return removeOwnedDevSkills(f.config, {dryRun: false, lease});
+              }),
+            )
+            .pipe(Effect.provideService(FileSystem.FileSystem, observing), Effect.forkChild);
+          yield* Deferred.await(absentObserved);
+          yield* f.fs.makeDirectory(directory);
+          yield* f.fs.writeFileString(indexFile, saved);
+          return child;
+        }),
+      );
+      expect(yield* Fiber.join(pending)).toHaveLength(1);
+      expect((yield* f.run(statusDevSkills(f.config))).targets[0].installationState).toBe('absent');
+    }).pipe(testLayer),
+  );
+  effectIt.effect.prop(
+    'F019 removal ignores unrelated runtime state when this home has no workflow state',
+    {bytes: Schema.String.check(Schema.isMaxLength(80))},
+    ({bytes}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.fs.makeDirectory(f.runtime);
+        yield* f.fs.writeFileString(f.path.join(f.runtime, 'dev-skills-enrollment.json'), bytes);
+        const before = yield* snapshot(f.root);
+        for (const dryRun of [true, false]) expect(yield* f.run(removeOwnedDevSkills(f.config, {dryRun}))).toEqual([]);
+        expect(yield* snapshot(f.root)).toEqual(before);
+      }).pipe(testLayer),
+    {arbitrary: {runs: 8}},
+  );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'F019 missing workflow state permits a legacy home below an aliased ancestor',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const parent = f.path.join(f.root, 'actual');
+        const alias = f.path.join(f.root, 'alias');
+        yield* f.fs.makeDirectory(f.path.join(parent, 'home'), {recursive: true});
+        yield* f.fs.symlink(parent, alias);
+        const config = {...f.config, agentContextHome: f.path.join(alias, 'home')};
+        const before = yield* snapshot(f.root);
+        for (const dryRun of [true, false]) expect(yield* f.run(removeOwnedDevSkills(config, {dryRun}))).toEqual([]);
+        expect(yield* snapshot(f.root)).toEqual(before);
+        yield* f.fs.makeDirectory(f.path.join(parent, 'home/dev-skills'));
+        expect(yield* f.run(removeOwnedDevSkills(config, {dryRun: false})).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'unsafe-path'},
+        });
+      }).pipe(testLayer),
+  );
+  effectIt.effect.skipIf(process.platform === 'win32')(
+    'F019 dangling workflow state remains an error rather than an absent enrollment',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.fs.makeDirectory(f.home);
+        const state = f.path.join(f.home, 'dev-skills');
+        const missing = f.path.join(f.root, 'missing-state');
+        yield* f.fs.symlink(missing, state);
+        expect(yield* f.run(removeOwnedDevSkills(f.config, {dryRun: false})).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'unsafe-path'},
+        });
+        expect(yield* f.fs.readLink(state)).toBe(missing);
+        expect(yield* f.fs.exists(f.runtime)).toBe(false);
+      }).pipe(testLayer),
+  );
   effectIt.effect('pure previews and unsupported attempts leave absent homes and all bytes untouched', () =>
     Effect.gen(function* () {
       const f = yield* fixture();

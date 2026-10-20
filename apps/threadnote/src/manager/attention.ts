@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import {Effect, Result} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -19,6 +20,7 @@ import {normalizeContextHealthSelector} from '../memory/context/health_selector.
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
 import {readTopicMaintenanceDraft} from '../memory/context/maintenance_draft.js';
+import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
 
 type ManagerAttentionResponse =
   | {readonly body: ManagerContextHealthResponseV1 | ManagerReviewInboxResponseV1; readonly status: 200}
@@ -32,7 +34,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
   if (request.method !== 'GET') return undefined;
   if (request.url.pathname !== '/api/reviews' && request.url.pathname !== '/api/context-health') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if ((!project && request.url.pathname !== '/api/reviews') || (project && !isProject(project))) {
+  if ((!project && request.url.pathname !== '/api/reviews') || (project && !isManagerProjectName(project))) {
     return {
       body: {code: 'invalid-project', error: 'Select a valid project to inspect its attention queue.'},
       status: 400,
@@ -195,6 +197,7 @@ export const managerContextHealthRecordPreviews = Effect.fn('managerAttention.re
           );
         return [
           {
+            contentHash: maintenanceContentHash(record.content),
             code,
             excerpt: memoryExcerpt(record.body),
             kind: record.metadata.kind,
@@ -274,8 +277,4 @@ function unavailableContextHealth(
 
 function isPending(state: string): boolean {
   return state === 'pending' || state === 'deferred' || state === 'applying';
-}
-
-function isProject(project: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project);
 }

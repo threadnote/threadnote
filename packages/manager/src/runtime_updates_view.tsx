@@ -3,6 +3,7 @@ import {ArrowDownToLine, BookOpen, Check, CircleAlert, RefreshCw, ShieldCheck} f
 import {api, errorMessage} from './ui/support.js';
 import {MarkdownViewer} from './ui/controls.js';
 import type {RuntimeReleaseNotes, RuntimeUpdates} from './update_contracts.js';
+import {ModelSetupPanel} from './model_setup.js';
 
 const endpoint = '/api/runtime/updates';
 
@@ -83,6 +84,7 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
   const disabled = !!busy || !!running;
   return (
     <div className="runtime-updates" aria-busy={disabled}>
+      <ModelSetupPanel />
       {error ? (
         <div className="workspace-note runtime-update-error" role="alert">
           <CircleAlert />

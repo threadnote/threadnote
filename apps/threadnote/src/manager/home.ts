@@ -1,3 +1,4 @@
+import {isManagerProjectName} from './project/name.js';
 import {Clock, Effect, Fiber, Result} from 'effect';
 import {managerHomeLanes, type ManagerHomeLane} from '@threadnote/manager/home';
 import {listCandidateReviews} from '@threadnote/memory/candidate';
@@ -72,9 +73,12 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
   if (request.url.pathname !== '/api/home') return undefined;
   if (request.method !== 'GET') return undefined;
   const project = request.url.searchParams.get('project')?.trim() ?? '';
-  if (project && !isProject(project)) {
+  if (project && !isManagerProjectName(project)) {
     return {
-      body: {code: 'invalid-project', error: 'Select a project with letters, numbers, dots, underscores, or hyphens.'},
+      body: {
+        code: 'invalid-project',
+        error: 'Select a project with letters, numbers, spaces, dots, underscores, or hyphens.',
+      },
       status: 400,
     } satisfies ManagerHomeApiResponse;
   }
@@ -246,10 +250,6 @@ function observeHomeSource<A, E, R>(
     if (remaining <= 0) return Result.fail('Home foreground budget exhausted.');
     return yield* operation.pipe(Effect.timeout(remaining), Effect.result);
   });
-}
-
-function isProject(project: string): boolean {
-  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(project);
 }
 
 function activeProjectRecords(records: Effect.Success<ReturnType<typeof homeSources.records>>, project: string) {
