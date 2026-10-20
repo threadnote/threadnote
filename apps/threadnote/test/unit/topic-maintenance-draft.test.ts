@@ -424,8 +424,17 @@ describe('topic maintenance private draft generation', () => {
             const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
             const scope = JSON.parse(/^Policy comparison scope: (.+)$/mu.exec(prompt)![1]);
             return JSON.stringify({
-              version: 4,
+              version: 5,
               ...identity,
+              paragraphComparisons: {
+                version: 1,
+                entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
+                  (item: {ordinal: number}) => ({
+                    ordinal: item.ordinal,
+                    rationale: 'Checked unchanged against current evidence.',
+                  }),
+                ),
+              },
               decision: {
                 currentWitnesses: scope.behaviorSourceIndices.slice(0, 1).map((sourceIndex: number) => ({
                   sourceIndex,
@@ -441,7 +450,6 @@ describe('topic maintenance private draft generation', () => {
                       ordinal: item.ordinal,
                       disposition: 'unchanged',
                       sourceIndices: item.sourceIndices,
-                      rationale: 'Checked unchanged against current evidence.',
                     }),
                   ),
                 },
@@ -463,10 +471,12 @@ describe('topic maintenance private draft generation', () => {
                       ...item,
                       disposition: 'update',
                       text: 'Request timeout is 60 seconds.',
-                      rationale: 'The current source states 60 seconds.',
                     }
                   : item,
             );
+            wire.paragraphComparisons.entries.find(
+              (item: {ordinal: number}) => item.ordinal === paragraph.ordinal,
+            ).rationale = 'The current source states 60 seconds.';
             return JSON.stringify(wire);
           };
           const invalidApplicationJson = (prompt: string) => {
@@ -530,7 +540,6 @@ describe('topic maintenance private draft generation', () => {
               disposition: 'update',
               text: 'This topic now describes changed runtime configuration.',
               sourceIndices: [0],
-              rationale: 'The source changed.',
             };
             return Effect.succeed(modelResult(JSON.stringify(draft)));
           };
@@ -1035,7 +1044,7 @@ const withControllerFixture = <A, E, R>(
   });
 
 describe('complete wire controller repair boundary', () => {
-  for (const violation of ['duplicate', 'quotation'] as const)
+  for (const violation of ['duplicate', 'quotation', 'comparison'] as const)
     effectIt.effect(
       'repairs complete ' + violation + ' assessment without losing either factual update or protected bytes',
       () =>
@@ -1043,6 +1052,8 @@ describe('complete wire controller repair boundary', () => {
           Effect.gen(function* () {
             const firstWire = structuredClone(violation === 'duplicate' ? f.invalid : f.valid);
             if (violation === 'quotation') firstWire.decision.currentWitnesses![0].quote = 'Historical implementation.';
+            if (violation === 'comparison')
+              firstWire.paragraphComparisons.entries[1].ordinal = firstWire.paragraphComparisons.entries[0].ordinal;
             const invalidText = JSON.stringify(schemaModule.decodeTopicDraftWire(f.basis, firstWire));
             const original = JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid});
             let calls = 0;
@@ -1053,7 +1064,9 @@ describe('complete wire controller repair boundary', () => {
                   expect(prompt).toContain(
                     violation === 'duplicate'
                       ? 'Duplicate topic assessment source index.'
-                      : 'Topic current witness is not an exact current excerpt quotation.',
+                      : violation === 'comparison'
+                        ? 'Invalid or duplicate topic comparison ordinal.'
+                        : 'Topic current witness is not an exact current excerpt quotation.',
                   );
                   expect(prompt).toContain('Prior invalid JSON data:');
                 }
@@ -1166,8 +1179,11 @@ describe('complete wire controller repair boundary', () => {
     'malformed',
     'partial',
     'legacy3',
+    'legacy4',
     'legacy1',
     'legacy2',
+    'missing-comparisons',
+    'protected-comparison',
     'schema',
     'identity',
     'oversized',
@@ -1203,9 +1219,13 @@ describe('complete wire controller repair boundary', () => {
                 ? {version: 2}
                 : scenario === 'legacy3'
                   ? {version: 3}
-                  : {}),
+                  : scenario === 'legacy4'
+                    ? {version: 4}
+                    : {}),
             ...(scenario === 'schema' ? {unexpected: true} : {}),
           };
+          if (scenario === 'missing-comparisons') wire.paragraphComparisons.entries.pop();
+          if (scenario === 'protected-comparison') wire.paragraphComparisons.entries[0].ordinal = 2;
           const text =
             scenario === 'malformed'
               ? '{invalid'

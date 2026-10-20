@@ -672,8 +672,11 @@ describe('reviewed personal topic acceptance', () => {
                 ordinal: item.ordinal,
                 disposition: item.ordinal === 0 ? 'update' : 'unchanged',
                 sourceIndices: item.sourceIndices,
-                rationale: 'Checked current source.',
                 ...(item.ordinal === 0 ? {text: 'Request timeout is 90 seconds.'} : {}),
+              }));
+              draft.paragraphComparisons.entries = eligible.map(item => ({
+                ordinal: item.ordinal,
+                rationale: 'Checked current source.',
               }));
               return {
                 text: JSON.stringify(draft),

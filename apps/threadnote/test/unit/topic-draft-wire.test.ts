@@ -41,6 +41,161 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown, evidence 
 }
 
 describe('single-decision compact topic wire', () => {
+  it('joins exact eligible comparisons by ordinal across independent permutations without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            disposition: fc.constantFrom('update', 'unchanged', 'unresolved'),
+            reason: fc.stringMatching(/^[a-z]{1,24}$/u),
+            order: fc.integer(),
+          }),
+          {minLength: 1, maxLength: 16},
+        ),
+        fc.nat(),
+        fc.func(fc.integer()),
+        (rows, seed, priority) => {
+          const protectedOrdinal = seed % (rows.length + 1);
+          const basis = basisFor(rows.length + 1, {protectedOrdinal});
+          const expected = rows.map((row, index) => ({
+            ...row,
+            ordinal: index < protectedOrdinal ? index : index + 1,
+          }));
+          const wire = wireFor(basis);
+          wire.paragraphComparisons.entries = expected.map(row => ({
+            ordinal: row.ordinal,
+            rationale: `Evidence for ${row.ordinal}: ${row.reason}.`,
+          }));
+          wire.decision.paragraphDispositions.entries = expected.map(row => ({
+            ordinal: row.ordinal,
+            disposition: row.disposition,
+            sourceIndices: row.disposition === 'unresolved' ? [] : [row.ordinal % 3],
+            ...(row.disposition === 'update' ? {text: `Current claim ${row.ordinal}.`} : {}),
+          }));
+          const unpermuted = canonical(basis, wire);
+          wire.paragraphComparisons.entries.sort(
+            (left, right) =>
+              expected.find(row => row.ordinal === left.ordinal)!.order -
+              expected.find(row => row.ordinal === right.ordinal)!.order,
+          );
+          const reorder = (value: unknown, path = ''): unknown =>
+            Array.isArray(value)
+              ? value.map((item, index) => reorder(item, `${path}/${index}`))
+              : typeof value === 'object' && value !== null
+                ? Object.fromEntries(
+                    Object.entries(value)
+                      .sort(([left], [right]) => priority(path + left) - priority(path + right))
+                      .map(([key, item]) => [key, reorder(item, `${path}/${key}`)]),
+                  )
+                : value;
+          const reordered = reorder(wire);
+          const before = JSON.stringify({basis, wire, reordered});
+          const result = canonical(basis, reordered);
+          expect(result).toEqual(unpermuted);
+          expect(result.draft).not.toHaveProperty('paragraphComparisons');
+          expect(result.draft.paragraphDispositions!.entries.map(entry => [entry.ordinal, entry.rationale])).toEqual(
+            expected.map(row => [row.ordinal, `Evidence for ${row.ordinal}: ${row.reason}.`]),
+          );
+          expect(
+            result.draft.operations.map(operation => [operation.ordinal, operation.rationale, operation.text]),
+          ).toEqual(
+            expected
+              .filter(row => row.disposition === 'update')
+              .map(row => [
+                row.ordinal,
+                `Evidence for ${row.ordinal}: ${row.reason}.`,
+                `Current claim ${row.ordinal}.`,
+              ]),
+          );
+          for (const kind of ['missing', 'duplicate', 'protected', 'action-duplicate', 'action-protected'] as const) {
+            const invalid = structuredClone(wire);
+            if (kind === 'missing') invalid.paragraphComparisons.entries.pop();
+            if (kind === 'duplicate' || kind === 'protected')
+              invalid.paragraphComparisons.entries[0].ordinal = protectedOrdinal;
+            if (kind === 'action-duplicate' || kind === 'action-protected')
+              invalid.decision.paragraphDispositions.entries[0].ordinal = protectedOrdinal;
+            // For two or more eligible claims, complete duplicate ledgers reach the application guard.
+            if (rows.length > 1 && (kind === 'duplicate' || kind === 'action-duplicate')) {
+              const entries =
+                kind === 'duplicate'
+                  ? invalid.paragraphComparisons.entries
+                  : invalid.decision.paragraphDispositions.entries;
+              entries[0].ordinal = entries[1].ordinal;
+            }
+            const invalidBefore = JSON.stringify(invalid);
+            expect(() => canonical(basis, invalid)).toThrow();
+            expect(JSON.stringify(invalid)).toBe(invalidBefore);
+          }
+          expect(JSON.stringify({basis, wire, reordered})).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('keeps comparison rationale scalar and UTF-8 bounds at application validation', () => {
+    const basis = basisFor(1);
+    const wire = wireFor(basis);
+    wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(512);
+    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe('é'.repeat(512));
+    for (const rationale of ['é'.repeat(513), '\ud83d', '\ude42']) {
+      wire.paragraphComparisons.entries[0].rationale = rationale;
+      expect(() => decodeTopicDraftWire(basis, wire)).not.toThrow();
+      expect(() => canonical(basis, wire)).toThrow(TopicDraftApplicationValidationError);
+    }
+  });
+
+  it('allows supported facts with unrelated policy uncertainty and keeps an actual conflict nonactionable', () => {
+    const original = basisFor(2, {protectedOrdinal: 1, firstParagraph: 'The limit is 32.'});
+    const requirement = 'Publishing requires explicit approval.';
+    const basis = {
+      ...original,
+      body: `The limit is 32.\n\n${requirement}`,
+      paragraphs: original.paragraphs.map(paragraph =>
+        paragraph.ordinal === 1 ? {...paragraph, hash: sha256HexSync(requirement)} : paragraph,
+      ),
+    };
+    const evidence = topicDraftCurrentEvidence(
+      basis,
+      topicDraftCurrentSourceHandles(basis).map(handleId => ({
+        handleId,
+        content: 'export const limit = 48; // Publication approval is outside this batching source.',
+      })),
+    );
+    const wire = wireFor(basis, 'unchanged', evidence);
+    wire.paragraphComparisons.entries[0].rationale = 'Current declared limit is 48; the accepted value 32 is stale.';
+    const comparison = JSON.stringify(wire.paragraphComparisons);
+    // Model-selected no-conflict does not fabricate a policy gap for an unrelated factual subject.
+    wire.decision.currentWitnesses = [{sourceIndex: 0, quote: 'export const limit = 48;'}];
+    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: 'The limit is 48.'});
+    const updated = canonical(basis, wire, evidence);
+    expect(updated.body).toBe(`The limit is 48.\n\n${requirement}`);
+    expect(updated.draft.outcome).toBe('propose-update');
+    expect(updated.draft.unresolvedQuestions).toEqual([]);
+    // The same factual comparison can precede a selected observed violation; the schema forbids its update.
+    const conflictEvidence = topicDraftCurrentEvidence(
+      basis,
+      topicDraftCurrentSourceHandles(basis).map(handleId => ({
+        handleId,
+        content: 'export const limit = 48; export const publicationRequiresApproval = false;',
+      })),
+    );
+    Object.assign(wire.decision, {
+      policyAssessment: 'conflict',
+      currentWitnesses: [{sourceIndex: 0, quote: 'export const publicationRequiresApproval = false;'}],
+      normativeOrdinal: 1,
+      requirementQuote: requirement,
+    });
+    expect(() => decodeTopicDraftWire(basis, wire)).toThrow();
+    wire.decision.paragraphDispositions.entries[0] = {ordinal: 0, disposition: 'unresolved', sourceIndices: []};
+    const conflicted = canonical(basis, wire, conflictEvidence);
+    expect(conflicted.body).toBe(basis.body);
+    expect(conflicted.draft.outcome).toBe('policy-conflict');
+    expect(conflicted.draft.operations).toEqual([]);
+    expect(conflicted.draft.paragraphDispositions!.entries[0].rationale).toBe(updated.draft.operations[0].rationale);
+    expect(JSON.stringify(wire.paragraphComparisons)).toBe(comparison);
+  });
+
   it('separates actionable generation from questions while preserving saved canonical compatibility', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z]{1,24}$/u), {minLength: 1, maxLength: 8}), questions => {
@@ -352,7 +507,7 @@ describe('single-decision compact topic wire', () => {
               beforeHash: basis.paragraphs[entry.ordinal].hash,
               disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition,
               supportHandles: indices.map(index => current[current.length - 1 - index].id),
-              rationale: entry.rationale,
+              rationale: 'Checked.',
             })),
           );
           expect(JSON.stringify({basis, wire})).toBe(before);
@@ -375,7 +530,7 @@ describe('single-decision compact topic wire', () => {
     const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
     const variant =
       schema.properties.decision.oneOf[0].properties.paragraphDispositions.properties.entries.items.oneOf[0];
-    expect(variant.required).toEqual(['ordinal', 'disposition', 'sourceIndices', 'rationale', 'text']);
+    expect(variant.required).toEqual(['ordinal', 'disposition', 'sourceIndices', 'text']);
     expect(variant.additionalProperties).toBe(false);
     expect(variant.properties).not.toHaveProperty('beforeHash');
     expect(variant.properties).not.toHaveProperty('supportHandles');
@@ -385,8 +540,8 @@ describe('single-decision compact topic wire', () => {
       disposition: 'update',
       text: 'Updated claim.',
       sourceIndices: [1],
-      rationale: 'Changed.',
     };
+    wire.paragraphComparisons.entries[0].rationale = 'Changed.';
     expect(canonical(basis, wire).draft.operations).toEqual([
       {
         ordinal: 0,
@@ -417,8 +572,11 @@ describe('single-decision compact topic wire', () => {
             ordinal,
             disposition,
             sourceIndices: disposition === 'unresolved' ? [] : [ordinal % sourceCount],
-            rationale: `Decision ${ordinal}.`,
             ...(disposition === 'update' ? {text: `Updated claim ${ordinal}.`} : {}),
+          }));
+          wire.paragraphComparisons.entries = decisions.map((_, ordinal) => ({
+            ordinal,
+            rationale: `Decision ${ordinal}.`,
           }));
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
@@ -451,15 +609,15 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
-  it('derives nonactionable outcomes and literal rationale without a redundant generated comparison', () => {
+  it('derives nonactionable outcomes and literal global rationale from selected policy witnesses', () => {
     const basis = basisFor(3, {protectedOrdinal: 2});
     for (const policyAssessment of ['conflict', 'undetermined']) {
       const wire = wireFor(basis, 'unresolved');
       wire.decision.policyAssessment = policyAssessment;
       wire.decision.currentWitnesses = [{sourceIndex: 0, quote: 'Current source 0.'}];
       if (policyAssessment === 'conflict') delete wire.decision.missingFact;
-      wire.decision.paragraphDispositions.entries[0].rationale = 'The actual value needs a policy decision.';
-      wire.decision.paragraphDispositions.entries[1].rationale = 'A separate claim remains unverified.';
+      wire.paragraphComparisons.entries[0].rationale = 'The actual value needs a policy decision.';
+      wire.paragraphComparisons.entries[1].rationale = 'A separate claim remains unverified.';
       const before = JSON.stringify({basis, wire});
       const result = canonical(basis, wire);
       expect(result.draft.outcome).toBe(policyAssessment === 'conflict' ? 'policy-conflict' : 'insufficient-evidence');
@@ -625,8 +783,8 @@ describe('single-decision compact topic wire', () => {
       disposition: 'update',
       sourceIndices: [0],
       text: 'Replacement requires descriptive direct support and project scope.',
-      rationale: 'Added scope.',
     };
+    wire.paragraphComparisons.entries[0].rationale = 'Added scope.';
     expect(canonical(basis, wire).body).toBe(wire.decision.paragraphDispositions.entries[0].text);
     wire.decision.paragraphDispositions.entries[0].disposition = 'unchanged';
     expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
@@ -639,6 +797,7 @@ describe('single-decision compact topic wire', () => {
     const basis = basisFor(1, {protectedOrdinal: 0});
     const wire = wireFor(basis);
     const result = canonical(basis, wire);
+    expect(wire.paragraphComparisons).toEqual({version: 1, entries: []});
     expect(result.body).toBe(basis.body);
     expect(result.draft.operations).toEqual([]);
     expect(result.draft.paragraphDispositions?.entries).toEqual([]);
@@ -650,6 +809,16 @@ describe('single-decision compact topic wire', () => {
   it('presents literal witnesses before assessment without requiring JSON key order on decode', () => {
     for (const basis of [basisFor(1), basisFor(1, {protectedOrdinal: 0})]) {
       const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
+      expect(Object.keys(schema.properties)).toEqual([
+        'version',
+        'targetHash',
+        'observationRevision',
+        'packetDigest',
+        'paragraphComparisons',
+        'decision',
+      ]);
+      for (const variant of schema.properties.decision.oneOf)
+        expect(variant.properties).not.toHaveProperty('paragraphComparisons');
       for (const variant of schema.properties.decision.oneOf)
         expect(Object.keys(variant.properties)[0]).toBe(
           variant.properties.currentWitnesses ? 'currentWitnesses' : 'policyAssessment',
@@ -669,7 +838,7 @@ describe('single-decision compact topic wire', () => {
 
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
-    for (const version of [1, 2, 3])
+    for (const version of [1, 2, 3, 4])
       expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version})).toThrow();
     const oldTag = wireFor(basis);
     Object.assign(oldTag.decision.paragraphDispositions.entries[0], {disposition: 'revalidate'});
@@ -693,6 +862,7 @@ describe('single-decision compact topic wire', () => {
     for (const extra of [
       {beforeHash: basis.paragraphs[0].hash},
       {supportHandles: [topicDraftCurrentSourceHandles(basis)[0]]},
+      {rationale: 'Rationale belongs only in paragraphComparisons.'},
       {unexpected: true},
     ]) {
       const wire = wireFor(basis);
@@ -747,8 +917,8 @@ describe('single-decision compact topic wire', () => {
       ordinal: 0,
       disposition: 'unresolved',
       sourceIndices: [],
-      rationale: 'Manual review.',
     };
+    wire.paragraphComparisons.entries[0].rationale = 'Manual review.';
     const result = canonical(basis, wire);
     expect(result.body).toBe(basis.body);
     expect(result.draft.paragraphDispositions?.entries).toEqual([
@@ -795,7 +965,7 @@ describe('single-decision compact topic wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v18');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v19');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>

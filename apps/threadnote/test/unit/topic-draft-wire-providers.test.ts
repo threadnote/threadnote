@@ -228,7 +228,7 @@ describe('compact topic provider boundary', () => {
       Effect.gen(function* () {
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.decision.paragraphDispositions.entries[0].rationale = 'x'.repeat(33 * 1024);
+        wire.paragraphComparisons.entries[0].rationale = 'x'.repeat(33 * 1024);
         yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
         if (backend === 'effect') {
           vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(

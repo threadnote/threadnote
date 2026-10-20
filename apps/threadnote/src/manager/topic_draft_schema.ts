@@ -67,7 +67,6 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
             Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
             Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
           ),
-          rationale,
         };
         return disposition === 'update'
           ? Schema.Struct({...fields, disposition: Schema.Literal('update'), text: rationale})
@@ -141,10 +140,18 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       : []),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(4),
+    version: Schema.Literal(5),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
+    paragraphComparisons: Schema.Struct({
+      version: Schema.Literal(1),
+      entries: Schema.Array(
+        descriptive.length
+          ? Schema.Struct({ordinal: Schema.Literals(descriptive.map(paragraph => paragraph.ordinal)), rationale})
+          : Schema.String,
+      ).check(Schema.isMinLength(descriptive.length), Schema.isMaxLength(descriptive.length)),
+    }),
     decision,
   });
 }
@@ -196,7 +203,7 @@ export function projectTopicDraftWire(
   wire: ReturnType<typeof decodeTopicDraftWire>,
   currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
-  const {decision, ...identity} = wire;
+  const {paragraphComparisons, decision, ...identity} = wire;
   const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
   const invalid = (message: string): never => {
     throw new TopicDraftApplicationValidationError({message});
@@ -206,6 +213,25 @@ export function projectTopicDraftWire(
   for (const handle of current)
     if (typeof currentEvidence[handle] !== 'string' || !wellFormed(currentEvidence[handle]))
       throw new Error('Verified current topic evidence is unavailable.');
+  const eligible = new Set(basis.paragraphs.filter(topicDraftGenerationEligible).map(paragraph => paragraph.ordinal));
+  const comparisons = new Map<number, string>();
+  for (const entry of paragraphComparisons.entries) {
+    if (typeof entry === 'string' || !eligible.has(entry.ordinal) || comparisons.has(entry.ordinal))
+      return invalid('Invalid or duplicate topic comparison ordinal.');
+    if (!wellFormed(entry.rationale) || byteLength(entry.rationale) > 1024)
+      invalid('Topic comparison rationale exceeds its UTF-8 scalar or byte bound.');
+    comparisons.set(entry.ordinal, entry.rationale);
+  }
+  const actionOrdinals = decision.paragraphDispositions.entries.map(entry =>
+    typeof entry === 'string' ? -1 : entry.ordinal,
+  );
+  if (
+    comparisons.size !== eligible.size ||
+    actionOrdinals.length !== eligible.size ||
+    new Set(actionOrdinals).size !== eligible.size ||
+    actionOrdinals.some(ordinal => !comparisons.has(ordinal))
+  )
+    invalid('Topic comparisons and dispositions must cover exactly the eligible ordinals.');
   const currentHandle = (index: number) => {
     if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
       return invalid('Invalid topic disposition source index.');
@@ -268,7 +294,7 @@ export function projectTopicDraftWire(
       ordinal: entry.ordinal,
       beforeHash: basis.paragraphs[entry.ordinal].hash,
       supportHandles: entry.sourceIndices.map(currentHandle),
-      rationale: entry.rationale,
+      rationale: comparisons.get(entry.ordinal)!,
     };
     entries.push({...fields, disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition});
     if (entry.disposition === 'update') operations.push({...fields, text: entry.text});
@@ -371,6 +397,13 @@ export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftM
     throw new Error('Topic generation assessments are not mutually exclusive.');
   return {
     ...document,
-    properties: {...fields, decision: {oneOf: branches.map(nativeDisjointUnions) as typeof branches}},
+    properties: {
+      ...Object.fromEntries(
+        Object.entries(fields ?? {})
+          .filter(([key]) => key !== 'decision')
+          .map(([key, value]) => [key, nativeDisjointUnions(value)]),
+      ),
+      decision: {oneOf: branches.map(nativeDisjointUnions) as typeof branches},
+    },
   };
 }

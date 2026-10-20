@@ -18,7 +18,6 @@ interface ParagraphDecision {
   ordinal: number;
   disposition: 'update' | 'unchanged' | 'unresolved';
   sourceIndices: number[];
-  rationale: string;
   text?: string;
 }
 
@@ -67,6 +66,7 @@ export interface TopicDraftWireFixture {
   targetHash: string;
   observationRevision: string;
   packetDigest: string;
+  paragraphComparisons: {version: number; entries: {ordinal: number; rationale: string}[]};
   decision: {
     currentWitnesses?: {sourceIndex: number; quote: string}[];
     normativeOrdinal?: number;
@@ -114,10 +114,17 @@ export function makeTopicDraftWireFixture(
   const sourceIndex = scope.behaviorSourceIndices[0];
   const handle = topicDraftCurrentSourceHandles(basis)[sourceIndex];
   return {
-    version: 4,
+    version: 5,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
+    paragraphComparisons: {
+      version: 1,
+      entries: eligible.map(paragraph => ({
+        ordinal: paragraph.ordinal,
+        rationale: unresolved ? 'Manual review.' : 'Checked.',
+      })),
+    },
     decision: {
       ...(!sourceReview
         ? {
@@ -144,7 +151,6 @@ export function makeTopicDraftWireFixture(
           ordinal: paragraph.ordinal,
           disposition,
           sourceIndices: unresolved ? [] : [0],
-          rationale: unresolved ? 'Manual review.' : 'Checked.',
         })),
       },
     },
