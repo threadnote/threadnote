@@ -90,7 +90,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
         sourceIndex: scope.behaviorSourceIndices.length ? Schema.Literals(scope.behaviorSourceIndices) : Schema.Int,
         quote,
       }),
-    ).check(Schema.isMinLength(required ? 1 : 0), Schema.isMaxLength(scope.behaviorSourceIndices.length));
+    ).check(Schema.isMinLength(required ? 1 : 0), Schema.isMaxLength(scope.behaviorSourceIndices.length ? 8 : 0));
   const requirement = () => ({
     normativeOrdinal: Schema.Literals(scope.normativeOrdinals),
     requirementQuote: quote,
@@ -140,7 +140,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       : []),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(5),
+    version: Schema.Literal(6),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
@@ -238,11 +238,13 @@ export function projectTopicDraftWire(
     return current[index];
   };
   const witnesses = 'currentWitnesses' in decision ? decision.currentWitnesses : [];
-  for (const indices of [
-    witnesses.map(witness => witness.sourceIndex),
-    ...('reviewedSourceIndices' in decision ? [decision.reviewedSourceIndices] : []),
-  ])
-    if (new Set(indices).size !== indices.length) invalid('Duplicate topic assessment source index.');
+  const witnessPairs = witnesses.map(witness => JSON.stringify([witness.sourceIndex, witness.quote]));
+  if (new Set(witnessPairs).size !== witnessPairs.length) invalid('Duplicate topic current witness pair.');
+  if (
+    'reviewedSourceIndices' in decision &&
+    new Set(decision.reviewedSourceIndices).size !== decision.reviewedSourceIndices.length
+  )
+    invalid('Duplicate topic assessment source index.');
   if (witnesses.reduce((total, witness) => total + byteLength(witness.quote), 0) > 512)
     invalid('Topic current witnesses exceed their UTF-8 byte bound.');
   for (const witness of witnesses)

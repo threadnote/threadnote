@@ -241,7 +241,124 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
-  it('strict preflight preserves duplicate assessment selections for explicit application rejection', () => {
+  it('keeps two changed facts from one source as distinct exact witnesses', () => {
+    const original = basisFor(4, {sourceCount: 1, protectedOrdinal: 3});
+    const paragraphs = [
+      'Draft output is limited to 32 KiB.',
+      'Replacement requires a descriptive paragraph with direct support.',
+      'Historical baseline: draft output was limited to 32 KiB.',
+      'Policy: accepting an update requires explicit approval.',
+    ];
+    const basis: TopicMaintenanceDraftBasisV1 = {
+      ...original,
+      body: paragraphs.join('\n\n'),
+      paragraphs: original.paragraphs.map((paragraph, ordinal) => ({
+        ...paragraph,
+        hash: sha256HexSync(paragraphs[ordinal]),
+        role: ordinal === 2 ? 'historical' : paragraph.role,
+      })),
+    };
+    const quotes = [
+      'export const draftLimitKiB = 48;',
+      "export const mayReplace = (c: Claim) => c.role === 'descriptive' && c.support === 'direct' && c.scope === 'project';",
+    ];
+    const handle = topicDraftCurrentSourceHandles(basis)[0];
+    // Separate small fragments remain representable even when the intervening source cannot fit the quote budget.
+    const evidence = {[handle]: quotes.join('\n' + '/'.repeat(600) + '\n')};
+    const wire = wireFor(basis, 'update', evidence);
+    wire.decision.currentWitnesses = quotes.map(quote => ({sourceIndex: 0, quote}));
+    const replacements = [
+      'Draft output is limited to 48 KiB.',
+      'Replacement requires a descriptive paragraph with direct support and project scope.',
+    ];
+    wire.decision.paragraphDispositions.entries.forEach((entry, ordinal) => {
+      entry.text = replacements[ordinal];
+    });
+    const before = JSON.stringify({basis, wire, evidence});
+    const result = canonical(basis, wire, evidence);
+    expect(result.body).toBe([...replacements, ...paragraphs.slice(2)].join('\n\n'));
+    expect(result.changedOrdinals).toEqual([0, 1]);
+    expect(result.draft.rationale).toContain(quotes.map(quote => `[0] ${quote}`).join('\n'));
+    expect(result.draft.operations.map(operation => operation.supportHandles)).toEqual([[handle], [handle]]);
+    expect(JSON.stringify({basis, wire, evidence})).toBe(before);
+  });
+
+  it('validates bounded fragment pairs against an independent model without changing canonical decisions', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 8}),
+        fc.array(fc.tuple(fc.nat({max: 7}), fc.nat({max: 7})), {minLength: 1, maxLength: 8}),
+        (sourceCount, selections) => {
+          const basis = basisFor(2, {sourceCount, protectedOrdinal: 1});
+          const handles = topicDraftCurrentSourceHandles(basis);
+          const fragments = Array.from({length: 8}, (_, index) => `fragment ${index}: é🙂`);
+          const evidence = Object.fromEntries(handles.map(handle => [handle, fragments.join('\n')]));
+          const wire = wireFor(basis, 'update', evidence);
+          const pairs = selections.map(([index, fragment]) => [index % sourceCount, fragments[fragment]] as const);
+          wire.decision.currentWitnesses = pairs.map(([sourceIndex, quote]) => ({sourceIndex, quote}));
+          const before = JSON.stringify({basis, wire, evidence});
+          const unique = pairs.every(
+            ([source, quote], index) =>
+              pairs.findIndex(([otherSource, otherQuote]) => source === otherSource && quote === otherQuote) === index,
+          );
+          if (!unique) {
+            expect(decodeTopicDraftWire(basis, wire).decision).toMatchObject({
+              currentWitnesses: wire.decision.currentWitnesses,
+            });
+            expect(() => canonical(basis, wire, evidence)).toThrow('Duplicate topic current witness pair.');
+          } else {
+            const result = canonical(basis, wire, evidence);
+            expect(result.draft.rationale).toContain(pairs.map(([index, quote]) => `[${index}] ${quote}`).join('\n'));
+            const reversed = canonical(
+              basis,
+              {...wire, decision: {...wire.decision, currentWitnesses: [...wire.decision.currentWitnesses].reverse()}},
+              evidence,
+            );
+            const {rationale: _first, ...firstDecisions} = result.draft;
+            const {rationale: _second, ...secondDecisions} = reversed.draft;
+            expect(secondDecisions).toEqual(firstDecisions);
+            expect(reversed.body).toBe(result.body);
+            const altered = structuredClone(wire);
+            altered.decision.currentWitnesses![0].quote += 'not in any current source';
+            expect(() => canonical(basis, altered, evidence)).toThrow('not an exact current excerpt');
+          }
+          expect(JSON.stringify({basis, wire, evidence})).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('allows eight distinct fragments in one source while preserving count and empty-pool fences', () => {
+    const basis = basisFor(1, {sourceCount: 1});
+    const handle = topicDraftCurrentSourceHandles(basis)[0];
+    const fragments = Array.from({length: 9}, (_, index) => `Fact ${index}.`);
+    const evidence = {[handle]: fragments.join('\n')};
+    const wire = wireFor(basis, 'update', evidence);
+    for (const count of [2, 8]) {
+      wire.decision.currentWitnesses = fragments.slice(0, count).map(quote => ({sourceIndex: 0, quote}));
+      expect(canonical(basis, wire, evidence).draft.operations).toHaveLength(1);
+    }
+    wire.decision.currentWitnesses!.push({sourceIndex: 0, quote: fragments[8]});
+    expect(() => decodeTopicDraftWire(basis, wire)).toThrow();
+    const boundedEvidence = {[handle]: 'a'.repeat(256) + '\n' + 'b'.repeat(257)};
+    wire.decision.currentWitnesses = ['a'.repeat(256), 'b'.repeat(256)].map(quote => ({sourceIndex: 0, quote}));
+    expect(canonical(basis, wire, boundedEvidence).draft.operations).toHaveLength(1);
+    wire.decision.currentWitnesses[1].quote += 'b';
+    expect(() => canonical(basis, wire, boundedEvidence)).toThrow('exceed their UTF-8 byte bound');
+    const sharedBasis = basisFor(1, {sourceCount: 2});
+    const sharedEvidence = Object.fromEntries(topicDraftCurrentSourceHandles(sharedBasis).map(id => [id, 'Same.']));
+    const shared = wireFor(sharedBasis, 'update', sharedEvidence);
+    shared.decision.currentWitnesses = [0, 1].map(sourceIndex => ({sourceIndex, quote: 'Same.'}));
+    expect(canonical(sharedBasis, shared, sharedEvidence).draft.operations).toHaveLength(1);
+    const protectedBasis = basisFor(1, {sourceCount: 1, protectedOrdinal: 0});
+    const unknown = wireFor(protectedBasis, 'unresolved');
+    expect(canonical(protectedBasis, unknown).draft.outcome).toBe('insufficient-evidence');
+    unknown.decision.currentWitnesses = [{sourceIndex: 0, quote: 'Current source 0.'}];
+    expect(() => decodeTopicDraftWire(protectedBasis, unknown)).toThrow();
+  });
+
+  it('strict preflight preserves duplicate witness pairs for explicit application rejection', () => {
     fc.assert(
       fc.property(fc.integer({min: 0, max: 2}), index => {
         const basis = basisFor(2);
@@ -838,7 +955,7 @@ describe('single-decision compact topic wire', () => {
 
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
-    for (const version of [1, 2, 3, 4])
+    for (const version of [1, 2, 3, 4, 5])
       expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version})).toThrow();
     const oldTag = wireFor(basis);
     Object.assign(oldTag.decision.paragraphDispositions.entries[0], {disposition: 'revalidate'});
@@ -965,7 +1082,7 @@ describe('single-decision compact topic wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v19');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v20');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>

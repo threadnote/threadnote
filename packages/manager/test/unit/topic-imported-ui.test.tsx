@@ -196,6 +196,8 @@ beforeEach(() => {
         }
         return response(privateReview);
       }
+      if (url.pathname === '/api/attention/topic-review' && url.searchParams.has('caseId'))
+        return response({error: 'No qualified saved review for this case.'}, 404);
       if (url.pathname === '/api/attention/topic-review') {
         await readGate;
         if (recoveryOnly)

@@ -235,6 +235,11 @@ beforeEach(() => {
         if (action.action === 'reject')
           current = review({...current, revision: current.revision + 1, state: 'rejected', canApply: false});
         result = current;
+      } else if (url.pathname === '/api/attention/topic-review' && url.searchParams.has('caseId')) {
+        return new Response(JSON.stringify({error: 'No qualified saved review for this case.'}), {
+          status: 404,
+          headers: {'content-type': 'application/json'},
+        });
       } else if (url.pathname === '/api/attention/topic-review') {
         if (current.state === 'deferred') await deferredReadGate;
         result = current;

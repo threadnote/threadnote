@@ -46,7 +46,7 @@ export {
   maintenanceAnchorChunksComplete,
   duplicateArchiveSafe,
 } from './maintenance_policy.js';
-import {Clock, Crypto, DateTime, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
+import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -63,6 +63,7 @@ import {
   type MemoryRelation,
 } from '@threadnote/memory/document';
 import {hasTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import type {TopicMaintenanceReviewPayload} from '@threadnote/memory/topic-maintenance-draft';
 import {memoryIdentityLockKey, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {
   contextHealthCaseIdV2,
@@ -111,14 +112,12 @@ import {
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {buildContextMaintenancePacket} from './maintenance_packet.js';
 import {
-  advanceTopicMaintenanceCursor,
-  deferTopicMaintenanceCase,
+  advanceScheduledTopicMaintenance,
   enrolledTopicCandidate,
-  observeTopicMaintenanceCase,
+  reconcileAcceptedTopicMaintenanceState,
   pruneAbsentTopicCheckpoints,
   readTopicMaintenanceCasePacket,
   selectRetainedMaintenanceCases,
-  selectTopicMaintenanceRecord,
   topicMaintenanceCaseId,
   validTopicMaintenanceCheckpoints,
   TOPIC_MAINTENANCE_FAMILY,
@@ -186,6 +185,33 @@ export const recordTopicMaintenanceReviewDecision = (config: RuntimeConfig, inpu
       Effect.flatMap(state => saveTopicReviewDecision(state, input, next => writeState(config, next))),
     ),
   );
+
+export function reconcileAcceptedTopicMaintenanceCase<A, E, R>(
+  config: RuntimeConfig,
+  original: MemoryRecord,
+  acceptedContent: string,
+  payload: TopicMaintenanceReviewPayload,
+  sourceCwd: string | undefined,
+  complete: Effect.Effect<A, E, R>,
+) {
+  return withStateLock(
+    config,
+    readState(config).pipe(
+      Effect.flatMap(state =>
+        reconcileAcceptedTopicMaintenanceState(
+          config,
+          state,
+          original,
+          acceptedContent,
+          payload,
+          sourceCwd,
+          next => writeState(config, next),
+          complete,
+        ),
+      ),
+    ),
+  );
+}
 
 export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')(function* (
   config: RuntimeConfig,
@@ -454,43 +480,17 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         yield* runRequestedMaintenanceProjection(config, request, active, corpus, snapshot.success.complete);
       }
       if (selectedCase === undefined && work.phase === 'topic') {
-        const selectedTopic = selectTopicMaintenanceRecord(topicRecords, state.workSchedule?.lastTopicMemoryId);
-        if (selectedTopic !== undefined) {
-          state = {
-            ...state,
-            workSchedule: advanceTopicMaintenanceCursor(state.workSchedule!, selectedTopic),
-          };
-          const root = roots.get(selectedTopic.metadata.project!) ?? options.cwd;
-          const expectedHash = logicalHashes.get(selectedTopic.uri) ?? contentHash(selectedTopic.content);
-          const turn = yield* observeTopicMaintenanceCase(
-            config,
-            selectedTopic,
-            expectedHash,
-            root,
-            now,
-            topicCheckpoints,
-            caseMap,
-          ).pipe(Effect.timeoutOption(5_000));
-          const result = Option.isSome(turn)
-            ? turn.value
-            : deferTopicMaintenanceCase(
-                selectedTopic,
-                expectedHash,
-                now,
-                topicCheckpoints[topicMaintenanceCaseId(selectedTopic)],
-                caseMap.get(topicMaintenanceCaseId(selectedTopic)),
-              );
-          if (result !== undefined) {
-            caseMap.set(result.caseId, result.item);
-            state = {
-              ...state,
-              topicCheckpoints: {
-                ...state.topicCheckpoints,
-                [result.caseId]: result.checkpoint,
-              },
-            };
-          }
-        }
+        state = yield* advanceScheduledTopicMaintenance(
+          config,
+          state,
+          topicRecords,
+          roots,
+          options.cwd,
+          logicalHashes,
+          now,
+          topicCheckpoints,
+          caseMap,
+        );
       }
       // maxRecords still controls inventory pagination; record work remains four per tick.
       const selected =

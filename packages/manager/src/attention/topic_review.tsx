@@ -160,8 +160,29 @@ export function TopicReviewContent(
           props.reviewId ??
           currentPacket?.reviewId;
         let result: ManagerTopicReviewV1 | undefined;
+        if (!selectedReviewId && props.caseId) {
+          try {
+            const qualified = await api<ManagerTopicReviewResponseV1>(
+              `/api/attention/topic-review?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(props.caseId)}`,
+              undefined,
+              options,
+            );
+            if (
+              qualified.kind !== 'topic-maintenance' ||
+              qualified.project !== props.project ||
+              qualified.caseId !== props.caseId ||
+              !qualified.canFinishVerification
+            )
+              throw new Error('The saved topic review changed. Refresh its evidence.');
+            selectedReviewId = qualified.reviewId;
+            result = qualified;
+            privateLoad ||= qualified.sourceKind === 'obsidian';
+          } catch (cause) {
+            if (!Schema.is(ManagerApiError)(cause) || cause.status !== 404) throw cause;
+          }
+        }
         if (selectedReviewId) {
-          result = await readSelectedReview(selectedReviewId);
+          result ??= await readSelectedReview(selectedReviewId);
           if (!result) return;
           privateLoad ||= result.sourceKind === 'obsidian';
         }
@@ -293,9 +314,11 @@ export function TopicReviewContent(
     !busy &&
     !error;
   const canResumeAcceptance =
-    review?.state === 'applying' &&
-    approval?.stage === 'prepared' &&
-    (!!review.canApply || !!review.canFinishVerification) &&
+    !!review &&
+    ((review.state === 'applying' &&
+      approval?.stage === 'prepared' &&
+      (review.canApply || !!review.canFinishVerification)) ||
+      (review.state === 'applied' && approval?.stage === 'written' && !!review.canFinishVerification)) &&
     !changedDraft &&
     !loading &&
     !busy &&
@@ -1028,25 +1051,27 @@ export function TopicReviewContent(
             Resume review
           </button>
         )}
-        {review?.state === 'applying' && approval?.stage === 'prepared' && (
-          <button
-            type="button"
-            className="primary"
-            disabled={!canResumeAcceptance}
-            onClick={() =>
-              void mutate({
-                action: 'apply',
-                project: props.project,
-                reviewId: review.reviewId,
-                revision: approval.reviewRevision,
-                approvalDigest: approval.approvalDigest,
-                approved: true,
-              })
-            }
-          >
-            {review.canFinishVerification ? 'Finish saved update verification' : 'Resume approved update'}
-          </button>
-        )}
+        {review &&
+          ((review.state === 'applying' && approval?.stage === 'prepared') ||
+            (review.state === 'applied' && approval?.stage === 'written' && review.canFinishVerification)) && (
+            <button
+              type="button"
+              className="primary"
+              disabled={!canResumeAcceptance}
+              onClick={() =>
+                void mutate({
+                  action: 'apply',
+                  project: props.project,
+                  reviewId: review.reviewId,
+                  revision: approval.reviewRevision,
+                  approvalDigest: approval.approvalDigest,
+                  approved: true,
+                })
+              }
+            >
+              {review.canFinishVerification ? 'Finish saved update verification' : 'Resume approved update'}
+            </button>
+          )}
         {review?.state === 'conflict' && (
           <button
             type="button"

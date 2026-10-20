@@ -103,7 +103,7 @@ export function topicDraftEvidenceFromPrompt(prompt: string): Readonly<Record<st
 
 export function makeTopicDraftWireFixture(
   basis: TopicMaintenanceDraftBasis,
-  disposition: 'unchanged' | 'unresolved' = 'unchanged',
+  disposition: 'update' | 'unchanged' | 'unresolved' = 'unchanged',
   evidence = makeTopicDraftWireEvidence(basis),
 ): TopicDraftWireFixture {
   const unresolved = disposition === 'unresolved';
@@ -114,7 +114,7 @@ export function makeTopicDraftWireFixture(
   const sourceIndex = scope.behaviorSourceIndices[0];
   const handle = topicDraftCurrentSourceHandles(basis)[sourceIndex];
   return {
-    version: 5,
+    version: 6,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
@@ -151,6 +151,7 @@ export function makeTopicDraftWireFixture(
           ordinal: paragraph.ordinal,
           disposition,
           sourceIndices: unresolved ? [] : [0],
+          ...(disposition === 'update' ? {text: `Current claim ${paragraph.ordinal}.`} : {}),
         })),
       },
     },

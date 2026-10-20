@@ -52721,6 +52721,7 @@
         "apps/threadnote/test/helpers/manager-test-server.ts",
         "apps/threadnote/test/helpers/runtime-policy.ts",
         "apps/threadnote/test/helpers/system-layer.ts",
+        "apps/threadnote/test/helpers/topic-draft-wire.ts",
         "apps/threadnote/test/helpers/topic-expansion.ts",
         "apps/threadnote/test/unit/manager-activation.test.ts",
         "apps/threadnote/test/unit/manager-attention-actions.test.ts",

@@ -516,9 +516,57 @@ describe('reviewed personal topic acceptance', () => {
               maintenanceApproval: {...previewReview.maintenanceApproval!, stage: 'prepared'},
             })?.canApply,
           ).toBe(true);
+          const stateFile = path.join(home, 'context-maintenance/state-v2.json');
+          const savedState = yield* fs.readFileString(stateFile);
+          const failingStateWrite = {
+            ...fs,
+            rename: (from: string, to: string) =>
+              to === stateFile ? fs.rename(`${stateFile}.missing`, to) : fs.rename(from, to),
+          };
+          const writePending = yield* applyTopicMaintenanceReview(config, {
+            reviewId: review.reviewId,
+            revision: previewReview.revision,
+            sourceCwd: repository,
+            approvalDigest: preview.approvalDigest,
+            approved: true,
+          }).pipe(Effect.provideService(FileSystem.FileSystem, failingStateWrite), Effect.result);
+          expect(writePending).toMatchObject({failure: {message: expect.stringContaining('verification is pending')}});
+          expect(yield* fs.readFileString(memory)).toBe(preview.content);
+          expect((yield* loadCandidateReview(home, review.reviewId)).maintenanceApproval?.stage).toBe('prepared');
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'needs-decision',
+          );
+          yield* fs.writeFileString(stateFile, '{malformed');
+          const pending = yield* applyTopicMaintenanceReview(config, {
+            reviewId: review.reviewId,
+            revision: previewReview.revision,
+            sourceCwd: repository,
+            approvalDigest: preview.approvalDigest,
+            approved: true,
+          }).pipe(Effect.result);
+          expect(Result.isFailure(pending)).toBe(true);
+          if (Result.isFailure(pending))
+            expect(pending.failure).toMatchObject({
+              message: expect.stringContaining('saved; maintenance verification is pending'),
+            });
+          expect(yield* fs.readFileString(memory)).toBe(preview.content);
+          expect((yield* loadCandidateReview(home, review.reviewId)).maintenanceApproval?.stage).toBe('prepared');
+          const pendingManager = yield* managerApply();
+          expect(pendingManager?.status).toBe(409);
+          expect(pendingManager?.body).toMatchObject({code: 'topic-review-verification-pending'});
+          yield* fs.writeFileString(stateFile, savedState);
           const recoveredBeforeWrite = yield* apply();
           expect(recoveredBeforeWrite.maintenanceApproval?.stage).toBe('written');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'resolved',
+          );
+          const beforeCache = JSON.parse(savedState);
+          const afterCache = JSON.parse(yield* fs.readFileString(stateFile));
+          expect(afterCache.projects).toEqual(beforeCache.projects);
+          expect(afterCache.preparation).toEqual(beforeCache.preparation);
+          expect(afterCache.workSchedule).toEqual(beforeCache.workSchedule);
+          expect(afterCache.checkpoints).toEqual(beforeCache.checkpoints);
           const managerBeforeWrite = yield* managerApply();
           expect(managerBeforeWrite?.status).toBe(200);
           expect(managerBeforeWrite?.body).toMatchObject({state: 'applied', approval: {stage: 'written'}});
@@ -544,8 +592,25 @@ describe('reviewed personal topic acceptance', () => {
             (yield* reviewTool({action: 'view', reviewId: review.reviewId})).structuredContent?.approval?.stage,
           ).toBe('written');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
+          yield* fs.writeFileString(stateFile, savedState);
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'needs-decision',
+          );
+          expect(Result.isFailure(yield* readContextMaintenancePacket(config, caseId).pipe(Effect.result))).toBe(true);
+          const qualified = yield* handleManagerTopicReview({
+            config,
+            method: 'GET',
+            url: new URL(`http://manager.test/api/attention/topic-review?project=fixture&caseId=${caseId}`),
+            body: Effect.succeed({}),
+          });
+          expect(qualified?.status).toBe(200);
+          expect(qualified?.body).toMatchObject({reviewId: review.reviewId, canFinishVerification: true});
           const replay = yield* apply();
           expect(replay.revision).toBe(applied.revision);
+          expect(replay.auditEvents).toEqual(applied.auditEvents);
+          expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+            'resolved',
+          );
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           const preparedAgain = candidateReviewWithState(applied, applied.candidates[0].candidateId, 'applying');
           yield* saveCandidateReview(home, {
@@ -579,7 +644,8 @@ describe('reviewed personal topic acceptance', () => {
           expect(conflicted.maintenanceApproval?.stage).toBe('conflict');
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
           let newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
-          for (let tick = 0; tick < 12 && newerCase?.evidenceRevision === basis.observationRevision; tick++) {
+          const acceptedRevision = newerCase?.evidenceRevision;
+          for (let tick = 0; tick < 12 && newerCase?.evidenceRevision === acceptedRevision; tick++) {
             yield* runContextMaintenance(config, {cwd: repository});
             newerCase = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
           }

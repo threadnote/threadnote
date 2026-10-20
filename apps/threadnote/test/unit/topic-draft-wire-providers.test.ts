@@ -290,7 +290,7 @@ describe('compact topic provider boundary', () => {
       expect(result.outputRepresentation).toBe('decoded-json');
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow(
-        'Duplicate topic assessment source index.',
+        'Duplicate topic current witness pair.',
       );
     }),
   );

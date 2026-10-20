@@ -424,7 +424,7 @@ describe('topic maintenance private draft generation', () => {
             const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
             const scope = JSON.parse(/^Policy comparison scope: (.+)$/mu.exec(prompt)![1]);
             return JSON.stringify({
-              version: 5,
+              version: 6,
               ...identity,
               paragraphComparisons: {
                 version: 1,
@@ -1063,7 +1063,7 @@ describe('complete wire controller repair boundary', () => {
                 if (calls === 2) {
                   expect(prompt).toContain(
                     violation === 'duplicate'
-                      ? 'Duplicate topic assessment source index.'
+                      ? 'Duplicate topic current witness pair.'
                       : violation === 'comparison'
                         ? 'Invalid or duplicate topic comparison ordinal.'
                         : 'Topic current witness is not an exact current excerpt quotation.',

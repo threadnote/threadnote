@@ -15,6 +15,7 @@ import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import {maintenanceContentHash} from '../../src/memory/context/maintenance_policy.js';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -174,6 +175,7 @@ beforeEach(() => {
         {
           caseId,
           project: 'alpha',
+          memoryId: 'tn_topic',
           family: 'topic-maintenance',
           slot: 'declared-support',
           subjectUri: targetUri,
@@ -194,6 +196,103 @@ beforeEach(() => {
 });
 
 describe('Manager topic review adapter', () => {
+  effectIt.effect('finds only a persisted stale written review by exact case selector after packet refusal', () =>
+    Effect.gen(function* () {
+      const exactId = `review-${sha256HexSync(`topic-maintenance\0${targetUri}`).slice(0, 24)}`;
+      const oldHash = maintenanceContentHash('PRIVATE BASELINE');
+      const savedHash = maintenanceContentHash('FINAL DOCUMENT');
+      const written = {
+        ...review,
+        reviewId: exactId,
+        candidates: [{...review.candidates[0], state: 'applied' as const}],
+        maintenance: {...review.maintenance!, basis: {...review.maintenance!.basis, targetHash: oldHash}},
+        maintenanceApproval: {
+          ...review.maintenanceApproval!,
+          stage: 'written' as const,
+          preview: {
+            ...review.maintenanceApproval!.preview,
+            reviewId: exactId,
+            targetUri,
+            beforeContentHash: oldHash,
+            contentHash: savedHash,
+          },
+        },
+      } as CandidateReview;
+      mocks.list.mockReturnValue(Effect.succeed([written]));
+      mocks.load.mockReturnValue(Effect.succeed(written));
+      mocks.records.mockReturnValue(
+        Effect.succeed([
+          {uri: targetUri, metadata: {project: 'alpha', memoryId: 'tn_topic'}, content: 'FINAL DOCUMENT'},
+        ]),
+      );
+      const staleCase = {
+        caseId,
+        project: 'alpha',
+        memoryId: 'tn_topic',
+        family: 'topic-maintenance',
+        slot: 'declared-support',
+        subjectUri: targetUri,
+        evidenceRevision: hash,
+        subjectContentHashes: [{uri: targetUri, hash: oldHash}],
+      };
+      mocks.status.mockReturnValue(Effect.succeed({cases: [staleCase]}));
+      mocks.packet.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'Stale packet.'})));
+      const result = yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`);
+      expect(result?.status).toBe(200);
+      expect(result?.body).toMatchObject({reviewId: exactId, canFinishVerification: true});
+      expect(mocks.packet).not.toHaveBeenCalled();
+      for (const query of [
+        `project=alpha&caseId=${caseId}&reviewId=${exactId}`,
+        `project=alpha&caseId=${caseId}&unknown=1`,
+        `project=alpha&caseId=${caseId}&caseId=${caseId}`,
+      ])
+        expect((yield* call('GET', `/api/attention/topic-review?${query}`))?.status).toBe(400);
+      for (const changed of [
+        {...staleCase, project: 'beta'},
+        {...staleCase, memoryId: 'other'},
+        {...staleCase, slot: 'other'},
+        {...staleCase, subjectUri: `${targetUri}-other`},
+        {...staleCase, evidenceRevision: 'd'.repeat(64)},
+        {...staleCase, subjectContentHashes: [{uri: targetUri, hash: 'd'.repeat(64)}]},
+      ]) {
+        mocks.status.mockReturnValue(Effect.succeed({cases: [changed]}));
+        expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
+      }
+      mocks.status.mockReturnValue(Effect.succeed({cases: [staleCase]}));
+      mocks.records.mockReturnValue(
+        Effect.succeed([
+          {uri: targetUri, metadata: {project: 'alpha', memoryId: 'tn_topic'}, content: 'NEWER DOCUMENT'},
+        ]),
+      );
+      expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
+      mocks.records.mockReturnValue(
+        Effect.succeed([
+          {uri: targetUri, metadata: {project: 'alpha', memoryId: 'tn_topic'}, content: 'FINAL DOCUMENT'},
+        ]),
+      );
+      mocks.load.mockReturnValue(
+        Effect.succeed({
+          ...written,
+          maintenanceApproval: {
+            ...written.maintenanceApproval!,
+            preview: {
+              ...written.maintenanceApproval!.preview,
+              reviewId: reviewId,
+            },
+          },
+        }),
+      );
+      expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
+      const imported = {...written, maintenance: {...written.maintenance!, version: 2 as const}} as CandidateReview;
+      mocks.load.mockReturnValue(Effect.succeed(imported));
+      mocks.read.mockReturnValue(Effect.fail(TopicReviewError.make({message: 'Imported access expired.'})));
+      expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
+      mocks.read
+        .mockReturnValueOnce(Effect.succeed(imported))
+        .mockReturnValueOnce(Effect.fail(TopicReviewError.make({message: 'Imported access expired.'})));
+      expect((yield* call('GET', `/api/attention/topic-review?project=alpha&caseId=${caseId}`))?.status).toBe(404);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('keeps a spaced project name through read, generation, preview and approval', () =>
     Effect.gen(function* () {
       const project = 'Example Project';
@@ -208,6 +307,7 @@ describe('Manager topic review adapter', () => {
             {
               caseId,
               project,
+              memoryId: 'tn_topic',
               family: 'topic-maintenance',
               slot: 'declared-support',
               subjectUri: targetUri,
@@ -818,6 +918,7 @@ describe('Manager topic review adapter', () => {
               {
                 caseId,
                 project: 'alpha',
+                memoryId: 'tn_topic',
                 family: 'topic-maintenance',
                 slot: 'declared-support',
                 subjectUri: targetUri,
