@@ -154,14 +154,16 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         const policy = join(run, 'loopback-only.sb');
         await writeFile(policy, LOOPBACK_ONLY_POLICY, {mode: 0o600});
         const environment = upgradeEnvironment(run);
-        const sandbox = (executable: string, args: string[]) =>
-          execute('/usr/bin/sandbox-exec', ['-f', policy, executable, ...args], {
+        const invoke = (executable: string, args: string[]) =>
+          execute(executable, args, {
             cwd: run,
             env: environment,
             timeout: 180_000,
             maxBuffer: 2 * 1024 * 1024,
           });
-        // Prove inherited containment before any product process, using numeric IP to avoid DNS ambiguity.
+        const sandbox = (executable: string, args: string[]) =>
+          invoke('/usr/bin/sandbox-exec', ['-f', policy, executable, ...args]);
+        // These probes qualify the later Manager sandbox, not the unsandboxed legacy update stage.
         await sandbox('/bin/sh', [
           '-c',
           `/usr/bin/python3 -c 'import errno, socket; result = socket.socket().connect_ex(("1.1.1.1", 443)); assert result == errno.EPERM, result'`,
@@ -185,7 +187,10 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
         let update;
         let commands: string[];
         try {
-          update = await sandbox(join(oldRelease, 'threadnote'), [
+          // Legacy repair requires OS process identity, which sandbox-exec denies on macOS.
+          // This explicitly admitted disposable runner allows update-stage network access;
+          // any setup job or generation bytes still fail the assertions below.
+          update = await invoke(join(oldRelease, 'threadnote'), [
             'update',
             '--home',
             home,
@@ -303,10 +308,20 @@ describe.skipIf(!requested)('actual predecessor automatic setup compatibility on
             callerHomeArgumentOnly: true,
             syntheticCandidateReleaseMetadata: true,
             officialCandidateTrustQualified: false,
-            loopbackOnlyPolicySha256: bytesSha256(LOOPBACK_ONLY_POLICY),
-            remoteNetworkProbe: 'EPERM',
-            loopbackNetworkProbe: 'passed',
-            processIdentityContainmentProbe: sandboxPs,
+            updateStage: {
+              sandboxed: false,
+              networkContained: false,
+              limitation:
+                'Legacy updater and repair have normal network access on the disposable runner; zero setup jobs and generation bytes are observed assertions, not network-denial guarantees.',
+            },
+            catchupStage: {
+              sandboxed: true,
+              networkContained: true,
+              loopbackOnlyPolicySha256: bytesSha256(LOOPBACK_ONLY_POLICY),
+              remoteNetworkProbe: 'EPERM',
+              loopbackNetworkProbe: 'passed',
+              processIdentityContainmentProbe: sandboxPs,
+            },
             observedCommands: commands,
             releaseFixtureRequests: releaseRequests,
             legacyChildCompletions: completed.filter(entry => ['post-update', 'repair'].includes(entry.operation)),
