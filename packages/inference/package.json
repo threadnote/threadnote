@@ -15,6 +15,7 @@
     "./models/catalog": "./src/models/catalog.ts",
     "./models/inference": "./src/models/inference.ts",
     "./models/selection": "./src/models/selection.ts",
+    "./models/setup": "./src/models/setup.ts",
     "./models/store": "./src/models/store.ts",
     "./vector-search": "./src/vector-search.ts"
   },
@@ -24,6 +25,7 @@
     "node-llama-cpp": "3.22.1"
   },
   "devDependencies": {
+    "@effect/platform-bun": "4.0.3",
     "@threadnote/testing": "workspace:*",
     "@effect/vitest": "4.0.3",
     "vitest": "5.0.3",

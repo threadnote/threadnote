@@ -206,6 +206,14 @@ describe('platform benchmark workflow', () => {
     expect(recallJob['runs-on']).toBe('ubuntu-latest');
     expect(recallJob['timeout-minutes']).toBeLessThanOrEqual(15);
     expect(recallCommand).toContain('bun run eval:recall');
+    const recallDiagnosticsStep = recallJob.steps?.find(
+      step =>
+        step.uses === 'actions/upload-artifact@v7' &&
+        step.with?.name === 'recall-production-pr-10000-Linux-${{ runner.arch }}',
+    );
+    expect(recallDiagnosticsStep?.if).toBe('always()');
+    expect(recallDiagnosticsStep?.with?.path).toBe('artifacts/recall-production-10000.json');
+    expect(recallDiagnosticsStep?.with?.['if-no-files-found']).toBe('warn');
     expect(recallCommand).toContain('bun run bench:recall:vectors');
     expect(recallCommand).toContain('--documents 10000');
     expect(recallCommand).toContain('--fail-on-budget');

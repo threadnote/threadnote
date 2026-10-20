@@ -11,6 +11,87 @@ import {localUserMemoriesRoot} from '../../src/memory/migrations.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 describe('Manager attention API', () => {
+  effectIt.effect('opens spaced project names without selecting their slug-shaped neighbor', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'manager-spaced-project-'});
+      const config: RuntimeConfig = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'threadnote',
+        manifestPath: `${home}/manifest.yaml`,
+        user: 'tester',
+      };
+      const memories = yield* localUserMemoriesRoot(config);
+      const reviews = `${home}/threadnote/candidates/v1/reviews`;
+      yield* fs.makeDirectory(memories, {recursive: true});
+      yield* fs.makeDirectory(reviews, {recursive: true});
+      for (const [index, project] of ['Example Project', 'Example-Project'].entries()) {
+        yield* fs.writeFileString(
+          `${memories}/${index}.md`,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              project,
+              sourceAgentClient: 'synthetic',
+              timestamp: '2026-10-19T00:00:00.000Z',
+            },
+            'Synthetic project fact.',
+          ),
+        );
+        yield* fs.writeFileString(
+          `${reviews}/review-${index}.json`,
+          JSON.stringify({
+            version: 2,
+            reviewId: `review-${index}`,
+            revision: 1,
+            project,
+            topic: 'scope',
+            task: 'Synthetic review',
+            createdAt: '2026-10-19T00:00:00.000Z',
+            codeCitations: [],
+            auditEvents: [],
+            candidates: [
+              {
+                candidateId: `candidate-${index}`,
+                state: 'pending',
+                categories: ['decision'],
+                comparison: 'new',
+                confidence: 1,
+                proposedText: 'Synthetic proposal',
+                reason: 'Review',
+                recommendation: 'create',
+              },
+            ],
+          }),
+        );
+      }
+      const call = (route: string) =>
+        handleManagerAttentionRequest({
+          config,
+          method: 'GET',
+          url: new URL(`http://manager.test/api/${route}?project=Example%20Project`),
+        });
+      expect(yield* call('reviews')).toMatchObject({
+        status: 200,
+        body: {
+          project: 'Example Project',
+          pendingCount: 1,
+          items: [{project: 'Example Project', reviewId: 'review-0'}],
+        },
+      });
+      expect(yield* call('context-health')).toMatchObject({
+        status: 200,
+        body: {
+          project: 'Example Project',
+          recordsScanned: 1,
+        },
+      });
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('scans health records once while retaining inactive and other-project relation targets', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -20,12 +20,14 @@ import {
   TopicSourceEvidence,
 } from './topic_review_presentation.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {memoryDocumentParts} from '../library_model.js';
 import type {ManagerContextMaintenancePacketV2} from './contracts.js';
 import type {
   ManagerTopicReviewActionV1,
   ManagerTopicReviewV1,
   ManagerTopicReviewResponseV1,
   ManagerTopicReviewRecoveryV1,
+  ManagerTopicReviewAppliedV1,
 } from './topic_contracts.js';
 
 interface TopicReviewProps {
@@ -34,6 +36,7 @@ interface TopicReviewProps {
   readonly reviewId?: string;
   readonly initialPacket?: ManagerContextMaintenancePacketV2;
   readonly onChanged: () => void;
+  readonly onApplied?: (result: ManagerTopicReviewAppliedV1) => void;
   readonly onClose: () => void;
   readonly onOpenLibrary: (uri: string) => void;
 }
@@ -53,7 +56,9 @@ export function TopicReviewDialog(props: TopicReviewProps): React.ReactElement {
   );
 }
 
-export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): React.ReactElement {
+export function TopicReviewContent(
+  props: Omit<TopicReviewProps, 'onClose'> & {readonly onClose?: () => void},
+): React.ReactElement {
   const [packet, setPacket] = useState(props.initialPacket);
   const [sourceKind, setSourceKind] = useState<'code' | 'obsidian' | undefined>(
     props.initialPacket?.topicEvidence?.version === 2 ? 'obsidian' : undefined,
@@ -67,6 +72,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
   const [recovery, setRecovery] = useState<typeof ReviewRecovery.Type>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [activeAction, setActiveAction] = useState<ManagerTopicReviewActionV1['action']>();
   const [generation, setGeneration] = useState(0);
   const [invalidatedApproval, setInvalidatedApproval] = useState<string>();
   const selectionKey = JSON.stringify([props.project, props.caseId, props.reviewId, props.initialPacket?.reviewId]);
@@ -91,6 +97,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       operationEpoch.current += 1;
       mutationInFlight.current = undefined;
       setBusy(false);
+      setActiveAction(undefined);
       setReview(undefined);
       setRedactedReview(undefined);
       setDraft(undefined);
@@ -316,6 +323,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     const epoch = ++operationEpoch.current;
     mutationInFlight.current = epoch;
     setBusy(true);
+    setActiveAction('capture');
     setError('');
     setNotice('');
     const action: ManagerTopicReviewActionV1 = {
@@ -359,7 +367,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       }
     } finally {
       if (mutationInFlight.current === epoch) mutationInFlight.current = undefined;
-      if (operationEpoch.current === epoch) setBusy(false);
+      if (operationEpoch.current === epoch) {
+        setBusy(false);
+        setActiveAction(undefined);
+      }
     }
   }
 
@@ -368,6 +379,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
     const epoch = ++operationEpoch.current;
     mutationInFlight.current = epoch;
     setBusy(true);
+    setActiveAction(action.action);
     setError('');
     setNotice('');
     setRecovery(undefined);
@@ -398,6 +410,36 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         return;
       }
       if (result.kind !== 'topic-maintenance') throw new Error('The selected topic review changed. Refresh it.');
+      if (
+        action.action === 'apply' &&
+        result.state === 'applied' &&
+        result.approval?.stage === 'written' &&
+        result.approval.reviewRevision === action.revision &&
+        result.approval.approvalDigest === action.approvalDigest &&
+        review &&
+        result.observationRevision === review?.observationRevision &&
+        result.targetUri === review.targetUri &&
+        result.targetHash === review.targetHash &&
+        (!result.caseId || !caseId || result.caseId === caseId)
+      ) {
+        learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
+        setReview(result);
+        setDraft(result.draft);
+        setNotice('The reviewed topic update was saved.');
+        props.onChanged();
+        props.onApplied?.({
+          project: result.project,
+          caseId: result.caseId ?? caseId,
+          evidenceRevision: result.observationRevision,
+          targetUri: result.targetUri,
+          targetHash: result.targetHash,
+          ...(result.resolvedCitationIds === undefined ? {} : {resolvedCitationIds: result.resolvedCitationIds}),
+        });
+        props.onClose?.();
+        return;
+      }
+      if (action.action === 'apply' && (result.state === 'applied' || result.approval?.stage === 'written'))
+        throw new Error('The saved result does not match this exact approval. Refresh the review before continuing.');
       learnedReview.current = {selection: selectionKey, reviewId: result.reviewId};
       if (action.action === 'preview') setInvalidatedApproval(undefined);
       setReview(result);
@@ -408,9 +450,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       props.onChanged();
       setNotice(
         action.action === 'apply'
-          ? result.approval?.stage === 'written' || result.state === 'applied'
-            ? 'The reviewed topic update was saved.'
-            : 'The saved result needs another review. Refresh the evidence below.'
+          ? 'The update is not confirmed. Refresh the evidence below before continuing.'
           : action.action === 'preview'
             ? 'Exact final document prepared for review.'
             : action.action === 'generate' || action.action === 'regenerate'
@@ -439,7 +479,10 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       }
     } finally {
       if (mutationInFlight.current === epoch) mutationInFlight.current = undefined;
-      if (operationEpoch.current === epoch) setBusy(false);
+      if (operationEpoch.current === epoch) {
+        setBusy(false);
+        setActiveAction(undefined);
+      }
     }
   }
 
@@ -619,6 +662,27 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
         draft={draft}
         sourceKind={topic?.version === 2 ? 'obsidian' : (sourceKind ?? review?.sourceKind)}
       />
+      {busy && activeAction ? (
+        <div className="topic-review-progress" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <div>
+            <strong>
+              {activeAction === 'generate' || activeAction === 'regenerate'
+                ? 'Generating draft…'
+                : activeAction === 'apply'
+                  ? 'Saving and verifying the approved update…'
+                  : activeAction === 'preview'
+                    ? 'Preparing the exact final document…'
+                    : 'Updating review…'}
+            </strong>
+            <p>
+              {activeAction === 'generate' || activeAction === 'regenerate'
+                ? 'Waiting for the model, then checking the draft against the selected evidence. Your saved memory stays unchanged until you approve.'
+                : 'Keep this review open while Threadnote checks the result.'}
+            </p>
+          </div>
+        </div>
+      ) : null}
       {loading ? (
         <p role="status" className="muted">
           Loading topic and review…
@@ -627,6 +691,12 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
       {error ? (
         <ReviewNotice role="alert" tone="danger" title="Review needs attention">
           {error}
+          {!recovery ? (
+            <p>
+              Refresh evidence to check the current case before trying again. Generating another draft remains your
+              choice.
+            </p>
+          ) : null}
           {recovery ? (
             <button
               type="button"
@@ -754,7 +824,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
                     ? 'Review this full document and its metadata before accepting.'
                     : 'This preview is retained for reference. Prepare a fresh preview before accepting.'}
               </p>
-              <MemoryBody content={approval.content} />
+              <MemoryBody content={memoryDocumentParts(approval.content).body} />
               <details>
                 <summary>Metadata and provenance changes</summary>
                 {approval.metadataDiff.length ? (
@@ -767,6 +837,8 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
                   <p>No metadata fields changed.</p>
                 )}
                 <p>Final content checksum: {approval.contentHash}</p>
+                <h5>Full stored document</h5>
+                <pre>{approval.content}</pre>
               </details>
             </section>
           ) : null}
@@ -832,6 +904,7 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
           ) : null}
           {caseId && (
             <button
+              className="primary"
               type="button"
               disabled={!availableToGenerate}
               onClick={() =>
@@ -845,7 +918,16 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
                 })
               }
             >
-              {review ? 'Regenerate draft' : 'Generate draft'}
+              {busy && (activeAction === 'generate' || activeAction === 'regenerate') ? (
+                <>
+                  <span className="spinner" aria-hidden="true" />
+                  Generating draft…
+                </>
+              ) : review ? (
+                'Regenerate draft'
+              ) : (
+                'Generate draft'
+              )}
             </button>
           )}
         </div>
@@ -890,7 +972,11 @@ export function TopicReviewContent(props: Omit<TopicReviewProps, 'onClose'>): Re
                 })
               }
             >
-              {review.draft.outcome === 'propose-revalidation' ? 'Confirm unchanged' : 'Accept update'}
+              {busy && activeAction === 'apply'
+                ? 'Saving update…'
+                : review.draft.outcome === 'propose-revalidation'
+                  ? 'Confirm unchanged'
+                  : 'Accept update'}
             </button>
             <button
               type="button"

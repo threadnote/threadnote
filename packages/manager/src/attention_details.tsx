@@ -1,4 +1,6 @@
 import {SemanticResolutionReview} from './attention/semantic_comparison.js';
+import {ArrowRight, BookOpen, FileCode2, Sparkles} from 'lucide-react';
+import {MemoryExcerpt, ReviewBadge, ReviewNotice} from './review_presentation.js';
 import React, {useEffect, useState} from 'react';
 import {Schema} from 'effect';
 import type {CandidateReview} from '@threadnote/memory/candidate';
@@ -299,6 +301,7 @@ interface RepairProposal {
 }
 export function HealthDetail(props: {
   readonly finding: Finding;
+  readonly memoryPreview?: ManagerContextHealthResponseV1['recordPreviews'][number];
   readonly project: string;
   readonly repairsAvailable: boolean;
   readonly after?: string;
@@ -315,6 +318,7 @@ export function HealthDetail(props: {
   const sourceUri =
     finding.repair.subjectUri ?? finding.uris.find(uri => uri !== finding.repair.targetUri && !uri.includes('#'));
   const targetUri = finding.repair.targetUri;
+  const memoryPreview = props.memoryPreview?.uri === sourceUri ? props.memoryPreview : undefined;
   const citationEvidenceReady =
     proposal?.mutation.kind !== 'replace-citation' ||
     (proposal.mutation.citationId !== undefined && proposal.mutation.replacement !== undefined);
@@ -393,43 +397,110 @@ export function HealthDetail(props: {
     );
   }
   return (
-    <DetailModal title={finding.category.replaceAll('-', ' ')} onClose={props.onClose}>
-      <p>{healthFindingSummary(finding.category)}</p>
-      <h3>What this means</h3>
-      <p>{healthFindingGuidance(finding.category)}</p>
-      <h3>Next step</h3>
-      <p>{healthFindingNextStep(finding.category)}</p>
+    <DetailModal
+      className="health-repair-dialog"
+      title={finding.category.replaceAll('-', ' ').replace(/^./u, letter => letter.toUpperCase())}
+      onClose={props.onClose}
+      footer={
+        !props.repairsAvailable && finding.category.startsWith('citation-') ? undefined : proposal ? (
+          proposal.mutation.kind === 'review-only' ? undefined : (
+            <>
+              <span className="muted">Apply only when the memory still matches the evidence.</span>
+              <button
+                className="primary"
+                disabled={busy || !citationEvidenceReady}
+                onClick={() => void apply()}
+                type="button"
+              >
+                {repairActionLabel(proposal.mutation.kind)}
+                <ArrowRight size={15} aria-hidden="true" />
+              </button>
+            </>
+          )
+        ) : (
+          <>
+            <span className="muted">Review the proposed change before applying it.</span>
+            <button className="primary" disabled={busy} onClick={() => void preview()} type="button">
+              <Sparkles size={15} aria-hidden="true" />
+              {busy ? 'Preparing preview…' : 'Preview repair'}
+            </button>
+          </>
+        )
+      }
+    >
+      <div className="health-repair-intro">
+        <div className="review-badge-row">
+          <ReviewBadge tone="warning">Needs review</ReviewBadge>
+          <ReviewBadge tone="info">
+            <FileCode2 size={13} aria-hidden="true" />
+            {finding.category.startsWith('citation-') ? 'Code evidence' : 'Memory health'}
+          </ReviewBadge>
+        </div>
+        <p>{healthFindingSummary(finding.category)}</p>
+      </div>
+      <ReviewNotice title="What this means" tone="warning">
+        {healthFindingGuidance(finding.category)}
+      </ReviewNotice>
+      <section className="health-repair-step">
+        <h3>
+          <ArrowRight size={17} aria-hidden="true" />
+          Next step
+        </h3>
+        <p>{healthFindingNextStep(finding.category)}</p>
+      </section>
       {sourceUri ? (
-        <p>
-          <strong>Source memory</strong>
-          <br />
+        <section className="health-repair-source" aria-label="Source memory">
+          <div className="health-dialog-section-heading">
+            <h3>
+              <BookOpen size={17} aria-hidden="true" />
+              Source memory
+            </h3>
+            <ReviewBadge tone="info">Saved context</ReviewBadge>
+          </div>
+          {memoryPreview ? <strong>{memoryPreview.title}</strong> : null}
+          {memoryPreview?.excerpt ? <MemoryExcerpt label="Saved memory">{memoryPreview.excerpt}</MemoryExcerpt> : null}
           <button onClick={() => props.onOpenLibrary(sourceUri)} type="button">
             Open source memory in Library
           </button>
-        </p>
+        </section>
       ) : null}
       {targetUri && targetUri !== sourceUri ? (
-        <p>
-          <strong>
-            {finding.category.startsWith('citation-') ? 'Stored code reference' : 'Related memory target'}
-          </strong>
-          <br />
-          <small>
+        <section className="health-repair-reference">
+          <h3>{finding.category.startsWith('citation-') ? 'Stored code reference' : 'Related memory target'}</h3>
+          <p className="muted">
             {finding.category.startsWith('citation-')
               ? 'Compare the current source excerpt with the proposed replacement below.'
               : 'The related memory is unavailable; preview the repair before removing the broken link.'}
-          </small>
-        </p>
+          </p>
+        </section>
       ) : null}
-      {error ? <p role="alert">{error}</p> : null}
-      {notice ? <p role="status">{notice}</p> : null}
+      {error ? (
+        <ReviewNotice title="Repair unavailable" tone="danger" role="alert">
+          {error}
+        </ReviewNotice>
+      ) : null}
+      {notice ? (
+        <ReviewNotice title="Manual review needed" tone="warning">
+          {notice}
+        </ReviewNotice>
+      ) : null}
       {!props.repairsAvailable && finding.category.startsWith('citation-') ? (
-        <p role="status">Repository-backed repairs require a configured local checkout for this project.</p>
+        <ReviewNotice title="Local checkout required" tone="warning">
+          Repository-backed repairs require a configured local checkout for this project.
+        </ReviewNotice>
       ) : proposal ? (
-        <section>
-          <h3>Repair preview</h3>
+        <section className="review-proposal health-repair-proposal">
+          <div className="health-dialog-section-heading">
+            <h3>
+              <Sparkles size={17} aria-hidden="true" />
+              Repair preview
+            </h3>
+            <ReviewBadge tone={proposal.mutation.kind === 'review-only' ? 'warning' : 'proposal'}>
+              {proposal.mutation.kind === 'review-only' ? 'Review required' : 'Proposed change'}
+            </ReviewBadge>
+          </div>
           <p>{proposal.summary}</p>
-          <p>
+          <p className="muted">
             {proposal.mutation.kind === 'review-only'
               ? proposal.mutation.reason
               : `This will ${proposal.mutation.kind.replaceAll('-', ' ')}.`}
@@ -439,7 +510,7 @@ export function HealthDetail(props: {
           ) : proposal.mutation.kind === 'replace-citation' ? (
             <p role="alert">The proposed citation evidence is incomplete. Refresh this repair preview.</p>
           ) : null}
-          <details>
+          <details className="health-repair-diagnostics">
             <summary>Exact revision and checked memories</summary>
             <code>{proposal.revision}</code>
             {proposal.preconditions.map(item => (
@@ -455,19 +526,9 @@ export function HealthDetail(props: {
               No automatic change is available for this finding. Review and update the memory in Library, then refresh
               context health.
             </p>
-          ) : (
-            <footer>
-              <button disabled={busy || !citationEvidenceReady} onClick={() => void apply()} type="button">
-                {repairActionLabel(proposal.mutation.kind)}
-              </button>
-            </footer>
-          )}
+          ) : null}
         </section>
-      ) : (
-        <button disabled={busy} onClick={() => void preview()} type="button">
-          {busy ? 'Preparing preview…' : 'Preview repair'}
-        </button>
-      )}
+      ) : null}
     </DetailModal>
   );
 }
@@ -476,7 +537,7 @@ function CitationReplacementEvidence(props: {readonly replacement: MemoryCodeCit
   const citation = props.replacement;
   const target = citation.target;
   return (
-    <section aria-label="Proposed citation evidence">
+    <section className="health-repair-evidence" aria-label="Proposed citation evidence">
       <h4>Proposed citation evidence</h4>
       <dl className="activation-review-guide">
         <div>

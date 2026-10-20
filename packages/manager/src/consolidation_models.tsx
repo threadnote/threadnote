@@ -1,19 +1,43 @@
 import React, {useEffect, useState} from 'react';
 import {api, errorMessage} from './ui/support.js';
 import type {ConsolidationModelOption, ConsolidationModelsResponse} from './ui/contracts.js';
+import {ModelSetupIndicator, useModelSetup} from './model_setup.js';
+
+interface ModelChoice {
+  readonly id: string;
+  readonly explicit: boolean;
+}
+
+export function reconcileConsolidationModelChoice(
+  preferred: ModelChoice | undefined,
+  models: readonly ConsolidationModelOption[],
+): ModelChoice | undefined {
+  if (preferred?.explicit || models.some(model => model.id === preferred?.id)) return preferred;
+  const recommended = models.find(model => model.isDefault) ?? models[0];
+  return recommended ? {id: recommended.id, explicit: false} : undefined;
+}
 
 export function useConsolidationModels(agent: string, enabled: boolean, storageKey = 'consolidationModel') {
+  const setup = useModelSetup(enabled && agent === 'local-ai');
+  const readyVersion = agent === 'local-ai' ? setup.readyVersion : 0;
   const [attempt, setAttempt] = useState(0);
   const [catalog, setCatalog] = useState<{
-    readonly agent: string;
+    readonly key: string;
     readonly attempt: number;
+    readonly readyVersion: number;
     readonly models: readonly ConsolidationModelOption[];
     readonly error?: string;
   }>();
-  const [selected, setSelected] = useState<{readonly agent: string; readonly id: string}>();
-  const current = catalog?.agent === agent && catalog.attempt === attempt ? catalog : undefined;
+  const [choices, setChoices] = useState<Readonly<Record<string, ModelChoice>>>({});
+  const key = modelKey(agent, storageKey);
+  const stored = readModel(agent, storageKey);
+  const selected = choices[key] ?? (stored === undefined ? undefined : {id: stored, explicit: true});
+  const current =
+    enabled && catalog?.key === key && catalog.attempt === attempt && catalog.readyVersion === readyVersion
+      ? catalog
+      : undefined;
   const models = current?.models ?? [];
-  const model = selected?.agent === agent && models.some(item => item.id === selected.id) ? selected.id : undefined;
+  const model = models.some(item => item.id === selected?.id) ? selected?.id : undefined;
 
   useEffect(() => {
     if (!enabled) return;
@@ -27,31 +51,36 @@ export function useConsolidationModels(agent: string, enabled: boolean, storageK
         if (controller.signal.aborted) return;
         const models = result.models;
         const stored = readModel(agent, storageKey);
-        setCatalog({agent, attempt, models});
-        setSelected(previous => {
-          const preferred = previous?.agent === agent ? previous.id : stored;
-          const option = models.find(item => item.id === preferred) ?? models.find(item => item.isDefault) ?? models[0];
-          return option ? {agent, id: option.id} : undefined;
+        setCatalog({key, attempt, readyVersion, models});
+        setChoices(previous => {
+          const preferred = previous[key] ?? (stored === undefined ? undefined : {id: stored, explicit: true});
+          const choice = reconcileConsolidationModelChoice(preferred, models);
+          return choice ? {...previous, [key]: choice} : previous;
         });
       },
       error => {
-        if (!controller.signal.aborted) setCatalog({agent, attempt, models: [], error: errorMessage(error)});
+        if (!controller.signal.aborted)
+          setCatalog({key, attempt, readyVersion, models: [], error: errorMessage(error)});
       },
     );
     return () => controller.abort();
-  }, [agent, attempt, enabled, storageKey]);
+  }, [agent, attempt, enabled, key, readyVersion, storageKey]);
 
   return {
     models,
     model,
+    selectedId: selected?.id,
+    unavailable: !!current && !!selected && !model,
+    local: agent === 'local-ai',
+    setupEnabled: enabled && agent === 'local-ai',
     loading: enabled && !current,
     error: current?.error,
     reload: () => setAttempt(value => value + 1),
     select: (id: string) => {
       if (!models.some(item => item.id === id)) return;
-      setSelected({agent, id});
+      setChoices(previous => ({...previous, [key]: {id, explicit: true}}));
       try {
-        localStorage.setItem(modelKey(agent, storageKey), id);
+        localStorage.setItem(key, id);
       } catch {
         /* Model choice remains available when browser storage is disabled. */
       }
@@ -78,26 +107,34 @@ export function ConsolidationModelPicker(props: {
 }): React.ReactElement {
   const {selection} = props;
   return (
-    <label>
-      {props.label ?? 'Model'}
-      <select
-        aria-label={props.label ?? 'Consolidation model'}
-        aria-busy={selection.loading}
-        disabled={props.disabled || selection.loading || !selection.models.length}
-        value={selection.model ?? ''}
-        onChange={event => selection.select(event.target.value)}
-      >
-        {!selection.models.length ? (
-          <option value="">{selection.loading ? 'Loading models…' : 'No models loaded'}</option>
-        ) : null}
-        {selection.models.map(model => (
-          <option key={model.id} value={model.id}>
-            {model.label}
-            {model.isDefault ? ' (recommended)' : ''}
-          </option>
-        ))}
-      </select>
-    </label>
+    <>
+      <label>
+        {props.label ?? 'Model'}
+        <select
+          aria-label={props.label ?? 'Consolidation model'}
+          aria-busy={selection.loading}
+          disabled={props.disabled || selection.loading || !selection.models.length}
+          value={selection.selectedId ?? ''}
+          onChange={event => selection.select(event.target.value)}
+        >
+          {selection.selectedId && !selection.model ? (
+            <option value={selection.selectedId} disabled>
+              {selection.selectedId} ({selection.loading ? 'checking availability…' : 'unavailable'})
+            </option>
+          ) : !selection.models.length ? (
+            <option value="">{selection.loading ? 'Loading models…' : 'No models loaded'}</option>
+          ) : null}
+          {selection.models.map(model => (
+            <option key={model.id} value={model.id}>
+              {model.label}
+              {model.isDefault ? ' (recommended)' : ''}
+            </option>
+          ))}
+        </select>
+        {selection.unavailable ? <span role="status">Choose an available model before generating.</span> : null}
+      </label>
+      {selection.local ? <ModelSetupIndicator enabled={selection.setupEnabled} /> : null}
+    </>
   );
 }
 

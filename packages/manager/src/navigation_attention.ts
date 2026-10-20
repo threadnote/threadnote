@@ -1,4 +1,4 @@
-import {useEffect, useState} from 'react';
+import {useCallback, useEffect, useState} from 'react';
 import type {ManagerContextMaintenanceStatusV2} from './attention/contracts.js';
 import type {SharingConflict} from './sharing_contracts.js';
 import {api} from './ui/support.js';
@@ -8,12 +8,38 @@ export interface NavigationAttention {
   readonly 'context-health'?: number;
 }
 
+interface ContextHealthDecisionCount {
+  readonly project: string;
+  readonly count: number;
+}
+
+/** A mounted Health view owns its projection; clearing one project never clears another. */
+export function useContextHealthDecisionCount(): readonly [
+  ContextHealthDecisionCount | undefined,
+  (project: string, count: number | undefined) => void,
+] {
+  const [snapshot, setSnapshot] = useState<ContextHealthDecisionCount>();
+  const update = useCallback((project: string, count: number | undefined) => {
+    setSnapshot(current =>
+      count === undefined
+        ? current?.project === project
+          ? undefined
+          : current
+        : current?.project === project && current.count === count
+          ? current
+          : {project, count},
+    );
+  }, []);
+  return [snapshot, update];
+}
+
 /** Counts come from the complete queues, not the currently visible page of findings. */
 export function useNavigationAttention(
   project: string,
   refreshGeneration: number,
   panel: string,
   enabled: boolean,
+  contextHealthDecisionCount?: ContextHealthDecisionCount,
 ): NavigationAttention {
   const [snapshot, setSnapshot] = useState<{project: string; counts: NavigationAttention}>();
   useEffect(() => {
@@ -59,7 +85,13 @@ export function useNavigationAttention(
       document.removeEventListener('visibilitychange', onVisible);
     };
   }, [project, refreshGeneration, panel, enabled]);
-  return enabled && snapshot?.project === project ? snapshot.counts : {};
+  if (!enabled) return {};
+  const counts = snapshot?.project === project ? snapshot.counts : {};
+  // The mounted Health panel reconciles confirmed writes against complete queue totals.
+  // Its scoped projection must also win over late, stale navigation polls.
+  return panel === 'context-health' && contextHealthDecisionCount?.project === project
+    ? {...counts, 'context-health': contextHealthDecisionCount.count}
+    : counts;
 }
 
 export function navigationAttentionLabel(panel: string, count: number, project: string): string {

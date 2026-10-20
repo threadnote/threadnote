@@ -118,6 +118,7 @@ import {
   runModelSelect,
   runModelVerify,
 } from '../models/commands.js';
+import {makeModelsSetupCommand} from './models_setup_cli.js';
 import {runIndexPurge, runIndexRebuild, runIndexStatus, runIndexVerify} from '../search/commands.js';
 import {runProductionLogs} from './production_log.js';
 import {runReportIssue} from '../report_issue.js';
@@ -600,9 +601,10 @@ const modelsRuntime = Command.make('runtime', {}, () => withRuntimeEffect(() => 
   Command.withDescription('Verify the prebuilt-only node-llama-cpp runtime and show its backend'),
 );
 
+const modelCatalogCommands = [modelsList, modelsInstall, modelsVerify, modelsRemove, modelsSelect, modelsRuntime];
 const models = Command.make('models').pipe(
   Command.withDescription('Manage pinned local GGUF models'),
-  Command.withSubcommands([modelsList, modelsInstall, modelsVerify, modelsRemove, modelsSelect, modelsRuntime]),
+  Command.withSubcommands([makeModelsSetupCommand(withRuntimeEffect), ...modelCatalogCommands]),
 );
 
 const indexRebuild = Command.make(
@@ -1896,8 +1898,8 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('repair', repair),
   registerTopLevelCommand('start', start),
   registerTopLevelCommand('stop', stop),
-  registerTopLevelCommand('uninstall', uninstall),
-  registerTopLevelCommand('models', models),
+  registerTopLevelCommand('uninstall', uninstall, {productionLog: {mode: 'never'}}),
+  registerTopLevelCommand('models', models, {productionLog: {subcommands: {setup: 'never'}}}),
   registerTopLevelCommand('index', indexCommand),
   registerTopLevelCommand('graph', graphCommand),
   registerTopLevelCommand('composer', makeComposerCommands(withScopedRuntime)),
