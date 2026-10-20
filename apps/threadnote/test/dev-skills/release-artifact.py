@@ -4,6 +4,7 @@ The normal suite does not build releases. Invoke through release-artifact.test.t
 with THREADNOTE_RELEASE_ARCHIVE after the production archive command.
 """
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -20,6 +21,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 
 
 def require(condition, message):
@@ -100,7 +102,88 @@ def verify_isolation(checkout, enforced):
             if sys.platform == "darwin" else []}
 
 
+@contextlib.contextmanager
+def hold_maintenance_state_lock(root):
+    """Serialize the preview observation with unrelated maintenance in this disposable home."""
+    lock = root / "data/context-maintenance/state-v2.json.lock"
+    token = json.dumps({"version": 1, "processId": os.getpid(), "token": uuid.uuid4().hex}) + "\n"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            require(time.monotonic() < deadline, "Maintenance state lock did not become available")
+            time.sleep(0.01)
+
+    body_failed = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(token)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield
+        try:
+            still_owned = lock.read_text(encoding="utf-8") == token
+        except FileNotFoundError:
+            still_owned = False
+        require(still_owned, "Fixture lost ownership of the maintenance state lock")
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        try:
+            if lock.read_text(encoding="utf-8") == token:
+                lock.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not body_failed:
+                raise
+
+
+def wait_for_compaction_scheduler(root, manager):
+    """Wait for the persistent startup lock, rather than sampling its creation mid-preview."""
+    lock = root / "data/locks/indexes/code-graph/automatic-compaction-scheduler.lock"
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        require(manager.poll() is None, "Manager stopped before its compaction scheduler was ready")
+        try:
+            owner = json.loads(lock.read_text(encoding="utf-8"))
+            if owner.get("version") == 1 and owner.get("processId") == manager.pid and owner.get("token"):
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.01)
+    raise RuntimeError("Manager did not acquire its automatic compaction scheduler lock")
+
+
 def manager_checks(root, binary, environment, checks):
+    previous = json.loads(run(
+        [str(binary), "context", "maintain", "--action", "status", "--json"], environment, root))
+    body_failed = False
+    try:
+        if not previous["paused"]:
+            paused = json.loads(run(
+                [str(binary), "context", "maintain", "--action", "pause", "--json"], environment, root))
+            require(paused["paused"] is True, "Context maintenance did not pause in the fixture home")
+        manager_checks_while_paused(root, binary, environment, checks)
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        if not previous["paused"]:
+            try:
+                restored = json.loads(run(
+                    [str(binary), "context", "maintain", "--action", "resume", "--json"], environment, root))
+                require(restored["paused"] is False, "Context maintenance pause state was not restored")
+            except Exception as error:
+                if not body_failed:
+                    raise
+                print("Maintenance pause-state restoration also failed: " + str(error), file=sys.stderr)
+
+
+def manager_checks_while_paused(root, binary, environment, checks):
     log = root / "manager.log"
     with log.open("w", encoding="utf-8") as output:
         manager = subprocess.Popen([str(binary), "manage", "--no-open", "--ui-port", "0"],
@@ -137,18 +220,20 @@ def manager_checks(root, binary, environment, checks):
             require(b"<html" in request("/").lower(), "Packaged Manager HTML is missing")
             request("/api/dev-skills/catalog", authenticated=False, expected=401)
             request("/api/dev-skills/catalog")
+            wait_for_compaction_scheduler(root, manager)
             selector = {"agent": "antigravity-cli", "scope": "user"}
             for action in ("install", "update", "remove"):
                 # Capture only user/data/runtime state; Manager's diagnostic log is expected to change.
-                before = {name: inventory(root / name) for name in ("user", "data", "runtime")}
-                preview = request("/api/dev-skills/preview", {"action": action, "selector": selector})
-                require(preview["canApply"], "Manager preview blocked: " + json.dumps(preview["issues"]))
-                after = {name: inventory(root / name) for name in before}
-                changed = [name + "/" + path for name in before
-                           for path in sorted(before[name].keys() | after[name].keys())
-                           if before[name].get(path) != after[name].get(path)]
-                require(before == after, "Manager " + action + " preview changed files (" + str(len(changed))
-                        + "): " + json.dumps(changed[:30]))
+                with hold_maintenance_state_lock(root):
+                    before = {name: inventory(root / name) for name in ("user", "data", "runtime")}
+                    preview = request("/api/dev-skills/preview", {"action": action, "selector": selector})
+                    require(preview["canApply"], "Manager preview blocked: " + json.dumps(preview["issues"]))
+                    after = {name: inventory(root / name) for name in before}
+                    changed = [name + "/" + path for name in before
+                               for path in sorted(before[name].keys() | after[name].keys())
+                               if before[name].get(path) != after[name].get(path)]
+                    require(before == after, "Manager " + action + " preview changed files (" + str(len(changed))
+                            + "): " + json.dumps(changed[:30]))
                 result = request("/api/dev-skills/apply", {"action": action, "selector": selector,
                                  "previewDigest": preview["previewDigest"], "confirm": True})
                 require(result["result"]["applied"] == (action != "update"), "Unexpected Manager apply result")

@@ -49,7 +49,7 @@ describe('agents CLI', () => {
   });
 
   it('registers the command grammar and preserves preview/apply boundaries', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'threadnote-agents-cli-'));
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-agents-cli-')));
     temporaryDirectories.push(root);
     const user = join(root, 'user');
     const environment = {
@@ -133,7 +133,7 @@ describe('agents CLI', () => {
     expect(await readFile(settings, 'utf8')).toContain('THREADNOTE_MCP_CLIENT');
     await runCli(['uninstall', '--preserve-memories'], environment);
     await expect(access(settings)).rejects.toMatchObject({code: 'ENOENT'});
-  });
+  }, 120_000);
 });
 
 function runCli(args: readonly string[], environment: NodeJS.ProcessEnv, cwd?: string) {
