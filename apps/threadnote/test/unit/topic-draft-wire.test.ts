@@ -7,6 +7,8 @@ import {
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
   decodeTopicDraftModelOutput,
+  decodeTopicDraftWire,
+  TopicDraftApplicationValidationError,
   topicDraftCurrentSourceHandles,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
@@ -68,6 +70,22 @@ describe('single-decision compact topic wire', () => {
         ).toThrow();
       }),
       {numRuns: 24},
+    );
+  });
+
+  it('strict preflight preserves duplicate assessment selections for explicit application rejection', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 2}), index => {
+        const basis = basisFor(2);
+        const wire = wireFor(basis);
+        wire.decision.behaviorSourceIndices = [index, index];
+        const before = JSON.stringify({basis, wire});
+        const decoded = decodeTopicDraftWire(basis, wire);
+        expect(decoded.decision).toMatchObject({behaviorSourceIndices: [index, index]});
+        expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow(TopicDraftApplicationValidationError);
+        expect(JSON.stringify({basis, wire})).toBe(before);
+      }),
+      {numRuns: 12},
     );
   });
 
@@ -569,7 +587,7 @@ describe('single-decision compact topic wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v16');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v17');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>

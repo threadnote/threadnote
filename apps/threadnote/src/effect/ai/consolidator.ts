@@ -8,6 +8,7 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
   RetainedTopicGenerationOutput,
   TopicGenerationUsage,
   retainedTopicGenerationOutput,
@@ -15,7 +16,7 @@ import {
   type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
-  decodeTopicDraftModelOutput,
+  decodeTopicDraftWire,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../manager/topic_draft_schema.js';
@@ -54,12 +55,16 @@ function decodeTopicDraftProviderOutput(
   output: unknown,
   usage: TopicGenerationUsageV1 = {status: 'unavailable'},
 ) {
+  let text: string | undefined;
   try {
-    return JSON.stringify(decodeTopicDraftModelOutput(basis, output));
+    text = JSON.stringify(decodeTopicDraftWire(basis, output));
+    if (new TextEncoder().encode(text).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
+      throw new Error('Topic wire exceeds the output boundary.');
+    return text;
   } catch {
     throw TopicDraftProviderOutputError.make({
       message: 'AI returned a malformed topic maintenance object.',
-      output: retainedTopicGenerationOutput(1, JSON.stringify(output), 'decoded-json'),
+      output: retainedTopicGenerationOutput(1, text ?? JSON.stringify(output), 'decoded-json'),
       usage,
     });
   }

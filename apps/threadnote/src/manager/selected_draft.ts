@@ -26,7 +26,7 @@ import {
 } from '../effect/ai/consolidator.js';
 import {topicDraftModelSchema} from './topic_draft_schema.js';
 
-export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v16';
+export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v17';
 export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
 export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
 export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;
@@ -191,6 +191,7 @@ export function runSelectedDraft(
             TopicDraftProviderOutputError.make({
               message: 'Topic maintenance draft exceeds the 32 KiB output boundary.',
               output: retainedTopicGenerationOutput(1, result.text, result.outputRepresentation ?? 'provider-text'),
+              usage: result.usage,
             }),
           )
         : Effect.void,

@@ -1,4 +1,4 @@
-import {Schema} from 'effect';
+import {Data, Schema} from 'effect';
 import {
   topicMaintenanceParagraphEligible,
   type TopicMaintenanceDraftBasis,
@@ -149,35 +149,44 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   });
 }
 
-export function decodeTopicDraftModelOutput(
+/** Strict provider/controller preflight; application guards belong after observed dispatch. */
+export function decodeTopicDraftWire(basis: TopicMaintenanceDraftBasis, input: unknown) {
+  return Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+}
+
+/** Only explicit complete-wire application rejections may enter bounded draft repair. */
+export class TopicDraftApplicationValidationError extends Data.TaggedError('TopicDraftApplicationValidationError')<{
+  readonly message: string;
+}> {}
+
+export function projectTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
-  input: unknown,
+  wire: ReturnType<typeof decodeTopicDraftWire>,
 ): TopicMaintenanceDraftV1 {
-  const {decision, ...identity} = Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(
-    input,
-  );
+  const {decision, ...identity} = wire;
   const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
   if (
     byteLength(decision.comparison) > 1024 ||
     ('observedBehavior' in decision && byteLength(decision.observedBehavior) > 512)
   )
-    throw new Error('Topic policy assessment exceeds its UTF-8 byte bound.');
+    throw new TopicDraftApplicationValidationError({message: 'Topic policy assessment exceeds its UTF-8 byte bound.'});
   for (const indices of [
     ...('behaviorSourceIndices' in decision ? [decision.behaviorSourceIndices] : []),
     ...('reviewedSourceIndices' in decision ? [decision.reviewedSourceIndices] : []),
   ])
-    if (new Set(indices).size !== indices.length) throw new Error('Duplicate topic assessment source index.');
+    if (new Set(indices).size !== indices.length)
+      throw new TopicDraftApplicationValidationError({message: 'Duplicate topic assessment source index.'});
   const current = topicDraftCurrentSourceHandles(basis);
   const currentHandle = (index: number) => {
     if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
-      throw new Error('Invalid topic disposition source index.');
+      throw new TopicDraftApplicationValidationError({message: 'Invalid topic disposition source index.'});
     return current[index];
   };
   const entries: TopicMaintenanceParagraphDispositionV1[] = [];
   const operations: TopicMaintenanceReplaceOperationV1[] = [];
   for (const entry of decision.paragraphDispositions.entries) {
     if (typeof entry === 'string' || !basis.paragraphs[entry.ordinal])
-      throw new Error('Invalid topic disposition ordinal.');
+      throw new TopicDraftApplicationValidationError({message: 'Invalid topic disposition ordinal.'});
     const fields = {
       ordinal: entry.ordinal,
       beforeHash: basis.paragraphs[entry.ordinal].hash,
@@ -217,6 +226,13 @@ export function decodeTopicDraftModelOutput(
     reviewedHandles: [...new Set(reviewed)],
     paragraphDispositions: {version: 1, entries},
   };
+}
+
+export function decodeTopicDraftModelOutput(
+  basis: TopicMaintenanceDraftBasis,
+  input: unknown,
+): TopicMaintenanceDraftV1 {
+  return projectTopicDraftWire(basis, decodeTopicDraftWire(basis, input));
 }
 
 function nativeDisjointUnions(value: unknown): unknown {

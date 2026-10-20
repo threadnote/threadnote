@@ -1,3 +1,4 @@
+import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {Effect, FileSystem, Path, Result} from 'effect';
@@ -655,42 +656,23 @@ describe('reviewed personal topic acceptance', () => {
                 verified: true,
               }),
           });
-          const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+          const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, currentBasis) =>
             Effect.sync(() => {
+              if (!currentBasis) throw new Error('Expected current generation basis.');
               const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
-              const evidence = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
-              const draft = {
-                version: 1,
-                targetHash: identity.targetHash,
-                observationRevision: identity.observationRevision,
-                packetDigest: identity.packetDigest,
-                outcome: 'propose-update',
-                paragraphDispositions: {
-                  version: 1,
-                  entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
-                    (item: {ordinal: number; beforeHash: string; currentHandles: string[]}) => ({
-                      ordinal: item.ordinal,
-                      beforeHash: item.beforeHash,
-                      disposition: item.ordinal === 0 ? 'update' : 'revalidate',
-                      supportHandles: item.currentHandles,
-                      rationale: 'Checked current source.',
-                    }),
-                  ),
-                },
-                operations: [
-                  {
-                    ordinal: 0,
-                    beforeHash: evidence.paragraphs[0].hash,
-                    text: 'Request timeout is 90 seconds.',
-                    supportHandles: [`current:${evidence.sources[0].citationId}`],
-                    rationale: 'The current source declares 90 seconds.',
-                  },
-                ],
-                reviewedHandles: [`current:${evidence.sources[0].citationId}`],
-                rationale: 'Replace the descriptive timeout.',
-                unresolvedQuestions: [],
-                removedClaims: ['Request timeout is 60 seconds.'],
-              };
+              const eligible: {ordinal: number; sourceIndices: number[]}[] = JSON.parse(
+                /^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1],
+              );
+              const draft = {...makeTopicDraftWireFixture(currentBasis), ...identity};
+              draft.decision.observedBehavior = 'The current source declares 90 seconds.';
+              draft.decision.removedClaims = ['Request timeout is 60 seconds.'];
+              draft.decision.paragraphDispositions.entries = eligible.map(item => ({
+                ordinal: item.ordinal,
+                disposition: item.ordinal === 0 ? 'update' : 'unchanged',
+                sourceIndices: item.sourceIndices,
+                rationale: 'Checked current source.',
+                ...(item.ordinal === 0 ? {text: 'Request timeout is 90 seconds.'} : {}),
+              }));
               return {
                 text: JSON.stringify(draft),
                 backendIdentity: 'local-ai',

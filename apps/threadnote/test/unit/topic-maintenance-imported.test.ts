@@ -1,3 +1,4 @@
+import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {runExportPack} from '../../src/memory/commands.js';
 import {runObsidianProjectionAdd, runObsidianProjectionSync} from '@threadnote/integration-obsidian/projection';
@@ -240,32 +241,8 @@ effectIt.effect(
           if (!basis || basis.version !== 2) throw new Error('Expected imported generation basis.');
           expect(prompt).toContain('current:tnob_');
           expect(prompt).not.toContain('sourceCommit');
-          const current = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
           return {
-            text: JSON.stringify({
-              version: 1,
-              targetHash: basis.targetHash,
-              observationRevision: basis.observationRevision,
-              packetDigest: basis.packetDigest,
-              outcome: 'propose-revalidation',
-              operations: [],
-              reviewedHandles: current,
-              rationale: 'Checked exact current note fragment.',
-              unresolvedQuestions: [],
-              removedClaims: [],
-              paragraphDispositions: {
-                version: 1,
-                entries: basis.paragraphs
-                  .filter(paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct')
-                  .map(paragraph => ({
-                    ordinal: paragraph.ordinal,
-                    beforeHash: paragraph.hash,
-                    disposition: 'revalidate',
-                    supportHandles: current,
-                    rationale: 'Reviewed unchanged.',
-                  })),
-              },
-            }),
+            text: JSON.stringify(makeTopicDraftWireFixture(basis)),
             backendIdentity: 'local-ai',
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,

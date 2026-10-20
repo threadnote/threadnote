@@ -23,7 +23,7 @@ import {
   runNativeAiTopicDraft,
   TopicDraftProviderOutputError,
 } from '../../src/effect/ai/consolidator.js';
-import {topicDraftModelSchema} from '../../src/manager/topic_draft_schema.js';
+import {decodeTopicDraftModelOutput, topicDraftModelSchema} from '../../src/manager/topic_draft_schema.js';
 import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
 import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
@@ -127,10 +127,9 @@ describe('compact topic provider boundary', () => {
     }
     for (const invalidAssessment of [{observedBehavior: 'é'.repeat(257)}, {behaviorSourceIndices: [0, 0]}]) {
       it.effect(
-        'preserves measured usage when a schema-valid assessment fails decoding: ' + Object.keys(invalidAssessment)[0],
+        'returns complete wire and measured usage before application validation: ' + Object.keys(invalidAssessment)[0],
         () =>
           Effect.gen(function* () {
-            const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
             const basis = makeTopicDraftWireBasis(2);
             const fixture = makeTopicDraftWireFixture(basis);
             const wire = {...fixture, decision: {...fixture.decision, ...invalidAssessment}};
@@ -154,23 +153,16 @@ describe('compact topic provider boundary', () => {
               }),
             );
             vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
-            const failure = yield* withTopicGenerationObservation(home, observationIdentity(basis), observation =>
-              observation.dispatch(
-                'prompt',
-                runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis),
-              ),
-            ).pipe(Effect.flip);
-            if (!Schema.is(TopicGenerationRequestError)(failure)) throw new Error('Expected safe generation error');
-            const receipt = yield* loadTopicGenerationReceipt(home, failure.diagnostics!.receiptId);
-            expect(receipt.attempts).toHaveLength(1);
-            expect(receipt.attempts[0]).toMatchObject({
-              status: 'provider-output-invalid',
-              usage: {status: 'measured', inputTokens: 12, outputTokens: 3},
-            });
-            expect(receipt.firstFailedOutput?.representation).toBe('decoded-json');
-            // Effect schema decoding orders keys; retained decoded data must remain identical.
-            expect(JSON.parse(receipt.firstFailedOutput!.text)).toEqual(wire);
-            expect(JSON.stringify(failure)).not.toContain(JSON.stringify(wire));
+            const result = yield* runEffectAiTopicDraft(
+              'prompt',
+              {model: 'fixture'},
+              topicDraftModelSchema(basis),
+              basis,
+            );
+            expect(JSON.parse(result.text)).toEqual(wire);
+            expect(result.outputRepresentation).toBe('decoded-json');
+            expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
+            expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow();
           }),
       );
     }
@@ -212,7 +204,79 @@ describe('compact topic provider boundary', () => {
       }),
     );
   });
-  effectIt.effect('hydrates native decoded objects with explicit basis and unchanged generation settings', () =>
+  for (const backend of ['native', 'effect'] as const) {
+    effectIt.effect('refuses oversized complete normalized wire at the provider boundary: ' + backend, () =>
+      Effect.gen(function* () {
+        const basis = makeTopicDraftWireBasis(2);
+        const wire = makeTopicDraftWireFixture(basis);
+        wire.decision.paragraphDispositions.entries[0].rationale = 'x'.repeat(33 * 1024);
+        yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
+        if (backend === 'effect') {
+          vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(
+            Layer.effect(
+              LanguageModel.LanguageModel,
+              LanguageModel.make({
+                generateText: () =>
+                  Effect.succeed([
+                    Response.makePart('text', {text: JSON.stringify(wire)}),
+                    Response.makePart('finish', {
+                      reason: 'stop',
+                      usage: Response.Usage.make({
+                        inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
+                        outputTokens: {total: 3, text: undefined, reasoning: undefined},
+                      }),
+                    }),
+                  ]),
+                streamText: () => Stream.empty,
+              }),
+            ),
+          );
+        }
+        const failure =
+          backend === 'effect'
+            ? yield* runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis).pipe(
+                Effect.flip,
+              )
+            : yield* runNativeAiTopicDraft(
+                {agentContextHome: '/fixture'},
+                'prompt',
+                manifest.id,
+                topicDraftModelSchema(basis),
+                basis,
+              ).pipe(provideNativeOutput(wire), Effect.flip);
+        if (!Schema.is(TopicDraftProviderOutputError)(failure))
+          throw new Error('Expected terminal provider output failure.');
+        expect(failure.output).toMatchObject({representation: 'decoded-json', truncated: true});
+        expect(failure.output.bytes).toBeGreaterThan(32 * 1024);
+        expect(failure.usage).toEqual(
+          backend === 'native' ? {status: 'unavailable'} : {status: 'measured', inputTokens: 12, outputTokens: 3},
+        );
+      }),
+    );
+  }
+
+  effectIt.effect('returns complete native duplicate selection for controller application validation', () =>
+    Effect.gen(function* () {
+      const basis = makeTopicDraftWireBasis(2);
+      const wire = makeTopicDraftWireFixture(basis);
+      wire.decision.behaviorSourceIndices = [1, 1];
+      const result = yield* runNativeAiTopicDraft(
+        {agentContextHome: '/fixture'},
+        'prompt',
+        manifest.id,
+        topicDraftModelSchema(basis),
+        basis,
+      ).pipe(provideNativeOutput(wire));
+      expect(JSON.parse(result.text)).toEqual(wire);
+      expect(result.outputRepresentation).toBe('decoded-json');
+      expect(result.usage).toEqual({status: 'unavailable'});
+      expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow(
+        'Duplicate topic assessment source index.',
+      );
+    }),
+  );
+
+  effectIt.effect('returns strict native decoded wire with explicit basis and unchanged generation settings', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(64, {sourceCount: 8});
       const wire = makeTopicDraftWireFixture(basis);
@@ -228,9 +292,13 @@ describe('compact topic provider boundary', () => {
           request = value;
         }),
       );
-      const canonical = parseTopicMaintenanceDraft(basis, result.text, {requireParagraphDispositions: true});
+      const canonical = parseTopicMaintenanceDraft(
+        basis,
+        JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(result.text))),
+        {requireParagraphDispositions: true},
+      );
       expect(canonical.draft.paragraphDispositions?.entries).toHaveLength(64);
-      expect(JSON.parse(result.text).paragraphDispositions.entries[0]).toEqual({
+      expect(canonical.draft.paragraphDispositions?.entries[0]).toEqual({
         ordinal: 0,
         beforeHash: basis.paragraphs[0].hash,
         disposition: 'revalidate',
@@ -240,7 +308,7 @@ describe('compact topic provider boundary', () => {
       expect(request).toMatchObject({prompt: 'exact prompt', maxTokens: 4000, seed: 0});
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(result.outputRepresentation).toBe('decoded-json');
-      expect(result.text).not.toContain('sourceIndices');
+      expect(JSON.parse(result.text)).toEqual(wire);
     }),
   );
 
@@ -277,12 +345,16 @@ describe('compact topic provider boundary', () => {
           basis,
         ).pipe(provideNativeOutput(wire));
         expect(() =>
-          parseTopicMaintenanceDraft(basis, semanticInvalid.text, {requireParagraphDispositions: true}),
+          parseTopicMaintenanceDraft(
+            basis,
+            JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(semanticInvalid.text))),
+            {requireParagraphDispositions: true},
+          ),
         ).toThrow();
       }),
   );
 
-  effectIt.effect('hydrates Effect objects through the same explicit basis and preserves measured usage', () =>
+  effectIt.effect('returns strict Effect wire through the same explicit basis and preserves measured usage', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(64, {sourceCount: 8});
       const wire = makeTopicDraftWireFixture(basis);
@@ -306,12 +378,13 @@ describe('compact topic provider boundary', () => {
       const spy = vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
       const result = yield* runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis);
       expect(
-        parseTopicMaintenanceDraft(basis, result.text, {requireParagraphDispositions: true}).draft.paragraphDispositions
-          ?.entries,
+        parseTopicMaintenanceDraft(basis, JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(result.text))), {
+          requireParagraphDispositions: true,
+        }).draft.paragraphDispositions?.entries,
       ).toHaveLength(64);
       expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
       expect(result.outputRepresentation).toBe('decoded-json');
-      expect(result.text).not.toContain('sourceIndices');
+      expect(JSON.parse(result.text)).toEqual(wire);
       expect(spy).toHaveBeenCalledWith({config: {max_output_tokens: 4000, strictJsonSchema: true}, model: 'fixture'});
     }),
   );
