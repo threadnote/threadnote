@@ -236,7 +236,7 @@ describe('v6 compact paragraph disposition wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v10');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v11');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
