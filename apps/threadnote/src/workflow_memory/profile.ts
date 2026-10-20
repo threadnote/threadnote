@@ -1,4 +1,4 @@
-import {Effect, FileSystem} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256Hex} from '@threadnote/platform/digest';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -6,7 +6,7 @@ import {codexCloudMemoryScope} from '../codex/cloud.js';
 import {readCodexCloudProfile, sameCloudIdentity} from '../codex/profile.js';
 import {readCursorCloudIdentityProfile} from '../cursor/profile.js';
 import {assertCursorCloudMemoryTeamsReady, resolveCursorCloudMemoryScope} from '../cursor/cloud.js';
-import {resolveTeam} from '../share/core.js';
+import {readTeamsFile, resolveTeam, shareTeamAccess} from '../share/core.js';
 import {gitValue} from '../utils.js';
 import {
   portableKey,
@@ -14,16 +14,17 @@ import {
   stableJson,
   workflowError,
   validateWorkflowInput,
+  WorkflowMemoryError,
+  type WorkflowProfile,
   type WorkflowBinding,
   type WorkflowRequest,
 } from './protocol.js';
 
 /** Resolve authority from configured profiles. A request cannot opt out of a cloud profile. */
-export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')(function* (
+const resolveConfiguredWorkflowProfile = Effect.fn('workflowMemory.resolveConfiguredProfile')(function* (
   config: RuntimeConfig,
-  request: WorkflowRequest,
+  requested?: WorkflowProfile,
 ) {
-  const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const environment = system.environment();
   const mode = environment.THREADNOTE_CURSOR_CLOUD_MODE?.trim();
@@ -44,8 +45,8 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   if ([codex, cursor].some(profile => profile && !sameCloudIdentity(profile, config)))
     return yield* workflowError('identity-drift', 'The configured cloud identity differs from this runtime.');
   const detected =
-    codex && cursor ? request.profile : codex ? 'codex-cloud-personal' : cursor ? 'cursor-cloud-personal' : 'desktop';
-  if (!detected || (request.profile !== undefined && request.profile !== detected))
+    codex && cursor ? requested : codex ? 'codex-cloud-personal' : cursor ? 'cursor-cloud-personal' : 'desktop';
+  if (!detected || (requested !== undefined && requested !== detected))
     return yield* workflowError(
       'profile-conflict',
       'Select the matching configured workflow profile; existing cloud profiles cannot be interpreted as desktop.',
@@ -60,6 +61,17 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
     );
   if ((detected === 'codex-cloud-personal' && !codex) || (detected === 'cursor-cloud-personal' && !cursor))
     return yield* workflowError('profile-missing', 'The requested personal cloud profile is not configured.');
+  return {profile: detected, environment};
+});
+
+/** Bind only after configuration is validated; read-only status does not create a binding. */
+export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')(function* (
+  config: RuntimeConfig,
+  request: WorkflowRequest,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const system = yield* SystemInfo;
+  const {profile: detected, environment} = yield* resolveConfiguredWorkflowProfile(config, request.profile);
   const home = yield* fs.realPath(config.agentContextHome);
   const repoRoot = yield* gitValue(['rev-parse', '--show-toplevel'], system.currentDirectory());
   if (!repoRoot) return yield* workflowError('repository-missing', 'Run the workflow from its Git checkout.');
@@ -117,4 +129,97 @@ export const verifyWorkflowBinding = Effect.fn('workflowMemory.verifyBinding')(f
       'binding-drift',
       'Workflow identity, home, checkout, profile or share changed. Resume in the original context.',
     );
+});
+
+export interface WorkflowOperationReadiness {
+  readonly state: 'ready' | 'blocked' | 'unchecked';
+  readonly reasons: readonly {readonly code: string; readonly message: string}[];
+}
+
+const blockedReadiness = (code: string, message: string): WorkflowOperationReadiness => ({
+  state: 'blocked',
+  reasons: [{code, message}],
+});
+
+/** Configuration-only projection: never bind a run, initialize a home, sync Git or probe credentials. */
+export const readWorkflowReadiness = Effect.fn('workflowMemory.readReadiness')(function (
+  config: RuntimeConfig,
+  requested?: WorkflowProfile,
+) {
+  return Effect.gen(function* () {
+    const {profile, environment} = yield* resolveConfiguredWorkflowProfile(config, requested);
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const scope =
+      profile === 'codex-cloud-personal'
+        ? yield* codexCloudMemoryScope(config)
+        : profile === 'cursor-cloud-personal'
+          ? yield* resolveCursorCloudMemoryScope(config, environment)
+          : undefined;
+    if (scope && profile === 'cursor-cloud-personal')
+      yield* assertCursorCloudMemoryTeamsReady(
+        config,
+        scope.shares.map(share => share.team),
+      );
+    const planning: WorkflowOperationReadiness = {
+      state: 'unchecked',
+      reasons: [
+        {
+          code: 'task-context-unchecked',
+          message:
+            'Profile configuration is available. Start a workflow in its Git checkout to verify task identity and storage.',
+        },
+      ],
+    };
+    const publication = yield* Effect.gen(function* () {
+      const teams = yield* readTeamsFile(config);
+      const selected = scope
+        ? scope.shares.map(share => teams.teams[share.team]).filter(team => team !== undefined)
+        : Object.values(teams.teams).filter(team => shareTeamAccess(team) === 'read-write');
+      if (selected.length === 0)
+        return blockedReadiness(
+          'share-missing',
+          'Configure a writable personal Git share before publishing approved durable knowledge. Local installation does not require a share.',
+        );
+      for (const team of selected) {
+        if (!(yield* fs.exists(team.worktree)) || !(yield* fs.exists(path.join(team.worktree, '.git'))))
+          return blockedReadiness(
+            'share-checkout-missing',
+            'A configured share checkout is unavailable. Restore it with the existing share configuration before publication.',
+          );
+      }
+      return {
+        state: 'unchecked',
+        reasons: [
+          {
+            code: 'publication-not-verified',
+            message:
+              'Share configuration is available. Git credentials, remote access and approval of exact content are verified during publication.',
+          },
+        ],
+      } satisfies WorkflowOperationReadiness;
+    }).pipe(
+      Effect.catchCause(() =>
+        Effect.succeed(
+          blockedReadiness('share-unavailable', 'Share configuration could not be read. Repair it before publication.'),
+        ),
+      ),
+    );
+    return {profile, planning, publication};
+  }).pipe(
+    Effect.catchDefect(() =>
+      Effect.fail(
+        workflowError('profile-unavailable', 'Personal workflow profile or share configuration could not be read.'),
+      ),
+    ),
+    Effect.catch(error => {
+      const issue = Schema.is(WorkflowMemoryError)(error)
+        ? blockedReadiness(error.code, error.message)
+        : blockedReadiness(
+            'profile-unavailable',
+            'Personal workflow profile or share configuration could not be read.',
+          );
+      return Effect.succeed({profile: requested ?? 'desktop', planning: issue, publication: issue});
+    }),
+  );
 });

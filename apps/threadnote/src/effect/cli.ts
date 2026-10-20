@@ -1,5 +1,6 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
 import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
+import {devSkillsCommandMetadata, makeDevSkillsCommand} from './dev_skills_cli.js';
 import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
@@ -1962,6 +1963,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('forget', forget),
   registerTopLevelCommand('cloud', cloud),
   registerTopLevelCommand('workflow-memory', makeWorkflowMemoryCommand(withRuntimeEffect)),
+  registerTopLevelCommand('dev-skills', makeDevSkillsCommand(withRuntimeEffect), devSkillsCommandMetadata),
   registerTopLevelCommand('share', share, {
     productionLog: {
       subcommands: {
@@ -1982,6 +1984,10 @@ export const threadnoteCommand = root.pipe(
   Command.withSubcommands(topLevelCommandRegistrations.map(registration => registration.command)),
 );
 export function inspectCliInvocation(arguments_: readonly string[]): CliInvocationInspection {
-  return inspectRegisteredCliInvocation(arguments_);
+  const invocation = inspectRegisteredCliInvocation(arguments_);
+  // Lifecycle validation precedes all writes, including diagnostics on invalid targets.
+  return invocation.operation === 'dev-skills'
+    ? {...invocation, writeAnonymousTelemetry: false, writeProductionLog: false}
+    : invocation;
 }
 export {CliError, normalizeCliArguments, type CliInvocationInspection};

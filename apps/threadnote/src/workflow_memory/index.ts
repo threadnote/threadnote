@@ -7,6 +7,8 @@ import {executeWorkflowOperation, prepareWorkflowOperation, readWorkflowArtifact
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
 import {assertWorkflowPublicationVerified, runWorkflowPublication} from './publication.js';
 
+export {readWorkflowReadiness} from './profile.js';
+
 export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Schema.decodeUnknownEffect(
     Schema.Union([WorkflowRequestSchema, WorkflowPublicationRequestSchema]),

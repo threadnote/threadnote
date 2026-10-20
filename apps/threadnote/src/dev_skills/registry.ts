@@ -1,0 +1,201 @@
+import {Effect, Path} from 'effect';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {SystemInfo} from '@threadnote/platform/system';
+import {installationRoot} from '../process/standalone_lease.js';
+import type {DevSkillsConsumer, DevSkillsManifest, DevSkillsTarget} from './contract.js';
+import {decode, fail, hash, isRecord, readOptional, requireValue} from './files.js';
+import {parseHistoricalDevSkillsManifest} from './manifest.js';
+
+export interface Enrollment extends DevSkillsConsumer {
+  readonly state: 'enrolled' | 'removed';
+}
+export interface HomeIndex {
+  readonly schemaVersion: 1;
+  readonly home: string;
+  readonly installationRoot: string;
+  readonly targets: Readonly<Record<string, Enrollment>>;
+}
+export interface RuntimeIndex {
+  readonly schemaVersion: 1;
+  readonly installationRoot: string;
+  readonly enrollments: Readonly<Record<string, Enrollment>>;
+}
+export interface PhysicalReceipt {
+  readonly schemaVersion: 1;
+  readonly skillRoot: string;
+  readonly layout: 'directory' | 'flat';
+  readonly manifest: DevSkillsManifest;
+  readonly generations: Readonly<Record<string, DevSkillsManifest>>;
+  readonly entrypoints: Readonly<Record<string, string>>;
+  readonly consumers: Readonly<Record<string, DevSkillsConsumer>>;
+}
+const absolute = (value: unknown): value is string =>
+  typeof value === 'string' && /^(?:\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/u.test(value) && !value.includes('\0');
+export const consumerId = (consumer: DevSkillsConsumer) =>
+  hash(
+    JSON.stringify({
+      home: consumer.home,
+      surfaceId: consumer.target.surfaceId,
+      profile: consumer.target.profile,
+      scope: consumer.target.scope,
+      cwd: consumer.target.cwd ?? null,
+    }),
+  );
+export function parseTarget(value: unknown): DevSkillsTarget {
+  requireValue(
+    isRecord(value) &&
+      typeof value.surfaceId === 'string' &&
+      typeof value.agentId === 'string' &&
+      ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'].includes(String(value.profile)) &&
+      ['user', 'project', 'local'].includes(String(value.scope)) &&
+      absolute(value.skillRoot) &&
+      ['directory', 'flat'].includes(String(value.layout)) &&
+      Array.isArray(value.discoveryRoots) &&
+      value.discoveryRoots.length <= 8 &&
+      value.discoveryRoots.every(absolute) &&
+      (value.cwd === undefined || absolute(value.cwd)),
+    'Invalid pinned development skills target.',
+  );
+  return value as unknown as DevSkillsTarget;
+}
+function parseConsumer(value: unknown): DevSkillsConsumer {
+  requireValue(
+    isRecord(value) && absolute(value.home) && absolute(value.installationRoot),
+    'Invalid development skills consumer.',
+  );
+  return {home: value.home, installationRoot: value.installationRoot, target: parseTarget(value.target)};
+}
+function parseEnrollments(value: unknown): Record<string, Enrollment> {
+  requireValue(isRecord(value) && Object.keys(value).length <= 1024, 'Invalid enrollment index.');
+  const result: Record<string, Enrollment> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const consumer = parseConsumer(entry);
+    requireValue(
+      isRecord(entry) && ['enrolled', 'removed'].includes(String(entry.state)) && key === consumerId(consumer),
+      'Invalid enrollment identity.',
+    );
+    result[key] = {...consumer, state: entry.state as Enrollment['state']};
+  }
+  return result;
+}
+export function parseHomeIndex(value: unknown): HomeIndex {
+  requireValue(
+    isRecord(value) && value.schemaVersion === 1 && absolute(value.home) && absolute(value.installationRoot),
+    'Invalid home enrollment index.',
+  );
+  const targets = parseEnrollments(value.targets);
+  requireValue(
+    Object.values(targets).every(
+      entry => entry.home === value.home && entry.installationRoot === value.installationRoot,
+    ),
+    'Enrollment home/runtime identity differs.',
+  );
+  return {schemaVersion: 1, home: value.home, installationRoot: value.installationRoot, targets};
+}
+export function parseRuntimeIndex(value: unknown): RuntimeIndex {
+  requireValue(
+    isRecord(value) && value.schemaVersion === 1 && absolute(value.installationRoot),
+    'Invalid runtime enrollment index.',
+  );
+  const enrollments = parseEnrollments(value.enrollments);
+  requireValue(
+    Object.values(enrollments).every(entry => entry.installationRoot === value.installationRoot),
+    'Enrollment runtime identity differs.',
+  );
+  return {schemaVersion: 1, installationRoot: value.installationRoot, enrollments};
+}
+export function entrypointPath(layout: DevSkillsTarget['layout'], id: string) {
+  return layout === 'flat' ? `${id}.md` : `${id}/SKILL.md`;
+}
+export function parseReceipt(value: unknown): PhysicalReceipt {
+  requireValue(
+    isRecord(value) &&
+      value.schemaVersion === 1 &&
+      absolute(value.skillRoot) &&
+      ['directory', 'flat'].includes(String(value.layout)) &&
+      isRecord(value.entrypoints) &&
+      isRecord(value.generations) &&
+      Object.keys(value.generations).length <= 1024 &&
+      isRecord(value.consumers) &&
+      Object.keys(value.consumers).length <= 1024,
+    'Invalid physical skills receipt.',
+  );
+  const manifest = parseHistoricalDevSkillsManifest(value.manifest);
+  const generations: Record<string, DevSkillsManifest> = {};
+  for (const [key, generation] of Object.entries(value.generations)) {
+    const decoded = parseHistoricalDevSkillsManifest(generation);
+    requireValue(key === decoded.digest, 'Invalid retained generation identity.');
+    generations[key] = decoded;
+  }
+  requireValue(manifest.digest in generations, 'Current generation is not owned.');
+  const layout = value.layout as DevSkillsTarget['layout'];
+  const allowed = new Set(manifest.skills.map(member => entrypointPath(layout, member.id)));
+  const entrypoints: Record<string, string> = {};
+  for (const [key, content] of Object.entries(value.entrypoints)) {
+    requireValue(
+      allowed.has(key) && typeof content === 'string' && content.length <= 300_000,
+      'Invalid discovery entrypoint receipt.',
+    );
+    entrypoints[key] = content;
+  }
+  const consumers: Record<string, DevSkillsConsumer> = {};
+  for (const [key, entry] of Object.entries(value.consumers)) {
+    const consumer = parseConsumer(entry);
+    requireValue(
+      key === consumerId(consumer) &&
+        consumer.target.skillRoot === value.skillRoot &&
+        consumer.target.layout === layout,
+      'Physical consumer identity differs.',
+    );
+    consumers[key] = consumer;
+  }
+  requireValue(
+    Object.keys(consumers).length === 0
+      ? Object.keys(entrypoints).length === 0
+      : Object.keys(entrypoints).length === allowed.size,
+    'Incomplete discovery entrypoint ownership.',
+  );
+  return {schemaVersion: 1, skillRoot: value.skillRoot, layout, manifest, generations, entrypoints, consumers};
+}
+export const homeIndexPath = (path: Path.Path, home: string) => path.join(home, 'dev-skills', 'index.json');
+export const runtimeIndexPath = (path: Path.Path, root: string) => path.join(root, 'dev-skills-enrollment.json');
+export const physicalDirectory = (path: Path.Path, root: string) => path.join(root, '.threadnote-dev-skills');
+export const receiptPath = (path: Path.Path, root: string) => path.join(physicalDirectory(path, root), 'receipt.json');
+export const journalPath = (path: Path.Path, root: string) => path.join(physicalDirectory(path, root), 'journal.json');
+export const readHomeIndex = Effect.fn('devSkills.homeIndex')(function* (config: RuntimeConfig) {
+  const path = yield* Path.Path;
+  const home = path.resolve(config.agentContextHome);
+  const content = yield* readOptional(homeIndexPath(path, home));
+  const index = content === null ? undefined : yield* decode(content, parseHomeIndex);
+  if (index && index.home !== home) return yield* fail('invalid-state', 'Pinned home identity differs.');
+  return {content, index};
+});
+export const enrollmentContext = Effect.fn('devSkills.enrollmentContext')(function* (config: RuntimeConfig) {
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const home = path.resolve(config.agentContextHome);
+  const homeRead = yield* readHomeIndex(config);
+  const root = homeRead.index?.installationRoot ?? installationRoot(path, system);
+  const runtimeContent = yield* readOptional(runtimeIndexPath(path, root));
+  const runtime =
+    runtimeContent === null
+      ? {schemaVersion: 1 as const, installationRoot: root, enrollments: {}}
+      : yield* decode(runtimeContent, parseRuntimeIndex);
+  if (runtime.installationRoot !== root) return yield* fail('invalid-state', 'Pinned runtime identity differs.');
+  return {
+    home,
+    root,
+    homeContent: homeRead.content,
+    runtimeContent,
+    homeIndex: homeRead.index ?? {schemaVersion: 1 as const, home, installationRoot: root, targets: {}},
+    runtimeIndex: runtime,
+  };
+});
+export const readReceipt = Effect.fn('devSkills.receipt')(function* (target: DevSkillsTarget) {
+  const path = yield* Path.Path;
+  const content = yield* readOptional(receiptPath(path, target.skillRoot));
+  const receipt = content === null ? undefined : yield* decode(content, parseReceipt);
+  if (receipt && (receipt.skillRoot !== target.skillRoot || receipt.layout !== target.layout))
+    return yield* fail('invalid-state', 'Pinned physical root differs.');
+  return {content, receipt};
+});

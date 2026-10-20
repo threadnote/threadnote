@@ -226,13 +226,9 @@ jobs:
           apps/threadnote/test/unit/local-ai.test.ts
           apps/threadnote/test/unit/update.test.ts
           apps/threadnote/test/unit/mcp.test.ts
-          apps/threadnote/test/dev-skills/bundle.test.ts
-          apps/threadnote/test/dev-skills/python-workflows.test.ts
-          apps/threadnote/test/dev-skills/workflow-memory.test.ts
-          apps/threadnote/test/dev-skills/workflow-publication.test.ts
-          apps/threadnote/test/dev-skills/workflow-publication-coordinator.test.ts
-          apps/threadnote/test/dev-skills/workflow-citation-recovery.test.ts
-          apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
+          apps/threadnote/test/dev-skills/
+          apps/threadnote/test/integration/cli.dev-skills.test.ts
+          packages/integrations/test/dev-skills-catalog.test.ts
       - name: Graph repair quarantine smoke
         run: >-
           bun --bun vitest run
