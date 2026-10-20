@@ -1,5 +1,6 @@
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {consolidationSections} from '@threadnote/memory/consolidation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   validateTopicMaintenanceDraftBasis,
@@ -7,6 +8,7 @@ import {
   type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
+  topicDraftCurrentEvidence,
   topicDraftCurrentSourceHandles,
   topicDraftGenerationEligible,
   topicDraftPolicyScope,
@@ -66,46 +68,76 @@ export interface TopicDraftWireFixture {
   observationRevision: string;
   packetDigest: string;
   decision: {
-    observedBehavior?: string;
-    behaviorSourceIndices?: number[];
-    comparison: string;
+    currentWitnesses?: {sourceIndex: number; quote: string}[];
+    normativeOrdinal?: number;
+    requirementQuote?: string;
+    missingFact?: string;
     policyAssessment: string;
-    unresolvedQuestions: string[];
     removedClaims: string[];
     reviewedSourceIndices?: number[];
     paragraphDispositions: {version: number; entries: ParagraphDecision[]};
   };
 }
 
+export function makeTopicDraftWireEvidence(basis: TopicMaintenanceDraftBasis) {
+  return topicDraftCurrentEvidence(
+    basis,
+    topicDraftCurrentSourceHandles(basis).map((handleId, index) => ({
+      handleId,
+      content: `Current source ${index}.`,
+    })),
+  );
+}
+
+export function topicDraftEvidenceFromPrompt(prompt: string): Readonly<Record<string, string>> {
+  const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+  return Object.freeze(
+    Object.fromEntries(
+      packet.sources.map((source: {currentHandle: string; current: {excerpt: string}}) => [
+        source.currentHandle,
+        source.current.excerpt,
+      ]),
+    ),
+  );
+}
+
 export function makeTopicDraftWireFixture(
   basis: TopicMaintenanceDraftBasis,
   disposition: 'unchanged' | 'unresolved' = 'unchanged',
+  evidence = makeTopicDraftWireEvidence(basis),
 ): TopicDraftWireFixture {
   const unresolved = disposition === 'unresolved';
   const eligible = basis.paragraphs.filter(topicDraftGenerationEligible);
+  const scope = topicDraftPolicyScope(basis);
+  const policyUnknown = unresolved && scope.normativeOrdinals.length > 0;
+  const sourceReview = !eligible.length && !policyUnknown;
+  const sourceIndex = scope.behaviorSourceIndices[0];
+  const handle = topicDraftCurrentSourceHandles(basis)[sourceIndex];
   return {
-    version: 3,
+    version: 4,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
     decision: {
-      ...(!eligible.length && !unresolved
-        ? {comparison: 'Checked source currency only; policy compliance not assessed.'}
-        : {
-            observedBehavior: unresolved ? 'Behavior could not be established.' : 'Current behavior checked.',
-            behaviorSourceIndices: unresolved ? [] : topicDraftPolicyScope(basis).behaviorSourceIndices.slice(0, 1),
-            comparison: unresolved
-              ? 'Manual comparison required.'
-              : topicDraftPolicyScope(basis).normativeOrdinals.length
-                ? 'No conflict observed in supplied evidence.'
-                : 'No protected normative requirement supplied.',
-          }),
-      policyAssessment: unresolved ? 'undetermined' : eligible.length ? 'no-conflict-observed' : 'source-review',
-      unresolvedQuestions: unresolved ? ['What current behavior applies?'] : [],
-      removedClaims: [],
-      ...(!eligible.length && !unresolved
-        ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)}
+      ...(!sourceReview
+        ? {
+            currentWitnesses: policyUnknown
+              ? []
+              : [{sourceIndex, quote: Array.from(evidence[handle]).slice(0, 64).join('')}],
+          }
         : {}),
+      ...(policyUnknown
+        ? {
+            normativeOrdinal: scope.normativeOrdinals[0],
+            requirementQuote: Array.from(consolidationSections(basis.body)[scope.normativeOrdinals[0]])
+              .slice(0, 64)
+              .join(''),
+            missingFact: 'Current applicable behavior is not established.',
+          }
+        : {}),
+      policyAssessment: policyUnknown ? 'undetermined' : sourceReview ? 'source-review' : 'no-conflict-observed',
+      removedClaims: [],
+      ...(sourceReview ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)} : {}),
       paragraphDispositions: {
         version: 1,
         entries: eligible.map<ParagraphDecision>(paragraph => ({

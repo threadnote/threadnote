@@ -1,4 +1,4 @@
-import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {runExportPack} from '../../src/memory/commands.js';
 import {runObsidianProjectionAdd, runObsidianProjectionSync} from '@threadnote/integration-obsidian/projection';
@@ -242,7 +242,7 @@ effectIt.effect(
           expect(prompt).toContain('current:tnob_');
           expect(prompt).not.toContain('sourceCommit');
           return {
-            text: JSON.stringify(makeTopicDraftWireFixture(basis)),
+            text: JSON.stringify(makeTopicDraftWireFixture(basis, 'unchanged', topicDraftEvidenceFromPrompt(prompt))),
             backendIdentity: 'local-ai',
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,

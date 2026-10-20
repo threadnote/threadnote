@@ -1,4 +1,4 @@
-import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import {Effect, FileSystem, Path, Result} from 'effect';
@@ -663,8 +663,10 @@ describe('reviewed personal topic acceptance', () => {
               const eligible: {ordinal: number; sourceIndices: number[]}[] = JSON.parse(
                 /^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1],
               );
-              const draft = {...makeTopicDraftWireFixture(currentBasis), ...identity};
-              draft.decision.observedBehavior = 'The current source declares 90 seconds.';
+              const draft = {
+                ...makeTopicDraftWireFixture(currentBasis, 'unchanged', topicDraftEvidenceFromPrompt(prompt)),
+                ...identity,
+              };
               draft.decision.removedClaims = ['Request timeout is 60 seconds.'];
               draft.decision.paragraphDispositions.entries = eligible.map(item => ({
                 ordinal: item.ordinal,

@@ -1,4 +1,5 @@
 import {Data, Schema} from 'effect';
+import {consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
   type TopicMaintenanceDraftBasis,
@@ -45,8 +46,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const currentHandles = topicDraftCurrentSourceHandles(basis);
   if (!currentHandles.length) throw new Error('Topic generation requires current evidence.');
   const rationale = Schema.String.check(Schema.isMinLength(1));
-  const observedBehavior = rationale.check(Schema.isMaxLength(512));
-  const comparison = rationale.check(Schema.isMaxLength(1024));
+  const quote = rationale.check(Schema.isMaxLength(512));
   const scope = topicDraftPolicyScope(basis);
   const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
   const common = (allowUpdate: boolean) => {
@@ -82,40 +82,35 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
           Schema.isMaxLength(descriptive.length),
         ),
       }),
-      unresolvedQuestions: Schema.Array(Schema.String),
       removedClaims: Schema.Array(Schema.String),
     };
   };
-  const behaviorIndices = (required: boolean) =>
-    Schema.Array(scope.behaviorSourceIndices.length ? Schema.Literals(scope.behaviorSourceIndices) : Schema.Int).check(
-      Schema.isMinLength(required ? 1 : 0),
-      Schema.isMaxLength(scope.behaviorSourceIndices.length),
-    );
-  const assessment = (required: boolean) => ({
-    observedBehavior,
-    behaviorSourceIndices: behaviorIndices(required),
-    comparison,
+  const witnesses = (required: boolean) =>
+    Schema.Array(
+      Schema.Struct({
+        sourceIndex: scope.behaviorSourceIndices.length ? Schema.Literals(scope.behaviorSourceIndices) : Schema.Int,
+        quote,
+      }),
+    ).check(Schema.isMinLength(required ? 1 : 0), Schema.isMaxLength(scope.behaviorSourceIndices.length));
+  const requirement = () => ({
+    normativeOrdinal: Schema.Literals(scope.normativeOrdinals),
+    requirementQuote: quote,
   });
-  const noQuestions = Schema.Array(Schema.String).check(Schema.isMaxLength(0));
-  const questions = Schema.Array(rationale).check(Schema.isMinLength(1));
   const decision = Schema.Union([
     ...(descriptive.length && scope.behaviorSourceIndices.length
       ? [
           Schema.Struct({
-            ...assessment(true),
+            currentWitnesses: witnesses(true),
             policyAssessment: Schema.Literal('no-conflict-observed'),
             ...common(true),
-            unresolvedQuestions: noQuestions,
           }),
         ]
       : []),
     ...(!descriptive.length
       ? [
           Schema.Struct({
-            comparison: Schema.Literal('Checked source currency only; policy compliance not assessed.'),
             policyAssessment: Schema.Literal('source-review'),
             ...common(false),
-            unresolvedQuestions: noQuestions,
             reviewedSourceIndices: Schema.Array(Schema.Literals(currentHandles.map((_, index) => index))).check(
               Schema.isMinLength(1),
               Schema.isMaxLength(currentHandles.length),
@@ -126,22 +121,27 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     ...(scope.normativeOrdinals.length && scope.behaviorSourceIndices.length
       ? [
           Schema.Struct({
-            ...assessment(true),
+            currentWitnesses: witnesses(true),
             policyAssessment: Schema.Literal('conflict'),
+            ...requirement(),
             ...common(false),
-            unresolvedQuestions: questions,
           }),
         ]
       : []),
-    Schema.Struct({
-      ...assessment(false),
-      policyAssessment: Schema.Literal('undetermined'),
-      ...common(false),
-      unresolvedQuestions: questions,
-    }),
+    ...(scope.normativeOrdinals.length
+      ? [
+          Schema.Struct({
+            currentWitnesses: witnesses(false),
+            policyAssessment: Schema.Literal('undetermined'),
+            ...requirement(),
+            missingFact: rationale.check(Schema.isMaxLength(256)),
+            ...common(false),
+          }),
+        ]
+      : []),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(3),
+    version: Schema.Literal(4),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
@@ -159,29 +159,106 @@ export class TopicDraftApplicationValidationError extends Data.TaggedError('Topi
   readonly message: string;
 }> {}
 
+/** Only validated handle-to-content bindings enter projection, including imported current handles. */
+export function topicDraftCurrentEvidence(
+  basis: TopicMaintenanceDraftBasis,
+  evidence: readonly {readonly handleId: string; readonly content: string}[],
+): Readonly<Record<string, string>> {
+  return Object.freeze(
+    Object.fromEntries(
+      topicDraftCurrentSourceHandles(basis).map(handle => {
+        const matches = evidence.filter(item => item.handleId === handle);
+        if (matches.length !== 1 || !wellFormed(matches[0].content))
+          throw new Error('Verified current topic evidence is missing or ambiguous.');
+        return [handle, matches[0].content];
+      }),
+    ),
+  );
+}
+
+function wellFormed(text: string) {
+  for (let index = 0; index < text.length; index++) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(++index);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+function exactQuote(source: string, quote: string) {
+  return quote.length > 0 && wellFormed(quote) && source.includes(quote);
+}
+
 export function projectTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
   wire: ReturnType<typeof decodeTopicDraftWire>,
+  currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
   const {decision, ...identity} = wire;
   const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
-  if (
-    byteLength(decision.comparison) > 1024 ||
-    ('observedBehavior' in decision && byteLength(decision.observedBehavior) > 512)
-  )
-    throw new TopicDraftApplicationValidationError({message: 'Topic policy assessment exceeds its UTF-8 byte bound.'});
-  for (const indices of [
-    ...('behaviorSourceIndices' in decision ? [decision.behaviorSourceIndices] : []),
-    ...('reviewedSourceIndices' in decision ? [decision.reviewedSourceIndices] : []),
-  ])
-    if (new Set(indices).size !== indices.length)
-      throw new TopicDraftApplicationValidationError({message: 'Duplicate topic assessment source index.'});
+  const invalid = (message: string): never => {
+    throw new TopicDraftApplicationValidationError({message});
+  };
   const current = topicDraftCurrentSourceHandles(basis);
+  // Context failures are terminal, even if the selected wire does not reference the missing source.
+  for (const handle of current)
+    if (typeof currentEvidence[handle] !== 'string' || !wellFormed(currentEvidence[handle]))
+      throw new Error('Verified current topic evidence is unavailable.');
   const currentHandle = (index: number) => {
     if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
-      throw new TopicDraftApplicationValidationError({message: 'Invalid topic disposition source index.'});
+      return invalid('Invalid topic disposition source index.');
     return current[index];
   };
+  const witnesses = 'currentWitnesses' in decision ? decision.currentWitnesses : [];
+  for (const indices of [
+    witnesses.map(witness => witness.sourceIndex),
+    ...('reviewedSourceIndices' in decision ? [decision.reviewedSourceIndices] : []),
+  ])
+    if (new Set(indices).size !== indices.length) invalid('Duplicate topic assessment source index.');
+  if (witnesses.reduce((total, witness) => total + byteLength(witness.quote), 0) > 512)
+    invalid('Topic current witnesses exceed their UTF-8 byte bound.');
+  for (const witness of witnesses)
+    if (!exactQuote(currentEvidence[currentHandle(witness.sourceIndex)], witness.quote))
+      invalid('Topic current witness is not an exact current excerpt quotation.');
+  if ('normativeOrdinal' in decision) {
+    const text = consolidationSections(basis.body)[decision.normativeOrdinal];
+    if (basis.paragraphs[decision.normativeOrdinal]?.role !== 'normative')
+      invalid('Topic requirement does not select a protected normative paragraph.');
+    if (byteLength(decision.requirementQuote) > 512)
+      invalid('Topic requirement quotation exceeds its UTF-8 byte bound.');
+    if (!exactQuote(text, decision.requirementQuote))
+      invalid('Topic requirement is not an exact normative paragraph quotation.');
+  }
+  if ('missingFact' in decision && (!wellFormed(decision.missingFact) || byteLength(decision.missingFact) > 256))
+    invalid('Topic missing fact exceeds its UTF-8 scalar or byte bound.');
+  const rationale =
+    decision.policyAssessment === 'source-review'
+      ? 'Checked source currency only; policy compliance not assessed.'
+      : [
+          witnesses.length
+            ? 'Current evidence:\n' + witnesses.map(witness => `[${witness.sourceIndex}] ${witness.quote}`).join('\n')
+            : 'No current behavior witness selected.',
+          ...('normativeOrdinal' in decision
+            ? [`Protected paragraph ${decision.normativeOrdinal}: ${decision.requirementQuote}`]
+            : []),
+          decision.policyAssessment === 'no-conflict-observed'
+            ? `Assessment: no conflict observed against protected paragraphs ${topicDraftPolicyScope(basis).normativeOrdinals.join(', ') || 'none supplied'}.`
+            : decision.policyAssessment === 'conflict'
+              ? 'Assessment: policy conflict.'
+              : 'Assessment: undetermined.',
+          ...('missingFact' in decision ? [`Missing fact: ${decision.missingFact}`] : []),
+        ].join('\n');
+  if (byteLength(rationale) > 2048) invalid('Topic assessment rationale exceeds its UTF-8 byte bound.');
+  const unresolvedQuestions =
+    decision.policyAssessment === 'conflict'
+      ? [
+          `How should the selected current evidence be reconciled with protected paragraph ${decision.normativeOrdinal}?`,
+        ]
+      : decision.policyAssessment === 'undetermined'
+        ? [`What evidence resolves the missing fact for protected paragraph ${decision.normativeOrdinal}?`]
+        : [];
   const entries: TopicMaintenanceParagraphDispositionV1[] = [];
   const operations: TopicMaintenanceReplaceOperationV1[] = [];
   for (const entry of decision.paragraphDispositions.entries) {
@@ -218,9 +295,8 @@ export function projectTopicDraftWire(
     ...identity,
     version: 1,
     outcome,
-    rationale:
-      'observedBehavior' in decision ? `${decision.observedBehavior}\n\n${decision.comparison}` : decision.comparison,
-    unresolvedQuestions: decision.unresolvedQuestions,
+    rationale,
+    unresolvedQuestions,
     removedClaims: decision.removedClaims,
     operations,
     reviewedHandles: [...new Set(reviewed)],
@@ -231,8 +307,9 @@ export function projectTopicDraftWire(
 export function decodeTopicDraftModelOutput(
   basis: TopicMaintenanceDraftBasis,
   input: unknown,
+  currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
-  return projectTopicDraftWire(basis, decodeTopicDraftWire(basis, input));
+  return projectTopicDraftWire(basis, decodeTopicDraftWire(basis, input), currentEvidence);
 }
 
 function nativeDisjointUnions(value: unknown): unknown {

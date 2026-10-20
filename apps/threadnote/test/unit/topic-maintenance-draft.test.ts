@@ -48,6 +48,7 @@ import {
   basisFromPacket,
   readTopicMaintenanceDraft,
   readyEvidence,
+  reviewEvidenceFromPacket,
   requestTopicMaintenanceDraft,
   topicMaintenanceDraftPrompt,
 } from '../../src/memory/context/maintenance_draft.js';
@@ -161,10 +162,7 @@ describe('topic maintenance private draft generation', () => {
         true,
       ),
     ).toBe(true);
-    expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual([
-      'source-review',
-      'undetermined',
-    ]);
+    expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual(['source-review']);
   });
 
   it('keeps assessment branches exclusive with updates only after no observed conflict', () => {
@@ -194,10 +192,7 @@ describe('topic maintenance private draft generation', () => {
         const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
         const branches = schema.properties.decision.oneOf;
         expect((schema as Record<string, unknown>).type).toBe('object');
-        expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual([
-          'no-conflict-observed',
-          'undetermined',
-        ]);
+        expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual(['no-conflict-observed']);
         for (const branch of branches) {
           expect(branch.properties).not.toHaveProperty('operations');
           expect(branch.properties).not.toHaveProperty('reviewedHandles');
@@ -429,12 +424,15 @@ describe('topic maintenance private draft generation', () => {
             const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
             const scope = JSON.parse(/^Policy comparison scope: (.+)$/mu.exec(prompt)![1]);
             return JSON.stringify({
-              version: 3,
+              version: 4,
               ...identity,
               decision: {
-                observedBehavior: 'Current scoped behavior checked.',
-                behaviorSourceIndices: scope.behaviorSourceIndices.slice(0, 1),
-                comparison: 'No protected normative requirement supplied.',
+                currentWitnesses: scope.behaviorSourceIndices.slice(0, 1).map((sourceIndex: number) => ({
+                  sourceIndex,
+                  quote: JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1])
+                    .sources.find((source: {sourceIndex: number}) => source.sourceIndex === sourceIndex)
+                    .current.excerpt.trimEnd(),
+                })),
                 policyAssessment: 'no-conflict-observed',
                 paragraphDispositions: {
                   version: 1,
@@ -447,7 +445,6 @@ describe('topic maintenance private draft generation', () => {
                     }),
                   ),
                 },
-                unresolvedQuestions: [],
                 removedClaims: [],
               },
             });
@@ -474,7 +471,13 @@ describe('topic maintenance private draft generation', () => {
           };
           const invalidApplicationJson = (prompt: string) => {
             const wire = JSON.parse(validUpdateJson(prompt));
-            wire.decision.behaviorSourceIndices = [1, 1];
+            const source = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).sources.find(
+              (source: {sourceIndex: number}) => source.sourceIndex === 1,
+            );
+            wire.decision.currentWitnesses = [1, 1].map(sourceIndex => ({
+              sourceIndex,
+              quote: source.current.excerpt.trimEnd(),
+            }));
             return JSON.stringify(wire);
           };
           const modelResult = (text: string) => ({
@@ -696,11 +699,11 @@ describe('topic maintenance private draft generation', () => {
             Effect.sync(() => {
               abstentionCalls += 1;
               const draft = JSON.parse(validJson(prompt));
-              draft.decision.policyAssessment = 'undetermined';
-              draft.decision.behaviorSourceIndices = abstentionCalls === 1 ? [1, 1] : [];
-              draft.decision.observedBehavior = 'The evidence does not establish a safe replacement.';
-              draft.decision.comparison = 'Manual comparison required.';
-              draft.decision.unresolvedQuestions = ['Which policy applies to the changed source?'];
+              if (abstentionCalls === 1)
+                draft.decision.currentWitnesses = [
+                  ...draft.decision.currentWitnesses,
+                  ...draft.decision.currentWitnesses,
+                ];
               draft.decision.paragraphDispositions.entries = draft.decision.paragraphDispositions.entries.map(
                 (item: {ordinal: number}) => ({...item, disposition: 'unresolved', sourceIndices: []}),
               );
@@ -968,14 +971,21 @@ const withControllerFixture = <A, E, R>(
       user: 'tester',
     };
     const basis = basisFromPacket(packet.topicEvidence);
-    const valid = makeTopicDraftWireFixture(basis);
+    const valid = makeTopicDraftWireFixture(
+      basis,
+      'unchanged',
+      schemaModule.topicDraftCurrentEvidence(basis, reviewEvidenceFromPacket(packet.topicEvidence)),
+    );
     valid.decision.paragraphDispositions.entries.forEach((entry, index) => {
       entry.disposition = 'update';
       entry.text = index === 0 ? 'Current first fact.' : 'Current second fact.';
       entry.sourceIndices = [index];
     });
     const invalid = structuredClone(valid);
-    invalid.decision.behaviorSourceIndices = [1, 1];
+    invalid.decision.currentWitnesses = [1, 1].map(sourceIndex => ({
+      sourceIndex,
+      quote: packet.topicEvidence.sources[sourceIndex].newExcerpt.content,
+    }));
     const modelResult = (text: string, call = 1): selectedModule.SelectedDraftResult => ({
       text,
       backendIdentity: 'local-ai',
@@ -1025,63 +1035,74 @@ const withControllerFixture = <A, E, R>(
   });
 
 describe('complete wire controller repair boundary', () => {
-  effectIt.effect(
-    'repairs the exact duplicate assessment selection without losing either factual update or protected bytes',
-    () =>
-      withControllerFixture(f =>
-        Effect.gen(function* () {
-          const invalidText = JSON.stringify(schemaModule.decodeTopicDraftWire(f.basis, f.invalid));
-          const original = JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid});
-          let calls = 0;
-          const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
-            Effect.sync(() => {
-              calls++;
-              if (calls === 2) {
-                expect(prompt).toContain('Duplicate topic assessment source index.');
-                expect(prompt).toContain('Prior invalid JSON data:');
-              }
-              return f.modelResult(calls === 1 ? invalidText : JSON.stringify(f.valid), calls);
+  for (const violation of ['duplicate', 'quotation'] as const)
+    effectIt.effect(
+      'repairs complete ' + violation + ' assessment without losing either factual update or protected bytes',
+      () =>
+        withControllerFixture(f =>
+          Effect.gen(function* () {
+            const firstWire = structuredClone(violation === 'duplicate' ? f.invalid : f.valid);
+            if (violation === 'quotation') firstWire.decision.currentWitnesses![0].quote = 'Historical implementation.';
+            const invalidText = JSON.stringify(schemaModule.decodeTopicDraftWire(f.basis, firstWire));
+            const original = JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid});
+            let calls = 0;
+            const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+              Effect.sync(() => {
+                calls++;
+                if (calls === 2) {
+                  expect(prompt).toContain(
+                    violation === 'duplicate'
+                      ? 'Duplicate topic assessment source index.'
+                      : 'Topic current witness is not an exact current excerpt quotation.',
+                  );
+                  expect(prompt).toContain('Prior invalid JSON data:');
+                }
+                return f.modelResult(calls === 1 ? invalidText : JSON.stringify(f.valid), calls);
+              });
+            const review = yield* f.request(generate);
+            expect(calls).toBe(2);
+            const proposal = review.maintenance!.proposal;
+            expect(proposal.body).toBe('Current first fact.\n\nCurrent second fact.\n\nProtected requirement.');
+            expect(proposal.changedOrdinals).toEqual([0, 1]);
+            expect(proposal.draft.operations.map(operation => operation.supportHandles)).toEqual([
+              [f.basis.handles.filter(handle => handle.variant === 'current')[0].id],
+              [f.basis.handles.filter(handle => handle.variant === 'current')[1].id],
+            ]);
+            expect(proposal.draft.paragraphDispositions!.entries.map(entry => entry.supportHandles)).toEqual(
+              proposal.draft.operations.map(operation => operation.supportHandles),
+            );
+            expect(review.maintenance!.generation.usage).toEqual({
+              status: 'measured',
+              inputTokens: 36,
+              outputTokens: 9,
             });
-          const review = yield* f.request(generate);
-          expect(calls).toBe(2);
-          const proposal = review.maintenance!.proposal;
-          expect(proposal.body).toBe('Current first fact.\n\nCurrent second fact.\n\nProtected requirement.');
-          expect(proposal.changedOrdinals).toEqual([0, 1]);
-          expect(proposal.draft.operations.map(operation => operation.supportHandles)).toEqual([
-            [f.basis.handles.filter(handle => handle.variant === 'current')[0].id],
-            [f.basis.handles.filter(handle => handle.variant === 'current')[1].id],
-          ]);
-          expect(proposal.draft.paragraphDispositions!.entries.map(entry => entry.supportHandles)).toEqual(
-            proposal.draft.operations.map(operation => operation.supportHandles),
-          );
-          expect(review.maintenance!.generation.usage).toEqual({status: 'measured', inputTokens: 36, outputTokens: 9});
-          const generation = review.maintenance!.generation;
-          if (generation.origin === 'manual') throw new Error('Expected generated review.');
-          const observation = generation.observation!;
-          const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, observation.receiptId);
-          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
-          expect(receipt.attempts.map(attempt => attempt.usage)).toEqual([
-            f.modelResult('', 1).usage,
-            f.modelResult('', 2).usage,
-          ]);
-          expect(receipt.firstFailedOutput).toMatchObject({
-            text: invalidText,
-            hash: sha256HexSync(invalidText),
-            bytes: new TextEncoder().encode(invalidText).byteLength,
-            representation: 'decoded-json',
-            truncated: false,
-          });
-          expect(receipt.attempts[1].output).toMatchObject({hash: sha256HexSync(JSON.stringify(f.valid))});
-          expect(
-            JSON.stringify(yield* readTopicGenerationSummary(f.config.agentContextHome, observation.receiptId)),
-          ).not.toContain(invalidText);
-          expect(JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid})).toBe(original);
-          expect(f.record.body).toBe(f.basis.body);
-          expect((yield* f.request(generate)).revision).toBe(review.revision);
-          expect(calls).toBe(2);
-        }),
-      ).pipe(provideTestLayer(ApplicationLayer)),
-  );
+            const generation = review.maintenance!.generation;
+            if (generation.origin === 'manual') throw new Error('Expected generated review.');
+            const observation = generation.observation!;
+            const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, observation.receiptId);
+            expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
+            expect(receipt.attempts.map(attempt => attempt.usage)).toEqual([
+              f.modelResult('', 1).usage,
+              f.modelResult('', 2).usage,
+            ]);
+            expect(receipt.firstFailedOutput).toMatchObject({
+              text: invalidText,
+              hash: sha256HexSync(invalidText),
+              bytes: new TextEncoder().encode(invalidText).byteLength,
+              representation: 'decoded-json',
+              truncated: false,
+            });
+            expect(receipt.attempts[1].output).toMatchObject({hash: sha256HexSync(JSON.stringify(f.valid))});
+            expect(
+              JSON.stringify(yield* readTopicGenerationSummary(f.config.agentContextHome, observation.receiptId)),
+            ).not.toContain(invalidText);
+            expect(JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid})).toBe(original);
+            expect(f.record.body).toBe(f.basis.body);
+            expect((yield* f.request(generate)).revision).toBe(review.revision);
+            expect(calls).toBe(2);
+          }),
+        ).pipe(provideTestLayer(ApplicationLayer)),
+    );
 
   for (const scenario of [
     'two-invalid',
@@ -1109,7 +1130,7 @@ describe('complete wire controller repair boundary', () => {
               const wire = structuredClone(
                 scenario === 'utf8' || scenario === 'canonical-invalid' ? f.valid : f.invalid,
               );
-              if (scenario === 'utf8') wire.decision.observedBehavior = 'é'.repeat(257);
+              if (scenario === 'utf8') wire.decision.currentWitnesses![0].quote = 'é'.repeat(257);
               if (scenario === 'canonical-invalid')
                 wire.decision.paragraphDispositions.entries[0].text = 'Old first fact.';
               const text = JSON.stringify(wire);
@@ -1144,6 +1165,7 @@ describe('complete wire controller repair boundary', () => {
   for (const scenario of [
     'malformed',
     'partial',
+    'legacy3',
     'legacy1',
     'legacy2',
     'schema',
@@ -1175,7 +1197,13 @@ describe('complete wire controller repair boundary', () => {
           const wire = {
             ...f.valid,
             ...(scenario === 'identity' ? {packetDigest: 'f'.repeat(64)} : {}),
-            ...(scenario === 'legacy1' ? {version: 1} : scenario === 'legacy2' ? {version: 2} : {}),
+            ...(scenario === 'legacy1'
+              ? {version: 1}
+              : scenario === 'legacy2'
+                ? {version: 2}
+                : scenario === 'legacy3'
+                  ? {version: 3}
+                  : {}),
             ...(scenario === 'schema' ? {unexpected: true} : {}),
           };
           const text =
@@ -1224,6 +1252,30 @@ describe('complete wire controller repair boundary', () => {
       ).pipe(provideTestLayer(ApplicationLayer)),
     );
   }
+  effectIt.effect('treats missing trusted lookup context as terminal before provider dispatch', () =>
+    withControllerFixture(f =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const spy = vi.spyOn(schemaModule, 'topicDraftCurrentEvidence').mockImplementationOnce(() => {
+          throw new Error('Verified current topic evidence is unavailable.');
+        });
+        const generate: typeof runSelectedDraft = () =>
+          Effect.sync(() => {
+            calls++;
+            return f.modelResult(JSON.stringify(f.valid));
+          });
+        const failure = yield* f
+          .request(generate)
+          .pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())), Effect.flip);
+        expect(calls).toBe(0);
+        expect(Schema.is(TopicDraftError)(failure) && failure.message).toBe(
+          'Verified current topic evidence is unavailable.',
+        );
+        expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('shares the original deadline after a nonzero first attempt', () =>
     withControllerFixture(f =>
       Effect.gen(function* () {

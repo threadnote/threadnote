@@ -23,15 +23,26 @@ import {
   runNativeAiTopicDraft,
   TopicDraftProviderOutputError,
 } from '../../src/effect/ai/consolidator.js';
-import {decodeTopicDraftModelOutput, topicDraftModelSchema} from '../../src/manager/topic_draft_schema.js';
+import {
+  decodeTopicDraftModelOutput as decodeModelOutput,
+  topicDraftModelSchema,
+} from '../../src/manager/topic_draft_schema.js';
 import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
-import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {
+  makeTopicDraftWireBasis,
+  makeTopicDraftWireFixture,
+  makeTopicDraftWireEvidence,
+} from '../helpers/topic-draft-wire.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 vi.mock('@effect/ai-openai-compat', async importOriginal => {
   const actual = await importOriginal<typeof import('@effect/ai-openai-compat')>();
   return {...actual, OpenAiLanguageModel: {...actual.OpenAiLanguageModel, layer: vi.fn()}};
 });
+
+function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input: unknown) {
+  return decodeModelOutput(basis, input, makeTopicDraftWireEvidence(basis));
+}
 
 const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
 const unexpected = () => Effect.die(TestError.make({message: 'Unexpected fixture service call'}));
@@ -125,7 +136,15 @@ describe('compact topic provider boundary', () => {
         }),
       );
     }
-    for (const invalidAssessment of [{observedBehavior: 'é'.repeat(257)}, {behaviorSourceIndices: [0, 0]}]) {
+    for (const invalidAssessment of [
+      {currentWitnesses: [{sourceIndex: 0, quote: 'é'.repeat(257)}]},
+      {
+        currentWitnesses: [
+          {sourceIndex: 0, quote: 'Current source 0.'},
+          {sourceIndex: 0, quote: 'Current source 0.'},
+        ],
+      },
+    ]) {
       it.effect(
         'returns complete wire and measured usage before application validation: ' + Object.keys(invalidAssessment)[0],
         () =>
@@ -259,7 +278,7 @@ describe('compact topic provider boundary', () => {
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(2);
       const wire = makeTopicDraftWireFixture(basis);
-      wire.decision.behaviorSourceIndices = [1, 1];
+      wire.decision.currentWitnesses = [1, 1].map(sourceIndex => ({sourceIndex, quote: 'Current source 1.'}));
       const result = yield* runNativeAiTopicDraft(
         {agentContextHome: '/fixture'},
         'prompt',
