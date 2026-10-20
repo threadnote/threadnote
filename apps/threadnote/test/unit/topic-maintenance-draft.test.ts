@@ -99,7 +99,7 @@ describe('topic maintenance private draft generation', () => {
             return;
           }
           const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
-          expect(branches.some(branch => branch.properties.outcome.enum[0] === 'propose-update')).toBe(
+          expect(branches.some(branch => branch.properties.policyAssessment.enum[0] === 'no-conflict-observed')).toBe(
             expected.length > 0,
           );
           if (expected.length)
@@ -118,7 +118,7 @@ describe('topic maintenance private draft generation', () => {
     );
   });
 
-  it('keeps non-editable bases in no-update outcome branches', () => {
+  it('keeps non-editable bases in source-only or undetermined assessment branches', () => {
     const basis: TopicMaintenanceDraftBasisV1 = {
       version: 1,
       targetUri: 'threadnote://user/tester/memories/durable/projects/fixture/topic.md',
@@ -147,14 +147,13 @@ describe('topic maintenance private draft generation', () => {
         true,
       ),
     ).toBe(true);
-    expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
-      'propose-revalidation',
-      'policy-conflict',
-      'insufficient-evidence',
+    expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual([
+      'source-review',
+      'undetermined',
     ]);
   });
 
-  it('keeps every native outcome exclusive with update decisions only in update outcomes', () => {
+  it('keeps assessment branches exclusive with updates only after no observed conflict', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 8}), count => {
         const ids = Array.from({length: count}, (_, index) => `tncc_${index.toString(16).padStart(40, '0')}`);
@@ -181,11 +180,9 @@ describe('topic maintenance private draft generation', () => {
         const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
         const branches = schema.properties.decision.oneOf;
         expect((schema as Record<string, unknown>).type).toBe('object');
-        expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
-          'propose-update',
-          'propose-revalidation',
-          'policy-conflict',
-          'insufficient-evidence',
+        expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual([
+          'no-conflict-observed',
+          'undetermined',
         ]);
         for (const branch of branches) {
           expect(branch.properties).not.toHaveProperty('operations');
@@ -202,7 +199,11 @@ describe('topic maintenance private draft generation', () => {
           );
           expect(
             updates.map((variant: {properties: {ordinal: {enum: number[]}}}) => variant.properties.ordinal.enum[0]),
-          ).toEqual(branch.properties.outcome.enum[0] === 'propose-update' ? basis.paragraphs.map(p => p.ordinal) : []);
+          ).toEqual(
+            branch.properties.policyAssessment.enum[0] === 'no-conflict-observed'
+              ? basis.paragraphs.map(p => p.ordinal)
+              : [],
+          );
           for (const variant of variants) {
             const update = variant.properties.disposition.enum[0] === 'update';
             expect(variant.required.includes('text')).toBe(update);

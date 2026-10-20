@@ -3,7 +3,11 @@ import {
   validateTopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasisV1,
 } from '@threadnote/memory/topic-maintenance-draft';
-import {topicDraftCurrentSourceHandles, topicDraftGenerationEligible} from '../../src/manager/topic_draft_schema.js';
+import {
+  topicDraftCurrentSourceHandles,
+  topicDraftGenerationEligible,
+  topicDraftPolicyScope,
+} from '../../src/manager/topic_draft_schema.js';
 
 interface ParagraphDecision {
   ordinal: number;
@@ -60,14 +64,24 @@ export function makeTopicDraftWireFixture(
   const unresolved = disposition === 'unresolved';
   const eligible = basis.paragraphs.filter(topicDraftGenerationEligible);
   return {
-    version: 2,
+    version: 3,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
     decision: {
-      outcome: unresolved ? 'insufficient-evidence' : 'propose-revalidation',
-      rationale: unresolved ? 'Manual review.' : 'Checked.',
-      unresolvedQuestions: [],
+      ...(!eligible.length && !unresolved
+        ? {comparison: 'Checked source currency only; policy compliance not assessed.'}
+        : {
+            observedBehavior: unresolved ? 'Behavior could not be established.' : 'Current behavior checked.',
+            behaviorSourceIndices: unresolved ? [] : topicDraftPolicyScope(basis).behaviorSourceIndices.slice(0, 1),
+            comparison: unresolved
+              ? 'Manual comparison required.'
+              : topicDraftPolicyScope(basis).normativeOrdinals.length
+                ? 'No conflict observed in supplied evidence.'
+                : 'No protected normative requirement supplied.',
+          }),
+      policyAssessment: unresolved ? 'undetermined' : eligible.length ? 'no-conflict-observed' : 'source-review',
+      unresolvedQuestions: unresolved ? ['What current behavior applies?'] : [],
       removedClaims: [],
       ...(!eligible.length && !unresolved
         ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)}

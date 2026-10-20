@@ -23,12 +23,31 @@ export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasis
   return basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
 }
 
+/** Trusted selection metadata; policy declarations alone are not observed behavior. */
+export function topicDraftPolicyScope(basis: TopicMaintenanceDraftBasis) {
+  const behaviorCitations = new Set([
+    ...basis.paragraphs.filter(topicDraftGenerationEligible).flatMap(paragraph => paragraph.citationIds),
+    ...basis.additionalDependencies.map(dependency => dependency.citationId),
+  ]);
+  return {
+    normativeOrdinals: basis.paragraphs
+      .filter(paragraph => paragraph.role === 'normative')
+      .map(paragraph => paragraph.ordinal),
+    behaviorSourceIndices: topicDraftCurrentSourceHandles(basis).flatMap((handle, index) =>
+      behaviorCitations.has(handle.slice('current:'.length)) ? [index] : [],
+    ),
+  };
+}
+
 /** Generation grammar only; the memory-owned validator remains the final authority. */
 export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
   const currentHandles = topicDraftCurrentSourceHandles(basis);
   if (!currentHandles.length) throw new Error('Topic generation requires current evidence.');
   const rationale = Schema.String.check(Schema.isMinLength(1));
+  const observedBehavior = rationale.check(Schema.isMaxLength(512));
+  const comparison = rationale.check(Schema.isMaxLength(1024));
+  const scope = topicDraftPolicyScope(basis);
   const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
   const common = (allowUpdate: boolean) => {
     const variants = descriptive.flatMap(paragraph => {
@@ -67,43 +86,62 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       removedClaims: Schema.Array(Schema.String),
     };
   };
+  const behaviorIndices = (required: boolean) =>
+    Schema.Array(scope.behaviorSourceIndices.length ? Schema.Literals(scope.behaviorSourceIndices) : Schema.Int).check(
+      Schema.isMinLength(required ? 1 : 0),
+      Schema.isMaxLength(scope.behaviorSourceIndices.length),
+    );
+  const assessment = (required: boolean) => ({
+    observedBehavior,
+    behaviorSourceIndices: behaviorIndices(required),
+    comparison,
+  });
   const noQuestions = Schema.Array(Schema.String).check(Schema.isMaxLength(0));
-  const revalidation = {
-    rationale,
-    outcome: Schema.Literal('propose-revalidation'),
-    ...common(false),
-    unresolvedQuestions: noQuestions,
-  };
+  const questions = Schema.Array(rationale).check(Schema.isMinLength(1));
   const decision = Schema.Union([
-    ...(descriptive.length
+    ...(descriptive.length && scope.behaviorSourceIndices.length
       ? [
           Schema.Struct({
-            rationale,
-            outcome: Schema.Literal('propose-update'),
+            ...assessment(true),
+            policyAssessment: Schema.Literal('no-conflict-observed'),
             ...common(true),
             unresolvedQuestions: noQuestions,
           }),
         ]
       : []),
-    descriptive.length
-      ? Schema.Struct(revalidation)
-      : Schema.Struct({
-          ...revalidation,
-          reviewedSourceIndices: Schema.Array(Schema.Literals(currentHandles.map((_, index) => index))).check(
-            Schema.isMinLength(1),
-            Schema.isMaxLength(currentHandles.length),
-          ),
-        }),
+    ...(!descriptive.length
+      ? [
+          Schema.Struct({
+            comparison: Schema.Literal('Checked source currency only; policy compliance not assessed.'),
+            policyAssessment: Schema.Literal('source-review'),
+            ...common(false),
+            unresolvedQuestions: noQuestions,
+            reviewedSourceIndices: Schema.Array(Schema.Literals(currentHandles.map((_, index) => index))).check(
+              Schema.isMinLength(1),
+              Schema.isMaxLength(currentHandles.length),
+            ),
+          }),
+        ]
+      : []),
+    ...(scope.normativeOrdinals.length && scope.behaviorSourceIndices.length
+      ? [
+          Schema.Struct({
+            ...assessment(true),
+            policyAssessment: Schema.Literal('conflict'),
+            ...common(false),
+            unresolvedQuestions: questions,
+          }),
+        ]
+      : []),
     Schema.Struct({
-      rationale,
-      outcome: Schema.Literal('policy-conflict'),
+      ...assessment(false),
+      policyAssessment: Schema.Literal('undetermined'),
       ...common(false),
-      unresolvedQuestions: Schema.Array(rationale).check(Schema.isMinLength(1)),
+      unresolvedQuestions: questions,
     }),
-    Schema.Struct({rationale, outcome: Schema.Literal('insufficient-evidence'), ...common(false)}),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(2),
+    version: Schema.Literal(3),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
@@ -118,6 +156,17 @@ export function decodeTopicDraftModelOutput(
   const {decision, ...identity} = Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(
     input,
   );
+  const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
+  if (
+    byteLength(decision.comparison) > 1024 ||
+    ('observedBehavior' in decision && byteLength(decision.observedBehavior) > 512)
+  )
+    throw new Error('Topic policy assessment exceeds its UTF-8 byte bound.');
+  for (const indices of [
+    ...('behaviorSourceIndices' in decision ? [decision.behaviorSourceIndices] : []),
+    ...('reviewedSourceIndices' in decision ? [decision.reviewedSourceIndices] : []),
+  ])
+    if (new Set(indices).size !== indices.length) throw new Error('Duplicate topic assessment source index.');
   const current = topicDraftCurrentSourceHandles(basis);
   const currentHandle = (index: number) => {
     if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
@@ -138,8 +187,20 @@ export function decodeTopicDraftModelOutput(
     entries.push({...fields, disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition});
     if (entry.disposition === 'update') operations.push({...fields, text: entry.text});
   }
+  const outcome =
+    decision.policyAssessment === 'conflict'
+      ? 'policy-conflict'
+      : decision.policyAssessment === 'undetermined'
+        ? 'insufficient-evidence'
+        : decision.policyAssessment === 'source-review'
+          ? 'propose-revalidation'
+          : operations.length
+            ? 'propose-update'
+            : entries.some(entry => entry.disposition === 'revalidate')
+              ? 'propose-revalidation'
+              : 'insufficient-evidence';
   const reviewed =
-    decision.outcome === 'propose-revalidation'
+    outcome === 'propose-revalidation'
       ? 'reviewedSourceIndices' in decision
         ? decision.reviewedSourceIndices.map(currentHandle)
         : entries.filter(entry => entry.disposition === 'revalidate').flatMap(entry => entry.supportHandles)
@@ -147,8 +208,9 @@ export function decodeTopicDraftModelOutput(
   return {
     ...identity,
     version: 1,
-    outcome: decision.outcome,
-    rationale: decision.rationale,
+    outcome,
+    rationale:
+      'observedBehavior' in decision ? `${decision.observedBehavior}\n\n${decision.comparison}` : decision.comparison,
     unresolvedQuestions: decision.unresolvedQuestions,
     removedClaims: decision.removedClaims,
     operations,
@@ -167,7 +229,7 @@ function nativeDisjointUnions(value: unknown): unknown {
       ? (variant as Record<string, unknown>)
       : undefined,
   );
-  const discriminatorKeys = ['ordinal', 'outcome', 'disposition'].filter(key =>
+  const discriminatorKeys = ['ordinal', 'policyAssessment', 'disposition'].filter(key =>
     entries.every(entry => {
       const properties = entry?.properties as Record<string, {enum?: readonly unknown[]}> | undefined;
       return properties?.[key]?.enum?.length === 1;
@@ -196,33 +258,26 @@ export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftM
       ? (properties as Record<string, unknown>)
       : undefined;
   const decision = fields?.decision;
-  if (
-    !decision ||
-    typeof decision !== 'object' ||
-    Array.isArray(decision) ||
-    !('anyOf' in decision) ||
-    !Array.isArray(decision.anyOf) ||
-    (decision.anyOf.length !== 3 && decision.anyOf.length !== 4)
-  )
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision))
     throw new Error('The topic generation schema has an unexpected decision union.');
-  const outcomeEnums = decision.anyOf.map(branch =>
+  const branches = 'anyOf' in decision && Array.isArray(decision.anyOf) ? decision.anyOf : [decision];
+  const assessmentEnums = branches.map(branch =>
     typeof branch === 'object' && branch !== null && 'properties' in branch
-      ? (branch.properties as {readonly outcome?: {readonly enum?: readonly string[]}}).outcome?.enum
+      ? (branch.properties as {readonly policyAssessment?: {readonly enum?: readonly string[]}}).policyAssessment?.enum
       : undefined,
   );
   if (
-    outcomeEnums.some(values => !Array.isArray(values) || values.length !== 1) ||
-    new Set(outcomeEnums.map(values => values?.[0])).size !== decision.anyOf.length ||
-    ![
-      ...(decision.anyOf.length === 4 ? ['propose-update'] : []),
-      'propose-revalidation',
-      'policy-conflict',
-      'insufficient-evidence',
-    ].every(expected => outcomeEnums.some(values => values?.[0] === expected))
+    assessmentEnums.some(
+      values =>
+        !Array.isArray(values) ||
+        values.length !== 1 ||
+        !['no-conflict-observed', 'conflict', 'undetermined', 'source-review'].includes(values[0]),
+    ) ||
+    new Set(assessmentEnums.map(values => values?.[0])).size !== branches.length
   )
-    throw new Error('Topic generation outcomes are not mutually exclusive.');
+    throw new Error('Topic generation assessments are not mutually exclusive.');
   return {
     ...document,
-    properties: {...fields, decision: {oneOf: decision.anyOf.map(nativeDisjointUnions) as typeof decision.anyOf}},
+    properties: {...fields, decision: {oneOf: branches.map(nativeDisjointUnions) as typeof branches}},
   };
 }

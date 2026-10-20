@@ -49,13 +49,18 @@ export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraft
   },
 ) {}
 
-function decodeTopicDraftProviderOutput(basis: TopicMaintenanceDraftBasis, output: unknown) {
+function decodeTopicDraftProviderOutput(
+  basis: TopicMaintenanceDraftBasis,
+  output: unknown,
+  usage: TopicGenerationUsageV1 = {status: 'unavailable'},
+) {
   try {
     return JSON.stringify(decodeTopicDraftModelOutput(basis, output));
   } catch {
     throw TopicDraftProviderOutputError.make({
       message: 'AI returned a malformed topic maintenance object.',
       output: retainedTopicGenerationOutput(1, JSON.stringify(output), 'decoded-json'),
+      usage,
     });
   }
 }
@@ -211,13 +216,14 @@ export function runEffectAiTopicDraft(
                   : error,
               ),
             );
+          const usage = topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total);
           const text = yield* Effect.try({
-            try: () => decodeTopicDraftProviderOutput(basis, response.value),
+            try: () => decodeTopicDraftProviderOutput(basis, response.value, usage),
             catch: error => error as TopicDraftProviderOutputError,
           });
           return {
             text,
-            usage: topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total),
+            usage,
             outputRepresentation: 'decoded-json' as const,
           };
         }).pipe(Effect.provide(context)),

@@ -10,6 +10,7 @@ import {
   topicDraftCurrentSourceHandles,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
+  topicDraftPolicyScope,
 } from '../../src/manager/topic_draft_schema.js';
 import {topicMaintenanceDraftPrompt} from '../../src/memory/context/maintenance_draft.js';
 import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
@@ -26,20 +27,18 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown) {
 }
 
 describe('single-decision compact topic wire', () => {
-  it('separates actionable generation from open questions without changing canonical compatibility', () => {
+  it('separates actionable generation from questions while preserving saved canonical compatibility', () => {
     fc.assert(
       fc.property(fc.array(fc.stringMatching(/^[a-z]{1,24}$/u), {minLength: 1, maxLength: 8}), questions => {
         const basis = basisFor(2);
         const revalidation = wireFor(basis);
         const update = wireFor(basis);
-        update.decision.outcome = 'propose-update';
         Object.assign(update.decision.paragraphDispositions.entries[0], {
           disposition: 'update',
           text: 'Updated claim.',
         });
         for (const wire of [update, revalidation]) {
           const saved = canonical(basis, wire).draft;
-          // Existing canonical reviews may contain advisory questions; only generation is restricted.
           expect(
             parseTopicMaintenanceDraft(basis, JSON.stringify({...saved, unresolvedQuestions: questions})).draft
               .unresolvedQuestions,
@@ -49,13 +48,18 @@ describe('single-decision compact topic wire', () => {
           expect(() => decodeTopicDraftModelOutput(basis, questioned)).toThrow();
           expect(JSON.stringify({basis, questioned})).toBe(before);
         }
-        const conflict = wireFor(basis, 'unresolved');
-        conflict.decision.outcome = 'policy-conflict';
-        expect(() => canonical(basis, conflict)).toThrow();
-        expect(
-          canonical(basis, {...conflict, decision: {...conflict.decision, unresolvedQuestions: questions}}).draft
-            .outcome,
-        ).toBe('policy-conflict');
+        const protectedBasis = basisFor(2, {protectedOrdinal: 1});
+        const conflict = wireFor(protectedBasis, 'unresolved');
+        Object.assign(conflict.decision, {
+          observedBehavior: 'Current behavior violates the requirement.',
+          behaviorSourceIndices: [0],
+          comparison: 'The current value exceeds the protected limit.',
+          policyAssessment: 'conflict',
+          unresolvedQuestions: questions,
+        });
+        expect(canonical(protectedBasis, conflict).draft.outcome).toBe('policy-conflict');
+        conflict.decision.unresolvedQuestions = [];
+        expect(() => canonical(protectedBasis, conflict)).toThrow();
         const noEligible = basisFor(1, {protectedOrdinal: 0});
         const checked = wireFor(noEligible);
         expect(canonical(noEligible, checked).draft.reviewedHandles).not.toHaveLength(0);
@@ -70,7 +74,6 @@ describe('single-decision compact topic wire', () => {
   it('retains genuine updates when a repeated-text replacement is repaired to unchanged', () => {
     const basis = basisFor(2);
     const wire = wireFor(basis);
-    wire.decision.outcome = 'propose-update';
     Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: 'Updated claim.'});
     const repeated = wire.decision.paragraphDispositions.entries[1];
     Object.assign(repeated, {disposition: 'update', text: 'Claim 1.'});
@@ -102,7 +105,6 @@ describe('single-decision compact topic wire', () => {
   it('does not infer current truth when a stale claim repeats the accepted text', () => {
     const basis = basisFor(1, {sourceCount: 1, firstParagraph: 'The limit is 32.'});
     const wire = wireFor(basis);
-    wire.decision.outcome = 'propose-update';
     Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: basis.body});
     let error = '';
     try {
@@ -199,7 +201,6 @@ describe('single-decision compact topic wire', () => {
     expect(variant.properties).not.toHaveProperty('beforeHash');
     expect(variant.properties).not.toHaveProperty('supportHandles');
     const wire = wireFor(basis);
-    wire.decision.outcome = 'propose-update';
     wire.decision.paragraphDispositions.entries[0] = {
       ordinal: 0,
       disposition: 'update',
@@ -218,8 +219,10 @@ describe('single-decision compact topic wire', () => {
     ]);
     expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('operations');
     expect(schema.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
-    for (const outcome of ['propose-revalidation', 'policy-conflict', 'insufficient-evidence'])
-      expect(() => decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, outcome}})).toThrow();
+    for (const policyAssessment of ['conflict', 'undetermined', 'source-review'])
+      expect(() =>
+        decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, policyAssessment}}),
+      ).toThrow();
     expect(JSON.stringify(schema)).not.toContain('"anyOf"');
   });
 
@@ -231,11 +234,6 @@ describe('single-decision compact topic wire', () => {
         (decisions, sourceCount) => {
           const basis = basisFor(decisions.length, {sourceCount});
           const wire = wireFor(basis);
-          wire.decision.outcome = decisions.includes('update')
-            ? 'propose-update'
-            : decisions.includes('unchanged')
-              ? 'propose-revalidation'
-              : 'insufficient-evidence';
           wire.decision.paragraphDispositions.entries = decisions.map((disposition, ordinal) => ({
             ordinal,
             disposition,
@@ -245,6 +243,13 @@ describe('single-decision compact topic wire', () => {
           }));
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
+          expect(result.draft.outcome).toBe(
+            decisions.includes('update')
+              ? 'propose-update'
+              : decisions.includes('unchanged')
+                ? 'propose-revalidation'
+                : 'insufficient-evidence',
+          );
           expect(result.draft.version).toBe(1);
           expect(result.draft.operations).toHaveLength(decisions.filter(value => value === 'update').length);
           expect(result.body.split('\n\n')).toEqual(
@@ -267,10 +272,130 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
+  it('derives refusal outcomes from assessment and refuses contradictory update entries', () => {
+    const basis = basisFor(3, {protectedOrdinal: 2});
+    for (const policyAssessment of ['conflict', 'undetermined']) {
+      const wire = wireFor(basis, 'unresolved');
+      Object.assign(wire.decision, {
+        observedBehavior: 'Current retention is 30 days.',
+        behaviorSourceIndices: [0],
+        comparison: 'The protected requirement allows at most 14 days.',
+        policyAssessment,
+      });
+      wire.decision.paragraphDispositions.entries[0].rationale = 'The actual value needs a policy decision.';
+      wire.decision.paragraphDispositions.entries[1].rationale = 'A separate claim remains unverified.';
+      const before = JSON.stringify({basis, wire});
+      const result = canonical(basis, wire);
+      expect(result.draft.outcome).toBe(policyAssessment === 'conflict' ? 'policy-conflict' : 'insufficient-evidence');
+      expect(result.draft.rationale).toBe(
+        'Current retention is 30 days.\n\nThe protected requirement allows at most 14 days.',
+      );
+      expect(result.draft.unresolvedQuestions).toEqual(wire.decision.unresolvedQuestions);
+      expect(result.draft.paragraphDispositions?.entries.map(entry => entry.rationale)).toEqual([
+        'The actual value needs a policy decision.',
+        'A separate claim remains unverified.',
+      ]);
+      expect(result.draft.operations).toEqual([]);
+      expect(result.body).toBe(basis.body);
+      expect(JSON.stringify({basis, wire})).toBe(before);
+      Object.assign(wire.decision.paragraphDispositions.entries[0], {
+        disposition: 'update',
+        sourceIndices: [0],
+        text: 'The retention is now 30 days.',
+      });
+      expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+    }
+  });
+
+  it('limits behavior selection to descriptive citations and explicit dependencies', () => {
+    const original = basisFor(2, {protectedOrdinal: 1});
+    const ids = original.handles.filter(handle => handle.variant === 'current').map(handle => handle.citationId);
+    const basis = {
+      ...original,
+      paragraphs: original.paragraphs.map(paragraph => ({...paragraph, citationIds: [ids[paragraph.ordinal]]})),
+      additionalDependencies: [{kind: 'dependency' as const, citationId: ids[2]}],
+    };
+    expect(topicDraftPolicyScope(basis)).toEqual({normativeOrdinals: [1], behaviorSourceIndices: [0, 2]});
+    const wire = wireFor(basis);
+    for (const indices of [[0], [2], [0, 2]])
+      expect(() =>
+        canonical(basis, {...wire, decision: {...wire.decision, behaviorSourceIndices: indices}}),
+      ).not.toThrow();
+    for (const indices of [[1], [0, 0], [-1], [3], [0.5], []])
+      expect(() =>
+        decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, behaviorSourceIndices: indices}}),
+      ).toThrow();
+    const shared = {
+      ...basis,
+      paragraphs: basis.paragraphs.map(paragraph => ({
+        ...paragraph,
+        citationIds: paragraph.role === 'normative' ? [ids[0], ids[1]] : [ids[0]],
+      })),
+    };
+    expect(topicDraftPolicyScope(shared)).toEqual({normativeOrdinals: [1], behaviorSourceIndices: [0, 2]});
+    expect(() => canonical(shared, wireFor(shared))).not.toThrow();
+  });
+
+  it('never invents a policy conflict when no protected requirement is supplied', () => {
+    const basis = basisFor(1);
+    const wire = wireFor(basis);
+    expect(topicDraftPolicyScope(basis).normativeOrdinals).toEqual([]);
+    expect(canonical(basis, wire).draft.rationale).toContain('No protected normative requirement supplied.');
+    Object.assign(wire.decision, {policyAssessment: 'conflict', unresolvedQuestions: ['Which requirement applies?']});
+    expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+  });
+
+  it('requires actual dependency behavior for conflicts on policy-only topics', () => {
+    const original = basisFor(1, {protectedOrdinal: 0});
+    const onlyPolicy = wireFor(original, 'unresolved');
+    Object.assign(onlyPolicy.decision, {policyAssessment: 'conflict', behaviorSourceIndices: [0]});
+    expect(() => decodeTopicDraftModelOutput(original, onlyPolicy)).toThrow();
+    expect(topicDraftPolicyScope(original)).toEqual({normativeOrdinals: [0], behaviorSourceIndices: []});
+    const dependencyId = topicDraftCurrentSourceHandles(original)[1].slice('current:'.length);
+    const basis = {...original, additionalDependencies: [{kind: 'dependency' as const, citationId: dependencyId}]};
+    const conflict = wireFor(basis, 'unresolved');
+    Object.assign(conflict.decision, {policyAssessment: 'conflict', behaviorSourceIndices: [1]});
+    expect(canonical(basis, conflict).draft.outcome).toBe('policy-conflict');
+    expect(canonical(original, wireFor(original, 'unresolved')).draft.outcome).toBe('insufficient-evidence');
+  });
+
+  it('keeps source-only review incapable of making a policy compliance claim', () => {
+    const basis = basisFor(1, {protectedOrdinal: 0});
+    const wire = wireFor(basis);
+    expect(canonical(basis, wire).draft.rationale).toBe(
+      'Checked source currency only; policy compliance not assessed.',
+    );
+    for (const change of [
+      {comparison: 'The behavior complies with every policy.'},
+      {observedBehavior: 'The implementation complies.'},
+      {behaviorSourceIndices: [0]},
+      {reviewedSourceIndices: [0, 0]},
+    ])
+      expect(() => decodeTopicDraftModelOutput(basis, {...wire, decision: {...wire.decision, ...change}})).toThrow();
+  });
+
+  it('enforces assessment UTF-8 limits without truncating text or losing removed claims', () => {
+    const basis = basisFor(1);
+    const wire = wireFor(basis);
+    Object.assign(wire.decision, {
+      observedBehavior: 'é'.repeat(256),
+      comparison: '界'.repeat(341),
+      removedClaims: ['Removed unsupported detail.'],
+    });
+    const result = canonical(basis, wire);
+    expect(new TextEncoder().encode(result.draft.rationale).byteLength).toBe(1537);
+    expect(result.draft.removedClaims).toEqual(['Removed unsupported detail.']);
+    for (const change of [{observedBehavior: 'é'.repeat(257)}, {comparison: '界'.repeat(342)}]) {
+      const invalid = {...wire, decision: {...wire.decision, ...change}};
+      const before = JSON.stringify(invalid);
+      expect(() => decodeTopicDraftModelOutput(basis, invalid)).toThrow('UTF-8 byte bound');
+      expect(JSON.stringify(invalid)).toBe(before);
+    }
+  });
+
   it('cannot hide replacement text behind unchanged or override its derived operation', () => {
     const basis = basisFor(1);
     const wire = wireFor(basis);
-    wire.decision.outcome = 'propose-update';
     wire.decision.paragraphDispositions.entries[0] = {
       ordinal: 0,
       disposition: 'update',
@@ -298,11 +423,15 @@ describe('single-decision compact topic wire', () => {
     expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
   });
 
-  it('explains and selects the global outcome before paragraph edits without requiring JSON key order on decode', () => {
+  it('compares observed behavior before choosing assessment without requiring JSON key order on decode', () => {
     for (const basis of [basisFor(1), basisFor(1, {protectedOrdinal: 0})]) {
       const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
       for (const variant of schema.properties.decision.oneOf)
-        expect(Object.keys(variant.properties).slice(0, 2)).toEqual(['rationale', 'outcome']);
+        expect(Object.keys(variant.properties).slice(0, variant.properties.observedBehavior ? 4 : 2)).toEqual(
+          variant.properties.observedBehavior
+            ? ['observedBehavior', 'behaviorSourceIndices', 'comparison', 'policyAssessment']
+            : ['comparison', 'policyAssessment'],
+        );
     }
     const basis = basisFor(2);
     const wire = wireFor(basis);
@@ -318,7 +447,8 @@ describe('single-decision compact topic wire', () => {
 
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
-    expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version: 1})).toThrow();
+    for (const version of [1, 2])
+      expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version})).toThrow();
     const oldTag = wireFor(basis);
     Object.assign(oldTag.decision.paragraphDispositions.entries[0], {disposition: 'revalidate'});
     expect(() => decodeTopicDraftModelOutput(basis, oldTag)).toThrow();
@@ -385,7 +515,8 @@ describe('single-decision compact topic wire', () => {
   it('keeps unresolved decisions explicit and protected paragraphs absent', () => {
     const basis = basisFor(2, {protectedOrdinal: 1});
     const wire = wireFor(basis);
-    wire.decision.outcome = 'insufficient-evidence';
+    wire.decision.policyAssessment = 'undetermined';
+    wire.decision.unresolvedQuestions = ['What current advice applies?'];
     wire.decision.paragraphDispositions.entries[0] = {
       ordinal: 0,
       disposition: 'unresolved',
@@ -433,7 +564,7 @@ describe('single-decision compact topic wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v14');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v15');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
@@ -458,7 +589,6 @@ describe('single-decision compact topic wire', () => {
           const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'unchanged');
           wire.decision.paragraphDispositions.entries[0].disposition = disposition;
           if (disposition === 'update') {
-            wire.decision.outcome = 'propose-update';
             wire.decision.paragraphDispositions.entries[0].text = 'Updated claim.';
           }
           expect(() => canonical(basis, wire)).not.toThrow();

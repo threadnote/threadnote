@@ -125,6 +125,55 @@ describe('compact topic provider boundary', () => {
         }),
       );
     }
+    for (const invalidAssessment of [{observedBehavior: 'é'.repeat(257)}, {behaviorSourceIndices: [0, 0]}]) {
+      it.effect(
+        'preserves measured usage when a schema-valid assessment fails decoding: ' + Object.keys(invalidAssessment)[0],
+        () =>
+          Effect.gen(function* () {
+            const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+            const basis = makeTopicDraftWireBasis(2);
+            const fixture = makeTopicDraftWireFixture(basis);
+            const wire = {...fixture, decision: {...fixture.decision, ...invalidAssessment}};
+            // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
+            yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
+            const model = Layer.effect(
+              LanguageModel.LanguageModel,
+              LanguageModel.make({
+                generateText: () =>
+                  Effect.succeed([
+                    Response.makePart('text', {text: JSON.stringify(wire)}),
+                    Response.makePart('finish', {
+                      reason: 'stop',
+                      usage: Response.Usage.make({
+                        inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
+                        outputTokens: {total: 3, text: undefined, reasoning: undefined},
+                      }),
+                    }),
+                  ]),
+                streamText: () => Stream.empty,
+              }),
+            );
+            vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
+            const failure = yield* withTopicGenerationObservation(home, observationIdentity(basis), observation =>
+              observation.dispatch(
+                'prompt',
+                runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis),
+              ),
+            ).pipe(Effect.flip);
+            if (!Schema.is(TopicGenerationRequestError)(failure)) throw new Error('Expected safe generation error');
+            const receipt = yield* loadTopicGenerationReceipt(home, failure.diagnostics!.receiptId);
+            expect(receipt.attempts).toHaveLength(1);
+            expect(receipt.attempts[0]).toMatchObject({
+              status: 'provider-output-invalid',
+              usage: {status: 'measured', inputTokens: 12, outputTokens: 3},
+            });
+            expect(receipt.firstFailedOutput?.representation).toBe('decoded-json');
+            // Effect schema decoding orders keys; retained decoded data must remain identical.
+            expect(JSON.parse(receipt.firstFailedOutput!.text)).toEqual(wire);
+            expect(JSON.stringify(failure)).not.toContain(JSON.stringify(wire));
+          }),
+      );
+    }
     it.effect('preserves only available structured-failure usage and excludes provider metadata', () =>
       Effect.gen(function* () {
         const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
@@ -215,6 +264,7 @@ describe('compact topic provider boundary', () => {
           if (Schema.is(TopicDraftProviderOutputError)(invalid.failure)) {
             expect(invalid.failure.output.text).toBe(JSON.stringify(wire));
             expect(invalid.failure.output.representation).toBe('decoded-json');
+            expect(invalid.failure.usage).toEqual({status: 'unavailable'});
           }
         }
         wire.decision.paragraphDispositions.entries[0].sourceIndices = [0];
