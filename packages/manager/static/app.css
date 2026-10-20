@@ -3592,6 +3592,34 @@ dd {
   height: 14px;
   width: 14px;
 }
+.topic-review-progress {
+  align-items: start;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+}
+.topic-review-progress .spinner {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.topic-review-progress p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 6px 0 0;
+}
+.topic-generation-controls .primary .spinner {
+  border-color: currentColor;
+  border-top-color: transparent;
+}
+@media (prefers-reduced-motion: reduce) {
+  .topic-review-content .spinner {
+    animation: none;
+  }
+}
 
 @keyframes spin {
   to {
@@ -9828,6 +9856,126 @@ h4 {
   font-size: 13px;
   margin-bottom: 3px;
 }
+.health-repair-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.health-repair-dialog > header,
+.health-repair-dialog > footer {
+  flex-shrink: 0;
+}
+.health-repair-dialog .detail-modal-body {
+  display: grid;
+  gap: 20px;
+  max-height: none;
+  min-height: 0;
+  overscroll-behavior: contain;
+  line-height: 1.65;
+}
+.health-repair-dialog .detail-modal-body > *,
+.health-repair-dialog .health-dialog-section-heading > * {
+  min-width: 0;
+}
+.health-repair-dialog h3 {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  font-size: 14px;
+  margin: 0;
+}
+.health-repair-dialog h3 svg {
+  flex-shrink: 0;
+}
+.health-repair-dialog p {
+  margin: 8px 0 0;
+}
+.health-repair-intro > p {
+  font-size: 16px;
+  font-weight: 500;
+}
+.health-repair-source {
+  background: color-mix(in srgb, var(--review-info) 5%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--review-info) 24%, var(--line));
+  border-radius: 9px;
+  padding: 18px;
+}
+.health-repair-source h3 {
+  color: var(--review-info);
+}
+.health-repair-source > strong {
+  display: block;
+  margin-top: 12px;
+}
+.health-repair-source > button {
+  margin-top: 12px;
+}
+.health-repair-source .memory-excerpt {
+  margin-bottom: 0;
+}
+.health-repair-reference {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+.health-repair-proposal h3 {
+  color: var(--accent);
+}
+.health-repair-evidence {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 16px;
+  padding: 16px;
+}
+.health-repair-evidence h4 {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+.health-repair-evidence .activation-review-guide {
+  margin: 0;
+}
+.health-repair-diagnostics {
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.health-repair-diagnostics summary {
+  cursor: pointer;
+  margin-bottom: 8px;
+}
+.health-repair-dialog > .detail-modal-actions {
+  align-items: center;
+  background: var(--panel-raised);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 16px 24px;
+}
+.health-repair-dialog > .detail-modal-actions > span {
+  flex: 1 1 220px;
+  font-size: 12px;
+}
+.health-repair-dialog > .detail-modal-actions button {
+  align-items: center;
+  display: inline-flex;
+  gap: 8px;
+  justify-content: center;
+}
+@media (max-width: 600px) {
+  .health-repair-dialog > header,
+  .health-repair-dialog > .detail-modal-actions {
+    padding: 16px;
+  }
+  .health-repair-dialog .detail-modal-body {
+    gap: 16px;
+  }
+  .health-repair-dialog > .detail-modal-actions button {
+    width: 100%;
+  }
+}
 .topic-review-content {
   display: grid;
   gap: 18px;
@@ -10096,6 +10244,12 @@ h4 {
 .review-final-document > p {
   color: var(--muted);
   font-size: 12px;
+}
+.review-final-document pre {
+  max-height: 320px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .topic-generation-controls {
   align-items: end;

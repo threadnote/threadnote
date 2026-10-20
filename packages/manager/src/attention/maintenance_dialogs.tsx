@@ -1,5 +1,6 @@
 import {SemanticResolutionReview} from './semantic_comparison.js';
 import {TopicReviewContent} from './topic_review.js';
+import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 import {Copy, ExternalLink, RefreshCw} from 'lucide-react';
 import React, {useEffect, useState} from 'react';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
@@ -71,6 +72,7 @@ export function MaintenanceCaseDialog(props: {
   readonly onOpenLibrary: (uri: string) => void;
   readonly onTask: (task: string) => void;
   readonly onChanged?: () => void;
+  readonly onApplied?: (result: ManagerTopicReviewAppliedV1) => void;
 }): React.ReactElement {
   const [caseId, setCaseId] = useState(props.caseId);
   const [item, setItem] = useState(props.initialCase);
@@ -143,6 +145,8 @@ export function MaintenanceCaseDialog(props: {
           caseId={caseId}
           initialPacket={packet}
           onChanged={() => props.onChanged?.()}
+          onApplied={props.onApplied}
+          onClose={props.onClose}
           onOpenLibrary={props.onOpenLibrary}
         />
       </DetailModal>

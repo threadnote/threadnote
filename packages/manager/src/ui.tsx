@@ -40,7 +40,13 @@ import {ManagerProcessesProvider} from './process/live.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
-import {ManagerNavigation, NavigationToggle, useNavigationCollapse} from './navigation.js';
+import {
+  ManagerNavigation,
+  NavigationToggle,
+  sidebarWidthForKey,
+  useContextHealthDecisionCount,
+  useNavigationCollapse,
+} from './navigation.js';
 import {ActionMenu} from './action_menu.js';
 import {libraryItemActions} from './library_actions.js';
 import {MemoryEditor} from './memory_editor.js';
@@ -103,10 +109,7 @@ import {
   isMarkdownUri,
   isResourceUri,
   loadSidebarWidth,
-  SIDEBAR_WIDTH_DEFAULT,
   SIDEBAR_WIDTH_KEY,
-  SIDEBAR_WIDTH_MAX,
-  SIDEBAR_WIDTH_MIN,
   loadManagerGraph,
   loadManagerGraphAnalysis,
   loadManagerGraphCatalogPage,
@@ -254,6 +257,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [sidebarCollapsed, toggleSidebar] = useNavigationCollapse();
   const libraryNavigator = useLibraryNavigatorResize();
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
+  const [contextHealthDecisionCount, onHealthDecisionCountChange] = useContextHealthDecisionCount();
   const [libraryError, setLibraryError] = useState('');
 
   useEffect(() => {
@@ -1295,22 +1299,10 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   }
 
   function resizeSidebarWithKeyboard(event: React.KeyboardEvent<HTMLDivElement>): void {
-    const step = event.shiftKey ? 48 : 16;
-    if (event.key === 'ArrowLeft') {
+    const next = sidebarWidthForKey(event.key, sidebarWidth, event.shiftKey);
+    if (next !== undefined) {
       event.preventDefault();
-      updateSidebarWidth(sidebarWidth - step);
-    } else if (event.key === 'ArrowRight') {
-      event.preventDefault();
-      updateSidebarWidth(sidebarWidth + step);
-    } else if (event.key === 'Home') {
-      event.preventDefault();
-      updateSidebarWidth(SIDEBAR_WIDTH_MIN);
-    } else if (event.key === 'End') {
-      event.preventDefault();
-      updateSidebarWidth(SIDEBAR_WIDTH_MAX);
-    } else if (event.key === 'Enter') {
-      event.preventDefault();
-      updateSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+      updateSidebarWidth(next);
     }
   }
 
@@ -1414,6 +1406,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
         panel={panel}
         disabled={controlsBlocked}
         connected={!!state}
+        contextHealthDecisionCount={contextHealthDecisionCount}
         onSelect={setPanel}
         width={sidebarWidth}
         onResizeKeyDown={resizeSidebarWithKeyboard}
@@ -1568,6 +1561,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
 
           {panel === 'context-health' ? (
             <ContextHealthPanel
+              onDecisionCountChange={onHealthDecisionCountChange}
               onOpenLibrary={uri => {
                 if (uri) void selectTreeUri(uri);
                 else setPanel('memory');
