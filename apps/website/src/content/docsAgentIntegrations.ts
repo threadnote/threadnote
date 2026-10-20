@@ -28,6 +28,14 @@ function agentDetailsArticle(integration: (typeof agentIntegrations)[number]): D
         text: `**Surface:** \`${integration.id}\` · **Product:** ${integration.agentId} · **Tier:** ${tierLabels[integration.tier]}.`,
       },
       {type: 'table', headers: ['Capability', 'Status', 'Notes'], rows: capabilityRows},
+      {type: 'heading', text: 'Bundled development workflows'},
+      {
+        type: 'paragraph',
+        text:
+          integration.devSkills.status === 'managed'
+            ? `Profile: ${integration.devSkills.profile}. Native skill scopes: ${integration.devSkills.scopes.join(', ')}. Platforms: ${integration.devSkills.platforms.join(', ')}. Layout: ${integration.devSkills.layout}. ${integration.devSkills.scopeReason ?? ''} See [Development workflows](/docs/development-workflows/).`
+            : `Bundled development workflow installation is unsupported: ${integration.devSkills.reason}`,
+      },
       {type: 'heading', text: 'Scope and platform'},
       {
         type: 'paragraph',
@@ -51,6 +59,68 @@ export const agentIntegrationDocsSection: DocsSection = {
   title: 'Agent integrations',
   description: 'Catalog-backed support tiers, lifecycle guidance, limitations, and exact surface details.',
   articles: [
+    {
+      id: 'development-workflows',
+      title: 'Development workflows',
+      summary: 'Specify, plan, implement and verify with the workflows shipped in Threadnote.',
+      keywords: ['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr', 'dev-skills', 'cloud'],
+      body: [
+        {
+          type: 'paragraph',
+          text: 'Standard agent setup installs dev-spec, dev-plan, dev-cycle and watch-pr by default. They use Threadnote context, graph evidence and linked memory to connect requirements, implementation and verified closeout. Installation makes skills discoverable; it does not execute development.',
+        },
+        {
+          type: 'table',
+          headers: ['Workflow', 'Purpose'],
+          rows: [
+            ['dev-spec', 'Define behavior, requirements and acceptance scenarios.'],
+            ['dev-plan', 'Ground architecture and implementation phases in current source.'],
+            ['dev-cycle', 'Implement, review, validate and preserve verified knowledge.'],
+            [
+              'watch-pr',
+              'Investigate CI and review issues, make scoped fixes and keep watching unless monitor-only was requested.',
+            ],
+          ],
+        },
+        {
+          type: 'code',
+          language: 'sh',
+          code: `threadnote dev-skills list
+threadnote dev-skills install --agent codex --dry-run
+threadnote dev-skills install --agent codex
+threadnote dev-skills status --agent codex
+threadnote dev-skills update --agent codex
+threadnote dev-skills remove --agent codex`,
+        },
+        {
+          type: 'paragraph',
+          text: 'Use --no-dev-skills during setup to opt out. Setup, repair and start respect disabled or removed enrollment; an explicit dev-skills install enables it again. Mutation commands apply immediately; --dry-run previews without writes. The catalog and each surface page declare native skill scopes and platforms independently of MCP or instruction support.',
+        },
+        {type: 'heading', text: 'Manage through the app'},
+        {
+          type: 'paragraph',
+          text: 'Open threadnote manage → Development workflows. Choose a host/profile and scope, select the exact project when needed, inspect status, preview an action and confirm it. The preview shows destinations and shared consumers. A changed target or file requires a new preview. Reload your host after installation or updates, then choose a workflow in its skill picker; Codex also supports $dev-spec, $dev-plan and $dev-cycle.',
+        },
+        {type: 'heading', text: 'Updates and ownership'},
+        {
+          type: 'paragraph',
+          text: 'Manual and automatic Threadnote updates refresh enabled workflow targets across accessible data homes, even with --no-repair or --no-post-update. A laptop update does not update another machine. Edited, unowned or inaccessible targets remain pending; inspect the conflict and retry threadnote update, including at the same version. Running tasks retain their original helpers and evidence. Removal disables enrollment and preserves other consumers, edits and retained helper generations.',
+        },
+        {
+          type: 'paragraph',
+          text: 'Legacy manual or team-pack copies with the same names are reported without deletion or adoption. Move reviewed old copies out of host discovery roots before retrying. The first public default-install release includes update refresh; pre-feature updater processes cannot retroactively run that stage. An unpublished development installation crossing that first hop must retry using the newly active runtime.',
+        },
+        {type: 'heading', text: 'Prerequisites and personal cloud'},
+        {
+          type: 'paragraph',
+          text: 'File installation works offline without a sharing team. Planning requires Python 3.10+, Git, ripgrep and the host’s core Threadnote integration; PR work also needs gh and repository credentials. Installation and operation readiness are shown separately. Watching does not authorize merging, force-pushing or changing protections.',
+        },
+        {
+          type: 'paragraph',
+          text: 'Personal Codex and Cursor cloud bootstrap installs workflows by default on catalog-supported platforms. Run setup, update and start inside that environment; startup maintains existing enabled enrollment. Select codex-cloud-personal or cursor-cloud-personal explicitly when managing files. Task drafts remain private and may disappear with an ephemeral workspace. Only concretely approved, sanitized durable knowledge is published and read back before draft retirement; denied or unavailable publication stays pending. Corporate and remote server profiles are outside this feature.',
+        },
+      ],
+    },
     {
       id: 'agent-integrations',
       title: 'Supported agents',

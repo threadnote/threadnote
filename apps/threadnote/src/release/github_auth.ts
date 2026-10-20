@@ -18,14 +18,22 @@ const RELEASE_HEADERS = {
 } as const;
 
 /** Only the official GitHub API may receive the machine's GitHub credential. */
-export const githubReleaseHeaders = Effect.fn('githubReleaseHeaders')(function* (source: string) {
+export interface ReleaseAuthenticationOptions {
+  /** Credential commands may write their own state, even when only reading a token. */
+  readonly allowCredentialCommand?: boolean;
+}
+
+export const githubReleaseHeaders = Effect.fn('githubReleaseHeaders')(function* (
+  source: string,
+  options: ReleaseAuthenticationOptions = {},
+) {
   if (!isOfficialGitHubReleasesUrl(source)) return RELEASE_HEADERS;
 
   const system = yield* Effect.serviceOption(SystemInfo);
   if (Option.isNone(system)) return RELEASE_HEADERS;
   const environment = system.value.environment();
   let token = validToken(environment.GH_TOKEN) ?? validToken(environment.GITHUB_TOKEN);
-  if (!token) {
+  if (!token && options.allowCredentialCommand !== false) {
     const command = yield* Effect.serviceOption(CommandExecutor);
     if (Option.isSome(command)) {
       const result = yield* command.value

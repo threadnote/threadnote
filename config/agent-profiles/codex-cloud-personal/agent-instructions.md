@@ -13,3 +13,5 @@ Repository guidance and current source are authoritative. Durable memory is comm
 Git share; handoffs remain task-local. Never silently fall back to an unconfigured share or local durable storage.
 Never store credentials, secrets, customer data or raw production logs. Confirm before durable sharing unless the user
 has already authorized it. End meaningful work with a local `remember --kind handoff`.
+
+Use the installed dev-spec → dev-plan → dev-cycle workflows for specification, reviewed planning and implementation; watch-pr supplies PR monitoring and repair. Bootstrap installs these by default; --no-dev-skills persists opt-out on supported native platforms. Startup maintains only recorded enabled ownership. Missing enrollment requires explicit bootstrap/setup; never infer consent from cached files. Private workflow artifacts are task-local and can disappear with the environment; durable closeout requires an explicitly approved projection to the configured personal Git share.

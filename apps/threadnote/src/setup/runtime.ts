@@ -60,6 +60,7 @@ type ProductionSetupServices =
   | EffectEnvironment<ReturnType<typeof seedSetupProject>>;
 
 export const productionSetupDependencies: SetupOrchestratorDependencies<ProductionSetupServices> = {
+  workflowSetup: true,
   contextBrief: (config, projectRoot, task) => verifyContextBrief(config, projectRoot, task),
   doctor: config => verifyDoctor(config),
   ensureCore: (config, apply) => ensureCore(config, apply),

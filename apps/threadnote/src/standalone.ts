@@ -585,6 +585,13 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     import('./threadnote.js'),
   ]);
   const invocation = inspectCliInvocation(arguments_);
+  if (invocation.operation === 'dev-skills' || invocation.observationalUpdate === true) {
+    // The lifecycle service owns mutation locks after validation. Read-only and
+    // rejected requests must not create process registrations or release leases.
+    // Bundle loading captures verified bytes before staging, so installation
+    // never depends on reopening a release that a concurrent update may prune.
+    return Effect.scoped(withCliOutputConsole(cliEffect(arguments_))).pipe(Effect.provide(runtime.ApplicationLayer));
+  }
   if (invocation.offline === true) {
     const {withPilotDiagnostics} = await import('./value_report/pilot/commands.js');
     return Effect.scoped(withCliOutputConsole(withPilotDiagnostics(cliEffect(arguments_)))).pipe(

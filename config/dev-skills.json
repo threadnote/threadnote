@@ -17,7 +17,8 @@
         "scripts/dev_spec.py",
         "scripts/portable_lock.py",
         "scripts/spec_closeout.py",
-        "scripts/support.py"
+        "scripts/support.py",
+        "scripts/workflow_transport.py"
       ]
     },
     {
@@ -30,9 +31,11 @@
         "references/review.md",
         "references/sources.md",
         "scripts/closeout.py",
+        "scripts/cloud_closeout.py",
         "scripts/dev_plan.py",
         "scripts/portable_lock.py",
-        "scripts/workflow.py"
+        "scripts/workflow.py",
+        "scripts/workflow_transport.py"
       ]
     },
     {

@@ -53,6 +53,13 @@ export interface JsonAgentStrategy {
   readonly unverifiedPolicyFile?: string;
 }
 
+/** Read-only root resolution, reusable without loading MCP documents or templates. */
+export interface AgentSkillRootPaths {
+  readonly root: string;
+  readonly skillRoot: string;
+  readonly cwd?: string;
+}
+
 export type AgentAdapterAction = 'install' | 'remove' | 'repair';
 
 export interface AgentAdapterStatus {

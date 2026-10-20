@@ -1,6 +1,47 @@
 import type {Effect} from 'effect';
 import {Command, Flag} from 'effect/cli';
-import {boolean, optionalString, repeatedString} from './cli/flags.js';
+import {cursorCloudRuntimeConfig, runCursorCloudStart, runCursorCloudVerify} from '../cursor/cloud.js';
+import type {CliRuntimeRunner} from './cli.js';
+import {boolean, defaultChoice, optionalString, repeatedString, requiredString} from './cli/flags.js';
+
+export function makeCursorCloudVerifyCommand(withRuntime: CliRuntimeRunner) {
+  return Command.make(
+    'verify',
+    {
+      agentId: optionalString('agent-id', 'Stable identity; defaults to the saved personal profile'),
+      user: optionalString('user', 'Stable Threadnote user; defaults to the saved personal profile'),
+      cwd: requiredString('cwd', 'Absolute Cursor Cloud checkout path used for local code-graph inspection'),
+      endpoint: optionalString('endpoint', 'Managed remote Streamable HTTP MCP endpoint'),
+      json: boolean('json', 'Print a machine-readable verification receipt'),
+      mode: makeCursorCloudModeFlag(defaultChoice),
+      shareId: optionalString('share-id', 'Opaque managed remote memory share identifier'),
+      teams: repeatedString('team', 'Personal Git memory share; repeat to verify one MCP share set'),
+    },
+    ({agentId, user, ...options}) =>
+      withRuntime(config => runCursorCloudVerify(cursorCloudRuntimeConfig(config, {agentId, user}), options)),
+  ).pipe(Command.withDescription('Verify the Cursor Cloud runtime, share, and local graph checkout'));
+}
+
+export function makeCursorCloudStartCommand(withRuntime: CliRuntimeRunner) {
+  return Command.make(
+    'start',
+    {
+      agentId: optionalString('agent-id', 'Stable identity; defaults to the saved personal profile'),
+      user: optionalString('user', 'Stable Threadnote user; defaults to the saved personal profile'),
+      cwd: requiredString('cwd', 'Existing absolute personal Cursor checkout'),
+      json: boolean('json', 'Print a machine-readable verification receipt'),
+      teams: repeatedString('team', 'Personal Git memory share; repeat for the selected shares'),
+    },
+    ({agentId, user, cwd, json, teams}) =>
+      withRuntime(config =>
+        runCursorCloudStart(cursorCloudRuntimeConfig(config, {agentId, user}), {
+          cwd,
+          json,
+          ...(teams.length ? {teams} : {}),
+        }),
+      ),
+  );
+}
 
 export interface CursorCloudAttestCliOptions {
   readonly audience: string;

@@ -1,3 +1,11 @@
+import {
+  setupWorkflowSelector,
+  ensureSetupWorkflows,
+  workflowSetupIdentity,
+  recordSetupWorkflowCheckpoint,
+  undoSetupWorkflows,
+} from './workflows.js';
+import {withDevSkillsMutationLease, type DevSkillsMutationLease} from '../dev_skills/index.js';
 import {Cause, Clock, Console, DateTime, Effect, Exit, FileSystem, Option, Path} from 'effect';
 import type {AgentAdapter} from '../agent_integration/adapters/contract.js';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -31,6 +39,7 @@ const SETUP_VERIFICATION_TASK =
   'Orient this agent to the current repository architecture, durable decisions, active handoffs, and next safe step.';
 
 export interface RunSetupOptions {
+  readonly noDevSkills?: boolean;
   readonly apply?: boolean;
   readonly cwd?: string;
   readonly scope?: 'user' | 'project' | 'local';
@@ -69,6 +78,8 @@ export interface SetupOperationOutcome {
 }
 
 export interface SetupOrchestratorDependencies<R> {
+  /** Production public composition; omitted for custom core-only orchestrators. */
+  readonly workflowSetup?: boolean;
   readonly contextBrief: (
     config: RuntimeConfig,
     projectRoot: string,
@@ -163,14 +174,42 @@ export const runSetupWith = Effect.fn('setup.runWith')(function* <R>(
   if (options.undo === true)
     return yield* runSetupUndo(config, adapter, projectRoot, scope, options.apply === true, dependencies);
   const threadnoteVersion = yield* getThreadnoteVersion();
-  const plan = yield* createSetupPlan({
+  const receiptId = yield* setupReceiptIdFor(projectRoot, scope, adapter.catalog.id);
+  const receiptPath = setupReceiptPath(path, config.agentContextHome, adapter.catalog.id, receiptId);
+  const previous = yield* readSetupReceipt(receiptPath);
+  const legacy =
+    dependencies.workflowSetup &&
+    previous &&
+    !['rolled-back', 'rolling-back'].includes(previous.receipt.status) &&
+    !previous.receipt.operations.some(operation => operation.kind === 'dev-skills.ensure');
+  const selector = setupWorkflowSelector(adapter.catalog.id, scope, projectRoot);
+  const identity = dependencies.workflowSetup
+    ? yield* workflowSetupIdentity(config, selector, receiptId, options.noDevSkills === true)
+    : undefined;
+  let plan = yield* createSetupPlan({
     adapter,
     manifestPath: config.manifestPath,
     projectRoot,
     scope,
     task: SETUP_VERIFICATION_TASK,
     threadnoteVersion,
+    ...(!legacy && identity
+      ? {workflows: {bundleDigest: identity.bundleDigest, disabled: options.noDevSkills === true}}
+      : {}),
   });
+  if (legacy && previous)
+    plan = {
+      ...plan,
+      planHash: previous.receipt.planHash,
+      threadnoteVersion: previous.receipt.threadnoteVersion,
+      operations: previous.receipt.operations.map(({id, kind, inputHash, reversible}) => ({
+        id,
+        kind,
+        inputHash,
+        reversible,
+        dependsOn: [],
+      })),
+    };
   yield* Console.log(renderSetupPlan(plan, adapter.catalog.displayName));
   if (options.apply !== true) {
     yield* previewSetup(config, adapter, plan, dependencies);
@@ -178,12 +217,32 @@ export const runSetupWith = Effect.fn('setup.runWith')(function* <R>(
     return undefined;
   }
 
-  const receiptId = yield* setupReceiptIdFor(plan.projectRoot, plan.scope, plan.surfaceId);
-  const receiptPath = setupReceiptPath(path, config.agentContextHome, plan.surfaceId, receiptId);
-  return yield* withSetupMutationLock(
-    config.agentContextHome,
-    applySetupPlan(config, adapter, plan, receiptId, receiptPath, dependencies),
-  );
+  const apply = (lease?: DevSkillsMutationLease) =>
+    Effect.gen(function* () {
+      const receipt = yield* applySetupPlan(
+        config,
+        adapter,
+        plan,
+        receiptId,
+        receiptPath,
+        dependencies,
+        lease,
+        legacy ? previous?.raw : undefined,
+      );
+      if (legacy && identity && lease) {
+        yield* recordSetupWorkflowCheckpoint(
+          `${receiptPath}.workflows.json`,
+          identity,
+          {selector, key: receiptId},
+          options.noDevSkills === true,
+        );
+        yield* ensureSetupWorkflows(config, selector, receiptId, options.noDevSkills === true, lease);
+      }
+      return receipt;
+    });
+  return yield* dependencies.workflowSetup
+    ? withDevSkillsMutationLease(config, apply)
+    : withSetupMutationLock(config.agentContextHome, apply());
 });
 
 const runSetupUndo = Effect.fn('setup.undo')(function* <R>(
@@ -207,7 +266,7 @@ const runSetupUndo = Effect.fn('setup.undo')(function* <R>(
   yield* Console.log(`Threadnote setup undo plan for ${adapter.catalog.displayName}`);
   yield* Console.log(`Receipt: ${receiptPath}`);
   for (const [index, id] of undoIds.entries()) yield* Console.log(`${index + 1}. undo ${id}`);
-  if (undoIds.length === 0 && !needsFinalization) {
+  if (undoIds.length === 0 && !needsFinalization && !(apply && dependencies.workflowSetup)) {
     yield* Console.log('Nothing setup-created remains eligible for rollback.');
     return read.receipt;
   }
@@ -216,10 +275,21 @@ const runSetupUndo = Effect.fn('setup.undo')(function* <R>(
     yield* Console.log('\nUndo preview complete. Re-run with --undo --apply to execute this rollback.');
     return read.receipt;
   }
-  return yield* withSetupMutationLock(
-    config.agentContextHome,
-    applySetupUndo(config, adapter, projectRoot, scope, receiptId, receiptPath, dependencies),
-  );
+  const undo = (lease?: DevSkillsMutationLease) =>
+    Effect.gen(function* () {
+      if (lease)
+        yield* undoSetupWorkflows(
+          config,
+          `${receiptPath}.workflows.json`,
+          {selector: setupWorkflowSelector(adapter.catalog.id, scope, projectRoot), key: receiptId},
+          lease,
+          read.receipt.recovery.undoOperationIds.includes('dev-skills'),
+        );
+      return yield* applySetupUndo(config, adapter, projectRoot, scope, receiptId, receiptPath, dependencies);
+    });
+  return yield* dependencies.workflowSetup
+    ? withDevSkillsMutationLease(config, undo)
+    : withSetupMutationLock(config.agentContextHome, undo());
 });
 
 const applySetupUndo = Effect.fn('setup.applyUndo')(function* <R>(
@@ -288,6 +358,7 @@ function executeSetupUndoOperation<R>(
   operation: SetupReceiptOperationV1,
   dependencies: SetupOrchestratorDependencies<R>,
 ) {
+  if (operation.kind === 'dev-skills.ensure') return Effect.void;
   if (operation.kind === 'surface.ensure') return dependencies.removeSurface(config, adapter, projectRoot, scope);
   if (operation.kind === 'surface.hooks') return dependencies.removeHooks(config, adapter, operation);
   if (operation.kind === 'manifest.ensure') return removeSetupCreatedManifest(config, operation);
@@ -343,6 +414,12 @@ const previewSetup = Effect.fn('setup.preview')(function* <R>(
     else if (operation.kind === 'surface.ensure')
       yield* dependencies.ensureSurface(config, adapter, plan.projectRoot, false, plan.scope);
     else if (operation.kind === 'surface.hooks') yield* dependencies.ensureHooks(config, adapter, false);
+    else if (operation.kind === 'dev-skills.ensure')
+      yield* Console.log(
+        plan.workflows?.disabled
+          ? 'Would persist disabled workflow enrollment.'
+          : 'Would ensure bundled development workflows.',
+      );
     else if (operation.kind === 'graph.index') yield* dependencies.indexGraph(config, plan.projectRoot, false);
     else if (operation.kind === 'doctor.verify') yield* Console.log('Would require Threadnote doctor checks to pass.');
     else yield* Console.log('Would compile and source-verify a final Context Brief.');
@@ -356,6 +433,8 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
   receiptId: string,
   receiptPath: string,
   dependencies: SetupOrchestratorDependencies<R>,
+  lease?: DevSkillsMutationLease,
+  legacyRaw?: string,
 ) {
   const replanned = yield* createSetupPlan({
     adapter,
@@ -364,11 +443,14 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
     scope: plan.scope,
     task: SETUP_VERIFICATION_TASK,
     threadnoteVersion: plan.threadnoteVersion,
+    ...(plan.workflows ? {workflows: plan.workflows} : {}),
   });
-  if (replanned.planHash !== plan.planHash)
+  if (!legacyRaw && replanned.planHash !== plan.planHash)
     return yield* SetupOperationError.make({message: 'Setup inputs changed before the plan lock was acquired.'});
 
   const previous = yield* readSetupReceipt(receiptPath);
+  if (legacyRaw && previous?.raw !== legacyRaw)
+    return yield* SetupOperationError.make({message: 'Legacy setup receipt changed before composition.'});
   if (previous?.receipt.status === 'rolling-back')
     return yield* SetupOperationError.make({
       message: 'Setup rollback is incomplete; re-run setup with --undo --apply.',
@@ -417,18 +499,15 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
       const replayVerifiedBrief = operation.kind === 'context-brief.verify' && existing.status === 'verified';
       if (['applied', 'already-current', 'verified'].includes(existing.status) && !replayVerifiedBrief) continue;
       if (operation.reversible) {
-        const inspection = yield* dependencies.inspectReversible(
-          config,
-          adapter,
-          plan.projectRoot,
-          operation.kind,
-          plan.scope,
-        );
+        const inspection =
+          operation.kind === 'dev-skills.ensure'
+            ? {status: 'already-current' as const, ownership: 'preexisting' as const}
+            : yield* dependencies.inspectReversible(config, adapter, plan.projectRoot, operation.kind, plan.scope);
         receipt = yield* updatePreparedReceipt(receiptPath, receipt, operation, inspection);
         existing = receipt.operations.find(candidate => candidate.id === operation.id)!;
       }
       const attempt = existing.status === 'pending' ? existing.attempt : existing.attempt + 1;
-      const outcome = yield* executeSetupOperation(config, adapter, plan, operation, dependencies).pipe(
+      const outcome = yield* executeSetupOperation(config, adapter, plan, operation, dependencies, lease).pipe(
         Effect.filterOrFail(
           outcome =>
             (!operation.reversible || outcome.ownership !== undefined) &&
@@ -499,13 +578,38 @@ const applySetupPlan = Effect.fn('setup.applyPlan')(function* <R>(
   );
 });
 
+type WorkflowSetupServices =
+  ReturnType<typeof ensureSetupWorkflows> extends Effect.Effect<unknown, unknown, infer Services> ? Services : never;
+
 function executeSetupOperation<R>(
   config: RuntimeConfig,
   adapter: AgentAdapter,
   plan: SetupPlanV1,
   operation: SetupPlanOperationV1,
   dependencies: SetupOrchestratorDependencies<R>,
-) {
+  lease?: DevSkillsMutationLease,
+): Effect.Effect<SetupOperationOutcome, unknown, R | WorkflowSetupServices> {
+  if (operation.kind === 'dev-skills.ensure')
+    return Effect.gen(function* () {
+      if (!lease)
+        return yield* SetupOperationError.make({message: 'Workflow setup requires its live composition lease.'});
+      const key = yield* setupReceiptIdFor(plan.projectRoot, plan.scope, plan.surfaceId);
+      const selector = setupWorkflowSelector(plan.surfaceId, plan.scope, plan.projectRoot);
+      const identity = yield* workflowSetupIdentity(config, selector, key, plan.workflows?.disabled === true);
+      const path = yield* Path.Path;
+      yield* recordSetupWorkflowCheckpoint(
+        `${setupReceiptPath(path, config.agentContextHome, plan.surfaceId, key)}.workflows.json`,
+        identity,
+        {selector, key},
+        plan.workflows?.disabled === true,
+      );
+      const result = yield* ensureSetupWorkflows(config, selector, key, plan.workflows?.disabled === true, lease);
+      return {
+        status: result.state === 'installed' ? ('applied' as const) : ('already-current' as const),
+        ownership: result.createdConsumer ? ('setup-created' as const) : ('preexisting' as const),
+        subsystemReceiptRef: result.operationId,
+      };
+    });
   if (operation.kind === 'core.ensure') return dependencies.ensureCore(config, true);
   if (operation.kind === 'manifest.ensure') return dependencies.ensureManifest(config, plan.projectRoot, true);
   if (operation.kind === 'project.seed') return dependencies.seedProject(config, plan.projectRoot, true);
@@ -544,6 +648,10 @@ const revalidatedSetupOwnershipIds = Effect.fn('setup.revalidatedOwnership')(fun
       !operation.reversible
     )
       continue;
+    if (operation.kind === 'dev-skills.ensure') {
+      preserved.add(operation.id);
+      continue;
+    }
     const inspection = yield* dependencies.inspectReversible(
       config,
       adapter,

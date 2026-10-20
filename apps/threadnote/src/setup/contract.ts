@@ -14,6 +14,7 @@ export const SETUP_OPERATION_KINDS = [
   'project.seed',
   'surface.ensure',
   'surface.hooks',
+  'dev-skills.ensure',
   'graph.index',
   'doctor.verify',
   'context-brief.verify',
@@ -31,6 +32,7 @@ export interface SetupPlanOperationV1 {
 }
 
 export interface SetupPlanV1 {
+  readonly workflows?: {readonly bundleDigest: string; readonly disabled: boolean};
   readonly adapterContractHash: string;
   readonly manifestPath: string;
   readonly operations: readonly SetupPlanOperationV1[];

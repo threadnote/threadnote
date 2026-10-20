@@ -428,6 +428,8 @@ function actionProgressLabel(action: 'archive' | 'forget' | 'publish' | 'unpubli
 
 function tabTitle(name: PanelName): string {
   switch (name) {
+    case 'dev-skills':
+      return 'Development workflows';
     case 'integrations':
       return 'Integrations';
     case 'context':
@@ -455,6 +457,8 @@ function tabTitle(name: PanelName): string {
 
 function panelIcon(name: PanelName): React.ReactElement {
   switch (name) {
+    case 'dev-skills':
+      return <ListChecks aria-hidden="true" />;
     case 'integrations':
       return <Plug aria-hidden="true" />;
     case 'context':
@@ -482,6 +486,8 @@ function panelIcon(name: PanelName): React.ReactElement {
 
 function panelNavDescription(name: PanelName): string {
   switch (name) {
+    case 'dev-skills':
+      return 'Bundled development workflows';
     case 'integrations':
       return 'Connected apps and vaults';
     case 'context':
@@ -509,6 +515,8 @@ function panelNavDescription(name: PanelName): string {
 
 function panelDescription(name: PanelName): string {
   switch (name) {
+    case 'dev-skills':
+      return 'Manage development workflows for your agent host.';
     case 'integrations':
       return 'Connect the tools where your knowledge lives.';
     case 'context':

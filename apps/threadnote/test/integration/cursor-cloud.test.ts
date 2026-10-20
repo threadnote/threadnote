@@ -183,6 +183,16 @@ describe('Cursor Cloud integration', () => {
         profile: 'shared-read-write',
         status: 'ok',
       });
+      const started = await runCli(
+        ['cloud', 'cursor', 'start', '--home', fixture.home, '--cwd', process.cwd(), '--json'],
+        {HOME: fixture.userHome},
+      );
+      expect(JSON.parse(started.stdout)).toMatchObject({status: 'ok', profile: 'shared-read-write'});
+      if (process.platform === 'linux') {
+        const enrollment = await readFile(join(fixture.home, 'dev-skills', 'index.json'), 'utf8');
+        expect(enrollment).toContain('cursor-cloud-personal');
+        expect(enrollment).toContain('"enabled": true');
+      }
     } finally {
       await rm(fixture.root, {force: true, recursive: true});
     }
@@ -911,10 +921,24 @@ function bootstrap(fixture: CloudFixture, team = 'engineering', remote = fixture
 }
 
 function runCli(args: readonly string[], environment: Readonly<Record<string, string>> = {}) {
-  return execFilePromise(process.execPath, ['apps/threadnote/src/standalone.ts', ...args], {
-    cwd: process.cwd(),
-    env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
-  });
+  return execFilePromise(
+    process.execPath,
+    [
+      'apps/threadnote/src/standalone.ts',
+      ...args,
+      ...(process.platform !== 'linux' &&
+      args[0] === 'cloud' &&
+      args[1] === 'cursor' &&
+      args[2] === 'bootstrap' &&
+      !args.includes('--mode')
+        ? ['--no-dev-skills']
+        : []),
+    ],
+    {
+      cwd: process.cwd(),
+      env: {...process.env, ...gitIdentityEnvironment, ...environment, NO_COLOR: '1'},
+    },
+  );
 }
 
 async function withCloudMcp<T>(

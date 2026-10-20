@@ -1,4 +1,6 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
+import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
+import {devSkillsCommandMetadata, makeDevSkillsCommand} from './dev_skills_cli.js';
 import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
 import {makeCompactCommand, makeRecallFeedbackCommand, makeValueCommand} from './workflow_cli.js';
@@ -162,18 +164,15 @@ import {runKnowledgeDeltaGitProposalExport, runKnowledgeDeltaGitProposalMaterial
 import {makeShareMemoryCommands, publishFlags} from './share/memory_cli.js';
 import {runSharedTopicProposal} from '../git_proposal/topic_maintenance_commands.js';
 import {initializeAutoUpdatePolicy, runAutoUpdateWorker, runThreadnoteUpdateCommand} from '../release/auto_update.js';
-import {
-  cursorCloudRuntimeConfig,
-  runCursorCloudBootstrap,
-  runCursorCloudConfig,
-  runCursorCloudVerify,
-} from '../cursor/cloud.js';
+import {cursorCloudRuntimeConfig, runCursorCloudBootstrap, runCursorCloudConfig} from '../cursor/cloud.js';
 import {runCursorAttestationCommand} from '../cursor/cloud_attestation.js';
 import {
   makeCursorCloudAttestCommand,
   makeCursorCloudIdentityFlags,
   makeCursorCloudModeFlag,
   makeCursorCloudRemoteConfigFlags,
+  makeCursorCloudStartCommand,
+  makeCursorCloudVerifyCommand,
 } from './cursor_cloud_cli.js';
 import {
   makeCliInvocationInspector,
@@ -559,8 +558,6 @@ const localAi = Command.make('local-ai').pipe(
   ]),
 );
 
-const modelsSetup = makeModelsSetupCommand(withRuntimeEffect);
-
 const modelsList = Command.make('list', {}, () => withRuntimeEffect(config => runModelList(config))).pipe(
   Command.withDescription('List pinned local model candidates and installation state'),
 );
@@ -603,17 +600,10 @@ const modelsRuntime = Command.make('runtime', {}, () => withRuntimeEffect(() => 
   Command.withDescription('Verify the prebuilt-only node-llama-cpp runtime and show its backend'),
 );
 
+const modelCatalogCommands = [modelsList, modelsInstall, modelsVerify, modelsRemove, modelsSelect, modelsRuntime];
 const models = Command.make('models').pipe(
   Command.withDescription('Manage pinned local GGUF models'),
-  Command.withSubcommands([
-    modelsSetup,
-    modelsList,
-    modelsInstall,
-    modelsVerify,
-    modelsRemove,
-    modelsSelect,
-    modelsRuntime,
-  ]),
+  Command.withSubcommands([makeModelsSetupCommand(withRuntimeEffect), ...modelCatalogCommands]),
 );
 
 const indexRebuild = Command.make(
@@ -1232,6 +1222,7 @@ const mcpInstall = Command.make(
       Argument.withDescription('codex, claude, cursor, copilot, or omp'),
     ),
     apply: boolean('apply', 'Actually modify the selected agent config'),
+    noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
     ...makeComposerAttachFlags(),
     name: defaultString('name', 'MCP server name', THREADNOTE_MCP_NAME),
     project: optionalString('project', 'Write Cursor/Copilot/omp MCP into this repository config'),
@@ -1594,17 +1585,19 @@ const cursorCloudBootstrap = Command.make(
     ...cursorCloudIdentityFlags,
     cwd: optionalString('cwd', 'Absolute checkout path prepared for local graph inspection'),
     dryRun: boolean('dry-run', 'Preview configuration without changing or synchronizing the share'),
+    noDevSkills: boolean('no-dev-skills', 'Persist disabled development workflow enrollment'),
     endpoint: optionalString('endpoint', 'Managed remote Streamable HTTP MCP endpoint'),
     mode: cursorCloudMode,
     remote: optionalString('remote', 'Credential-free Git URL for the shared memory repository'),
     shareId: optionalString('share-id', 'Opaque managed remote memory share identifier'),
     sync: negatedBoolean('sync', 'Configure the share without synchronizing it immediately'),
   },
-  ({agentId, cwd, dryRun, endpoint, mode, remote, shareId, sync, team, user}) =>
+  ({agentId, cwd, dryRun, noDevSkills, endpoint, mode, remote, shareId, sync, team, user}) =>
     withRuntimeEffect(config =>
       runCursorCloudBootstrap(cursorCloudRuntime(config, agentId, user), {
         cwd,
         dryRun,
+        noDevSkills,
         endpoint,
         mode,
         remote,
@@ -1615,22 +1608,9 @@ const cursorCloudBootstrap = Command.make(
     ),
 ).pipe(Command.withDescription('Idempotently prepare one writable Personal Cursor Cloud memory share'));
 
-const cursorCloudVerify = Command.make(
-  'verify',
-  {
-    ...cursorCloudBaseIdentityFlags,
-    cwd: requiredString('cwd', 'Absolute Cursor Cloud checkout path used for local code-graph inspection'),
-    endpoint: optionalString('endpoint', 'Managed remote Streamable HTTP MCP endpoint'),
-    json: boolean('json', 'Print a machine-readable verification receipt'),
-    mode: cursorCloudMode,
-    shareId: optionalString('share-id', 'Opaque managed remote memory share identifier'),
-    teams: repeatedString('team', 'Personal Git memory share; repeat to verify one MCP share set'),
-  },
-  ({agentId, cwd, endpoint, json, mode, shareId, teams, user}) =>
-    withRuntimeEffect(config =>
-      runCursorCloudVerify(cursorCloudRuntime(config, agentId, user), {cwd, endpoint, json, mode, shareId, teams}),
-    ),
-).pipe(Command.withDescription('Verify the Cursor Cloud runtime, share, and local graph checkout'));
+const cursorCloudStart = makeCursorCloudStartCommand(withRuntimeEffect);
+
+const cursorCloudVerify = makeCursorCloudVerifyCommand(withRuntimeEffect);
 
 const cursorCloudAttest = makeCursorCloudAttestCommand({boolean, requiredString}, options =>
   withRuntimeEffect(() => runCursorAttestationCommand(options)),
@@ -1638,7 +1618,13 @@ const cursorCloudAttest = makeCursorCloudAttestCommand({boolean, requiredString}
 
 const cursorCloud = Command.make('cursor').pipe(
   Command.withDescription('Configure Threadnote for Cursor Cloud Agents'),
-  Command.withSubcommands([cursorCloudConfig, cursorCloudBootstrap, cursorCloudVerify, cursorCloudAttest]),
+  Command.withSubcommands([
+    cursorCloudConfig,
+    cursorCloudBootstrap,
+    cursorCloudStart,
+    cursorCloudVerify,
+    cursorCloudAttest,
+  ]),
 );
 
 const cloud = Command.make('cloud').pipe(
@@ -1973,6 +1959,8 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('archive', archive),
   registerTopLevelCommand('forget', forget),
   registerTopLevelCommand('cloud', cloud),
+  registerTopLevelCommand('workflow-memory', makeWorkflowMemoryCommand(withRuntimeEffect)),
+  registerTopLevelCommand('dev-skills', makeDevSkillsCommand(withRuntimeEffect), devSkillsCommandMetadata),
   registerTopLevelCommand('share', share, {
     productionLog: {
       subcommands: {
@@ -1993,6 +1981,10 @@ export const threadnoteCommand = root.pipe(
   Command.withSubcommands(topLevelCommandRegistrations.map(registration => registration.command)),
 );
 export function inspectCliInvocation(arguments_: readonly string[]): CliInvocationInspection {
-  return inspectRegisteredCliInvocation(arguments_);
+  const invocation = inspectRegisteredCliInvocation(arguments_);
+  // Lifecycle validation precedes all writes, including diagnostics on invalid targets.
+  return invocation.operation === 'dev-skills'
+    ? {...invocation, writeAnonymousTelemetry: false, writeProductionLog: false}
+    : invocation;
 }
 export {CliError, normalizeCliArguments, type CliInvocationInspection};

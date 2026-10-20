@@ -30,6 +30,12 @@ import {
 } from '../../share/index.js';
 import {currentPackageVersion, safeTimestamp, sha256} from '../../utils.js';
 import {errorMessage} from '@threadnote/platform/errors';
+import {
+  assertShareGitPublicationImages,
+  assertShareGitPublicationTarget,
+  publishShareGitChangeVerified,
+  type ShareGitCommitReceipt,
+} from '../../share/git.js';
 import {EffectMcpServerAdapter, McpInput} from '../../effect/ai/mcp.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -65,7 +71,12 @@ import {
   type DeferredCodeAnchorWriteRequest,
   withDeferredCodeAnchorMutationLocks,
 } from '../../memory/deferred/code_anchor.js';
-import {isMemoryRelocationUri, readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
+import {
+  discardMemoryRelocation,
+  isMemoryRelocationUri,
+  readMemoryWithRelocations,
+  recordMemoryRelocation,
+} from '@threadnote/memory/relocation';
 import {resolveLocalMemoryReplacementTarget} from '../../memory/replacement_target.js';
 import {topicMaintenanceReplacementError, type TopicMaintenanceManifestV1} from '@threadnote/memory/topic-maintenance';
 import {validateApprovedTopicMaintenanceSourceWrite} from '@threadnote/memory/topic-maintenance-acceptance';
@@ -489,15 +500,73 @@ export interface WriteDurableMemoryParams {
   readonly prepared?: PreparedPersonalMemoryWrite;
   readonly replaceUri?: string;
   readonly skipMemoryIdentityLock?: boolean;
+  readonly sharedPublication?: {
+    readonly prepared: PreparedSharedMemoryWrite;
+    readonly expectedRemote: string;
+    readonly expectedBranch: string;
+    /** Only a persisted write-ahead intent may enable desired-postimage recovery. */
+    readonly resume?: boolean;
+    readonly committed?: ShareGitCommitReceipt;
+    readonly onCommitted?: (receipt: ShareGitCommitReceipt) => Effect.Effect<void, unknown>;
+  };
 }
 
-interface PreparedPersonalMemoryWrite {
+export interface PreparedPersonalMemoryWrite {
   readonly expectedReplaceContent?: string;
   readonly finalMetadata: MemoryMetadata;
   readonly isInPlaceUpdate: boolean;
   readonly memory: string;
   readonly memoryUri: string;
 }
+
+export interface PreparedSharedMemoryWrite {
+  readonly expectedReplaceContent?: string;
+  readonly finalMetadata: MemoryMetadata;
+  readonly memory: string;
+  readonly memoryUri: string;
+}
+
+/** Strict native read: only an explicit not-found result represents absence. */
+const readSharedPublicationMemory = Effect.fn('mcpServer.readSharedPublicationMemory')(function* (
+  config: RuntimeConfig,
+  uri: string,
+) {
+  const store = yield* ResourceStore;
+  const content = yield* store
+    .read(resourceStoreLocation(config), uri)
+    .pipe(Effect.catchTag('ResourceNotFound', () => Effect.void));
+  if (content === undefined) return undefined;
+  const record = parseMemoryDocument(uri, content);
+  if (!record) return yield* McpServerOperationError.make({message: `Invalid shared memory: ${uri}`});
+  return record;
+});
+
+/** Prepare once, then persist this exact shared document in the workflow journal. */
+export const prepareCursorCloudSharedMemory = Effect.fn('mcpServer.prepareCursorCloudSharedMemory')(function* (
+  config: RuntimeConfig,
+  scope: CursorCloudShareScope,
+  params: WriteDurableMemoryParams,
+) {
+  const prepared = params.prepared ?? (yield* preparePersonalMemoryWrite(config, params));
+  const memoryUri = params.replaceUri ?? sharedUriFor(config, prepared.memoryUri, scope.team);
+  if (params.metadata.kind !== 'durable' || !resourceIdIsWithin(memoryUri, scope.root))
+    return yield* McpServerOperationError.make({message: 'Shared memory preparation is outside its durable share.'});
+  const existing = yield* readSharedPublicationMemory(config, memoryUri);
+  const finalMetadata: MemoryMetadata = {
+    ...prepared.finalMetadata,
+    createdAt: existing?.metadata.createdAt ?? existing?.metadata.timestamp ?? prepared.finalMetadata.createdAt,
+    memoryId: existing?.metadata.memoryId ?? prepared.finalMetadata.memoryId,
+    supersedes: undefined,
+    visibility: 'shared',
+  };
+  const memory = setMemoryVisibility(formatMemoryDocument('MEMORY', finalMetadata, params.bodyText), 'shared');
+  return {
+    expectedReplaceContent: params.expectedReplaceContent ?? prepared.expectedReplaceContent,
+    finalMetadata,
+    memory,
+    memoryUri,
+  } satisfies PreparedSharedMemoryWrite;
+});
 
 export function writeDurableMemory(config: RuntimeConfig, inputParams: WriteDurableMemoryParams) {
   return Effect.gen(function* () {
@@ -738,13 +807,26 @@ export function writeCursorCloudSharedMemory(
       if (params.deferredCodeAnchor) {
         return argumentError('Deferred code anchors are private-local and cannot write shared memory.');
       }
-      const prepared = yield* preparePersonalMemoryWrite(config, params);
-      const targetUri = params.replaceUri ?? sharedUriFor(config, prepared.memoryUri, scope.team);
+      const publication = params.sharedPublication;
+      const prepared = publication?.prepared ?? (yield* prepareCursorCloudSharedMemory(config, scope, params));
+      const targetUri = prepared.memoryUri;
       if (!resourceIdIsWithin(targetUri, scope.root)) {
         return argumentError(`Cursor Cloud durable memory writes must stay within ${scope.root}.`);
       }
       const resolved = yield* resolveTeam(config, scope.team);
       assertShareTeamWritable(resolved, 'write Cursor Cloud memories');
+      if (publication && resolved.config.remote !== publication.expectedRemote)
+        return argumentError('The configured shared publication remote changed.');
+      if (publication)
+        yield* assertShareGitPublicationTarget(
+          resolved.config.worktree,
+          publication.expectedRemote,
+          publication.expectedBranch,
+        );
+      if (params.operation === 'replace' && !params.replaceUri)
+        return argumentError('A replace write requires replaceUri.');
+      if (params.replaceUri && params.replaceUri !== targetUri)
+        return argumentError('Prepared shared memory destination does not match replaceUri.');
       const fs = yield* FileSystem.FileSystem;
       return yield* withMemoryUriLocks(
         fs,
@@ -756,13 +838,30 @@ export function writeCursorCloudSharedMemory(
         ],
         Effect.gen(function* () {
           for (const source of params.expectedSourceContent ?? []) {
-            const [currentSource] = yield* readMemoryRecordsByUri(config, [source.uri]);
+            const currentSource = yield* readSharedPublicationMemory(config, source.uri);
             if (!currentSource || currentSource.content !== source.content) {
               return argumentError('A relation target changed during the write; refresh memory and retry.');
             }
           }
           yield* verifyAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent ?? []);
-          const [existingTarget] = yield* readMemoryRecordsByUri(config, [targetUri]);
+          const existingTarget = yield* readSharedPublicationMemory(config, targetUri);
+          const resumed = publication?.resume === true && existingTarget?.content === prepared.memory;
+          if (params.operation === 'create' && existingTarget && !resumed)
+            return argumentError(`Shared memory ${targetUri} already exists.`);
+          if (
+            existingTarget &&
+            params.expectedReplaceMemoryId !== undefined &&
+            existingTarget.metadata.memoryId !== params.expectedReplaceMemoryId
+          )
+            return argumentError(`Shared memory ${targetUri} identity changed.`);
+          if (
+            !resumed &&
+            params.expectedReplaceContentHash !== undefined &&
+            (!existingTarget ||
+              sha256HexSync(canonicalMemoryDocumentContent(existingTarget.content)) !==
+                params.expectedReplaceContentHash)
+          )
+            return argumentError(`Shared memory ${targetUri} changed after preparation.`);
           if (params.replaceUri && !existingTarget) {
             return argumentError(`Shared memory ${targetUri} no longer exists.`);
           }
@@ -770,25 +869,16 @@ export function writeCursorCloudSharedMemory(
             const schemaRewriteError = memorySchemaRewriteError(existingTarget.content);
             if (schemaRewriteError) return argumentError(schemaRewriteError.message);
             if (
-              prepared.expectedReplaceContent !== undefined &&
-              existingTarget.content !== prepared.expectedReplaceContent
+              !resumed &&
+              (params.expectedReplaceContent ?? prepared.expectedReplaceContent) !== undefined &&
+              existingTarget.content !== (params.expectedReplaceContent ?? prepared.expectedReplaceContent)
             ) {
               return argumentError(
                 `Memory ${targetUri} changed while its replacement was being prepared. Retry the update.`,
               );
             }
           }
-          const metadata: MemoryMetadata = {
-            ...prepared.finalMetadata,
-            createdAt:
-              existingTarget?.metadata.createdAt ??
-              existingTarget?.metadata.timestamp ??
-              prepared.finalMetadata.createdAt,
-            memoryId: existingTarget?.metadata.memoryId ?? prepared.finalMetadata.memoryId,
-            supersedes: undefined,
-            visibility: 'shared',
-          };
-          const rawMemory = setMemoryVisibility(formatMemoryDocument('MEMORY', metadata, params.bodyText), 'shared');
+          const rawMemory = prepared.memory;
           const scrub = applyScrubber(rawMemory, {redact: false});
           if (scrub.blocker) {
             return argumentError(
@@ -798,32 +888,49 @@ export function writeCursorCloudSharedMemory(
           const projected = parseMemoryDocument(targetUri, scrub.cleaned);
           if (!projected || projected.metadata.topicMaintenanceError)
             return argumentError('Topic maintenance shared projection is malformed or stale.');
+          if (
+            projected.body !== params.bodyText.trim() ||
+            projected.metadata.memoryId !== prepared.finalMetadata.memoryId ||
+            projected.metadata.kind !== 'durable' ||
+            projected.metadata.visibility !== 'shared' ||
+            projected.metadata.project !== params.metadata.project ||
+            projected.metadata.topic !== params.metadata.topic ||
+            (existingTarget && projected.metadata.memoryId !== existingTarget.metadata.memoryId)
+          )
+            return argumentError('Prepared shared memory does not match its intended body or identity.');
+          const citationBlocker = memoryCodeCitationSharingBlocker(projected.metadata);
+          if (citationBlocker) return argumentError(memoryCodeCitationSharingBlockerMessage(citationBlocker));
+          if (publication && scrub.cleaned !== prepared.memory)
+            return argumentError('Prepared shared memory changed during canonical validation.');
           const maintenanceError = topicMaintenanceReplacementError(existingTarget, projected);
           if (maintenanceError) return argumentError(maintenanceError);
           const relativePath = resourceUriToWorktreeRelative(config, targetUri, resolved.name);
-          yield* assertSharedWorktreeFileReady(resolved.config.worktree, relativePath, existingTarget?.content);
+          if (publication)
+            yield* assertShareGitPublicationImages(
+              resolved.config.worktree,
+              relativePath,
+              publication.committed ? prepared.memory : prepared.expectedReplaceContent,
+              prepared.memory,
+              publication.resume === true,
+            );
+          else yield* assertSharedWorktreeFileReady(resolved.config.worktree, relativePath, existingTarget?.content);
           yield* ensureSharedDirectoryChain(config, 'threadnote-native', targetUri, false, {quiet: true});
-          yield* params.expectedSourceContent?.length
-            ? writeMemoryFileChecked(
-                config,
-                'threadnote-native',
-                targetUri,
-                scrub.cleaned,
-                existingTarget ? 'replace' : 'create',
-                false,
-                verifyAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent),
-                {quiet: true},
-              )
-            : writeMemoryFile(
-                config,
-                'threadnote-native',
-                targetUri,
-                scrub.cleaned,
-                existingTarget ? 'replace' : 'create',
-                false,
-                {quiet: true},
-              );
-          const [storedTarget] = yield* readMemoryRecordsByUri(config, [targetUri]);
+          if (!resumed) {
+            const store = yield* ResourceStore;
+            params.onCanonicalWriteStarted?.();
+            yield* store.writeChecked(
+              resourceStoreLocation(config),
+              targetUri,
+              scrub.cleaned,
+              {
+                mode: existingTarget ? 'replace' : 'create',
+                ...(existingTarget ? {expectedFingerprint: yield* store.fingerprint(existingTarget.content)} : {}),
+              },
+              verifyAuthoredMemoryRelationTargetIdentities(config, params.expectedSourceContent ?? []),
+            );
+            yield* discardMemoryRelocation(config, targetUri);
+          }
+          const storedTarget = yield* readSharedPublicationMemory(config, targetUri);
           if (
             !storedTarget ||
             canonicalMemoryDocumentContent(storedTarget.content) !== canonicalMemoryDocumentContent(scrub.cleaned)
@@ -831,11 +938,17 @@ export function writeCursorCloudSharedMemory(
             return argumentError(`Shared memory verification failed after writing ${targetUri}.`);
           }
           yield* writeSharedWorktreeFile(resolved.config.worktree, relativePath, scrub.cleaned);
-          const gitMessages = yield* publishShareGitChange(
-            resolved.config.worktree,
-            relativePath,
-            `cloud: ${existingTarget ? 'update' : 'store'} ${relativePath}`,
-          );
+          const commitMessage = `cloud: ${existingTarget ? 'update' : 'store'} ${relativePath}`;
+          const verified = publication
+            ? yield* publishShareGitChangeVerified(resolved.config.worktree, relativePath, commitMessage, {
+                ...publication,
+                content: prepared.memory,
+                expectedContent: prepared.expectedReplaceContent,
+              })
+            : undefined;
+          const gitMessages = verified
+            ? [`Verified shared Git publication: ${verified.commit}`]
+            : yield* publishShareGitChange(resolved.config.worktree, relativePath, commitMessage);
           const messages = [`${existingTarget ? 'Updated' : 'Stored'} shared memory: ${targetUri}`, ...gitMessages];
           return {
             _meta: {
@@ -849,7 +962,13 @@ export function writeCursorCloudSharedMemory(
               },
             },
             content: [{type: 'text' as const, text: messages.join('\n')}],
-            structuredContent: {memoryUri: targetUri, persistence: 'shared-git-pushed'},
+            structuredContent: {
+              memoryUri: targetUri,
+              persistence: 'shared-git-pushed',
+              ...(verified
+                ? {publication: verified, memoryId: projected.metadata.memoryId, content: prepared.memory}
+                : {}),
+            },
           } satisfies CallToolResult;
         }),
       );

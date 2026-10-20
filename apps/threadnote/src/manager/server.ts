@@ -109,6 +109,7 @@ import {runSeed, runSeedSkills} from '../seeding.js';
 import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
 import {handleManagerProcessRequest} from './processes.js';
+import {handleManagerDevSkillsRequest} from './dev_skills.js';
 import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
 import {handleManagerIntegrationRequest} from '../integrations/manager.js';
 import {handleManagerWorkspaceRequest} from './value.js';
@@ -566,7 +567,11 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
     writeJson(response, 401, {error: 'Unauthorized'});
     return;
   }
-  for (const handler of [handleManagerSharingConflictRequest, handleManagerIntegrationRequest]) {
+  for (const handler of [
+    handleManagerDevSkillsRequest,
+    handleManagerSharingConflictRequest,
+    handleManagerIntegrationRequest,
+  ]) {
     const result = yield* handler({body: request.body, config: context.config, method: request.method, url});
     if (result) return writeJson(response, result.status, result.body);
   }

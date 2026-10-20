@@ -3,6 +3,7 @@ import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Console, Effect, FileSystem, Path} from 'effect';
 import {sha256FileHex} from '@threadnote/platform/digest';
+import {hasUndeclaredPythonRuntimeReference} from './effect/self-contained-source.js';
 
 interface PackageManifest {
   readonly dependencies?: Readonly<Record<string, string>>;
@@ -67,12 +68,6 @@ const ALLOWED_LEGACY_IDENTIFIER_SOURCES = new Set([
   'apps/threadnote/src/migration/layout.ts',
   'packages/store/src/resource-id.ts',
 ]);
-const ALLOWED_PYTHON_LANGUAGE_METADATA_SOURCES = new Set([
-  'packages/graph/src/languages/catalog.generated.ts',
-  'packages/graph/src/languages/generic/definitions.ts',
-  'packages/graph/src/languages/tree_sitter_assets.ts',
-  'packages/manager/src/memory_editor_languages.ts',
-]);
 
 const checkSelfContained = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -100,12 +95,10 @@ const checkSelfContained = Effect.gen(function* () {
     if (/\b(?:openviking|pipx)\b/i.test(content) && !ALLOWED_LEGACY_RUNTIME_SOURCES.has(relativePath)) {
       failures.push(`legacy runtime token outside migration boundary: ${relativePath}`);
     }
-    if (
-      /\bpython\b/i.test(content) &&
-      relativePath !== 'apps/threadnote/src/migration/legacy-installations.ts' &&
-      !ALLOWED_PYTHON_LANGUAGE_METADATA_SOURCES.has(relativePath)
-    ) {
-      failures.push(`Python runtime token outside migration or language metadata: ${relativePath}`);
+    if (hasUndeclaredPythonRuntimeReference(relativePath, content)) {
+      failures.push(
+        `Python runtime token outside migration, language metadata or optional workflow prerequisites: ${relativePath}`,
+      );
     }
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {
       failures.push(`legacy identifier or storage path outside compatibility boundary: ${relativePath}`);

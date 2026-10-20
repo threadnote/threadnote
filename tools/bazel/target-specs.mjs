@@ -75,6 +75,11 @@ const recallQualityEntries = [
 const windowsSmokeEntries = [
   'apps/threadnote/test/dev-skills/bundle.test.ts',
   'apps/threadnote/test/dev-skills/python-workflows.test.ts',
+  'apps/threadnote/test/dev-skills/workflow-memory.test.ts',
+  'apps/threadnote/test/dev-skills/workflow-publication.test.ts',
+  'apps/threadnote/test/dev-skills/workflow-publication-coordinator.test.ts',
+  'apps/threadnote/test/dev-skills/workflow-citation-recovery.test.ts',
+  'apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts',
   'apps/threadnote/test/unit/windows-support.test.ts',
   'apps/threadnote/test/unit/command-shim.test.ts',
   'apps/threadnote/test/unit/effect-command.test.ts',
@@ -784,6 +789,9 @@ export const staticTargets = [
     lane: 'release_matrix',
     dependsOn: ['//:release_check', '//:threadnote_build'],
     inputs: [
+      ...filesBelow('apps/threadnote/test/dev-skills').filter(
+        path => !path.includes('/__pycache__/') && !/\.py[co]$/u.test(path),
+      ),
       ...filesBelow('apps/threadnote/src'),
       ...filesBelow('packages').filter(path => path.includes('/src/')),
       ...filesBelow('assets'),

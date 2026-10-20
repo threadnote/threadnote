@@ -389,6 +389,9 @@
       "dependencies": {
         "effect": "4.0.3",
       },
+      "devDependencies": {
+        "vitest": "5.0.3",
+      },
     },
     "packages/manager": {
       "name": "@threadnote/manager",

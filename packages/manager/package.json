@@ -17,6 +17,7 @@
     "./context/paging": "./src/context/paging.ts",
     "./context/view": "./src/context/view.tsx",
     "./detail-modal": "./src/detail_modal.tsx",
+    "./dev-skills/contracts": "./src/dev_skills/contracts.ts",
     "./dialog": "./src/dialog.tsx",
     "./graph": "./src/graph.tsx",
     "./graph/model": "./src/graph/model.ts",

@@ -19,13 +19,14 @@ export interface ReleaseNote {
 }
 
 interface ReleaseNotesOptions {
+  readonly allowCredentialCommand?: boolean;
   readonly includePrereleases?: boolean;
 }
 
 export const fetchThreadnoteReleaseNotes = Effect.fn('fetchThreadnoteReleaseNotes')(function* (
   options: ReleaseNotesOptions = {},
 ) {
-  const headers = yield* githubReleaseHeaders(GITHUB_RELEASES_URL);
+  const headers = yield* githubReleaseHeaders(GITHUB_RELEASES_URL, options);
   const response = yield* getJsonEffect(GITHUB_RELEASES_URL, {
     headers,
     timeoutMs: RELEASE_FETCH_TIMEOUT_MS,

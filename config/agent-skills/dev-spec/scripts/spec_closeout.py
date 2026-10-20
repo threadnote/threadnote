@@ -2,6 +2,7 @@
 """Preserve verified behavioral knowledge before retiring owned spec drafts."""
 import sys
 sys.dont_write_bytecode = True
+import workflow_transport as wt
 
 import copy
 import json
@@ -40,6 +41,7 @@ def check(spec, revision, evidence, client, verify_architecture=True):
 
 
 def complete(root_uri, evidence, path, client, recover_uri=None):
+    wt.block_cloud_finish(client)
     with locked(path):
         store = Store(path, client, {"root": root_uri, "evidenceHash": digest(evidence)})
         store.recover(recover_uri)

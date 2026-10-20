@@ -3,7 +3,10 @@ import {it as effectIt} from '@effect/vitest';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import fc from 'fast-check';
 import {Effect, FileSystem, Layer, Path} from 'effect';
-import {describe, expect, it} from 'vitest';
+import {TestClock} from 'effect/testing';
+import {describe, expect, it, vi} from 'vitest';
+import {DevSkillsUpdatePending} from '../../src/release/dev_skills_update.js';
+import {runUpdate} from '@threadnote/threadnote/release/index';
 import {
   autoUpdateWorkerTelemetryFields,
   initializeAutoUpdatePolicy,
@@ -12,6 +15,7 @@ import {
   nextAutoUpdateAttempt,
   parseAutoUpdateState,
   readAutoUpdateStatus,
+  runAutoUpdateWorker,
   setAutoUpdatePolicy,
   stateAfterFailedAutoUpdateSpawn,
   terminalAutoUpdateState,
@@ -21,9 +25,109 @@ import {
 } from '@threadnote/threadnote/release/auto_update';
 import type {UpdateOptions} from '@threadnote/threadnote/types';
 import {SystemInfo} from '@threadnote/platform/system';
+import {CommandExecutor} from '@threadnote/platform/command';
+import {HttpService} from '@threadnote/platform/http';
+import {CliOutput} from '../../src/effect/cli/output.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const AutoUpdateTestLayer = Layer.mergeAll(BunServices.layer, TestSystemInfoLayer);
+const WorkerBoundaryLayer = Layer.mergeAll(
+  AutoUpdateTestLayer,
+  CliOutput.layer.pipe(Layer.provide(TestSystemInfoLayer)),
+  Layer.succeed(
+    CommandExecutor,
+    CommandExecutor.of({
+      execute: () => Effect.die('mock updater owns commands'),
+      executeStreaming: () => Effect.die('mock updater owns commands'),
+    }),
+  ),
+  Layer.succeed(
+    HttpService,
+    HttpService.of({
+      downloadToFile: () => Effect.die('mock updater owns HTTP'),
+      getJson: () => Effect.die('mock updater owns HTTP'),
+      getStatus: () => Effect.die('mock updater owns HTTP'),
+      getText: () => Effect.die('mock updater owns HTTP'),
+    }),
+  ),
+);
+
+vi.mock('@threadnote/threadnote/release/index', () => ({runUpdate: vi.fn()}));
+vi.mock('@threadnote/workspace/runtime-version', async importOriginal => ({
+  ...(await importOriginal<typeof import('@threadnote/workspace/runtime-version')>()),
+  isStandaloneThreadnoteBuild: () => true,
+}));
+vi.mock('../../src/system_notification.js', () => ({sendSystemNotification: () => Effect.succeed('unavailable')}));
+
+effectIt.effect(
+  'records workflow attention after activation and clears it only after a successful same-version retry',
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseSystem = yield* SystemInfo;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-auto-workflow-'});
+      const installRoot = path.join(root, 'runtime');
+      const home = path.join(root, 'home');
+      const config = {
+        account: 'local' as const,
+        agentContextHome: home,
+        agentId: 'test',
+        manifestPath: path.join(home, 'manifest.yaml'),
+        user: 'test',
+      };
+      const system = SystemInfo.of({...baseSystem, environment: () => ({THREADNOTE_INSTALL_ROOT: installRoot})});
+      const activate = (version: string) =>
+        Effect.gen(function* () {
+          const releaseRoot = path.join(installRoot, 'versions', version);
+          yield* fs.makeDirectory(releaseRoot, {recursive: true});
+          yield* fs.writeFileString(path.join(releaseRoot, 'release.json'), JSON.stringify({version}));
+          yield* fs.writeFileString(
+            path.join(installRoot, 'active-release.json'),
+            JSON.stringify({version, releaseRoot}),
+          );
+        });
+      yield* activate('5.3.0');
+      yield* initializeAutoUpdatePolicy('automatic').pipe(Effect.provideService(SystemInfo, system));
+      vi.mocked(runUpdate).mockImplementation(() =>
+        activate('5.4.0').pipe(
+          Effect.andThen(Effect.fail(DevSkillsUpdatePending.make({message: 'fixture edited target'}))),
+        ),
+      );
+      const first = yield* runAutoUpdateWorker(config).pipe(Effect.provideService(SystemInfo, system));
+      expect(first).toEqual({result: 'updated', repairRequired: true});
+      let status = yield* readAutoUpdateStatus().pipe(Effect.provideService(SystemInfo, system));
+      expect(status.lastSuccess).toMatchObject({toVersion: '5.4.0', repairRequired: true, repairScope: 'workflows'});
+      expect(status.lastFailure).toBeDefined();
+      vi.mocked(runUpdate).mockReturnValue(Effect.fail(DevSkillsUpdatePending.make({message: 'still edited'})));
+      expect(
+        yield* runAutoUpdateWorker(config).pipe(Effect.provideService(SystemInfo, system), Effect.result),
+      ).toMatchObject({_tag: 'Failure'});
+      status = yield* readAutoUpdateStatus().pipe(Effect.provideService(SystemInfo, system));
+      expect(status.lastSuccess?.repairRequired).toBe(true);
+      vi.mocked(runUpdate).mockReturnValue(Effect.void);
+      expect(yield* runAutoUpdateWorker(config).pipe(Effect.provideService(SystemInfo, system))).toEqual({
+        result: 'current',
+      });
+      status = yield* readAutoUpdateStatus().pipe(Effect.provideService(SystemInfo, system));
+      expect(status.lastSuccess).toMatchObject({toVersion: '5.4.0', repairRequired: false});
+      expect(status.lastFailure).toBeUndefined();
+
+      // A successful workflow retry cannot claim an earlier core repair was fixed.
+      yield* fs.writeFileString(
+        path.join(installRoot, 'auto-update.json'),
+        JSON.stringify({
+          version: 1,
+          policy: 'automatic',
+          lastSuccess: {...status.lastSuccess, repairScope: undefined, repairRequired: true},
+        }),
+      );
+      yield* runAutoUpdateWorker(config).pipe(Effect.provideService(SystemInfo, system));
+      expect(
+        (yield* readAutoUpdateStatus().pipe(Effect.provideService(SystemInfo, system))).lastSuccess?.repairRequired,
+      ).toBe(true);
+    }).pipe(provideTestLayer(WorkerBoundaryLayer), TestClock.withLive),
+);
 
 describe('automatic update state', () => {
   it('treats JSON as an output modifier for explicit release options without weakening mode conflicts', () => {
@@ -151,6 +255,7 @@ describe('automatic update state', () => {
         fromVersion: version,
         notification,
         repairRequired: fc.boolean(),
+        repairScope: fc.option(fc.constant('workflows' as const), {nil: undefined}),
         toVersion: version,
       }),
       policy: fc.constantFrom('automatic' as const, 'notify' as const),
