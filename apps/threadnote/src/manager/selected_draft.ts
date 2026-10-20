@@ -26,7 +26,7 @@ import {
 } from '../effect/ai/consolidator.js';
 import {topicDraftModelSchema} from './topic_draft_schema.js';
 
-export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v15';
+export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v16';
 export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
 export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
 export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;

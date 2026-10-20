@@ -558,13 +558,18 @@ describe('single-decision compact topic wire', () => {
       expect(new TextEncoder().encode(prompt).byteLength).toBeLessThanOrEqual(80 * 1024);
       expect(prompt).toContain('sourceIndices');
       expect(prompt).not.toContain('entries:[{ordinal,beforeHash');
+      expect(prompt).toContain('identify its subject and scope before comparing');
+      expect(prompt).toContain('Unrelated policy uncertainty must not block supported factual changes.');
+      expect(prompt).toContain(
+        'If current implementation directly disables a required check, that IS an applicable conflict.',
+      );
       expect(
         JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).sources.map(
           (source: {sourceIndex: number}) => source.sourceIndex,
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v15');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v16');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
