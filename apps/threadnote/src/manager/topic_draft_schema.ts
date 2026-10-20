@@ -35,15 +35,24 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     }),
   );
   const operation = Schema.Union(operationVariants.length ? operationVariants : [Schema.String]);
-  const sourceIndex = currentHandles.length ? Schema.Literals(currentHandles.map((_, index) => index)) : Schema.Int;
-  const dispositionVariants = descriptive.map(paragraph =>
-    Schema.Struct({
-      ordinal: Schema.Literal(paragraph.ordinal),
-      disposition: Schema.Literals(['update', 'revalidate', 'unresolved']),
-      sourceIndices: Schema.Array(sourceIndex).check(Schema.isMaxLength(currentHandles.length)),
-      rationale: Schema.String.check(Schema.isMinLength(1)),
-    }),
-  );
+  const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
+  const dispositionVariants = descriptive.flatMap(paragraph => {
+    const allowed = new Set([...paragraph.citationIds, ...dependencies].map(id => `current:${id}`));
+    const indices = currentHandles.flatMap((handle, index) => (allowed.has(handle) ? [index] : []));
+    const sourceIndex = indices.length ? Schema.Literals(indices) : Schema.Int;
+    const dispositions = indices.length ? (['update', 'revalidate', 'unresolved'] as const) : (['unresolved'] as const);
+    return dispositions.map(disposition =>
+      Schema.Struct({
+        ordinal: Schema.Literal(paragraph.ordinal),
+        disposition: Schema.Literal(disposition),
+        sourceIndices: Schema.Array(sourceIndex).check(
+          Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
+          Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
+        ),
+        rationale: Schema.String.check(Schema.isMinLength(1)),
+      }),
+    );
+  });
   const disposition = Schema.Union(dispositionVariants.length ? dispositionVariants : [Schema.String]);
   const rationale = Schema.String.check(Schema.isMinLength(1));
   const common = {
@@ -67,7 +76,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
             outcome: Schema.Literal('propose-update'),
             ...common,
             operations: Schema.Array(operation).check(Schema.isMinLength(1)),
-            reviewedHandles: Schema.Array(currentHandle),
+            reviewedHandles: noReviewedHandles,
           }),
         ]
       : []),
@@ -136,12 +145,24 @@ function nativeDisjointUnions(value: unknown): unknown {
   if (typeof value !== 'object' || value === null) return value;
   const converted = Object.fromEntries(Object.entries(value).map(([key, item]) => [key, nativeDisjointUnions(item)]));
   if (!Array.isArray(converted.anyOf)) return converted;
-  const tags = converted.anyOf.map(variant => {
-    if (typeof variant !== 'object' || variant === null || Array.isArray(variant)) return undefined;
-    const entry = variant as Record<string, unknown>;
-    const properties = entry.properties as Record<string, {enum?: readonly unknown[]}> | undefined;
-    const values = entry.enum ?? properties?.ordinal?.enum ?? properties?.outcome?.enum;
-    return Array.isArray(values) && values.length === 1 ? JSON.stringify(values[0]) : undefined;
+  const entries = converted.anyOf.map(variant =>
+    typeof variant === 'object' && variant !== null && !Array.isArray(variant)
+      ? (variant as Record<string, unknown>)
+      : undefined,
+  );
+  const discriminatorKeys = ['ordinal', 'outcome', 'disposition'].filter(key =>
+    entries.every(entry => {
+      const properties = entry?.properties as Record<string, {enum?: readonly unknown[]}> | undefined;
+      return properties?.[key]?.enum?.length === 1;
+    }),
+  );
+  const tags = entries.map(entry => {
+    if (!entry) return undefined;
+    const properties = entry.properties as Record<string, {enum?: readonly unknown[]}>;
+    const values = entry.enum ?? discriminatorKeys.map(key => properties[key].enum![0]);
+    return Array.isArray(values) && values.length > 0 && (entry.enum === undefined || values.length === 1)
+      ? JSON.stringify(values)
+      : undefined;
   });
   if (tags.length > 1 && (tags.some(tag => tag === undefined) || new Set(tags).size !== tags.length))
     throw new Error('Topic generation schema contains overlapping alternatives.');

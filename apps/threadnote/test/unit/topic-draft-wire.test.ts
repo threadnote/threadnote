@@ -84,6 +84,7 @@ describe('v6 compact paragraph disposition wire', () => {
     expect(variant.properties).not.toHaveProperty('supportHandles');
     const wire = wireFor(basis);
     wire.decision.outcome = 'propose-update';
+    wire.decision.reviewedHandles = [];
     wire.decision.operations = [
       {
         ordinal: 0,
@@ -175,8 +176,12 @@ describe('v6 compact paragraph disposition wire', () => {
       additionalDependencies: [{kind: 'dependency' as const, citationId: ids[2]}],
     };
     const unrelated = wireFor(unrelatedBasis);
+    unrelated.decision.paragraphDispositions.entries[1].sourceIndices = [1];
     unrelated.decision.paragraphDispositions.entries[0].sourceIndices = [1];
+    expect(() => decodeTopicDraftModelOutput(unrelatedBasis, unrelated)).toThrow();
     expect(() => canonical(unrelatedBasis, unrelated)).toThrow();
+    unrelated.decision.paragraphDispositions.entries[0].sourceIndices = [2];
+    expect(() => canonical(unrelatedBasis, unrelated)).not.toThrow();
   });
 
   it('keeps unresolved decisions explicit and protected paragraphs absent', () => {
@@ -231,12 +236,51 @@ describe('v6 compact paragraph disposition wire', () => {
         ),
       ).toEqual([2, 1, 0]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v9');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v10');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
       Schema.decodeUnknownSync(topicDraftModelSchema(basisFor(64)), {onExcessProperty: 'error'})(wire),
     ).not.toThrow();
+  });
+
+  it('constrains disposition support cardinality before native generation', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 8}), sourceCount => {
+        const basis = basisFor(1, {sourceCount});
+        const schema = topicDraftModelSchema(basis);
+        const native = topicDraftNativeJsonSchema(schema);
+        const variants =
+          native.properties.decision.oneOf[0].properties.paragraphDispositions.properties.entries.items.oneOf;
+        expect(
+          variants.map(
+            (variant: {properties: {disposition: {enum: string[]}}}) => variant.properties.disposition.enum[0],
+          ),
+        ).toEqual(['update', 'revalidate', 'unresolved']);
+        for (const disposition of ['update', 'revalidate', 'unresolved'] as const) {
+          const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'revalidate');
+          wire.decision.paragraphDispositions.entries[0].disposition = disposition;
+          if (disposition === 'update') {
+            wire.decision.outcome = 'propose-update';
+            wire.decision.reviewedHandles = [];
+            wire.decision.operations = [
+              {
+                ordinal: 0,
+                beforeHash: basis.paragraphs[0].hash,
+                text: 'Updated claim.',
+                supportHandles: [topicDraftCurrentSourceHandles(basis)[0]],
+                rationale: 'Changed.',
+              },
+            ];
+          }
+          expect(() => canonical(basis, wire)).not.toThrow();
+          wire.decision.paragraphDispositions.entries[0].sourceIndices = disposition === 'unresolved' ? [0] : [];
+          expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+        }
+        expect(native.properties.decision.oneOf[0].properties.reviewedHandles.maxItems).toBe(0);
+      }),
+      {numRuns: 24},
+    );
   });
 
   it('binds candidate indices to their handles while presenting protected requirements first', () => {
