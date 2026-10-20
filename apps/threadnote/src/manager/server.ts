@@ -1,3 +1,4 @@
+import {startAutomaticModelSetupScheduler} from '../models/setup_lifecycle.js';
 import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
 import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {
@@ -365,6 +366,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope}),
           );
           yield* startManagerContextSchedulers(config, automaticCompactionStatus);
+          yield* startAutomaticModelSetupScheduler(config.agentContextHome);
           const actualPort =
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port

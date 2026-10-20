@@ -23,6 +23,7 @@ import {
   type ModelSetupState,
 } from '@threadnote/inference/models/setup';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {withStandaloneProcessLease} from '../process/standalone_lease.js';
 
 export const MODEL_SETUP_WORKER_ARGUMENT = 'model-setup-worker';
@@ -205,13 +206,17 @@ export function modelSetupWorkerEnvironment(environment: NodeJS.ProcessEnv, home
   };
 }
 
-function automaticRuntimeAllowed(system: SystemInfoShape): boolean {
+export function automaticModelSetupRuntimeAllowed(system: SystemInfoShape, version: string): boolean {
   const environment = system.environment();
   return (
+    /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version) &&
+    !/[.-]local\.g/.test(version) &&
+    environment.THREADNOTE_MODEL_SETUP !== 'off' &&
     !environment.CI &&
     !environment.VITEST &&
     environment.NODE_ENV !== 'test' &&
     environment.THREADNOTE_TOOLSET !== 'cloud' &&
+    !environment.THREADNOTE_MCP_TOOLSET?.startsWith('cursor-cloud') &&
     !['bun', 'bun.exe', 'node', 'node.exe'].includes(
       system.executablePath.replaceAll('\\', '/').split('/').at(-1)?.toLowerCase() ?? '',
     )
@@ -311,7 +316,10 @@ export const requestModelSetup = Effect.fn('models.setup.request')(function* (
   options: {readonly retry?: boolean; readonly automatic?: boolean; readonly expectedEpoch?: number} = {},
 ) {
   const system = yield* SystemInfo;
-  if (system.environment().THREADNOTE_MODEL_SETUP === 'off' || (options.automatic && !automaticRuntimeAllowed(system)))
+  if (
+    system.environment().THREADNOTE_MODEL_SETUP === 'off' ||
+    (options.automatic && !automaticModelSetupRuntimeAllowed(system, yield* getThreadnoteVersion()))
+  )
     return yield* readModelSetupStatus(home);
   const fs = yield* FileSystem.FileSystem;
   const catalog = yield* LocalModelCatalog;
