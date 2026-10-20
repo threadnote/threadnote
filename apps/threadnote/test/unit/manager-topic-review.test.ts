@@ -12,6 +12,9 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {TopicReviewError} from '../../src/memory/context/maintenance_review.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import {handleManagerAttentionRequest} from '../../src/manager/attention.js';
+import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {canonicalMemoryDocumentContent, formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 
 const mocks = vi.hoisted(() => ({
   list: vi.fn(),
@@ -191,6 +194,83 @@ beforeEach(() => {
 });
 
 describe('Manager topic review adapter', () => {
+  effectIt.effect('keeps a spaced project name through read, generation, preview and approval', () =>
+    Effect.gen(function* () {
+      const project = 'Example Project';
+      const selected = {...review, project};
+      mocks.list.mockReturnValue(Effect.succeed([selected]));
+      for (const mock of [mocks.load, mocks.read, mocks.draft, mocks.preview, mocks.apply])
+        mock.mockReturnValue(Effect.succeed(selected));
+      mocks.records.mockReturnValue(Effect.succeed([{uri: targetUri, metadata: {project, memoryId: 'tn_topic'}}]));
+      mocks.status.mockReturnValue(
+        Effect.succeed({
+          cases: [
+            {
+              caseId,
+              project,
+              family: 'topic-maintenance',
+              slot: 'declared-support',
+              subjectUri: targetUri,
+              evidenceRevision: hash,
+            },
+          ],
+        }),
+      );
+      mocks.packet.mockReturnValue(
+        Effect.succeed({caseId, project, memoryUri: targetUri, topicEvidence: {outcome: 'ready'}}),
+      );
+      expect(
+        (yield* call('GET', `/api/attention/topic-review?project=${encodeURIComponent(project)}&reviewId=${reviewId}`))
+          ?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'generate',
+          project,
+          caseId,
+          backend: 'local-ai',
+          modelId: 'synthetic-model',
+        }))?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'preview',
+          project,
+          reviewId,
+          revision: 3,
+        }))?.status,
+      ).toBe(200);
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'apply',
+          project,
+          reviewId,
+          revision: 3,
+          approvalDigest: hash,
+          approved: true,
+        }))?.status,
+      ).toBe(200);
+      expect(mocks.root).toHaveBeenCalledWith(config, project);
+      expect(mocks.apply).toHaveBeenCalledWith(config, {
+        reviewId,
+        revision: 3,
+        sourceCwd: '/selected/alpha',
+        approvalDigest: hash,
+        approved: true,
+      });
+      expect(
+        (yield* call('POST', '/api/attention/topic-review', {
+          action: 'apply',
+          project: 'Example-Project',
+          reviewId,
+          revision: 3,
+          approvalDigest: hash,
+          approved: true,
+        }))?.status,
+      ).toBe(404);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   const importedReview = () =>
     ({
       ...review,
@@ -830,6 +910,136 @@ describe('Manager topic review adapter', () => {
 });
 
 describe('topic projection invariant', () => {
+  effectIt.effect(
+    'projects only old accepted slots whose reviewed current citation is active after the written approval',
+    () =>
+      Effect.sync(() => {
+        const receiptUri = 'threadnote://user/tester/memories/durable/projects/alpha/topic.md';
+        const citation = (value: string) =>
+          createMemoryCodeCitation({
+            version: 1,
+            evidenceRetention: 'capsule-retained',
+            repositoryId: '1'.repeat(64),
+            repositoryIdentityKind: 'local',
+            sourceCommit: '2'.repeat(40),
+            sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
+            sourceDirty: false,
+            extractorSet: 'test',
+            path: 'source.ts',
+            fileContentHash: {algorithm: 'sha256', value: value.repeat(64)},
+            target: {kind: 'file'},
+          });
+        const origin = citation('4');
+        const previous = citation('5');
+        const current = citation('6');
+        const base = parseMemoryDocument(
+          receiptUri,
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              kind: 'durable',
+              status: 'active',
+              project: 'alpha',
+              memoryId: 'tn_projection',
+              schemaVersion: 9,
+              sourceAgentClient: 'test',
+              timestamp: '2026-10-01T00:00:00.000Z',
+              codeCitations: [origin],
+            },
+            'Accepted body',
+          ),
+        )!;
+        const enrolled = parseMemoryDocument(
+          receiptUri,
+          proposeTopicMaintenanceEnrollment(base, {
+            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [origin.id]}],
+          }).content,
+        )!;
+        const manifest = enrolled.metadata.topicMaintenance;
+        if (manifest?.version !== 1) throw new Error('Expected a code enrollment fixture.');
+        const content = (acceptedCitationId: string) =>
+          formatMemoryDocument(
+            'MEMORY',
+            {
+              ...enrolled.metadata,
+              codeCitations: [origin, previous, current],
+              topicMaintenance: {
+                ...manifest,
+                version: 2,
+                originCitationIds: [origin.id],
+                acceptedSources: [{citationId: origin.id, acceptedCitationId}],
+              },
+            },
+            enrolled.body,
+          );
+        const beforeContent = content(previous.id);
+        const afterContent = content(current.id);
+        const contentHash = (value: string) => sha256HexSync(canonicalMemoryDocumentContent(value));
+        const fixture = {
+          ...review,
+          candidates: [{...review.candidates[0], state: 'applied'}],
+          maintenance: {
+            ...review.maintenance!,
+            basis: {
+              ...review.maintenance!.basis,
+              targetUri: receiptUri,
+              targetHash: contentHash(beforeContent),
+              handles: [{id: `current:${origin.id}`, citationId: origin.id, variant: 'current'}],
+            },
+            reviewEvidence: [
+              {
+                handleId: `current:${origin.id}`,
+                citation: current,
+                source: {path: current.path},
+                provenance: 'current-verified',
+                supportsCitation: true,
+                truncated: false,
+              },
+            ],
+          },
+          maintenanceApproval: {
+            ...review.maintenanceApproval!,
+            stage: 'written',
+            preview: {
+              ...review.maintenanceApproval!.preview,
+              targetUri: receiptUri,
+              beforeContent,
+              beforeContentHash: contentHash(beforeContent),
+              content: afterContent,
+              contentHash: contentHash(afterContent),
+            },
+          },
+        } as unknown as CandidateReview;
+        const value = projectManagerTopicReview(fixture)!;
+        expect(value.resolvedCitationIds).toEqual([previous.id]);
+        expect(JSON.stringify(value)).not.toContain(beforeContent);
+        const retainedOnly = {
+          ...fixture,
+          maintenanceApproval: {
+            ...fixture.maintenanceApproval!,
+            preview: {
+              ...fixture.maintenanceApproval!.preview,
+              content: beforeContent,
+              contentHash: contentHash(beforeContent),
+            },
+          },
+        } as CandidateReview;
+        expect(projectManagerTopicReview(retainedOnly)!.resolvedCitationIds).toEqual([]);
+        const malformed = {
+          ...fixture,
+          maintenanceApproval: {
+            ...fixture.maintenanceApproval!,
+            preview: {...fixture.maintenanceApproval!.preview, beforeContent: 'unavailable'},
+          },
+        } as CandidateReview;
+        expect(projectManagerTopicReview(malformed)!.resolvedCitationIds).toBeUndefined();
+        const unwritten = {
+          ...fixture,
+          candidates: [{...fixture.candidates[0], state: 'applying' as const}],
+        } as CandidateReview;
+        expect(projectManagerTopicReview(unwritten)!.resolvedCitationIds).toBeUndefined();
+      }),
+  );
   effectIt.effect('projects the persisted approved proposal while preserving the generated draft', () =>
     Effect.sync(() => {
       const approval = review.maintenanceApproval;

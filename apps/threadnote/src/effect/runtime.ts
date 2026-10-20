@@ -131,6 +131,11 @@ const ApplicationServicesLayer = Layer.mergeAll(
   systemLayer,
 );
 
+export const ModelSetupWorkerLayer = Layer.mergeAll(localModelCatalogLayer, localModelStoreLayer, systemLayer).pipe(
+  Layer.provideMerge(BunServices.layer),
+  Layer.provideMerge(BunHttpClient.layer),
+);
+
 export const ApplicationLayer = ApplicationServicesLayer.pipe(
   Layer.provideMerge(codeGraphRuntimeAdapters),
   Layer.provideMerge(BunServices.layer),

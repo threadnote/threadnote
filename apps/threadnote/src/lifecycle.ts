@@ -1,3 +1,4 @@
+import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
 import {Console, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {
@@ -18,7 +19,7 @@ import {startProgress, withProgressLine} from './cli_ui.js';
 import {commandShimCheck, installCommandShim, removeCommandShim} from './command-shim.js';
 import {sha256FileHex} from '@threadnote/platform/digest';
 import {hasManagedClaudeHooks, runHooksInstall} from './hooks.js';
-import {removeOwnedDevSkills, withDevSkillsMutationLease} from './dev_skills/index.js';
+import {removeOwnedDevSkills, withDevSkillsRemovalLease} from './dev_skills/index.js';
 import type {DevSkillsMutationLease} from './dev_skills/index.js';
 import {hasManagedOmpHooks} from './omp_hooks.js';
 import {localAiDoctorCheck} from './effect/local-ai.js';
@@ -756,7 +757,7 @@ export const runUninstall = Effect.fn('lifecycle.uninstall')(function* (
   const dryRun = options.dryRun === true;
   yield* dryRun
     ? runUninstallInTransaction(config, options)
-    : withDevSkillsMutationLease(config, lease =>
+    : withDevSkillsRemovalLease(config, lease =>
         withAgentIntegrationLock(config, runUninstallInTransaction(config, options, lease)),
       );
 });
@@ -772,6 +773,7 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
       message: 'Use either --erase-memories or --preserve-memories, not both.',
     });
   }
+  if (!dryRun) yield* stopModelSetup(config.agentContextHome);
   const registry = yield* readAgentIntegrationRegistry(config);
   const registeredClients = registeredAgentClients(registry);
   if (

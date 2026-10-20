@@ -5,7 +5,7 @@ import type {DevSkillsAction, DevSkillsPlan, DevSkillsResult, DevSkillsSelector,
 import {applyCapturedDevSkills} from './mutation.js';
 import {loadDevSkillsBundle} from './manifest.js';
 import {planMutation} from './plan.js';
-import {enrollmentContext, readReceipt} from './registry.js';
+import {enrollmentContext, hasDevSkillsHomeState, readReceipt} from './registry.js';
 import {withDevSkillsMutationLease, type DevSkillsMutationLease} from './lease.js';
 import {devSkillsReadiness} from './readiness.js';
 import {readDevSkillsRefresh as readRefresh} from './refresh_state.js';
@@ -13,6 +13,7 @@ import {installedSummary} from './capabilities.js';
 export {readDevSkillsRuntimeCapabilities} from './capabilities.js';
 
 export {withDevSkillsMutationLease};
+export {withDevSkillsRemovalLease} from './lease.js';
 export type {DevSkillsMutationLease};
 export * from './contract.js';
 export const listDevSkills = Effect.fn('devSkills.list')(function* (_config: RuntimeConfig) {
@@ -107,6 +108,7 @@ export const removeOwnedDevSkills = Effect.fn('devSkills.removeOwned')(function*
   config: RuntimeConfig,
   options: {readonly dryRun: boolean; readonly lease?: DevSkillsMutationLease},
 ) {
+  if (!(yield* hasDevSkillsHomeState(config))) return [];
   const context = yield* enrollmentContext(config);
   const entries = Object.values(context.homeIndex.targets)
     .filter(entry => entry.state === 'enrolled')

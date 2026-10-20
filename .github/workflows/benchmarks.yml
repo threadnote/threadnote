@@ -116,6 +116,14 @@ jobs:
       - name: Gate production lexical and exact-search behavior
         run: bun run eval:recall
 
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: recall-production-pr-10000-Linux-${{ runner.arch }}
+          path: artifacts/recall-production-10000.json
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: Gate seeded one-hop memory retrieval and currentness
         run: bun run eval:memory-connections-retrieval
 

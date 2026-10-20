@@ -1,10 +1,10 @@
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withSetupMutationLock} from '../setup/lock.js';
 import {assertSafePath, fail} from './files.js';
 import {recoverEnablement} from './enablement.js';
-import {enrollmentContext, physicalDirectory} from './registry.js';
+import {enrollmentContext, hasDevSkillsHomeState, physicalDirectory} from './registry.js';
 
 const identity: unique symbol = Symbol('DevSkillsMutationLease');
 const coordinatorIdentity: unique symbol = Symbol('DevSkillsRuntimeCoordinator');
@@ -85,6 +85,26 @@ export function withDevSkillsMutationLease<A, E, R>(
   return Effect.gen(function* () {
     const context = yield* enrollmentContext(config);
     return yield* withRuntimeCoordinator(context.root, coordinator => withHomeLease(config, coordinator, body));
+  });
+}
+export function withDevSkillsRemovalLease<A, E, R>(
+  config: RuntimeConfig,
+  body: (lease?: DevSkillsMutationLease) => Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    if (!(yield* hasDevSkillsHomeState(config))) {
+      const legacy = yield* withSetupMutationLock(
+        config.agentContextHome,
+        Effect.gen(function* () {
+          if (yield* hasDevSkillsHomeState(config)) return Option.none<A>();
+          return Option.some(yield* body());
+        }),
+      );
+      if (Option.isSome(legacy)) return legacy.value;
+      // State appeared while waiting. Release the home lock before acquiring
+      // the normal coordinator -> home lease; never invert that order.
+    }
+    return yield* withDevSkillsMutationLease(config, body);
   });
 }
 export const validateLease = Effect.fn('devSkills.validateLease')(function* (

@@ -1,3 +1,5 @@
+import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {stopModelSetup} from './setup.js';
 import {Console, Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -77,6 +79,7 @@ export const runModelRemove = Effect.fn('models.command.remove')(function* (
     yield* Console.log(`Would remove ${store.path(config.agentContextHome, manifest)}.`);
     return;
   }
+  if (manifest.id === CORE_GENERATION_MODEL_ID) yield* stopModelSetup(config.agentContextHome);
   const removed = yield* store.remove(config.agentContextHome, manifest);
   yield* Console.log(removed ? `Removed model ${manifest.id}.` : `Model ${manifest.id} is not installed.`);
 });
