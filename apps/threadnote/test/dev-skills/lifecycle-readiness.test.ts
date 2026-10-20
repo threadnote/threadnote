@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -45,17 +45,29 @@ describe('installed workflow readiness', () => {
         );
         const bin = f.path.join(f.root, 'bin');
         yield* f.fs.makeDirectory(bin);
+        const executableFiles = new Set<string>();
         for (const command of ['threadnote', 'git', 'rg', 'gh', 'python3']) {
           const file = f.path.join(bin, command);
           yield* f.fs.writeFileString(file, 'fixture executable');
           yield* f.fs.chmod(file, 0o700);
+          executableFiles.add(file);
         }
         f.environment.PATH = bin;
+        // This is a Linux cloud probe fixture on a native filesystem, not native cloud acceptance.
+        // Windows chmod cannot model POSIX execute bits, so supply them only for these fake commands.
+        const probeFs = FileSystem.FileSystem.of({
+          ...f.fs,
+          stat: file =>
+            f.fs
+              .stat(file)
+              .pipe(Effect.map(info => (executableFiles.has(file) ? {...info, mode: info.mode | 0o111} : info))),
+        });
         const executor = yield* CommandExecutor;
         const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
           f.run(
             effect.pipe(
               Effect.provideService(SystemInfo, {...f.system, platform: 'linux'}),
+              Effect.provideService(FileSystem.FileSystem, probeFs),
               Effect.provideService(CommandExecutor, {
                 ...executor,
                 execute: () => Effect.succeed({exitCode: 0, stdout: '', stderr: ''}),

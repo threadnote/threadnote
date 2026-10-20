@@ -207,6 +207,8 @@ describe('exact-release enrolled workflow refresh', () => {
           );
         }
       }).pipe(provide),
+    // Two complete convergence scenarios; single Windows refresh cases took 19–25s in CI.
+    process.platform === 'win32' ? 120_000 : undefined,
   );
   effectIt.effect.prop(
     'late disabled or removed enrollment does not block the prepared enabled membership',
@@ -232,7 +234,8 @@ describe('exact-release enrolled workflow refresh', () => {
         expect(yield* snapshot(late.target.skillRoot)).toEqual(before);
         expect((yield* release.run(statusDevSkills(f.config, lateSelector))).targets[0].enabled).toBe(false);
       }).pipe(provide),
-    {arbitrary: {runs: 4}},
+    // Four real-filesystem refresh runs retain the same property coverage on slower Windows runners.
+    {arbitrary: {runs: 4}, ...(process.platform === 'win32' ? {timeout: 120_000} : {})},
   );
   effectIt.effect(
     'recovers a committed write with lost response and refuses stale child execution without rewriting progress',

@@ -83,24 +83,30 @@ export const publicationDigest = (intent: PublicationIntent) => sha256HexSync(st
 export function assertPublicationText(text: string, binding: WorkflowBinding, sharedRoot: string): void {
   let decoded = text;
   for (let attempt = 0; attempt < 8; attempt++) {
-    const next = decoded
-      .replace(/\\u([0-9a-f]{4})/giu, (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
-      .replace(/\\x([0-9a-f]{2})/giu, (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
-      .replace(/\\([\\/])/gu, '$1')
-      .replace(/(?:%[0-9a-f]{2})+/giu, value => {
-        try {
-          return decodeURIComponent(value);
-        } catch {
-          return value.replace(/%([0-9a-f]{2})/giu, (_, code: string) =>
-            String.fromCharCode(Number.parseInt(code, 16)),
-          );
-        }
-      })
-      .replace(/&#(?:x([0-9a-f]+)|(\d+));/giu, (_, hex: string, decimal: string) => {
-        const value = Number.parseInt(hex ?? decimal, hex ? 16 : 10);
-        return value <= 0x10ffff ? String.fromCodePoint(value) : '';
-      })
-      .replace(/&(colon|sol|bsol);/giu, (_, name: string) => ({colon: ':', sol: '/', bsol: '\\'})[name.toLowerCase()]!);
+    const unescaped = decoded.replace(/\\([\\/])/gu, '$1');
+    const next =
+      unescaped !== decoded
+        ? unescaped
+        : decoded
+            .replace(/\\u([0-9a-f]{4})/giu, (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
+            .replace(/\\x([0-9a-f]{2})/giu, (_, code: string) => String.fromCharCode(Number.parseInt(code, 16)))
+            .replace(/(?:%[0-9a-f]{2})+/giu, value => {
+              try {
+                return decodeURIComponent(value);
+              } catch {
+                return value.replace(/%([0-9a-f]{2})/giu, (_, code: string) =>
+                  String.fromCharCode(Number.parseInt(code, 16)),
+                );
+              }
+            })
+            .replace(/&#(?:x([0-9a-f]+)|(\d+));/giu, (_, hex: string, decimal: string) => {
+              const value = Number.parseInt(hex ?? decimal, hex ? 16 : 10);
+              return value <= 0x10ffff ? String.fromCodePoint(value) : '';
+            })
+            .replace(
+              /&(colon|sol|bsol);/giu,
+              (_, name: string) => ({colon: ':', sol: '/', bsol: '\\'})[name.toLowerCase()]!,
+            );
     if (next === decoded) break;
     decoded = next;
     if (attempt === 7) throw workflowError('private-publication-content', 'Publication encoding is too deeply nested.');

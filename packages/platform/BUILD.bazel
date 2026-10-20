@@ -927,6 +927,7 @@ bun_test(
         "//apps/threadnote:src/manager/value.ts",
         "//apps/threadnote:src/manager/workflow.ts",
         "//apps/threadnote:src/manager/worksets.ts",
+        "//apps/threadnote:src/mcp/adapter-command.ts",
         "//apps/threadnote:src/mcp/broker.ts",
         "//apps/threadnote:src/mcp/code_graph_agent_provenance.ts",
         "//apps/threadnote:src/mcp/code_graph_projection.ts",

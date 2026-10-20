@@ -34,7 +34,7 @@ fcEffectProp(
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-property-'});
+        const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-property-'}));
         const user = path.join(root, 'user');
         const home = path.join(user, '.threadnote');
         const bin = path.join(root, 'bin');
@@ -74,7 +74,11 @@ fcEffectProp(
         yield* fs.makeDirectory(path.dirname(configPath), {recursive: true});
         yield* fs.writeFileString(configPath, original);
 
-        yield* runMcpInstall(testRuntime, 'cursor', {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem));
+        // This property isolates MCP JSON preservation; workflow enrollment has
+        // its own default/opt-out lifecycle properties in setup-composition.
+        yield* runMcpInstall(testRuntime, 'cursor', {apply: true, noDevSkills: true}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
 
         expect(yield* fs.readFileString(configPath)).toBe(original);
       }),
@@ -97,7 +101,9 @@ fcEffectProp(
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const baseSystem = yield* SystemInfo;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-property-'});
+        const root = yield* fs.realPath(
+          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-property-'}),
+        );
         const user = path.join(root, 'user');
         const home = path.join(user, '.threadnote');
         const bin = path.join(root, 'bin');
@@ -133,7 +139,9 @@ fcEffectProp(
         yield* fs.makeDirectory(path.dirname(configPath), {recursive: true});
         yield* fs.writeFileString(configPath, original);
 
-        yield* runMcpInstall(testRuntime, 'omp', {apply: true}).pipe(Effect.provideService(SystemInfo, testSystem));
+        yield* runMcpInstall(testRuntime, 'omp', {apply: true, noDevSkills: true}).pipe(
+          Effect.provideService(SystemInfo, testSystem),
+        );
 
         expect(yield* fs.readFileString(configPath)).toBe(original);
       }),

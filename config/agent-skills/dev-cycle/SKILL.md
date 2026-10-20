@@ -5,6 +5,8 @@ description: Implement, review, validate, and learn from development work; deliv
 
 # Dev Cycle
 
+Use the installed dev-spec→ dev-plan → dev-cycle workflows for behavioral specification, source-grounded planning and reviewed implementation; watch-pr is their included PR support workflow. Installation does not start a development task. Standard setup installs them by default; --no-dev-skills records opt-out, and maintenance respects disabled/removed enrollment. Use dev-skills status for exact readiness and explicit dev-skills install to re-enable.
+
 Resource directory: {{THREADNOTE_SKILL_ROOT}}
 
 Bundle directory: {{THREADNOTE_BUNDLE_ROOT}}

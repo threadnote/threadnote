@@ -139,6 +139,7 @@ bun_test(
         "//apps/threadnote:src/manager/topic_draft_schema.ts",
         "//apps/threadnote:src/manager/topic_expansion.ts",
         "//apps/threadnote:src/manager/topic_review.ts",
+        "//apps/threadnote:src/mcp/adapter-command.ts",
         "//apps/threadnote:src/mcp/code_graph_agent_provenance.ts",
         "//apps/threadnote:src/mcp/code_graph_projection.ts",
         "//apps/threadnote:src/mcp/codex_org_attach.ts",

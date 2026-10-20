@@ -15,7 +15,8 @@ import {
   type AgentIntegrationMcpReceipt,
   withAgentIntegrationLock,
 } from '../agent_integration/registry.js';
-import {commandLauncherPath} from '../command-shim.js';
+import {mcpAdapterCommand} from './adapter-command.js';
+export {mcpAdapterCommand} from './adapter-command.js';
 import {THREADNOTE_MCP_CLIENT_ENV, THREADNOTE_MCP_NAME, THREADNOTE_MCP_SURFACE_ENV} from '../constants.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {maybeRunEffect} from '../effect/command-presentation.js';
@@ -113,9 +114,20 @@ export function runMcpInstall(config: RuntimeConfig, agent: AgentClient, options
     });
     if (attach)
       return yield* options.apply === true ? withSetupMutationLock(config.agentContextHome, operation) : operation;
+    const requestedScope = options.project ? 'project' : options.scope;
+    const selector = setupWorkflowSelector(agent, requestedScope, options.project ?? options.cwd);
+    // A project MCP request must never enroll a personal workflow target merely
+    // because that host has no native project-scope workflow discovery.
+    const workflowSelector = requestedScope
+      ? {
+          ...selector,
+          scope: requestedScope,
+          ...(requestedScope === 'user' ? {} : {cwd: options.project ?? options.cwd}),
+        }
+      : selector;
     return yield* composeWorkflowSetup(
       config,
-      setupWorkflowSelector(agent, options.project ? 'project' : options.scope, options.project ?? options.cwd),
+      workflowSelector,
       {apply: options.apply === true, noDevSkills: options.noDevSkills, key: `mcp:${agent}`},
       () => operation,
     );
@@ -999,16 +1011,6 @@ const buildMcpInstallCommand = Effect.fn('mcp.buildInstallCommand')(function* (
     args: ['mcp', 'add', '--scope', claudeScope, name, ...env.flatMap(value => ['--env', value]), '--', ...command],
     cwd: claudeCwd,
   };
-});
-
-export const mcpAdapterCommand = Effect.fn('mcp.adapterCommand')(function* () {
-  const system = yield* SystemInfo;
-  const launcher = yield* commandLauncherPath('mcp');
-  if (system.platform === 'win32') {
-    const comSpec = system.environment().ComSpec ?? system.environment().COMSPEC ?? 'C:\\Windows\\System32\\cmd.exe';
-    return [comSpec, '/d', '/c', launcher];
-  }
-  return [launcher];
 });
 
 const buildMcpRemoveCommand = Effect.fn('mcp.buildRemoveCommand')(function* (

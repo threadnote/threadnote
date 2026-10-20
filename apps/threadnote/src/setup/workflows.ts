@@ -92,6 +92,18 @@ export function composeWorkflowSetup<A, E, R>(
   core: (lease?: DevSkillsMutationLease) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
+    const capability = findAgentSurface(selector.agent)?.devSkills;
+    if (
+      capability?.status === 'managed' &&
+      selector.scope !== undefined &&
+      !capability.scopes.includes(selector.scope)
+    ) {
+      const result = yield* core();
+      yield* Console.log(
+        `Development workflows: unsupported ${selector.scope} scope; core setup ${options.apply ? 'completed' : 'previewed'} without workflow enrollment.`,
+      );
+      return result;
+    }
     const admission = yield* resolveDevSkillsTarget(config, selector).pipe(Effect.result);
     if (admission._tag === 'Failure') {
       if (

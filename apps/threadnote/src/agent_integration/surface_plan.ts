@@ -7,7 +7,7 @@ import {
 } from '../constants.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {SystemInfo} from '@threadnote/platform/system';
-import {mcpAdapterCommand} from '../mcp/install.js';
+import {mcpAdapterCommand} from '../mcp/adapter-command.js';
 import {MCP_TOOLSET_ENV} from '../mcp/toolset.js';
 import type {McpToolset} from '../mcp/toolset.js';
 import type {JsonObject} from '@threadnote/platform/json';

@@ -454,28 +454,37 @@ describe('approved workflow graph publication', () => {
           'threadnote://user/tester/memories/handoffs/active/task.md',
           '/Users/private/threadnote/workflow-memory/run.json',
           '/work/project/.context/task.json',
+          String.raw`C:\Users\private\threadnote\workflow-memory\run.json`,
         ),
         fc.array(fc.constantFrom('unicode', 'percent', 'slash'), {minLength: 0, maxLength: 3}),
         (privateText, encodings) => {
-          const encoded = encodings.reduce<string>(
-            (text, encoding) =>
-              encoding === 'unicode'
-                ? [...text].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('')
-                : encoding === 'percent'
-                  ? [...text].map(character => `%${character.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')
-                  : text.replace(/\//gu, '\\/'),
-            privateText,
-          );
-          expect(() =>
+          const encode = (value: string) =>
+            encodings.reduce<string>(
+              (text, encoding) =>
+                encoding === 'unicode'
+                  ? [...text].map(character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`).join('')
+                  : encoding === 'percent'
+                    ? [...text].map(character => `%${character.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')
+                    : text.replace(/[\\/]/gu, '\\$&'),
+              value,
+            );
+          const inspect = (value: string) =>
             assertPublicationText(
-              `Embedded {"value":"${encoded}"}`,
+              `Embedded ${JSON.stringify({value: encode(value)})}`,
               binding,
               'threadnote://user/tester/memories/shared/default',
-            ),
-          ).toThrow();
+            );
+          expect(() => inspect(privateText)).toThrow();
+          expect(() => inspect('threadnote://user/tester/memories/shared/default/design.md')).not.toThrow();
         },
       ),
-      {numRuns: 24},
+      {
+        numRuns: 120,
+        examples: [
+          ['threadnote://user/tester/memories/handoffs/active/task.md', ['unicode']],
+          ['threadnote://user/tester/memories/handoffs/active/task.md', ['unicode', 'slash']],
+        ],
+      },
     );
     expect(() =>
       assertPublicationText(

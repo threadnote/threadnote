@@ -350,7 +350,8 @@ describe('development skills lifecycle', () => {
         yield* f.run(applyDevSkills(f.config, 'remove', selector));
         expect(Array.from(yield* f.fs.readFile(unrelated))).toEqual(bytes);
       }).pipe(testLayer),
-    {arbitrary: {runs: 8}},
+    // Eight real-filesystem runs exceed 30s on Windows (one lifecycle case took 5.8s in CI).
+    {arbitrary: {runs: 8}, ...(process.platform === 'win32' ? {timeout: 120_000} : {})},
   );
   effectIt.effect('renders flat targets and keeps changed OMP environment roots pinned', () =>
     Effect.gen(function* () {
