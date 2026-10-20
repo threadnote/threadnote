@@ -20780,6 +20780,7 @@
         "//:windows_smoke_inputs"
       ],
       "inputs": [
+        ".github/workflows/ci.yml",
         "apps/threadnote/src/effect/activation_cli.ts",
         "apps/threadnote/src/effect/agents_cli.ts",
         "apps/threadnote/src/effect/ai/consolidator.ts",
