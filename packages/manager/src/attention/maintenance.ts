@@ -4,8 +4,129 @@ import type {
   ManagerContextMaintenanceStatusV2,
 } from './contracts.js';
 import {classifyContextHealthFindingV2} from '@threadnote/context/health_maintenance';
+import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 
 type Finding = ManagerContextHealthResponseV1['findings'][number];
+
+/** A completed write supersedes only its old record's explicitly refreshed citation slots. */
+export function reconcileAppliedHealthReport(
+  report: ManagerContextHealthResponseV1,
+  applied: readonly ManagerTopicReviewAppliedV1[],
+  status?: ManagerContextMaintenanceStatusV2,
+): ManagerContextHealthResponseV1 {
+  const findings = report.findings.filter(
+    finding =>
+      !applied.some(receipt => {
+        if (
+          receipt.project !== report.project ||
+          !receipt.caseId ||
+          !receipt.targetUri ||
+          !receipt.targetHash ||
+          !receipt.resolvedCitationIds?.length ||
+          !['citation-changed', 'citation-missing', 'citation-unknown'].includes(finding.category)
+        )
+          return false;
+        if (
+          status?.cases.some(
+            item =>
+              item.project === receipt.project &&
+              item.caseId === receipt.caseId &&
+              item.disposition === 'needs-decision' &&
+              item.evidenceRevision !== receipt.evidenceRevision,
+          )
+        )
+          return false;
+        const preview = report.recordPreviews.find(
+          item => item.uri === receipt.targetUri && item.contentHash === receipt.targetHash,
+        );
+        return (
+          preview !== undefined &&
+          finding.repair.subjectUri === receipt.targetUri &&
+          receipt.resolvedCitationIds.some(
+            id =>
+              finding.repair.targetUri === `${receipt.targetUri}#${id}` &&
+              preview.code.some(code => code.citationId === id && code.findingIds.includes(finding.id)),
+          )
+        );
+      }),
+  );
+  if (findings.length === report.findings.length) return report;
+  const retained = new Set(findings.map(item => item.id));
+  const actionable = (items: readonly Finding[]) =>
+    items.filter(item => (item.classification ?? classifyContextHealthFindingV2(item)) === 'actionable');
+  const memories = (items: readonly Finding[]) =>
+    new Set(actionable(items).flatMap(item => (item.repair.subjectUri ? [item.repair.subjectUri] : item.uris)));
+  const removedMemories =
+    report.omittedFindings > 0 || report.nextCursor ? 0 : memories(report.findings).size - memories(findings).size;
+  return {
+    ...report,
+    findings,
+    recordPreviews: report.recordPreviews.map(preview => ({
+      ...preview,
+      code: preview.code.flatMap(code => {
+        const findingIds = code.findingIds.filter(id => retained.has(id));
+        return findingIds.length ? [{...code, findingIds}] : [];
+      }),
+    })),
+    ...(report.maintenance
+      ? {
+          maintenance: {
+            ...report.maintenance,
+            affectedMemories: Math.max(0, report.maintenance.affectedMemories - removedMemories),
+            actionableFindings: Math.max(
+              0,
+              report.maintenance.actionableFindings -
+                (actionable(report.findings).length - actionable(findings).length),
+            ),
+          },
+        }
+      : {}),
+  };
+}
+
+/** Suppress only the completed source observation, including when an older poll arrives later. */
+export function reconcileAppliedMaintenanceCases(
+  status: ManagerContextMaintenanceStatusV2,
+  applied: readonly ManagerTopicReviewAppliedV1[],
+): ManagerContextMaintenanceStatusV2 {
+  const cases = status.cases.filter(
+    item =>
+      !applied.some(
+        result =>
+          result.project === item.project &&
+          result.caseId === item.caseId &&
+          result.evidenceRevision === item.evidenceRevision,
+      ),
+  );
+  if (cases.length === status.cases.length) return status;
+  const decisions = (items: ManagerContextMaintenanceStatusV2['cases']) =>
+    items.filter(item => item.disposition === 'needs-decision');
+  const memories = (items: ManagerContextMaintenanceStatusV2['cases']) =>
+    new Set(decisions(items).map(item => `${item.project}\0${item.memoryId}`));
+  const removedDecisions = decisions(status.cases).length - decisions(cases).length;
+  // An unloaded case may still require a decision for the same memory.
+  const removedMemories =
+    (status.omittedCases ?? 0) > 0 || status.page?.caseNextCursor
+      ? 0
+      : memories(status.cases).size - memories(cases).size;
+  return {
+    ...status,
+    cases,
+    ...(status.counts
+      ? {
+          counts: {
+            ...status.counts,
+            ...(status.counts['needs-decision'] === undefined
+              ? {}
+              : {'needs-decision': Math.max(0, status.counts['needs-decision'] - removedDecisions)}),
+            ...(status.counts.decisionMemories === undefined
+              ? {}
+              : {decisionMemories: Math.max(0, status.counts.decisionMemories - removedMemories)}),
+          },
+        }
+      : {}),
+  };
+}
 
 export function mergeMaintenanceStatusPage(
   current: ManagerContextMaintenanceStatusV2,

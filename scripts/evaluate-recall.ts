@@ -10,6 +10,14 @@ import {
   loadRecallIndex,
 } from '@threadnote/recall/index';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  captureRecallEvaluationSource,
+  measureRecallEvaluationSample,
+  recallEvaluationScenario,
+  writeRecallEvaluationDiagnosticsAndEnforce,
+  type RecallEvaluationSample,
+} from './evaluate-recall-diagnostics.js';
 
 const FIXTURE_PATH = 'apps/threadnote/test/evaluation/fixtures/recall-v1/fixture.json';
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
@@ -30,6 +38,7 @@ const PRODUCTION_BENCHMARK_QUERY = 'benchmark-anchor-9999';
 const PRODUCTION_BENCHMARK_BASE_TIMESTAMP_MILLISECONDS = Date.UTC(2026, 0, 1);
 
 const program = Effect.gen(function* () {
+  const sourceBefore = yield* captureRecallEvaluationSource();
   const fs = yield* FileSystem.FileSystem;
   const raw = yield* fs.readFileString(FIXTURE_PATH);
   const fixture = yield* Effect.try({
@@ -45,7 +54,8 @@ const program = Effect.gen(function* () {
   }
   const result = evaluateRecallFixture(fixture);
   const sortedDurations = [...durations].sort((left, right) => left - right);
-  const productionBenchmark = yield* runProductionBenchmark;
+  const {observations, ...productionBenchmark} = yield* runProductionBenchmark;
+  const sourceAfter = yield* captureRecallEvaluationSource();
   const output = {
     ...result,
     latencyMs: {
@@ -55,16 +65,13 @@ const program = Effect.gen(function* () {
     productionBenchmark,
   };
   yield* Console.log(JSON.stringify(output, undefined, 2));
-  if (result.failures.length > 0) {
-    return yield* ScriptError.make({message: `Recall evaluation failed ${result.failures.length} contract check(s).`});
-  }
-  for (const [name, benchmark] of Object.entries(productionBenchmark.scenarios)) {
-    if (benchmark.p95Milliseconds > benchmark.p95LimitMilliseconds) {
-      return yield* ScriptError.make({
-        message: `Recall ${name} benchmark p95 ${benchmark.p95Milliseconds.toFixed(2)}ms exceeds ${benchmark.p95LimitMilliseconds}ms.`,
-      });
-    }
-  }
+  yield* writeRecallEvaluationDiagnosticsAndEnforce('artifacts/recall-production-10000.json', {
+    correctnessFailureCount: result.failures.length,
+    fixtureSha256: sha256HexSync(raw),
+    observations,
+    productionBenchmark,
+    source: {before: sourceBefore, after: sourceAfter},
+  });
 });
 
 const runProductionBenchmark = Effect.scoped(
@@ -168,51 +175,45 @@ const runProductionBenchmark = Effect.scoped(
       runSample: (sample: number) => ReturnType<typeof prepareForQuery> = () => prepare,
     ) =>
       Effect.gen(function* () {
-        const durations: number[] = [];
+        const observations: RecallEvaluationSample[] = [];
         for (let sample = 0; sample < samples; sample += 1) {
           yield* beforeSample(sample);
-          const startedAt = yield* Clock.currentTimeNanos;
-          const result = yield* runSample(sample);
-          const finishedAt = yield* Clock.currentTimeNanos;
+          const measured = yield* measureRecallEvaluationSample(() => runSample(sample));
+          const result = measured.result;
           if (!result.ranked.some(hit => hit.uri === targetUri)) {
             return yield* ScriptError.make({message: 'Production benchmark failed to retrieve its target.'});
           }
-          durations.push(Number(finishedAt - startedAt) / NANOSECONDS_PER_MILLISECOND);
+          observations.push({...measured.observation, resultCount: result.ranked.length});
         }
-        const sorted = durations.sort((left, right) => left - right);
         return {
-          p50Milliseconds: percentile(sorted, 0.5),
-          p95LimitMilliseconds,
-          p95Milliseconds: percentile(sorted, 0.95),
-          samples,
+          summary: recallEvaluationScenario(observations, p95LimitMilliseconds),
+          observations,
         };
       });
     const hotQuery = yield* measure(HOT_QUERY_SAMPLE_COUNT, HOT_QUERY_P95_LIMIT_MILLISECONDS, () => Effect.void);
     const measureExactSearch = (term: string, expected: 'hit' | 'no-hit') =>
       Effect.gen(function* () {
-        const durations: number[] = [];
+        const observations: RecallEvaluationSample[] = [];
         for (let sample = 0; sample < EXACT_SEARCH_SAMPLE_COUNT; sample += 1) {
-          const startedAt = yield* Clock.currentTimeNanos;
-          const matches = yield* loadRecallExactMatches(config, {
-            includeInactive: false,
-            terms: [term],
-            uriScopes: ['threadnote://resources/repos/threadnote'],
-          });
-          const finishedAt = yield* Clock.currentTimeNanos;
+          const measured = yield* measureRecallEvaluationSample(() =>
+            loadRecallExactMatches(config, {
+              includeInactive: false,
+              terms: [term],
+              uriScopes: ['threadnote://resources/repos/threadnote'],
+            }),
+          );
+          const matches = measured.result;
           const found = matches.some(match => match.uri === targetUri);
           if ((expected === 'hit' && !found) || (expected === 'no-hit' && matches.length > 0)) {
             return yield* ScriptError.make({
               message: `Production exact-search benchmark produced an unexpected ${expected}.`,
             });
           }
-          durations.push(Number(finishedAt - startedAt) / NANOSECONDS_PER_MILLISECOND);
+          observations.push({...measured.observation, resultCount: matches.length});
         }
-        const sorted = durations.sort((left, right) => left - right);
         return {
-          p50Milliseconds: percentile(sorted, 0.5),
-          p95LimitMilliseconds: EXACT_SEARCH_P95_LIMIT_MILLISECONDS,
-          p95Milliseconds: percentile(sorted, 0.95),
-          samples: EXACT_SEARCH_SAMPLE_COUNT,
+          summary: recallEvaluationScenario(observations, EXACT_SEARCH_P95_LIMIT_MILLISECONDS),
+          observations,
         };
       });
     const exactSubstring = yield* measureExactSearch('anchor-9999', 'hit');
@@ -254,12 +255,20 @@ const runProductionBenchmark = Effect.scoped(
     return {
       documents: PRODUCTION_BENCHMARK_DOCUMENT_COUNT,
       scenarios: {
-        coldDecode,
-        exactNoHit,
-        exactSubstring,
-        hotQuery,
-        incrementalUpdate,
-        sourceValidation,
+        coldDecode: coldDecode.summary,
+        exactNoHit: exactNoHit.summary,
+        exactSubstring: exactSubstring.summary,
+        hotQuery: hotQuery.summary,
+        incrementalUpdate: incrementalUpdate.summary,
+        sourceValidation: sourceValidation.summary,
+      },
+      observations: {
+        coldDecode: coldDecode.observations,
+        exactNoHit: exactNoHit.observations,
+        exactSubstring: exactSubstring.observations,
+        hotQuery: hotQuery.observations,
+        incrementalUpdate: incrementalUpdate.observations,
+        sourceValidation: sourceValidation.observations,
       },
       warmups: PRODUCTION_BENCHMARK_WARMUP_COUNT,
     };

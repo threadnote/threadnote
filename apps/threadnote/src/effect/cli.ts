@@ -117,6 +117,7 @@ import {
   runModelSelect,
   runModelVerify,
 } from '../models/commands.js';
+import {makeModelsSetupCommand} from './models_setup_cli.js';
 import {runIndexPurge, runIndexRebuild, runIndexStatus, runIndexVerify} from '../search/commands.js';
 import {runProductionLogs} from './production_log.js';
 import {runReportIssue} from '../report_issue.js';
@@ -557,6 +558,8 @@ const localAi = Command.make('local-ai').pipe(
   ]),
 );
 
+const modelsSetup = makeModelsSetupCommand(withRuntimeEffect);
+
 const modelsList = Command.make('list', {}, () => withRuntimeEffect(config => runModelList(config))).pipe(
   Command.withDescription('List pinned local model candidates and installation state'),
 );
@@ -601,7 +604,15 @@ const modelsRuntime = Command.make('runtime', {}, () => withRuntimeEffect(() => 
 
 const models = Command.make('models').pipe(
   Command.withDescription('Manage pinned local GGUF models'),
-  Command.withSubcommands([modelsList, modelsInstall, modelsVerify, modelsRemove, modelsSelect, modelsRuntime]),
+  Command.withSubcommands([
+    modelsSetup,
+    modelsList,
+    modelsInstall,
+    modelsVerify,
+    modelsRemove,
+    modelsSelect,
+    modelsRuntime,
+  ]),
 );
 
 const indexRebuild = Command.make(
@@ -1895,8 +1906,8 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('repair', repair),
   registerTopLevelCommand('start', start),
   registerTopLevelCommand('stop', stop),
-  registerTopLevelCommand('uninstall', uninstall),
-  registerTopLevelCommand('models', models),
+  registerTopLevelCommand('uninstall', uninstall, {productionLog: {mode: 'never'}}),
+  registerTopLevelCommand('models', models, {productionLog: {subcommands: {setup: 'never'}}}),
   registerTopLevelCommand('index', indexCommand),
   registerTopLevelCommand('graph', graphCommand),
   registerTopLevelCommand('composer', makeComposerCommands(withScopedRuntime)),

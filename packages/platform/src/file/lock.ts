@@ -10,6 +10,8 @@ import {
 } from '../system.js';
 
 export interface ExclusiveFileLockOptions {
+  /** Existing-home workers must never recreate a directory removed by uninstall. Defaults to true. */
+  readonly createParentDirectory?: boolean;
   readonly heartbeatIntervalMilliseconds?: number;
   readonly onAcquired?: (lockPath: string) => Effect.Effect<void, never>;
   readonly onCompleted?: (lockPath: string) => Effect.Effect<void, never>;
@@ -85,7 +87,8 @@ export function withExclusiveFileLock<A, E, R>(
 ) {
   return Effect.gen(function* () {
     const pathService = yield* Path.Path;
-    yield* fs.makeDirectory(pathService.dirname(lockPath), {recursive: true});
+    if (options.createParentDirectory !== false)
+      yield* fs.makeDirectory(pathService.dirname(lockPath), {recursive: true});
     const token = yield* fileLockToken(options.useCanonicalProcessStartIdentity === true);
     const startedAt = yield* Clock.currentTimeMillis;
     let contentionReported = false;

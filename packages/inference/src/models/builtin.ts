@@ -1,5 +1,6 @@
 import type {LocalModelManifest} from './catalog.js';
 
+export const CORE_GENERATION_MODEL_ID = 'gemma-4-e4b-it-q4';
 export const CORE_EMBEDDING_MODEL_ID = 'bge-small-en-v1.5-q8';
 
 /**
@@ -92,8 +93,10 @@ export const BUILTIN_MODEL_MANIFESTS = [
     architecture: 'gemma4',
     contextLimit: 32_768,
     file: 'gemma-4-E4B-it-Q4_0.gguf',
-    id: 'gemma-4-e4b-it-q4',
-    license: 'Gemma',
+    id: CORE_GENERATION_MODEL_ID,
+    // Pinned ggml-org README and google/gemma-4-E4B-it model card: Apache-2.0.
+    // https://huggingface.co/ggml-org/gemma-4-E4B-it-GGUF/blob/06f24bb269339b2a19a5167199b81e89ef813c10/README.md
+    license: 'Apache-2.0',
     minimumRamBytes: 8 * 1024 * 1024 * 1024,
     quantization: 'Q4_0',
     repository: 'ggml-org/gemma-4-E4B-it-GGUF',

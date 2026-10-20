@@ -4,6 +4,7 @@ import {Effect, FileSystem, Layer, Path, Result, Schema} from 'effect';
 import {describe, expect, vi} from 'vitest';
 import {LocalModelCatalog, type LocalModelManifest, type LocalModelRole} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
+import {ModelManifestInvalid} from '@threadnote/inference/engine/errors';
 import {LocalModelRuntime, type LocalGenerationRequest} from '@threadnote/inference/engine/local-model-runtime';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -41,7 +42,12 @@ function services(
     BunServices.layer,
     TestSystemInfoLayer,
     Layer.succeed(LocalModelCatalog, {
-      get: id => Effect.succeed(manifests.find(model => model.id === id)!),
+      get: id => {
+        const model = manifests.find(model => model.id === id);
+        return model
+          ? Effect.succeed(model)
+          : Effect.fail(ModelManifestInvalid.make({message: `Unknown local model: ${id}.`, modelId: id}));
+      },
       list: role => Effect.succeed(manifests.filter(model => role === undefined || model.role === role)),
       selected: () => Effect.die('Catalog defaults must not select a consolidation model.'),
     }),
@@ -97,6 +103,19 @@ describe('Manager local AI consolidation', () => {
         ),
       ),
     ),
+  );
+  effectIt.effect('keeps an unavailable explicit selection when the installed catalog is empty', () =>
+    Effect.gen(function* () {
+      const home = yield* temporaryHome();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fs.makeDirectory(path.join(home, 'models'));
+      const selectionPath = path.join(home, 'models/selection.json');
+      const raw = JSON.stringify({version: 1, roles: {generation: 'model-0'}});
+      yield* fs.writeFileString(selectionPath, raw);
+      expect(yield* discoverLocalConsolidationModels(home)).toEqual([]);
+      expect(yield* fs.readFileString(selectionPath)).toBe(raw);
+    }).pipe(provideTestLayer(services([], []))),
   );
   effectIt.effect.prop(
     'installed catalog is the generation subset and discovery preserves selection',

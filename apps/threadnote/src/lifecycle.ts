@@ -1,3 +1,4 @@
+import {stopModelSetup} from './models/setup.js';
 import {hasManagedCursorHooks} from './cursor/hooks.js';
 import {Console, Effect, FileSystem, Path, Result, Schema} from 'effect';
 import {
@@ -769,6 +770,7 @@ const runUninstallInTransaction = Effect.fn('lifecycle.uninstallInTransaction')(
       message: 'Use either --erase-memories or --preserve-memories, not both.',
     });
   }
+  if (!dryRun) yield* stopModelSetup(config.agentContextHome);
   const registry = yield* readAgentIntegrationRegistry(config);
   const registeredClients = registeredAgentClients(registry);
   if (

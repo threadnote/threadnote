@@ -4,7 +4,34 @@ import {navigationAttentionLabel, useNavigationAttention} from './navigation_att
 import {ThemeSwitch} from './theme.js';
 import {readManagerPreference, writeManagerPreference} from './preferences.js';
 import type {PanelName} from './ui/contracts.js';
-import {panelIcon, panelNavDescription, tabTitle, SIDEBAR_WIDTH_MAX, SIDEBAR_WIDTH_MIN} from './ui/support.js';
+import {
+  panelIcon,
+  panelNavDescription,
+  tabTitle,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_MAX,
+  SIDEBAR_WIDTH_MIN,
+} from './ui/support.js';
+
+export {useContextHealthDecisionCount} from './navigation_attention.js';
+
+export function sidebarWidthForKey(key: string, currentWidth: number, shift: boolean): number | undefined {
+  const step = shift ? 48 : 16;
+  switch (key) {
+    case 'ArrowLeft':
+      return currentWidth - step;
+    case 'ArrowRight':
+      return currentWidth + step;
+    case 'Home':
+      return SIDEBAR_WIDTH_MIN;
+    case 'End':
+      return SIDEBAR_WIDTH_MAX;
+    case 'Enter':
+      return SIDEBAR_WIDTH_DEFAULT;
+    default:
+      return undefined;
+  }
+}
 
 export function ManagerNavigation(props: {
   readonly panel: PanelName;
@@ -12,13 +39,20 @@ export function ManagerNavigation(props: {
   readonly refreshGeneration: number;
   readonly disabled: boolean;
   readonly connected: boolean;
+  readonly contextHealthDecisionCount?: {readonly project: string; readonly count: number};
   readonly onSelect: (panel: PanelName) => void;
   readonly width: number;
   readonly onResizeKeyDown: React.KeyboardEventHandler<HTMLDivElement>;
   readonly onResizePointerDown: React.PointerEventHandler<HTMLDivElement>;
   readonly updateIndicator?: {readonly label: string; readonly detail: string};
 }): React.ReactElement {
-  const attention = useNavigationAttention(props.project, props.refreshGeneration, props.panel, props.connected);
+  const attention = useNavigationAttention(
+    props.project,
+    props.refreshGeneration,
+    props.panel,
+    props.connected,
+    props.contextHealthDecisionCount,
+  );
   return (
     <>
       <aside className="sidebar" id="manager-navigation">

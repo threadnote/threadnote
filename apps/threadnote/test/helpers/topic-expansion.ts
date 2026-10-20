@@ -11,8 +11,9 @@ import {
 
 /** Real Git/graph/capsule fixture shared by application and Manager boundary tests. */
 export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')(function* (
-  options: {readonly scoped?: boolean} = {},
+  options: {readonly scoped?: boolean; readonly project?: string} = {},
 ) {
+  const project = options.project ?? 'fixture';
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-expansion-'});
@@ -51,7 +52,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   };
   yield* fs.writeFileString(
     config.manifestPath,
-    `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n${options.scoped ? '    graph:\n      roots: [src]\n      closure: dependencies\n' : ''}`,
+    `version: 1\nprojects:\n  - name: ${project}\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n${options.scoped ? '    graph:\n      roots: [src]\n      closure: dependencies\n' : ''}`,
   );
   const index = () =>
     CodeGraphIndexer.pipe(
@@ -74,7 +75,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   yield* index();
   const [origin] = yield* captureMemoryCodeCitations(config, {
     callerCwd: repository,
-    project: 'fixture',
+    project,
     refs: ['src/main.ts'],
   });
   const uri = 'threadnote://user/tester/memories/durable/projects/fixture/limit.md';
@@ -88,7 +89,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
         kind: 'durable',
         status: 'active',
         schemaVersion: 10,
-        project: 'fixture',
+        project,
         topic: 'limit',
         sourceAgentClient: 'test',
         timestamp: '2026-10-18T00:00:00.000Z',
@@ -109,12 +110,12 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   yield* fs.makeDirectory(path.dirname(memoryPath), {recursive: true});
   yield* fs.writeFileString(memoryPath, enrolled.content);
   const record = parseMemoryDocument(uri, enrolled.content)!;
-  const inspected = yield* inspectTopicDependencyExpansion(config, {uri, callerCwd: repository, project: 'fixture'});
+  const inspected = yield* inspectTopicDependencyExpansion(config, {uri, callerCwd: repository, project});
   if (!inspected.seeds.length) throw new Error('Fixture requires a declared file seed.');
   const input = {
     version: 1,
     depth: 1,
-    project: 'fixture',
+    project,
     root: inspected.root,
     configDigest: inspected.configDigest,
     seeds: [inspected.seeds[0].id],
@@ -130,7 +131,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   const choices = yield* inspectTopicDependencyExpansion(config, {
     uri,
     callerCwd: repository,
-    project: 'fixture',
+    project,
     input,
   });
   const endpoint = choices.choices?.eligible.find(node => node.path === 'src/dependency.ts');
