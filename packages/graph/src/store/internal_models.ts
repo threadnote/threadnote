@@ -7,6 +7,11 @@ import {
   type CodeGraphWorkspaceProvenance,
 } from '../languages/types.js';
 
+type CodeGraphTraversalEdge = Pick<
+  CodeGraphEdge,
+  'id' | 'sourceId' | 'targetId' | 'relation' | 'provenance' | 'confidence'
+>;
+
 interface SnapshotRow {
   readonly scope_id?: string;
   readonly base_snapshot_id: unknown;
@@ -111,6 +116,7 @@ class CodeGraphCacheCapacityPlanChanged extends Schema.TaggedError<CodeGraphCach
 ) {}
 
 export {
+  CodeGraphTraversalEdge,
   SnapshotRow,
   SymbolRow,
   EdgeRow,

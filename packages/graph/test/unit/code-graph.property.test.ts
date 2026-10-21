@@ -734,26 +734,30 @@ function graphStore(
   edges: readonly CodeGraphEdge[],
 ): CodeGraphStoreShape {
   const byId = new Map(nodes.map(node => [node.id, node]));
+  const edgesForNodes = (
+    _databasePath: string,
+    _snapshotId: string,
+    ids: readonly string[],
+    direction: 'both' | 'incoming' | 'outgoing',
+    limit: number,
+  ) =>
+    Effect.succeed(
+      edges
+        .filter(edge => {
+          if (direction === 'incoming') return edge.targetId !== undefined && ids.includes(edge.targetId);
+          if (direction === 'outgoing') return edge.sourceId !== undefined && ids.includes(edge.sourceId);
+          return (
+            (edge.sourceId !== undefined && ids.includes(edge.sourceId)) ||
+            (edge.targetId !== undefined && ids.includes(edge.targetId))
+          );
+        })
+        .slice(0, limit),
+    );
   return {
-    edgesForNodes: (
-      _databasePath: string,
-      _snapshotId: string,
-      ids: readonly string[],
-      direction: 'both' | 'incoming' | 'outgoing',
-      limit: number,
-    ) =>
-      Effect.succeed(
-        edges
-          .filter(edge => {
-            if (direction === 'incoming') return edge.targetId !== undefined && ids.includes(edge.targetId);
-            if (direction === 'outgoing') return edge.sourceId !== undefined && ids.includes(edge.sourceId);
-            return (
-              (edge.sourceId !== undefined && ids.includes(edge.sourceId)) ||
-              (edge.targetId !== undefined && ids.includes(edge.targetId))
-            );
-          })
-          .slice(0, limit),
-      ),
+    edgesForNodes,
+    traversalEdgesForNodes: edgesForNodes,
+    edgesByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
+      Effect.succeed(ids.map(id => edges.find(edge => edge.id === id)!)),
     searchSymbolsMany: () => Effect.succeed([[seed]]),
     symbolsByIds: (_databasePath: string, _snapshotId: string, ids: readonly string[]) =>
       Effect.succeed(ids.flatMap(id => (byId.has(id) ? [byId.get(id)!] : []))),

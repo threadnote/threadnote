@@ -618,6 +618,7 @@ function effectiveAdjacentEdgesCte(
   direction: 'both' | 'incoming' | 'outgoing',
   allowedProvenances: readonly CodeGraphProvenance[],
   branchLimit?: number,
+  projection: 'full' | 'traversal' = 'full',
 ): CodeGraphSqlQueryStatement {
   const ids = [...new Set(nodeIds)].slice(0, 500);
   const provenances = [...new Set(allowedProvenances)];
@@ -636,8 +637,14 @@ function effectiveAdjacentEdgesCte(
   const parameters: Array<number | string> = [];
   const boundedBranchLimit =
     branchLimit === undefined ? undefined : Math.max(1, Math.min(5_000, Math.floor(branchLimit)));
+  const columns = (alias: string) =>
+    projection === 'full'
+      ? `${alias}.*`
+      : ['id', 'source_id', 'target_id', 'relation', 'provenance', 'confidence', 'source_name', 'target_name']
+          .map(column => `${alias}.${column}`)
+          .join(', ');
   for (const axis of axes) {
-    const currentBranch = `SELECT current_edges.*
+    const currentBranch = `SELECT ${columns('current_edges')}
       FROM edges AS current_edges INDEXED BY ${axis.index}
       WHERE current_edges.snapshot_id = ?
         AND current_edges.${axis.column} IN (${idPlaceholders})
@@ -652,7 +659,7 @@ function effectiveAdjacentEdgesCte(
     );
     parameters.push(snapshotId, ...ids, ...provenances);
     if (boundedBranchLimit !== undefined) parameters.push(boundedBranchLimit);
-    const baseBranch = `SELECT base_edges.*
+    const baseBranch = `SELECT ${columns('base_edges')}
       FROM edges AS base_edges INDEXED BY ${axis.index}
       WHERE base_edges.snapshot_id = ?
         AND base_edges.${axis.column} IN (${idPlaceholders})

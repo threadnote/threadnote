@@ -230,6 +230,8 @@ describe('code graph query budgets', () => {
               ),
             edgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
               Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
+            traversalEdgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
+              Effect.succeed(snapshotId === readyBaseSnapshotId && ids.includes(stableSeed.id) ? [stableEdge] : []),
             readySnapshot: () =>
               recordStoreRead('readyByWorktree').pipe(
                 Effect.andThen(Ref.get(readySnapshotFailure)),
@@ -1320,7 +1322,7 @@ describe('code graph query budgets', () => {
       const baseFrontierSizes: number[] = [];
       const baseFrontiers: string[][] = [];
       const store = {
-        edgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
+        traversalEdgesForNodes: (_databasePath: string, snapshotId: string, ids: readonly string[]) =>
           Effect.sync(() => {
             if (snapshotId !== 'base') return [];
             baseFrontierSizes.push(ids.length);
@@ -1330,13 +1332,12 @@ describe('code graph query budgets', () => {
               const current = currentNodes.get(`current-${pathIndex}`);
               if (!current) throw TestError.make({message: `Missing current recovery fixture for ${id}.`});
               return {
-                ...edge,
-                evidencePath: current.path,
+                confidence: 1,
                 id: `base-recovery-${index}`,
+                provenance: 'resolved',
+                relation: 'calls',
                 sourceId: current.id,
-                sourceName: current.name,
                 targetId: id,
-                targetName: `deleted${pathIndex}_0`,
               };
             });
           }),
