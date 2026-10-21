@@ -105,6 +105,7 @@ export function selectTopRecallPostingsByTerms(
   workspaceScopeMode: RecallWorkspaceScopeMode | undefined,
   postingPoolLimit: number,
   corpusStatistics: RecallCorpusStatistics,
+  globalCorpusStatistics?: RecallCorpusStatistics & {readonly physicalDocumentCount: number},
 ) {
   if (terms.length === 0) return Effect.succeed<readonly RecallPostingSelectionRow[]>([]);
   const uriScope = recallUriScopePredicate('d', allowedUriScopes);
@@ -117,12 +118,23 @@ export function selectTopRecallPostingsByTerms(
   );
   const queryTermValues = terms.map(() => '(?, ?)').join(', ');
   const queryTermParameters = terms.flatMap(term => [term, postingInverseDocumentFrequency(term, corpusStatistics)]);
-  const indexHint = uriScope.restricted
-    ? ' INDEXED BY documents_uri'
-    : workspace.restricted
-      ? ' INDEXED BY documents_workspace_scope_uri'
-      : '';
-  const postingsFirst = workspaceScopeMode === 'sibling';
+  // A logical frequency can hide physical aliases. Bound their worst-case
+  // contribution before preferring term lookups to an authorized URI scan.
+  // Missing evidence preserves the existing narrow-scope access plan.
+  const termRowsBound = boundedRecallTermPostingRows(terms, globalCorpusStatistics);
+  const postingsFirst =
+    workspaceScopeMode === 'sibling' ||
+    (uriScope.restricted &&
+      termRowsBound !== undefined &&
+      Number.isSafeInteger(corpusStatistics.documentCount) &&
+      corpusStatistics.documentCount >= 0 &&
+      termRowsBound <= corpusStatistics.documentCount);
+  const indexHint =
+    uriScope.restricted && !postingsFirst
+      ? ' INDEXED BY documents_uri'
+      : !uriScope.restricted && workspace.restricted
+        ? ' INDEXED BY documents_workspace_scope_uri'
+        : '';
   const fromClause =
     scope.restricted && !postingsFirst
       ? `documents AS d${indexHint}
@@ -189,6 +201,29 @@ export function selectTopRecallPostingsByTerms(
       postingPoolLimit,
     ],
   );
+}
+
+function boundedRecallTermPostingRows(
+  terms: readonly string[],
+  statistics: (RecallCorpusStatistics & {readonly physicalDocumentCount: number}) | undefined,
+): number | undefined {
+  if (
+    statistics === undefined ||
+    !Number.isSafeInteger(statistics.documentCount) ||
+    statistics.documentCount < 0 ||
+    !Number.isSafeInteger(statistics.physicalDocumentCount) ||
+    statistics.physicalDocumentCount < statistics.documentCount
+  )
+    return undefined;
+  const aliases = statistics.physicalDocumentCount - statistics.documentCount;
+  let bound = 0;
+  for (const term of terms) {
+    const frequency = statistics.documentFrequency[term];
+    if (!Number.isSafeInteger(frequency) || frequency < 0 || frequency > statistics.documentCount) return undefined;
+    bound += frequency + aliases;
+    if (!Number.isSafeInteger(bound)) return undefined;
+  }
+  return bound;
 }
 
 /**

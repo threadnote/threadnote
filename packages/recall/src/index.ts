@@ -363,7 +363,14 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
               const corpusStatistics = yield* loadRecallCorpusStatistics(sql, recallStatisticTerms(effectiveOptions));
               const loadIdentityConflicts = RecallIndexIdentity.createRecallIdentityConflictLoader(sql);
               const selectData = (selection: LoadRecallIndexOptions) =>
-                selectRecallIndexData(sql, corpusStatistics, generation, selection, loadIdentityConflicts);
+                selectRecallIndexData(
+                  sql,
+                  corpusStatistics,
+                  generation,
+                  selection,
+                  loadIdentityConflicts,
+                  metadata.has('document_count') ? Number(metadata.get('document_count')) : undefined,
+                );
               return 'terms' in effectiveOptions
                 ? yield* selectRecallExactMatches(sql, effectiveOptions)
                 : 'selections' in effectiveOptions
@@ -718,6 +725,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
   generation: string,
   options: LoadRecallIndexOptions,
   loadIdentityConflicts: ReturnType<typeof RecallIndexIdentity.createRecallIdentityConflictLoader>,
+  physicalDocumentCount?: number,
 ) {
   if (options.query === undefined) {
     const rows =
@@ -816,6 +824,7 @@ const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
     options.workspaceScopeMode,
     postingPoolLimit,
     postingCorpusStatistics,
+    physicalDocumentCount === undefined ? undefined : {...corpusStatistics, physicalDocumentCount},
   );
   yield* options.onQueryDiagnostics?.({
     postingRows: postingRows.length,
