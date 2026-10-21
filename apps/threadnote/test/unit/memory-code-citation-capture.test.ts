@@ -38,6 +38,7 @@ import {
 } from '@threadnote/context/citation/capture';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {captureMemoryCodeCitationsForMcp} from '../../src/mcp/memory_code_citation.js';
 
 const SOURCE = 'export function value() {\n  return "😀";\n}\n';
 const SOURCE_HASH = codeGraphCommittedFileContentHash('sha1', new TextEncoder().encode(SOURCE));
@@ -48,6 +49,31 @@ const SYMBOL_ID = `cgs_${'4'.repeat(32)}`;
 const MODULE_ID = `cgs_${'6'.repeat(32)}`;
 
 describe('memory code citation capture and validation', () => {
+  effectIt.effect('MCP memory writes refuse a busy writer before reading citation evidence', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-mcp-citation-writer-'});
+      const fixture = citationFixture(root, {
+        acquireLease: (_database, _snapshot, _duration, options) => {
+          expect(options?.waitTimeoutMilliseconds).toBe(0);
+          return Effect.fail(CodeGraphStoreBusyError.of('fixture writer busy'));
+        },
+      });
+      const result = yield* captureMemoryCodeCitationsForMcp(
+        CONFIG,
+        {callerCwd: root, refs: ['src/value.ts']},
+        'remember_context',
+      ).pipe(provideTestLayer(fixture.layer));
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
+      expect(result.failure).toMatchObject({retryable: true});
+      expect(result.error.isError).toBe(true);
+      expect(fixture.evidenceCalls()).toBe(0);
+      expect(fixture.leases()).toEqual({acquired: 0, released: 0});
+    }).pipe(provideTestLayer(StandaloneBrokerLayer)),
+  );
+
   effectIt.effect('captures exact file and symbol evidence and reuses snapshot-scoped validation receipts', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -375,6 +401,7 @@ describe('memory code citation capture and validation', () => {
 function citationFixture(
   root: string,
   statusOptions: {
+    readonly acquireLease?: CodeGraphStoreShape['acquireSnapshotLease'];
     readonly evidenceFailure?: CodeGraphStoreFailure;
     readonly freshness?: CodeGraphStatus['freshness'];
     readonly stale?: boolean;
@@ -485,7 +512,7 @@ function citationFixture(
     } satisfies CodeGraphEffectiveSnapshotCitationEvidence;
   };
   const store = CodeGraphStore.of({
-    acquireSnapshotLease: () => Effect.sync(() => `lease-${++acquired}`),
+    acquireSnapshotLease: statusOptions.acquireLease ?? (() => Effect.sync(() => `lease-${++acquired}`)),
     effectiveSnapshotCitationEvidence: (
       _databasePath: string,
       _snapshotId: string,

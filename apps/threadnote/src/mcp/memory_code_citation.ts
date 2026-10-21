@@ -12,7 +12,7 @@ export function captureMemoryCodeCitationsForMcp(
   if (input.refs.length === 0) {
     return Effect.succeed({citations: [] as const, ok: true as const});
   }
-  return captureMemoryCodeCitations(config, input).pipe(
+  return captureMemoryCodeCitations(config, {...input, writerWaitTimeoutMilliseconds: 0}).pipe(
     Effect.match({
       onFailure: error => ({
         error: memoryCodeCitationCaptureErrorResult(error, operation),
