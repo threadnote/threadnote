@@ -25,6 +25,7 @@ bun_test(
         "//packages/context:src/health_schedule.ts",
         "//packages/context:src/health_semantic.ts",
         "//packages/context:src/memory-evidence.ts",
+        "//packages/context:src/memory_maintenance.ts",
         "//packages/context:src/memory_projection.ts",
         "//packages/context:src/planner.ts",
         "//packages/context:src/procedure/contract.ts",
@@ -52,6 +53,7 @@ bun_test(
         "//packages/context:test/unit/context-health-schedule.test.ts",
         "//packages/context:test/unit/context-health-topic-history.test.ts",
         "//packages/context:test/unit/context_health.test.ts",
+        "//packages/context:test/unit/memory-maintenance.test.ts",
         "//packages/graph:package.json",
         "//packages/graph:src/admission_freshness.ts",
         "//packages/graph:src/analysis.ts",
@@ -453,7 +455,9 @@ bun_test(
         "//packages/integrations:src/catalog.json",
         "//packages/integrations:src/catalog.ts",
         "//packages/memory:package.json",
+        "//packages/memory:src/automatic-maintenance.ts",
         "//packages/memory:src/candidate.ts",
+        "//packages/memory:src/code/citation-policy.ts",
         "//packages/memory:src/code/citation.ts",
         "//packages/memory:src/consolidation.ts",
         "//packages/memory:src/document.ts",
@@ -546,6 +550,7 @@ bun_test(
         "packages/context/test/unit/context-health-schedule.test.ts",
         "packages/context/test/unit/context-health-topic-history.test.ts",
         "packages/context/test/unit/context_health.test.ts",
+        "packages/context/test/unit/memory-maintenance.test.ts",
     ],
 )
 

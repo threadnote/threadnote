@@ -14,6 +14,7 @@ bun_test(
     srcs = [
         "//:package.json",
         "//packages/memory:package.json",
+        "//packages/memory:src/automatic-maintenance.ts",
         "//packages/memory:src/candidate.ts",
         "//packages/memory:src/code/citation-policy.ts",
         "//packages/memory:src/code/citation.ts",
@@ -47,6 +48,7 @@ bun_test(
         "//packages/memory:test/remote-address.test.ts",
         "//packages/memory:test/remote-contracts.test.ts",
         "//packages/memory:test/remote-revisions.test.ts",
+        "//packages/memory:test/unit/automatic-maintenance.test.ts",
         "//packages/memory:test/unit/consolidation.test.ts",
         "//packages/memory:test/unit/maintenance-metadata.test.ts",
         "//packages/memory:test/unit/memory-read-projection.test.ts",
@@ -119,6 +121,7 @@ bun_test(
         "packages/memory/test/remote-address.test.ts",
         "packages/memory/test/remote-contracts.test.ts",
         "packages/memory/test/remote-revisions.test.ts",
+        "packages/memory/test/unit/automatic-maintenance.test.ts",
         "packages/memory/test/unit/consolidation.test.ts",
         "packages/memory/test/unit/maintenance-metadata.test.ts",
         "packages/memory/test/unit/memory-read-projection.test.ts",

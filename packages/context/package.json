@@ -22,7 +22,8 @@
     "./health": "./src/health.ts",
     "./health_semantic": "./src/health_semantic.ts",
     "./health_schedule": "./src/health_schedule.ts",
-    "./health_maintenance": "./src/health_maintenance.ts"
+    "./health_maintenance": "./src/health_maintenance.ts",
+    "./memory_maintenance": "./src/memory_maintenance.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",
