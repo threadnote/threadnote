@@ -29,7 +29,13 @@ import {
   type CodeGraphProvenance,
   CodeGraphStoreError,
 } from '../types.js';
-import {type EdgeRow, type FileBlobRow, type SnapshotRow, type SymbolRow} from './internal_models.js';
+import {
+  type CodeGraphTraversalEdge,
+  type EdgeRow,
+  type FileBlobRow,
+  type SnapshotRow,
+  type SymbolRow,
+} from './internal_models.js';
 import {edgeFromRow, snapshotFromRow, symbolFromRow} from './rows.js';
 import {CODE_GRAPH_LEXICAL_COMPACT_FORMAT_VERSION} from './build/core.js';
 import {
@@ -60,6 +66,11 @@ import {
 } from './query/core.js';
 import {materializedFileShardIdentity} from './cache.js';
 import {type CodeGraphSqlQueryStatement} from './visualization_sql.js';
+import {
+  CODE_GRAPH_EDGE_HYDRATION_BATCH_SIZE,
+  codeGraphEdgesByIdsQueryStatement,
+  codeGraphTraversalQueryStatement,
+} from './query/traversal.js';
 import {selectSnapshotPackProvenance} from './pack_provenance.js';
 
 const selectReadySnapshot = Effect.fn('codeGraph.selectReadySnapshot')(function* (
@@ -1606,6 +1617,63 @@ const selectEdgesForNodes = Effect.fn('codeGraph.selectEdgesForNodes')(function*
   return rows.map(edgeFromRow);
 });
 
+const selectTraversalEdgesForNodes = Effect.fn('codeGraph.selectTraversalEdgesForNodes')(function* (
+  snapshotId: string,
+  nodeIds: readonly string[],
+  direction: 'both' | 'incoming' | 'outgoing',
+  limit: number,
+  allowedProvenances: readonly CodeGraphProvenance[],
+) {
+  if (nodeIds.length === 0 || limit <= 0 || allowedProvenances.length === 0) return [];
+  const sql = yield* SqlClient.SqlClient;
+  yield* configureConnection(sql);
+  const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
+  const statement = codeGraphTraversalQueryStatement(
+    snapshotId,
+    baseSnapshotId,
+    nodeIds,
+    direction,
+    limit,
+    allowedProvenances,
+  );
+  const rows = yield* sql.unsafe<
+    Pick<EdgeRow, 'id' | 'source_id' | 'target_id' | 'relation' | 'provenance' | 'confidence'>
+  >(statement.text, statement.parameters);
+  return rows.map((row): CodeGraphTraversalEdge => ({
+    id: row.id,
+    sourceId: Option.getOrUndefined(sqlTextOption(row.source_id)),
+    targetId: Option.getOrUndefined(sqlTextOption(row.target_id)),
+    relation: row.relation,
+    provenance: row.provenance,
+    confidence: row.confidence,
+  }));
+});
+
+const selectEdgesByIds = Effect.fn('codeGraph.selectEdgesByIds')(function* (
+  snapshotId: string,
+  edgeIds: readonly string[],
+) {
+  const ids = [...new Set(edgeIds)];
+  if (ids.length === 0) return [];
+  const sql = yield* SqlClient.SqlClient;
+  yield* configureConnection(sql);
+  const baseSnapshotId = yield* selectBaseSnapshotId(sql, snapshotId);
+  const result: ReturnType<typeof edgeFromRow>[] = [];
+  for (const batch of chunk(ids, CODE_GRAPH_EDGE_HYDRATION_BATCH_SIZE)) {
+    const statement = codeGraphEdgesByIdsQueryStatement(snapshotId, baseSnapshotId, batch);
+    const rows = yield* sql.unsafe<EdgeRow>(statement.text, statement.parameters);
+    const byId = new Map(rows.map(row => [row.id, row]));
+    for (const id of batch) {
+      const row = byId.get(id);
+      if (!row) {
+        return yield* CodeGraphStoreError.of('Selected code graph edge is missing from its snapshot.');
+      }
+      result.push(edgeFromRow(row));
+    }
+  }
+  return result;
+});
+
 const selectDirectEdgeBetweenNodes = Effect.fn('codeGraph.selectDirectEdgeBetweenNodes')(function* (
   snapshotId: string,
   sourceId: string,
@@ -1697,5 +1765,7 @@ export {
   selectSearchSymbolsMany,
   selectSymbolsByIds,
   selectEdgesForNodes,
+  selectTraversalEdgesForNodes,
+  selectEdgesByIds,
   selectDirectEdgeBetweenNodes,
 };

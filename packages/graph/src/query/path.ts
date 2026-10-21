@@ -1,7 +1,8 @@
 import {Clock, Effect} from 'effect';
 import type {CodeGraphStoreShape} from '../store.js';
+import type {CodeGraphTraversalEdge} from '../store/internal_models.js';
 import {codeGraphEndpointMatches, parseCodeGraphEndpointSelector, selectCodeGraphEndpoint} from './selector.js';
-import type {CodeGraphEdge, CodeGraphProvenance, CodeGraphQueryNode, CodeGraphQueryResult} from '../types.js';
+import type {CodeGraphProvenance, CodeGraphQueryNode, CodeGraphQueryResult} from '../types.js';
 
 export const QUERY_TRAVERSAL_TIME_BUDGET_MILLISECONDS = 2_000;
 
@@ -96,7 +97,7 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
   }
   let frontier = [start.id];
   const visited = new Set([start.id]);
-  const parent = new Map<string, {readonly edge: CodeGraphEdge; readonly previous: string}>();
+  const parent = new Map<string, {readonly edge: CodeGraphTraversalEdge; readonly previous: string}>();
   let found = false;
   let inspectedEdges = 0;
   let timedOut = false;
@@ -113,7 +114,7 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
       break;
     }
     const remainingEdges = edgeLimit - inspectedEdges;
-    const outgoing = yield* store.edgesForNodes(
+    const outgoing = yield* store.traversalEdgesForNodes(
       databasePath,
       snapshotId,
       frontier,
@@ -167,7 +168,7 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
       ],
     };
   }
-  const pathEdges: CodeGraphEdge[] = [];
+  const pathEdges: CodeGraphTraversalEdge[] = [];
   const pathIds = new Set<string>([target.id]);
   let current = target.id;
   while (current !== start.id) {
@@ -186,10 +187,23 @@ export const pathQuery = Effect.fn('codeGraph.pathQuery')(function* (
       warnings: ['Path search reached its elapsed-time budget; results are partial.'],
     };
   }
+  const hydratedEdges = yield* store.edgesByIds(
+    databasePath,
+    snapshotId,
+    pathEdges.map(edge => edge.id),
+  );
+  if (yield* deadlineReached(deadline)) {
+    return {
+      edges: [],
+      nodes: [start, target],
+      searchCoverage: coverage('timed-out', ['time-budget'], visited.size, inspectedEdges, true),
+      warnings: ['Path search reached its elapsed-time budget; results are partial.'],
+    };
+  }
   const byId = new Map(symbols.map(symbol => [symbol.id, symbol]));
   const orderedIds = [start.id, ...pathEdges.map(edge => edge.targetId!).filter(Boolean)];
   return {
-    edges: pathEdges,
+    edges: hydratedEdges,
     nodes: orderedIds
       .map((id, index) => {
         const symbol = byId.get(id);
