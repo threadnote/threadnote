@@ -29,6 +29,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const LOCAL_SYMBOL_REF = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const QUALIFIED_SYMBOL_REF = /^cgr_[0-9a-f]{40}$/u;
+const CAPTURE_LEASE_WRITER_OPTIONS = {waitTimeoutMilliseconds: 0} as const;
 
 export const MEMORY_CODE_CITATION_GRAPH_PREPARATION_COMMAND = 'threadnote graph index --no-vectors' as const;
 export const MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND = 'threadnote workset prepare' as const;
@@ -349,8 +350,16 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   });
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      yield* Effect.acquireRelease(store.acquireSnapshotLease(before.databasePath, snapshot.id, 60_000), token =>
-        store.releaseSnapshotLease(before.databasePath, token).pipe(Effect.ignore),
+      // Capture is a foreground operation over ready evidence. Joining a
+      // builder's unbounded writer wait here also makes scoped acquisition and
+      // release defer cancellation. A busy writer is retryable before any
+      // memory write; a busy release leaves only this bounded, expiring lease.
+      yield* Effect.acquireRelease(
+        store
+          .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, CAPTURE_LEASE_WRITER_OPTIONS)
+          .pipe(Effect.mapError(error => captureError(cwd, error))),
+        token =>
+          store.releaseSnapshotLease(before.databasePath, token, CAPTURE_LEASE_WRITER_OPTIONS).pipe(Effect.ignore),
       );
       const repositoryRoot = yield* fs
         .realPath(before.identity.repoRoot)

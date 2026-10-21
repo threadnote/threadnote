@@ -7,7 +7,7 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
-import type {CodeGraphStatus} from '@threadnote/graph/types';
+import {CodeGraphStoreBusyError, type CodeGraphStatus} from '@threadnote/graph/types';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -66,11 +66,50 @@ describe('local citation capture fences', () => {
         }),
       {fastCheck: {numRuns: 36}},
     );
+
+    fcEffectProp(
+      test,
+      'retries denied leases without reading evidence and preserves capture identity',
+      {denials: fc.integer({min: 1, max: 6})},
+      ({denials}) =>
+        Effect.gen(function* () {
+          let evidenceReads = 0;
+          const fixture = yield* captureFixture({
+            deniedAcquisitions: denials,
+            onEvidence: () => evidenceReads++,
+          });
+          for (let attempt = 0; attempt < denials; attempt++) {
+            const failure = yield* fixture.capture().pipe(Effect.flip);
+            expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
+            expect(failure).toMatchObject({retryable: true});
+            expect(evidenceReads).toBe(0);
+            expect(fixture.leases()).toEqual({acquired: 0, released: 0});
+          }
+          const first = yield* fixture.capture();
+          const replay = yield* fixture.capture();
+          expect(replay).toEqual(first);
+          expect(evidenceReads).toBe(2);
+          expect(fixture.leases()).toEqual({acquired: 2, released: 2});
+        }),
+      {fastCheck: {numRuns: 12}},
+    );
+
+    test.effect('returns captured evidence when a writer prevents immediate lease release', () =>
+      Effect.gen(function* () {
+        const fixture = yield* captureFixture({denyRelease: true});
+        const citations = yield* fixture.capture();
+        expect(citations).toHaveLength(1);
+        expect(fixture.leases()).toEqual({acquired: 1, released: 1});
+        expect(fixture.writerWaits()).toEqual([0, 0]);
+      }),
+    );
   });
 });
 
 function captureFixture(
   options: {
+    readonly deniedAcquisitions?: number;
+    readonly denyRelease?: boolean;
     readonly onEvidence?: () => void;
     readonly statusFor?: (status: CodeGraphStatus) => CodeGraphStatus;
   } = {},
@@ -114,6 +153,8 @@ function captureFixture(
     let observations = 0;
     let acquired = 0;
     let released = 0;
+    let deniedAcquisitions = options.deniedAcquisitions ?? 0;
+    const writerWaits: (number | undefined)[] = [];
     const query = CodeGraphQueryService.of({
       status: () =>
         Effect.sync(() => {
@@ -122,8 +163,18 @@ function captureFixture(
         }),
     } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
     const store = CodeGraphStore.of({
-      acquireSnapshotLease: () => Effect.sync(() => `lease-${++acquired}`),
-      releaseSnapshotLease: () => Effect.sync(() => void ++released),
+      acquireSnapshotLease: (_database, _snapshot, _duration, writerOptions) =>
+        Effect.suspend(() => {
+          writerWaits.push(writerOptions?.waitTimeoutMilliseconds);
+          if (deniedAcquisitions-- > 0) return Effect.fail(CodeGraphStoreBusyError.of('fixture writer busy'));
+          return Effect.succeed(`lease-${++acquired}`);
+        }),
+      releaseSnapshotLease: (_database, _token, writerOptions) =>
+        Effect.suspend(() => {
+          writerWaits.push(writerOptions?.waitTimeoutMilliseconds);
+          released++;
+          return options.denyRelease ? Effect.fail(CodeGraphStoreBusyError.of('fixture writer busy')) : Effect.void;
+        }),
       effectiveSnapshotCitationEvidence: () =>
         Effect.sync(() => {
           options.onEvidence?.();
@@ -148,7 +199,7 @@ function captureFixture(
             ],
           };
         }),
-    } as unknown as CodeGraphStoreShape);
+    } satisfies Partial<CodeGraphStoreShape> as unknown as CodeGraphStoreShape);
     return {
       capture: () =>
         captureMemoryCodeCitations(CONFIG, {
@@ -159,6 +210,7 @@ function captureFixture(
         }).pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, store)),
       observations: () => observations,
       leases: () => ({acquired, released}),
+      writerWaits: () => writerWaits,
     };
   });
 }
