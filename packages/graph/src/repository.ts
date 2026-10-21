@@ -57,6 +57,7 @@ export const resolveRepositoryCheckoutIdentity = Effect.fn('codeGraph.resolveRep
 /** @internal Complete live observation used when a caller also needs the non-serializing git-dir detail. */
 export const resolveRepositoryIdentityDetail = Effect.fn('codeGraph.resolveRepositoryIdentityDetail')(function* (
   cwd: string,
+  observeMetadata?: RepositoryIdentityMetadataObserver,
 ) {
   const result = yield* runBinaryCommandEffect(
     'git',
@@ -70,23 +71,51 @@ export const resolveRepositoryIdentityDetail = Effect.fn('codeGraph.resolveRepos
       '--git-dir',
       '--show-object-format',
       'HEAD',
+      ...(observeMetadata === undefined ? [] : ['--git-path', 'index']),
     ],
-    {maxOutputBytes: REPOSITORY_METADATA_BYTES_MAXIMUM, timeoutMs: 30_000},
+    {
+      maxOutputBytes:
+        REPOSITORY_METADATA_BYTES_MAXIMUM + (observeMetadata === undefined ? 0 : GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM),
+      timeoutMs: 30_000,
+    },
   ).pipe(
     Effect.catchTag('CommandFailed', () => succeedUndefined),
     Effect.mapError(cause => CodeGraphRepositoryError.make({message: `Not a Git repository: ${cause.message}`})),
   );
   // An unborn HEAD or an ambiguous frame must repeat complete discovery at the
   // original caller. Never combine a partial batch with later fallback fields.
-  const metadata = result?.exitCode === 0 ? parseRepositoryIdentityMetadata(result.stdout) : undefined;
+  const metadata =
+    result?.exitCode === 0 ? parseRepositoryIdentityMetadata(result.stdout, observeMetadata !== undefined) : undefined;
+  yield* observeMetadata?.(metadata) ?? Effect.void;
   return yield* resolveRepositoryIdentityDetailFromObservation(cwd, metadata);
 });
 
 /** Start a scoped worktree read, then bind it to the independently discovered local identity. */
 export const startRepositoryWorktreeObservation = Effect.fn('codeGraph.startRepositoryWorktreeObservation')(function* (
   cwd: string,
+  shared?: {
+    readonly cache: CodeGraphUntrackedStatusCacheOptions;
+    readonly metadata: Effect.Effect<RepositoryIdentityMetadata | undefined>;
+  },
 ) {
-  const pending = yield* readRepositoryReadFenceWorktree(cwd).pipe(Effect.option, Effect.forkScoped);
+  const read =
+    shared === undefined
+      ? readRepositoryReadFenceWorktree(cwd)
+      : Effect.gen(function* () {
+          const metadata = yield* shared.metadata;
+          if (metadata?.sourceIndex === undefined) return yield* readRepositoryReadFenceWorktree(cwd);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const repoRoot = yield* fs.realPath(metadata.repoRoot);
+          const gitCommonDirectory = yield* fs.realPath(path.resolve(repoRoot, metadata.commonDirectory));
+          return yield* readRepositoryWorktreeWithCache(cwd, shared.cache, {
+            repoRoot,
+            gitCommonDirectory,
+            objectFormat: metadata.objectFormat,
+            sourceIndex: metadata.sourceIndex,
+          });
+        }).pipe(Effect.timeout('10 seconds'));
+  const pending = yield* read.pipe(Effect.option, Effect.forkScoped);
   return (identity: RepositoryIdentity) =>
     Effect.gen(function* () {
       const output = yield* Fiber.join(pending);
@@ -173,32 +202,50 @@ const resolveRepositoryIdentityDetailFromObservation = Effect.fn(
   return {gitDirectory: directories.gitDirectory, identity};
 });
 
-interface RepositoryIdentityMetadata {
+/** @internal One complete, freshly observed discovery frame; never persisted as authority. */
+export interface RepositoryIdentityMetadata {
   readonly repoRoot: string;
   readonly commonDirectory: string;
   readonly gitDirectory: string;
   readonly objectFormat: 'sha1' | 'sha256';
   readonly headCommit: string;
+  readonly sourceIndex?: string;
 }
 
+/** @internal Share discovery with a scoped worktree read that independently binds the original caller. */
+export type RepositoryIdentityMetadataObserver = (
+  metadata: RepositoryIdentityMetadata | undefined,
+) => Effect.Effect<void>;
+
 /** @internal Successful bounded Git metadata only; undefined requests fresh legacy discovery. */
-export function parseRepositoryIdentityMetadata(output: Uint8Array): RepositoryIdentityMetadata | undefined {
-  if (output.byteLength === 0 || output.byteLength > REPOSITORY_METADATA_BYTES_MAXIMUM) return undefined;
+export function parseRepositoryIdentityMetadata(
+  output: Uint8Array,
+  includeIndex = false,
+): RepositoryIdentityMetadata | undefined {
+  if (
+    output.byteLength === 0 ||
+    output.byteLength > REPOSITORY_METADATA_BYTES_MAXIMUM + (includeIndex ? GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM : 0)
+  )
+    return undefined;
   try {
     const decoded = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true}).decode(output);
     if (!decoded.endsWith('\n')) return undefined;
     const records = decoded.slice(0, -1).split('\n');
-    if (records.length !== 5 || records.some(record => !record || record.includes('\0') || record.includes('\r'))) {
+    if (
+      records.length !== (includeIndex ? 6 : 5) ||
+      records.some(record => !record || record.includes('\0') || record.includes('\r'))
+    ) {
       return undefined;
     }
-    const [repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit] = records;
+    const [repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit, sourceIndex] = records;
     // Full discovery trims the root output. Preserve that behavior by declining
     // the fast path for roots whose edge whitespace would select a different path.
     if (repoRoot !== repoRoot.trim() || byteLength(`${repoRoot}\n`) > GIT_TEXT_OUTPUT_BYTES_MAXIMUM) return undefined;
     if (byteLength(`${commonDirectory}\n${gitDirectory}\n`) > GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM) return undefined;
     if (objectFormat !== 'sha1' && objectFormat !== 'sha256') return undefined;
     if (!(objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u).test(headCommit)) return undefined;
-    return {repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit};
+    if (includeIndex && byteLength(`${sourceIndex}\n`) > GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM) return undefined;
+    return {repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit, ...(includeIndex ? {sourceIndex} : {})};
   } catch {
     return undefined;
   }

@@ -10,7 +10,11 @@ import {
   type CodeGraphGitWorktreeRegistration,
 } from './git/worktree/registration.js';
 import {classifyCodeGraphLifecycle} from './lifecycle/classification.js';
-import {normalizeRepositoryBranchName, resolveRepositoryIdentityDetail} from './repository.js';
+import {
+  normalizeRepositoryBranchName,
+  resolveRepositoryIdentityDetail,
+  type RepositoryIdentityMetadataObserver,
+} from './repository.js';
 import {codeGraphLocalProvenanceLockPath} from './layout.js';
 import type {RepositoryIdentity} from './types.js';
 
@@ -238,6 +242,26 @@ export const resolveAndRecordCodeGraphLocalAssociation = Effect.fn('codeGraph.re
       resolved.gitDirectory,
     );
     return {association, identity};
+  },
+);
+
+/**
+ * @internal Pair supplemental association recording with status preparation.
+ * Each request still completes both before consuming graph evidence; a repeated
+ * status read when opening the existing store session must not record twice.
+ * This memoizes only that request's recording, never repository freshness.
+ */
+export const prepareCodeGraphLocalAssociationObservation = Effect.fn('codeGraph.prepareLocalAssociationObservation')(
+  function* (threadnoteHome: string, cwd: string, observeMetadata?: RepositoryIdentityMetadataObserver) {
+    const resolved = yield* resolveRepositoryIdentityDetail(cwd, observeMetadata);
+    const association = yield* Effect.cached(
+      recordResolvedCodeGraphLocalAssociation(threadnoteHome, resolved.identity, {}, resolved.gitDirectory),
+    );
+    return {
+      identity: resolved.identity,
+      observeTogether: <A, E, R>(observation: Effect.Effect<A, E, R>) =>
+        Effect.all([association, observation], {concurrency: 2}).pipe(Effect.map(([, result]) => result)),
+    };
   },
 );
 

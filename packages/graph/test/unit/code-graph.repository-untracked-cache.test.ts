@@ -42,6 +42,27 @@ const makeFixture = (format: 'sha1' | 'sha256' = 'sha1') =>
 
 const fixture = makeFixture();
 
+const observeInitialComposite = (
+  f: Effect.Success<typeof fixture>,
+  cwd = f.root,
+  identity = f.identity,
+  minimumIndexBytes = 0,
+) =>
+  Effect.gen(function* () {
+    const bind = yield* startRepositoryWorktreeObservation(cwd, {
+      cache: {threadnoteHome: f.home, minimumIndexBytes},
+      metadata: Effect.succeed({
+        repoRoot: identity.repoRoot,
+        commonDirectory: identity.gitCommonDirectory,
+        gitDirectory: f.path.dirname(f.index),
+        objectFormat: identity.objectFormat,
+        headCommit: identity.headCommit,
+        sourceIndex: f.index,
+      }),
+    });
+    return {identity, worktreeChanged: yield* bind(identity)};
+  });
+
 const scenario = (changes: readonly Mutation[], minimumIndexBytes = 0) =>
   Effect.gen(function* () {
     const f = yield* fixture;
@@ -85,6 +106,7 @@ const scenario = (changes: readonly Mutation[], minimumIndexBytes = 0) =>
       const final = yield* resolveRepositoryIdentityForExpectationAndWorktree(f.root, f.identity, cache);
       const changed = raw.stdout.split('\0').some(record => record.length > 0 && !record.startsWith('# '));
       expect(initial).toBe(changed);
+      expect((yield* observeInitialComposite(f, f.root, f.identity, minimumIndexBytes)).worktreeChanged).toBe(changed);
       expect(final.worktreeChanged).toBe(changed);
       const privateStatus = statuses.find(status => status.private);
       if (privateStatus !== undefined) {
@@ -252,6 +274,10 @@ const ignoreRefreshScenario = (relaxed: boolean, nested: boolean, ignoreName = '
         threadnoteHome: f.home,
         minimumIndexBytes: 0,
       }).pipe(Effect.provideService(CommandExecutor, observed));
+      const initial = yield* observeInitialComposite(f, f.root, identity).pipe(
+        Effect.provideService(CommandExecutor, observed),
+      );
+      expect(initial.worktreeChanged).toBe(result.worktreeChanged);
       expect(privateOutput).toBeUndefined();
       expect(trackedOutput).toBeUndefined();
       expect(rawOutput).toBe(raw);
@@ -527,6 +553,39 @@ describe('bounded repository untracked cache', () => {
         expect(result._tag).toBe('Failure');
       }).pipe(TestClock.withLive),
     );
+    it.effect('initial observation rejects HEAD movement after metadata discovery', () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const command = yield* CommandExecutor;
+        let moved = false;
+        const observed = CommandExecutor.of({
+          ...command,
+          execute: (executable, args, options) =>
+            Effect.gen(function* () {
+              if (args.includes('status') && options?.trustedGitIndexFile !== undefined && !moved) {
+                moved = true;
+                yield* f.git([
+                  '-c',
+                  'user.name=Test',
+                  '-c',
+                  'user.email=test@example.invalid',
+                  'commit',
+                  '--allow-empty',
+                  '-qm',
+                  'moved',
+                ]);
+              }
+              return yield* command.execute(executable, args, options);
+            }).pipe(Effect.provideService(CommandExecutor, command), Effect.orDie),
+        });
+        const result = yield* observeInitialComposite(f).pipe(
+          Effect.provideService(CommandExecutor, observed),
+          Effect.result,
+        );
+        expect(moved).toBe(true);
+        expect(result._tag).toBe('Failure');
+      }).pipe(TestClock.withLive),
+    );
     it.effect('falls back to a fresh raw observation when the source index changes during private status', () =>
       Effect.gen(function* () {
         const f = yield* fixture;
@@ -558,6 +617,39 @@ describe('bounded repository untracked cache', () => {
         expect(rawReads).toBe(2);
         expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(stagedIndex);
       }).pipe(TestClock.withLive),
+    );
+    it.effect(
+      'initial observation: falls back to a fresh raw observation when the source index changes during private status',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const command = yield* CommandExecutor;
+          let mutated = false;
+          let rawReads = 0;
+          let stagedIndex: string | undefined;
+          const observed = CommandExecutor.of({
+            ...command,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                if (args.includes('status')) {
+                  if (options?.trustedGitIndexFile === undefined) rawReads += 1;
+                  else if (!mutated) {
+                    mutated = true;
+                    yield* f.fs.writeFileString(f.path.join(f.root, 'src/tracked.ts'), 'export const staged = 2;\n');
+                    yield* f.git(['add', '.']);
+                    stagedIndex = sha256HexSync(yield* f.fs.readFile(f.index));
+                  }
+                }
+                return yield* command.execute(executable, args, options);
+              }).pipe(Effect.provideService(CommandExecutor, command), Effect.orDie),
+          });
+          const result = yield* observeInitialComposite(f, f.root).pipe(
+            Effect.provideService(CommandExecutor, observed),
+          );
+          expect(result.worktreeChanged).toBe(true);
+          expect(rawReads).toBe(2);
+          expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(stagedIndex);
+        }).pipe(TestClock.withLive),
     );
     it.effect('discards a private result from an ABA-retargeted caller before the final identity check', () =>
       Effect.gen(function* () {
@@ -603,6 +695,52 @@ describe('bounded repository untracked cache', () => {
         expect(result.worktreeChanged).toBe(false);
         expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(before);
       }).pipe(TestClock.withLive),
+    );
+    it.effect(
+      'initial observation: discards a private result from an ABA-retargeted caller before the final identity check',
+      () =>
+        Effect.gen(function* () {
+          const f = yield* fixture;
+          const linked = f.path.join(f.path.dirname(f.root), 'linked');
+          const caller = f.path.join(f.path.dirname(f.root), 'caller');
+          yield* f.git(['worktree', 'add', '-q', '--detach', linked]);
+          yield* Effect.sync(() => symlinkSync(f.root, caller, 'junction'));
+          yield* f.fs.writeFileString(f.path.join(linked, 'src/tracked.ts'), 'export const different = 2;\n');
+          const command = yield* CommandExecutor;
+          let switched = false;
+          let rawReads = 0;
+          const observed = CommandExecutor.of({
+            ...command,
+            execute: (executable, args, options) =>
+              Effect.gen(function* () {
+                if (!args.includes('status')) return yield* command.execute(executable, args, options);
+                if (options?.trustedGitIndexFile === undefined) {
+                  rawReads += 1;
+                  return yield* command.execute(executable, args, options);
+                }
+                switched = true;
+                yield* f.fs.remove(caller);
+                yield* Effect.sync(() => symlinkSync(linked, caller, 'junction'));
+                return yield* command
+                  .execute(executable, args, options)
+                  .pipe(
+                    Effect.ensuring(
+                      f.fs
+                        .remove(caller)
+                        .pipe(Effect.andThen(Effect.sync(() => symlinkSync(f.root, caller, 'junction'))), Effect.orDie),
+                    ),
+                  );
+              }).pipe(Effect.provideService(CommandExecutor, command), Effect.orDie),
+          });
+          const before = sha256HexSync(yield* f.fs.readFile(f.index));
+          const result = yield* observeInitialComposite(f, caller).pipe(
+            Effect.provideService(CommandExecutor, observed),
+          );
+          expect(switched).toBe(true);
+          expect(rawReads).toBe(2);
+          expect(result.worktreeChanged).toBe(false);
+          expect(sha256HexSync(yield* f.fs.readFile(f.index))).toBe(before);
+        }).pipe(TestClock.withLive),
     );
     fcEffectProp(
       it,

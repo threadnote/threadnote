@@ -151,31 +151,35 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
 });
 
 describe('approved workflow graph publication', () => {
-  effectIt.effect('publishes and replays the three approved stages before admitting draft retirement', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const preview = yield* f.preview();
-      if (!('stages' in preview)) return yield* Effect.die('Expected preview');
-      expect(preview.stages).toHaveLength(3);
-      expect(preview.nodes.every(node => node.relations.length === 1)).toBe(true);
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
-      expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
-        _tag: 'Failure',
-        failure: {code: 'publication-approval-required'},
-      });
-      yield* f.approve(preview.approvalDigest);
-      const result = yield* f.publish(preview.approvalDigest);
-      expect(result).toMatchObject({status: 'ok', verifiedReadback: true});
-      expect(yield* f.publish(preview.approvalDigest)).toEqual(result);
-      expect(yield* f.guard).toEqual(result);
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
-      const files = (yield* f.git(f.remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout;
-      expect(files).not.toMatch(/handoff|workflow-memory|\.publication/);
-      for (const node of preview.nodes) {
-        const content = yield* readOptionalResource(f.config, node.canonicalUri);
-        expect(parseMemoryDocument(node.canonicalUri, content!)?.metadata.relations).toEqual(node.relations);
-      }
-    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  effectIt.effect(
+    'publishes and replays the three approved stages before admitting draft retirement',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const preview = yield* f.preview();
+        if (!('stages' in preview)) return yield* Effect.die('Expected preview');
+        expect(preview.stages).toHaveLength(3);
+        expect(preview.nodes.every(node => node.relations.length === 1)).toBe(true);
+        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'publication-approval-required'},
+        });
+        yield* f.approve(preview.approvalDigest);
+        const result = yield* f.publish(preview.approvalDigest);
+        expect(result).toMatchObject({status: 'ok', verifiedReadback: true});
+        expect(yield* f.publish(preview.approvalDigest)).toEqual(result);
+        expect(yield* f.guard).toEqual(result);
+        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        const files = (yield* f.git(f.remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout;
+        expect(files).not.toMatch(/handoff|workflow-memory|\.publication/);
+        for (const node of preview.nodes) {
+          const content = yield* readOptionalResource(f.config, node.canonicalUri);
+          expect(parseMemoryDocument(node.canonicalUri, content!)?.metadata.relations).toEqual(node.relations);
+        }
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    // Three native stages plus fresh replay/retirement verification exceeded 30s on Windows CI.
+    process.platform === 'win32' ? 60_000 : undefined,
   );
 
   effectIt.effect('keeps a partially pushed graph pending and resumes its committed stage without duplicates', () =>

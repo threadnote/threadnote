@@ -1,14 +1,15 @@
-import {Effect, Option} from 'effect';
+import {Deferred, Effect, Option} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import type {CodeGraphUntrackedStatusCacheOptions} from '../git/status_cache.js';
 import {worktreeOverlayState} from '../inventory.js';
-import {resolveAndRecordCodeGraphLocalAssociation} from '../local_provenance.js';
+import {prepareCodeGraphLocalAssociationObservation} from '../local_provenance.js';
 import {withCodeGraphQueryTelemetryStage, type CodeGraphStatusOptions} from './contract.js';
 import type {CodeGraphLanguagePackRegistryShape} from '../languages/registry.js';
 import {
   resolveRepositoryIdentityForExpectation,
   resolveRepositoryIdentityForExpectationAndWorktree,
   startRepositoryWorktreeObservation,
+  type RepositoryIdentityMetadata,
 } from '../repository.js';
 import type {CodeGraphLanguagePackStatus, RepositoryIdentity, RepositoryIdentityExpectation} from '../types.js';
 
@@ -98,17 +99,29 @@ export const observeCodeGraphStatusSessionIdentity = Effect.fn('codeGraph.observ
   expected: RepositoryIdentityExpectation | undefined,
   options: CodeGraphStatusOptions,
 ) {
+  const metadata = yield* Deferred.make<RepositoryIdentityMetadata | undefined>();
   const pendingWorktree =
     expected === undefined && options.observeWorktree !== false && options.afterIdentityObserved === undefined
-      ? yield* startRepositoryWorktreeObservation(cwd)
+      ? yield* startRepositoryWorktreeObservation(cwd, {cache: {threadnoteHome}, metadata: Deferred.await(metadata)})
       : undefined;
   const observation = yield* expected === undefined
     ? withCodeGraphQueryTelemetryStage(
         options.telemetry,
         'graph.query.status',
         'query-repository-identity',
-        resolveAndRecordCodeGraphLocalAssociation(threadnoteHome, cwd),
-      ).pipe(Effect.map(local => repositoryIdentityObservation(local.identity)))
+        prepareCodeGraphLocalAssociationObservation(
+          threadnoteHome,
+          cwd,
+          pendingWorktree === undefined
+            ? undefined
+            : observed => Deferred.succeed(metadata, observed).pipe(Effect.asVoid),
+        ),
+      ).pipe(
+        Effect.map(local => ({
+          ...repositoryIdentityObservation(local.identity),
+          observeTogether: local.observeTogether,
+        })),
+      )
     : withCodeGraphQueryTelemetryStage(
         options.telemetry,
         'graph.query.status',
@@ -124,5 +137,10 @@ export const observeCodeGraphStatusSessionIdentity = Effect.fn('codeGraph.observ
         ? observation.worktreeChanged
         : pendingWorktree(identity)
       : undefined;
-  return {identity, worktreeChanged: changed};
+  return {
+    identity,
+    worktreeChanged: changed,
+    observeTogether:
+      'observeTogether' in observation ? observation.observeTogether : <A, E, R>(read: Effect.Effect<A, E, R>) => read,
+  };
 });
