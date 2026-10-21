@@ -16,7 +16,11 @@ import {
 import {readMemoryRecordsByUri, writeApprovedTopicMaintenanceContent} from '../../mcp/server/memory.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
 import {verifyTopicMaintenanceReviewSource} from './maintenance_review_source.js';
-import {readContextMaintenanceStatus, recordTopicMaintenanceReviewDecision} from './maintenance.js';
+import {
+  readContextMaintenanceStatus,
+  reconcileAcceptedTopicMaintenanceCase,
+  recordTopicMaintenanceReviewDecision,
+} from './maintenance.js';
 
 export class TopicReviewError extends Schema.TaggedError<TopicReviewError>()('TopicReviewError', {
   message: Schema.String,
@@ -142,7 +146,7 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
       if (!uri.startsWith(`threadnote://user/${config.user}/memories/durable/`))
         return yield* fail('Only personal durable topics can be applied here.');
       const fs = yield* FileSystem.FileSystem;
-      return yield* withMemoryUriLocks(
+      const prepared = yield* withMemoryUriLocks(
         fs,
         config.agentContextHome,
         [uri],
@@ -231,16 +235,54 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
               'The approved write completed, but exact readback or source freshness failed. Review the conflict.',
             );
           }
-          const applied = candidateReviewWithState(review, review.candidates[0].candidateId, 'applied', {
-            action: 'apply',
-            at: DateTime.formatIso(yield* DateTime.now),
-            memoryUri: uri,
-          });
-          const completed = {...applied, maintenanceApproval: {...approval, stage: 'written' as const}};
-          yield* saveCandidateReview(config.agentContextHome, completed);
-          return completed;
+          return review;
         }),
       );
+      const original = parseMemoryDocument(uri, approval.preview.beforeContent);
+      if (!original) return yield* fail('The prepared target baseline is unavailable.');
+      const complete = Effect.gen(function* () {
+        if (approval.stage === 'written') return prepared;
+        const applied = candidateReviewWithState(prepared, prepared.candidates[0].candidateId, 'applied', {
+          action: 'apply',
+          at: DateTime.formatIso(yield* DateTime.now),
+          memoryUri: uri,
+        });
+        const completed = {...applied, maintenanceApproval: {...approval, stage: 'written' as const}};
+        yield* saveCandidateReview(config.agentContextHome, completed);
+        return completed;
+      });
+      const reconciled = yield* reconcileAcceptedTopicMaintenanceCase(
+        config,
+        original,
+        approval.preview.content,
+        payload,
+        input.sourceCwd,
+        complete,
+      ).pipe(Effect.result);
+      if (Result.isFailure(reconciled)) {
+        const current = (yield* readMemoryRecordsByUri(config, [uri]))[0];
+        const source = yield* verifyTopicMaintenanceReviewSource(config, original, payload, input.sourceCwd).pipe(
+          Effect.result,
+        );
+        if (
+          approval.stage !== 'written' &&
+          (current?.content !== approval.preview.content || Result.isFailure(source))
+        ) {
+          const conflicted = candidateReviewWithState(prepared, prepared.candidates[0].candidateId, 'conflict', {
+            action: 'conflict',
+            at: DateTime.formatIso(yield* DateTime.now),
+          });
+          yield* saveCandidateReview(config.agentContextHome, {
+            ...conflicted,
+            maintenanceApproval: {...approval, stage: 'conflict'},
+          });
+          return yield* fail('The approved topic was saved, but its target or source changed during verification.');
+        }
+        return yield* fail(
+          'The approved topic was saved; maintenance verification is pending. Retry finish verification.',
+        );
+      }
+      return reconciled.success;
     }),
   );
 });

@@ -216,7 +216,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: >-
-          bun --bun vitest run
+          bun --bun vitest run --no-file-parallelism
           apps/threadnote/test/unit/windows-support.test.ts
           apps/threadnote/test/unit/command-shim.test.ts
           apps/threadnote/test/unit/effect-command.test.ts

@@ -17,7 +17,11 @@ import type {DevSkillMember} from '../../src/dev_skills/contract.js';
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer));
-const historical = Effect.fn(function* (flat = false, count = 1) {
+const historical = Effect.fn(function* (
+  flat = false,
+  count = 1,
+  retiredSupportFiles: 'full' | 'entrypoint-only' = 'full',
+) {
   const f = yield* fixture();
   const selector = {agent: flat ? 'antigravity-cli' : 'codex'};
   const installed = yield* f.run(applyDevSkills(f.config, 'install', selector));
@@ -25,10 +29,11 @@ const historical = Effect.fn(function* (flat = false, count = 1) {
   yield* f.run(applyDevSkills(other, 'install', selector));
   const current = yield* loadDevSkillsBundleAt(f.source, '5.3.0-beta.4');
   const support = current.manifest.skills.find(skill => skill.id === 'watch-pr')!;
+  const retiredSupport = retiredSupportFiles === 'entrypoint-only' ? {...support, files: ['SKILL.md']} : support;
   const retiredIds = Array.from({length: count}, (_, index) => `dev-retired-${String.fromCharCode(97 + index)}`);
   const skills = [
     ...current.manifest.skills.filter(skill => skill.role === 'primary'),
-    ...retiredIds.map(id => ({...support, id})),
+    ...retiredIds.map(id => ({...retiredSupport, id})),
   ].sort((a, b) => a.id.localeCompare(b.id));
   const files: Record<string, string> = {};
   const hashes: Record<string, string> = {};
@@ -79,7 +84,7 @@ describe('bounded historical support retirement', () => {
         `${flat ? 'flat' : 'directory'} refresh retires the full support bound and preserves ${edited ? 'edited' : 'unchanged'} history`,
         () =>
           Effect.gen(function* () {
-            const f = yield* historical(flat, 16);
+            const f = yield* historical(flat, 16, 'entrypoint-only');
             const relative = flat ? `${f.retiredIds[0]}.md` : `${f.retiredIds[0]}/SKILL.md`;
             const retired = f.path.join(f.installed.target.skillRoot, relative);
             if (edited) yield* f.fs.writeFileString(retired, 'user-edited historical workflow');

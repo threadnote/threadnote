@@ -1,3 +1,4 @@
+import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {runExportPack} from '../../src/memory/commands.js';
 import {runObsidianProjectionAdd, runObsidianProjectionSync} from '@threadnote/integration-obsidian/projection';
@@ -233,39 +234,37 @@ effectIt.effect(
             verified: true,
           }),
       });
+      const expectedEvidence = reviewEvidenceFromPacket(
+        readyEvidence(yield* readContextMaintenancePacket(f.config, f.caseId)),
+      );
       let calls = 0;
       const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, basis) =>
         Effect.sync(() => {
           calls++;
           if (!basis || basis.version !== 2) throw new Error('Expected imported generation basis.');
-          expect(prompt).toContain('current:tnob_');
+          for (const handle of basis.handles) expect(prompt).not.toContain(handle.id);
+          const semantic = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+          const current = topicDraftEvidenceFromPrompt(prompt, basis);
+          expect(current).toEqual(
+            Object.fromEntries(
+              expectedEvidence.filter(e => e.handleId.startsWith('current:')).map(e => [e.handleId, e.content]),
+            ),
+          );
+          expect(new Set(semantic.historicalSources.map((source: unknown) => JSON.stringify(source))).size).toBe(
+            semantic.historicalSources.length,
+          );
+          for (const source of semantic.sources) {
+            const handle = Object.keys(current)[source.sourceIndex];
+            const prior = expectedEvidence.find(e => e.handleId === handle.replace('current:', 'historical:'))!;
+            expect(
+              source.historicalSourceIndices.map((index: number) => semantic.historicalSources[index].excerpt),
+            ).toEqual([prior.content]);
+          }
           expect(prompt).not.toContain('sourceCommit');
-          const current = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
           return {
-            text: JSON.stringify({
-              version: 1,
-              targetHash: basis.targetHash,
-              observationRevision: basis.observationRevision,
-              packetDigest: basis.packetDigest,
-              outcome: 'propose-revalidation',
-              operations: [],
-              reviewedHandles: current,
-              rationale: 'Checked exact current note fragment.',
-              unresolvedQuestions: [],
-              removedClaims: [],
-              paragraphDispositions: {
-                version: 1,
-                entries: basis.paragraphs
-                  .filter(paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct')
-                  .map(paragraph => ({
-                    ordinal: paragraph.ordinal,
-                    beforeHash: paragraph.hash,
-                    disposition: 'revalidate',
-                    supportHandles: current,
-                    rationale: 'Reviewed unchanged.',
-                  })),
-              },
-            }),
+            text: JSON.stringify(
+              makeTopicDraftWireFixture(basis, 'unchanged', topicDraftEvidenceFromPrompt(prompt, basis)),
+            ),
             backendIdentity: 'local-ai',
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,

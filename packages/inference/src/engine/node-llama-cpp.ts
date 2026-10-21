@@ -84,7 +84,9 @@ interface NativeChatSession {
       readonly maxTokens: number;
       readonly seed?: number;
       readonly signal: AbortSignal;
-      readonly temperature: 0;
+      readonly temperature: number;
+      readonly topP?: number;
+      readonly topK?: number;
     },
   ) => Promise<string>;
 }
@@ -467,7 +469,8 @@ function generationSession(
                 maxTokens: request.maxTokens,
                 seed: request.seed,
                 signal,
-                temperature: 0,
+                temperature: request.sampling?.temperature ?? 0,
+                ...(request.sampling ? {topP: request.sampling.topP, topK: request.sampling.topK} : {}),
               }),
             cause =>
               isAbortError(cause)
