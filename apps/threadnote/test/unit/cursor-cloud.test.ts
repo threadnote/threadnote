@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
+import {Schema} from 'effect';
 import {
   buildCursorCloudMcpConfig,
   buildCursorCloudProfile,
@@ -14,6 +15,7 @@ import {
 } from '@threadnote/threadnote/cursor/cloud';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {ShareTeamConfig, ShareTeamsFile} from '@threadnote/threadnote/types';
+import {InvalidResourceId, validatePortableSegment} from '@threadnote/store/resource-id';
 
 const runtime: RuntimeConfig = {
   account: 'local',
@@ -80,32 +82,44 @@ describe('Cursor Cloud profile', () => {
   });
 
   it('preserves a saved Personal Cursor Cloud identity unless a command explicitly overrides it', () => {
+    const identity = fc.stringMatching(/^[a-z][a-z0-9]{0,20}$/u);
+    const portableUser = identity.filter(value => {
+      try {
+        validatePortableSegment(value);
+        return true;
+      } catch (error) {
+        if (Schema.is(InvalidResourceId)(error)) return false;
+        throw error;
+      }
+    });
     fc.assert(
-      fc.property(
-        fc.stringMatching(/^[a-z][a-z0-9]{0,20}$/u),
-        fc.stringMatching(/^[a-z][a-z0-9]{0,20}$/u),
-        fc.stringMatching(/^[a-z][a-z0-9]{0,20}$/u),
-        (savedUser, savedAgent, overrideUser) => {
-          const savedRuntime: RuntimeConfig = {
-            ...runtime,
-            agentId: savedAgent,
-            agentIdSource: 'cursor-cloud-profile',
-            user: savedUser,
-            userSource: 'cursor-cloud-profile',
-          };
-          expect(cursorCloudRuntimeConfig(savedRuntime, {})).toMatchObject({
-            agentId: savedAgent,
-            user: savedUser,
-          });
-          expect(cursorCloudRuntimeConfig(savedRuntime, {user: overrideUser})).toMatchObject({
-            agentId: savedAgent,
-            user: overrideUser,
-            userSource: 'cursor-cloud-command',
-          });
-        },
-      ),
-      {numRuns: 100},
+      fc.property(portableUser, identity, portableUser, (savedUser, savedAgent, overrideUser) => {
+        const savedRuntime: RuntimeConfig = {
+          ...runtime,
+          agentId: savedAgent,
+          agentIdSource: 'cursor-cloud-profile',
+          user: savedUser,
+          userSource: 'cursor-cloud-profile',
+        };
+        expect(cursorCloudRuntimeConfig(savedRuntime, {})).toMatchObject({
+          agentId: savedAgent,
+          user: savedUser,
+        });
+        expect(cursorCloudRuntimeConfig(savedRuntime, {user: overrideUser})).toMatchObject({
+          agentId: savedAgent,
+          user: overrideUser,
+          userSource: 'cursor-cloud-command',
+        });
+      }),
+      {examples: [['a', 'prn', 'b']], numRuns: 100},
     );
+  });
+
+  it('rejects reserved saved and overriding user memory-path identities', () => {
+    expect(() => cursorCloudRuntimeConfig({...runtime, user: 'prn', userSource: 'cursor-cloud-profile'}, {})).toThrow(
+      InvalidResourceId,
+    );
+    expect(() => cursorCloudRuntimeConfig(runtime, {user: 'prn'})).toThrow(InvalidResourceId);
   });
 
   it('renders two credential-free Dashboard entries for remote-hybrid mode', () => {
