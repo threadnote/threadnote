@@ -1,23 +1,42 @@
 import {Effect, FileSystem, Option, Path, Result} from 'effect';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {readSeedManifest} from '@threadnote/workspace/manifest';
+import {
+  resolveAutomaticSharedMemorySource,
+  authorizeAutomaticSharedMemorySource,
+} from '../../git_proposal/topic_maintenance_commands.js';
+import type {ApprovedSourceDescriptorV1} from '@threadnote/memory/reviewed-support';
+import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
+import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {verifyAuthoredMemoryRelationTargetIdentities} from '../relations.js';
 import {expandPath} from '@threadnote/platform/paths';
-import {isAgentArtifactUri, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  isSharedMemoryUri,
+  MAX_MEMORY_RELATIONS,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {MAX_MEMORY_CODE_CITATIONS} from '@threadnote/memory/code/citation';
 import {
   automaticMaintenanceEvidenceId,
   automaticMaintenanceMemoryScope,
   automaticMaintenanceSections,
+  MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE,
   type AutomaticMaintenanceEvidenceV1,
 } from '@threadnote/memory/automatic-maintenance';
-import {validateConsolidationProvenance, validateConsolidationProvenanceV2} from '@threadnote/memory/consolidation';
+import {
+  MAX_CONSOLIDATION_SOURCES,
+  validateConsolidationProvenance,
+  validateConsolidationProvenanceV2,
+} from '@threadnote/memory/consolidation';
 import {prepareMemoryMaintenanceBasis, memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {captureMemoryCodeCitations, memoryCodeCitationProjectScopeReceipt} from '@threadnote/context/citation/capture';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
 import {
   readContextMaintenanceCanonicalRecord,
@@ -25,6 +44,7 @@ import {
 } from './maintenance_inventory.js';
 import {
   AUTOMATIC_PREPARATION_MAPPER,
+  AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES,
   selectAutomaticPreparationUris,
   readAutomaticPreparationCursor,
   writeAutomaticPreparationCursor,
@@ -38,6 +58,13 @@ type InventorySnapshot = Effect.Success<ReturnType<typeof prepareContextMaintena
 type Candidate = PreparedMemoryV1['candidates'][number];
 type Read = PreparedMemoryV1['reads'][number];
 const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
+const RELATED_SOURCE_BUDGET = 8;
+
+/** Match public memory reads, narrowed to the already eligible team for a shared target. */
+export function automaticMemorySourceUriScopes(config: RuntimeConfig, record: MemoryRecord): readonly string[] {
+  const root = `threadnote://user/${uriSegment(config.user)}/memories`;
+  return [isSharedMemoryUri(record.uri) ? `${root}/shared/${record.uri.split('/shared/')[1].split('/')[0]}` : root];
+}
 
 /** Meaning-bearing policy only: incidental timestamps and other assessments cannot recursively churn support. */
 export function automaticPreparationMemoryContext(record: MemoryRecord) {
@@ -129,6 +156,10 @@ export function prepareAutomaticMemory(
     else evidence[index] = item;
   }
   const candidates = [...(input.candidates ?? [])];
+  const evidenceBudget = record.metadata.reviewedSupport
+    ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE
+    : MAX_MEMORY_CODE_CITATIONS;
+  const candidateBudget = record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16;
   const sourceContexts: unknown[] = [];
   const sections = automaticMaintenanceSections(record.body);
   if (!sections) omissions.push('target-paragraph-bounds');
@@ -159,14 +190,19 @@ export function prepareAutomaticMemory(
     const ordinals = [...new Set([...preferred, ...sourceSections.keys()])];
     for (const ordinal of ordinals) {
       const text = sourceSections[ordinal];
-      if (evidence.length >= MAX_MEMORY_CODE_CITATIONS) {
+      const descriptor = memoryMaintenanceFragmentSource(source, ordinal);
+      const id = automaticMaintenanceEvidenceId(descriptor);
+      const existing = evidence.findIndex(item => item.id === id);
+      if ((existing < 0 && evidence.length >= evidenceBudget) || candidates.length >= candidateBudget) {
         omissions.push('evidence-budget');
         omittedSources++;
         break;
       }
-      const descriptor = memoryMaintenanceFragmentSource(source, ordinal);
-      const id = automaticMaintenanceEvidenceId(descriptor);
-      if (evidence.some(item => item.id === id)) continue;
+      if (existing >= 0) {
+        evidence[existing] = {...evidence[existing], availability: 'available'};
+        candidates.push({evidenceId: id, text});
+        continue;
+      }
       evidence.push({
         id,
         source: descriptor,
@@ -188,11 +224,37 @@ export function prepareAutomaticMemory(
           ),
       )
       .map(candidate => candidate.evidenceId);
+    const approved = record.metadata.reviewedSupport?.active.paragraphs[ordinal];
+    const retained =
+      approved &&
+      approved.evidenceIds.length > 0 &&
+      approved.evidenceIds.every(id => {
+        const descriptor = record.metadata.reviewedSupport!.active.sources.find(source => source.id === id);
+        if (!descriptor) return false;
+        return candidates.some(candidate => {
+          if (candidate.evidenceId !== id) return false;
+          if (descriptor.source.kind === 'memory')
+            return (
+              evidence.some(item => item.id === id && item.availability === 'available') &&
+              sha256HexSync(candidate.text) === descriptor.source.fragment.hash
+            );
+          if (descriptor.source.kind === 'code')
+            return (
+              candidate.excerpt?.provenance === 'current-verified' &&
+              candidate.excerpt.supportsCitation &&
+              !candidate.excerpt.truncated &&
+              (candidate.excerpt.source.fileContentHash === descriptor.source.citation.fileContentHash.value ||
+                candidate.excerpt.fileBytesHash === descriptor.source.citation.fileContentHash.value) &&
+              candidate.excerpt.source.sourceDirty === descriptor.source.citation.sourceDirty
+            );
+          return false;
+        });
+      });
     return {
       ordinal,
       role: 'unknown' as const,
-      support: ids.length ? ('direct' as const) : ('unresolved' as const),
-      currentEvidenceIds: [...new Set(ids)].sort(),
+      support: retained ? approved.support : ids.length ? ('direct' as const) : ('unresolved' as const),
+      currentEvidenceIds: retained ? approved.evidenceIds : [...new Set(ids)].sort(),
     };
   });
   if (
@@ -310,6 +372,12 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     return {evidence, candidates, reads, omissions: ['code-service-unavailable'], searchedScopes};
   // Recorded repository routes are independent of configured uncited discovery roots.
   const citations = [...(record.metadata.codeCitations ?? [])];
+  for (const descriptor of record.metadata.reviewedSupport?.active.sources ?? []) {
+    const source = descriptor.source;
+    if (source.kind === 'code' && !citations.some(citation => citation.id === source.citation.id))
+      citations.push(source.citation);
+  }
+  const recordedIds = new Set(citations.map(citation => citation.id));
   if (
     citations.length === 0 &&
     configuredRoot &&
@@ -376,7 +444,10 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     );
     citations.push(...discovered);
   } else if (citations.length === 0) omissions.push('code-project-unbound');
-  for (const citation of citations.slice(0, 4)) {
+  // Reviewed records may retain eight immutable roots and eight distinct active pins.
+  const codeBudget = record.metadata.reviewedSupport ? MAX_MEMORY_CODE_CITATIONS * 2 : 4;
+  if (citations.length > codeBudget) omissions.push('code-source-budget');
+  for (const citation of citations.slice(0, codeBudget)) {
     const result = yield* readContextHealthCitationEvidence(
       config,
       {kind: 'repository', callerCwd: configuredRoot ?? config.agentContextHome},
@@ -384,7 +455,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       {maximumBytes: 4096, maximumLines: 24, symbolSpanOnly: true},
     ).pipe(Effect.result);
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
-    const recorded = (record.metadata.codeCitations ?? []).some(item => item.id === citation.id);
+    const recorded = recordedIds.has(citation.id);
     const current = Result.isSuccess(result)
       ? result.success.excerpts.find(item => item.provenance === 'current-verified')
       : undefined;
@@ -414,7 +485,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     }
     if (!current) omissions.push('current-code-evidence-unavailable');
   }
-  if (citations.length > 4) omissions.push('code-evidence-budget');
+  if (citations.length > codeBudget) omissions.push('code-evidence-budget');
   return {evidence, candidates, reads, omissions, searchedScopes};
 });
 
@@ -467,17 +538,22 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
       const reviewedUris = [...new Set(reviewedOriginSupports(origin).map(item => item.sourceUri))];
       const refs = [
         ...new Set([
+          ...(target.record.metadata.reviewedSupport?.active.sources ?? []).flatMap(entry =>
+            entry.source.kind === 'memory' ? [entry.source.uri] : [],
+          ),
           ...reviewedUris,
           ...(original?.sources ?? []).map(item => item.uri).sort(),
           ...(target.record.metadata.relations ?? []).map(item => item.uri).sort(),
         ]),
       ];
       const visited = new Set([uri]);
-      if (refs.length > 8) {
+      // Reviewed-origin references are a subset of the validated receipt's source vector.
+      const selectorBudget = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
+      if (refs.length > selectorBudget) {
         omissions.push('related-source-budget');
-        omittedSources += refs.length - 8;
+        omittedSources += refs.length - selectorBudget;
       }
-      for (const ref of refs.slice(0, 8)) {
+      for (const ref of refs.slice(0, selectorBudget)) {
         const resolved = resolveRelationTarget(snapshot.records, ref);
         if (resolved.state === 'conflicted') {
           omissions.push('related-source-ambiguous');
@@ -507,6 +583,11 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
         }
         if (visited.has(projected.uri)) continue;
         visited.add(projected.uri);
+        if (visited.size - 1 > RELATED_SOURCE_BUDGET) {
+          omissions.push('related-source-budget');
+          omittedSources++;
+          continue;
+        }
         if (projected.metadata.status !== 'active') {
           omissions.push('related-source-inactive');
           omittedSources++;
@@ -634,4 +715,205 @@ export const prepareAutomaticMaintenance = Effect.fn('automaticPreparation.prepa
       {project: options.project, maxRecords: 1},
     );
   return roots;
+});
+
+/** Explicit review reconstructs preparation from authorized canonical reads, never from the disposable cache. */
+export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.readLiveReview')(function* (
+  config: RuntimeConfig,
+  uri: string,
+  sourceCwd?: string,
+) {
+  const target = yield* readContextMaintenanceCanonicalRecord(config, uri);
+  const record = target.record;
+  if (record.metadata.status !== 'active' || isAgentArtifactUri(uri))
+    return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+  const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
+  let root: string | undefined;
+  if (Result.isSuccess(manifest)) {
+    const matches = manifest.success.projects.filter(project => project.name === record.metadata.project);
+    if (matches.length === 1) root = yield* expandPath(matches[0].path);
+  }
+  if (sourceCwd !== undefined) {
+    const path = yield* Path.Path;
+    if (!path.isAbsolute(sourceCwd)) return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
+    if (
+      root &&
+      (yield* (yield* FileSystem.FileSystem).realPath(root)) !==
+        (yield* (yield* FileSystem.FileSystem).realPath(sourceCwd))
+    )
+      return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
+    root = sourceCwd;
+  }
+  const refs = [
+    ...new Set([
+      ...(record.metadata.reviewedSupport?.active.sources ?? []).flatMap(item =>
+        item.source.kind === 'memory' ? [item.source.uri] : [],
+      ),
+      ...(record.metadata.relations ?? []).map(item => item.uri),
+    ]),
+  ];
+  const sources: MemoryRecord[] = [];
+  const locators = new Map<string, ApprovedSourceDescriptorV1['locator']>();
+  const portableReads = new Map<
+    string,
+    {
+      readonly source: Extract<
+        import('@threadnote/memory/automatic-maintenance').AutomaticMaintenanceSourceV1,
+        {kind: 'memory'}
+      >;
+      readonly locator: ApprovedSourceDescriptorV1['locator'];
+    }
+  >();
+  const reads: Read[] = [{uri, hash: target.hash}];
+  // Approved paths and authored aliases can name the same source. Resolve the
+  // bounded selectors before spending the budget on distinct canonical reads.
+  const selectorBudget = RELATED_SOURCE_BUDGET + MAX_MEMORY_RELATIONS;
+  const allowedUriScopes = automaticMemorySourceUriScopes(config, record);
+  const visited = new Set([uri]);
+  const liveSources = new Map<string, MemoryRecord>();
+  let omittedSources = Math.max(0, refs.length - selectorBudget);
+  const omissions: string[] = omittedSources ? ['related-source-budget'] : [];
+  for (const ref of refs.slice(0, selectorBudget)) {
+    const stored = record.metadata.reviewedSupport?.active.sources.find(
+      entry => entry.source.kind === 'memory' && entry.source.uri === ref,
+    );
+    const portable =
+      stored?.source.kind === 'memory' && stored.locator
+        ? yield* resolveAutomaticSharedMemorySource(config, stored.source, stored.locator)
+        : undefined;
+    const route = portable
+      ? undefined
+      : yield* resolveMemoryIdentityAliases(config, [ref], allowedUriScopes, {
+          validateNow: true,
+        }).pipe(Effect.result);
+    if (route && Result.isFailure(route)) {
+      omittedSources++;
+      omissions.push('related-source-unreadable');
+      continue;
+    }
+    const identity = route && Result.isSuccess(route) ? route.success[0] : undefined;
+    const actualUri = portable ? portable.uri : identity!.canonicalUri;
+    if (!portable && isSharedMemoryUri(uri) && !allowedUriScopes.some(scope => resourceIdIsWithin(actualUri, scope))) {
+      omittedSources++;
+      omissions.push('related-source-policy');
+      continue;
+    }
+    if (visited.has(actualUri)) {
+      const prior = liveSources.get(actualUri);
+      if (identity && prior) {
+        const verified = yield* verifyResolvedMemoryIdentity(identity, actualUri, prior.content).pipe(Effect.result);
+        if (Result.isFailure(verified)) {
+          omittedSources++;
+          omissions.push('related-source-unreadable');
+        }
+      }
+      continue;
+    }
+    visited.add(actualUri);
+    if (visited.size - 1 > RELATED_SOURCE_BUDGET) {
+      omittedSources++;
+      omissions.push('related-source-budget');
+      continue;
+    }
+    const selected = portable
+      ? Result.succeed({
+          record: {...portable.record, uri: ref},
+          hash: sha256HexSync(portable.record.content),
+          actualUri,
+        })
+      : yield* readContextMaintenanceCanonicalRecord(config, actualUri).pipe(
+          Effect.tap(value => verifyResolvedMemoryIdentity(identity!, actualUri, value.record.content)),
+          Effect.map(value => ({...value, actualUri})),
+          Effect.result,
+        );
+    if (Result.isFailure(selected)) {
+      omittedSources++;
+      omissions.push('related-source-unreadable');
+      continue;
+    }
+    const source = selected.success.record;
+    if (source.uri === uri) continue;
+    if (
+      source.metadata.status !== 'active' ||
+      (source.metadata.project ?? '') !== (record.metadata.project ?? '') ||
+      source.metadata.visibility === 'external' ||
+      source.metadata.trust === 'untrusted' ||
+      source.metadata.authority === 'external' ||
+      source.metadata.citationErrors?.length ||
+      source.metadata.consolidationError ||
+      source.metadata.topicMaintenanceError ||
+      source.metadata.reviewedSupportError ||
+      (isSharedMemoryUri(uri) &&
+        (!isSharedMemoryUri(source.uri) ||
+          uri.split('/shared/')[1]?.split('/')[0] !== source.uri.split('/shared/')[1]?.split('/')[0]))
+    ) {
+      omittedSources++;
+      omissions.push('related-source-policy');
+      continue;
+    }
+    if (isSharedMemoryUri(source.uri)) {
+      const descriptor = memoryMaintenanceFragmentSource(source, 0);
+      const locator = portable?.locator ?? (yield* authorizeAutomaticSharedMemorySource(config, descriptor));
+      locators.set(source.uri, locator);
+    }
+    if (portable && stored?.source.kind === 'memory')
+      portableReads.set(selected.success.actualUri, {source: stored.source, locator: portable.locator});
+    sources.push(source);
+    liveSources.set(selected.success.actualUri, source);
+    reads.push({uri: selected.success.actualUri, hash: selected.success.hash});
+  }
+  const code =
+    record.metadata.codeCitations?.length || record.metadata.reviewedSupport?.active.sources.length || root
+      ? yield* readAutomaticCodeEvidence(config, record, root)
+      : {evidence: [], candidates: [], reads: [], omissions: [], searchedScopes: []};
+  const scopeRevision = hash({
+    project: record.metadata.project,
+    root: root ?? null,
+    sourcePolicy: 'same-project-and-shared-team-v1',
+    mapper: AUTOMATIC_PREPARATION_MAPPER,
+  });
+  const prepared = yield* Effect.try(() =>
+    prepareAutomaticMemory(record, {
+      sources,
+      evidence: code.evidence,
+      candidates: code.candidates,
+      reads: [...reads, ...code.reads],
+      scopeRevision,
+      searchedScopes: code.searchedScopes,
+      omissions: [...omissions, ...code.omissions],
+      omittedSources,
+    }),
+  );
+  for (const read of reads) {
+    const portable = portableReads.get(read.uri);
+    const actual = portable
+      ? sha256HexSync(
+          (yield* resolveAutomaticSharedMemorySource(config, portable.source, portable.locator)).record.content,
+        )
+      : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
+    if (actual !== read.hash) return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
+  }
+  yield* verifyAuthoredMemoryRelationTargetIdentities(
+    config,
+    [...liveSources].flatMap(([sourceUri, source]) =>
+      portableReads.has(sourceUri)
+        ? []
+        : [
+            {
+              content: source.content,
+              memoryId: source.metadata.memoryId,
+              uri: sourceUri,
+              allowedUriScopes,
+            },
+          ],
+    ),
+  );
+  const identity =
+    root && code.candidates.some(candidate => candidate.excerpt?.provenance === 'current-verified')
+      ? yield* resolveRepositoryIdentity(root)
+      : undefined;
+  const repositoryIdentity = identity
+    ? {repositoryId: identity.repositoryId, kind: identity.remoteIdentity ? ('remote' as const) : ('local' as const)}
+    : undefined;
+  return {record, prepared, root, locators, repositoryIdentity};
 });

@@ -1,3 +1,4 @@
+import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -25,6 +26,11 @@ import {
 import {buildTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
 import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
+import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
+import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
+import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {ContextHealthCitationSourceExcerptV1} from '@threadnote/context/citation_validation';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
@@ -35,9 +41,12 @@ import {
   advanceAutomaticPreparation,
   prepareAutomaticMemory,
   readAutomaticCodeEvidence,
+  readLiveAutomaticPreparation,
+  automaticMemorySourceUriScopes,
 } from '@threadnote/threadnote/memory/context/maintenance_preparation';
 import {
   readPreparedMemory,
+  writePreparedMemory,
   selectAutomaticPreparationUris,
 } from '@threadnote/threadnote/memory/context/maintenance_preparation_state';
 import {writeDurableMemory} from '@threadnote/threadnote/mcp/server/memory';
@@ -126,7 +135,7 @@ const settle = (f: Effect.Success<ReturnType<typeof fixture>>, ticks = 25, budge
     }
   });
 
-function codeCitation(kind: 'file' | 'symbol' = 'file') {
+function codeCitation(kind: 'file' | 'symbol' = 'file', path = 'src/current.ts') {
   return createMemoryCodeCitation({
     version: 1,
     repositoryId: '1'.repeat(64),
@@ -135,7 +144,7 @@ function codeCitation(kind: 'file' | 'symbol' = 'file') {
     sourceDirty: false,
     sourceSnapshotId: `cgsn_${'3'.repeat(40)}`,
     extractorSet: 'native-code-graph-13',
-    path: 'src/current.ts',
+    path,
     fileContentHash: {algorithm: 'sha256', value: '4'.repeat(64)},
     target:
       kind === 'file'
@@ -200,7 +209,385 @@ function prepareCode(citation: MemoryCodeCitationV1, excerpts: readonly ContextH
   });
 }
 
+function reviewedCodeRecord(roots: readonly MemoryCodeCitationV1[], active: readonly MemoryCodeCitationV1[]) {
+  const body = 'Current approved code behavior.';
+  const sources = active.map(citation => {
+    const source = {kind: 'code' as const, citation};
+    return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
+  });
+  const reviewedSupport = {
+    type: 'reviewed-memory-support' as const,
+    version: 1 as const,
+    active: createReviewedSupportSnapshot({
+      bodyHash: sha256HexSync(body),
+      paragraphs: [
+        {
+          ordinal: 0,
+          hash: sha256HexSync(body),
+          role: 'descriptive',
+          support: 'direct',
+          evidenceIds: sources.map(source => source.id),
+        },
+      ],
+      sources,
+      acceptance: {
+        reviewId: 'review-preparation-boundary',
+        approvedAt: NOW,
+        targetBeforeHash: '1'.repeat(64),
+        preparationDigest: '2'.repeat(64),
+        sourceVectorDigest: '3'.repeat(64),
+      },
+    }),
+  };
+  return record('reviewed_code', body, {schemaVersion: 11, codeCitations: roots, reviewedSupport});
+}
+
+const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function* (
+  aliases: readonly number[],
+  overflow: boolean,
+  batch = false,
+) {
+  const f = yield* fixture();
+  const body = 'This exact current statement has eight approved sources.';
+  const sources = Array.from({length: 9}, (_, index) => record(`budget_source_${index}`, body));
+  for (const source of sources) yield* f.write(source);
+  const descriptors = sources.slice(0, 8).map(source => {
+    const fragment = memoryMaintenanceFragmentSource(source, 0);
+    return {id: automaticMaintenanceEvidenceId(fragment), source: fragment, scope: 'personal' as const};
+  });
+  const active = createReviewedSupportSnapshot({
+    bodyHash: sha256HexSync(body),
+    paragraphs: [
+      {
+        ordinal: 0,
+        hash: sha256HexSync(body),
+        role: 'descriptive',
+        support: 'direct',
+        evidenceIds: descriptors.map(descriptor => descriptor.id),
+      },
+    ],
+    sources: descriptors,
+    acceptance: {
+      reviewId: 'review-related-budget',
+      approvedAt: NOW,
+      targetBeforeHash: '1'.repeat(64),
+      preparationDigest: '2'.repeat(64),
+      sourceVectorDigest: '3'.repeat(64),
+    },
+  });
+  const target = record('budget_target', body, {
+    schemaVersion: 11,
+    reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
+    relations: [...aliases, ...(overflow ? [8] : [])].map(index => ({
+      type: 'references',
+      uri: memoryIdentityAlias(sources[index].metadata.memoryId!),
+    })),
+  });
+  yield* f.write(target);
+  const live = yield* readLiveAutomaticPreparation(f.config, target.uri);
+  expect(live.prepared.reads).toHaveLength(9);
+  expect(new Set(live.prepared.reads.map(read => read.uri)).size).toBe(9);
+  expect(live.prepared.assessment.evidence).toHaveLength(8);
+  expect(live.prepared.assessment.coverage.omittedSources).toBe(Number(overflow));
+  expect(live.prepared.omissions.includes('related-source-budget')).toBe(overflow);
+  expect(live.prepared.reads.some(read => read.uri === sources[8].uri)).toBe(false);
+  if (batch) {
+    yield* settle(f, 6, 100);
+    const cached = (yield* readPreparedMemory(f.config, target.uri))!;
+    expect(cached.reads).toHaveLength(9);
+    expect(new Set(cached.reads.map(read => read.uri)).size).toBe(9);
+    expect(cached.assessment.coverage.omittedSources).toBe(Number(overflow));
+    expect(cached.omissions.includes('related-source-budget')).toBe(overflow);
+    expect(cached.relevantRevision).toBe(live.prepared.relevantRevision);
+  }
+  expect(yield* f.store.read(f.location, target.uri)).toBe(target.content);
+});
+
 describe('automatic private preparation', () => {
+  effectIt.effect('retains legacy-origin ambiguity, partial inventory, successor and access fences after dedupe', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const body = 'Exact legacy-origin claim.';
+      const origin = record('origin_control', body);
+      const ambiguous = [
+        record('ambiguous_one', body, {memoryId: 'tn_ambiguous_control'}),
+        record('ambiguous_two', body, {memoryId: 'tn_ambiguous_control'}),
+      ];
+      const archived = record('old_control', body, {status: 'archived'});
+      const successor = record('successor_control', body, {relations: [{type: 'supersedes', uri: archived.uri}]});
+      const blocked = record('blocked_control', body, {trust: 'untrusted'});
+      const carrier = record('carrier_control', body, {
+        relations: [
+          {type: 'references', uri: memoryIdentityAlias(origin.metadata.memoryId!)},
+          {type: 'references', uri: memoryIdentityAlias('tn_missing_control')},
+          {type: 'references', uri: memoryIdentityAlias('tn_ambiguous_control')},
+          {type: 'depends_on', uri: archived.uri},
+          {type: 'references', uri: blocked.uri},
+        ],
+      });
+      const reviewed = reviewConsolidation(
+        body,
+        [origin, carrier].map(captureConsolidationSource),
+        [
+          {
+            section: body,
+            disposition: 'direct',
+            supports: [
+              {sourceUri: origin.uri, fragment: 0, citationIds: [], relationIndexes: []},
+              {sourceUri: carrier.uri, fragment: 0, citationIds: [], relationIndexes: [0, 1, 2, 3, 4]},
+            ],
+          },
+        ],
+        {
+          operationId: 'legacy-dedupe-control',
+          cleanup: 'keep',
+          cleanupShared: false,
+          target: {
+            kind: 'durable',
+            status: 'active',
+            project: 'selected',
+            topic: 'legacy_control',
+            sourceAgentClient: 'test',
+          },
+        },
+      );
+      const target = record('legacy_control', body, {
+        consolidation: reviewed.provenance,
+        relations: reviewed.relations,
+      });
+      for (const source of [origin, carrier, ...ambiguous, archived, successor, blocked, target])
+        yield* f.write(source);
+      const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
+      const advance = (complete: boolean, records = snapshot.records) =>
+        Effect.gen(function* () {
+          for (let tick = 0; tick < 3; tick++)
+            yield* advanceAutomaticPreparation(
+              f.config,
+              {...snapshot, records, complete},
+              new Map(),
+              () => Effect.succeed({evidence: [], candidates: [], reads: [], omissions: [], searchedScopes: []}),
+              {maxRecords: 4},
+            );
+        });
+      yield* advance(false);
+      const partial = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(partial.omissions).toContain('related-source-unknown');
+      expect(partial.omissions).toContain('related-source-ambiguous');
+      expect(partial.omissions).toContain('related-source-inactive');
+      expect(partial.omissions).toContain('related-source-policy');
+      expect(partial.reads).toHaveLength(3);
+      expect(new Set(partial.reads.map(read => read.uri))).toEqual(new Set([target.uri, carrier.uri, origin.uri]));
+      yield* advance(true);
+      const complete = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(complete.omissions).toContain('related-source-unavailable');
+      expect(complete.omissions).toContain('related-source-ambiguous');
+      expect(complete.omissions).toContain('related-successor-candidate');
+      expect(complete.omissions).toContain('related-source-policy');
+      expect(new Set(complete.reads.map(read => read.uri))).toEqual(
+        new Set([target.uri, carrier.uri, origin.uri, successor.uri]),
+      );
+      expect(complete.origin?.receipt).toEqual(reviewed.provenance);
+      const timestampOnly = record('origin_control', body, {...origin.metadata, timestamp: '2026-10-22T00:00:00.000Z'});
+      yield* f.write(timestampOnly);
+      yield* advance(
+        true,
+        snapshot.records.map(record => (record.uri === origin.uri ? timestampOnly : record)),
+      );
+      const refreshed = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(refreshed.reads).not.toEqual(complete.reads);
+      expect(refreshed.relevantRevision).toBe(complete.relevantRevision);
+      expect(refreshed.origin?.receipt).toEqual(reviewed.provenance);
+      expect(yield* f.store.read(f.location, target.uri)).toBe(target.content);
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('deduplicates all eight active paths and authored aliases before source budgeting', () =>
+    Effect.gen(function* () {
+      yield* checkRelatedSourceBudget(
+        Array.from({length: 8}, (_, index) => index),
+        false,
+        true,
+      );
+      yield* checkRelatedSourceBudget(
+        Array.from({length: 8}, (_, index) => index),
+        true,
+        true,
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'canonical read budgets ignore redundant alias subsets and ordering',
+    {
+      aliases: fc.shuffledSubarray(Array.from({length: 8}, (_, index) => index)),
+      overflow: fc.boolean(),
+    },
+    ({aliases, overflow}) =>
+      checkRelatedSourceBudget(aliases, overflow).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 4, seed: 756301}, timeout: 30000},
+  );
+
+  effectIt.effect(
+    'resolves shared identities within the eligible team despite retained private and other-team copies',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const personal = record('scope');
+        const shared = record('scope', personal.body, {
+          visibility: 'shared',
+          authority: 'reviewed_shared',
+          trust: 'approved',
+        });
+        const teamA = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-a/')};
+        const teamB = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-b/')};
+        const privateOnly = record('private_only');
+        for (const source of [personal, teamA, teamB, privateOnly]) yield* f.write(source);
+        const scopes = automaticMemorySourceUriScopes(f.config, teamA);
+        const [resolved] = yield* resolveMemoryIdentityAliases(
+          f.config,
+          [memoryIdentityAlias(personal.metadata.memoryId!)],
+          scopes,
+          {validateNow: true},
+        );
+        expect(resolved.canonicalUri).toBe(teamA.uri);
+        const live = yield* readContextMaintenanceCanonicalRecord(f.config, resolved.canonicalUri);
+        yield* verifyResolvedMemoryIdentity(resolved, live.record.uri, live.record.content);
+        expect(
+          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(privateOnly.metadata.memoryId!)], scopes, {
+            validateNow: true,
+          }).pipe(Effect.flip),
+        ).toMatchObject({reason: 'not-found'});
+        const conflict = {
+          ...record('conflict', 'Conflicting shared projection.', teamA.metadata),
+          uri: teamA.uri.replace('/scope.md', '/conflict.md'),
+        };
+        yield* f.write(conflict);
+        expect(
+          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(personal.metadata.memoryId!)], scopes, {
+            validateNow: true,
+          }).pipe(Effect.flip),
+        ).toMatchObject({reason: 'ambiguous'});
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+  effectIt.effect(
+    'roundtrips V2 preparation with sixteen roots/active descriptors and thirty-two exact candidates',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const roots = Array.from({length: 8}, (_, index) => codeCitation('file', `root-${index}.ts`));
+        const active = Array.from({length: 8}, (_, index) => codeCitation('file', `active-${index}.ts`));
+        const target = reviewedCodeRecord(roots, active);
+        const evidence = [...roots, ...active].map(citation => ({
+          id: automaticMaintenanceEvidenceId({kind: 'code', citation}),
+          source: {kind: 'code' as const, citation},
+          scope: 'repository' as const,
+          authority: 'recorded' as const,
+          availability: 'available' as const,
+        }));
+        const candidates = evidence.flatMap(entry =>
+          ['current-verified', 'historical-verified'].map(provenance => {
+            const text = 'x'.repeat(4096);
+            return {
+              evidenceId: entry.id,
+              text,
+              excerpt: codeExcerpt(entry.source.citation, text, text, {
+                provenance: provenance as 'current-verified' | 'historical-verified',
+              }),
+            };
+          }),
+        );
+        const reads = Array.from({length: 25}, (_, index) => ({
+          uri: `code:read-${index}`,
+          hash: sha256HexSync(String(index)),
+        }));
+        const prepared = prepareAutomaticMemory(target, {scopeRevision, evidence, candidates, reads});
+        expect(prepared.assessment.version).toBe(2);
+        expect(prepared.candidates).toHaveLength(32);
+        yield* writePreparedMemory(f.config, prepared);
+        expect(yield* readPreparedMemory(f.config, target.uri)).toEqual(prepared);
+        expect(target.metadata.codeCitations).toEqual(roots);
+        expect(target.metadata.reviewedSupport!.active.sources).toHaveLength(8);
+      }).pipe(provide),
+  );
+
+  effectIt.effect(
+    'reads all eight historical roots and eight active current code pins through the actual producer',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const repository = f.path.join(f.home, 'repository');
+        yield* f.fs.makeDirectory(repository);
+        const refs = Array.from({length: 8}, (_, index) => `source-${index}.ts`);
+        const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+        const commit = (message: string) =>
+          Effect.gen(function* () {
+            yield* git(['add', '.']);
+            yield* git([
+              '-c',
+              'user.name=Test',
+              '-c',
+              'user.email=test@example.invalid',
+              'commit',
+              '--quiet',
+              '-m',
+              message,
+            ]);
+          });
+        const index = () =>
+          CodeGraphIndexer.pipe(
+            Effect.flatMap(indexer => indexer.index({cwd: repository, threadnoteHome: f.home, ensureVectors: false})),
+          );
+        yield* git(['init', '--quiet']);
+        for (const ref of refs) yield* f.fs.writeFileString(f.path.join(repository, ref), 'export const value = 30;\n');
+        yield* commit('original');
+        yield* index();
+        const roots = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs});
+        for (const ref of refs) yield* f.fs.writeFileString(f.path.join(repository, ref), 'export const value = 60;\n');
+        yield* commit('current');
+        yield* index();
+        const active = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs});
+        expect(roots).toHaveLength(8);
+        expect(active).toHaveLength(8);
+        const target = reviewedCodeRecord(roots, active);
+        const code = yield* readAutomaticCodeEvidence(f.config, target, repository);
+        expect(code.evidence).toHaveLength(16);
+        expect(code.reads).toHaveLength(16);
+        expect(code.candidates.filter(candidate => candidate.excerpt?.provenance === 'current-verified')).toHaveLength(
+          16,
+        );
+        expect(code.omissions).not.toContain('code-source-budget');
+        expect(code.omissions).not.toContain('code-evidence-budget');
+        const prepared = prepareAutomaticMemory(target, {scopeRevision, ...code});
+        expect(prepared.assessment.paragraphs[0].currentEvidenceIds).toEqual(
+          target.metadata.reviewedSupport!.active.paragraphs[0].evidenceIds,
+        );
+        yield* writePreparedMemory(f.config, prepared);
+        expect(yield* readPreparedMemory(f.config, target.uri)).toEqual(prepared);
+        expect(target.metadata.codeCitations).toEqual(roots);
+
+        const legacy = yield* readAutomaticCodeEvidence(
+          f.config,
+          record('legacy_budget', target.body, {codeCitations: roots}),
+          repository,
+        );
+        expect(legacy.evidence).toHaveLength(4);
+        expect(legacy.omissions).toContain('code-evidence-budget');
+        // The producer also bounds raw inventory input before canonical admission.
+        const {id: originalId, ...rootInput} = roots[0];
+        const extra = createMemoryCodeCitation({...rootInput, sourceCommit: 'f'.repeat(40)});
+        expect(extra.id).not.toBe(originalId);
+        const overflow = yield* readAutomaticCodeEvidence(
+          f.config,
+          {...target, metadata: {...target.metadata, codeCitations: [...roots, extra]}},
+          repository,
+        );
+        expect(overflow.evidence).toHaveLength(16);
+        expect(overflow.omissions).toContain('code-source-budget');
+        expect(overflow.omissions).toContain('code-evidence-budget');
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('backfills distinct encoded resource names through inventory and canonical cache lookup', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -269,6 +656,36 @@ describe('automatic private preparation', () => {
     expect(unsupported.relevantRevision).not.toBe(prepareCode(citation, [first]).relevantRevision);
     expect(unsupported.omissions).toContain('current-code-citation-unsupported');
     expect(unsupported.assessment.coverage.outcome).toBe('partial');
+  });
+
+  it('review current pins bind actual new bytes even when preparation reused the original private evidence ID', () => {
+    const citation = codeCitation('symbol');
+    const excerpt = codeExcerpt(citation, 'export const value = 60;', 'export const value = 60;');
+    const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
+    const target = record('current_code', 'Old behavior.', {codeCitations: [citation]});
+    const prepared = prepareAutomaticMemory(target, {
+      scopeRevision,
+      evidence: [
+        {id, source: {kind: 'code', citation}, scope: 'repository', authority: 'recorded', availability: 'available'},
+      ],
+      candidates: [{evidenceId: id, text: excerpt.content, excerpt}],
+    });
+    const packet = automaticReviewPacket(target, prepared);
+    const pin = packet.reviewEvidence[0].descriptor;
+    if (pin.source.kind !== 'code') throw new Error('Expected code source.');
+    expect(pin.source.citation.id).not.toBe(citation.id);
+    expect(pin.id).not.toBe(id);
+    expect(pin.source.citation.fileContentHash.value).toBe(sha256HexSync(excerpt.content));
+    expect(pin.source.citation.fileContentHash.value).not.toBe(citation.fileContentHash.value);
+    expect(packet.basis.assessment.evidence.find(item => item.id === id)!.source).toEqual({kind: 'code', citation});
+    const local = automaticReviewPacket(target, prepared, undefined, {
+      repositoryId: excerpt.source.repositoryId,
+      kind: 'local',
+    });
+    expect(local.reviewEvidence[0].descriptor.source).toMatchObject({
+      kind: 'code',
+      citation: {repositoryIdentityKind: 'local'},
+    });
   });
 
   it('binds every current-verified code candidate independently of historical candidates and ordering', () => {
@@ -479,6 +896,21 @@ describe('automatic private preparation', () => {
           });
           expect(assessment.assessment.paragraphs[0].historicalEvidenceIds).toEqual([]);
           expect(assessment.assessment.paragraphs[0].currentSupport).toBe('unresolved');
+          const packet = automaticReviewPacket(target, assessment);
+          const current = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'code')!;
+          const actual = discovered.candidates.find(
+            entry => entry.excerpt?.provenance === 'current-verified',
+          )!.excerpt!;
+          if (current.descriptor.source.kind !== 'code') throw new Error('Expected current code pin.');
+          expect(current.descriptor.source.citation.fileContentHash.value).toBe(actual.source.fileContentHash);
+          expect(current.codeExcerpt).toEqual({
+            startLine: actual.startLine,
+            endLine: actual.endLine,
+            fileBytesHash: actual.fileBytesHash,
+          });
+          expect(current.descriptor.source.citation.target.kind).toBe('file');
+          expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('historical:'))).toBe(false);
+
           yield* f.write(target);
           const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
           // Real graph discovery is verified above; cache wiring must not promise a wall-clock IO latency.

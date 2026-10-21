@@ -1,3 +1,4 @@
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {prepareAutomaticMaintenance} from './maintenance_preparation.js';
 import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
@@ -125,13 +126,14 @@ import {
   saveTopicReviewDecision,
 } from './maintenance_topic.js';
 import {
-  CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION,
+  maintenanceCitationAdmissionVersion,
   maintenanceRecordSourceObservation,
   maintenanceRecordRevision,
   recordSourceRevision,
 } from './maintenance_source.js';
 import {
   prepareMaintenanceWorkerBatches,
+  readMaintenanceInventorySubjects,
   runRequestedMaintenanceProjection,
   selectRelationBoundedMaintenanceWindow,
   maintenanceWorkerBatchCurrent,
@@ -272,7 +274,10 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         yield* writeState(config, state);
         return publicStatus(state);
       }
-      const corpus = snapshot.success.records;
+      const inventory = snapshot.success;
+      const corpus = yield* readMaintenanceInventorySubjects(config, inventory.records, inventory.hashes);
+      if (!corpus.every((record): record is MemoryRecord => record !== undefined))
+        return yield* fail('The approved-support inventory subject changed; refresh maintenance.');
       const logicalHashes = snapshot.success.canonicalContentHashes;
       if (selectedCase === undefined)
         state = {
@@ -355,7 +360,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       const sourceRevisions = new Map<string, string>();
       const recordSourceRevisions = new Map<string, string>();
       const tasks = active.flatMap(record => {
-        const chunks = Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64));
+        const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
         return Array.from({length: chunks}, (_, chunk) => ({
           record,
           project: record.metadata.project!,
@@ -532,7 +537,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             lastProject: task.project,
             lastTaskByProject: {...state.lastTaskByProject, [task.project]: task.key},
           };
-        if ((record.metadata.codeCitations?.length ?? 0) > 0) {
+        if (currentMemoryCodeCitations(record).length > 0) {
           const source = yield* maintenanceRecordSourceObservation(
             config,
             record,
@@ -575,9 +580,9 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             (item.family.startsWith('citation')
               ? item.family === 'citation-coverage'
                 ? item.slot === String(task.chunk)
-                : (record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? []).some(
-                    citation => contextHealthCitationCaseSlotV2(citation) === item.slot,
-                  )
+                : currentMemoryCodeCitations(record)
+                    .slice(task.chunk * 64, (task.chunk + 1) * 64)
+                    .some(citation => contextHealthCitationCaseSlotV2(citation) === item.slot)
               : selectedCase === undefined && task.chunk === 0 && item.family !== TOPIC_MAINTENANCE_FAMILY),
         );
         const seen = new Set<string>();
@@ -706,7 +711,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             }
           }
         }
-        const citations = record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? [];
+        const citations = currentMemoryCodeCitations(record).slice(task.chunk * 64, (task.chunk + 1) * 64);
         const duplicateRecords = yield* readMemoryRecordsByUri(
           config,
           active
@@ -859,7 +864,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
                   .flatMap(item => item.receipts)
                   .find(item => `${record.uri}#${item.citationId}` === finding.repair.targetUri)
               : undefined;
-            const citation = record.metadata.codeCitations?.find(item => item.id === receipt?.citationId);
+            const citation = currentMemoryCodeCitations(record).find(item => item.id === receipt?.citationId);
             const disposition =
               receipt?.provenance === 'historical-verified'
                 ? 'historical'
@@ -979,7 +984,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
         if (selectedCase === undefined)
           checkpoints[task.key] = {
             ...(batchByTask.get(task.key)?.observation !== undefined && Result.isSuccess(report)
-              ? {citationAdmissionVersion: CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION}
+              ? {citationAdmissionVersion: maintenanceCitationAdmissionVersion(record)}
               : {}),
             inventoryComplete: snapshot.success.complete,
             memoryHash: postMutationHash ?? contentHash(record.content),
@@ -1063,7 +1068,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       for (const task of tasks) {
         if (
           (options.project !== undefined && task.project !== options.project) ||
-          (task.record.metadata.codeCitations?.length ?? 0) === 0 ||
+          currentMemoryCodeCitations(task.record).length === 0 ||
           sourceRevisions.has(task.project)
         )
           continue;
@@ -1132,7 +1137,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
             checked: checked.length,
             eligibleCitations: selected.reduce(
               (count, task) =>
-                count + (task.record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64).length ?? 0),
+                count + currentMemoryCodeCitations(task.record).slice(task.chunk * 64, (task.chunk + 1) * 64).length,
               0,
             ),
             checkedCitations: checked.reduce(
@@ -1922,11 +1927,8 @@ export const readContextMaintenancePacket = Effect.fn('contextMaintenance.packet
     )
       return yield* fail('The selected maintenance source changed. Refresh its packet.');
   });
-  return yield* buildContextMaintenancePacket(
-    config,
-    {item, record, corpus, callerCwd: item.sourceSnapshot?.cwd ?? (yield* SystemInfo).currentDirectory(), selection},
-    assertCurrent,
-  );
+  const callerCwd = item.sourceSnapshot?.cwd ?? (yield* SystemInfo).currentDirectory();
+  return yield* buildContextMaintenancePacket(config, {item, record, corpus, callerCwd, selection}, assertCurrent);
 });
 
 export function migrateMaintenanceCases(
@@ -1938,6 +1940,7 @@ export function migrateMaintenanceCases(
   const identities = new Map<string, ContextMaintenanceCaseV2>();
   for (const item of cases) {
     const subject = records.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId);
+    const citations = subject ? currentMemoryCodeCitations(subject) : [];
     const ordinal = /^(?:anchor:)?(\d+)$/u.exec(item.slot);
     const unchangedSubject =
       subject !== undefined &&
@@ -1947,23 +1950,18 @@ export function migrateMaintenanceCases(
           reference.hash === (hashes?.get(subject.uri) ?? contentHash(subject.content)),
       );
     const citationId =
-      item.citationId ??
-      (unchangedSubject && ordinal !== null ? subject.metadata.codeCitations?.[Number(ordinal[1])]?.id : undefined);
+      item.citationId ?? (unchangedSubject && ordinal !== null ? citations[Number(ordinal[1])]?.id : undefined);
     const slot =
       item.family === 'citation'
         ? records.length === 0 || item.slot.startsWith('legacy-unresolved:')
           ? item.slot
           : /^anchor:tncc_[0-9a-f]{40}$/u.test(item.slot) &&
-              !subject?.metadata.codeCitations?.some(
-                citation => contextHealthCitationCaseSlotV2(citation) === item.slot,
-              )
+              !citations.some(citation => contextHealthCitationCaseSlotV2(citation) === item.slot)
             ? item.slot
             : (migrateContextHealthCitationCaseSlotV2({
                 slot: item.slot,
                 citationId,
-                citations:
-                  records.find(record => (record.metadata.memoryId ?? record.uri) === item.memoryId)?.metadata
-                    .codeCitations ?? [],
+                citations,
               }) ?? `legacy-unresolved:${item.caseId}`)
         : item.family === 'relation'
           ? item.slot.replace(/^(?:depends_on|references|related_to|supersedes|evidence_for):(?=threadnote:\/\/)/u, '')

@@ -13,8 +13,15 @@ import {
 } from '../../../memory/context/maintenance.js';
 import {argumentError, mcpErrorResult} from '../common.js';
 import {captureTopicObsidianEvidence} from '../../../memory/context/maintenance_obsidian.js';
-import {readTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
-import {projectTopicReviewDecisionAcknowledgement} from '../../../memory/context/maintenance_review_projection.js';
+import {
+  readTopicMaintenanceDraft,
+  requestAutomaticMemoryReview,
+  requestAutomaticMemoryDraft,
+} from '../../../memory/context/maintenance_draft.js';
+import {
+  projectTopicReviewDecisionAcknowledgement,
+  projectAutomaticMemoryReview,
+} from '../../../memory/context/maintenance_review_projection.js';
 import {requestTopicMaintenanceDraft} from '../../../memory/context/maintenance_draft.js';
 import {MAX_TOPIC_MAINTENANCE_BYTES} from '@threadnote/memory/topic-maintenance';
 import {MAX_TOPIC_MAINTENANCE_DRAFT_BYTES} from '@threadnote/memory/topic-maintenance-draft';
@@ -24,6 +31,7 @@ import {
   applyTopicEnrollment,
 } from '../../../memory/maintenance/topic_enrollment.js';
 import {managerTopicReviewCaseIdentity, projectManagerTopicReview} from '../../../manager/topic_review.js';
+import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {registerTopicDependencyExpansionTools} from './topic_expansion.js';
 
 class InvalidTopicEnrollmentJson extends Schema.TaggedError<InvalidTopicEnrollmentJson>()(
@@ -148,6 +156,9 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       description:
         'Explicitly generate or regenerate a private topic proposal from one exact ready maintenance case and selected text model. Accepted memory is unchanged.',
       inputSchema: {
+        uri: McpInput.string('Exact ordinary-memory target URI instead of an enrolled topic case'),
+        expectedContentHash: McpInput.string('Exact current ordinary-memory content hash'),
+        sourceCwd: McpInput.string('Optional exact configured source checkout for ordinary generation'),
         caseId: McpInput.string('Exact topic maintenance case ID'),
         backend: McpInput.literals(['local-ai', 'effect-ai'], 'Explicit text-only backend'),
         modelId: McpInput.string('Exact installed or configured model ID'),
@@ -156,6 +167,25 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     },
     input =>
       Effect.gen(function* () {
+        if (typeof input.uri === 'string') {
+          if (
+            (input.backend !== 'local-ai' && input.backend !== 'effect-ai') ||
+            typeof input.modelId !== 'string' ||
+            !input.modelId.trim() ||
+            typeof input.expectedContentHash !== 'string' ||
+            !/^[a-f0-9]{64}$/u.test(input.expectedContentHash)
+          )
+            return argumentError('Ordinary generation requires an exact target baseline and selected model.');
+          const review = yield* requestAutomaticMemoryDraft(config, {
+            uri: input.uri,
+            expectedContentHash: input.expectedContentHash,
+            sourceCwd: input.sourceCwd,
+            backend: input.backend,
+            modelId: input.modelId,
+          });
+          const result = projectAutomaticMemoryReview(review)!;
+          return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+        }
         if (
           typeof input.caseId !== 'string' ||
           !/^health-case-[a-f0-9]{40}$/u.test(input.caseId) ||
@@ -183,7 +213,16 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       description:
         'Read, preview, decide, or apply one exact private topic-maintenance review. Applying requires approved=true, the preview revision, and its full-document digest.',
       inputSchema: {
-        action: McpInput.literals(['view', 'preview', 'apply', 'reject', 'defer', 'resume'], 'Exact review action'),
+        action: McpInput.literals(
+          ['view', 'preview', 'automatic-preview', 'manual-preview', 'apply', 'reject', 'defer', 'resume'],
+          'Exact review action',
+        ),
+        uri: McpInput.string('Exact ordinary memory URI for automatic-preview or manual-preview'),
+        expectedContentHash: McpInput.string('Exact current canonical content hash for an ordinary preview'),
+        draftJson: McpInput.string('Closed automatic V2 role/support proposal; omit to inspect its prepared basis'),
+        desiredBody: McpInput.string(
+          'Full explicit user-authored desired body for manual-preview; no model or automatic operations',
+        ),
         reviewId: McpInput.string('Exact private topic review ID'),
         caseId: McpInput.string('Exact topic maintenance case for model review decisions'),
         revision: McpInput.integer('Exact private review or approval revision', {minimum: 1}),
@@ -195,6 +234,36 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     },
     input =>
       Effect.gen(function* () {
+        if (input.action === 'automatic-preview' || input.action === 'manual-preview') {
+          if (
+            typeof input.uri !== 'string' ||
+            !input.uri.startsWith('threadnote://') ||
+            typeof input.expectedContentHash !== 'string' ||
+            !/^[a-f0-9]{64}$/u.test(input.expectedContentHash) ||
+            (input.action === 'manual-preview' && typeof input.desiredBody !== 'string')
+          )
+            return argumentError(
+              'Ordinary preview requires the exact target URI and current content hash; manual-preview also requires the complete user-authored desiredBody.',
+            );
+          const requested = yield* requestAutomaticMemoryReview(config, {
+            uri: input.uri,
+            expectedContentHash: input.expectedContentHash,
+            sourceCwd: input.sourceCwd,
+            draftJson: input.action === 'automatic-preview' ? input.draftJson : undefined,
+            desiredBody: input.action === 'manual-preview' ? input.desiredBody : undefined,
+            reviewId: input.reviewId,
+            revision: input.revision,
+          });
+          if (!('reviewId' in requested))
+            return {content: [{type: 'text' as const, text: JSON.stringify(requested)}], structuredContent: requested};
+          const reviewed = yield* prepareTopicMaintenanceReview(config, {
+            reviewId: requested.reviewId,
+            revision: requested.revision,
+            sourceCwd: input.sourceCwd,
+          });
+          const result = projectAutomaticMemoryReview(reviewed)!;
+          return {content: [{type: 'text' as const, text: JSON.stringify(result)}], structuredContent: result};
+        }
         if (
           input.action !== 'view' &&
           input.action !== 'preview' &&
@@ -227,15 +296,25 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
           !/^health-case-[a-f0-9]{40}$/u.test(input.caseId)
         )
           return argumentError('Select an exact topic maintenance case.');
+        const selectedVersion =
+          input.action === 'preview' || input.action === 'apply'
+            ? (yield* loadCandidateReview(config.agentContextHome, input.reviewId)).maintenance?.version
+            : undefined;
         const cwd =
           input.action === 'preview' || input.action === 'apply'
-            ? (input.sourceCwd ?? (yield* SystemInfo).currentDirectory())
-            : '';
-        if ((input.action === 'preview' || input.action === 'apply') && !(yield* Path.Path).isAbsolute(cwd))
+            ? selectedVersion === 3
+              ? input.sourceCwd
+              : (input.sourceCwd ?? (yield* SystemInfo).currentDirectory())
+            : undefined;
+        if (
+          (input.action === 'preview' || input.action === 'apply') &&
+          cwd !== undefined &&
+          !(yield* Path.Path).isAbsolute(cwd)
+        )
           return argumentError('Topic review sourceCwd must be absolute.');
         const result =
           input.action === 'view'
-            ? yield* readTopicMaintenanceDraft(config, input.reviewId ?? '')
+            ? yield* readTopicMaintenanceDraft(config, input.reviewId ?? '', input.sourceCwd)
             : input.action === 'preview'
               ? yield* prepareTopicMaintenanceReview(config, {
                   reviewId: input.reviewId ?? '',
@@ -259,6 +338,7 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
                   });
         const projection =
           projectTopicReviewDecisionAcknowledgement(result, input.action, input.caseId) ??
+          projectAutomaticMemoryReview(result) ??
           projectManagerTopicReview(result, yield* managerTopicReviewCaseIdentity(config, result));
         if (!projection) return argumentError('The selected review is not a topic maintenance proposal.');
         return {content: [{type: 'text' as const, text: JSON.stringify(projection)}], structuredContent: projection};

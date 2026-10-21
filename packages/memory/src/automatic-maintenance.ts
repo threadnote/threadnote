@@ -3,7 +3,7 @@ import {parseResourceId} from '@threadnote/store/resource-id';
 import {
   assertMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
-  MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
   type MemoryCodeCitationV1,
 } from './code/citation.js';
 import {
@@ -25,13 +25,16 @@ import {
   type TopicMaintenanceClaimRole,
   type TopicMaintenanceSupport,
 } from './topic-maintenance.js';
-import {MAX_TOPIC_MAINTENANCE_BASIS_BYTES} from './topic-maintenance-draft.js';
+import {reviewedMemorySupportDigest, validateReviewedMemorySupport} from './reviewed-support.js';
 import {memoryCodeCitationSharingBlocker} from './code/citation-policy.js';
 import type {MemoryKind, MemoryStatus} from './types.js';
 
 export const AUTOMATIC_MAINTENANCE_VERSION = 1 as const;
 export const AUTOMATIC_MAINTENANCE_PREPARATION_VERSION = 1 as const;
-export const MAX_AUTOMATIC_MAINTENANCE_BYTES = MAX_TOPIC_MAINTENANCE_BASIS_BYTES;
+export const MAX_AUTOMATIC_MAINTENANCE_BYTES = 64 * 1024;
+export const MAX_AUTOMATIC_MAINTENANCE_V2_BYTES = 1024 * 1024;
+/** Eight immutable roots, eight approved active descriptors and eight current comparison reads. */
+export const MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE = 24;
 
 /** Exact read preconditions, not a semantic truth or publication assertion. */
 export type AutomaticMaintenanceSourceV1 =
@@ -131,6 +134,24 @@ export interface AutomaticMaintenanceAssessmentV1 {
   readonly coverage: AutomaticMaintenanceCoverageV1;
   readonly capabilities: AutomaticMaintenanceCapabilitiesV1;
 }
+
+export interface AutomaticMaintenanceParagraphV2 extends Omit<
+  AutomaticMaintenanceParagraphV1,
+  'roleAuthority' | 'supportAuthority'
+> {
+  readonly roleAuthority: 'reviewed';
+  readonly supportAuthority: 'reviewed';
+}
+export interface AutomaticMaintenanceAssessmentV2 extends Omit<
+  AutomaticMaintenanceAssessmentV1,
+  'version' | 'preparation' | 'paragraphs'
+> {
+  readonly version: 2;
+  readonly preparation: {readonly version: 2; readonly kind: 'reviewed-support'; readonly supportDigest: string};
+  readonly paragraphs: readonly AutomaticMaintenanceParagraphV2[];
+}
+export type AutomaticMaintenanceAssessment = AutomaticMaintenanceAssessmentV1 | AutomaticMaintenanceAssessmentV2;
+export type AutomaticMaintenanceParagraph = AutomaticMaintenanceParagraphV1 | AutomaticMaintenanceParagraphV2;
 
 const HASH = /^[a-f0-9]{64}$/u;
 const MEMORY_ID = /^tn_[a-z0-9_]{1,128}$/u;
@@ -283,7 +304,7 @@ export function assertAutomaticMaintenanceEvidence(value: unknown): asserts valu
 /** This eligibility calculation is advisory; later exact review/apply owns all authority checks. */
 export function automaticMaintenanceCapabilities(
   target: AutomaticMaintenanceTargetV1,
-  paragraphs: readonly AutomaticMaintenanceParagraphV1[],
+  paragraphs: readonly AutomaticMaintenanceParagraph[],
   evidence: readonly AutomaticMaintenanceEvidenceV1[],
   coverage: AutomaticMaintenanceCoverageV1,
 ): AutomaticMaintenanceCapabilitiesV1 {
@@ -293,7 +314,7 @@ export function automaticMaintenanceCapabilities(
   if (!target.memoryId) reasons.push('missing-id');
   if (target.paragraphCount === null) reasons.push('target-bounds');
   if (target.readOnly || target.visibility === 'external') reasons.push('read-only');
-  if ((target.schemaVersion ?? 1) > MEMORY_SCHEMA_VERSION) reasons.push('unsupported-schema');
+  if ((target.schemaVersion ?? 1) > MAX_SUPPORTED_MEMORY_SCHEMA_VERSION) reasons.push('unsupported-schema');
   if (coverage.outcome !== 'complete' || coverage.omittedParagraphs || coverage.omittedSources)
     reasons.push('coverage-gap');
   const eligible = paragraphs.filter(
@@ -327,9 +348,7 @@ export function automaticMaintenanceCapabilities(
   };
 }
 
-export function assertAutomaticMaintenanceAssessment(
-  value: unknown,
-): asserts value is AutomaticMaintenanceAssessmentV1 {
+export function assertAutomaticMaintenanceAssessment(value: unknown): asserts value is AutomaticMaintenanceAssessment {
   shape(value, [
     'version',
     'preparation',
@@ -340,16 +359,26 @@ export function assertAutomaticMaintenanceAssessment(
     'coverage',
     'capabilities',
   ]);
-  if (value.version !== AUTOMATIC_MAINTENANCE_VERSION || bytes(JSON.stringify(value)) > MAX_AUTOMATIC_MAINTENANCE_BYTES)
+  if (
+    (value.version !== AUTOMATIC_MAINTENANCE_VERSION && value.version !== 2) ||
+    bytes(JSON.stringify(value)) >
+      (value.version === 2 ? MAX_AUTOMATIC_MAINTENANCE_V2_BYTES : MAX_AUTOMATIC_MAINTENANCE_BYTES)
+  )
     refuse();
-  shape(value.preparation, ['version', 'kind'], ['manifestVersion', 'manifestHash']);
-  if (value.preparation.version !== AUTOMATIC_MAINTENANCE_PREPARATION_VERSION) refuse();
-  if (value.preparation.kind === 'derived') shape(value.preparation, ['version', 'kind']);
-  else if (value.preparation.kind === 'legacy-approved') {
-    shape(value.preparation, ['version', 'kind', 'manifestVersion', 'manifestHash']);
-    if (![1, 2, 3].includes(value.preparation.manifestVersion as number)) refuse();
-    hash(value.preparation.manifestHash);
-  } else refuse();
+  if (value.version === 2) {
+    shape(value.preparation, ['version', 'kind', 'supportDigest']);
+    if (value.preparation.version !== 2 || value.preparation.kind !== 'reviewed-support') refuse();
+    hash(value.preparation.supportDigest);
+  } else {
+    shape(value.preparation, ['version', 'kind'], ['manifestVersion', 'manifestHash']);
+    if (value.preparation.version !== AUTOMATIC_MAINTENANCE_PREPARATION_VERSION) refuse();
+    if (value.preparation.kind === 'derived') shape(value.preparation, ['version', 'kind']);
+    else if (value.preparation.kind === 'legacy-approved') {
+      shape(value.preparation, ['version', 'kind', 'manifestVersion', 'manifestHash']);
+      if (![1, 2, 3].includes(value.preparation.manifestVersion as number)) refuse();
+      hash(value.preparation.manifestHash);
+    } else refuse();
+  }
   const target = value.target;
   shape(
     target,
@@ -377,7 +406,7 @@ export function assertAutomaticMaintenanceAssessment(
     count(target.schemaVersion);
     if (!target.schemaVersion) refuse();
   }
-  list(value.evidence, MAX_MEMORY_CODE_CITATIONS);
+  list(value.evidence, value.version === 2 ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS);
   value.evidence.forEach(assertAutomaticMaintenanceEvidence);
   const evidence = value.evidence as AutomaticMaintenanceEvidenceV1[];
   const ids = new Set(evidence.map(item => item.id));
@@ -414,8 +443,8 @@ export function assertAutomaticMaintenanceAssessment(
     uniqueStrings(paragraph.historicalEvidenceIds, MAX_MEMORY_CODE_CITATIONS);
     uniqueStrings(paragraph.acceptedEvidenceIds, MAX_MEMORY_CODE_CITATIONS);
     uniqueStrings(paragraph.currentEvidenceIds, MAX_MEMORY_CODE_CITATIONS);
-    oneOf(paragraph.roleAuthority, ['legacy-approved', 'provisional']);
-    oneOf(paragraph.supportAuthority, ['legacy-approved', 'provisional']);
+    oneOf(paragraph.roleAuthority, value.version === 2 ? ['reviewed'] : ['legacy-approved', 'provisional']);
+    oneOf(paragraph.supportAuthority, value.version === 2 ? ['reviewed'] : ['legacy-approved', 'provisional']);
     if (
       [...paragraph.historicalEvidenceIds, ...paragraph.acceptedEvidenceIds, ...paragraph.currentEvidenceIds].some(
         id => !ids.has(id),
@@ -439,7 +468,7 @@ export function assertAutomaticMaintenanceAssessment(
     )
       refuse();
     const baselineCount =
-      paragraph.supportAuthority === 'legacy-approved'
+      paragraph.supportAuthority !== 'provisional'
         ? paragraph.historicalEvidenceIds.length + paragraph.acceptedEvidenceIds.length
         : paragraph.currentEvidenceIds.length;
     if (
@@ -488,7 +517,7 @@ export function assertAutomaticMaintenanceAssessment(
   shape(capabilities, ['assess', 'draft', 'apply', 'publish', 'reviewRoute', 'reasons']);
   const expected = automaticMaintenanceCapabilities(
     target as unknown as AutomaticMaintenanceTargetV1,
-    value.paragraphs as AutomaticMaintenanceParagraphV1[],
+    value.paragraphs as AutomaticMaintenanceParagraph[],
     evidence,
     value.coverage as unknown as AutomaticMaintenanceCoverageV1,
   );
@@ -500,14 +529,15 @@ export function assertAutomaticMaintenanceAssessment(
     refuse();
 }
 
-export function encodeAutomaticMaintenanceAssessment(value: AutomaticMaintenanceAssessmentV1): string {
+export function encodeAutomaticMaintenanceAssessment(value: AutomaticMaintenanceAssessment): string {
   assertAutomaticMaintenanceAssessment(value);
   return JSON.stringify(value);
 }
-export function parseAutomaticMaintenanceAssessment(encoded: string): AutomaticMaintenanceAssessmentV1 {
-  if (bytes(encoded) > MAX_AUTOMATIC_MAINTENANCE_BYTES) refuse();
+export function parseAutomaticMaintenanceAssessment(encoded: string): AutomaticMaintenanceAssessment {
+  if (bytes(encoded) > MAX_AUTOMATIC_MAINTENANCE_V2_BYTES) refuse();
   const value: unknown = JSON.parse(encoded);
   assertAutomaticMaintenanceAssessment(value);
+  if (value.version === 1 && bytes(encoded) > MAX_AUTOMATIC_MAINTENANCE_BYTES) refuse();
   return value;
 }
 
@@ -522,7 +552,7 @@ export function automaticMaintenanceSections(body: string): readonly string[] | 
 
 /** Must be repeated at consumption: a cache read is never authority over canonical content. */
 export function assertAutomaticMaintenanceTarget(
-  assessment: AutomaticMaintenanceAssessmentV1,
+  assessment: AutomaticMaintenanceAssessment,
   record: MemoryRecord,
 ): void {
   assertAutomaticMaintenanceAssessment(assessment);
@@ -540,6 +570,42 @@ export function assertAutomaticMaintenanceTarget(
     assessment.paragraphs.some(item => item.hash !== consolidationRevision(sections![item.ordinal]))
   )
     refuse();
+  if (record.metadata.reviewedSupportError) refuse();
+  if (record.metadata.reviewedSupport) {
+    const support = validateReviewedMemorySupport(record.metadata.reviewedSupport, record.body);
+    if (assessment.version !== 2 || assessment.preparation.supportDigest !== reviewedMemorySupportDigest(support))
+      refuse();
+    for (const paragraph of assessment.paragraphs) {
+      const approved = support.active.paragraphs[paragraph.ordinal];
+      if (
+        !approved ||
+        paragraph.roleAuthority !== 'reviewed' ||
+        paragraph.supportAuthority !== 'reviewed' ||
+        paragraph.role !== approved.role ||
+        paragraph.support !== approved.support ||
+        paragraph.scope !== approved.scope ||
+        paragraph.validity !== approved.validity ||
+        JSON.stringify(paragraph.acceptedEvidenceIds) !== JSON.stringify(approved.evidenceIds) ||
+        paragraph.historicalEvidenceIds.length !== 0
+      )
+        refuse();
+    }
+    if (
+      assessment.dependencies.length ||
+      support.active.sources.some(
+        source =>
+          !assessment.evidence.some(
+            item =>
+              item.id === source.id &&
+              item.authority !== 'provisional' &&
+              JSON.stringify(item.source) === JSON.stringify(source.source),
+          ),
+      )
+    )
+      refuse();
+    return;
+  }
+  if (assessment.version === 2) refuse();
   if (
     assessment.preparation.kind === 'legacy-approved' &&
     (!record.metadata.topicMaintenance ||
@@ -620,8 +686,8 @@ export function assertAutomaticMaintenanceTarget(
 
 /** Whole-value refusal keeps private URI/pin/fragment identities out of shared payloads. */
 export function projectShareableAutomaticMaintenanceAssessment(
-  assessment: AutomaticMaintenanceAssessmentV1,
-): AutomaticMaintenanceAssessmentV1 | undefined {
+  assessment: AutomaticMaintenanceAssessment,
+): AutomaticMaintenanceAssessment | undefined {
   assertAutomaticMaintenanceAssessment(assessment);
   if (
     assessment.target.visibility !== 'shared' ||

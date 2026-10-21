@@ -1,9 +1,15 @@
+import {captureReviewedSupportLegacyOrigin, createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
+import {captureConsolidationSource, consolidationRevision, reviewConsolidation} from '@threadnote/memory/consolidation';
+import {topicMaintenanceReplacementError} from '@threadnote/memory/topic-maintenance';
+import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Path, Ref} from 'effect';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
+import * as selectedDraft from '../../src/manager/selected_draft.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
-import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {readMemoryRecordsByUri} from '@threadnote/threadnote/memory/index';
@@ -14,8 +20,9 @@ import {
 } from '@threadnote/threadnote/manager/memory/save';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {startManagerTestServer} from '../helpers/manager-test-server.js';
-import {mkdir, mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
+import {execFileSync} from '@threadnote/testing/node-child-process';
 import {join} from '@threadnote/testing/node-path';
 
 const personalUri = 'threadnote://user/test/memories/durable/projects/threadnote/source.md';
@@ -440,3 +447,328 @@ function memoryContent(memoryId: string, topic: string, body: string, overrides:
     body,
   );
 }
+
+describe('Manager raw approved-support boundary', () => {
+  it('refuses body edits and header removal with an actionable manual preview route', () => {
+    const body = 'Reviewed ordinary body.';
+    const active = createReviewedSupportSnapshot({
+      bodyHash: consolidationRevision(body),
+      paragraphs: [
+        {ordinal: 0, hash: consolidationRevision(body), role: 'unknown', support: 'unresolved', evidenceIds: []},
+      ],
+      sources: [],
+      acceptance: {
+        reviewId: 'review-manager-support',
+        approvedAt: '2026-10-21T00:00:00.000Z',
+        targetBeforeHash: '1'.repeat(64),
+        preparationDigest: '2'.repeat(64),
+        sourceVectorDigest: '3'.repeat(64),
+      },
+    });
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        project: 'threadnote',
+        topic: 'source',
+        memoryId: 'tn_manager_source',
+        schemaVersion: 11,
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-21T00:00:00.000Z',
+        reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
+      },
+      body,
+    );
+    expect(() => assertManagerRawPersonalMemorySave(personalUri, content, content, content)).not.toThrow();
+    for (const next of [content.replace(body, 'Edited prose.'), content.replace(/^reviewed_support: .*\n/mu, '')]) {
+      expect(() => assertManagerRawPersonalMemorySave(personalUri, content, content, next)).toThrow(
+        /context_maintenance_review/u,
+      );
+      expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, content, content, next)).toThrow(
+        /context_maintenance_review/u,
+      );
+    }
+  });
+});
+
+function reviewedCodeMemory() {
+  const citation = (revision: 'a' | 'b') =>
+    createMemoryCodeCitation({
+      version: 1,
+      repositoryId: 'c'.repeat(64),
+      repositoryIdentityKind: 'remote',
+      sourceSnapshotId: `cgsn_${revision.repeat(40)}`,
+      sourceCommit: revision.repeat(40),
+      sourceDirty: false,
+      path: 'src/limit.ts',
+      target: {kind: 'file'},
+      fileContentHash: {algorithm: 'sha256', value: revision.repeat(64)},
+      extractorSet: 'test',
+    });
+  const root = citation('a');
+  const current = citation('b');
+  const body = 'Current limit is 60.';
+  const source = {kind: 'code' as const, citation: current};
+  const id = automaticMaintenanceEvidenceId(source);
+  const active = createReviewedSupportSnapshot({
+    bodyHash: consolidationRevision(body),
+    paragraphs: [
+      {ordinal: 0, hash: consolidationRevision(body), role: 'descriptive', support: 'direct', evidenceIds: [id]},
+    ],
+    sources: [{id, source, scope: 'repository'}],
+    acceptance: {
+      reviewId: 'review-manager-current-code',
+      approvedAt: '2026-10-21T00:00:00.000Z',
+      targetBeforeHash: '1'.repeat(64),
+      preparationDigest: '2'.repeat(64),
+      sourceVectorDigest: '3'.repeat(64),
+    },
+  });
+  const content = memoryContent('tn_manager_source', 'source', body, {
+    schemaVersion: 11,
+    codeCitations: [root],
+    reviewedSupport: {type: 'reviewed-memory-support', version: 1, active, initialApproval: active},
+  });
+  return {content, root, current};
+}
+
+async function managerProvenanceFixture(shared = false) {
+  const home = await mkdtemp(join(tmpdir(), 'threadnote-manager-provenance-'));
+  const runtime = {...config(), agentContextHome: home, manifestPath: join(home, 'manifest.yaml')};
+  await writeFile(runtime.manifestPath, 'version: 1\nprojects: []\n');
+  const relative = join('durable', 'projects', 'threadnote', 'source.md');
+  const memoryRoot = join(home, 'data', 'local', 'user', 'test', 'memories');
+  const canonicalPath = join(memoryRoot, ...(shared ? ['shared', 'default'] : []), relative);
+  const {content} = reviewedCodeMemory();
+  await mkdir(join(canonicalPath, '..'), {recursive: true});
+  await writeFile(canonicalPath, content);
+  let worktreePath: string | undefined;
+  if (shared) {
+    const worktree = join(home, 'share', 'worktrees', 'default');
+    const remote = join(home, 'share', 'remote.git');
+    worktreePath = join(worktree, relative);
+    await mkdir(join(worktreePath, '..'), {recursive: true});
+    await writeFile(worktreePath, content);
+    const git = (args: readonly string[]) => execFileSync('git', [...args], {stdio: 'pipe'});
+    git(['init', '--bare', '-q', remote]);
+    git(['init', '-q', worktree]);
+    git(['-C', worktree, 'config', 'user.name', 'Threadnote Test']);
+    git(['-C', worktree, 'config', 'user.email', 'test@threadnote.local']);
+    git(['-C', worktree, 'add', '--', relative]);
+    git(['-C', worktree, 'commit', '-qm', 'shared provenance fixture']);
+    git(['-C', worktree, 'remote', 'add', 'origin', remote]);
+    git(['-C', worktree, 'push', '-qu', 'origin', 'HEAD']);
+    await writeFile(
+      join(home, 'share', 'teams.json'),
+      JSON.stringify({
+        version: 1,
+        defaultTeam: 'default',
+        teams: {
+          default: {
+            name: 'default',
+            worktree,
+            gitdir: join(worktree, '.git'),
+            remote,
+            addedAt: '2026-10-21T00:00:00.000Z',
+          },
+        },
+      }),
+    );
+  }
+  return {home, runtime, canonicalPath, worktreePath, content, uri: shared ? sharedUri : personalUri};
+}
+
+describe('Manager retained reviewed provenance', () => {
+  it.each([false, true])('rejects root deletion and substitution through HTTP Save (shared=%s)', async shared => {
+    const f = await managerProvenanceFixture(shared);
+    const server = await startManagerTestServer(f.runtime, 'provenance-secret');
+    const save = (text: string, expectedContent: string) =>
+      fetch(`${server.url}/api/memory/save`, {
+        method: 'POST',
+        headers: {authorization: 'Bearer provenance-secret', 'content-type': 'application/json'},
+        body: JSON.stringify({replaceUri: f.uri, expectedContent, text}),
+      });
+    try {
+      const {root, current} = reviewedCodeMemory();
+      const rootLine = `code_citation: ${JSON.stringify(root)}`;
+      for (const replacement of ['', `code_citation: ${JSON.stringify(current)}\n`, `${rootLine} \n`]) {
+        const changed = f.content.replace(`${rootLine}\n`, replacement);
+        expect(parseMemoryDocument(f.uri, changed)?.metadata.reviewedSupport).toEqual(
+          parseMemoryDocument(f.uri, f.content)?.metadata.reviewedSupport,
+        );
+        const response = await save(changed, f.content);
+        const result = await response.text();
+        expect(response.status, result).toBe(500);
+        expect(result).toContain('context_maintenance_review');
+        expect(await readFile(f.canonicalPath, 'utf8')).toBe(f.content);
+        if (f.worktreePath) expect(await readFile(f.worktreePath, 'utf8')).toBe(f.content);
+      }
+      const edited = f.content.replace('status: active', 'status: active\nkeywords: retained-provenance');
+      const response = await save(edited, f.content);
+      expect(response.status, await response.text()).toBe(200);
+      const stored = await readFile(f.canonicalPath, 'utf8');
+      expect(stored).toBe(edited);
+      expect(parseMemoryDocument(f.uri, stored)?.metadata.reviewedSupport).toEqual(
+        parseMemoryDocument(f.uri, f.content)?.metadata.reviewedSupport,
+      );
+      if (f.worktreePath) expect(await readFile(f.worktreePath, 'utf8')).toBe(edited);
+    } finally {
+      await server.close();
+      await rm(f.home, {recursive: true, force: true});
+    }
+  });
+
+  it('protects roots without raw content and retains first approval and typed legacy origin', () => {
+    const {content, root, current} = reviewedCodeMemory();
+    const legacyBody = 'Historic limit was 30.';
+    const legacy = memoryContent('tn_manager_source', 'source', legacyBody, {codeCitations: [root]});
+    const captured = captureConsolidationSource({uri: personalUri, content: legacy});
+    const reviewed = reviewConsolidation(
+      legacyBody,
+      [captured],
+      [
+        {
+          section: legacyBody,
+          disposition: 'direct',
+          supports: [{sourceUri: personalUri, fragment: 0, citationIds: [root.id], relationIndexes: []}],
+        },
+      ],
+      {
+        operationId: 'manager-legacy-origin',
+        cleanup: 'keep',
+        cleanupShared: false,
+        target: {kind: 'durable', status: 'active', project: 'threadnote', topic: 'source', sourceAgentClient: 'test'},
+      },
+    );
+    const legacyOrigin = captureReviewedSupportLegacyOrigin(
+      parseMemoryDocument(
+        personalUri,
+        memoryContent('tn_manager_source', 'source', legacyBody, {
+          codeCitations: reviewed.codeCitations,
+          consolidation: reviewed.provenance,
+        }),
+      )!,
+    );
+    expect(legacyOrigin).toBeDefined();
+    const original = parseMemoryDocument(personalUri, content)!;
+    const preserved = {...original.metadata.reviewedSupport!, legacyOrigin};
+    const withLegacy = memoryContent('tn_manager_source', 'source', original.body, {
+      schemaVersion: 11,
+      codeCitations: [root],
+      reviewedSupport: preserved,
+    });
+    const record = parseMemoryDocument(personalUri, withLegacy)!;
+    expect(record.metadata.reviewedSupportError).toBeUndefined();
+    const metadataEdit = withLegacy.replace('status: active', 'status: active\nkeywords: keep-history');
+    expect(() => assertManagerRawPersonalMemorySave(personalUri, withLegacy, withLegacy, metadataEdit)).not.toThrow();
+    expect(topicMaintenanceReplacementError(record, parseMemoryDocument(personalUri, metadataEdit)!)).toBeUndefined();
+    expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, withLegacy, withLegacy, metadataEdit)).toThrow(
+      'private source evidence',
+    );
+    expect(parseMemoryDocument(personalUri, metadataEdit)?.metadata.reviewedSupport).toEqual(preserved);
+    expect(
+      topicMaintenanceReplacementError(record, {
+        body: record.body,
+        metadata: {...record.metadata, codeCitations: [current]},
+      }),
+    ).toContain('root code citations');
+    const ordinaryEdit = legacy.replace(
+      `code_citation: ${JSON.stringify(root)}`,
+      `code_citation: ${JSON.stringify(current)}`,
+    );
+    expect(() => assertManagerRawPersonalMemorySave(personalUri, legacy, legacy, ordinaryEdit)).not.toThrow();
+    expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, legacy, legacy, ordinaryEdit)).not.toThrow();
+  });
+
+  it('preserves reviewed root bytes across unrelated metadata edits and browser line endings', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.stringMatching(/^[a-z]{1,12}$/u), {minLength: 1, maxLength: 4}),
+        fc.constantFrom('\n', '\r\n', '\r'),
+        (keywords, ending) => {
+          const {content} = reviewedCodeMemory();
+          const previous = content.replaceAll('\n', ending);
+          const next = content.replace('status: active', `status: active\nkeywords: ${keywords.join(' ')}`);
+          expect(() => assertManagerRawPersonalMemorySave(personalUri, previous, previous, next)).not.toThrow();
+          expect(() => assertManagerRawSharedMemorySave(config(), sharedUri, previous, previous, next)).not.toThrow();
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+
+  it('refuses reviewed-support consolidation before model dispatch or cleanup', async () => {
+    const f = await managerProvenanceFixture();
+    const otherPath = join(f.canonicalPath, '..', 'other.md');
+    const other = memoryContent('tn_manager_other', 'other', 'Another memory.');
+    await writeFile(otherPath, other);
+    const generation = vi.spyOn(selectedDraft, 'runSelectedDraft').mockReturnValue(
+      Effect.succeed({
+        text: 'Bounded test draft.',
+        backendIdentity: 'fixture',
+        modelIdentity: 'fixture',
+        usage: {status: 'unavailable'},
+        settings: {maxOutputTokens: 4000},
+      }),
+    );
+    const server = await startManagerTestServer(f.runtime, 'provenance-secret');
+    try {
+      const response = await fetch(`${server.url}/api/consolidations`, {
+        method: 'POST',
+        headers: {authorization: 'Bearer provenance-secret', 'content-type': 'application/json'},
+        body: JSON.stringify({
+          agent: 'cursor',
+          kind: 'durable',
+          project: 'threadnote',
+          topic: 'consolidated',
+          uris: [f.uri, personalUri.replace('/source.md', '/other.md')],
+        }),
+      });
+      expect(response.status).toBe(200);
+      const {job} = (await response.json()) as {job: {id: string; status: string; error?: string}};
+      expect(job).toMatchObject({
+        status: 'failed',
+        error: expect.stringMatching(/reviewed support.*cannot preserve/iu),
+      });
+      expect(generation).not.toHaveBeenCalled();
+      const apply = await fetch(`${server.url}/api/consolidations/${job.id}/apply`, {
+        method: 'POST',
+        headers: {authorization: 'Bearer provenance-secret', 'content-type': 'application/json'},
+        body: JSON.stringify({confirm: true, cleanup: 'forget'}),
+      });
+      expect(apply.status).toBe(500);
+      expect(await apply.text()).toContain('not completed');
+      expect(await readFile(f.canonicalPath, 'utf8')).toBe(f.content);
+      expect(await readFile(otherPath, 'utf8')).toBe(other);
+      const legacy = f.content
+        .replace(/^reviewed_support: .*\n/mu, '')
+        .replace('schema_version: 11', 'schema_version: 10');
+      await writeFile(f.canonicalPath, legacy);
+      const control = await fetch(`${server.url}/api/consolidations`, {
+        method: 'POST',
+        headers: {authorization: 'Bearer provenance-secret', 'content-type': 'application/json'},
+        body: JSON.stringify({
+          agent: 'cursor',
+          kind: 'durable',
+          project: 'threadnote',
+          topic: 'consolidated',
+          uris: [f.uri, personalUri.replace('/source.md', '/other.md')],
+        }),
+      });
+      expect(control.status).toBe(200);
+      expect(await control.json()).toMatchObject({
+        job: {
+          status: 'completed',
+          sources: [{uri: f.uri, codeCitations: [reviewedCodeMemory().root]}, {codeCitations: []}],
+        },
+      });
+      expect(generation).toHaveBeenCalledOnce();
+      expect(await readFile(f.canonicalPath, 'utf8')).toBe(legacy);
+    } finally {
+      await server.close();
+      generation.mockRestore();
+      await rm(f.home, {recursive: true, force: true});
+    }
+  });
+});

@@ -1,3 +1,4 @@
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertSafeRelativePath} from '@threadnote/platform/paths';
@@ -16,16 +17,18 @@ export type MaintenanceCitationAssociation = Effect.Success<
 
 export const CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION = 1;
 
+export const maintenanceCitationAdmissionVersion = (record: MemoryRecord) =>
+  CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION + (record.metadata.reviewedSupport ? 1 : 0);
+
 /** Older checkpoints never admitted explicit citations on non-brief memory kinds. */
 export function maintenanceCitationAdmissionCurrent(
   record: MemoryRecord,
   checkpoint: {readonly citationAdmissionVersion?: number} | undefined,
 ) {
   return (
-    (record.metadata.codeCitations?.length ?? 0) === 0 ||
-    record.metadata.kind === 'durable' ||
-    record.metadata.kind === 'handoff' ||
-    checkpoint?.citationAdmissionVersion === CURRENT_MAINTENANCE_CITATION_ADMISSION_VERSION
+    currentMemoryCodeCitations(record).length === 0 ||
+    (!record.metadata.reviewedSupport && (record.metadata.kind === 'durable' || record.metadata.kind === 'handoff')) ||
+    checkpoint?.citationAdmissionVersion === maintenanceCitationAdmissionVersion(record)
   );
 }
 
@@ -68,7 +71,7 @@ const readRecordSourceAssociation = Effect.fn('contextMaintenance.recordAssociat
 ) {
   const citations = [
     ...new Map(
-      (record.metadata.codeCitations ?? []).map(citation => [
+      currentMemoryCodeCitations(record).map(citation => [
         `${citation.repositoryId}:${citation.sourceCommit}`,
         citation,
       ]),
@@ -93,12 +96,16 @@ export function projectMaintenanceCitationAssociation(
   association: MaintenanceCitationAssociation,
 ) {
   const selectors = [
-    ...new Set(
-      (record.metadata.codeCitations ?? []).map(citation => `${citation.repositoryId}:${citation.sourceCommit}`),
-    ),
+    ...new Set(currentMemoryCodeCitations(record).map(citation => `${citation.repositoryId}:${citation.sourceCommit}`)),
   ].sort();
   return sha256HexSync(
     JSON.stringify([
+      ...(record.metadata.reviewedSupport
+        ? [
+            record.metadata.reviewedSupport.active.digest,
+            currentMemoryCodeCitations(record).map(citation => citation.id),
+          ]
+        : []),
       selectors.length,
       Object.fromEntries(
         selectors.flatMap(selector => {
@@ -122,7 +129,7 @@ export const recordSourceRevision = Effect.fn('contextMaintenance.recordSourceRe
   return sha256HexSync(
     projectMaintenanceCitationAssociation(record, association) +
       (yield* Effect.forEach(
-        [...new Set((record.metadata.codeCitations ?? []).map(citation => citation.path))],
+        [...new Set(currentMemoryCodeCitations(record).map(citation => citation.path))],
         relative =>
           Effect.gen(function* () {
             const safe = yield* Effect.try(() => assertSafeRelativePath(relative));

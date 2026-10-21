@@ -1,3 +1,15 @@
+import {captureReviewedSupportLegacyOrigin, createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
+import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
+import {localMemoryPathForUri} from '@threadnote/memory/local-path';
+import {requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
+import {prepareTopicMaintenanceReview} from '../../src/memory/context/maintenance_review.js';
+import {
+  readSharedAutomaticMemoryGitBaseline,
+  resolveAutomaticSharedMemorySource,
+} from '../../src/git_proposal/topic_maintenance_commands.js';
+import {buildReviewedGitProposal} from '../../src/git_proposal/commands.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
 import fc from 'fast-check';
@@ -463,3 +475,394 @@ describe('reviewed existing shared topic Git proposal', () => {
     {timeout: 120_000},
   );
 });
+
+describe('reviewed ordinary shared memory owner path', () => {
+  effectIt.effect('uses the public manual review and exact V3 owner artifact for a committed incident path', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-shared-ordinary-'});
+      const shared = path.join(home, 'shared');
+      yield* fs.makeDirectory(shared, {recursive: true});
+      const git = (args: readonly string[]) => runCommandEffect('git', ['-C', shared, ...args]);
+      yield* git(['init', '--quiet']);
+      yield* git(['config', 'user.name', 'Test']);
+      yield* git(['config', 'user.email', 'test@example.invalid']);
+      yield* git(['remote', 'add', 'origin', 'https://example.com/fixture/ordinary.git']);
+      const config = {
+        account: 'local',
+        agentContextHome: home,
+        agentId: 'test',
+        manifestPath: path.join(home, 'manifest.yaml'),
+        user: 'tester',
+      };
+      yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      const uri = 'threadnote://user/tester/memories/shared/default/incident/projects/fixture/incident.md';
+      const relative = 'incident/projects/fixture/incident.md';
+      const body = 'Original historical incident.';
+      const active = createReviewedSupportSnapshot({
+        bodyHash: sha256HexSync(body),
+        paragraphs: [
+          {ordinal: 0, hash: sha256HexSync(body), role: 'historical', support: 'unresolved', evidenceIds: []},
+        ],
+        sources: [],
+        acceptance: {
+          reviewId: 'review-1111111111111111',
+          approvedAt: '2026-10-21T00:00:00.000Z',
+          targetBeforeHash: '1'.repeat(64),
+          preparationDigest: '2'.repeat(64),
+          sourceVectorDigest: '3'.repeat(64),
+        },
+      });
+      const accepted = formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'incident',
+          status: 'active',
+          project: 'fixture',
+          topic: 'incident',
+          memoryId: 'tn_shared_incident',
+          schemaVersion: 11,
+          visibility: 'shared',
+          sourceAgentClient: 'test',
+          timestamp: '2026-10-21T00:00:00.000Z',
+          reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
+        },
+        body,
+      );
+      const target = path.join(shared, relative);
+      yield* fs.makeDirectory(path.dirname(target), {recursive: true});
+      yield* fs.writeFileString(target, accepted);
+      yield* git(['add', '.']);
+      yield* git(['commit', '--quiet', '-m', 'accepted ordinary incident']);
+      const local = yield* localMemoryPathForUri(config, uri);
+      if (!local) throw new Error('Expected local shared memory path.');
+      yield* fs.makeDirectory(path.dirname(local), {recursive: true});
+      yield* fs.writeFileString(local, accepted);
+      const teamsPath = path.join(home, 'share', 'teams.json');
+      yield* fs.makeDirectory(path.dirname(teamsPath), {recursive: true});
+      const teams = {
+        version: 1,
+        defaultTeam: 'default',
+        teams: {
+          default: {
+            name: 'default',
+            access: 'read-write',
+            addedAt: '2026-10-21T00:00:00.000Z',
+            remote: 'fixture',
+            gitdir: path.join(shared, '.git'),
+            worktree: shared,
+          },
+        },
+      };
+      yield* fs.writeFileString(teamsPath, JSON.stringify(teams));
+      const baseline = yield* readSharedAutomaticMemoryGitBaseline(config, uri);
+      expect(baseline.path).toBe(relative);
+      const requested = yield* requestAutomaticMemoryReview(config, {
+        uri,
+        expectedContentHash: sha256HexSync(accepted),
+        desiredBody: 'Explicitly edited incident history.',
+      });
+      if (!('reviewId' in requested)) throw new Error('Expected an exact pending ordinary review.');
+      const prepared = yield* prepareTopicMaintenanceReview(
+        config,
+        {reviewId: requested.reviewId, revision: requested.revision},
+        baseline.record,
+      );
+      const built = yield* buildReviewedGitProposal(config, {
+        reviewId: prepared.reviewId,
+        revision: prepared.revision,
+        candidateIds: [],
+      });
+      expect(built.proposal.version).toBe(3);
+      expect(built.proposal.files[0].path).toBe(relative);
+      expect(() => stripPersonalProvenanceForSharedPublication(built.proposal.files[0].content)).toThrow(
+        /existing-target/u,
+      );
+      expect(yield* prepareSharedInboundContentEffect(uri, built.proposal.files[0].content)).toBe(
+        built.proposal.files[0].content,
+      );
+      const artifact = path.join(home, 'ordinary-proposal.json');
+      yield* fs.writeFileString(artifact, built.artifact);
+      const options = {proposal: artifact, apply: true, approvalDigest: built.proposal.proposalHash};
+      const first = yield* runKnowledgeDeltaGitProposalMaterialize(config, options);
+      const again = yield* runKnowledgeDeltaGitProposalMaterialize(config, options);
+      expect(again.commit).toBe(first.commit);
+      expect(yield* fs.readFileString(target)).toBe(accepted);
+      expect((yield* git(['show', `${first.commit}:${relative}`])).stdout).toBe(built.proposal.files[0].content);
+      const foreignRoute = {
+        ...memoryMaintenanceFragmentSource(baseline.record, 0),
+        uri: uri.replace('/tester/', '/other-workstation-user/'),
+      };
+      const locator = {repositoryId: baseline.repository.repositoryId, teamId: baseline.team.name, path: baseline.path};
+      const resolved = yield* resolveAutomaticSharedMemorySource(config, foreignRoute, locator);
+      expect(resolved.uri).toBe(uri);
+      expect(resolved.record.metadata.memoryId).toBe('tn_shared_incident');
+      teams.teams.default.access = 'read-only';
+      yield* fs.writeFileString(teamsPath, JSON.stringify(teams));
+      expect((yield* runKnowledgeDeltaGitProposalMaterialize(config, options).pipe(Effect.result))._tag).toBe(
+        'Failure',
+      );
+      expect((yield* readSharedAutomaticMemoryGitBaseline(config, uri, undefined, {requireWritable: false})).path).toBe(
+        relative,
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+});
+
+// First approval and origin remain canonical even when no current operation references them.
+effectIt.effect('reauthorizes retained initial and legacy provenance and fences its live source policy', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-retained-sharing-'});
+    const shared = path.join(home, 'shared');
+    const historical = path.join(home, 'historical');
+    const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
+    for (const [cwd, remote] of [
+      [shared, 'target'],
+      [historical, 'history'],
+    ]) {
+      yield* fs.makeDirectory(cwd, {recursive: true});
+      yield* git(cwd, ['init', '--quiet']);
+      yield* git(cwd, ['config', 'user.name', 'Test']);
+      yield* git(cwd, ['config', 'user.email', 'test@example.invalid']);
+      yield* git(cwd, ['remote', 'add', 'origin', `https://example.com/retained/${remote}.git`]);
+    }
+    const config = {
+      account: 'local',
+      agentContextHome: home,
+      agentId: 'test',
+      manifestPath: path.join(home, 'manifest.yaml'),
+      user: 'tester',
+    };
+    yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+    const uri = 'threadnote://user/tester/memories/shared/default/incident/projects/fixture/incident.md';
+    const sourceUri = 'threadnote://user/old-workstation/memories/shared/history/durable/projects/fixture/history.md';
+    const sourcePath = 'durable/projects/fixture/history.md';
+    const legacyOnlyUri =
+      'threadnote://user/old-workstation/memories/shared/legacy-only/durable/projects/fixture/origin.md';
+    const sourceFile = path.join(historical, sourcePath);
+    const sourceMetadata = {
+      kind: 'durable' as const,
+      status: 'active' as const,
+      project: 'fixture',
+      topic: 'history',
+      memoryId: 'tn_retained_history',
+      schemaVersion: 10,
+      visibility: 'shared' as const,
+      sourceAgentClient: 'test',
+      timestamp: '2026-10-21T00:00:00.000Z',
+      relations: [
+        {type: 'references' as const, uri},
+        {type: 'references' as const, uri: legacyOnlyUri},
+      ],
+    };
+    const original = formatMemoryDocument('MEMORY', sourceMetadata, 'Original public evidence.');
+    yield* fs.makeDirectory(path.dirname(sourceFile), {recursive: true});
+    yield* fs.writeFileString(sourceFile, original);
+    yield* git(historical, ['add', '.']);
+    yield* git(historical, ['commit', '--quiet', '-m', 'historical public source']);
+    yield* fs.writeFileString(
+      path.join(historical, 'durable/projects/fixture/origin.md'),
+      formatMemoryDocument(
+        'MEMORY',
+        {...sourceMetadata, topic: 'origin', memoryId: 'tn_retained_origin', relations: []},
+        'Other public origin.',
+      ),
+    );
+    const repository = yield* resolveRepositoryIdentity(historical);
+    const sourceRecord = parseMemoryDocument(sourceUri, original)!;
+    const source = memoryMaintenanceFragmentSource(sourceRecord, 0);
+    const id = automaticMaintenanceEvidenceId(source);
+    const initialApproval = createReviewedSupportSnapshot({
+      bodyHash: sha256HexSync('First approved incident.'),
+      paragraphs: [
+        {
+          ordinal: 0,
+          hash: sha256HexSync('First approved incident.'),
+          role: 'historical',
+          support: 'direct',
+          evidenceIds: [id],
+        },
+      ],
+      sources: [
+        {
+          id,
+          source,
+          scope: 'shared',
+          locator: {repositoryId: repository.repositoryId, teamId: 'history', path: sourcePath},
+        },
+      ],
+      acceptance: {
+        reviewId: 'review-1111111111111111',
+        approvedAt: '2026-10-21T00:00:00.000Z',
+        targetBeforeHash: '1'.repeat(64),
+        preparationDigest: '2'.repeat(64),
+        sourceVectorDigest: '3'.repeat(64),
+      },
+    });
+    const captured = captureConsolidationSource({uri: sourceUri, content: original});
+    const consolidated = reviewConsolidation(
+      'Original public evidence.',
+      [captured],
+      [
+        {
+          section: 'Original public evidence.',
+          disposition: 'direct',
+          supports: [{sourceUri, fragment: 0, citationIds: [], relationIndexes: []}],
+        },
+      ],
+      {
+        operationId: 'retained-public-origin',
+        cleanup: 'keep',
+        cleanupShared: false,
+        target: {kind: 'incident', status: 'active', project: 'fixture', topic: 'incident', sourceAgentClient: 'test'},
+      },
+    );
+    const legacyRecord = parseMemoryDocument(
+      uri,
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          ...sourceMetadata,
+          kind: 'incident',
+          topic: 'incident',
+          memoryId: 'tn_shared_incident',
+          relations: [],
+          consolidation: consolidated.provenance,
+        },
+        'Original public evidence.',
+      ),
+    )!;
+    const legacyOrigin = captureReviewedSupportLegacyOrigin(legacyRecord)!;
+    const body = 'Current approved incident.';
+    const active = createReviewedSupportSnapshot({
+      ...initialApproval,
+      bodyHash: sha256HexSync(body),
+      paragraphs: [{ordinal: 0, hash: sha256HexSync(body), role: 'historical', support: 'unresolved', evidenceIds: []}],
+      sources: [],
+    });
+    const accepted = formatMemoryDocument(
+      'MEMORY',
+      {
+        ...sourceMetadata,
+        kind: 'incident',
+        topic: 'incident',
+        memoryId: 'tn_shared_incident',
+        schemaVersion: 11,
+        relations: [],
+        reviewedSupport: {type: 'reviewed-memory-support', version: 1, active, initialApproval, legacyOrigin},
+      },
+      body,
+    );
+    const target = path.join(shared, 'incident/projects/fixture/incident.md');
+    yield* fs.makeDirectory(path.dirname(target), {recursive: true});
+    yield* fs.writeFileString(target, accepted);
+    yield* git(shared, ['add', '.']);
+    yield* git(shared, ['commit', '--quiet', '-m', 'accepted incident with retained public provenance']);
+    const local = yield* localMemoryPathForUri(config, uri);
+    if (!local) throw new Error('Expected local shared memory path.');
+    yield* fs.makeDirectory(path.dirname(local), {recursive: true});
+    yield* fs.writeFileString(local, accepted);
+    const teamsPath = path.join(home, 'share', 'teams.json');
+    yield* fs.makeDirectory(path.dirname(teamsPath), {recursive: true});
+    const team = (name: string, worktree: string, access: 'read-only' | 'read-write') => ({
+      name,
+      worktree,
+      access,
+      gitdir: path.join(worktree, '.git'),
+      remote: 'fixture',
+      addedAt: '2026-10-21T00:00:00.000Z',
+    });
+    const defaultTeam = team('default', shared, 'read-write');
+    const historyTeam = team('history', historical, 'read-only');
+    const legacyTeam = team('legacy-only', historical, 'read-only');
+    const writeTeams = (include: boolean, access: 'read-only' | 'read-write' = 'read-only', includeLegacy = include) =>
+      fs.writeFileString(
+        teamsPath,
+        JSON.stringify({
+          version: 1,
+          defaultTeam: 'default',
+          teams: {
+            default: defaultTeam,
+            ...(include ? {history: {...historyTeam, access}} : {}),
+            ...(includeLegacy ? {'legacy-only': legacyTeam} : {}),
+          },
+        }),
+      );
+    yield* writeTeams(false);
+    // The retained descriptor is intentionally historical; current public bytes and lifecycle have advanced.
+    yield* fs.writeFileString(
+      sourceFile,
+      formatMemoryDocument(
+        'MEMORY',
+        {...sourceMetadata, status: 'archived', relations: [sourceMetadata.relations[0]]},
+        'Later archived public evidence.',
+      ),
+    );
+    yield* git(historical, ['add', '.']);
+    yield* git(historical, ['commit', '--quiet', '-m', 'archive changed source']);
+    const baseline = yield* readSharedAutomaticMemoryGitBaseline(config, uri);
+    const requested = yield* requestAutomaticMemoryReview(config, {
+      uri,
+      expectedContentHash: sha256HexSync(accepted),
+      desiredBody: 'Explicit new incident text.',
+    });
+    if (!('reviewId' in requested)) throw new Error('Expected pending review.');
+    const prepared = yield* prepareTopicMaintenanceReview(
+      config,
+      {reviewId: requested.reviewId, revision: requested.revision},
+      baseline.record,
+    );
+    const build = () =>
+      buildReviewedGitProposal(config, {reviewId: prepared.reviewId, revision: prepared.revision, candidateIds: []});
+    expect((yield* build().pipe(Effect.result))._tag).toBe('Failure');
+    yield* writeTeams(true, 'read-only', false);
+    expect((yield* build().pipe(Effect.result))._tag).toBe('Failure');
+    yield* writeTeams(true);
+    const built = yield* build();
+    const final = parseMemoryDocument(uri, built.proposal.files[0].content)!;
+    expect(final.metadata.reviewedSupport!.initialApproval).toEqual(initialApproval);
+    expect(final.metadata.reviewedSupport!.legacyOrigin).toEqual(legacyOrigin);
+    expect(final.metadata.reviewedSupport!.active.sources).toHaveLength(0);
+    const artifact = path.join(home, 'retained-proposal.json');
+    yield* fs.writeFileString(artifact, built.artifact);
+    const materialize = () =>
+      runKnowledgeDeltaGitProposalMaterialize(config, {
+        proposal: artifact,
+        apply: true,
+        approvalDigest: built.proposal.proposalHash,
+      });
+    yield* writeTeams(false);
+    expect((yield* materialize().pipe(Effect.result))._tag).toBe('Failure');
+    yield* writeTeams(true, 'read-write');
+    expect((yield* materialize().pipe(Effect.result))._tag).toBe('Failure');
+    yield* writeTeams(true);
+    yield* fs.writeFileString(
+      sourceFile,
+      formatMemoryDocument(
+        'MEMORY',
+        {...sourceMetadata, status: 'superseded', relations: [sourceMetadata.relations[0]]},
+        'Another public historical revision.',
+      ),
+    );
+    yield* git(historical, ['add', '.']);
+    yield* git(historical, ['commit', '--quiet', '-m', 'source drift after owner preview']);
+    expect((yield* materialize().pipe(Effect.result))._tag).toBe('Failure');
+    const refreshed = yield* build();
+    expect(refreshed.proposal.proposalHash).not.toBe(built.proposal.proposalHash);
+    expect(
+      parseMemoryDocument(uri, refreshed.proposal.files[0].content)!.metadata.reviewedSupport!.initialApproval,
+    ).toEqual(initialApproval);
+    yield* fs.writeFileString(
+      sourceFile,
+      formatMemoryDocument('MEMORY', {...sourceMetadata, visibility: 'personal'}, 'No longer public.'),
+    );
+    yield* git(historical, ['add', '.']);
+    yield* git(historical, ['commit', '--quiet', '-m', 'revoke public authority']);
+    expect((yield* build().pipe(Effect.result))._tag).toBe('Failure');
+    expect(yield* fs.readFileString(target)).toBe(accepted);
+    expect((yield* git(shared, ['branch', '--list', 'threadnote/knowledge-delta/*'])).stdout.trim()).toBe('');
+  }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+);

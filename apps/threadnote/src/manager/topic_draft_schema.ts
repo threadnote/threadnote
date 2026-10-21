@@ -2,7 +2,10 @@ import {Data, Schema} from 'effect';
 import {consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
-  type TopicMaintenanceDraftBasis,
+  type LegacyTopicMaintenanceDraftBasis as TopicMaintenanceDraftBasis,
+  type TopicMaintenanceDraftBasis as AnyTopicMaintenanceDraftBasis,
+  type AutomaticMaintenanceDraftBasisV3,
+  parseAutomaticMaintenanceDraft,
   type TopicMaintenanceDraftV1,
   type TopicMaintenanceParagraphDispositionV1,
   type TopicMaintenanceReplaceOperationV1,
@@ -49,7 +52,7 @@ export function topicDraftPolicyScope(basis: TopicMaintenanceDraftBasis) {
 }
 
 /** Generation grammar only; the memory-owned validator remains the final authority. */
-export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
+function legacyTopicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const descriptive = basis.paragraphs.filter(topicDraftGenerationEligible);
   const currentHandles = topicDraftCurrentSourceHandles(basis);
   if (!currentHandles.length) throw new Error('Topic generation requires current evidence.');
@@ -138,8 +141,8 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
 }
 
 /** Strict provider/controller preflight; application guards belong after observed dispatch. */
-export function decodeTopicDraftWire(basis: TopicMaintenanceDraftBasis, input: unknown) {
-  return Schema.decodeUnknownSync(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+function decodeLegacyTopicDraftWire(basis: TopicMaintenanceDraftBasis, input: unknown) {
+  return Schema.decodeUnknownSync(legacyTopicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
 }
 
 /** Only explicit complete-wire application rejections may enter bounded draft repair. */
@@ -177,7 +180,7 @@ function wellFormed(text: string) {
 
 export function projectTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
-  wire: ReturnType<typeof decodeTopicDraftWire>,
+  wire: ReturnType<typeof decodeLegacyTopicDraftWire>,
   currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
   const {facts, normativeComparisons, decision, ...identity} = wire;
@@ -334,7 +337,7 @@ export function decodeTopicDraftModelOutput(
   input: unknown,
   currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
-  return projectTopicDraftWire(basis, decodeTopicDraftWire(basis, input), currentEvidence);
+  return projectTopicDraftWire(basis, decodeLegacyTopicDraftWire(basis, input), currentEvidence);
 }
 
 function nativeDisjointUnions(value: unknown): unknown {
@@ -417,4 +420,52 @@ export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftM
       decision: {oneOf: branches.map(nativeDisjointUnions) as typeof branches},
     },
   };
+}
+
+/** Ordinary generation proposes roles/support in its final review; it does not enroll or approve a memory. */
+export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
+  if (basis.version !== 3) return legacyTopicDraftModelSchema(basis);
+  const text = Schema.String;
+  return Schema.Struct({
+    version: Schema.Literal(2),
+    kind: Schema.Literal('automatic'),
+    purpose: Schema.Literal('automatic'),
+    targetHash: Schema.Literal(basis.targetHash),
+    observationRevision: Schema.Literal(basis.observationRevision),
+    packetDigest: Schema.Literal(basis.packetDigest),
+    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
+    operations: Schema.Array(
+      Schema.Struct({ordinal: Schema.Int, beforeHash: text, text, supportHandles: Schema.Array(text), rationale: text}),
+    ),
+    reviewedHandles: Schema.Array(text),
+    rationale: text,
+    unresolvedQuestions: Schema.Array(text),
+    removedClaims: Schema.Array(text),
+    paragraphDecisions: Schema.Array(
+      Schema.Struct({
+        ordinal: Schema.Int,
+        beforeHash: text,
+        role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+        support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+        evidenceIds: Schema.Array(text),
+      }),
+    ),
+  });
+}
+export function decodeTopicDraftWire(
+  basis: TopicMaintenanceDraftBasis,
+  input: unknown,
+): ReturnType<typeof decodeLegacyTopicDraftWire>;
+export function decodeTopicDraftWire(
+  basis: AutomaticMaintenanceDraftBasisV3,
+  input: unknown,
+): ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
+export function decodeTopicDraftWire(
+  basis: AnyTopicMaintenanceDraftBasis,
+  input: unknown,
+): ReturnType<typeof decodeLegacyTopicDraftWire> | ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
+export function decodeTopicDraftWire(basis: AnyTopicMaintenanceDraftBasis, input: unknown) {
+  return basis.version === 3
+    ? parseAutomaticMaintenanceDraft(basis, JSON.stringify(input)).draft
+    : decodeLegacyTopicDraftWire(basis, input);
 }

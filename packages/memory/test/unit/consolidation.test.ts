@@ -18,6 +18,8 @@ import {
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
 import {migrateMemoryDocumentToCurrent} from '../../src/migrations.js';
 import {consolidationRevision} from '../../src/consolidation.js';
+import {createReviewedSupportSnapshot} from '../../src/reviewed-support.js';
+import {automaticMaintenanceEvidenceId} from '../../src/automatic-maintenance.js';
 
 const citation = (path: string) =>
   createMemoryCodeCitation({
@@ -75,6 +77,54 @@ const options = {
 };
 
 describe('reviewed consolidation', () => {
+  it('refuses to capture current approved support as historical root-only evidence', () => {
+    const root = citation('old-limit.ts');
+    const current = citation('current-limit.ts');
+    const body = 'Current limit is 60.';
+    const evidence = {kind: 'code' as const, citation: current};
+    const id = automaticMaintenanceEvidenceId(evidence);
+    const active = createReviewedSupportSnapshot({
+      bodyHash: consolidationRevision(body),
+      paragraphs: [
+        {ordinal: 0, hash: consolidationRevision(body), role: 'descriptive', support: 'direct', evidenceIds: [id]},
+      ],
+      sources: [{id, source: evidence, scope: 'repository'}],
+      acceptance: {
+        reviewId: 'review-capture-provenance',
+        approvedAt: '2026-10-21T00:00:00.000Z',
+        targetBeforeHash: '1'.repeat(64),
+        preparationDigest: '2'.repeat(64),
+        sourceVectorDigest: '3'.repeat(64),
+      },
+    });
+    const content = formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        sourceAgentClient: 'test',
+        timestamp: '2026-10-21T00:00:00.000Z',
+        schemaVersion: 11,
+        codeCitations: [root],
+        reviewedSupport: {type: 'reviewed-memory-support', version: 1, active, initialApproval: active},
+      },
+      body,
+    );
+    const uri = source().uri;
+    const parsed = parseMemoryDocument(uri, content)!;
+    expect(parsed.metadata.reviewedSupportError).toBeUndefined();
+    expect(parsed.metadata.codeCitations).toEqual([root]);
+    expect(parsed.metadata.reviewedSupport?.active.sources[0].source).toEqual(evidence);
+    expect(() => captureConsolidationSource({uri, content})).toThrow(/reviewed support.*cannot preserve/iu);
+    const malformed = content.replace(/^reviewed_support: .*$/mu, 'reviewed_support: {not-json}');
+    expect(parseMemoryDocument(uri, malformed)?.metadata.reviewedSupportError).toBeDefined();
+    expect(() => captureConsolidationSource({uri, content: malformed})).toThrow();
+    expect(captureConsolidationSource({uri, content: content.replace(/^reviewed_support: .*\n/mu, '')})).toMatchObject({
+      fragments: [body],
+      codeCitations: [root],
+    });
+  });
+
   it('preserves derivation through repeated archives without removing a reviewed archive paragraph', () => {
     const body = 'Archived original Threadnote memory.\n\nKeep this claim.';
     const reviewed = reviewConsolidation(

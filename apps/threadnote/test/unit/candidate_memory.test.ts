@@ -14,6 +14,7 @@ import {
   candidateReviewWithReplacementSafety,
   candidateReviewWithState,
   loadCandidateReview,
+  parseCandidateReview,
   readActiveProjectMemories,
   replacementSafetyBaseline,
   saveCandidateReview,
@@ -110,6 +111,64 @@ function projectedCandidate(
 }
 
 describe('candidate-memory formation', () => {
+  it('retains legacy generic reviews without candidate kinds', () => {
+    const candidate = Object.fromEntries(
+      Object.entries(projectedCandidate('legacy')).filter(([key]) => key !== 'kind'),
+    );
+    for (const version of [1, 2]) {
+      const raw = {...projectedReview([]), version, candidates: [candidate]};
+      const before = structuredClone(raw);
+      const parsed = parseCandidateReview(raw);
+      expect(parsed.candidates).toEqual([candidate]);
+      expect(Object.hasOwn(parsed.candidates[0], 'kind')).toBe(false);
+      expect(raw).toEqual(before);
+    }
+  });
+
+  it('round trips legacy generic candidate states and optional kinds without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(1, 2),
+        fc.option(fc.constantFrom('durable', 'handoff', 'preference'), {nil: undefined}),
+        fc.shuffledSubarray(['pending', 'applying', 'deferred', 'applied', 'rejected', 'conflict'], {
+          minLength: 1,
+        }),
+        (version, kind, states) => {
+          const candidates = states.map((state, index) => {
+            const candidate = Object.fromEntries(
+              Object.entries(projectedCandidate(`legacy-${index}`)).filter(([key]) => key !== 'kind'),
+            );
+            return {...candidate, state, ...(kind === undefined ? {} : {kind})};
+          });
+          const raw = {...projectedReview([]), version, candidates};
+          const before = structuredClone(raw);
+          const parsed = parseCandidateReview(raw);
+          expect(parsed.candidates).toEqual(candidates);
+          expect(parseCandidateReview(JSON.parse(JSON.stringify(parsed)))).toEqual(parsed);
+          expect(raw).toEqual(before);
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
+  it('still refuses maintenance-only kinds and closed journal versions in generic reviews', () => {
+    for (const version of [1, 2]) {
+      for (const kind of ['incident', 'smoke', 'unknown', null]) {
+        expect(() =>
+          parseCandidateReview({
+            ...projectedReview([]),
+            version,
+            candidates: [{...projectedCandidate('generic'), kind}],
+          }),
+        ).toThrow('Generic candidates cannot select ordinary maintenance-only kinds.');
+      }
+    }
+    for (const version of [3, 4, 5]) {
+      expect(() => parseCandidateReview({...projectedReview([]), version})).toThrow();
+    }
+  });
+
   it('projects review candidates as a bounded KnowledgeDeltaV1 without mutating the review', () => {
     const review = projectedReview([
       projectedCandidate('review-0123456789abcdef-1'),

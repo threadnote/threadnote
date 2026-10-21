@@ -1,3 +1,13 @@
+import {
+  captureReviewedSupportLegacyOrigin,
+  validateReviewedSupportLegacyOrigin,
+  createReviewedSupportSnapshot,
+  validateReviewedMemorySupport,
+  reviewedSupportSharingBlocker,
+  type ReviewedMemorySupportV1,
+} from '../../src/reviewed-support.js';
+import {topicMaintenanceReplacementError} from '../../src/topic-maintenance.js';
+import {memoryCodeCitationContentSharingBlocker} from '../../src/code/citation-policy.js';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -8,6 +18,7 @@ import {
   automaticMaintenanceSourceIdentity,
   encodeAutomaticMaintenanceAssessment,
   MAX_AUTOMATIC_MAINTENANCE_BYTES,
+  MAX_AUTOMATIC_MAINTENANCE_V2_BYTES,
   parseAutomaticMaintenanceAssessment,
   projectShareableAutomaticMaintenanceAssessment,
   type AutomaticMaintenanceAssessmentV1,
@@ -16,12 +27,13 @@ import {
 } from '../../src/automatic-maintenance.js';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
 import {
+  assertMemoryDocumentSchemaWritable,
   canonicalMemoryDocumentContent,
   formatMemoryDocument,
   parseMemoryDocument,
   type MemoryObsidianEvidenceV1,
 } from '../../src/document.js';
-import {consolidationRevision} from '../../src/consolidation.js';
+import {consolidationRevision, reviewConsolidation} from '../../src/consolidation.js';
 
 const code = createMemoryCodeCitation({
   version: 1,
@@ -338,4 +350,218 @@ describe('automatic maintenance closed assessment contract', () => {
     expect(() => assertAutomaticMaintenanceTarget(assessment, changed)).toThrow();
     expect(() => assertAutomaticMaintenanceTarget(assessment, {...record, body: 'Other claim.'})).toThrow();
   });
+});
+
+// Canonical approval survives disposal of the private preparation/review stores.
+describe('canonical reviewed support', () => {
+  const acceptance = {
+    reviewId: 'review-canonical-support',
+    approvedAt: '2026-10-21T00:00:00.000Z',
+    targetBeforeHash: '1'.repeat(64),
+    preparationDigest: '2'.repeat(64),
+    sourceVectorDigest: '3'.repeat(64),
+  };
+  function support(body = 'Approved claim.', citation = code): ReviewedMemorySupportV1 {
+    const source = {kind: 'code' as const, citation};
+    const id = automaticMaintenanceEvidenceId(source);
+    return {
+      type: 'reviewed-memory-support',
+      version: 1,
+      active: createReviewedSupportSnapshot({
+        bodyHash: consolidationRevision(body),
+        paragraphs: [
+          {ordinal: 0, hash: consolidationRevision(body), role: 'normative', support: 'direct', evidenceIds: [id]},
+        ],
+        sources: [{id, source, scope: 'repository'}],
+        acceptance,
+      }),
+    };
+  }
+  function content(value: ReviewedMemorySupportV1, body = 'Approved claim.') {
+    return formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        schemaVersion: 11,
+        memoryId: 'tn_target',
+        sourceAgentClient: 'test',
+        timestamp: acceptance.approvedAt,
+        reviewedSupport: value,
+      },
+      body,
+    );
+  }
+  it('round-trips a body-bound approval without granting body edits or header removal', () => {
+    const value = support();
+    const stored = content(value);
+    const current = parseMemoryDocument(uri, stored)!;
+    expect(current.metadata.reviewedSupport).toEqual(value);
+    expect(() => assertMemoryDocumentSchemaWritable(stored)).not.toThrow();
+    expect(topicMaintenanceReplacementError(current, current)).toBeUndefined();
+    expect(
+      topicMaintenanceReplacementError(current, {
+        ...current,
+        metadata: {...current.metadata, reviewedSupport: undefined},
+      }),
+    ).toMatch(/review\/manual-preview/u);
+    expect(topicMaintenanceReplacementError(undefined, current)).toMatch(/review\/manual-preview/u);
+    expect(topicMaintenanceReplacementError(current, {...current, body: 'Changed claim.'})).toMatch(
+      /malformed or stale/u,
+    );
+    expect(
+      parseMemoryDocument(uri, stored.replace('Approved claim.', 'Changed claim.'))!.metadata.reviewedSupportError,
+    ).toBeTruthy();
+  });
+  it('rejects duplicate, noncanonical, unsupported, and schema-10 approved headers', () => {
+    const stored = content(support());
+    const line = stored.split('\n').find(line => line.startsWith('reviewed_support: '))!;
+    for (const modified of [
+      stored.replace(line, `${line}\n${line}`),
+      stored.replace(line, ` ${line}`),
+      stored.replace('schema_version: 11', 'schema_version: 10'),
+      stored.replace('"type":"reviewed-memory-support","version":1', '"type":"reviewed-memory-support","version":2'),
+    ]) {
+      expect(parseMemoryDocument(uri, modified)!.metadata.reviewedSupportError).toBeTruthy();
+      expect(() => assertMemoryDocumentSchemaWritable(modified)).toThrow();
+      expect(memoryCodeCitationContentSharingBlocker(uri, modified)).toBe('malformed-citation');
+    }
+  });
+  it('inspects retained unreferenced initial approval evidence and portable memory locators', () => {
+    const clean = support();
+    const {id: _id, ...input} = code;
+    const dirty = createMemoryCodeCitation({...input, sourceDirty: true});
+    expect(reviewedSupportSharingBlocker({...clean, initialApproval: support('Earlier policy.', dirty).active})).toBe(
+      'dirty-source',
+    );
+    const source: AutomaticMaintenanceSourceV1 = {
+      kind: 'memory',
+      uri: uri.replace('/durable/', '/shared/default/durable/').replace('target.md', 'source.md'),
+      memoryId: 'tn_source',
+      canonicalHash: '4'.repeat(64),
+      fragment: {ordinal: 0, hash: '5'.repeat(64), startOffset: 0, endOffset: 6},
+    };
+    const descriptor = {id: automaticMaintenanceEvidenceId(source), source, scope: 'shared' as const};
+    const active = createReviewedSupportSnapshot({
+      ...clean.active,
+      paragraphs: [{...clean.active.paragraphs[0], evidenceIds: [descriptor.id]}],
+      sources: [descriptor],
+    });
+    expect(reviewedSupportSharingBlocker({...clean, active})).toBe('private-source-evidence');
+    const portable = createReviewedSupportSnapshot({
+      ...active,
+      sources: [
+        {
+          ...descriptor,
+          locator: {repositoryId: 'a'.repeat(64), teamId: 'default', path: 'durable/projects/threadnote/source.md'},
+        },
+      ],
+    });
+    expect(reviewedSupportSharingBlocker({...clean, active: portable})).toBeUndefined();
+  });
+  it('preserves truthful consolidation source revisions and rejects private nested origin', () => {
+    const body = 'Reviewed origin.';
+    const sourceUri = uri.replace('target.md', 'original.md');
+    const reviewed = reviewConsolidation(
+      body,
+      [
+        {
+          uri: sourceUri,
+          revision: '9'.repeat(64),
+          memoryId: 'tn_original',
+          fragments: [body],
+          codeCitations: [code],
+          relations: [],
+        },
+      ],
+      [
+        {
+          section: body,
+          disposition: 'direct',
+          supports: [{sourceUri, fragment: 0, citationIds: [code.id], relationIndexes: []}],
+        },
+      ],
+      {
+        operationId: 'origin-support',
+        cleanup: 'keep',
+        cleanupShared: false,
+        target: {kind: 'durable', status: 'active', project: 'threadnote', topic: 'target', sourceAgentClient: 'test'},
+      },
+    );
+    const previous = parseMemoryDocument(
+      uri,
+      formatMemoryDocument(
+        'MEMORY',
+        {
+          kind: 'durable',
+          status: 'active',
+          schemaVersion: 10,
+          memoryId: 'tn_target',
+          sourceAgentClient: 'test',
+          timestamp: acceptance.approvedAt,
+          codeCitations: reviewed.codeCitations,
+          relations: reviewed.relations,
+          consolidation: reviewed.provenance,
+        },
+        body,
+      ),
+    )!;
+    const legacyOrigin = captureReviewedSupportLegacyOrigin(previous)!;
+    expect(legacyOrigin.consolidation).toEqual(reviewed.provenance);
+    expect(legacyOrigin.body).toBe(body);
+    expect(() => validateReviewedSupportLegacyOrigin(legacyOrigin)).not.toThrow();
+    expect(reviewedSupportSharingBlocker({...support(), legacyOrigin})).toBe('private-source-evidence');
+    const corrupted = structuredClone(legacyOrigin);
+    (corrupted as {body: string}).body = 'Invented origin.';
+    expect(() => validateReviewedSupportLegacyOrigin(corrupted)).toThrow();
+    expect(
+      captureReviewedSupportLegacyOrigin({
+        ...previous,
+        metadata: {...previous.metadata, reviewedSupport: {...support(), legacyOrigin}},
+      }),
+    ).toBe(legacyOrigin);
+  });
+  it('accepts a large explicit manual body without weakening automatic draft bounds', () => {
+    const body = 'a'.repeat(40 * 1024);
+    expect(parseMemoryDocument(uri, content(support(body), body))!.metadata.reviewedSupportError).toBeUndefined();
+  });
+  it('validates snapshot encoding without mutating the input', () => {
+    fc.assert(
+      fc.property(
+        fc.string({minLength: 1, maxLength: 200}).filter(value => value.trim().length > 0 && !value.includes('\n')),
+        text => {
+          const body = text.trim();
+          const value = support(body);
+          const original = structuredClone(value);
+          expect(validateReviewedMemorySupport(JSON.parse(JSON.stringify(value)), body)).toEqual(original);
+          expect(value).toEqual(original);
+          expect(() => validateReviewedMemorySupport(value, `${body} changed`)).toThrow();
+        },
+      ),
+      {numRuns: 30},
+    );
+  });
+});
+
+it('keeps legacy private assessment byte and descriptor limits while preflighting the new version separately', () => {
+  const legacy = fixture();
+  const encoded = encodeAutomaticMaintenanceAssessment(legacy);
+  expect(() =>
+    parseAutomaticMaintenanceAssessment(`${encoded}${' '.repeat(MAX_AUTOMATIC_MAINTENANCE_BYTES)}`),
+  ).toThrow();
+  expect(() => parseAutomaticMaintenanceAssessment(' '.repeat(MAX_AUTOMATIC_MAINTENANCE_V2_BYTES + 1))).toThrow();
+  const evidence = [
+    legacy.evidence[0],
+    ...Array.from({length: 8}, (_, ordinal) => {
+      const source: AutomaticMaintenanceSourceV1 = {
+        kind: 'memory',
+        uri: uri.replace('target.md', `source-${ordinal}.md`),
+        memoryId: `tn_source_${ordinal}`,
+        canonicalHash: 'a'.repeat(64),
+        fragment: {ordinal: 0, hash: 'b'.repeat(64), startOffset: 0, endOffset: 6},
+      };
+      return {...legacy.evidence[0], source, id: automaticMaintenanceEvidenceId(source)};
+    }),
+  ];
+  expect(() => assertAutomaticMaintenanceAssessment({...legacy, evidence})).toThrow();
 });

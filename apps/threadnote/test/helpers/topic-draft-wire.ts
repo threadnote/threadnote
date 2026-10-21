@@ -4,7 +4,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   validateTopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasisV1,
-  type TopicMaintenanceDraftBasis,
+  type LegacyTopicMaintenanceDraftBasis as TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
   topicDraftCurrentEvidence,

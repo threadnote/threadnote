@@ -1,3 +1,4 @@
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   isAgentArtifactUri,
@@ -116,9 +117,9 @@ export function selectMaintenanceCitationCaseTask<
       (selected.family === 'citation-coverage'
         ? String(item.chunk) === selected.slot
         : selected.family === 'citation' &&
-          (item.record.metadata.codeCitations?.slice(item.chunk * 64, (item.chunk + 1) * 64) ?? []).some(
-            citation => contextHealthCitationCaseSlotV2(citation) === selected.slot,
-          )),
+          currentMemoryCodeCitations(item.record)
+            .slice(item.chunk * 64, (item.chunk + 1) * 64)
+            .some(citation => contextHealthCitationCaseSlotV2(citation) === selected.slot)),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }
@@ -358,8 +359,8 @@ export function reconcileAbsentMaintenanceAnchors(
   record: MemoryRecord,
   now: string,
 ) {
-  const anchors = new Set((record.metadata.codeCitations ?? []).map(contextHealthCitationCaseSlotV2));
-  const chunks = Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64));
+  const anchors = new Set(currentMemoryCodeCitations(record).map(contextHealthCitationCaseSlotV2));
+  const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
   for (const [id, item] of cases) {
     if (!absentMaintenanceAnchorCase(item, record, anchors, chunks)) continue;
     const unresolved = item.slot.startsWith('legacy-unresolved:');
@@ -379,8 +380,8 @@ export function reconcileAbsentMaintenanceAnchors(
 }
 
 export function hasAbsentMaintenanceAnchors(cases: Iterable<ContextMaintenanceCaseV2>, record: MemoryRecord): boolean {
-  const anchors = new Set((record.metadata.codeCitations ?? []).map(contextHealthCitationCaseSlotV2));
-  const chunks = Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64));
+  const anchors = new Set(currentMemoryCodeCitations(record).map(contextHealthCitationCaseSlotV2));
+  const chunks = Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64));
   for (const item of cases) if (absentMaintenanceAnchorCase(item, record, anchors, chunks)) return true;
   return false;
 }
@@ -412,7 +413,7 @@ export function maintenanceAnchorChunksComplete(
   return (
     hash !== undefined &&
     Array.from(
-      {length: Math.max(1, Math.ceil((record.metadata.codeCitations?.length ?? 0) / 64))},
+      {length: Math.max(1, Math.ceil(currentMemoryCodeCitations(record).length / 64))},
       (_, chunk) => checkpoints[`${record.metadata.memoryId ?? record.uri}:${chunk}`],
     ).every(check => check?.inventoryComplete === true && check.memoryHash === hash)
   );

@@ -2,6 +2,8 @@ import {Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
 export const MEMORY_SCHEMA_VERSION = 10 as const;
+/** Schema 11 is emitted only by approved automatic maintenance. */
+export const MAX_SUPPORTED_MEMORY_SCHEMA_VERSION = 11 as const;
 export const MEMORY_CODE_CITATION_SCHEMA_VERSION = 4 as const;
 export const MEMORY_CODE_CITATION_VERSION = 1 as const;
 export const MEMORY_CODE_CITATION_HEADER = 'code_citation' as const;
@@ -131,7 +133,7 @@ export class UnsupportedMemorySchemaVersionError extends Schema.TaggedError<Unsu
 ) {
   static of(schemaVersion: number): UnsupportedMemorySchemaVersionError {
     return UnsupportedMemorySchemaVersionError.make({
-      message: `Memory schema version ${schemaVersion} is newer than supported version ${MEMORY_SCHEMA_VERSION}.`,
+      message: `Memory schema version ${schemaVersion} is newer than supported version ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION}.`,
       schemaVersion,
     });
   }
@@ -162,7 +164,7 @@ const CODE_CITATION_PREFIX = `${MEMORY_CODE_CITATION_HEADER}: `;
 export function canWriteMemorySchemaVersion(schemaVersion: number | undefined): boolean {
   return (
     schemaVersion === undefined ||
-    (Number.isSafeInteger(schemaVersion) && schemaVersion > 0 && schemaVersion <= MEMORY_SCHEMA_VERSION)
+    (Number.isSafeInteger(schemaVersion) && schemaVersion > 0 && schemaVersion <= MAX_SUPPORTED_MEMORY_SCHEMA_VERSION)
   );
 }
 
@@ -175,7 +177,8 @@ export function isMemoryCodeCitationSchemaVersion(schemaVersion: number | undefi
     schemaVersion === 7 ||
     schemaVersion === 8 ||
     schemaVersion === 9 ||
-    schemaVersion === MEMORY_SCHEMA_VERSION
+    schemaVersion === MEMORY_SCHEMA_VERSION ||
+    schemaVersion === MAX_SUPPORTED_MEMORY_SCHEMA_VERSION
   );
 }
 
@@ -184,7 +187,7 @@ export function assertMemorySchemaWritable(schemaVersion: number | undefined): v
   if (schemaVersion !== undefined && (!Number.isSafeInteger(schemaVersion) || schemaVersion <= 0)) {
     throw new Error('Memory schema version must be a positive safe integer.');
   }
-  if (schemaVersion !== undefined && schemaVersion > MEMORY_SCHEMA_VERSION) {
+  if (schemaVersion !== undefined && schemaVersion > MAX_SUPPORTED_MEMORY_SCHEMA_VERSION) {
     throw UnsupportedMemorySchemaVersionError.of(schemaVersion);
   }
 }

@@ -611,13 +611,14 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
         if (
           !current ||
           current.content !== acceptedContent ||
-          !enrolledTopicRecord(current) ||
+          (payload.version !== 3 && !enrolledTopicRecord(current)) ||
           current.metadata.project !== original.metadata.project ||
           current.metadata.memoryId !== original.metadata.memoryId ||
           current.uri !== payload.basis.targetUri
         )
           return yield* topicFail('The accepted topic changed before maintenance verification.');
         yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
+        if (payload.version === 3) return yield* complete;
         const caseId = topicMaintenanceCaseId(original);
         const prior = state.cases.find(item => item.caseId === caseId);
         const checkpoint = state.topicCheckpoints?.[caseId];

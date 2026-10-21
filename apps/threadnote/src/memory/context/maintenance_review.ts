@@ -1,7 +1,7 @@
 import {DateTime, Effect, FileSystem, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
-import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {parseMemoryDocument, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {
   assertTopicMaintenanceAcceptanceCoverage,
   prepareTopicMaintenanceSourceAcceptance,
@@ -107,7 +107,9 @@ export const prepareTopicMaintenanceReview = Effect.fn('topicMaintenance.prepare
         maintenanceApproval:
           preview.version === 1
             ? {version: 1, reviewRevision: review.revision + 1, stage: 'preview', preview}
-            : {version: 2, sourceKind: 'obsidian', reviewRevision: review.revision + 1, stage: 'preview', preview},
+            : preview.version === 2
+              ? {version: 2, sourceKind: 'obsidian', reviewRevision: review.revision + 1, stage: 'preview', preview}
+              : {version: 3, kind: 'automatic', reviewRevision: review.revision + 1, stage: 'preview', preview},
       };
       yield* saveCandidateReview(config.agentContextHome, updated);
       return updated;
@@ -143,8 +145,14 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
       )
         return yield* fail('The approval revision or digest changed. Read the current preview.');
       const uri = approval.preview.targetUri;
-      if (!uri.startsWith(`threadnote://user/${config.user}/memories/durable/`))
-        return yield* fail('Only personal durable topics can be applied here.');
+      if (
+        payload.version === 3
+          ? !uri.startsWith(`threadnote://user/${config.user}/memories/`) || isSharedMemoryUri(uri)
+          : !uri.startsWith(`threadnote://user/${config.user}/memories/durable/`)
+      )
+        return yield* fail(
+          'Use the authorized shared Git owner/publication flow for shared targets; personal approval applies only to your exact ordinary memory.',
+        );
       const fs = yield* FileSystem.FileSystem;
       const prepared = yield* withMemoryUriLocks(
         fs,
@@ -201,6 +209,10 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
             if (Result.isFailure(wrote)) {
               current = yield* readTarget();
               if (current?.content !== preview.content) {
+                if (payload.version === 3 && !current)
+                  return yield* fail(
+                    'The approved memory write may have completed, but exact readback is unavailable. Its prepared receipt remains retryable.',
+                  );
                 if (current?.content !== original.content) {
                   const conflicted = candidateReviewWithState(review, review.candidates[0].candidateId, 'conflict', {
                     action: 'conflict',
@@ -218,6 +230,10 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
             }
           }
           current = yield* readTarget();
+          if (payload.version === 3 && !current)
+            return yield* fail(
+              'The approved memory was saved, but exact readback is unavailable. Retry finish verification with its prepared receipt.',
+            );
           const close = yield* Effect.gen(function* () {
             if (current?.content !== preview.content) return yield* fail('Approved write readback differs.');
             return yield* sourceCheck;
@@ -268,6 +284,10 @@ export const applyTopicMaintenanceReview = Effect.fn('topicMaintenance.applyRevi
           approval.stage !== 'written' &&
           (current?.content !== approval.preview.content || Result.isFailure(source))
         ) {
+          if (payload.version === 3 && !current)
+            return yield* fail(
+              'The approved memory was saved; exact readback is unavailable and its prepared verification remains retryable.',
+            );
           const conflicted = candidateReviewWithState(prepared, prepared.candidates[0].candidateId, 'conflict', {
             action: 'conflict',
             at: DateTime.formatIso(yield* DateTime.now),
@@ -309,7 +329,7 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
         candidate.state === nextState &&
         review.auditEvents.at(-1)?.action === input.action &&
         review.auditEvents.at(-1)?.revision === review.revision;
-      if (review.maintenance.generation.origin !== 'manual') {
+      if (review.maintenance.version !== 3 && review.maintenance.generation.origin !== 'manual') {
         if (!input.caseId) return yield* fail('Select the exact topic maintenance case for this review decision.');
         const status = yield* readContextMaintenanceStatus(config, undefined, {caseId: input.caseId});
         const item = status.cases[0];
@@ -325,7 +345,7 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
           return yield* fail('The selected topic case no longer matches this review.');
       }
       if (replay) {
-        if (review.maintenance.generation.origin !== 'manual')
+        if (review.maintenance.version !== 3 && review.maintenance.generation.origin !== 'manual')
           yield* reconcile(config, {
             caseId: input.caseId!,
             observationRevision: review.maintenance.basis.observationRevision,
@@ -370,7 +390,7 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
                 : {...review.maintenanceApproval, stage: 'parked' as const},
           };
       yield* saveCandidateReview(config.agentContextHome, decided);
-      if (decided.maintenance!.generation.origin !== 'manual')
+      if (decided.maintenance!.version !== 3 && decided.maintenance!.generation.origin !== 'manual')
         yield* reconcile(config, {
           caseId: input.caseId!,
           observationRevision: decided.maintenance!.basis.observationRevision,
