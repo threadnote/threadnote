@@ -7,6 +7,7 @@ import type {MemoryRecord} from '@threadnote/memory/document';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
+import {TopicReviewContent} from '../../src/attention/topic_review.js';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import type {
   ManagerContextHealthResponseV1,
@@ -125,6 +126,158 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it.each([404, 409])('falls back to the ordinary topic packet only after case selector %s', async statusCode => {
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = new URL(input, 'http://manager.test');
+        requests.push(`${url.pathname}${url.search}`);
+        if (url.pathname === '/api/consolidation-models') return new Response(JSON.stringify({models: []}));
+        return new Response(JSON.stringify({error: `Selector ${statusCode}`}), {status: statusCode});
+      }),
+    );
+    await render(
+      <TopicReviewContent
+        project="threadnote"
+        caseId={`health-case-${'b'.repeat(40)}`}
+        onChanged={() => undefined}
+        onOpenLibrary={() => undefined}
+      />,
+    );
+    expect(requests.some(request => request.includes('/api/attention/topic-review?project=threadnote&caseId='))).toBe(
+      true,
+    );
+    expect(
+      requests.some(request => request.includes('/api/attention/context-maintenance?project=threadnote&caseId=')),
+    ).toBe(statusCode === 404);
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(`Selector ${statusCode}`);
+  });
+  it('recovers a stale written topic from a fresh case-only health mount after packet refusal', async () => {
+    const caseId = `health-case-${'b'.repeat(40)}`;
+    const reviewId = `review-${'a'.repeat(24)}`;
+    const hash = 'c'.repeat(64);
+    const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/topic.md';
+    const item = {
+      caseId,
+      project: 'threadnote',
+      memoryId: 'tn_topic',
+      subjectUri: uri,
+      subjectContentHashes: [{uri, hash}],
+      family: 'topic-maintenance',
+      slot: 'declared-support',
+      evidenceRevision: hash,
+      disposition: 'needs-decision' as const,
+      reason: 'source-changed',
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    let snapshot: ManagerContextMaintenanceStatusV2 = {
+      ...status(),
+      cases: [item],
+      counts: {decisionMemories: 1, 'needs-decision': 1},
+    };
+    const saved: ManagerTopicReviewV1 = {
+      version: 1,
+      kind: 'topic-maintenance',
+      project: 'threadnote',
+      reviewId,
+      revision: 4,
+      state: 'applied',
+      topic: 'Topic',
+      caseId,
+      caseObservationMatches: true,
+      targetUri: uri,
+      targetHash: hash,
+      acceptedBody: 'Saved claim.',
+      observationRevision: hash,
+      coverage: 'declared-only',
+      generation: {origin: 'manual', agent: 'user', model: 'manual', attempts: 0, usage: {status: 'unavailable'}},
+      draft: {
+        version: 1,
+        targetHash: hash,
+        observationRevision: hash,
+        packetDigest: hash,
+        outcome: 'propose-revalidation',
+        operations: [],
+        reviewedHandles: ['current:source'],
+        rationale: 'Reviewed source.',
+        unresolvedQuestions: [],
+        removedClaims: [],
+      },
+      proposal: {body: 'Saved claim.', finalBodyHash: hash, changedOrdinals: []},
+      paragraphs: [],
+      additionalDependencies: [],
+      support: [],
+      warnings: [],
+      canApply: false,
+      canFinishVerification: true,
+      approval: {
+        stage: 'written',
+        reviewRevision: 3,
+        approvalDigest: hash,
+        content: 'SAVED DOCUMENT',
+        contentHash: hash,
+        metadataDiff: [],
+      },
+    };
+    const requests: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init?: RequestInit) => {
+        const url = new URL(input, 'http://manager.test');
+        requests.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}`);
+        if (url.pathname === '/api/consolidation-models') return new Response(JSON.stringify({models: []}));
+        if (url.pathname === '/api/shares/conflicts') return new Response(JSON.stringify({conflicts: []}));
+        if (url.pathname === '/api/context-health') return new Response(JSON.stringify(report()));
+        if (url.pathname === '/api/attention/topic-review') {
+          if (init?.method === 'POST') {
+            const action = JSON.parse(String(init.body));
+            expect(action).toMatchObject({
+              action: 'apply',
+              reviewId,
+              revision: 3,
+              approvalDigest: hash,
+              approved: true,
+            });
+            snapshot = {...snapshot, generation: 'resolved', cases: [], counts: {decisionMemories: 0}};
+            return new Response(JSON.stringify(saved));
+          }
+          return new Response(JSON.stringify(saved));
+        }
+        if (url.pathname === '/api/attention/context-maintenance') {
+          if (url.searchParams.get('caseId') && url.searchParams.get('view') !== 'status')
+            return new Response(JSON.stringify({error: 'The accepted baseline changed.'}), {status: 409});
+          return new Response(JSON.stringify(snapshot));
+        }
+        return new Response(JSON.stringify(snapshot));
+      }),
+    );
+    const mount = async () => {
+      await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+    };
+    await mount();
+    const open = [...document.querySelectorAll<HTMLButtonElement>('button')].find(button =>
+      button.textContent?.includes('Review memory and evidence'),
+    );
+    expect(open).toBeDefined();
+    await act(async () => open!.click());
+    const finish = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent?.trim() === 'Finish saved update verification',
+    );
+    expect(finish).toBeDefined();
+    expect(requests.some(request => request.includes(`topic-review?project=threadnote&caseId=${caseId}`))).toBe(true);
+    await act(async () => finish!.click());
+    expect(document.querySelector('dialog')).toBeNull();
+    expect(snapshot.cases).toHaveLength(0);
+    await act(async () => root?.unmount());
+    root = undefined;
+    await mount();
+    expect(document.body.textContent).not.toContain('1 memory needs your decision');
+  });
   it.each([false, true])(
     'reconciles only a confirmed topic apply while stale polls are pending (failure: %s)',
     async failed => {

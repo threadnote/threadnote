@@ -1,3 +1,6 @@
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {decodeTopicDraftWire} from '../../src/manager/topic_draft_schema.js';
 import {InvalidModelOutput} from '@threadnote/inference/engine/errors';
 import {TopicDraftProviderOutputError} from '../../src/effect/ai/consolidator.js';
 import {retainedTopicGenerationOutput} from '@threadnote/memory/topic-maintenance-draft';
@@ -39,9 +42,21 @@ describe('private topic generation lifecycle', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const home = yield* fs.makeTempDirectoryScoped();
+        const basis = makeTopicDraftWireBasis(2);
+        const wire = makeTopicDraftWireFixture(basis);
+        wire.facts.entries[1].ordinal = 0;
+        const firstWire = JSON.stringify(decodeTopicDraftWire(basis, wire));
+        const before = JSON.stringify(wire);
         const summary = yield* withTopicGenerationObservation(home, identity, observation =>
           Effect.gen(function* () {
-            yield* observation.dispatch('é🙂', Effect.succeed(result('private invalid')));
+            yield* observation.dispatch(
+              'é🙂',
+              Effect.succeed({
+                ...result(firstWire),
+                outputRepresentation: 'decoded-json' as const,
+                usage: {status: 'measured' as const, inputTokens: 12, outputTokens: 3},
+              }),
+            );
             yield* observation.finishAttempt('draft-invalid');
             yield* observation.dispatch('repair', Effect.succeed(result('{}')));
             yield* observation.finishAttempt('accepted');
@@ -51,10 +66,16 @@ describe('private topic generation lifecycle', () => {
         expect(summary.attempts.map(a => a.status)).toEqual(['draft-invalid', 'accepted']);
         expect(summary.attempts[0].promptBytes).toBe(6);
         const receipt = yield* loadTopicGenerationReceipt(home, summary.receiptId);
-        expect(receipt.firstFailedOutput?.text).toBe('private invalid');
-        expect(JSON.stringify(yield* readTopicGenerationSummary(home, summary.receiptId))).not.toContain(
-          'private invalid',
-        );
+        expect(receipt.firstFailedOutput).toMatchObject({
+          text: firstWire,
+          representation: 'decoded-json',
+          hash: sha256HexSync(firstWire),
+          bytes: new TextEncoder().encode(firstWire).byteLength,
+          truncated: false,
+        });
+        expect(receipt.attempts[0].usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
+        expect(JSON.stringify(wire)).toBe(before);
+        expect(JSON.stringify(yield* readTopicGenerationSummary(home, summary.receiptId))).not.toContain(firstWire);
         const output: string[] = [];
         yield* readTopicGenerationReceiptCommand(home, summary.receiptId, true).pipe(
           Effect.provideService(CliOutput, {
@@ -70,7 +91,7 @@ describe('private topic generation lifecycle', () => {
           }),
         );
         expect(JSON.parse(output[0]).receiptId).toBe(summary.receiptId);
-        expect(output[0]).not.toContain('private invalid');
+        expect(output[0]).not.toContain(firstWire);
         const path = yield* Path.Path;
         expect(
           (yield* fs.stat(path.join(home, 'threadnote/candidates/v1/topic-generation', summary.receiptId + '.json')))
@@ -148,9 +169,16 @@ describe('private topic generation lifecycle', () => {
       Effect.gen(function* () {
         const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
         const started = yield* Deferred.make<void>();
+        const firstStarted = yield* Deferred.make<void>();
         const fiber = yield* withTopicGenerationObservation(home, identity, observation =>
           Effect.gen(function* () {
-            yield* observation.dispatch('first', Effect.succeed(result('first invalid')));
+            yield* observation.dispatch(
+              'first',
+              Deferred.succeed(firstStarted, undefined).pipe(
+                Effect.andThen(Effect.sleep(20_000)),
+                Effect.as(result('first invalid')),
+              ),
+            );
             yield* observation.finishAttempt('draft-invalid');
             return yield* observation.dispatch(
               'repair',
@@ -163,8 +191,10 @@ describe('private topic generation lifecycle', () => {
             }),
           ),
         ).pipe(Effect.forkChild);
+        yield* Deferred.await(firstStarted);
+        yield* TestClock.adjust(20_000);
         yield* Deferred.await(started);
-        yield* TestClock.adjust(120_000);
+        yield* TestClock.adjust(100_000);
         const failure = yield* Fiber.join(fiber).pipe(Effect.flip);
         expect(failure).toBeInstanceOf(TopicGenerationRequestError);
         if (Schema.is(TopicGenerationRequestError)(failure)) {
@@ -172,6 +202,7 @@ describe('private topic generation lifecycle', () => {
           expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'deadline']);
           expect(receipt.firstFailedOutput?.text).toBe('first invalid');
           expect(receipt.elapsedMilliseconds).toBe(120_000);
+          expect(receipt.attempts.map(attempt => attempt.elapsedMilliseconds)).toEqual([20_000, 100_000]);
         }
       }),
     );

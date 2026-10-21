@@ -1,4 +1,6 @@
 import {isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
+import {withMemoryUriLocks} from '@threadnote/memory/lock';
+import type {TopicMaintenanceReviewPayload} from '@threadnote/memory/topic-maintenance-draft';
 import {validateTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
 import {contextHealthCaseIdV2} from '@threadnote/context/health_maintenance';
 import {assertMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -7,7 +9,7 @@ import {
   observeTopicMaintenanceEvidence,
   buildTopicMaintenanceEvidencePacket,
 } from '@threadnote/context/topic_maintenance';
-import {DateTime, Effect, Schema} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
@@ -17,6 +19,7 @@ import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js'
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {MaintenanceWorkSchedule} from './maintenance_decisions.js';
 import {isObsidianTopic, inspectTopicObsidianState, readTopicObsidianPacket} from './maintenance_obsidian.js';
+import {verifyTopicMaintenanceReviewSource} from './maintenance_review_source.js';
 
 export const TOPIC_MAINTENANCE_FAMILY = 'topic-maintenance';
 export const TOPIC_MAINTENANCE_SLOT = 'declared-support';
@@ -527,6 +530,153 @@ export const observeTopicMaintenanceCase = Effect.fn('contextMaintenance.observe
   };
   return {caseId, item, checkpoint};
 });
+
+export const advanceScheduledTopicMaintenance = Effect.fn('contextMaintenance.advanceScheduledTopic')(function* (
+  config: RuntimeConfig,
+  state: MaintenanceState,
+  records: readonly MemoryRecord[],
+  roots: ReadonlyMap<string, string>,
+  cwd: string,
+  logicalHashes: ReadonlyMap<string, string>,
+  now: string,
+  checkpoints: Readonly<Record<string, TopicMaintenanceCheckpoint>>,
+  caseMap: Map<string, ContextMaintenanceCaseV2>,
+) {
+  const selected = selectTopicMaintenanceRecord(records, state.workSchedule?.lastTopicMemoryId);
+  if (!selected) return state;
+  const scheduled = {...state, workSchedule: advanceTopicMaintenanceCursor(state.workSchedule!, selected)};
+  const root = roots.get(selected.metadata.project!) ?? cwd;
+  const expectedHash = logicalHashes.get(selected.uri) ?? maintenanceContentHash(selected.content);
+  const turn = yield* observeTopicMaintenanceCase(config, selected, expectedHash, root, now, checkpoints, caseMap).pipe(
+    Effect.timeoutOption(5_000),
+  );
+  const result = Option.isSome(turn)
+    ? turn.value
+    : deferTopicMaintenanceCase(
+        selected,
+        expectedHash,
+        now,
+        checkpoints[topicMaintenanceCaseId(selected)],
+        caseMap.get(topicMaintenanceCaseId(selected)),
+      );
+  if (!result) return scheduled;
+  caseMap.set(result.caseId, result.item);
+  return {
+    ...scheduled,
+    topicCheckpoints: {...state.topicCheckpoints, [result.caseId]: result.checkpoint},
+  };
+});
+
+export function stateWithAcceptedTopicObservation(
+  state: MaintenanceState,
+  observed: {
+    readonly caseId: string;
+    readonly item: ContextMaintenanceCaseV2;
+    readonly checkpoint: TopicMaintenanceCheckpoint;
+  },
+): MaintenanceState {
+  const cases = state.cases.map(item => (item.caseId === observed.caseId ? observed.item : item));
+  return {
+    ...state,
+    cases,
+    state: cases.some(item => item.disposition === 'needs-decision')
+      ? 'needs-decision'
+      : cases.some(item => item.disposition === 'waiting-evidence')
+        ? 'waiting-evidence'
+        : state.state === 'needs-decision' || state.state === 'waiting-evidence'
+          ? 'idle'
+          : state.state,
+    topicCheckpoints: {...state.topicCheckpoints, [observed.caseId]: observed.checkpoint},
+  };
+}
+
+/** Under the state lock, re-observe the exact post-write target before completing its review receipt. */
+export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
+  config: RuntimeConfig,
+  state: MaintenanceState,
+  original: MemoryRecord,
+  acceptedContent: string,
+  payload: TopicMaintenanceReviewPayload,
+  sourceCwd: string | undefined,
+  persist: (state: MaintenanceState) => Effect.Effect<void, P, Q>,
+  complete: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    return yield* withMemoryUriLocks(
+      yield* FileSystem.FileSystem,
+      config.agentContextHome,
+      [original.uri],
+      Effect.gen(function* () {
+        const current = (yield* readMemoryRecordsByUri(config, [original.uri]))[0];
+        if (
+          !current ||
+          current.content !== acceptedContent ||
+          !enrolledTopicRecord(current) ||
+          current.metadata.project !== original.metadata.project ||
+          current.metadata.memoryId !== original.metadata.memoryId ||
+          current.uri !== payload.basis.targetUri
+        )
+          return yield* topicFail('The accepted topic changed before maintenance verification.');
+        yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
+        const caseId = topicMaintenanceCaseId(original);
+        const prior = state.cases.find(item => item.caseId === caseId);
+        const checkpoint = state.topicCheckpoints?.[caseId];
+        if (!prior && !checkpoint) {
+          if (payload.generation.origin === 'manual') return yield* complete;
+          return yield* topicFail('The generated topic case is unavailable for verification.');
+        }
+        if (!prior || !checkpoint) return yield* topicFail('The topic case checkpoint is incomplete.');
+        if (
+          prior.project !== original.metadata.project ||
+          prior.memoryId !== original.metadata.memoryId ||
+          prior.family !== TOPIC_MAINTENANCE_FAMILY ||
+          prior.slot !== TOPIC_MAINTENANCE_SLOT ||
+          prior.subjectUri !== original.uri ||
+          (checkpoint.revision !== payload.basis.observationRevision &&
+            checkpoint.targetHash !== maintenanceContentHash(acceptedContent))
+        )
+          return yield* topicFail('The topic case changed before maintenance verification.');
+        const cases = new Map(state.cases.map(item => [item.caseId, item]));
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const observed = yield* observeTopicMaintenanceCase(
+          config,
+          current,
+          maintenanceContentHash(acceptedContent),
+          sourceCwd ?? '',
+          now,
+          state.topicCheckpoints ?? {},
+          cases,
+        );
+        if (!observed || observed.caseId !== caseId)
+          return yield* topicFail('The accepted topic changed during maintenance verification.');
+        yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
+        if (
+          checkpoint.targetHash === observed.checkpoint.targetHash &&
+          checkpoint.revision === observed.checkpoint.revision &&
+          checkpoint.outcome === observed.checkpoint.outcome &&
+          prior.disposition === observed.item.disposition &&
+          prior.evidenceRevision === observed.item.evidenceRevision &&
+          prior.subjectContentHashes?.find(subject => subject.uri === original.uri)?.hash ===
+            maintenanceContentHash(acceptedContent) &&
+          prior.sourceSnapshot?.revision === observed.item.sourceSnapshot?.revision
+        )
+          return yield* complete;
+        yield* persist(stateWithAcceptedTopicObservation(state, observed));
+        const finalFence = yield* Effect.gen(function* () {
+          const persistedTarget = (yield* readMemoryRecordsByUri(config, [original.uri]))[0];
+          if (!persistedTarget || persistedTarget.content !== acceptedContent)
+            return yield* topicFail('The accepted topic changed during maintenance verification.');
+          yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
+        }).pipe(Effect.result);
+        if (Result.isFailure(finalFence)) {
+          yield* persist(state);
+          return yield* Effect.fail(finalFence.failure);
+        }
+        return yield* complete;
+      }),
+    );
+  });
+}
 
 /** A timed-out turn retains prior evidence and records an explicit bounded retry reason. */
 export function deferTopicMaintenanceCase(

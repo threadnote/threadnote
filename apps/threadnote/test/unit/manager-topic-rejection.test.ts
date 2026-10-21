@@ -20,6 +20,7 @@ import {registerContextMaintenanceTools} from '../../src/mcp/server/context/main
 import {runContextMaintainCommand} from '../../src/memory/context/maintenance_commands.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {projectTopicReviewRecovery} from '../../src/memory/context/maintenance_review_projection.js';
+import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 
 const modelReviewedFixture = Effect.gen(function* () {
   const f = yield* managerImportedTopicFixture();
@@ -39,43 +40,15 @@ const modelReviewedFixture = Effect.gen(function* () {
         verified: true,
       }),
   });
-  const generate: typeof runSelectedDraft = (_config, _agent, _model, _prompt, _purpose, basis) =>
+  const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, basis) =>
     Effect.sync(() => {
       if (basis?.version !== 2) throw new Error('Expected imported model basis.');
-      const handles = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+      const draft = makeTopicDraftWireFixture(basis, 'update', topicDraftEvidenceFromPrompt(prompt, basis));
+      const first = draft.facts.entries.find(entry => entry.ordinal === 0);
+      if (!first || first.disposition !== 'update') throw new Error('Expected editable imported claim.');
+      first.text = 'Model proposed current claim.';
       return {
-        text: JSON.stringify({
-          version: 1,
-          targetHash: basis.targetHash,
-          observationRevision: basis.observationRevision,
-          packetDigest: basis.packetDigest,
-          outcome: 'propose-update',
-          operations: [
-            {
-              ordinal: 0,
-              beforeHash: basis.paragraphs[0].hash,
-              text: 'Model proposed current claim.',
-              supportHandles: handles,
-              rationale: 'Current note.',
-            },
-          ],
-          reviewedHandles: handles,
-          rationale: 'Reviewed note.',
-          unresolvedQuestions: [],
-          removedClaims: [],
-          paragraphDispositions: {
-            version: 1,
-            entries: [
-              {
-                ordinal: 0,
-                beforeHash: basis.paragraphs[0].hash,
-                disposition: 'update',
-                supportHandles: handles,
-                rationale: 'Reviewed source.',
-              },
-            ],
-          },
-        }),
+        text: JSON.stringify(draft),
         backendIdentity: 'local-ai',
         modelIdentity: modelId,
         modelVersion: `${model.revision}:${model.sha256}`,

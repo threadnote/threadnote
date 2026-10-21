@@ -1,7 +1,24 @@
+import * as candidateGenerationModule from '@threadnote/memory/candidate-generation';
+import * as maintenanceModule from '../../src/memory/context/maintenance.js';
+import * as memoryModule from '../../src/mcp/server/memory.js';
+import * as modelModule from '../../src/manager/consolidation_models.js';
+import * as selectedModule from '../../src/manager/selected_draft.js';
+import * as schemaModule from '../../src/manager/topic_draft_schema.js';
+import * as inventoryModule from '../../src/memory/context/maintenance_inventory.js';
+import {loadTopicGenerationReceipt, readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
+import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_snapshot.js';
+import {InvalidModelOutput} from '@threadnote/inference/engine/errors';
+import {
+  TopicDraftProviderOutputError,
+  localDraftGenerationSettings,
+  serializeDraftGenerationSettings,
+} from '../../src/effect/ai/consolidator.js';
+import {TopicDraftError} from '../../src/memory/context/maintenance_draft.js';
+import {makeTopicDraftControllerPacket, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
-import {Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -12,6 +29,7 @@ import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
 import {
+  retainedTopicGenerationOutput,
   validateTopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasisV1,
 } from '@threadnote/memory/topic-maintenance-draft';
@@ -34,6 +52,7 @@ import {
   basisFromPacket,
   readTopicMaintenanceDraft,
   readyEvidence,
+  reviewEvidenceFromPacket,
   requestTopicMaintenanceDraft,
   topicMaintenanceDraftPrompt,
 } from '../../src/memory/context/maintenance_draft.js';
@@ -86,7 +105,6 @@ describe('topic maintenance private draft generation', () => {
             additionalDependencies: [],
             handles: ids.map(id => ({id: `current:${id}`, citationId: id, variant: 'current' as const})),
           };
-          const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
           const expected = paragraphs.filter(
             paragraph => paragraph.role === 'descriptive' && paragraph.support === 'direct',
           );
@@ -94,18 +112,24 @@ describe('topic maintenance private draft generation', () => {
           expect(topicDraftGenerationScopeSupported(basis, true)).toBe(
             expected.length > 0 || combinations.every(paragraph => paragraph.role !== 'descriptive'),
           );
-          expect(branches.some(branch => branch.properties.outcome.enum[0] === 'propose-update')).toBe(
+          if (!ids.length) {
+            expect(() => topicDraftModelSchema(basis)).toThrow('Topic generation requires current evidence.');
+            expect(JSON.stringify(paragraphs)).toBe(before);
+            return;
+          }
+          const branches = topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties.decision.oneOf;
+          expect(branches.some(branch => branch.properties.policyAssessment.enum[0] === 'no-conflict-observed')).toBe(
             expected.length > 0,
           );
           if (expected.length)
             expect(
-              branches[0].properties.operations.items.oneOf.map(
-                (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => [
-                  variant.properties.ordinal.enum[0],
-                  variant.properties.beforeHash.enum[0],
-                ],
-              ),
-            ).toEqual(expected.map(paragraph => [paragraph.ordinal, paragraph.hash]));
+              topicDraftNativeJsonSchema(topicDraftModelSchema(basis))
+                .properties.facts.properties.entries.items.oneOf.filter(
+                  (variant: {properties: {disposition: {enum: string[]}}}) =>
+                    variant.properties.disposition.enum[0] === 'update',
+                )
+                .map((variant: {properties: {ordinal: {enum: number[]}}}) => variant.properties.ordinal.enum[0]),
+            ).toEqual(expected.map(paragraph => paragraph.ordinal));
           expect(JSON.stringify(paragraphs)).toBe(before);
         },
       ),
@@ -113,7 +137,7 @@ describe('topic maintenance private draft generation', () => {
     );
   });
 
-  it('keeps non-editable bases in no-update outcome branches', () => {
+  it('keeps non-editable bases in source-only or undetermined assessment branches', () => {
     const basis: TopicMaintenanceDraftBasisV1 = {
       version: 1,
       targetUri: 'threadnote://user/tester/memories/durable/projects/fixture/topic.md',
@@ -142,14 +166,10 @@ describe('topic maintenance private draft generation', () => {
         true,
       ),
     ).toBe(true);
-    expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
-      'propose-revalidation',
-      'policy-conflict',
-      'insufficient-evidence',
-    ]);
+    expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual(['source-review']);
   });
 
-  it('keeps every native outcome exclusive with operation cardinality across bounded evidence sets', () => {
+  it('keeps assessment branches exclusive with updates only after no observed conflict', () => {
     fc.assert(
       fc.property(fc.integer({min: 1, max: 8}), count => {
         const ids = Array.from({length: count}, (_, index) => `tncc_${index.toString(16).padStart(40, '0')}`);
@@ -176,36 +196,35 @@ describe('topic maintenance private draft generation', () => {
         const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
         const branches = schema.properties.decision.oneOf;
         expect((schema as Record<string, unknown>).type).toBe('object');
-        expect(branches.map(branch => branch.properties.outcome.enum[0])).toEqual([
-          'propose-update',
-          'propose-revalidation',
-          'policy-conflict',
-          'insufficient-evidence',
-        ]);
-        expect(branches.map(branch => branch.properties.operations.minItems ?? 0)).toEqual([1, 0, 0, 0]);
-        expect(branches.slice(1).map(branch => branch.properties.operations.maxItems)).toEqual([0, 0, 0]);
-        expect(branches[1].properties.reviewedHandles.minItems).toBe(1);
+        expect(branches.map(branch => branch.properties.policyAssessment.enum[0])).toEqual(['no-conflict-observed']);
         for (const branch of branches) {
-          expect(branch.properties.paragraphDispositions.properties.entries).toMatchObject({
+          expect(branch.properties).not.toHaveProperty('operations');
+          expect(branch.properties).not.toHaveProperty('reviewedHandles');
+          expect(schema.properties.facts.properties.entries).toMatchObject({
             minItems: count,
             maxItems: count,
           });
-          expect(branch.required).toContain('paragraphDispositions');
+          expect(schema.required).toContain('facts');
+          const variants = schema.properties.facts.properties.entries.items.oneOf;
+          const updates = variants.filter(
+            (variant: {properties: {disposition: {enum: string[]}}}) =>
+              variant.properties.disposition.enum[0] === 'update',
+          );
+          expect(
+            updates.map((variant: {properties: {ordinal: {enum: number[]}}}) => variant.properties.ordinal.enum[0]),
+          ).toEqual(
+            branch.properties.policyAssessment.enum[0] === 'no-conflict-observed'
+              ? basis.paragraphs.map(p => p.ordinal)
+              : [],
+          );
+          for (const variant of variants) {
+            const update = variant.properties.disposition.enum[0] === 'update';
+            expect(variant.required.includes('text')).toBe(update);
+            expect(Object.hasOwn(variant.properties, 'text')).toBe(update);
+            expect(variant.properties).not.toHaveProperty('beforeHash');
+            expect(variant.properties).not.toHaveProperty('supportHandles');
+          }
         }
-        expect(branches.slice(2).map(branch => branch.properties.reviewedHandles.maxItems)).toEqual([0, 0]);
-        expect(
-          branches[0].properties.operations.items.oneOf.map(
-            (variant: {properties: {ordinal: {enum: number[]}; beforeHash: {enum: string[]}}}) => ({
-              ordinal: variant.properties.ordinal.enum[0],
-              beforeHash: variant.properties.beforeHash.enum[0],
-            }),
-          ),
-        ).toEqual(
-          basis.paragraphs.map(paragraph => ({
-            ordinal: paragraph.ordinal,
-            beforeHash: paragraph.hash,
-          })),
-        );
         expect(JSON.stringify(schema)).not.toContain('"anyOf"');
       }),
       {numRuns: 16},
@@ -311,7 +330,6 @@ describe('topic maintenance private draft generation', () => {
           yield* fs.makeDirectory(path.dirname(memory), {recursive: true});
           yield* fs.writeFileString(memory, enrolled.content);
           const accepted = yield* fs.readFileString(memory);
-          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
           yield* fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
           yield* git(['add', '.']);
           yield* git([
@@ -408,61 +426,60 @@ describe('topic maintenance private draft generation', () => {
           });
           const validJson = (prompt: string) => {
             const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
-            const evidence = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+            const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
             return JSON.stringify({
-              version: 1,
-              targetHash: identity.targetHash,
-              observationRevision: identity.observationRevision,
-              packetDigest: identity.packetDigest,
-              outcome: 'propose-revalidation',
-              paragraphDispositions: {
+              version: 8,
+              ...identity,
+              facts: {
                 version: 1,
-                entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
-                  (item: {ordinal: number; beforeHash: string; currentHandles: string[]}) => ({
+                entries: packet.paragraphs
+                  .filter(
+                    (item: {role: string; support: string}) => item.role === 'descriptive' && item.support === 'direct',
+                  )
+                  .map((item: {ordinal: number; sourceIndices: number[]}) => ({
                     ordinal: item.ordinal,
-                    beforeHash: item.beforeHash,
-                    disposition: 'revalidate',
-                    supportHandles: item.currentHandles,
+                    currentBehavior: 'Current supported behavior.',
                     rationale: 'Checked unchanged against current evidence.',
-                  }),
-                ),
+                    disposition: 'unchanged',
+                    sourceIndices: item.sourceIndices,
+                  })),
               },
-              operations: [],
-              reviewedHandles: evidence.sources.map((item: {citationId: string}) => `current:${item.citationId}`),
-              rationale: 'The scoped claim remains correct after reviewing the changed source.',
-              unresolvedQuestions: [],
-              removedClaims: [],
+              normativeComparisons: packet.paragraphs
+                .filter((item: {role: string}) => item.role === 'normative')
+                .map((item: {ordinal: number}) => ({
+                  ordinal: item.ordinal,
+                  rationale: 'Checked current applicable behavior.',
+                })),
+              decision: {
+                policyAssessment: 'no-conflict-observed',
+                removedClaims: [],
+              },
             });
           };
           const validUpdateJson = (prompt: string) => {
-            const draft = JSON.parse(validJson(prompt));
+            const wire = JSON.parse(validJson(prompt));
             const evidence = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
             const paragraph = evidence.paragraphs[0];
             expect(paragraph.text).toBe('Request timeout is 30 seconds.');
             expect(evidence.paragraphs[1].text).toBe('This topic describes runtime configuration.');
-            expect(prompt).toContain('including still-stale accepted claims from earlier events');
-            return JSON.stringify({
-              ...draft,
-              outcome: 'propose-update',
-              paragraphDispositions: {
-                version: 1,
-                entries: draft.paragraphDispositions.entries.map((item: {ordinal: number}) =>
-                  item.ordinal === paragraph.ordinal
-                    ? {...item, disposition: 'update', supportHandles: [`current:${citations[0].id}`]}
-                    : item,
-                ),
-              },
-              reviewedHandles: [],
-              operations: [
-                {
-                  ordinal: paragraph.ordinal,
-                  beforeHash: paragraph.hash,
-                  text: 'Request timeout is 60 seconds.',
-                  supportHandles: [`current:${citations[0].id}`],
-                  rationale: 'The current source states 60 seconds.',
-                },
-              ],
-            });
+            expect(prompt).toContain('still-stale facts from earlier events');
+            wire.facts.entries = wire.facts.entries.map((item: {ordinal: number}) =>
+              item.ordinal === paragraph.ordinal
+                ? {
+                    ...item,
+                    disposition: 'update',
+                    text: 'Request timeout is 60 seconds.',
+                  }
+                : item,
+            );
+            wire.facts.entries.find((item: {ordinal: number}) => item.ordinal === paragraph.ordinal).rationale =
+              'The current source states 60 seconds.';
+            return JSON.stringify(wire);
+          };
+          const invalidApplicationJson = (prompt: string) => {
+            const wire = JSON.parse(validUpdateJson(prompt));
+            wire.facts.entries[0].rationale = 'é'.repeat(513);
+            return JSON.stringify(wire);
           };
           const modelResult = (text: string) => ({
             text,
@@ -470,13 +487,13 @@ describe('topic maintenance private draft generation', () => {
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,
             usage: {status: 'unavailable' as const},
-            settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+            settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
           });
           let calls = 0;
           const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
             Effect.sync(() => {
               calls += 1;
-              return modelResult(calls === 1 ? '{invalid' : validUpdateJson(prompt));
+              return modelResult(calls === 1 ? invalidApplicationJson(prompt) : validUpdateJson(prompt));
             });
           const request = (regenerate = false) =>
             requestTopicMaintenanceDraft(config, {caseId, backend: 'local-ai', modelId, regenerate}, generator).pipe(
@@ -509,24 +526,15 @@ describe('topic maintenance private draft generation', () => {
           const contextualOperation: typeof runSelectedDraft = (_config, _agent, _model, prompt) => {
             const draft = JSON.parse(validJson(prompt));
             const paragraph = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs[1];
-            return Effect.succeed(
-              modelResult(
-                JSON.stringify({
-                  ...draft,
-                  outcome: 'propose-update',
-                  reviewedHandles: [],
-                  operations: [
-                    {
-                      ordinal: paragraph.ordinal,
-                      beforeHash: paragraph.hash,
-                      text: 'This topic now describes changed runtime configuration.',
-                      supportHandles: [`current:${citations[0].id}`],
-                      rationale: 'The source changed.',
-                    },
-                  ],
-                }),
-              ),
-            );
+            draft.facts.entries[0] = {
+              ordinal: paragraph.ordinal,
+              currentBehavior: 'Changed behavior.',
+              rationale: 'Current configuration changed.',
+              disposition: 'update',
+              text: 'This topic now describes changed runtime configuration.',
+              sourceIndices: [0],
+            };
+            return Effect.succeed(modelResult(JSON.stringify(draft)));
           };
           const contextual = yield* requestTopicMaintenanceDraft(
             config,
@@ -692,17 +700,13 @@ describe('topic maintenance private draft generation', () => {
           const abstentionGenerator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
             Effect.sync(() => {
               abstentionCalls += 1;
-              const draft = JSON.parse(validJson(prompt)) as Record<string, unknown>;
-              draft.outcome = abstentionCalls === 1 ? 'propose-update' : 'insufficient-evidence';
-              draft.operations = [];
-              draft.reviewedHandles = [];
-              draft.rationale = 'The evidence does not establish a safe replacement.';
-              draft.unresolvedQuestions = ['Which policy applies to the changed source?'];
-              const accounting = draft.paragraphDispositions as {entries: Record<string, unknown>[]};
-              draft.paragraphDispositions = {
-                version: 1,
-                entries: accounting.entries.map(item => ({...item, disposition: 'unresolved', supportHandles: []})),
-              };
+              const draft = JSON.parse(validJson(prompt));
+              if (abstentionCalls === 1) draft.facts.entries[0].rationale = 'é'.repeat(513);
+              draft.facts.entries = draft.facts.entries.map((item: {ordinal: number}) => ({
+                ...item,
+                disposition: 'unresolved',
+                sourceIndices: [],
+              }));
               return remoteResult(JSON.stringify(draft));
             });
           const abstentionReview = yield* remoteRequest(abstentionGenerator);
@@ -942,4 +946,433 @@ describe('topic maintenance private draft generation', () => {
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
     90_000,
   );
+});
+
+const withControllerFixture = <A, E, R>(
+  use: (fixture: {
+    config: {account: string; agentContextHome: string; agentId: string; manifestPath: string; user: string};
+    caseId: string;
+    basis: TopicMaintenanceDraftBasisV1;
+    valid: ReturnType<typeof makeTopicDraftWireFixture>;
+    invalid: ReturnType<typeof makeTopicDraftWireFixture>;
+    modelResult: (text: string, call?: number) => selectedModule.SelectedDraftResult;
+    request: (generate: typeof runSelectedDraft) => ReturnType<typeof requestTopicMaintenanceDraft>;
+    record: ReturnType<typeof makeTopicDraftControllerPacket>['record'];
+  }) => Effect.Effect<A, E, R>,
+) =>
+  Effect.gen(function* () {
+    const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+    const {record, packet} = makeTopicDraftControllerPacket();
+    const config = {
+      account: 'local',
+      agentContextHome: home,
+      agentId: 'test',
+      manifestPath: home + '/manifest.yaml',
+      user: 'tester',
+    };
+    const basis = basisFromPacket(packet.topicEvidence);
+    const valid = makeTopicDraftWireFixture(
+      basis,
+      'unchanged',
+      schemaModule.topicDraftCurrentEvidence(basis, reviewEvidenceFromPacket(packet.topicEvidence)),
+    );
+    valid.facts.entries.forEach((entry, index) => {
+      entry.disposition = 'update';
+      entry.text = index === 0 ? 'Current first fact.' : 'Current second fact.';
+      entry.sourceIndices = [index];
+    });
+    const invalid = structuredClone(valid);
+    invalid.facts.entries[1].ordinal = invalid.facts.entries[0].ordinal;
+    const modelResult = (text: string, call = 1): selectedModule.SelectedDraftResult => ({
+      text,
+      backendIdentity: 'local-ai',
+      modelIdentity: modelId,
+      modelVersion: 'fixture-v1',
+      outputRepresentation: 'decoded-json',
+      usage: {status: 'measured', inputTokens: call * 12, outputTokens: call * 3},
+      settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
+    });
+    return yield* Effect.acquireUseRelease(
+      Effect.sync(() => [
+        vi.spyOn(maintenanceModule, 'readContextMaintenancePacket').mockReturnValue(Effect.succeed(packet)),
+        vi.spyOn(memoryModule, 'readMemoryRecordsByUri').mockReturnValue(Effect.succeed([record])),
+        vi
+          .spyOn(modelModule, 'availableConsolidationModels')
+          .mockReturnValue(Effect.succeed([{id: modelId, label: modelId, isDefault: true}])),
+        vi.spyOn(selectedModule, 'selectedTopicDraftIdentity').mockReturnValue(
+          Effect.succeed({
+            agent: 'local-ai',
+            model: modelId,
+            modelVersion: 'fixture-v1',
+            backendIdentity: 'local-ai',
+            settings: serializeDraftGenerationSettings(localDraftGenerationSettings(modelId, 'topic-maintenance')),
+          }),
+        ),
+        vi
+          .spyOn(inventoryModule, 'prepareContextMaintenanceInventory')
+          .mockReturnValue(Effect.fail(maintenanceSnapshotFailure('io-error', 'inventory-cache'))),
+      ]),
+      () =>
+        use({
+          config,
+          caseId: packet.caseId,
+          basis,
+          valid,
+          invalid,
+          modelResult,
+          record,
+          request: generate =>
+            requestTopicMaintenanceDraft(config, {caseId: packet.caseId, backend: 'local-ai', modelId}, generate),
+        }),
+      spies =>
+        Effect.sync(() => {
+          for (const spy of spies) spy.mockRestore();
+        }),
+    );
+  });
+
+describe('complete wire controller repair boundary', () => {
+  for (const violation of ['duplicate', 'utf8', 'action-duplicate'] as const)
+    effectIt.effect(
+      'repairs complete ' + violation + ' assessment without losing either factual update or protected bytes',
+      () =>
+        withControllerFixture(f =>
+          Effect.gen(function* () {
+            const firstWire = structuredClone(violation === 'duplicate' ? f.invalid : f.valid);
+            if (violation === 'utf8') firstWire.facts.entries[0].rationale = 'é'.repeat(513);
+            if (violation === 'action-duplicate')
+              firstWire.facts.entries[1].ordinal = firstWire.facts.entries[0].ordinal;
+            const invalidText = JSON.stringify(schemaModule.decodeTopicDraftWire(f.basis, firstWire));
+            const original = JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid});
+            let calls = 0;
+            const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
+              Effect.sync(() => {
+                calls++;
+                if (calls === 2) {
+                  expect(prompt).toContain(
+                    violation === 'duplicate'
+                      ? 'Invalid or duplicate topic fact ordinal.'
+                      : violation === 'utf8'
+                        ? 'Topic fact rationale exceeds its UTF-8 scalar or byte bound.'
+                        : 'Invalid or duplicate topic fact ordinal.',
+                  );
+                  expect(prompt).toContain('Prior invalid JSON data:');
+                }
+                return f.modelResult(calls === 1 ? invalidText : JSON.stringify(f.valid), calls);
+              });
+            const review = yield* f.request(generate);
+            expect(calls).toBe(2);
+            const proposal = review.maintenance!.proposal;
+            expect(proposal.body).toBe('Current first fact.\n\nCurrent second fact.\n\nProtected requirement.');
+            expect(proposal.changedOrdinals).toEqual([0, 1]);
+            expect(proposal.draft.operations.map(operation => operation.supportHandles)).toEqual([
+              [f.basis.handles.filter(handle => handle.variant === 'current')[0].id],
+              [f.basis.handles.filter(handle => handle.variant === 'current')[1].id],
+            ]);
+            expect(proposal.draft.paragraphDispositions!.entries.map(entry => entry.supportHandles)).toEqual(
+              proposal.draft.operations.map(operation => operation.supportHandles),
+            );
+            expect(review.maintenance!.generation.usage).toEqual({
+              status: 'measured',
+              inputTokens: 36,
+              outputTokens: 9,
+            });
+            const generation = review.maintenance!.generation;
+            if (generation.origin === 'manual') throw new Error('Expected generated review.');
+            const observation = generation.observation!;
+            const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, observation.receiptId);
+            expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
+            expect(receipt.attempts.map(attempt => attempt.usage)).toEqual([
+              f.modelResult('', 1).usage,
+              f.modelResult('', 2).usage,
+            ]);
+            expect(receipt.firstFailedOutput).toMatchObject({
+              text: invalidText,
+              hash: sha256HexSync(invalidText),
+              bytes: new TextEncoder().encode(invalidText).byteLength,
+              representation: 'decoded-json',
+              truncated: false,
+            });
+            expect(receipt.attempts[1].output).toMatchObject({hash: sha256HexSync(JSON.stringify(f.valid))});
+            expect(
+              JSON.stringify(yield* readTopicGenerationSummary(f.config.agentContextHome, observation.receiptId)),
+            ).not.toContain(invalidText);
+            expect(JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid})).toBe(original);
+            expect(f.record.body).toBe(f.basis.body);
+            expect((yield* f.request(generate)).revision).toBe(review.revision);
+            expect(calls).toBe(2);
+          }),
+        ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+
+  for (const scenario of [
+    'two-invalid',
+    'provider-failure',
+    'provider-output-invalid',
+    'utf8',
+    'canonical-invalid',
+  ] as const) {
+    effectIt.effect('allows only the existing second attempt: ' + scenario, () =>
+      withControllerFixture(f =>
+        Effect.gen(function* () {
+          let calls = 0;
+          let firstText = '';
+          const generate: typeof runSelectedDraft = () =>
+            Effect.gen(function* () {
+              calls++;
+              if (scenario === 'provider-failure' && calls === 2)
+                return yield* selectedModule.SelectedDraftError.make({message: 'Provider transport failed.'});
+              if (scenario === 'provider-output-invalid' && calls === 2)
+                return yield* TopicDraftProviderOutputError.make({
+                  message: 'Repair provider schema failed.',
+                  output: retainedTopicGenerationOutput(2, '{}', 'decoded-json'),
+                  usage: f.modelResult('', 2).usage,
+                });
+              const wire = structuredClone(
+                scenario === 'utf8' || scenario === 'canonical-invalid' ? f.valid : f.invalid,
+              );
+              if (scenario === 'utf8') wire.facts.entries[0].rationale = 'é'.repeat(513);
+              if (scenario === 'canonical-invalid') wire.facts.entries[0].text = 'Old first fact.';
+              const text = JSON.stringify(wire);
+              if (calls === 1) firstText = text;
+              return f.modelResult(text, calls);
+            });
+          const failure = yield* f.request(generate).pipe(Effect.flip);
+          expect(calls).toBe(2);
+          expect(failure).toBeInstanceOf(TopicDraftError);
+          if (!Schema.is(TopicDraftError)(failure) || !failure.diagnostics)
+            throw new Error('Expected observed failure.');
+          const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, failure.diagnostics.receiptId);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual([
+            'draft-invalid',
+            scenario === 'provider-failure'
+              ? 'provider-failed'
+              : scenario === 'provider-output-invalid'
+                ? 'provider-output-invalid'
+                : 'draft-invalid',
+          ]);
+          expect(receipt.firstFailedOutput?.text).toBe(firstText);
+          expect(receipt.attempts[1].usage).toEqual(
+            scenario === 'provider-failure' ? {status: 'unavailable'} : f.modelResult('', 2).usage,
+          );
+          expect(receipt.attempts[0].usage).toEqual(f.modelResult('', 1).usage);
+          expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  for (const scenario of [
+    'malformed',
+    'partial',
+    'legacy3',
+    'legacy4',
+    'legacy1',
+    'legacy2',
+    'missing-comparisons',
+    'wrong-role-comparison',
+    'schema',
+    'identity',
+    'oversized',
+    'model',
+    'settings',
+    'sampling-absent',
+    'sampling-profileId',
+    'sampling-temperature',
+    'sampling-topP',
+    'sampling-topK',
+    'provider-parse',
+    'provider-schema',
+    'unsupported',
+    'deadline',
+    'unexpected-defect',
+    'prefix-defect',
+  ] as const) {
+    effectIt.effect('refuses repair of terminal output: ' + scenario, () =>
+      withControllerFixture(f =>
+        Effect.gen(function* () {
+          let calls = 0;
+          const projection =
+            scenario === 'unexpected-defect' || scenario === 'prefix-defect'
+              ? vi.spyOn(schemaModule, 'projectTopicDraftWire').mockImplementationOnce(() => {
+                  throw new Error(
+                    scenario === 'prefix-defect'
+                      ? 'Topic maintenance draft: unexpected projection defect.'
+                      : 'UNEXPECTED DEFECT',
+                  );
+                })
+              : undefined;
+          const wire = {
+            ...f.valid,
+            ...(scenario === 'identity' ? {packetDigest: 'f'.repeat(64)} : {}),
+            ...(scenario === 'legacy1'
+              ? {version: 1}
+              : scenario === 'legacy2'
+                ? {version: 2}
+                : scenario === 'legacy3'
+                  ? {version: 3}
+                  : scenario === 'legacy4'
+                    ? {version: 4}
+                    : {}),
+            ...(scenario === 'schema' ? {unexpected: true} : {}),
+          };
+          if (scenario === 'missing-comparisons') wire.facts.entries.pop();
+          if (scenario === 'wrong-role-comparison') wire.facts.entries[0].ordinal = 77;
+          const text =
+            scenario === 'malformed'
+              ? '{invalid'
+              : scenario === 'partial'
+                ? '{}'
+                : scenario === 'oversized'
+                  ? 'x'.repeat(32 * 1024 + 1)
+                  : JSON.stringify(wire);
+          const generate: typeof runSelectedDraft = () =>
+            Effect.gen(function* () {
+              calls++;
+              if (scenario === 'provider-parse')
+                return yield* InvalidModelOutput.make({message: 'Provider parse failed.', modelId});
+              if (scenario === 'provider-schema')
+                return yield* TopicDraftProviderOutputError.make({
+                  message: 'Provider schema failed.',
+                  output: retainedTopicGenerationOutput(1, '{}', 'decoded-json'),
+                  usage: f.modelResult('').usage,
+                });
+              if (scenario === 'deadline')
+                return yield* selectedModule.SelectedDraftError.make({
+                  message: 'Provider deadline.',
+                  reason: 'deadline',
+                });
+              if (scenario === 'unsupported')
+                return yield* selectedModule.SelectedDraftError.make({message: 'Unsupported provider.'});
+              return {
+                ...f.modelResult(text),
+                ...(scenario === 'model' ? {modelIdentity: 'wrong'} : {}),
+                ...(scenario === 'settings' ? {settings: {maxOutputTokens: 4000 as const}} : {}),
+                ...(scenario === 'sampling-absent'
+                  ? {settings: {maxOutputTokens: 4000 as const, seed: 0 as const}}
+                  : {}),
+                ...(scenario.startsWith('sampling-') && scenario !== 'sampling-absent'
+                  ? {
+                      settings: {
+                        ...f.modelResult('').settings,
+                        sampling: {
+                          ...f.modelResult('').settings.sampling!,
+                          [scenario.slice('sampling-'.length)]:
+                            scenario === 'sampling-profileId' ? 'different-profile' : -1,
+                        },
+                      },
+                    }
+                  : {}),
+              };
+            });
+          const failure = yield* f
+            .request(generate)
+            .pipe(Effect.ensuring(Effect.sync(() => projection?.mockRestore())), Effect.flip);
+          expect(calls).toBe(1);
+          if (!Schema.is(TopicDraftError)(failure) || !failure.diagnostics)
+            throw new Error('Expected observed failure.');
+          const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, failure.diagnostics.receiptId);
+          expect(receipt.attempts).toHaveLength(1);
+          expect(receipt.attempts[0].status).not.toBe('draft-invalid');
+          expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+  effectIt.effect('treats missing trusted lookup context as terminal before provider dispatch', () =>
+    withControllerFixture(f =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const spy = vi.spyOn(schemaModule, 'topicDraftCurrentEvidence').mockImplementationOnce(() => {
+          throw new Error('Verified current topic evidence is unavailable.');
+        });
+        const generate: typeof runSelectedDraft = () =>
+          Effect.sync(() => {
+            calls++;
+            return f.modelResult(JSON.stringify(f.valid));
+          });
+        const failure = yield* f
+          .request(generate)
+          .pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())), Effect.flip);
+        expect(calls).toBe(0);
+        expect(Schema.is(TopicDraftError)(failure) && failure.message).toBe(
+          'Verified current topic evidence is unavailable.',
+        );
+        expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('shares the original deadline after a nonzero first attempt', () =>
+    withControllerFixture(f =>
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<void>();
+        const repairStarted = yield* Deferred.make<void>();
+        let calls = 0;
+        let completed = false;
+        const generate: typeof runSelectedDraft = () =>
+          Effect.gen(function* () {
+            calls++;
+            if (calls === 1) {
+              yield* Deferred.succeed(firstStarted, undefined);
+              yield* Effect.sleep(40_000);
+              return f.modelResult(JSON.stringify(f.invalid));
+            }
+            yield* Deferred.succeed(repairStarted, undefined);
+            return yield* Effect.never;
+          });
+        const fiber = yield* f.request(generate).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              completed = true;
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(firstStarted);
+        yield* TestClock.adjust(40_000);
+        yield* Deferred.await(repairStarted);
+        yield* TestClock.adjust(79_999);
+        expect(completed).toBe(false);
+        yield* TestClock.adjust(1);
+        const failure = yield* Fiber.join(fiber).pipe(Effect.flip);
+        expect(calls).toBe(2);
+        if (!Schema.is(TopicDraftError)(failure) || !failure.diagnostics)
+          throw new Error('Expected observed deadline.');
+        const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, failure.diagnostics.receiptId);
+        expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'deadline']);
+        expect(receipt.attempts.map(attempt => attempt.elapsedMilliseconds)).toEqual([40_000, 80_000]);
+        expect(receipt.elapsedMilliseconds).toBe(120_000);
+        expect(receipt.firstFailedOutput?.text).toBe(JSON.stringify(f.invalid));
+        expect(receipt.attempts[0].usage).toEqual(f.modelResult('').usage);
+        expect(receipt.attempts[1].usage).toEqual({status: 'unavailable'});
+      }),
+    ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const failSave of [2, 4]) {
+    effectIt.effect('does not dispatch repair after a required observation save fails: ' + failSave, () =>
+      withControllerFixture(f =>
+        Effect.gen(function* () {
+          const persist = candidateGenerationModule.saveTopicGenerationReceiptUnderLock;
+          let saves = 0;
+          let calls = 0;
+          const spy = vi
+            .spyOn(candidateGenerationModule, 'saveTopicGenerationReceiptUnderLock')
+            .mockImplementation((...args) => {
+              saves++;
+              return saves === failSave ? Effect.die('Fixture persistence failure.') : persist(...args);
+            });
+          const generate: typeof runSelectedDraft = () =>
+            Effect.sync(() => {
+              calls++;
+              return f.modelResult(JSON.stringify(f.invalid));
+            });
+          yield* f.request(generate).pipe(Effect.ensuring(Effect.sync(() => spy.mockRestore())), Effect.flip);
+          expect(calls).toBe(failSave === 2 ? 0 : 1);
+          expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
 });

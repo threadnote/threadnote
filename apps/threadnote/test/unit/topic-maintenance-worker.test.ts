@@ -1,7 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, FileSystem, Fiber, Layer, Option, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -14,6 +14,7 @@ import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {proposeTopicMaintenanceEnrollment} from '@threadnote/memory/topic-maintenance';
+import {parseTopicMaintenanceDraft} from '@threadnote/memory/topic-maintenance-draft';
 import {
   selectMaintenanceWorkPhase,
   type MaintenanceWorkSchedule,
@@ -21,6 +22,7 @@ import {
 import {
   readContextMaintenancePacket,
   readContextMaintenanceStatus,
+  reconcileAcceptedTopicMaintenanceCase,
   recordTopicMaintenanceReviewDecision,
   runContextMaintenance,
   type ContextMaintenanceCaseV2,
@@ -37,9 +39,18 @@ import {
   pruneAbsentTopicCheckpoints,
   selectRetainedMaintenanceCases,
   selectTopicMaintenanceRecord,
+  stateWithAcceptedTopicObservation,
+  reconcileAcceptedTopicMaintenanceState,
   topicMaintenanceCaseId,
   validTopicMaintenanceCheckpoints,
 } from '../../src/memory/context/maintenance_topic.js';
+import {basisFromPacket, readyEvidence, reviewEvidenceFromPacket} from '../../src/memory/context/maintenance_draft.js';
+import {privateReview} from '../../src/memory/context/maintenance_draft.js';
+import {
+  applyTopicMaintenanceReview,
+  prepareTopicMaintenanceReview,
+} from '../../src/memory/context/maintenance_review.js';
+import {saveCandidateReview} from '@threadnote/memory/candidate';
 
 const at = '2026-10-16T00:00:00.000Z';
 function topicCase(id: number, disposition: ContextMaintenanceCaseV2['disposition']): ContextMaintenanceCaseV2 {
@@ -100,6 +111,155 @@ function topic(id: number) {
   return parseMemoryDocument(uri, enrolled.content)!;
 }
 
+const codeTopicFixture = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-acceptance-'});
+  const repository = path.join(home, 'repository');
+  yield* fs.makeDirectory(repository);
+  const source = path.join(repository, 'source.ts');
+  yield* fs.writeFileString(source, 'export const retryLimit = 3;\n');
+  const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
+  const commit = (message: string) =>
+    Effect.gen(function* () {
+      yield* git(['add', '.']);
+      yield* git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', message]);
+    });
+  yield* git(['init', '--quiet']);
+  yield* commit('initial');
+  const config = {
+    account: 'local',
+    agentContextHome: home,
+    agentId: 'test',
+    manifestPath: path.join(home, 'manifest.yaml'),
+    user: 'tester',
+  };
+  yield* fs.writeFileString(
+    config.manifestPath,
+    `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
+  );
+  const index = () =>
+    CodeGraphIndexer.pipe(
+      Effect.flatMap(indexer => indexer.index({cwd: repository, threadnoteHome: home, ensureVectors: false})),
+    );
+  yield* index();
+  const [citation] = yield* captureMemoryCodeCitations(config, {callerCwd: repository, refs: ['source.ts']});
+  const uri = 'threadnote://user/tester/memories/durable/projects/fixture/source-topic.md';
+  const base = parseMemoryDocument(
+    uri,
+    formatMemoryDocument(
+      'MEMORY',
+      {
+        kind: 'durable',
+        status: 'active',
+        schemaVersion: 8,
+        memoryId: 'tn_source_topic',
+        project: 'fixture',
+        topic: 'source-topic',
+        sourceAgentClient: 'test',
+        timestamp: at,
+        codeCitations: [citation],
+      },
+      'The retry limit is three.',
+    ),
+  )!;
+  const enrolled = proposeTopicMaintenanceEnrollment(base, {
+    paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [citation.id]}],
+  });
+  const memory = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/source-topic.md');
+  yield* fs.makeDirectory(path.dirname(memory), {recursive: true});
+  yield* fs.writeFileString(memory, enrolled.content);
+  const accepted = yield* fs.readFileString(memory);
+  const original = parseMemoryDocument(uri, accepted)!;
+  const caseId = topicMaintenanceCaseId(original);
+  const stateFile = path.join(home, 'context-maintenance/state-v2.json');
+  for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
+  return {
+    fs,
+    path,
+    home,
+    repository,
+    source,
+    git,
+    commit,
+    config,
+    index,
+    citation,
+    uri,
+    memory,
+    accepted,
+    original,
+    caseId,
+    stateFile,
+  };
+});
+
+const noTextReviewFixture = Effect.gen(function* () {
+  const fixture = yield* codeTopicFixture;
+  const {fs, source, commit, index, config, repository, caseId} = fixture;
+  yield* fs.writeFileString(source, 'export const retryLimit = 3; // unchanged value\n');
+  yield* commit('source metadata changed');
+  yield* index();
+  let current = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+  for (let tick = 0; tick < 12 && current?.disposition !== 'needs-decision'; tick++) {
+    yield* runContextMaintenance(config, {cwd: repository});
+    current = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+  }
+  expect(current?.disposition).toBe('needs-decision');
+  const packet = readyEvidence(yield* readContextMaintenancePacket(config, caseId));
+  if (packet.version !== 1) throw new Error('Expected code topic packet.');
+  const basis = basisFromPacket(packet);
+  const proposal = parseTopicMaintenanceDraft(
+    basis,
+    JSON.stringify({
+      version: 1,
+      targetHash: basis.targetHash,
+      observationRevision: basis.observationRevision,
+      packetDigest: basis.packetDigest,
+      outcome: 'propose-revalidation',
+      operations: [],
+      reviewedHandles: [`current:${fixture.citation.id}`],
+      rationale: 'The cited value remains three.',
+      unresolvedQuestions: [],
+      removedClaims: [],
+      paragraphDispositions: {
+        version: 1,
+        entries: basis.paragraphs
+          .filter(item => item.role === 'descriptive' && item.support === 'direct')
+          .map(item => ({
+            ordinal: item.ordinal,
+            beforeHash: item.hash,
+            disposition: 'revalidate',
+            supportHandles: [`current:${fixture.citation.id}`],
+            rationale: 'The cited value remains three.',
+          })),
+      },
+    }),
+  );
+  const payload = {
+    version: 1 as const,
+    basis,
+    proposal,
+    reviewEvidence: reviewEvidenceFromPacket(packet),
+    generation: {
+      origin: 'manual' as const,
+      agent: 'manual' as const,
+      model: 'none' as const,
+      promptVersion: 'manual-topic-v1' as const,
+      attempts: 0 as const,
+      usage: {status: 'unavailable' as const},
+    },
+  };
+  const review = privateReview(undefined, basis, payload, 'fixture', 'source-topic', [], at);
+  yield* saveCandidateReview(fixture.home, review);
+  const prepared = yield* prepareTopicMaintenanceReview(config, {
+    reviewId: review.reviewId,
+    revision: review.revision,
+    sourceCwd: repository,
+  });
+  return {...fixture, basis, payload, review, prepared, preview: prepared.maintenanceApproval!.preview};
+});
+
 describe('topic maintenance worker scheduling', () => {
   it('gives topic work a bounded turn amid perpetual record, semantic, and requested work', () => {
     let schedule: Parameters<typeof selectMaintenanceWorkPhase>[0];
@@ -142,6 +302,93 @@ describe('topic maintenance worker scheduling', () => {
         expect(records.map(record => record.uri)).toEqual(order);
       }),
       {numRuns: 25},
+    );
+  });
+
+  it('reconciles only the selected case and checkpoint, with material replay idempotence', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(fc.integer({min: 0, max: 24}), {minLength: 1, maxLength: 10}),
+        fc.nat(),
+        fc.array(fc.constantFrom('needs-decision' as const, 'waiting-evidence' as const, 'resolved' as const), {
+          minLength: 1,
+          maxLength: 10,
+        }),
+        fc.constantFrom(
+          'idle' as const,
+          'running' as const,
+          'waiting-evidence' as const,
+          'needs-decision' as const,
+          'failed' as const,
+        ),
+        (ids, choice, dispositions, initialState) => {
+          const selected = ids[choice % ids.length];
+          const beforeCases = ids.map((id, index) => topicCase(id, dispositions[index % dispositions.length]));
+          const prior = {
+            targetHash: 'a'.repeat(64),
+            revision: 'a'.repeat(64),
+            outcome: 'review-required' as const,
+            checkedAt: at,
+            coverage: 'declared-only' as const,
+          };
+          const checkpoints = Object.fromEntries(beforeCases.map(item => [item.caseId, prior]));
+          const state: MaintenanceState = {
+            version: 2,
+            paused: false,
+            state: initialState,
+            generation: 'test',
+            projects: [],
+            cases: beforeCases,
+            receipts: [],
+            checkpoints: {},
+            topicCheckpoints: checkpoints,
+          };
+          const original = JSON.stringify(state);
+          const chosen = beforeCases.find(item => item.memoryId === `tn_topic_${selected}`)!;
+          const accepted = {...chosen, disposition: 'resolved' as const, evidenceRevision: 'b'.repeat(64)};
+          const checkpoint = {
+            ...prior,
+            targetHash: 'b'.repeat(64),
+            revision: 'b'.repeat(64),
+            outcome: 'unchanged' as const,
+          };
+          const observed = {caseId: chosen.caseId, item: accepted, checkpoint};
+          const once = stateWithAcceptedTopicObservation(state, observed);
+          const twice = stateWithAcceptedTopicObservation(once, observed);
+          expect(twice).toEqual(once);
+          expect(JSON.stringify(state)).toBe(original);
+          expect(once.cases.map(item => item.caseId)).toEqual(beforeCases.map(item => item.caseId));
+          expect(once.cases.filter(item => item.caseId !== chosen.caseId)).toEqual(
+            beforeCases.filter(item => item.caseId !== chosen.caseId),
+          );
+          expect(Object.entries(once.topicCheckpoints ?? {}).filter(([id]) => id !== chosen.caseId)).toEqual(
+            Object.entries(checkpoints).filter(([id]) => id !== chosen.caseId),
+          );
+          expect(once.cases.find(item => item.caseId === chosen.caseId)).toEqual(accepted);
+          expect(once.topicCheckpoints?.[chosen.caseId]).toEqual(checkpoint);
+          const remainingDispositions = new Set(
+            beforeCases.filter(item => item.caseId !== chosen.caseId).map(item => item.disposition),
+          );
+          const expectedState = remainingDispositions.has('needs-decision')
+            ? 'needs-decision'
+            : remainingDispositions.has('waiting-evidence')
+              ? 'waiting-evidence'
+              : initialState === 'needs-decision' || initialState === 'waiting-evidence'
+                ? 'idle'
+                : initialState;
+          expect(once.state).toBe(expectedState);
+        },
+      ),
+      {
+        numRuns: 50,
+        verbose: true,
+        examples: [
+          [[0], 0, ['waiting-evidence'], 'waiting-evidence'],
+          [[0, 1], 0, ['needs-decision', 'waiting-evidence'], 'needs-decision'],
+          [[0], 0, ['resolved'], 'failed'],
+          [[0], 0, ['resolved'], 'running'],
+        ],
+      },
     );
   });
 
@@ -547,73 +794,12 @@ describe('topic maintenance worker scheduling', () => {
     () =>
       Effect.scoped(
         Effect.gen(function* () {
-          const fs = yield* FileSystem.FileSystem;
-          const path = yield* Path.Path;
-          const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-maintenance-source-'});
-          const repository = path.join(home, 'repository');
-          yield* fs.makeDirectory(repository);
-          const source = path.join(repository, 'source.ts');
-          yield* fs.writeFileString(source, 'export const retryLimit = 3;\n');
-          const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repository, ...args]);
-          yield* git(['init', '--quiet']);
-          yield* git(['add', '.']);
-          yield* git([
-            '-c',
-            'user.name=Test',
-            '-c',
-            'user.email=test@example.invalid',
-            'commit',
-            '--quiet',
-            '-m',
-            'initial',
-          ]);
-          const config = {
-            account: 'local',
-            agentContextHome: home,
-            agentId: 'test',
-            manifestPath: path.join(home, 'manifest.yaml'),
-            user: 'tester',
-          };
-          yield* fs.writeFileString(
-            config.manifestPath,
-            `version: 1\nprojects:\n  - name: fixture\n    path: ${JSON.stringify(repository)}\n    uri: threadnote://resources/repos/fixture\n    seed: []\n`,
-          );
-          yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: home, ensureVectors: false});
-          const citations = yield* captureMemoryCodeCitations(config, {callerCwd: repository, refs: ['source.ts']});
-          expect(citations).toHaveLength(1);
-          const uri = 'threadnote://user/tester/memories/durable/projects/fixture/source-topic.md';
-          const base = parseMemoryDocument(
-            uri,
-            formatMemoryDocument(
-              'MEMORY',
-              {
-                kind: 'durable',
-                status: 'active',
-                schemaVersion: 8,
-                memoryId: 'tn_source_topic',
-                project: 'fixture',
-                topic: 'source-topic',
-                sourceAgentClient: 'test',
-                timestamp: '2026-10-16T00:00:00.000Z',
-                codeCitations: citations,
-              },
-              'The retry limit is three.',
-            ),
-          )!;
-          const enrolled = proposeTopicMaintenanceEnrollment(base, {
-            paragraphs: [{role: 'descriptive', support: 'direct', citationIds: [citations[0].id]}],
-          });
-          const memory = path.join(home, 'data/local/user/tester/memories/durable/projects/fixture/source-topic.md');
-          yield* fs.makeDirectory(path.dirname(memory), {recursive: true});
-          yield* fs.writeFileString(memory, enrolled.content);
-          const accepted = yield* fs.readFileString(memory);
-          const caseId = topicMaintenanceCaseId(parseMemoryDocument(uri, accepted)!);
-          const stateFile = path.join(home, 'context-maintenance/state-v2.json');
+          const {fs, path, home, repository, source, git, config, uri, memory, accepted, caseId, stateFile} =
+            yield* codeTopicFixture;
           const currentCase = Effect.gen(function* () {
             const state = JSON.parse(yield* fs.readFileString(stateFile));
             return state.cases.find((item: {caseId: string}) => item.caseId === caseId);
           });
-          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(config, {cwd: repository});
           const before = yield* currentCase;
           expect(before).toBeDefined();
           const priorState = JSON.parse(yield* fs.readFileString(stateFile));
@@ -712,6 +898,136 @@ describe('topic maintenance worker scheduling', () => {
           expect(reopened.disposition).toBe('needs-decision');
           expect(reopened.evidenceRevision).not.toBe(suppressed.evidenceRevision);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
+        }),
+      ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('revalidates unchanged text and persists the fresh observed case before written completion', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* noTextReviewFixture;
+        const {config, repository, review, prepared, preview, fs, memory, caseId, accepted} = fixture;
+        expect(preview.content).toContain('The retry limit is three.');
+        expect(preview.content).not.toBe(accepted);
+        const applied = yield* applyTopicMaintenanceReview(config, {
+          reviewId: review.reviewId,
+          revision: prepared.revision,
+          sourceCwd: repository,
+          approvalDigest: preview.approvalDigest,
+          approved: true,
+        });
+        expect(applied.maintenanceApproval?.stage).toBe('written');
+        expect(yield* fs.readFileString(memory)).toBe(preview.content);
+        expect((yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0]?.disposition).toBe(
+          'resolved',
+        );
+      }),
+    ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('holds the state lock across the fresh observation and cache write', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* noTextReviewFixture;
+        const {fs, config, stateFile, memory, preview, original, payload, repository, caseId, basis} = fixture;
+        yield* fs.writeFileString(memory, preview.content);
+        const writing = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        const pausedFs = {
+          ...fs,
+          rename: (from: string, to: string) =>
+            to === stateFile
+              ? Effect.gen(function* () {
+                  yield* Deferred.succeed(writing, undefined);
+                  yield* Deferred.await(resume);
+                  yield* fs.rename(from, to);
+                })
+              : fs.rename(from, to),
+        };
+        const completing = yield* reconcileAcceptedTopicMaintenanceCase(
+          config,
+          original,
+          preview.content,
+          payload,
+          repository,
+          Effect.succeed('completed'),
+        ).pipe(Effect.provideService(FileSystem.FileSystem, pausedFs), Effect.forkScoped);
+        yield* Deferred.await(writing);
+        const deciding = yield* recordTopicMaintenanceReviewDecision(config, {
+          caseId,
+          observationRevision: basis.observationRevision,
+          action: 'defer',
+        }).pipe(Effect.forkScoped);
+        expect(Option.isNone(yield* Fiber.await(deciding).pipe(Effect.timeoutOption(25)))).toBe(true);
+        yield* Deferred.succeed(resume, undefined);
+        expect(yield* Fiber.join(completing)).toBe('completed');
+        const decision = yield* Fiber.join(deciding).pipe(Effect.result);
+        const state: MaintenanceState = JSON.parse(yield* fs.readFileString(stateFile));
+        expect(state.cases.find(item => item.caseId === caseId)?.evidenceRevision).toBe(
+          state.topicCheckpoints?.[caseId]?.revision,
+        );
+        if (Result.isFailure(decision))
+          expect(state.cases.find(item => item.caseId === caseId)?.disposition).toBe('resolved');
+        else expect(state.cases.find(item => item.caseId === caseId)?.disposition).toBe('deferred-policy');
+      }),
+    ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect.each(['source', 'target'] as const)(
+    'keeps a raced %s actionable when it changes during persisted verification',
+    drift =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* noTextReviewFixture;
+          const {fs, config, stateFile, memory, preview, original, payload, repository, source, commit, index, caseId} =
+            fixture;
+          yield* fs.writeFileString(memory, preview.content);
+          const state: MaintenanceState = JSON.parse(yield* fs.readFileString(stateFile));
+          const persisted = yield* Deferred.make<void>();
+          const resume = yield* Deferred.make<void>();
+          const reconcile = reconcileAcceptedTopicMaintenanceState(
+            config,
+            state,
+            original,
+            preview.content,
+            payload,
+            repository,
+            next =>
+              Effect.gen(function* () {
+                yield* fs.writeFileString(stateFile, JSON.stringify(next));
+                yield* Deferred.succeed(persisted, undefined);
+                yield* Deferred.await(resume);
+              }),
+            Effect.succeed('completed'),
+          );
+          const fiber = yield* Effect.forkScoped(reconcile);
+          yield* Deferred.await(persisted);
+          if (drift === 'source') {
+            yield* fs.writeFileString(source, 'export const retryLimit = 4;\n');
+            yield* commit('newer source during state persistence');
+            yield* index();
+          } else {
+            yield* fs.writeFileString(
+              memory,
+              preview.content.replace('The retry limit is three.', 'The retry limit is four.'),
+            );
+          }
+          yield* Deferred.succeed(resume, undefined);
+          const result = yield* Fiber.join(fiber).pipe(Effect.result);
+          expect(Result.isFailure(result)).toBe(true);
+          const after: MaintenanceState = JSON.parse(yield* fs.readFileString(stateFile));
+          expect(after.cases.find(item => item.caseId === caseId)?.disposition).toBe('needs-decision');
+          expect(after.topicCheckpoints?.[caseId]).toEqual(state.topicCheckpoints?.[caseId]);
+          if (drift === 'source') {
+            const priorRevision = after.cases.find(item => item.caseId === caseId)?.evidenceRevision;
+            let reopened = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+            for (let tick = 0; tick < 12 && reopened?.evidenceRevision === priorRevision; tick++) {
+              yield* runContextMaintenance(config, {cwd: repository});
+              reopened = (yield* readContextMaintenanceStatus(config, 'fixture', {caseId})).cases[0];
+            }
+            expect(reopened?.evidenceRevision).not.toBe(priorRevision);
+            expect(reopened?.disposition).toBe('needs-decision');
+          }
         }),
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
