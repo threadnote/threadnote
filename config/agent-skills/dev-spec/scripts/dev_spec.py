@@ -196,7 +196,7 @@ def summary(spec):
 def record(spec, kind, data, markdown, refs, code_refs=None, deferred=False):
     body = markdown.rstrip() + "\n\n" + "\n".join(lines("Relevant prior memories", ["[Memory](" + u + ")" for u in refs]))
     return {"schemaVersion": 1, "featureId": spec["id"], "project": spec["project"], "kind": kind,
-            "memoryKind": "durable" if kind == "verified" else "handoff", "data": data,
+            "memoryKind": "durable", "data": data,
             "markdown": body, "codeRefs": code_refs or [], "deferred": deferred,
             "relations": [{"type": "references", "uri": uri} for uri in refs]}
 
@@ -218,11 +218,15 @@ def save(spec, path, client, confirmation=None, review=None, draft=False, deferr
         store.recover(recover_uri)
         saved_input = digest([spec, confirmation, review, draft, deferred])
         if store.state.get("savedInput") == saved_input:
+            durable = True
             for receipt in store.state["receipts"].values():
-                require(digest(load_record(client.read(receipt["uri"]))) == receipt["hash"], "Stored artifact changed")
-            root = load_record(client.read(store.state["rootUri"]))
-            return {"rootUri": store.state["rootUri"], "status": root["data"]["status"],
-                    "specHash": digest(spec), "children": root["data"]["children"]}
+                observed = load_record(client.read(receipt["uri"]))
+                require(digest(observed) == receipt["hash"], "Stored artifact changed")
+                durable = durable and observed.get("memoryKind") == "durable"
+            if durable:
+                root = load_record(client.read(store.state["rootUri"]))
+                return {"rootUri": store.state["rootUri"], "status": root["data"]["status"],
+                        "specHash": digest(spec), "children": root["data"]["children"]}
         children, used = {}, {"root"}
         for artifact in spec["artifacts"]:
             key = artifact["id"]

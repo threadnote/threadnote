@@ -13,6 +13,14 @@ When these placeholders are rendered, use those absolute immutable resource root
 
 Help the user decide what a feature means. Threadnote is authoritative; local JSON and Markdown/Mermaid files are working drafts and previews. Own behavior, domain concepts, constraints and external contracts. `dev-plan` owns implementation architecture and phases; `dev-cycle` implements and verifies them. Spec approval alone does not authorize implementation or publication.
 
+## Required persistence
+
+On desktop, store the specification root and every domain, workflow, capability and contract artifact as private **durable** Threadnote memories, including drafts. Durability controls retention; `draft`, `ready` and verified implementation remain separate states. Saving these requested artifacts is part of the task and needs no additional Knowledge Delta approval. A session handoff is a separate memory and cannot substitute for the artifacts.
+
+Once the draft has valid structure, run `save --draft` before requesting approval or pausing with substantive work. After an affirmative response, record the actual approval and save the approved revision in the same turn, before `export-plan`, implementation handoff or a completion response. If review or citation readiness blocks a ready save, persist the accepted intent with `--draft` and report the remaining gate; never silently leave it only in chat or local files.
+
+Completion requires a successful save, verified child/root readback and recorded receipts. Return the actual `threadnote://` root URI and its saved state. A suggested command, preview or confirmation file is not proof of persistence. If saving fails, retain the draft/receipts, report the concrete failure and continue recovery; do not claim completion. Personal cloud's task-local storage is not durable—state that limitation and follow the profile contract without silently publishing private artifacts.
+
 ## Discover and interview
 
 1. Use installed `threadnote-context` for the initial brief with task and absolute `callerCwd`. Read applicable repository guidance. Understand the goal and define the code/product scope before targeted recall. Inspect relevant existing behavior, callers, tests and public contracts; use `threadnote-code-graph` for unfamiliar relationships or evidence gaps. For greenfield work, state the known integration boundary and unknowns.
@@ -31,6 +39,7 @@ python3 "$SPEC_DIR/scripts/dev_spec.py" pin --uri "$MEMORY_URI" --out "$RUN/sour
 python3 "$SPEC_DIR/scripts/dev_spec.py" validate --spec "$RUN/spec.json"
 python3 "$SPEC_DIR/scripts/dev_spec.py" render --spec "$RUN/spec.json" --out "$RUN/preview"
 python3 "$SPEC_DIR/scripts/dev_spec.py" acceptance-packet --spec "$RUN/spec.json" --out "$RUN/acceptance.json"
+python3 "$SPEC_DIR/scripts/dev_spec.py" save --spec "$RUN/spec.json" --state "$RUN/receipts.json" --draft
 ```
 
 `init` is incomplete. Fill it through the interview; `save --draft` allows unresolved decisions once the basic structure is valid. Domain/workflow artifacts require Mermaid; other artifact kinds use diagrams where useful. `validate --mermaid-cli /absolute/path/to/mmdc` renders diagrams when an installed CLI is available; otherwise report type/fence checks only.

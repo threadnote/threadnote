@@ -13,6 +13,14 @@ When these placeholders are rendered, use those absolute immutable resource root
 
 Produce a plan another agent can implement without rediscovering important decisions. Threadnote is authoritative; local files are working drafts or generated previews. Planning does not start implementation or authorize publication.
 
+## Required persistence
+
+On desktop, store the root plan, current and target architecture, phases and navigation indexes as private **durable** Threadnote memories, including drafts. Durable retention does not make a proposed design approved or implemented; preserve its explicit readiness and verification state. These are requested task artifacts, so save them directly without a separate Knowledge Delta approval. Keep the session handoff separate.
+
+Once the draft has valid structure, run `save --draft` before presenting it for approval or pausing with substantive work. After approval or a requested revision, save the exact resulting plan in the same turn before handing off to dev-cycle or reporting completion. If a ready save is blocked by review, open questions or current citations, save a draft and identify the remaining gate. Never defer artifact storage until implementation closeout.
+
+Completion requires verified child/root readback and save receipts. Return the actual `threadnote://` root URI and saved readiness; local files, previews, a proposed save command or a session handoff are insufficient. Recover failed or interrupted writes without claiming completion. Personal cloud's task-local save is not durable—disclose the limitation and follow its profile contract without silently publishing private artifacts.
+
 ## Workflow
 
 When the task has an approved dev-spec, read its pinned root and artifacts instead of restarting the behavioral interview. Use `dev_spec.py export-plan` followed by `dev_plan.py from-spec`; preserve feature/requirement/scenario identities and upstream obligations. Discover the installed dev-spec path from the skill catalog. Read its `references/workflow.md` for the shared contract; an import initializes an incomplete plan, not a finished design. Standalone planning remains supported.
@@ -24,7 +32,7 @@ When the task has an approved dev-spec, read its pinned root and artifacts inste
 5. **Describe the final solution.** Produce a separate **target architecture** artifact: final structure and behavior, key contracts, decisions and rationale. Prefer Mermaid flow, sequence, state or ER diagrams. Distinguish existing, modified, new and removed components. Cite current code through native `codeRefs`; proposed components have planned paths, never invented graph handles.
 6. **Plan the transition.** Specify outcomes, affected code, key contracts and verification; leave routine implementation choices open. Split large work into independently verifiable outcomes, preferably safe PR boundaries. Each prefix must preserve a working system. Use a dependency DAG; a chain is a valid DAG. Multi-phase plans store each phase separately; one phase stays in the root. Map requirements to phase acceptance. Include compatibility/migration sequencing when relevant.
 7. **Validate and review.** Use the satellite for mechanical checks and previews. Substantial plans (multiple phases, significant ownership/contract changes, migration or consequential uncertainty) get one independent review following [review.md](references/review.md). The reviewer is quiet and returns only its final artifact. Fix material findings; a material revision may get one targeted follow-up. Avoid endless review or model self-grades as proof.
-8. **Save and hand off.** Save private memories with native citations and typed links. Observed architecture is reusable factual context; proposed architecture and execution plans remain planning artifacts. The satellite writes children before the root, verifies readback and records receipts. A partial write is not a stored, ready plan. Finish with the required private `threadnote-memory` handoff: root URI, readiness, checks, limitations and next step. Sharing and unrelated durable knowledge promotion retain their existing authorization rules.
+8. **Save and hand off.** Complete the required durable artifact save with native citations and typed links. Observed architecture is factual context; target architecture and execution plans retain their proposed state. The satellite writes children before the root, verifies readback and records receipts. A partial write is not a stored, ready plan. Finish with the separate private `threadnote-memory` handoff: saved root URI, readiness, checks, limitations and next step. Sharing and unrelated durable knowledge promotion retain their existing authorization rules.
 
 ## Satellite
 
@@ -36,6 +44,7 @@ python3 "$SKILL_DIR/scripts/dev_plan.py" init --scope "$RUN/scope.json" --id fea
 python3 "$SKILL_DIR/scripts/dev_plan.py" pin --uri "$MEMORY_URI" --out "$RUN/source.json"
 python3 "$SKILL_DIR/scripts/dev_plan.py" validate --plan "$RUN/plan.json"
 python3 "$SKILL_DIR/scripts/dev_plan.py" render --plan "$RUN/plan.json" --out "$RUN/preview"
+python3 "$SKILL_DIR/scripts/dev_plan.py" save --plan "$RUN/plan.json" --state "$RUN/receipts.json" --draft
 python3 "$SKILL_DIR/scripts/dev_plan.py" review-packet --plan "$RUN/plan.json" --out "$RUN/review-input.json"
 python3 "$SKILL_DIR/scripts/dev_plan.py" save --plan "$RUN/plan.json" --state "$RUN/receipts.json" --review "$RUN/review.json"
 ```

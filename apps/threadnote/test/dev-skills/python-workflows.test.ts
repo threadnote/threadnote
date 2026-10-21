@@ -43,6 +43,34 @@ describe('bundled development workflow Python contracts', () => {
   }
 });
 
+it('plan revisions remain durable and idempotent across readiness changes and legacy migration', () => {
+  fc.assert(
+    fc.property(
+      fc.record({
+        phases: fc.integer({min: 1, max: 18}),
+        legacy: fc.boolean(),
+        drafts: fc.array(fc.boolean(), {minLength: 1, maxLength: 5}),
+      }),
+      sequence => {
+        const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+        const result = spawnSync(
+          python,
+          ['-B', resolve('apps/threadnote/test/dev-skills/python/dev-plan/test_dev_plan.py'), '--durability-fixture'],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(sequence),
+            timeout: 10_000,
+            env: {...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: ''},
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({roundtrip: true, durable: true, idempotent: true});
+      },
+    ),
+    {numRuns: 12, examples: [[{phases: 18, legacy: true, drafts: [true, false, true]}]]},
+  );
+}, 45_000);
+
 it('replay and acknowledgement preserve arbitrary event order across delivery boundaries', () => {
   fc.assert(
     fc.property(fc.array(fc.integer(), {maxLength: 250}), ids => {
