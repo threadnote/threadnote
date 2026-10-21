@@ -104,6 +104,8 @@ describe('exact-release enrolled workflow refresh', () => {
         yield* f.fs.writeFileString(file, original);
         expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(false);
       }).pipe(provide),
+    // Two roots plus a repair retry took 23–29s on Windows CI, leaving too little room under 30s.
+    process.platform === 'win32' ? 60_000 : undefined,
   );
   effectIt.effect.prop(
     'never re-enables disabled or removed consumers during refresh',

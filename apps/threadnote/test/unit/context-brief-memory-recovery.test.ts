@@ -82,43 +82,56 @@ describe('Context Brief code-linked memory recovery', () => {
     );
   });
 
+  const assertScopedAnchorRetrieval = ({team, topic}: {team: string; topic: string}) =>
+    Effect.gen(function* () {
+      const root = `threadnote://user/tester/memories/shared/${team}`;
+      const inside = `${root}/durable/projects/threadnote/${topic}.md`;
+      const outside = [`${root}-other/durable/projects/threadnote/${topic}.md`, MEMORY_URI];
+      const citation = codeCitation('src/first.ts');
+      mocks.loadRecallCodeLinks.mockReturnValue(
+        Effect.succeed(
+          [inside, ...outside].map(uri => ({
+            anchorOrdinal: 0,
+            citationId: citation.id,
+            matchKind: 'file-path',
+            uri,
+          })),
+        ),
+      );
+      mocks.readMemoryRecordsByUri.mockImplementation((_config: RuntimeConfig, uris: readonly string[]) =>
+        Effect.succeed(uris.map(uri => ({...memoryRecord(citation), uri}))),
+      );
+      const result = yield* contextBriefRecoveryTestEffect(
+        retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts']), {
+          allowedUriScopes: [root],
+        }),
+      );
+      expect(mocks.readMemoryRecordsByUri).toHaveBeenLastCalledWith(CONFIG, [inside]);
+      expect(mocks.loadRecallMemoryIdentities).toHaveBeenLastCalledWith(
+        CONFIG,
+        expect.objectContaining({allowedUriScopes: [root]}),
+      );
+      expect(result.candidates.map(candidate => candidate.uri)).toEqual([inside]);
+      expect(mocks.finalizeDeferredCodeAnchorsForRoute).not.toHaveBeenCalled();
+    });
+
   fcEffectProp(
     effectIt,
     'scoped anchor retrieval excludes sibling shares and personal memory before reading bodies',
-    {team: fc.stringMatching(/^[a-z][a-z0-9-]{0,10}$/u), topic: fc.stringMatching(/^[a-z]{1,12}$/u)},
-    ({team, topic}) =>
-      Effect.gen(function* () {
-        const root = `threadnote://user/tester/memories/shared/${team}`;
-        const inside = `${root}/durable/projects/threadnote/${topic}.md`;
-        const outside = [`${root}-other/durable/projects/threadnote/${topic}.md`, MEMORY_URI];
-        const citation = codeCitation('src/first.ts');
-        mocks.loadRecallCodeLinks.mockReturnValue(
-          Effect.succeed(
-            [inside, ...outside].map(uri => ({
-              anchorOrdinal: 0,
-              citationId: citation.id,
-              matchKind: 'file-path',
-              uri,
-            })),
-          ),
-        );
-        mocks.readMemoryRecordsByUri.mockImplementation((_config: RuntimeConfig, uris: readonly string[]) =>
-          Effect.succeed(uris.map(uri => ({...memoryRecord(citation), uri}))),
-        );
-        const result = yield* contextBriefRecoveryTestEffect(
-          retrieveContextBriefCodeLinkedMemoryEvidence(CONFIG, codeAnchorPlan(['src/first.ts']), {
-            allowedUriScopes: [root],
-          }),
-        );
-        expect(mocks.readMemoryRecordsByUri).toHaveBeenLastCalledWith(CONFIG, [inside]);
-        expect(mocks.loadRecallMemoryIdentities).toHaveBeenLastCalledWith(
-          CONFIG,
-          expect.objectContaining({allowedUriScopes: [root]}),
-        );
-        expect(result.candidates.map(candidate => candidate.uri)).toEqual([inside]);
-        expect(mocks.finalizeDeferredCodeAnchorsForRoute).not.toHaveBeenCalled();
-      }),
+    {
+      // These fixtures exercise scope isolation with valid cross-platform resource segments.
+      team: fc.stringMatching(/^[a-z][a-z0-9-]{0,10}$/u).map(value => `team-${value}`),
+      topic: fc.stringMatching(/^[a-z]{1,12}$/u).map(value => `topic-${value}`),
+    },
+    assertScopedAnchorRetrieval,
     {fastCheck: {numRuns: 24}},
+  );
+
+  effectIt.effect('keeps scopes isolated when fixture names contain Windows-reserved words', () =>
+    Effect.gen(function* () {
+      yield* assertScopedAnchorRetrieval({team: 'team-c--j9msw', topic: 'topic-con'});
+      yield* assertScopedAnchorRetrieval({team: 'team-con', topic: 'topic-nul'});
+    }),
   );
 
   fcEffectProp(

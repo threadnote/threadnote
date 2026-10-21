@@ -1,3 +1,4 @@
+import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {it as effectIt} from '@effect/vitest';
 import {Effect, Result} from 'effect';
 import {TestClock} from 'effect/testing';
@@ -53,7 +54,7 @@ const modelReviewedFixture = Effect.gen(function* () {
         modelIdentity: modelId,
         modelVersion: `${model.revision}:${model.sha256}`,
         usage: {status: 'unavailable' as const},
-        settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+        settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
       };
     });
   const review = yield* requestTopicMaintenanceDraft(
