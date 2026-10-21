@@ -351,6 +351,7 @@ const captureMemoryCodeCitationsForWrite = Effect.fn('memory.captureCodeCitation
     callerCwd: input.callerCwd,
     project: input.project,
     refs: input.refs,
+    writerWaitTimeoutMilliseconds: 0,
   }).pipe(Effect.result);
   if (Result.isSuccess(captured)) {
     return {citations: captured.success, deferred: undefined};
