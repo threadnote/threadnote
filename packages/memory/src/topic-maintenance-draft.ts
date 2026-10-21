@@ -4,6 +4,13 @@ import {
   topicGenerationUsage,
   type TopicGenerationSummaryV1,
 } from './topic-maintenance-generation.js';
+import type {
+  AutomaticMaintenanceAssessment,
+  AutomaticMaintenanceSourceV1,
+  AutomaticMaintenanceScope,
+} from './automatic-maintenance.js';
+import {assertAutomaticMaintenanceAssessment} from './automatic-maintenance.js';
+import {assertApprovedSourceDescriptor} from './reviewed-support.js';
 import {consolidationRevision, consolidationSections} from './consolidation.js';
 import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from './code/citation.js';
 import type {MemoryObsidianEvidenceV1} from './document.js';
@@ -62,7 +69,27 @@ export interface TopicMaintenanceObsidianDraftBasisV2 extends Omit<TopicMaintena
   /** Already captured with explicit approval; pure parsing never allocates pins. */
   readonly currentEvidence: MemoryObsidianEvidenceV1;
 }
-export type TopicMaintenanceDraftBasis = TopicMaintenanceDraftBasisV1 | TopicMaintenanceObsidianDraftBasisV2;
+export type LegacyTopicMaintenanceDraftBasis = TopicMaintenanceDraftBasisV1 | TopicMaintenanceObsidianDraftBasisV2;
+export interface AutomaticMaintenanceDraftBasisV3 {
+  readonly version: 3;
+  readonly kind: 'automatic';
+  readonly targetUri: string;
+  readonly targetHash: string;
+  readonly observationRevision: string;
+  readonly packetDigest: string;
+  readonly body: string;
+  readonly assessment: AutomaticMaintenanceAssessment;
+  readonly reads: readonly {readonly uri: string; readonly hash: string}[];
+  readonly scopeRevision: string;
+  readonly paragraphs: AutomaticMaintenanceAssessment['paragraphs'];
+  readonly additionalDependencies: readonly [];
+  readonly handles: readonly {
+    readonly id: string;
+    readonly citationId: string;
+    readonly variant: 'accepted' | 'current';
+  }[];
+}
+export type TopicMaintenanceDraftBasis = LegacyTopicMaintenanceDraftBasis | AutomaticMaintenanceDraftBasisV3;
 
 export interface TopicMaintenanceReplaceOperationV1 {
   readonly ordinal: number;
@@ -226,7 +253,54 @@ export interface TopicMaintenanceObsidianReviewPayloadV2 {
   readonly reviewEvidence: readonly TopicMaintenanceObsidianReviewEvidenceV2[];
   readonly generation: TopicMaintenanceGenerationReceiptV1;
 }
-export type TopicMaintenanceReviewPayload = TopicMaintenanceReviewPayloadV1 | TopicMaintenanceObsidianReviewPayloadV2;
+export interface AutomaticMaintenanceReviewEvidenceV3 {
+  readonly handleId: string;
+  readonly descriptor: {
+    readonly id: string;
+    readonly source: AutomaticMaintenanceSourceV1;
+    readonly scope: AutomaticMaintenanceScope;
+    readonly locator?: {readonly repositoryId: string; readonly teamId: string; readonly path: string};
+  };
+  readonly content: string;
+  readonly contentHash: string;
+  readonly codeExcerpt?: {readonly startLine: number; readonly endLine: number; readonly fileBytesHash: string};
+}
+export interface AutomaticMaintenanceParagraphDecisionV2 {
+  readonly ordinal: number;
+  readonly beforeHash: string;
+  readonly role: 'descriptive' | 'normative' | 'historical' | 'unknown';
+  readonly support: 'direct' | 'contextual' | 'unresolved';
+  readonly evidenceIds: readonly string[];
+}
+export interface AutomaticMaintenanceDraftV2 extends Omit<
+  TopicMaintenanceDraftV1,
+  'version' | 'paragraphDispositions'
+> {
+  readonly version: 2;
+  readonly kind: 'automatic';
+  readonly purpose: 'automatic' | 'manual-edit';
+  readonly paragraphDecisions: readonly AutomaticMaintenanceParagraphDecisionV2[];
+  readonly desiredBody?: string;
+}
+export interface AutomaticMaintenanceDraftProposalV2 extends Omit<
+  TopicMaintenanceDraftProposalV1,
+  'version' | 'draft'
+> {
+  readonly version: 2;
+  readonly kind: 'automatic';
+  readonly draft: AutomaticMaintenanceDraftV2;
+}
+export interface AutomaticMaintenanceReviewPayloadV3 {
+  readonly version: 3;
+  readonly kind: 'automatic';
+  readonly basis: AutomaticMaintenanceDraftBasisV3;
+  readonly proposal: AutomaticMaintenanceDraftProposalV2;
+  readonly reviewEvidence: readonly AutomaticMaintenanceReviewEvidenceV3[];
+  readonly generation: TopicMaintenanceGenerationReceiptV1;
+}
+export type TopicMaintenanceDraftProposal = TopicMaintenanceDraftProposalV1 | AutomaticMaintenanceDraftProposalV2;
+export type TopicMaintenanceReviewPayload =
+  TopicMaintenanceReviewPayloadV1 | TopicMaintenanceObsidianReviewPayloadV2 | AutomaticMaintenanceReviewPayloadV3;
 
 interface ParagraphSpan {
   readonly start: number;
@@ -289,6 +363,7 @@ export function validateTopicMaintenanceDraftBasis(input: unknown): TopicMainten
 }
 
 export function validateTopicMaintenanceBasis(input: unknown): TopicMaintenanceDraftBasis {
+  if (object(input) && input.version === 3) return validateAutomaticMaintenanceDraftBasis(input);
   assertTopicMaintenanceBasis(input);
   return input;
 }
@@ -385,7 +460,7 @@ function assertTopicMaintenanceBasis(input: unknown): asserts input is TopicMain
     fail('basis omits a declared paragraph citation handle.');
 }
 
-function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasis): TopicMaintenanceDraftV1 {
+function validateDraft(input: unknown, basis: LegacyTopicMaintenanceDraftBasis): TopicMaintenanceDraftV1 {
   if (
     !object(input) ||
     !keys(
@@ -520,7 +595,10 @@ function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasis): Topic
   return input as unknown as TopicMaintenanceDraftV1;
 }
 
-function assemble(basis: TopicMaintenanceDraftBasis, draft: TopicMaintenanceDraftV1): TopicMaintenanceDraftProposalV1 {
+function assemble(
+  basis: Pick<TopicMaintenanceDraftBasisV1, 'body'>,
+  draft: TopicMaintenanceDraftV1,
+): TopicMaintenanceDraftProposalV1 {
   const spans = paragraphSpans(basis.body);
   const replacements = new Map(draft.operations.map(operation => [operation.ordinal, operation.text]));
   let cursor = 0;
@@ -544,11 +622,27 @@ function assemble(basis: TopicMaintenanceDraftBasis, draft: TopicMaintenanceDraf
 
 /** Strictly interprets one bounded model proposal; it never mutates accepted memory. */
 export function parseTopicMaintenanceDraft(
+  basisInput: LegacyTopicMaintenanceDraftBasis,
+  rawJson: string,
+  options?: {readonly requireParagraphDispositions?: boolean},
+): TopicMaintenanceDraftProposalV1;
+export function parseTopicMaintenanceDraft(
+  basisInput: AutomaticMaintenanceDraftBasisV3,
+  rawJson: string,
+  options?: {readonly requireParagraphDispositions?: boolean},
+): AutomaticMaintenanceDraftProposalV2;
+export function parseTopicMaintenanceDraft(
+  basisInput: TopicMaintenanceDraftBasis,
+  rawJson: string,
+  options?: {readonly requireParagraphDispositions?: boolean},
+): TopicMaintenanceDraftProposal;
+export function parseTopicMaintenanceDraft(
   basisInput: TopicMaintenanceDraftBasis,
   rawJson: string,
   options: {readonly requireParagraphDispositions?: boolean} = {},
-): TopicMaintenanceDraftProposalV1 {
+): TopicMaintenanceDraftProposal {
   const basis = validateTopicMaintenanceBasis(basisInput);
+  if (basis.version === 3) return parseAutomaticMaintenanceDraft(basis, rawJson);
   if (!boundedText(rawJson, MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)) fail('model output is empty or oversized.');
   let parsed: unknown;
   try {
@@ -674,6 +768,7 @@ export function validateTopicMaintenanceReviewPayload(input: unknown): TopicMain
 }
 
 export function validateTopicMaintenanceReview(input: unknown): TopicMaintenanceReviewPayload {
+  if (object(input) && input.version === 3) return validateAutomaticMaintenanceReview(input);
   assertTopicMaintenanceReview(input);
   return input;
 }
@@ -749,6 +844,7 @@ function assertTopicMaintenanceReview(input: unknown): asserts input is TopicMai
   )
     fail('invalid model generation receipt.');
   const basis = validateTopicMaintenanceBasis(input.basis);
+  if (basis.version === 3) fail('automatic basis requires its own review envelope.');
   if ((basis.version === 2) !== imported) fail('review and basis source kinds differ.');
   if (observation) {
     const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
@@ -960,4 +1056,400 @@ function assertObsidianCaptureIntent(value: unknown): asserts value is TopicMain
       fail('capture pin differs from its immutable reservation.');
   }
   if (jsonBytes(value) > 24 * 1024) fail('capture intent exceeds the private boundary.');
+}
+
+/** Automatic and manual reviews have their own closed contracts; legacy parser limits stay frozen. */
+export const MAX_AUTOMATIC_REVIEW_BYTES = 16 * 1024 * 1024;
+export function automaticReviewSections(body: string): readonly string[] {
+  const canonical = body.replace(/\r\n?/gu, '\n').trim();
+  if (!canonical || canonical.length > 1_000_000) fail('manual body is empty or exceeds the canonical body limit.');
+  return canonical
+    .split(/\n[\t ]*\n/u)
+    .map(text => text.trim())
+    .filter(Boolean);
+}
+export function validateAutomaticMaintenanceDraftBasis(input: unknown): AutomaticMaintenanceDraftBasisV3 {
+  if (
+    !object(input) ||
+    !keys(input, [
+      'version',
+      'kind',
+      'targetUri',
+      'targetHash',
+      'observationRevision',
+      'packetDigest',
+      'body',
+      'assessment',
+      'reads',
+      'scopeRevision',
+      'paragraphs',
+      'additionalDependencies',
+      'handles',
+    ]) ||
+    input.version !== 3 ||
+    input.kind !== 'automatic' ||
+    typeof input.body !== 'string' ||
+    input.body.length > 1_000_000 ||
+    jsonBytes(input) > MAX_AUTOMATIC_REVIEW_BYTES ||
+    !Array.isArray(input.reads) ||
+    input.reads.length > (object(input.assessment) && input.assessment.version === 2 ? 32 : 16) ||
+    !Array.isArray(input.handles) ||
+    input.handles.length > (object(input.assessment) && input.assessment.version === 2 ? 24 : 16) ||
+    !Array.isArray(input.additionalDependencies) ||
+    input.additionalDependencies.length
+  )
+    fail('invalid automatic basis.');
+  assertAutomaticMaintenanceAssessment(input.assessment);
+  const assessment = input.assessment;
+  if (
+    input.targetUri !== assessment.target.uri ||
+    input.targetHash !== assessment.target.canonicalHash ||
+    consolidationRevision(input.body) !== assessment.target.bodyHash ||
+    JSON.stringify(input.paragraphs) !== JSON.stringify(assessment.paragraphs) ||
+    ![input.observationRevision, input.packetDigest, input.scopeRevision].every(
+      value => typeof value === 'string' && HASH.test(value),
+    )
+  )
+    fail('automatic basis differs from its exact preparation.');
+  const seen = new Set<string>();
+  for (const read of input.reads) {
+    if (
+      !object(read) ||
+      !keys(read, ['uri', 'hash']) ||
+      !boundedText(read.uri, 4096) ||
+      typeof read.hash !== 'string' ||
+      !HASH.test(read.hash) ||
+      seen.has(read.uri)
+    )
+      fail('invalid automatic read precondition.');
+    seen.add(read.uri);
+  }
+  const handles = new Set<string>();
+  for (const handle of input.handles) {
+    if (
+      !object(handle) ||
+      !keys(handle, ['id', 'citationId', 'variant']) ||
+      !['accepted', 'current'].includes(handle.variant as string) ||
+      typeof handle.citationId !== 'string' ||
+      !/^ame_[a-f0-9]{64}$/u.test(handle.citationId) ||
+      handle.id !== `${handle.variant}:${handle.citationId}` ||
+      handles.has(handle.id)
+    )
+      fail('unknown automatic evidence handle.');
+    handles.add(handle.id);
+  }
+  return input as unknown as AutomaticMaintenanceDraftBasisV3;
+}
+
+export function parseAutomaticMaintenanceDraft(
+  basisInput: AutomaticMaintenanceDraftBasisV3,
+  raw: string,
+): AutomaticMaintenanceDraftProposalV2 {
+  const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
+  if (!boundedText(raw, MAX_AUTOMATIC_REVIEW_BYTES)) fail('automatic proposal is empty or oversized.');
+  let input: unknown;
+  try {
+    input = JSON.parse(raw);
+  } catch {
+    fail('automatic proposal must be closed JSON.');
+  }
+  if (
+    !object(input) ||
+    !keys(
+      input,
+      [
+        'version',
+        'kind',
+        'purpose',
+        'targetHash',
+        'observationRevision',
+        'packetDigest',
+        'outcome',
+        'operations',
+        'reviewedHandles',
+        'rationale',
+        'unresolvedQuestions',
+        'removedClaims',
+        'paragraphDecisions',
+      ],
+      ['desiredBody'],
+    ) ||
+    input.version !== 2 ||
+    input.kind !== 'automatic' ||
+    !['automatic', 'manual-edit'].includes(input.purpose as string) ||
+    input.targetHash !== basis.targetHash ||
+    input.observationRevision !== basis.observationRevision ||
+    input.packetDigest !== basis.packetDigest ||
+    !Array.isArray(input.operations) ||
+    !Array.isArray(input.paragraphDecisions) ||
+    !boundedText(input.rationale, 2048) ||
+    !boundedStrings(input.reviewedHandles, basis.assessment.version === 2 ? 24 : 16, 80) ||
+    !boundedStrings(input.unresolvedQuestions, 16, 512) ||
+    !boundedStrings(input.removedClaims, 64, 512)
+  )
+    fail('invalid or stale automatic proposal.');
+  const manual = input.purpose === 'manual-edit';
+  if (
+    !['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'].includes(
+      input.outcome as string,
+    ) ||
+    (manual
+      ? typeof input.desiredBody !== 'string' || input.operations.length !== 0
+      : input.desiredBody !== undefined || textBytes(raw) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
+  )
+    fail('automatic and user-authored purposes cannot be mixed.');
+  const known = new Set(basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id));
+  if (
+    new Set(input.reviewedHandles).size !== input.reviewedHandles.length ||
+    input.reviewedHandles.some(
+      handle => !(manual ? basis.handles.some(entry => entry.id === handle) : known.has(handle)),
+    )
+  )
+    fail('reviewed current handle is unknown.');
+  const oldSections = automaticReviewSections(basis.body);
+  const replacements = new Map<number, string>();
+  if (input.operations.length > oldSections.length) fail('too many automatic operations.');
+  for (const operation of input.operations) {
+    if (
+      !object(operation) ||
+      !keys(operation, ['ordinal', 'beforeHash', 'text', 'supportHandles', 'rationale']) ||
+      !Number.isSafeInteger(operation.ordinal) ||
+      !basis.paragraphs[operation.ordinal as number] ||
+      replacements.has(operation.ordinal as number) ||
+      operation.beforeHash !== basis.paragraphs[operation.ordinal as number].hash ||
+      !boundedText(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
+      operation.text !== operation.text.trim() ||
+      automaticReviewSections(operation.text).length !== 1 ||
+      operation.text === oldSections[operation.ordinal as number] ||
+      !boundedText(operation.rationale, 1024) ||
+      !boundedStrings(operation.supportHandles, 8, 80) ||
+      !operation.supportHandles.length ||
+      new Set(operation.supportHandles).size !== operation.supportHandles.length ||
+      operation.supportHandles.some(handle => !known.has(handle))
+    )
+      fail('invalid automatic paragraph replacement.');
+    replacements.set(operation.ordinal as number, operation.text);
+  }
+  let body: string;
+  if (manual) body = (input.desiredBody as string).replace(/\r\n?/gu, '\n').trim();
+  else {
+    const spans = paragraphSpans(basis.body);
+    let cursor = 0;
+    body = '';
+    for (const [ordinal, span] of spans.entries()) {
+      body +=
+        basis.body.slice(cursor, span.start) + (replacements.get(ordinal) ?? basis.body.slice(span.start, span.end));
+      cursor = span.end;
+    }
+    body += basis.body.slice(cursor);
+    if (textBytes(body) > MAX_TOPIC_MAINTENANCE_BYTES) fail('automatic body exceeds the bounded model limit.');
+  }
+  const finalSections = automaticReviewSections(body);
+  if (input.paragraphDecisions.length !== finalSections.length)
+    fail('every final paragraph needs an explicit role and support decision.');
+  for (const [ordinal, decision] of input.paragraphDecisions.entries()) {
+    if (
+      !object(decision) ||
+      !keys(decision, ['ordinal', 'beforeHash', 'role', 'support', 'evidenceIds']) ||
+      decision.ordinal !== ordinal ||
+      decision.beforeHash !== consolidationRevision(oldSections[ordinal] ?? '') ||
+      !['descriptive', 'normative', 'historical', 'unknown'].includes(decision.role as string) ||
+      !['direct', 'contextual', 'unresolved'].includes(decision.support as string) ||
+      !boundedStrings(decision.evidenceIds, 8, 68) ||
+      new Set(decision.evidenceIds).size !== decision.evidenceIds.length ||
+      decision.evidenceIds.some(
+        id =>
+          !basis.assessment.evidence.some(entry => entry.id === id) &&
+          !basis.handles.some(handle => handle.citationId === id),
+      ) ||
+      (decision.support === 'unresolved') !== (decision.evidenceIds.length === 0)
+    )
+      fail('invalid automatic paragraph role/support decision.');
+    const prior = basis.paragraphs[ordinal];
+    const unchanged = oldSections[ordinal] === finalSections[ordinal];
+    if (manual) {
+      // Ordinal and exact text are both required: duplicate text is never relocated by a fuzzy match.
+      if (
+        !unchanged &&
+        (decision.role !== 'unknown' || decision.support !== 'unresolved' || decision.evidenceIds.length)
+      )
+        fail('manual changed text must visibly invalidate support and remain protected.');
+      if (
+        unchanged &&
+        prior &&
+        !(decision.role === 'unknown' && decision.support === 'unresolved' && decision.evidenceIds.length === 0) &&
+        (decision.role !== prior.role ||
+          decision.support !== prior.support ||
+          JSON.stringify(decision.evidenceIds) !== JSON.stringify(prior.acceptedEvidenceIds))
+      )
+        fail('manual unchanged paragraphs must retain their approved mapping.');
+      continue;
+    }
+    if (!prior) fail('automatic review changes paragraph geometry.');
+    const established = prior.roleAuthority !== 'provisional' || ['normative', 'historical'].includes(prior.role);
+    if (established && decision.role !== prior.role)
+      fail('automatic review cannot downgrade a protected approved role.');
+    if (
+      replacements.has(ordinal) &&
+      (decision.role !== 'descriptive' ||
+        decision.support !== 'direct' ||
+        (established && prior.role !== 'descriptive'))
+    )
+      fail('only explicitly reviewed descriptive direct claims may be automatically replaced.');
+    const operation = input.operations.find(item => item.ordinal === ordinal);
+    if (
+      operation &&
+      JSON.stringify([...operation.supportHandles].sort()) !==
+        JSON.stringify(decision.evidenceIds.map(id => `current:${id}`).sort())
+    )
+      fail('operation support differs from its visible decision.');
+    if (
+      decision.support !== 'unresolved' &&
+      decision.evidenceIds.some(id => !known.has(`current:${id}`)) &&
+      (!unchanged ||
+        decision.role !== prior.role ||
+        decision.support !== prior.support ||
+        JSON.stringify(decision.evidenceIds) !== JSON.stringify(prior.acceptedEvidenceIds))
+    )
+      fail('new support requires exact current reviewed evidence.');
+  }
+  if (
+    !manual &&
+    ((input.outcome === 'propose-update') !== replacements.size > 0 ||
+      (input.outcome === 'propose-revalidation' && !input.reviewedHandles.length))
+  )
+    fail('automatic outcome differs from its operations.');
+  return {
+    version: 2,
+    kind: 'automatic',
+    draft: input as unknown as AutomaticMaintenanceDraftV2,
+    body,
+    finalBodyHash: consolidationRevision(body),
+    changedOrdinals: manual
+      ? finalSections.flatMap((text, ordinal) => (text === oldSections[ordinal] ? [] : [ordinal]))
+      : [...replacements.keys()].sort((a, b) => a - b),
+  };
+}
+
+export function validateAutomaticMaintenanceReview(input: unknown): AutomaticMaintenanceReviewPayloadV3 {
+  if (
+    !object(input) ||
+    !keys(input, ['version', 'kind', 'basis', 'proposal', 'reviewEvidence', 'generation']) ||
+    input.version !== 3 ||
+    input.kind !== 'automatic' ||
+    jsonBytes(input) > MAX_AUTOMATIC_REVIEW_BYTES ||
+    !object(input.proposal) ||
+    !keys(input.proposal, ['version', 'kind', 'draft', 'body', 'finalBodyHash', 'changedOrdinals']) ||
+    !Array.isArray(input.reviewEvidence)
+  )
+    fail('invalid automatic review envelope.');
+  const basis = validateAutomaticMaintenanceDraftBasis(input.basis);
+  // The validated basis owns version-specific bounds; evidence must cover its handles bijectively.
+  const seen = new Set<string>();
+  for (const entry of input.reviewEvidence) {
+    if (
+      !object(entry) ||
+      !keys(entry, ['handleId', 'descriptor', 'content', 'contentHash'], ['codeExcerpt']) ||
+      !object(entry.descriptor) ||
+      !keys(entry.descriptor, ['id', 'source', 'scope'], ['locator']) ||
+      typeof entry.handleId !== 'string' ||
+      seen.has(entry.handleId) ||
+      !basis.handles.some(
+        handle =>
+          handle.id === entry.handleId && handle.citationId === (entry.descriptor as Record<string, unknown>).id,
+      ) ||
+      typeof entry.content !== 'string' ||
+      entry.contentHash !== consolidationRevision(entry.content)
+    )
+      fail('invalid automatic reviewed source.');
+    const descriptor = entry.descriptor;
+    const evidence = basis.assessment.evidence.find(item => item.id === descriptor.id);
+    assertApprovedSourceDescriptor(descriptor);
+    if (
+      evidence
+        ? JSON.stringify(evidence.source) !== JSON.stringify(descriptor.source) || evidence.scope !== descriptor.scope
+        : descriptor.source.kind !== 'code' || !entry.handleId.startsWith('current:')
+    )
+      fail('reviewed source differs from exact preparation.');
+    if (descriptor.source.kind === 'memory' && descriptor.source.fragment.hash !== entry.contentHash)
+      fail('canonical memory fragment differs from its descriptor.');
+    if (
+      descriptor.source.kind === 'code' &&
+      (!object(entry.codeExcerpt) ||
+        !keys(entry.codeExcerpt, ['startLine', 'endLine', 'fileBytesHash']) ||
+        !Number.isSafeInteger(entry.codeExcerpt.startLine) ||
+        (entry.codeExcerpt.startLine as number) < 1 ||
+        !Number.isSafeInteger(entry.codeExcerpt.endLine) ||
+        (entry.codeExcerpt.endLine as number) < (entry.codeExcerpt.startLine as number) ||
+        typeof entry.codeExcerpt.fileBytesHash !== 'string' ||
+        !/^[0-9a-f]{64}$/u.test(entry.codeExcerpt.fileBytesHash))
+    )
+      fail('code review lacks exact current byte geometry.');
+    // A graph content identity can wrap a Git blob hash. Live verification binds it to these raw bytes.
+    seen.add(entry.handleId);
+  }
+  if (seen.size !== basis.handles.length) fail('review evidence omits a selected handle.');
+  const proposal = parseAutomaticMaintenanceDraft(basis, JSON.stringify(input.proposal.draft));
+  if (JSON.stringify(proposal) !== JSON.stringify(input.proposal))
+    fail('automatic proposal differs from deterministic projection.');
+  const generation = input.generation;
+  if (
+    !object(generation) ||
+    !keys(
+      generation,
+      ['origin', 'agent', 'model', 'promptVersion', 'attempts', 'usage'],
+      ['modelVersion', 'observation'],
+    ) ||
+    !object(generation.usage)
+  )
+    fail('automatic generation receipt is malformed.');
+  if (generation.origin === 'manual') {
+    if (
+      generation.agent !== 'manual' ||
+      generation.model !== 'none' ||
+      generation.promptVersion !== 'manual-topic-v1' ||
+      generation.attempts !== 0 ||
+      !keys(generation.usage, ['status']) ||
+      generation.usage.status !== 'unavailable' ||
+      generation.modelVersion !== undefined ||
+      generation.observation !== undefined
+    )
+      fail('manual automatic review cannot claim model execution.');
+  } else if (
+    generation.origin !== 'model' ||
+    !boundedText(generation.agent, 64) ||
+    !boundedText(generation.model, 256) ||
+    !boundedText(generation.promptVersion, 64) ||
+    ![1, 2].includes(generation.attempts as number) ||
+    proposal.draft.purpose !== 'automatic'
+  )
+    fail('automatic model receipt is malformed.');
+  const usage = generation.usage;
+  if (
+    usage.status === 'unavailable'
+      ? !keys(usage, ['status'])
+      : usage.status !== 'measured' ||
+        !keys(usage, ['status', 'inputTokens', 'outputTokens']) ||
+        ![usage.inputTokens, usage.outputTokens].every(value => Number.isSafeInteger(value) && (value as number) >= 0)
+  )
+    fail('automatic generation usage is malformed.');
+  if (generation.modelVersion !== undefined && !boundedText(generation.modelVersion, 256))
+    fail('automatic model revision is malformed.');
+  if (generation.observation !== undefined) {
+    const observation = validateTopicGenerationSummary(generation.observation);
+    const measured = topicGenerationUsage(observation.attempts.map(attempt => attempt.usage));
+    if (
+      observation.state !== 'completed' ||
+      observation.targetHash !== basis.targetHash ||
+      observation.observationRevision !== basis.observationRevision ||
+      observation.packetDigest !== basis.packetDigest ||
+      observation.agent !== generation.agent ||
+      observation.model !== generation.model ||
+      observation.promptVersion !== generation.promptVersion ||
+      observation.attempts.length !== generation.attempts ||
+      JSON.stringify(measured) !== JSON.stringify(usage)
+    )
+      fail('automatic generation observation differs from the exact reviewed basis.');
+  }
+  return input as unknown as AutomaticMaintenanceReviewPayloadV3;
 }

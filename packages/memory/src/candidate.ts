@@ -82,7 +82,7 @@ export interface MemoryCandidate {
   readonly comparison: CandidateComparison;
   readonly confidence: number;
   readonly evidence: readonly string[];
-  readonly kind: Extract<MemoryKind, 'durable' | 'handoff' | 'preference'>;
+  readonly kind: MemoryKind;
   readonly project: string;
   readonly proposedText: string;
   readonly reason: string;
@@ -132,7 +132,7 @@ export interface CandidateReview {
   readonly maintenanceClosedConflict?: TopicMaintenanceClosedConflictV1;
   readonly task: string;
   readonly topic: string;
-  readonly version: 2 | 3 | 4;
+  readonly version: 2 | 3 | 4 | 5;
   readonly dependencyExpansion?: TopicDependencyExpansionJournal;
 }
 
@@ -679,6 +679,7 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
 ) {
   assertExpansionReview(review);
   assertImportedReviewCapture(review);
+  assertAutomaticReviewEnvelope(review);
   if (review.maintenanceCapture !== undefined)
     yield* Effect.try({
       try: () => validateTopicMaintenanceObsidianCaptureIntent(review.maintenanceCapture),
@@ -708,7 +709,10 @@ export const saveCandidateReview = Effect.fn('candidate.saveReview')(function* (
   const pathService = yield* Path.Path;
   const path = candidateReviewPath(pathService, agentContextHome, review.reviewId);
   const serialized = `${JSON.stringify(review, undefined, 2)}\n`;
-  if (new TextEncoder().encode(serialized).byteLength > MAX_CANDIDATE_REVIEW_BYTES) {
+  if (
+    new TextEncoder().encode(serialized).byteLength >
+    (review.version === 5 ? 16 * 1024 * 1024 : MAX_CANDIDATE_REVIEW_BYTES)
+  ) {
     return yield* CandidateMemoryError.make({
       message: `Candidate review exceeds the ${MAX_CANDIDATE_REVIEW_BYTES}-byte persistence limit.`,
     });
@@ -1271,7 +1275,7 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     typeof value !== 'object' ||
     value === null ||
     !('version' in value) ||
-    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4) ||
+    (value.version !== 1 && value.version !== 2 && value.version !== 3 && value.version !== 4 && value.version !== 5) ||
     !('reviewId' in value) ||
     typeof value.reviewId !== 'string' ||
     !('revision' in value) ||
@@ -1287,12 +1291,13 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     readonly maintenanceApproval?: unknown;
     readonly maintenanceClosedConflict?: unknown;
     readonly structuredCloseout?: unknown;
-    readonly version: 1 | 2 | 3 | 4;
+    readonly version: 1 | 2 | 3 | 4 | 5;
   };
   let codeCitations: readonly MemoryCodeCitationV1[] = [];
   if (
     review.version !== 2 &&
     review.version !== 3 &&
+    review.version !== 5 &&
     (review.maintenance !== undefined ||
       review.maintenanceApproval !== undefined ||
       review.maintenanceCapture !== undefined)
@@ -1300,7 +1305,7 @@ export function parseCandidateReview(value: unknown): CandidateReview {
     throw CandidateMemoryError.make({message: 'maintenance payload requires a v2 candidate review'});
   if (review.maintenanceApproval !== undefined && review.maintenance === undefined)
     throw CandidateMemoryError.make({message: 'maintenance approval requires a review payload'});
-  if (review.version === 2 || review.version === 3 || review.version === 4) {
+  if (review.version === 2 || review.version === 3 || review.version === 4 || review.version === 5) {
     if (!Array.isArray(review.codeCitations)) throw CandidateMemoryError.make({message: 'invalid v2 code citations'});
     try {
       codeCitations = review.codeCitations.map(assertMemoryCodeCitation);
@@ -1332,12 +1337,13 @@ export function parseCandidateReview(value: unknown): CandidateReview {
             review.revision,
           ),
         }),
-    version: review.version === 4 ? 4 : review.version === 3 ? 3 : 2,
+    version: review.version === 5 ? 5 : review.version === 4 ? 4 : review.version === 3 ? 3 : 2,
   };
   if (!validTopicClosedConflict(parsed))
     throw CandidateMemoryError.make({message: 'invalid closed topic conflict receipt'});
   assertExpansionReview(parsed);
   assertImportedReviewCapture(parsed);
+  assertAutomaticReviewEnvelope(parsed);
   return parsed;
 }
 
@@ -1466,4 +1472,32 @@ function candidateAuditEventIsValid(value: unknown): value is CandidateAuditEven
 
 function errorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+function assertAutomaticReviewEnvelope(review: CandidateReview): void {
+  const payload = review.maintenance;
+  if ((review.version === 5) !== (payload?.version === 3))
+    throw CandidateMemoryError.make({message: 'Automatic maintenance requires its closed v5 journal.'});
+  if (review.version !== 5) {
+    if (review.candidates.some(candidate => !['durable', 'handoff', 'preference'].includes(candidate.kind)))
+      throw CandidateMemoryError.make({message: 'Generic candidates cannot select ordinary maintenance-only kinds.'});
+    return;
+  }
+  const candidate = review.candidates[0];
+  if (
+    !payload ||
+    payload.version !== 3 ||
+    review.candidates.length !== 1 ||
+    !candidate ||
+    candidate.kind !== payload.basis.assessment.target.kind ||
+    candidate.targetUri !== payload.basis.targetUri ||
+    candidate.targetContentHash !== payload.basis.targetHash ||
+    candidate.proposedText !== payload.proposal.body ||
+    review.maintenanceCapture ||
+    review.dependencyExpansion ||
+    review.codeCitations.length
+  )
+    throw CandidateMemoryError.make({
+      message: 'Automatic journal target or candidate differs from its exact maintenance payload.',
+    });
 }

@@ -8,6 +8,7 @@
     "./code/citation": "./src/code/citation.ts",
     "./code/citation-policy": "./src/code/citation-policy.ts",
     "./document": "./src/document.ts",
+    "./reviewed-support": "./src/reviewed-support.ts",
     "./hygiene": "./src/hygiene.ts",
     "./hygiene/provenance": "./src/hygiene/provenance.ts",
     "./identity-alias": "./src/identity-alias.ts",

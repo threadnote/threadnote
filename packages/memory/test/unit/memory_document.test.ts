@@ -20,6 +20,7 @@ import {
   formatMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
   MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
   UnsupportedMemorySchemaVersionError,
   type MemoryCodeCitationInputV1,
 } from '@threadnote/memory/code/citation';
@@ -96,7 +97,7 @@ describe('memory document contract', () => {
             input.keywords.map(value => `keywords: ${value}`),
             [
               `schema_version: ${input.schema === 'spaced' ? ' ' : ''}${MEMORY_SCHEMA_VERSION}`,
-              ...(input.schema === 'duplicate' ? [`schema_version: ${MEMORY_SCHEMA_VERSION + 1}`] : []),
+              ...(input.schema === 'duplicate' ? [`schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`] : []),
             ],
             [citationLine],
             [`kind: ${kind === 'handoff' ? '' : 'durable'}`, 'kind: preference', 'status: active'],
@@ -579,13 +580,15 @@ describe('memory document contract', () => {
         path: `src/${'p'.repeat(4_000)}`,
       }),
     ).toThrow('per-entry byte limit');
-    expect(() => assertMemorySchemaWritable(MEMORY_SCHEMA_VERSION + 1)).toThrow(UnsupportedMemorySchemaVersionError);
+    expect(() => assertMemorySchemaWritable(MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1)).toThrow(
+      UnsupportedMemorySchemaVersionError,
+    );
     expect(() =>
       formatMemoryDocument(
         'MEMORY',
         {
           kind: 'durable',
-          schemaVersion: MEMORY_SCHEMA_VERSION + 1,
+          schemaVersion: MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1,
           sourceAgentClient: 'codex',
           status: 'active',
           timestamp: '2026-08-26T20:00:00.000Z',
@@ -599,7 +602,7 @@ describe('memory document contract', () => {
           'MEMORY',
           'kind: durable',
           'status: active',
-          `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           '',
           'Future body',
         ].join('\n'),
@@ -627,7 +630,7 @@ describe('memory document contract', () => {
             'MEMORY',
             'kind: durable',
             'status: active',
-            `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+            `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
             '',
             'Future line-ending body',
           ].join(newline),
@@ -641,7 +644,7 @@ describe('memory document contract', () => {
           'MEMORY',
           'kind: durable',
           'status: active',
-          `  schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `  schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           '',
           'Indented future body',
         ].join('\n'),
@@ -668,7 +671,7 @@ describe('memory document contract', () => {
           'kind: durable',
           'status: active',
           `schema_version: ${MEMORY_SCHEMA_VERSION}`,
-          `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           '',
           'Duplicate-version body',
         ].join('\n'),

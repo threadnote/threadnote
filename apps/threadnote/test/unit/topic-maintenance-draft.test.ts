@@ -1062,7 +1062,9 @@ describe('complete wire controller repair boundary', () => {
               });
             const review = yield* f.request(generate);
             expect(calls).toBe(2);
-            const proposal = review.maintenance!.proposal;
+            const payload = review.maintenance;
+            if (payload?.version !== 1) throw new Error('Expected the frozen legacy code draft.');
+            const proposal = payload.proposal;
             expect(proposal.body).toBe('Current first fact.\n\nCurrent second fact.\n\nProtected requirement.');
             expect(proposal.changedOrdinals).toEqual([0, 1]);
             expect(proposal.draft.operations.map(operation => operation.supportHandles)).toEqual([

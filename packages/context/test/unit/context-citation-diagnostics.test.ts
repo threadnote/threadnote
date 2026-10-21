@@ -4,6 +4,7 @@ import {
   formatMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
   MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
 } from '@threadnote/memory/code/citation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {contextBriefMemoryCandidate} from '../../src/memory-evidence.js';
@@ -18,7 +19,7 @@ describe('Context Brief citation metadata diagnostics', () => {
   });
 
   it('reports a document schema mismatch without claiming its valid citation line was malformed', () => {
-    const {logical, record} = diagnostic([citationLine(0)], MEMORY_SCHEMA_VERSION + 1);
+    const {logical, record} = diagnostic([citationLine(0)], MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1);
     expect(record.metadata.citationErrors).toEqual([{reason: 'schema-version-mismatch'}]);
     expect(record.metadata.codeCitations).toHaveLength(1);
     expectMetadataWarning(logical, 1);

@@ -1,15 +1,17 @@
+import {reviewedMemorySupportDigest, validateReviewedMemorySupport} from '@threadnote/memory/reviewed-support';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertAutomaticMaintenanceAssessment,
   assertAutomaticMaintenanceEvidence,
+  MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE,
   automaticMaintenanceCapabilities,
   automaticMaintenanceEvidenceId,
   automaticMaintenanceMemoryScope,
   automaticMaintenanceSections,
-  type AutomaticMaintenanceAssessmentV1,
+  type AutomaticMaintenanceAssessment,
   type AutomaticMaintenanceCoverageV1,
   type AutomaticMaintenanceEvidenceV1,
-  type AutomaticMaintenanceParagraphV1,
+  type AutomaticMaintenanceParagraph,
   type AutomaticMaintenanceSourceV1,
   type AutomaticMaintenanceTargetV1,
 } from '@threadnote/memory/automatic-maintenance';
@@ -41,7 +43,7 @@ export interface MemoryMaintenancePreparationOptions {
 }
 export interface MemoryMaintenanceBasisV1 {
   readonly version: 1;
-  readonly assessment: AutomaticMaintenanceAssessmentV1;
+  readonly assessment: AutomaticMaintenanceAssessment;
   /** Exact original envelope, full typed relation prior set and compatibility history; never rewritten here. */
   readonly record: MemoryRecord;
 }
@@ -69,6 +71,10 @@ export function prepareMemoryMaintenanceBasis(
   record: MemoryRecord,
   options: MemoryMaintenancePreparationOptions = {},
 ): MemoryMaintenanceBasisV1 {
+  if (record.metadata.reviewedSupportError) throw new Error('Malformed reviewed support must remain protected.');
+  const reviewed = record.metadata.reviewedSupport
+    ? validateReviewedMemorySupport(record.metadata.reviewedSupport, record.body)
+    : undefined;
   if (record.metadata.topicMaintenanceError) throw new Error('Malformed legacy maintenance must remain protected.');
   const manifest = record.metadata.topicMaintenance
     ? validateTopicMaintenanceManifest(record.metadata.topicMaintenance, record)
@@ -104,8 +110,9 @@ export function prepareMemoryMaintenanceBasis(
     add(recordedEvidence({kind: 'obsidian', evidence: record.metadata.obsidianEvidence}));
   if (manifest && !isCodeTopicMaintenanceManifest(manifest))
     add(recordedEvidence({kind: 'obsidian', evidence: manifest.activeEvidence}));
+  for (const descriptor of reviewed?.active.sources ?? []) add(recordedEvidence(descriptor.source));
   for (const item of options.evidence ?? []) add(item);
-  if (evidence.length > MAX_MEMORY_CODE_CITATIONS)
+  if (evidence.length > (reviewed ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS))
     throw new Error('Automatic maintenance evidence exceeds the existing source budget.');
   const byCitationId = new Map(
     evidence.flatMap(item =>
@@ -129,13 +136,30 @@ export function prepareMemoryMaintenanceBasis(
     )
   )
     throw new Error('Inference paragraph identity is invalid.');
-  const paragraphs: AutomaticMaintenanceParagraphV1[] = overflow
+  const paragraphs: AutomaticMaintenanceParagraph[] = overflow
     ? []
     : sections.map((section, ordinal) => {
         const inferred = inferences.find(item => item.ordinal === ordinal);
         const approved = manifest?.paragraphs[ordinal];
         const currentEvidenceIds = inferred?.currentEvidenceIds ?? [];
         const currentSupport = inferred?.support ?? 'unresolved';
+        const approvedReviewed = reviewed?.active.paragraphs[ordinal];
+        if (approvedReviewed)
+          return {
+            ordinal,
+            hash: consolidationRevision(section),
+            role: approvedReviewed.role,
+            support: approvedReviewed.support,
+            roleAuthority: 'reviewed',
+            supportAuthority: 'reviewed',
+            historicalEvidenceIds: [],
+            acceptedEvidenceIds: approvedReviewed.evidenceIds,
+            currentEvidenceIds,
+            currentSupport,
+            currentSupportAuthority: 'provisional',
+            ...(approvedReviewed.scope === undefined ? {} : {scope: approvedReviewed.scope}),
+            ...(approvedReviewed.validity === undefined ? {} : {validity: approvedReviewed.validity}),
+          };
         if (approved) {
           const historicalEvidenceIds = approved.citationIds.map(resolve);
           const acceptedEvidenceIds = [
@@ -200,16 +224,18 @@ export function prepareMemoryMaintenanceBasis(
   };
   if (overflow && coverage.outcome === 'complete')
     throw new Error('An oversized target cannot have complete coverage.');
-  const assessment: AutomaticMaintenanceAssessmentV1 = {
-    version: 1,
-    preparation: manifest
-      ? {
-          version: 1,
-          kind: 'legacy-approved',
-          manifestVersion: manifest.version,
-          manifestHash: sha256HexSync(JSON.stringify(manifest)),
-        }
-      : {version: 1, kind: 'derived'},
+  const assessment: AutomaticMaintenanceAssessment = {
+    version: reviewed ? 2 : 1,
+    preparation: reviewed
+      ? {version: 2, kind: 'reviewed-support', supportDigest: reviewedMemorySupportDigest(reviewed)}
+      : manifest
+        ? {
+            version: 1,
+            kind: 'legacy-approved',
+            manifestVersion: manifest.version,
+            manifestHash: sha256HexSync(JSON.stringify(manifest)),
+          }
+        : {version: 1, kind: 'derived'},
     target,
     paragraphs,
     evidence,
@@ -217,7 +243,7 @@ export function prepareMemoryMaintenanceBasis(
       manifest?.additionalDependencies.map(item => ({kind: item.kind, evidenceId: resolve(item.citationId)})) ?? [],
     coverage,
     capabilities: automaticMaintenanceCapabilities(target, paragraphs, evidence, coverage),
-  };
+  } as AutomaticMaintenanceAssessment;
   assertAutomaticMaintenanceAssessment(assessment);
   return {version: 1, assessment, record};
 }

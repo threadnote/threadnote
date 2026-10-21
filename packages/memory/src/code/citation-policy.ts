@@ -1,3 +1,4 @@
+import {reviewedSupportSharingBlocker} from '../reviewed-support.js';
 import {MEMORY_CODE_CITATION_HEADER} from './citation.js';
 import {parseMemoryDocument, type MemoryMetadata} from '../document.js';
 
@@ -22,8 +23,15 @@ export function memoryCodeCitationSharingBlocker(
     | 'sourceEvidence'
     | 'sourceEvidenceError'
   > &
-    Partial<Pick<MemoryMetadata, 'topicMaintenanceError' | 'topicMaintenance'>>,
+    Partial<
+      Pick<MemoryMetadata, 'topicMaintenanceError' | 'topicMaintenance' | 'reviewedSupport' | 'reviewedSupportError'>
+    >,
 ): MemoryCodeCitationSharingBlocker | undefined {
+  if (metadata.reviewedSupportError) return 'malformed-citation';
+  if (metadata.reviewedSupport) {
+    const blocker = reviewedSupportSharingBlocker(metadata.reviewedSupport);
+    if (blocker) return blocker;
+  }
   if (metadata.obsidianEvidenceError || metadata.sourceEvidenceError || metadata.topicMaintenanceError)
     return 'malformed-citation';
   if (metadata.sourceEvidence) return 'private-source-evidence';
@@ -49,6 +57,7 @@ export function memoryCodeCitationContentSharingBlocker(
   const evidenceHeader = inspectObsidianEvidenceHeaderShape(content);
   const sourceEvidenceHeader = inspectEvidenceHeaderShape(content, 'source_evidence');
   const topicMaintenanceHeader = inspectEvidenceHeaderShape(content, 'topic_maintenance');
+  const reviewedSupportHeader = inspectEvidenceHeaderShape(content, 'reviewed_support');
   const parsed = parseMemoryDocument(uri, content);
   if (parsed) {
     const blocker = memoryCodeCitationSharingBlocker(parsed.metadata);
@@ -56,7 +65,8 @@ export function memoryCodeCitationContentSharingBlocker(
     return shapedHeader.hasNonCanonical ||
       evidenceHeader.hasNonCanonical ||
       sourceEvidenceHeader.hasNonCanonical ||
-      topicMaintenanceHeader.hasNonCanonical
+      topicMaintenanceHeader.hasNonCanonical ||
+      reviewedSupportHeader.hasNonCanonical
       ? 'malformed-citation'
       : sourceEvidenceHeader.hasCitationShape
         ? 'private-source-evidence'
@@ -67,7 +77,8 @@ export function memoryCodeCitationContentSharingBlocker(
   return shapedHeader.hasCitationShape ||
     evidenceHeader.hasCitationShape ||
     sourceEvidenceHeader.hasCitationShape ||
-    topicMaintenanceHeader.hasCitationShape
+    topicMaintenanceHeader.hasCitationShape ||
+    reviewedSupportHeader.hasCitationShape
     ? 'malformed-citation'
     : undefined;
 }
@@ -79,6 +90,18 @@ export function memoryHasPrivateEvidenceProvenance(uri: string, content: string)
     inspectEvidenceHeaderShape(content, 'source_evidence').hasCitationShape
   )
     return true;
+  const reviewedHeader = inspectEvidenceHeaderShape(content, 'reviewed_support');
+  if (reviewedHeader.hasCitationShape) {
+    const record = parseMemoryDocument(uri, content);
+    if (
+      !record ||
+      reviewedHeader.hasNonCanonical ||
+      record.metadata.reviewedSupportError ||
+      !record.metadata.reviewedSupport ||
+      reviewedSupportSharingBlocker(record.metadata.reviewedSupport)
+    )
+      return true;
+  }
   const topicHeader = inspectEvidenceHeaderShape(content, 'topic_maintenance');
   if (!topicHeader.hasCitationShape) return false;
   const parsed = parseMemoryDocument(uri, content);
@@ -114,7 +137,7 @@ function inspectObsidianEvidenceHeaderShape(content: string): {
 
 function inspectEvidenceHeaderShape(
   content: string,
-  name: 'obsidian_evidence' | 'source_evidence' | 'topic_maintenance',
+  name: 'obsidian_evidence' | 'source_evidence' | 'topic_maintenance' | 'reviewed_support',
 ): {
   readonly hasCitationShape: boolean;
   readonly hasNonCanonical: boolean;
@@ -122,7 +145,7 @@ function inspectEvidenceHeaderShape(
   const canonical = content.trim().replace(/\r\n?/gu, '\n');
   const separatorIndex = canonical.indexOf('\n\n');
   const header = separatorIndex === -1 ? canonical : canonical.slice(0, separatorIndex);
-  const lines = header.split('\n').filter(line => new RegExp(`^\\s*${name}\\s*:`, 'u').test(line));
+  const lines = header.split('\n').filter(line => new RegExp(`^\\s*${name}\\s*:`, 'iu').test(line));
   return {
     hasCitationShape: lines.length > 0,
     hasNonCanonical: lines.length > 1 || lines.some(line => !line.startsWith(`${name}: `)),

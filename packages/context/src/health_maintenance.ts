@@ -3,6 +3,7 @@ import type {ContextHealthFindingV1} from './health.js';
 import type {ContextHealthSemanticCompletenessV2} from './health_semantic.js';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {memoryCodeCitationAnchorId, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 
@@ -132,7 +133,7 @@ export function contextHealthFindingCaseIdentityV2(input: {
     slot =
       migrateContextHealthCitationCaseSlotV2({
         slot: citationId ?? slot,
-        citations: subject?.metadata.codeCitations ?? [],
+        citations: subject === undefined ? [] : currentMemoryCodeCitations(subject),
       }) ??
       citationId ??
       slot;
@@ -179,6 +180,8 @@ export function classifyContextHealthFindingV2(
 export function contextHealthCitationCoverageV2(input: {
   readonly records: readonly MemoryRecord[];
   readonly validations: readonly ContextBriefMemoryCitationValidationV2[];
+  /** Reader DTOs may explicitly select a bounded subset of the canonical current vector. */
+  readonly citationSelection?: 'provided';
 }): ContextHealthCitationCoverageV2 {
   const validations = new Map(input.validations.map(validation => [validation.uri, validation]));
   let eligible = 0;
@@ -193,10 +196,15 @@ export function contextHealthCitationCoverageV2(input: {
     const receipts = new Map(
       (validations.get(record.uri)?.receipts ?? []).map(receipt => [receipt.citationId, receipt]),
     );
-    const citationIds = new Set([
-      ...(record.metadata.codeCitations ?? []).map(citation => citation.id),
-      ...receipts.keys(),
-    ]);
+    const current = currentMemoryCodeCitations(record);
+    const provided = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
+    const citationIds = new Set(
+      record.metadata.reviewedSupport === undefined
+        ? [...current.map(citation => citation.id), ...receipts.keys()]
+        : current
+            .filter(citation => input.citationSelection !== 'provided' || provided.has(citation.id))
+            .map(citation => citation.id),
+    );
     for (const citationId of citationIds) {
       eligible += 1;
       const receipt = receipts.get(citationId);

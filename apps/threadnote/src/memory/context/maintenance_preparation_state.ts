@@ -2,7 +2,7 @@ import {Crypto, Data, Effect, FileSystem, Path} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   assertAutomaticMaintenanceAssessment,
-  type AutomaticMaintenanceAssessmentV1,
+  type AutomaticMaintenanceAssessment,
 } from '@threadnote/memory/automatic-maintenance';
 import type {ConsolidationReceipt} from '@threadnote/memory/consolidation';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -12,6 +12,9 @@ const hashReceipt = (receipt: ConsolidationReceipt) => sha256HexSync(JSON.string
 
 export const AUTOMATIC_PREPARATION_MAPPER = 'exact-canonical-paragraph-v1';
 export const AUTOMATIC_PREPARATION_MAX_BYTES = 512 * 1024;
+export const AUTOMATIC_PREPARATION_V2_MAX_BYTES = 2 * 1024 * 1024;
+export const AUTOMATIC_PREPARATION_V2_MAX_READS = 32;
+export const AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES = 48;
 export class AutomaticPreparationError extends Data.TaggedError('AutomaticPreparationError')<{
   readonly reason: 'cache-size-limit' | 'memory-fence-changed' | 'code-fence-changed';
 }> {}
@@ -21,7 +24,7 @@ export class AutomaticPreparationError extends Data.TaggedError('AutomaticPrepar
 export interface PreparedMemoryV1 {
   readonly version: 1;
   readonly mapper: typeof AUTOMATIC_PREPARATION_MAPPER;
-  readonly assessment: AutomaticMaintenanceAssessmentV1;
+  readonly assessment: AutomaticMaintenanceAssessment;
   /** Exact re-read preconditions. Never use these as generation suppression identities. */
   readonly reads: readonly {readonly uri: string; readonly hash: string}[];
   readonly scopeRevision: string;
@@ -49,9 +52,9 @@ const readCache = Effect.fn('automaticPreparation.readCache')(function* (config:
   const file = preparationPath(path, config, key);
   return yield* Effect.gen(function* () {
     const info = yield* fs.stat(file);
-    if (info.type !== 'File' || Number(info.size) > AUTOMATIC_PREPARATION_MAX_BYTES) return undefined;
+    if (info.type !== 'File' || Number(info.size) > AUTOMATIC_PREPARATION_V2_MAX_BYTES) return undefined;
     const text = yield* fs.readFileString(file);
-    if (new TextEncoder().encode(text).byteLength > AUTOMATIC_PREPARATION_MAX_BYTES) return undefined;
+    if (new TextEncoder().encode(text).byteLength > AUTOMATIC_PREPARATION_V2_MAX_BYTES) return undefined;
     return yield* Effect.try((): unknown => JSON.parse(text));
   }).pipe(Effect.orElseSucceed(() => undefined));
 });
@@ -75,13 +78,16 @@ export const readPreparedMemory = Effect.fn('automaticPreparation.readPrepared')
     )
       return undefined;
     assertAutomaticMaintenanceAssessment(prepared.assessment);
+    const reviewed = prepared.assessment.version === 2;
     if (
-      prepared.reads.length > 16 ||
+      new TextEncoder().encode(JSON.stringify(prepared)).byteLength >
+        (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_BYTES : AUTOMATIC_PREPARATION_MAX_BYTES) ||
+      prepared.reads.length > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_READS : 16) ||
       new Set(prepared.reads.map(read => read.uri)).size !== prepared.reads.length ||
       prepared.reads.some(read => typeof read.uri !== 'string' || !/^[0-9a-f]{64}$/u.test(read.hash)) ||
       prepared.omissions.some(reason => typeof reason !== 'string' || reason.length > 128) ||
       !['waiting-mapping', 'assessed'].includes(prepared.state) ||
-      prepared.candidates.length > 16
+      prepared.candidates.length > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16)
     )
       return undefined;
     for (const candidate of prepared.candidates) {
@@ -121,7 +127,12 @@ const writeCache = Effect.fn('automaticPreparation.writeCache')(function* (
   const previous = yield* readCache(config, key);
   if (previous !== undefined && JSON.stringify(previous) === text) return;
   const encoded = new TextEncoder().encode(text);
-  if (encoded.byteLength > AUTOMATIC_PREPARATION_MAX_BYTES)
+  const reviewed =
+    typeof value === 'object' &&
+    value !== null &&
+    'assessment' in value &&
+    (value.assessment as AutomaticMaintenanceAssessment)?.version === 2;
+  if (encoded.byteLength > (reviewed ? AUTOMATIC_PREPARATION_V2_MAX_BYTES : AUTOMATIC_PREPARATION_MAX_BYTES))
     return yield* new AutomaticPreparationError({reason: 'cache-size-limit'});
   yield* fs.makeDirectory(path.dirname(file), {recursive: true, mode: 0o700});
   const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;

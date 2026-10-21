@@ -6,6 +6,7 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import {
   canonicalMemoryDocumentContent,
   declaresTopicMaintenanceHeader,
+  declaresReviewedSupportHeader,
   parseMemoryDocument,
   type MemoryRelation,
   type MemoryRecord,
@@ -230,7 +231,7 @@ export function verifyKnowledgeDeltaGitProposalV1(proposal: KnowledgeDeltaGitPro
   if (ordered.some((file, index) => file !== proposal.files[index])) invalid('Git proposal files are not canonical.');
   for (const file of proposal.files) {
     const record = verifyProposalFile(proposal, file);
-    if (record.metadata.topicMaintenance !== undefined)
+    if (record.metadata.topicMaintenance !== undefined || record.metadata.reviewedSupport !== undefined)
       invalid('Enrolled topic Git proposals require the maintenance variant and its source/policy fences.');
     if (record.metadata.authority !== 'user_approved' || record.metadata.trust !== 'approved')
       invalid(`Git proposal file ${file.path} does not carry reviewed publication authority.`);
@@ -274,7 +275,7 @@ function proposalFile(
   }
   const source = parseMemoryDocument(mutation.sourceUri, canonicalSource);
   if (!source) invalid(`Candidate ${mutation.candidateId} source is not a memory document.`);
-  if (source.metadata.topicMaintenance !== undefined) {
+  if (source.metadata.topicMaintenance !== undefined || source.metadata.reviewedSupport !== undefined) {
     invalid(
       'Enrolled topics require the reviewed existing-target maintenance proposal path; generic publication cannot project their provenance.',
     );
@@ -360,7 +361,10 @@ function buildTargetPrecondition(
   if (sha256HexSync(mutation.expectedTarget.content) !== mutation.expectedTarget.contentHash) {
     invalid('Replacement target content does not match its expected hash.');
   }
-  if (declaresTopicMaintenanceHeader(mutation.expectedTarget.content))
+  if (
+    declaresTopicMaintenanceHeader(mutation.expectedTarget.content) ||
+    declaresReviewedSupportHeader(mutation.expectedTarget.content)
+  )
     invalid('Legacy V1 proposals cannot replace an enrolled shared target; use the reviewed maintenance variant.');
   const target = parseMemoryDocument('threadnote://proposal/target', mutation.expectedTarget.content);
   if (
@@ -415,6 +419,22 @@ export function verifyProposalFile(
   proposal: Pick<KnowledgeDeltaGitProposalV1, 'knowledgeDelta' | 'project'>,
   file: KnowledgeDeltaGitProposalFileV1,
 ): MemoryRecord {
+  return verifyProposalFileContract(proposal, file, false);
+}
+
+/** Existing ordinary owner paths reuse file/CAS/privacy checks without changing V1 durable admission. */
+export function verifyAutomaticProposalFile(
+  proposal: Pick<KnowledgeDeltaGitProposalV1, 'knowledgeDelta' | 'project'>,
+  file: KnowledgeDeltaGitProposalFileV1,
+): MemoryRecord {
+  return verifyProposalFileContract(proposal, file, true);
+}
+
+function verifyProposalFileContract(
+  proposal: Pick<KnowledgeDeltaGitProposalV1, 'knowledgeDelta' | 'project'>,
+  file: KnowledgeDeltaGitProposalFileV1,
+  automatic: boolean,
+): MemoryRecord {
   if (file.approval.scope !== 'shared') invalid('Git proposal file does not carry explicit shared approval.');
   if (
     file.approval.reviewId !== proposal.knowledgeDelta.reviewId ||
@@ -429,18 +449,27 @@ export function verifyProposalFile(
   requirePattern(file.contentHash, SHA256, 'file content hash');
   if (sha256HexSync(file.content) !== file.contentHash) invalid(`Git proposal file ${file.path} content hash changed.`);
   if (!isMemoryId(file.memory.id)) invalid(`Git proposal file ${file.path} has an invalid memory identity.`);
-  const topic = portableSegment(file.memory.topic, `file ${file.path} topic`);
-  const expectedPath = sharedDurablePath(proposal.project, topic);
+  const topic = automatic ? file.memory.topic : portableSegment(file.memory.topic, `file ${file.path} topic`);
+  if (typeof topic !== 'string' || !topic || topic.length > 512 || /[\r\n\0]/u.test(topic))
+    invalid('Git proposal topic receipt is invalid.');
+  const expectedPath = automatic ? assertSafeShareRelativePath(file.path) : sharedDurablePath(proposal.project, topic);
   if (file.path !== expectedPath) invalid(`Git proposal file ${file.path} crosses its project/topic boundary.`);
   const record = parseMemoryDocument('threadnote://proposal/file', file.content);
   if (
     !record ||
-    record.headerTitle !== 'MEMORY' ||
-    record.metadata.kind !== 'durable' ||
+    (!automatic &&
+      (record.headerTitle !== 'MEMORY' ||
+        record.metadata.kind !== 'durable' ||
+        record.metadata.project !== proposal.project ||
+        record.metadata.topic !== topic)) ||
+    (automatic &&
+      (!['durable', 'handoff', 'incident', 'preference', 'smoke'].includes(record.metadata.kind) ||
+        file.path.split('/')[0] !== record.metadata.kind ||
+        !file.path.endsWith('.md') ||
+        file.operation !== 'replace' ||
+        (record.metadata.topic ?? file.path.split('/').at(-1)!.slice(0, -3)) !== topic)) ||
     record.metadata.status !== 'active' ||
     record.metadata.visibility !== 'shared' ||
-    record.metadata.project !== proposal.project ||
-    record.metadata.topic !== topic ||
     record.metadata.memoryId !== file.memory.id
   ) {
     invalid(`Git proposal file ${file.path} does not match its shared memory receipt.`);

@@ -1,3 +1,9 @@
+import {
+  createReviewedSupportSnapshot,
+  currentMemoryCodeCitations,
+  reviewedMemorySupportDigest,
+} from '@threadnote/memory/reviewed-support';
+import {consolidationRevision} from '@threadnote/memory/consolidation';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
@@ -10,12 +16,14 @@ import {
   assertAutomaticMaintenanceAssessment,
   automaticMaintenanceEvidenceId,
   automaticMaintenanceSourceIdentity,
+  MAX_AUTOMATIC_MAINTENANCE_BYTES,
+  MAX_AUTOMATIC_MAINTENANCE_V2_BYTES,
   encodeAutomaticMaintenanceAssessment,
   parseAutomaticMaintenanceAssessment,
   projectShareableAutomaticMaintenanceAssessment,
   type AutomaticMaintenanceEvidenceV1,
 } from '@threadnote/memory/automatic-maintenance';
-import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
+import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {
   formatMemoryDocument,
   parseMemoryDocument,
@@ -30,6 +38,9 @@ import {
   type TopicMaintenanceManifest,
 } from '@threadnote/memory/topic-maintenance';
 import type {MemoryKind} from '@threadnote/memory/types';
+import {buildContextHealthReport} from '../../src/health.js';
+import {contextHealthCitationCaseSlotV2, contextHealthCitationCoverageV2} from '../../src/health_maintenance.js';
+import type {ContextBriefCitationValidationReceiptV2} from '../../src/types.js';
 
 const uri = 'threadnote://user/test/memories/durable/projects/threadnote/target.md';
 const origin = createMemoryCodeCitation({
@@ -192,6 +203,7 @@ describe('automatic memory maintenance evidence projection', () => {
       expect(assessment.dependencies).toEqual([{kind: 'configuration', evidenceId: originalId}]);
       expect(assessment.capabilities).toMatchObject({draft: true, apply: false, publish: false});
       expect(() => assertAutomaticMaintenanceTarget(assessment, original)).not.toThrow();
+      if (assessment.version !== 1) throw new Error('Legacy preparation must keep its V1 assessment.');
       const alteredCaches = [
         {
           ...assessment,
@@ -512,5 +524,315 @@ describe('automatic memory maintenance evidence projection', () => {
       }),
     ).toThrow();
     expect(() => memoryMaintenanceFragmentSource(initial, -1)).toThrow();
+  });
+});
+
+describe('preparation from canonical approved ordinary support', () => {
+  it('rebuilds approved roles and active support from only canonical bytes and resists provisional role poisoning', () => {
+    const body = 'Same paragraph.\n\nSame paragraph.\n\nPolicy is protected.';
+    const source = {kind: 'code' as const, citation: accepted};
+    const id = automaticMaintenanceEvidenceId(source);
+    const approved = {
+      type: 'reviewed-memory-support' as const,
+      version: 1 as const,
+      active: createReviewedSupportSnapshot({
+        bodyHash: consolidationRevision(body),
+        paragraphs: body.split('\n\n').map((paragraph, ordinal) => ({
+          ordinal,
+          hash: consolidationRevision(paragraph),
+          role: ordinal === 2 ? ('normative' as const) : ('descriptive' as const),
+          support: 'direct' as const,
+          evidenceIds: [id],
+        })),
+        sources: [{id, source, scope: 'repository'}],
+        acceptance: {
+          reviewId: 'review-canonical-context',
+          approvedAt: '2026-10-21T00:00:00.000Z',
+          targetBeforeHash: '1'.repeat(64),
+          preparationDigest: '2'.repeat(64),
+          sourceVectorDigest: '3'.repeat(64),
+        },
+      }),
+    };
+    const saved = record(body, {schemaVersion: 11, reviewedSupport: approved});
+    const fresh = parseMemoryDocument(uri, saved.content)!;
+    const basis = prepareMemoryMaintenanceBasis(fresh, {
+      inferences: [{ordinal: 2, role: 'descriptive', support: 'direct', currentEvidenceIds: [id]}],
+    });
+    expect(basis.assessment.version).toBe(2);
+    expect(basis.assessment.preparation).toEqual({
+      version: 2,
+      kind: 'reviewed-support',
+      supportDigest: reviewedMemorySupportDigest(approved),
+    });
+    expect(basis.assessment.paragraphs[2]).toMatchObject({
+      role: 'normative',
+      roleAuthority: 'reviewed',
+      supportAuthority: 'reviewed',
+      acceptedEvidenceIds: [id],
+    });
+    expect(basis.assessment.evidence[0].source).toEqual(source);
+    expect(() => assertAutomaticMaintenanceTarget(basis.assessment, fresh)).not.toThrow();
+    const poisoned = structuredClone(basis.assessment);
+    (poisoned.paragraphs[2] as {role: string}).role = 'descriptive';
+    expect(() => assertAutomaticMaintenanceTarget(poisoned, fresh)).toThrow();
+    expect(prepareMemoryMaintenanceBasis(parseMemoryDocument(uri, saved.content)!).assessment).toEqual(
+      prepareMemoryMaintenanceBasis(fresh).assessment,
+    );
+  });
+});
+
+it('rebuilds eight immutable roots plus eight approved sources and accounts for eight distinct current reads', () => {
+  const body = 'Current descriptive claim.\n\nProtected policy.\n\nRecorded history.';
+  const citations = (group: string) =>
+    Array.from({length: 8}, (_, index) =>
+      createMemoryCodeCitation({
+        ...originInput,
+        // Real canonical envelopes exercise the serialized budget, rather than padding an invalid assessment.
+        path: `${'nested/'.repeat(500)}${group}-${index}.ts`,
+        fileContentHash: {algorithm: 'sha256', value: consolidationRevision(`${group}-${index}`)},
+      }),
+    );
+  const roots = citations('root');
+  const active = citations('active');
+  const current = citations('current');
+  const approvedSources = active.map(citation => {
+    const source = {kind: 'code' as const, citation};
+    return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
+  });
+  const approved = {
+    type: 'reviewed-memory-support' as const,
+    version: 1 as const,
+    active: createReviewedSupportSnapshot({
+      bodyHash: consolidationRevision(body),
+      paragraphs: body.split('\n\n').map((section, ordinal) => ({
+        ordinal,
+        hash: consolidationRevision(section),
+        role: (['descriptive', 'normative', 'historical'] as const)[ordinal],
+        support: 'direct' as const,
+        evidenceIds: approvedSources.map(source => source.id),
+      })),
+      sources: approvedSources,
+      acceptance: {
+        reviewId: 'review-root-active-budget',
+        approvedAt: '2026-10-21T00:00:00.000Z',
+        targetBeforeHash: '1'.repeat(64),
+        preparationDigest: '2'.repeat(64),
+        sourceVectorDigest: '3'.repeat(64),
+      },
+    }),
+  };
+  const saved = record(body, {schemaVersion: 11, codeCitations: roots, reviewedSupport: approved});
+  expect(saved.metadata.citationErrors).toBeUndefined();
+  expect(saved.metadata.reviewedSupportError).toBeUndefined();
+  const canonical = parseMemoryDocument(uri, saved.content)!;
+  const untouched = structuredClone(canonical);
+  const rebuilt = prepareMemoryMaintenanceBasis(canonical).assessment;
+  expect(rebuilt.evidence).toHaveLength(16);
+  expect(
+    rebuilt.evidence
+      .filter(item => item.source.kind === 'code')
+      .map(item => (item.source.kind === 'code' ? item.source.citation : undefined)),
+  ).toEqual([...roots, ...active]);
+  expect(
+    rebuilt.paragraphs.map(item => [
+      item.role,
+      item.roleAuthority,
+      item.support,
+      item.supportAuthority,
+      item.acceptedEvidenceIds,
+    ]),
+  ).toEqual(
+    approved.active.paragraphs.map(item => [item.role, 'reviewed', item.support, 'reviewed', item.evidenceIds]),
+  );
+  const currentEvidence: AutomaticMaintenanceEvidenceV1[] = current.map(citation => {
+    const source = {kind: 'code' as const, citation};
+    return {
+      id: automaticMaintenanceEvidenceId(source),
+      source,
+      scope: 'repository',
+      authority: 'provisional',
+      availability: 'available',
+    };
+  });
+  const assessment = prepareMemoryMaintenanceBasis(canonical, {
+    evidence: currentEvidence,
+    inferences: [
+      {ordinal: 0, role: 'descriptive', support: 'direct', currentEvidenceIds: currentEvidence.map(item => item.id)},
+    ],
+  }).assessment;
+  expect(assessment.version).toBe(2);
+  expect(assessment.evidence).toHaveLength(24);
+  expect(assessment.paragraphs[0].currentEvidenceIds).toEqual(currentEvidence.map(item => item.id));
+  expect(assessment.paragraphs[0].acceptedEvidenceIds).toEqual(approvedSources.map(item => item.id));
+  expect(assessment.capabilities.draft).toBe(true);
+  const encoded = encodeAutomaticMaintenanceAssessment(assessment);
+  expect(new TextEncoder().encode(encoded).byteLength).toBeGreaterThan(MAX_AUTOMATIC_MAINTENANCE_BYTES);
+  expect(new TextEncoder().encode(encoded).byteLength).toBeLessThan(MAX_AUTOMATIC_MAINTENANCE_V2_BYTES);
+  expect(parseAutomaticMaintenanceAssessment(encoded)).toEqual(assessment);
+  expect(() => assertAutomaticMaintenanceTarget(assessment, canonical)).not.toThrow();
+  const extra = currentEvidence[0];
+  const citation = createMemoryCodeCitation({...originInput, path: 'extra-current.ts'});
+  const source = {kind: 'code' as const, citation};
+  const evidence = [...currentEvidence, {...extra, source, id: automaticMaintenanceEvidenceId(source)}];
+  expect(() => prepareMemoryMaintenanceBasis(canonical, {evidence})).toThrow(/source budget/u);
+  expect(() =>
+    assertAutomaticMaintenanceAssessment({...assessment, evidence: [...assessment.evidence, evidence.at(-1)]}),
+  ).toThrow();
+  expect(canonical).toEqual(untouched);
+  expect(canonical.metadata.reviewedSupport!.active.sources).toHaveLength(8);
+  expect(() =>
+    prepareMemoryMaintenanceBasis(record(body, {codeCitations: roots}), {evidence: [currentEvidence[0]]}),
+  ).toThrow(/source budget/u);
+});
+
+describe('health readers of approved ordinary support', () => {
+  const second = createMemoryCodeCitation({...originInput, path: 'packages/context/src/health.ts'});
+  const unused = createMemoryCodeCitation({...originInput, path: 'packages/context/src/health_maintenance.ts'});
+  const now = new Date('2026-10-21T00:00:00.000Z');
+  const acceptance = {
+    reviewId: 'review-current-health',
+    approvedAt: now.toISOString(),
+    targetBeforeHash: '1'.repeat(64),
+    preparationDigest: '2'.repeat(64),
+    sourceVectorDigest: '3'.repeat(64),
+  };
+  function approved(referenced: readonly MemoryCodeCitationV1[] = [accepted, second]): MemoryRecord {
+    const body = 'Approved current claim.';
+    const memory = currentEvidence();
+    const descriptor = (citation: MemoryCodeCitationV1) => {
+      const source = {kind: 'code' as const, citation};
+      return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
+    };
+    const paragraph = {
+      ordinal: 0,
+      hash: consolidationRevision(body),
+      role: 'descriptive' as const,
+      support: 'direct' as const,
+    };
+    return record(body, {
+      project: 'threadnote',
+      schemaVersion: 11,
+      codeCitations: [origin],
+      reviewedSupport: {
+        type: 'reviewed-memory-support',
+        version: 1,
+        active: createReviewedSupportSnapshot({
+          bodyHash: consolidationRevision(body),
+          paragraphs: [{...paragraph, evidenceIds: [...referenced.map(c => descriptor(c).id), memory.id]}],
+          sources: [
+            ...[accepted, second, unused].map(descriptor),
+            {id: memory.id, source: memory.source, scope: memory.scope},
+          ],
+          acceptance,
+        }),
+        initialApproval: createReviewedSupportSnapshot({
+          bodyHash: consolidationRevision(body),
+          paragraphs: [{...paragraph, evidenceIds: [descriptor(origin).id]}],
+          sources: [descriptor(origin)],
+          acceptance,
+        }),
+      },
+    });
+  }
+  function receipt(
+    citation: MemoryCodeCitationV1,
+    status: 'exact' | 'changed' | 'unknown',
+  ): ContextBriefCitationValidationReceiptV2 {
+    return {
+      citationId: citation.id,
+      candidateCount: 0,
+      coverage: status === 'unknown' ? 'incomplete' : 'current-complete',
+      kind: 'file',
+      observedAt: now.toISOString(),
+      provenance: 'current-verified',
+      reason: status === 'exact' ? 'exact' : status === 'changed' ? 'source-changed' : 'repository-unavailable',
+      status,
+      strategy: 'content-hash',
+      validatorVersion: 1,
+    };
+  }
+
+  it('selects only referenced active code pins without changing canonical roots or source envelopes', () => {
+    fc.assert(
+      fc.property(fc.subarray([accepted, second]), referenced => {
+        const canonical = freeze(approved(referenced));
+        const before = JSON.stringify(canonical);
+        expect(currentMemoryCodeCitations(canonical)).toEqual(referenced);
+        expect(currentMemoryCodeCitations(parseMemoryDocument(uri, canonical.content)!)).toEqual(referenced);
+        expect(canonical.metadata.codeCitations).toEqual([origin]);
+        expect(JSON.stringify(canonical)).toBe(before);
+      }),
+      {numRuns: 20},
+    );
+    const legacy = freeze(record('Legacy claim.', {codeCitations: [origin, accepted]}));
+    expect(currentMemoryCodeCitations(legacy)).toBe(legacy.metadata.codeCitations);
+  });
+
+  it('uses the current vector for coverage and drift findings while ignoring root and unreferenced receipts', () => {
+    const canonical = freeze(approved());
+    const before = JSON.stringify(canonical);
+    const historical = [receipt(origin, 'changed'), receipt(unused, 'unknown')];
+    const validations = [{uri, receipts: [...historical, receipt(accepted, 'exact'), receipt(second, 'exact')]}];
+    expect(contextHealthCitationCoverageV2({records: [canonical], validations})).toMatchObject({
+      eligible: 2,
+      checked: 2,
+      pending: 0,
+      unavailable: 0,
+      currentVerified: 2,
+      historicalVerified: 0,
+      state: 'complete',
+      reasons: [],
+    });
+    const result = buildContextHealthReport({
+      now,
+      project: 'threadnote',
+      records: [canonical],
+      citationValidations: [{uri, receipts: [...historical, receipt(accepted, 'changed'), receipt(second, 'exact')]}],
+      includeCitationCoverageFindings: true,
+    });
+    const findings = result.findings.filter(item => item.category.startsWith('citation-'));
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      category: 'citation-changed',
+      repair: {targetUri: `${uri}#${accepted.id}`},
+      caseIdentity: {slot: contextHealthCitationCaseSlotV2(accepted)},
+    });
+    expect(
+      contextHealthCitationCoverageV2({records: [canonical], validations: [{uri, receipts: historical}]}),
+    ).toMatchObject({eligible: 2, checked: 0, pending: 2, state: 'unavailable'});
+    expect(JSON.stringify(canonical)).toBe(before);
+  });
+
+  it('preserves an explicitly selected worker subset and permits active support containing no code', () => {
+    const canonical = approved();
+    const selected = {...canonical, metadata: {...canonical.metadata, codeCitations: [accepted]}};
+    expect(
+      contextHealthCitationCoverageV2({
+        records: [selected],
+        validations: [{uri, receipts: [receipt(accepted, 'exact'), receipt(second, 'unknown')]}],
+        citationSelection: 'provided',
+      }),
+    ).toMatchObject({eligible: 1, checked: 1, pending: 0, currentVerified: 1, state: 'complete'});
+    expect(contextHealthCitationCoverageV2({records: [approved([])], validations: []})).toMatchObject({
+      eligible: 0,
+      state: 'complete',
+    });
+  });
+
+  it('fails closed for malformed or body-stale reviewed headers instead of reviving legacy roots', () => {
+    const canonical = approved();
+    const invalid = parseMemoryDocument(
+      uri,
+      canonical.content.replace(/^reviewed_support:.*$/mu, 'reviewed_support: {invalid}'),
+    )!;
+    expect(invalid.metadata.reviewedSupportError).toBeDefined();
+    const stripped = {...canonical, metadata: {...canonical.metadata, reviewedSupport: undefined}};
+    const wrongSchema = {...canonical, metadata: {...canonical.metadata, schemaVersion: 10}};
+    for (const unsafe of [invalid, stripped, wrongSchema, {...canonical, body: 'Changed after approval.'}]) {
+      expect(() => currentMemoryCodeCitations(unsafe)).toThrow(/Reviewed memory support/u);
+      expect(() => contextHealthCitationCoverageV2({records: [unsafe], validations: []})).toThrow();
+      expect(() => buildContextHealthReport({now, project: 'threadnote', records: [unsafe]})).toThrow();
+    }
   });
 });

@@ -3,6 +3,7 @@ import {Schema} from 'effect';
 import {parseResourceId} from '@threadnote/store/resource-id';
 import {
   assertMemoryDocumentSchemaWritable,
+  declaresReviewedSupportHeader,
   MAX_MEMORY_RELATIONS,
   parseMemoryDocument,
   type MemoryRelation,
@@ -183,6 +184,11 @@ export function captureConsolidationSource(source: {
   readonly uri: string;
   readonly content: string;
 }): ConsolidationSource {
+  // Legacy capture cannot carry active, initial, or legacy reviewed-support provenance.
+  if (declaresReviewedSupportHeader(source.content))
+    fail(
+      `source ${source.uri} has reviewed support that consolidation cannot preserve yet; use maintenance review/manual-preview instead.`,
+    );
   assertMemoryDocumentSchemaWritable(source.content);
   const record = parseMemoryDocument(source.uri, source.content);
   if (!record || record.metadata.citationErrors?.length) fail(`source ${source.uri} has invalid evidence metadata.`);

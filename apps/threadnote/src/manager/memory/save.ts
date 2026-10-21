@@ -1,3 +1,4 @@
+import {topicMaintenanceReplacementError} from '@threadnote/memory/topic-maintenance';
 import {
   memoryCodeCitationContentSharingBlocker,
   memoryCodeCitationSharingBlockerMessage,
@@ -20,6 +21,7 @@ export function assertManagerRawSharedMemorySave(
   }
   if (existingContent !== expectedContent)
     throw new Error(`${uri} changed after it was opened in Manager. Reload and retry.`);
+  assertManagerReviewedSupportUnchanged(uri, existingContent, content);
   assertMemoryDocumentSchemaWritable(existingContent);
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
@@ -55,6 +57,7 @@ export function assertManagerRawPersonalMemorySave(
   if (expectedContent !== undefined && existingContent !== expectedContent) {
     throw new Error(`${uri} changed after it was opened in Manager. Reload and retry.`);
   }
+  assertManagerReviewedSupportUnchanged(uri, existingContent, content);
   assertMemoryDocumentSchemaWritable(existingContent);
   assertMemoryDocumentSchemaWritable(content);
   assertManagerRelationHeadersUnchanged(existingContent, content);
@@ -120,4 +123,15 @@ function relationHeaderLines(content: string): readonly string[] {
   const lines = content.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n');
   const headerEnd = lines.findIndex(line => line.trim() === '');
   return lines.slice(0, headerEnd === -1 ? lines.length : headerEnd).filter(line => line.startsWith('relation:'));
+}
+
+function assertManagerReviewedSupportUnchanged(uri: string, existingContent: string, content: string): void {
+  const current = parseMemoryDocument(uri, existingContent);
+  const next = parseMemoryDocument(uri, content);
+  if (!current || !next) return;
+  const error = topicMaintenanceReplacementError(current, next);
+  if (error)
+    throw new Error(
+      `${error} Use context_maintenance_review with action=manual-preview, the exact uri and expectedContentHash, and the complete desiredBody before approving the returned preview.`,
+    );
 }

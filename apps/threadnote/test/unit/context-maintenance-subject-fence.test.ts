@@ -130,6 +130,30 @@ function exercise(phase: number, mutateSelected: boolean, reverse = false) {
 }
 
 describe('canonical subject fences for citation maintenance', () => {
+  effectIt.effect('refuses current source drift after the actual shared worker validation has completed', () =>
+    Effect.gen(function* () {
+      const data = yield* fixture();
+      const record = parseMemoryDocument(data.uri, data.content)!;
+      const evidence = yield* collectMaintenanceWorkerBatch(
+        data.config,
+        [{record, project: 'fixture', chunk: 0, key: 'tn_source:0', citationIds: [data.citations[0].id]}],
+        data.repository,
+      );
+      expect(
+        evidence.validations
+          .flatMap(item => item.receipts)
+          .some(receipt => receipt.status === 'exact' && receipt.provenance !== 'historical-verified'),
+      ).toBe(true);
+      expect(yield* maintenanceWorkerBatchCurrent(data.config, evidence)).toBe(true);
+      yield* (yield* FileSystem.FileSystem).writeFileString(
+        (yield* Path.Path).join(data.repository, 'source.ts'),
+        'export const supported = false;\n',
+      );
+      expect(yield* maintenanceWorkerBatchCurrent(data.config, evidence)).toBe(false);
+      expect(yield* data.store.read(data.location, data.uri)).toBe(data.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect(
     'survives an unrelated native write between complete selector partitions and rejects a later subject edit',
     () =>

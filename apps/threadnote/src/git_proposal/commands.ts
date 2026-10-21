@@ -31,6 +31,7 @@ import {
 import {planKnowledgeDeltaGitMaterializationV1, type KnowledgeDeltaGitMaterializationPlanV1} from './materializer.js';
 import {
   verifyTopicMaintenanceGitProposal,
+  verifyAutomaticMaintenanceGitProposal,
   type GitProposal,
   type GitProposalBuild,
 } from './topic_maintenance_proposal.js';
@@ -85,13 +86,15 @@ export const runKnowledgeDeltaGitProposalMaterialize = Effect.fn('gitProposal.ma
   });
   yield* Effect.try({
     try: () =>
-      proposal.version === 2
-        ? verifyTopicMaintenanceGitProposal(proposal)
-        : verifyKnowledgeDeltaGitProposalV1(proposal),
+      proposal.version === 3
+        ? verifyAutomaticMaintenanceGitProposal(proposal)
+        : proposal.version === 2
+          ? verifyTopicMaintenanceGitProposal(proposal)
+          : verifyKnowledgeDeltaGitProposalV1(proposal),
     catch: cause => operationError(cause instanceof Error ? cause.message : 'Git proposal is invalid.'),
   });
   const materialize = materializeProposal(config, options, proposal);
-  return yield* proposal.version === 2
+  return yield* proposal.version !== 1
     ? withCandidateReviewLock(config.agentContextHome, proposal.knowledgeDelta.reviewId, materialize)
     : materialize;
 });
@@ -102,7 +105,7 @@ const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function
   proposal: GitProposal,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  if (proposal.version === 2) {
+  if (proposal.version !== 1) {
     if (options.apply === true && options.approvalDigest !== proposal.proposalHash)
       return yield* operationError(
         'Shared maintenance materialization requires the exact proposalHash as approvalDigest.',
@@ -165,7 +168,7 @@ const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function
   const existing = yield* materializedBranchCommit(read, branchRef);
   if (existing !== undefined) {
     yield* verifyMaterializedBranch(read, branchRef, existing, base, plan);
-    if (proposal.version === 2) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
+    if (proposal.version !== 1) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
     yield* Console.log(
       JSON.stringify({
         branch: plan.branch,
@@ -189,7 +192,7 @@ const materializeProposal = Effect.fn('gitProposal.materializeDecoded')(function
     return {branch: plan.branch, materialized: false, proposalHash: plan.proposalHash} as const;
   }
   const commit = yield* createMaterializedBranch(fs, yield* Path.Path, run, read, branchRef, base, plan);
-  if (proposal.version === 2) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
+  if (proposal.version !== 1) yield* verifyTopicMaintenanceMaterialization(config, proposal, options);
   yield* Console.log(
     JSON.stringify({
       branch: plan.branch,
