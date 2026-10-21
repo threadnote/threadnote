@@ -75,6 +75,7 @@ import {
   invalidateMaintenanceWorkerBatch,
   prepareMaintenanceWorkerBatches,
   collectMaintenanceWorkerBatch,
+  maintenanceWorkerBatchCurrent,
   runRequestedMaintenanceProjection,
   selectRelationBoundedMaintenanceWindow,
   selectRequestedMaintenanceUris,
@@ -999,23 +1000,80 @@ describe('persistent context maintenance', () => {
       yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
       // The resumed semantic phase advances separately before the next citation phase.
       yield* runContextMaintenance(fixture.config, {cwd: repository});
-      const query = yield* CodeGraphQueryService;
-      let statusCalls = 0;
-      const racing = CodeGraphQueryService.of({
-        ...query,
-        status: (home, cwd, options) =>
-          Effect.gen(function* () {
-            if (++statusCalls === 3) yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
-            return yield* query.status(home, cwd, options);
-          }),
+      const evidence = yield* collectMaintenanceWorkerBatch(
+        fixture.config,
+        [{record: source, project: 'threadnote', chunk: 0, key: 'tn_source:0'}],
+        repository,
+      );
+      expect(
+        evidence.validations
+          .flatMap(item => item.receipts)
+          .some(receipt => receipt.status === 'exact' && receipt.provenance !== 'historical-verified'),
+      ).toBe(true);
+      expect(yield* maintenanceWorkerBatchCurrent(fixture.config, evidence)).toBe(true);
+      yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
+      expect(yield* maintenanceWorkerBatchCurrent(fixture.config, evidence)).toBe(false);
+      yield* fixture.fs.writeFileString(file, 'export const supported = true;\n');
+      yield* (yield* CodeGraphIndexer).index({cwd: repository, threadnoteHome: fixture.home, ensureVectors: false});
+      const stateFile = fixture.path.join(fixture.home, 'context-maintenance', 'state-v2.json');
+      const evidenceFile = fixture.path.join(
+        fixture.home,
+        'context-maintenance',
+        'evidence',
+        `${sha256HexSync(`threadnote\0${repository}`)}.json`,
+      );
+      yield* fixture.fs.remove(evidenceFile);
+      const prior = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      const taskKey = `${source.metadata.memoryId}:0`;
+      let injected: MaintenanceState | undefined;
+      const racing = FileSystem.FileSystem.of({
+        ...fixture.fs,
+        rename: (from, to) =>
+          fixture.fs.rename(from, to).pipe(
+            Effect.tap(() =>
+              Effect.gen(function* () {
+                if (to !== stateFile || injected !== undefined) return;
+                const tentative = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+                if (
+                  tentative.checkpoints[taskKey]?.checkedCitations !== 1 ||
+                  tentative.cases.find(item => item.caseId === originalSupport.caseId)?.disposition !== 'resolved'
+                )
+                  return;
+                const projection = JSON.parse(yield* fixture.fs.readFileString(evidenceFile)) as {
+                  entries: {receipts: {citationId: string; status: string; provenance: string}[]}[];
+                };
+                expect(
+                  projection.entries.some(entry =>
+                    entry.receipts.some(
+                      receipt =>
+                        receipt.citationId === source.metadata.codeCitations![0].id &&
+                        receipt.status === 'exact' &&
+                        receipt.provenance !== 'historical-verified',
+                    ),
+                  ),
+                ).toBe(true);
+                expect(yield* fixture.fs.readFileString(file)).toBe('export const supported = true;\n');
+                injected = tentative;
+                yield* fixture.fs.writeFileString(file, 'export const supported = false;\n');
+              }),
+            ),
+          ),
       });
       const result = yield* runContextMaintenance(fixture.config, {cwd: repository}).pipe(
-        Effect.provideService(CodeGraphQueryService, racing),
+        Effect.provideService(FileSystem.FileSystem, racing),
       );
-      expect(statusCalls).toBeGreaterThanOrEqual(3);
+      expect(injected).toBeDefined();
+      expect(injected!.checkpoints[taskKey].checkedCitations).toBe(1);
       expect(result.projects[0].checked).toBe(0);
+      expect(result.projects[0].checkedCitations).toBe(0);
       expect(result.cases.find(item => item.caseId === originalCase.caseId)).toEqual(originalCase);
       expect(result.cases.find(item => item.caseId === originalSupport.caseId)).toEqual(originalSupport);
+      const persisted = JSON.parse(yield* fixture.fs.readFileString(stateFile)) as MaintenanceState;
+      const expectedCheckpoints = {...prior.checkpoints};
+      delete expectedCheckpoints[taskKey];
+      expect(persisted.checkpoints).toEqual(expectedCheckpoints);
+      expect(persisted.cases).toEqual(prior.cases);
+      expect(result.receipts).toEqual(prior.receipts);
       expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
       const health = yield* collectContextHealth(fixture.config, 'threadnote', [source], repository);
       expect(health.maintenance?.citationCoverage.currentVerified).toBe(0);
@@ -3892,7 +3950,14 @@ describe('persistent context maintenance', () => {
         const content = '---\nname: synthetic-tool\n---\nNot a memory.';
         yield* fixture.fs.writeFileString(file, content);
         const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
-        expect(result.error?.diagnostic?.category).toBe('invalid-header');
+        expect(result.error).toBeUndefined();
+        expect(result.preparation).toMatchObject({
+          complete: false,
+          omittedRecords: 1,
+          incompleteReason: 'inventory-records-omitted',
+          diagnostics: [{category: 'invalid-header', stage: 'record-read', retryable: false}],
+        });
+        expect(result.preparation?.diagnostics?.[0].memoryUri).toContain(relative);
         expect(result.receipts).toHaveLength(0);
         expect(yield* fixture.fs.readFileString(file)).toBe(content);
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -3905,29 +3970,36 @@ describe('persistent context maintenance', () => {
       yield* fixture.fs.writeFileString(fixture.source, source.content);
       yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'missing.md'), 'Malformed but present.');
       const result = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
-      expect(result).toMatchObject({
-        state: 'failed',
-        error: {
-          reason: 'memory-snapshot-unreadable',
-          diagnostic: {
+      expect(result.error).toBeUndefined();
+      expect(result.preparation).toMatchObject({
+        complete: false,
+        admittedRecords: 1,
+        omittedRecords: 1,
+        incompleteReason: 'inventory-records-omitted',
+        diagnostics: [
+          {
             version: 1,
             category: 'invalid-header',
             stage: 'record-read',
             memoryUri: URI.replace('source.md', 'missing.md'),
             retryable: false,
           },
-        },
+        ],
       });
-      expect(JSON.stringify(result.error)).not.toContain('Malformed but present.');
+      expect(result.cases).toContainEqual(
+        expect.objectContaining({disposition: 'waiting-evidence', reason: 'inventory-preparation-incomplete'}),
+      );
+      expect(JSON.stringify(result.preparation)).not.toContain('Malformed but present.');
       expect(renderContextMaintenanceStatus(result)).toContain('missing.md');
       expect(renderContextMaintenanceStatus(result)).toContain('backup');
-      expect((yield* readContextMaintenanceStatus(fixture.config)).error).toEqual(result.error);
+      expect((yield* readContextMaintenanceStatus(fixture.config)).preparation).toEqual(result.preparation);
       expect(result.receipts).toHaveLength(0);
       expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
       const target = record('missing');
       yield* fixture.fs.writeFileString(fixture.path.join(fixture.directory, 'missing.md'), target.content);
       const recovered = yield* runContextMaintenance(fixture.config, {cwd: fixture.home});
       expect(recovered.error).toBeUndefined();
+      expect(recovered.preparation?.complete).toBe(true);
       expect(recovered.receipts).toHaveLength(0);
       expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
@@ -3961,17 +4033,23 @@ describe('persistent context maintenance', () => {
         );
         if (persistent) {
           expect(opens).toBe(2);
-          expect(result).toMatchObject({
-            state: 'failed',
-            error: {diagnostic: {category: 'record-changed', retryable: true, memoryUri: URI}},
+          expect(result.preparation).toMatchObject({
+            complete: false,
+            admittedRecords: 0,
+            omittedRecords: 1,
+            incompleteReason: 'inventory-records-omitted',
+            diagnostics: [{category: 'record-changed', stage: 'record-read', retryable: true, memoryUri: URI}],
           });
-          expect(JSON.stringify(result.error)).not.toContain('Synthetic private');
-          expect(JSON.stringify(result.error)).not.toContain('/synthetic/private/path');
+          expect((yield* readContextMaintenanceStatus(fixture.config)).preparation).toEqual(result.preparation);
+          expect(JSON.stringify(result.preparation)).not.toContain('Synthetic private');
+          expect(JSON.stringify(result.preparation)).not.toContain('/synthetic/private/path');
         } else {
           expect(opens).toBeGreaterThanOrEqual(2);
           expect(result.state).not.toBe('failed');
           expect(result.error).toBeUndefined();
         }
+        expect(result.error).toBeUndefined();
+        expect(result.receipts).toHaveLength(0);
         expect(yield* fixture.fs.readFileString(fixture.source)).toBe(source.content);
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
     );
@@ -4009,6 +4087,9 @@ describe('persistent context maintenance', () => {
         source.metadata.relations!.slice(0, 2),
       );
       expect(yield* fixture.fs.exists(fixture.path.join(shared, 'guide.md'))).toBe(true);
+      expect(yield* fixture.fs.readFileString(fixture.path.join(shared, 'guide.md'))).toBe(
+        '---\ntitle: Guide\n---\nAncillary docs.',
+      );
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 

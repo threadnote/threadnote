@@ -3,6 +3,7 @@ import {
   canonicalMemoryDocumentContent,
   isAgentArtifactUri,
   isAgentArtifactPath,
+  isSharedMemoryUri,
   parseMemoryDocument,
   type MemoryMetadata,
   type MemoryRecord,
@@ -304,7 +305,14 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
         catch: () => maintenanceSnapshotFailure('invalid-utf8', 'record-read', uri),
       });
       const record = parseMemoryDocument(uri, content);
-      if (record === undefined) return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
+      if (record === undefined) {
+        const firstLine = content
+          .trim()
+          .split(/\r\n?|\n/u, 1)[0]
+          ?.trim();
+        if (!isSharedMemoryUri(uri) || firstLine === 'MEMORY' || firstLine === 'HANDOFF')
+          return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
+      }
       const entry: InventoryEntry | undefined =
         record !== undefined && (project === undefined || (record.metadata.project ?? 'unscoped') === project)
           ? {

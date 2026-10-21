@@ -1,5 +1,8 @@
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import type {ContextHealthCaseDispositionV2} from '@threadnote/context/health_maintenance';
+import type {
+  ContextHealthCaseDispositionV2,
+  ContextMaintenanceSnapshotDiagnosticV1,
+} from '@threadnote/context/health_maintenance';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
 import type {
   ContextMaintenanceCaseV2,
@@ -7,6 +10,7 @@ import type {
   ContextMaintenanceReadOptions,
   MaintenanceState,
 } from './maintenance.js';
+import {maintenanceSnapshotFailure} from './maintenance_snapshot.js';
 
 function maintenanceCaseSubjectKeys(item: ContextMaintenanceCaseV2): readonly string[] {
   return (item.subjectContentHashes?.length ?? 0) > 0
@@ -200,12 +204,38 @@ export function publicStatus(
   };
 }
 
+function renderSnapshotDiagnostic(diagnostic: ContextMaintenanceSnapshotDiagnosticV1): readonly string[] {
+  return [
+    diagnostic.summary,
+    `Category: ${diagnostic.category}`,
+    `Stage: ${diagnostic.stage}`,
+    ...(diagnostic.memoryUri === undefined ? [] : [`Memory: ${diagnostic.memoryUri}`]),
+    diagnostic.recovery,
+  ];
+}
+
 export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV2): string {
   const counts = status.counts ?? {};
+  const diagnostics = [
+    ...new Map(
+      [...(status.error?.diagnostic ? [status.error.diagnostic] : []), ...(status.preparation?.diagnostics ?? [])].map(
+        diagnostic => {
+          const safe = maintenanceSnapshotFailure(
+            diagnostic.category,
+            diagnostic.stage,
+            diagnostic.memoryUri,
+          ).diagnostic;
+          return [JSON.stringify([safe.category, safe.stage, safe.memoryUri]), safe];
+        },
+      ),
+    ).values(),
+  ];
   return [
     `Context maintenance: ${status.paused ? 'paused' : status.state}`,
     ...(status.preparation?.complete === false
-      ? [`Preparation: partial; ${status.preparation.admittedRecords} records indexed so far.`]
+      ? [
+          `Preparation: partial; ${status.preparation.admittedRecords} records indexed so far; ${status.preparation.omittedRecords ?? 0} records omitted.`,
+        ]
       : []),
     `Decisions: ${counts.decisionMemories ?? 0}; waiting evidence: ${counts['waiting-evidence'] ?? 0}; completed: ${(counts.resolved ?? 0) + (counts.retired ?? 0)}.`,
     ...status.projects.map(
@@ -216,13 +246,7 @@ export function renderContextMaintenanceStatus(status: ContextMaintenanceStatusV
       .slice(0, 12)
       .map(group => `${group.project}: ${group.reason} (${group.affectedMemories} memories)`),
     ...(status.error === undefined ? [] : [`Maintenance error: ${status.error.reason}`]),
-    ...(status.error?.diagnostic === undefined
-      ? []
-      : [
-          status.error.diagnostic.summary,
-          `Stage: ${status.error.diagnostic.stage}`,
-          ...(status.error.diagnostic.memoryUri === undefined ? [] : [`Memory: ${status.error.diagnostic.memoryUri}`]),
-          status.error.diagnostic.recovery,
-        ]),
+    ...diagnostics.slice(0, 8).flatMap(renderSnapshotDiagnostic),
+    ...(diagnostics.length > 8 ? [`Diagnostics: ${diagnostics.length - 8} additional diagnostics omitted.`] : []),
   ].join('\n');
 }
