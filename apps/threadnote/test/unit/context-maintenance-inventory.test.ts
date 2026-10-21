@@ -361,6 +361,98 @@ describe('maintenance inventory authority and fairness', () => {
 
   fcEffectProp(
     effectIt,
+    'shared ancillary classification preserves bytes and never hides malformed canonical headers',
+    {
+      ending: fc.constantFrom('\n', '\r\n', '\r'),
+      prefix: fc.constantFrom('', ' \t', '\ufeff\n'),
+      kind: fc.constantFrom('durable' as const, 'preference' as const, 'handoff' as const),
+      malformed: fc.constantFrom('MEMORY\nkind: unsupported', 'MEMORY\nstatus: active'),
+      body: fc.array(fc.constantFrom('a', 'b', 'λ', '\n', ' '), {maxLength: 64}),
+    },
+    ({ending, prefix, kind, malformed, body}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture([0]);
+        const directory = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories', 'shared', 'default');
+        yield* f.fs.makeDirectory(directory, {recursive: true});
+        const sharedUri = (name: string) => `threadnote://user/tester/memories/shared/default/${name}.md`;
+        const guide = `${prefix}---\ntitle: Guide\n---\n${body.join('')}`.replace(/\n/gu, ending);
+        const canonical = `${prefix}${content(2).replace('kind: durable', `kind: ${kind}`)}`.replace(/\n/gu, ending);
+        yield* f.fs.writeFileString(f.path.join(directory, 'guide.md'), guide);
+        yield* f.fs.writeFileString(f.path.join(directory, 'canonical.md'), canonical);
+        const ready = yield* f.prepare(100);
+        expect(ready.complete).toBe(true);
+        expect(ready.records.map(record => record.uri).sort()).toEqual([uri(0), sharedUri('canonical')].sort());
+        expect(ready.records.find(record => record.uri === sharedUri('canonical'))?.metadata.kind).toBe(kind);
+        const direct = yield* readContextMaintenanceCanonicalRecord(f.config, sharedUri('guide')).pipe(Effect.result);
+        expect(Result.isFailure(direct)).toBe(true);
+        if (Result.isFailure(direct)) expect(direct.failure.diagnostic.category).toBe('invalid-header');
+        const broken = `${prefix}${malformed}\n\n${body.join('')}`.replace(/\n/gu, ending);
+        yield* f.fs.writeFileString(f.path.join(directory, 'broken.md'), broken);
+        const partial = yield* f.prepare(100);
+        expect(partial.complete).toBe(false);
+        expect(partial.diagnostics).toEqual([
+          expect.objectContaining({category: 'invalid-header', memoryUri: sharedUri('broken'), retryable: false}),
+        ]);
+        expect(partial.records.map(record => record.uri).sort()).toEqual([uri(0), sharedUri('canonical')].sort());
+        for (const [name, bytes] of [
+          ['guide', guide],
+          ['canonical', canonical],
+          ['broken', broken],
+        ])
+          expect(Array.from(yield* f.fs.readFile(f.path.join(directory, `${name}.md`)))).toEqual(
+            Array.from(new TextEncoder().encode(bytes)),
+          );
+      }).pipe(TestClock.withLive, provide),
+    {fastCheck: {numRuns: 16, seed: 80512}},
+  );
+
+  for (const failure of ['invalid-utf8', 'record-size-limit', 'permission-denied'] as const)
+    effectIt.effect(`shared ancillary paths retain ${failure} diagnostics before classification`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture([0]);
+        const directory = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories', 'shared', 'default');
+        yield* f.fs.makeDirectory(directory, {recursive: true});
+        const file = f.path.join(directory, 'guide.md');
+        const raw =
+          failure === 'invalid-utf8'
+            ? new Uint8Array([0xff])
+            : failure === 'record-size-limit'
+              ? new Uint8Array(contextMaintenanceInventoryAuthorityLimits.recordBytes + 1)
+              : new TextEncoder().encode('---\ntitle: Guide\n---\nAncillary docs.');
+        yield* f.fs.writeFile(file, raw);
+        const wrapped = FileSystem.FileSystem.of({
+          ...f.fs,
+          open: (candidate, options) =>
+            candidate === file && failure === 'permission-denied'
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: 'PermissionDenied',
+                    module: 'FileSystem',
+                    method: 'open',
+                    description: 'Synthetic private error.',
+                    pathOrDescriptor: '/synthetic/private/path',
+                  }),
+                )
+              : f.fs.open(candidate, options),
+        });
+        const partial = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped));
+        expect(partial.complete).toBe(false);
+        expect(partial.records.map(record => record.uri)).toEqual([uri(0)]);
+        expect(partial.diagnostics).toEqual([
+          expect.objectContaining({
+            category: failure,
+            stage: 'record-read',
+            memoryUri: 'threadnote://user/tester/memories/shared/default/guide.md',
+          }),
+        ]);
+        expect(JSON.stringify(partial.diagnostics)).not.toContain('Synthetic private');
+        expect(JSON.stringify(partial.diagnostics)).not.toContain('/synthetic/private/path');
+        expect(Array.from(yield* f.fs.readFile(file))).toEqual(Array.from(raw));
+      }).pipe(TestClock.withLive, provide),
+    );
+
+  fcEffectProp(
+    effectIt,
     'unreadable present records remain unchanged and failures retain only safe diagnostics',
     {invalidUtf8: fc.boolean(), body: fc.string({minLength: 1, maxLength: 96})},
     ({invalidUtf8, body}) =>

@@ -13,7 +13,8 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {StandaloneBrokerLayer} from '../../src/effect/runtime-bootstrap.js';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import type {MaintenanceState} from '../../src/memory/context/maintenance.js';
-import {publicStatus} from '../../src/memory/context/maintenance_projection.js';
+import {publicStatus, renderContextMaintenanceStatus} from '../../src/memory/context/maintenance_projection.js';
+import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_snapshot.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 function legacyProgress(eligibleRecords = 2, cursor = 1, totalBatches = 1) {
@@ -50,6 +51,45 @@ const incomplete = {
 };
 
 describe('maintenance status semantic checkpoint compatibility', () => {
+  it('renders safe partial and whole-run diagnostics once with bounded omission visibility', () => {
+    const diagnostics = Array.from(
+      {length: 12},
+      (_, index) =>
+        maintenanceSnapshotFailure(
+          'invalid-header',
+          'record-read',
+          `threadnote://user/tester/memories/durable/broken-${index}.md`,
+        ).diagnostic,
+    );
+    const original: MaintenanceState = {
+      ...state({}),
+      preparation: {
+        complete: false,
+        admittedRecords: 2,
+        omittedRecords: 12,
+        diagnostics: [...diagnostics, diagnostics[0]],
+      },
+      error: {
+        at: '2026-10-03T15:00:00.000Z',
+        reason: 'memory-snapshot-unreadable',
+        diagnostic: {...diagnostics[0], summary: 'Synthetic private content.', recovery: '/synthetic/private/path'},
+      },
+    };
+    const before = structuredClone(original);
+    const text = renderContextMaintenanceStatus(publicStatus(original));
+    expect(text).toContain('12 records omitted');
+    expect(text).toContain('Category: invalid-header');
+    expect(text).toContain('Stage: record-read');
+    expect(text).toContain('backup');
+    expect(text.split('Memory:')).toHaveLength(9);
+    expect(text.split('Memory: ' + diagnostics[0].memoryUri)).toHaveLength(2);
+    expect(text).toContain('4 additional diagnostics omitted');
+    expect(text).not.toContain('broken-8.md');
+    expect(text).not.toContain('Synthetic private content');
+    expect(text).not.toContain('/synthetic/private/path');
+    expect(original).toEqual(before);
+  });
+
   it.each([{}, {version: 1}, {version: 2, analyzerVersion: 1}])(
     'shows obsolete completed progress %j as incomplete without rewriting it',
     version => {

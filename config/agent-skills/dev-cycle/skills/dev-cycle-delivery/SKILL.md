@@ -17,6 +17,8 @@ Use independent PRs targeting the normal base when phases are independent. For r
 
 Prefer isolated phase branches/worktrees, particularly with unrelated user edits/staging. Reuse suitable attached worktrees before creating more. Do not carry another phase's uncommitted changes across branch switches. If the implementation depends on unowned local changes, resolve ownership/dependency before publication; never sweep them into the PR. Main agent owns commits/publication; workers and reviewers remain within their assigned source/artifact authority.
 
+Each phase has a separate development cycle and, for PR delivery, its own PR. Publish the phase as soon as its local cycle passes; do not accumulate multiple completed phases for one final PR. Record the PR and start its watcher with an owned consumer, then immediately begin a fresh cycle for the next eligible phase. This handoff completes the local cycle's delivery, not CI or merge. Continue automatically within the approved plan; only explicit scope limits or concrete blockers justify stopping between phases.
+
 ## Commit and publish
 
 Before committing, complete phase acceptance, valid review or a justified skip, source identity and applicable checks. For a mapped phase `phase_state.py ready` enforces the recorded gates. Inspect the exact owned diff and stage only intended files/hunks; never `git add --all` in a dirty user checkout. Hooks may change source: detect it, revalidate, and update review if new blockers arise. Do not use `--no-verify` to force a pass.

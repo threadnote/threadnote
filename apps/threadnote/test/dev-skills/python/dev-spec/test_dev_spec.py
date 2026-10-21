@@ -15,6 +15,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import dev_spec as ds
 import support
@@ -225,6 +226,30 @@ class Specs(unittest.TestCase):
         count = len(self.backend.writes)
         self.assertEqual(self.saved()["rootUri"], result["rootUri"])
         self.assertEqual(len(self.backend.writes), count)
+
+    def test_draft_and_approved_spec_artifacts_are_durable(self):
+        draft = self.saved(draft=True)
+        self.assertEqual(support.load_record(self.sc.read(draft["rootUri"]))["data"]["status"], "draft")
+        with self.assertRaisesRegex(support.PlanError, "confirmed ready"):
+            ds.export_plan(draft["rootUri"], self.sc)
+        approved = self.saved()
+        self.assertEqual(ds.export_plan(approved["rootUri"], self.sc)["featureId"], self.spec["id"])
+        self.assertTrue(all(record["memoryKind"] == "durable" for _, record in self.backend.writes))
+        self.assertEqual(ds.load(approved["rootUri"], self.sc)[0], self.spec)
+
+    def test_unchanged_legacy_spec_is_resaved_as_durable(self):
+        original = ds.record
+        def legacy(*args, **kwargs):
+            return {**original(*args, **kwargs), "memoryKind": "handoff"}
+        with patch.object(ds, "record", legacy):
+            previous = self.saved()
+        count = len(self.backend.writes)
+        current = self.saved()
+        self.assertNotEqual(previous["rootUri"], current["rootUri"])
+        self.assertTrue(all(record["memoryKind"] == "durable" for _, record in self.backend.writes[count:]))
+        self.assertIn(previous["rootUri"], support.load_record(self.sc.read(current["rootUri"]))["data"]["history"])
+        self.assertTrue(self.sc.active(previous["rootUri"]))
+        self.assertEqual(ds.load(current["rootUri"], self.sc)[0], self.spec)
 
     def test_relevant_prior_memory_links_survive_on_each_artifact(self):
         uri = "threadnote://user/test/memories/active/prior.md"
@@ -440,6 +465,10 @@ class Specs(unittest.TestCase):
 
         index()
         saved, plan, result, cycle, memories = self.plan_cycle()
+        for client, state in ((self.sc, self.state), (self.pc, self.directory / "plan-receipts.json")):
+            # Inspect the actual native metadata, not only the embedded payload.
+            for receipt in ds.read_json(state)["receipts"].values():
+                self.assertEqual(client.workflow.read(receipt["uri"])["storageKind"], "durable")
         (self.repo / "src/expiry.py").write_text("def expired(deadline, now):\n    return deadline is not None and now >= deadline\n")
         self.git("add", ".")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", "commit", "-qm", "Synthetic implementation")

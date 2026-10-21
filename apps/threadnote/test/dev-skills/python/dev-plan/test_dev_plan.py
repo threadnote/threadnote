@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import dev_plan as dp
 import closeout
@@ -134,6 +135,37 @@ class Plans(unittest.TestCase):
         self.saved()
         self.assertEqual(len(self.client.writes), 3)
         self.assertIn("bind current code-graph references", self.client.read(result["rootUri"]))
+
+    def test_draft_and_ready_plan_artifacts_are_durable(self):
+        second = copy.deepcopy(self.plan["phases"][0])
+        second.update(id="expose", title="Expose expiry", dependsOn=["deliver"])
+        self.plan["phases"].append(second)
+        draft = self.saved(draft=True)
+        self.assertEqual(draft["readiness"], "draft")
+        self.assertEqual(self.saved()["readiness"], "ready")
+        self.assertEqual({r["kind"] for _, r, _, _ in self.client.writes}, {"current", "target", "phase", "root"})
+        self.assertTrue(all(r["memoryKind"] == "durable" for _, r, _, _ in self.client.writes))
+
+    def test_legacy_root_gets_a_durable_identity_with_preserved_history(self):
+        original = dp.record_for
+        def legacy(*args, **kwargs):
+            return {**original(*args, **kwargs), "memoryKind": "handoff"}
+        with patch.object(dp, "record_for", legacy):
+            previous = self.saved()
+        state = dp.read_json(self.state)
+        old_uri = previous["rootUri"].replace("-plan-durable.md", "-plan.md")
+        self.client.memories[old_uri] = self.client.memories.pop(previous["rootUri"])
+        state["receipts"]["root"]["uri"] = state["rootUri"] = old_uri
+        dp.write_json(self.state, state)
+        current = self.saved()
+        self.assertNotEqual(current["rootUri"], old_uri)
+        loaded, root = dp.load_plan(current["rootUri"], self.client)
+        self.assertEqual(loaded, self.plan)
+        self.assertIn(old_uri, root["data"]["priorArtifacts"])
+        self.assertTrue(self.client.is_active(old_uri))
+        count = len(self.client.writes)
+        self.assertEqual(self.saved()["rootUri"], current["rootUri"])
+        self.assertEqual(len(self.client.writes), count)
 
     def test_direct_recalled_memory_links_on_every_artifact(self):
         uri = "threadnote://user/test/memories/constraint.md"
@@ -341,6 +373,8 @@ class Plans(unittest.TestCase):
         loaded, root = dp.load_plan(result["rootUri"], client)
         self.assertEqual(loaded, self.plan)
         self.assertEqual(root["data"]["readiness"], "draft")
+        for receipt in dp.read_json(self.state)["receipts"].values():
+            self.assertEqual(client.workflow.read(receipt["uri"])["storageKind"], "durable")
         again = dp.save(self.plan, self.state, client, draft=True, deferred=True)
         self.assertEqual(result["rootUri"], again["rootUri"])
 
@@ -388,5 +422,47 @@ class Plans(unittest.TestCase):
             self.assertFalse(client.is_active(archived))
 
 
+def durability_fixture(case):
+    """Exercise generated revision sequences through save/load and receipt recovery."""
+    fixture = Plans()
+    fixture.setUp()
+    try:
+        template = copy.deepcopy(fixture.plan["phases"][0])
+        fixture.plan["phases"] = [dict(copy.deepcopy(template), id="phase-" + str(index),
+                                      dependsOn=[] if index == 0 else ["phase-" + str(index - 1)])
+                                  for index in range(case["phases"])]
+        if case["legacy"]:
+            original = dp.record_for
+            with patch.object(dp, "record_for", lambda *a, **kw: {**original(*a, **kw), "memoryKind": "handoff"}):
+                fixture.saved(draft=True)
+            state = dp.read_json(fixture.state)
+            prior = state["rootUri"]
+            old_uri = prior.replace("-plan-durable.md", "-plan.md")
+            fixture.client.memories[old_uri] = fixture.client.memories.pop(prior)
+            state["receipts"]["root"]["uri"] = state["rootUri"] = old_uri
+            dp.write_json(fixture.state, state)
+        for index, draft in enumerate(case["drafts"]):
+            fixture.plan["target"]["summary"] = "Reads exclude expired values. Revision " + str(index)
+            result = fixture.saved(draft=draft)
+            loaded, root = dp.load_plan(result["rootUri"], fixture.client)
+            fixture.assertEqual(loaded, fixture.plan)
+            fixture.assertEqual(result["readiness"], "draft" if draft else "ready")
+            for receipt in dp.read_json(fixture.state)["receipts"].values():
+                fixture.assertEqual(dp.load_record(fixture.client.read(receipt["uri"]))["memoryKind"], "durable")
+            count = len(fixture.client.writes)
+            fixture.assertEqual(fixture.saved(draft=draft), result)
+            fixture.assertEqual(len(fixture.client.writes), count)
+            if case["legacy"]:
+                fixture.assertIn(old_uri, root["data"]["priorArtifacts"])
+                fixture.assertTrue(fixture.client.is_active(old_uri))
+        print(json.dumps({"roundtrip": True, "durable": True, "idempotent": True}))
+    finally:
+        fixture.tearDown()
+        fixture.doCleanups()
+
+
 if __name__ == "__main__":
-    unittest.main()
+    if "--durability-fixture" in sys.argv:
+        durability_fixture(json.load(sys.stdin))
+    else:
+        unittest.main()
