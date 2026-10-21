@@ -4,9 +4,10 @@ import {Effect, FileSystem, Layer, Path, Result, Schema, Stream} from 'effect';
 import {AiError, LanguageModel, Response} from 'effect/ai';
 import {OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {beforeEach, describe, expect, vi} from 'vitest';
+import {CommandExecutor} from '@threadnote/platform/command';
 import {TestError} from '@threadnote/testing/test-error';
-import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
-import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime, type LocalGenerationRequest} from '@threadnote/inference/engine/local-model-runtime';
 import {
@@ -21,10 +22,25 @@ import {
 import {
   runEffectAiTopicDraft,
   runNativeAiTopicDraft,
+  runNativeAiConsolidation,
+  localDraftGenerationSettings,
+  serializeDraftGenerationSettings,
   TopicDraftProviderOutputError,
 } from '../../src/effect/ai/consolidator.js';
-import {topicDraftModelSchema} from '../../src/manager/topic_draft_schema.js';
-import {makeTopicDraftWireBasis, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {
+  decodeTopicDraftModelOutput as decodeModelOutput,
+  topicDraftModelSchema,
+} from '../../src/manager/topic_draft_schema.js';
+import {
+  runSelectedDraft,
+  selectedTopicDraftIdentity,
+  TOPIC_DRAFT_PROMPT_VERSION,
+} from '../../src/manager/selected_draft.js';
+import {
+  makeTopicDraftWireBasis,
+  makeTopicDraftWireFixture,
+  makeTopicDraftWireEvidence,
+} from '../helpers/topic-draft-wire.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 
 vi.mock('@effect/ai-openai-compat', async importOriginal => {
@@ -32,14 +48,23 @@ vi.mock('@effect/ai-openai-compat', async importOriginal => {
   return {...actual, OpenAiLanguageModel: {...actual.OpenAiLanguageModel, layer: vi.fn()}};
 });
 
+function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input: unknown) {
+  return decodeModelOutput(basis, input, makeTopicDraftWireEvidence(basis));
+}
+
 const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
 const unexpected = () => Effect.die(TestError.make({message: 'Unexpected fixture service call'}));
-function nativeLayer(output: unknown, capture: (request: LocalGenerationRequest) => void = () => {}) {
+function nativeLayer(
+  output: unknown,
+  capture: (request: LocalGenerationRequest) => void = () => {},
+  selectedManifest: LocalModelManifest = manifest,
+) {
   return Layer.mergeAll(
     FileSystem.layerNoop({}),
     Path.layer,
     TestSystemInfoLayer,
-    LocalModelCatalog.layer([manifest]),
+    Layer.succeed(CommandExecutor, {execute: unexpected, executeStreaming: unexpected}),
+    LocalModelCatalog.layer([selectedManifest]),
     Layer.succeed(LocalModelStore, {
       install: unexpected,
       path: () => '/fixture/model.gguf',
@@ -68,10 +93,16 @@ function nativeLayer(output: unknown, capture: (request: LocalGenerationRequest)
   );
 }
 
-function provideNativeOutput(output: unknown, capture?: (request: LocalGenerationRequest) => void) {
+function provideNativeOutput(
+  output: unknown,
+  capture?: (request: LocalGenerationRequest) => void,
+  selectedManifest: LocalModelManifest = manifest,
+) {
   return <A, E, R>(program: Effect.Effect<A, E, R>) =>
     Effect.scoped(
-      Layer.build(nativeLayer(output, capture)).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context)))),
+      Layer.build(nativeLayer(output, capture, selectedManifest)).pipe(
+        Effect.flatMap(context => program.pipe(Effect.provide(context))),
+      ),
     );
 }
 
@@ -84,7 +115,7 @@ function observationIdentity(basis: TopicMaintenanceDraftBasisV1) {
     packetDigest: basis.packetDigest,
     agent: 'effect-ai' as const,
     model: 'fixture',
-    promptVersion: 'topic-maintenance-draft-v6',
+    promptVersion: TOPIC_DRAFT_PROMPT_VERSION,
   };
 }
 
@@ -121,6 +152,47 @@ describe('compact topic provider boundary', () => {
           expect(receipt.firstFailedOutput?.bytes).toBe(new TextEncoder().encode(responseText).byteLength);
           expect(JSON.stringify(failure)).not.toContain(responseText);
           expect(JSON.stringify(failure.diagnostics)).not.toContain('private');
+        }),
+      );
+    }
+    for (const invalidAssessment of ['comparison-over-byte-limit', 'duplicate-comparison-ordinal'] as const) {
+      it.effect('returns complete wire and measured usage before application validation: ' + invalidAssessment, () =>
+        Effect.gen(function* () {
+          const basis = makeTopicDraftWireBasis(2);
+          const fixture = makeTopicDraftWireFixture(basis);
+          const wire = structuredClone(fixture);
+          if (invalidAssessment === 'comparison-over-byte-limit') wire.facts.entries[0].rationale = 'é'.repeat(513);
+          else wire.facts.entries[1].ordinal = 0;
+          // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
+          yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
+          const model = Layer.effect(
+            LanguageModel.LanguageModel,
+            LanguageModel.make({
+              generateText: () =>
+                Effect.succeed([
+                  Response.makePart('text', {text: JSON.stringify(wire)}),
+                  Response.makePart('finish', {
+                    reason: 'stop',
+                    usage: Response.Usage.make({
+                      inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
+                      outputTokens: {total: 3, text: undefined, reasoning: undefined},
+                    }),
+                  }),
+                ]),
+              streamText: () => Stream.empty,
+            }),
+          );
+          vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
+          const result = yield* runEffectAiTopicDraft(
+            'prompt',
+            {model: 'fixture'},
+            topicDraftModelSchema(basis),
+            basis,
+          );
+          expect(JSON.parse(result.text)).toEqual(wire);
+          expect(result.outputRepresentation).toBe('decoded-json');
+          expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
+          expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow();
         }),
       );
     }
@@ -162,7 +234,129 @@ describe('compact topic provider boundary', () => {
       }),
     );
   });
-  effectIt.effect('hydrates native decoded objects with explicit basis and unchanged generation settings', () =>
+  for (const backend of ['native', 'effect'] as const) {
+    effectIt.effect('refuses oversized complete normalized wire at the provider boundary: ' + backend, () =>
+      Effect.gen(function* () {
+        const basis = makeTopicDraftWireBasis(2);
+        const wire = makeTopicDraftWireFixture(basis);
+        wire.facts.entries[0].rationale = 'x'.repeat(33 * 1024);
+        yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
+        if (backend === 'effect') {
+          vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(
+            Layer.effect(
+              LanguageModel.LanguageModel,
+              LanguageModel.make({
+                generateText: () =>
+                  Effect.succeed([
+                    Response.makePart('text', {text: JSON.stringify(wire)}),
+                    Response.makePart('finish', {
+                      reason: 'stop',
+                      usage: Response.Usage.make({
+                        inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
+                        outputTokens: {total: 3, text: undefined, reasoning: undefined},
+                      }),
+                    }),
+                  ]),
+                streamText: () => Stream.empty,
+              }),
+            ),
+          );
+        }
+        const failure =
+          backend === 'effect'
+            ? yield* runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis).pipe(
+                Effect.flip,
+              )
+            : yield* runNativeAiTopicDraft(
+                {agentContextHome: '/fixture'},
+                'prompt',
+                manifest.id,
+                topicDraftModelSchema(basis),
+                basis,
+              ).pipe(provideNativeOutput(wire), Effect.flip);
+        if (!Schema.is(TopicDraftProviderOutputError)(failure))
+          throw new Error('Expected terminal provider output failure.');
+        expect(failure.output).toMatchObject({representation: 'decoded-json', truncated: true});
+        expect(failure.output.bytes).toBeGreaterThan(32 * 1024);
+        expect(failure.usage).toEqual(
+          backend === 'native' ? {status: 'unavailable'} : {status: 'measured', inputTokens: 12, outputTokens: 3},
+        );
+      }),
+    );
+  }
+
+  effectIt.effect('binds complete E4B settings in selected identity, dispatch and recorded limits', () =>
+    Effect.gen(function* () {
+      const basis = makeTopicDraftWireBasis(1);
+      const model = {id: CORE_GENERATION_MODEL_ID, label: 'Gemma', isDefault: true};
+      const identity = yield* selectedTopicDraftIdentity({} as never, 'local-ai', model);
+      const result = yield* runSelectedDraft(
+        {agentContextHome: '/fixture'} as never,
+        'local-ai',
+        model,
+        'prompt',
+        'topic-maintenance',
+        basis,
+      );
+      expect(result.settings).toEqual({
+        maxOutputTokens: 4000,
+        seed: 0,
+        sampling: {profileId: 'gemma4-e4b-v1', temperature: 1, topP: 0.95, topK: 64},
+      });
+      expect(identity.settings).toBe('seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64');
+      expect(serializeDraftGenerationSettings(result.settings)).toBe(identity.settings);
+      expect(new TextEncoder().encode(`${identity.modelVersion};${identity.settings}`).byteLength).toBeLessThanOrEqual(
+        256,
+      );
+    }).pipe(provideNativeOutput(makeTopicDraftWireFixture(makeTopicDraftWireBasis(1)))),
+  );
+
+  effectIt.effect('preserves defaults for consolidation and a different generation model', () =>
+    Effect.gen(function* () {
+      const requests: LocalGenerationRequest[] = [];
+      yield* runNativeAiConsolidation({agentContextHome: '/fixture'}, 'prompt', manifest.id).pipe(
+        provideNativeOutput({draft: 'Consolidated.'}, request => requests.push(request)),
+      );
+      const other = {...manifest, id: CORE_GENERATION_MODEL_ID + '-other'};
+      const basis = makeTopicDraftWireBasis(1);
+      yield* runNativeAiTopicDraft(
+        {agentContextHome: '/fixture'},
+        'prompt',
+        other.id,
+        topicDraftModelSchema(basis),
+        basis,
+      ).pipe(provideNativeOutput(makeTopicDraftWireFixture(basis), request => requests.push(request), other));
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request).toMatchObject({maxTokens: 4000, seed: 0});
+        expect(request).not.toHaveProperty('sampling');
+      }
+      expect(localDraftGenerationSettings(other.id, 'topic-maintenance')).toEqual({maxOutputTokens: 4000, seed: 0});
+    }),
+  );
+
+  effectIt.effect('returns complete native duplicate comparison for controller application validation', () =>
+    Effect.gen(function* () {
+      const basis = makeTopicDraftWireBasis(2);
+      const wire = makeTopicDraftWireFixture(basis);
+      wire.facts.entries[1].ordinal = 0;
+      const result = yield* runNativeAiTopicDraft(
+        {agentContextHome: '/fixture'},
+        'prompt',
+        manifest.id,
+        topicDraftModelSchema(basis),
+        basis,
+      ).pipe(provideNativeOutput(wire));
+      expect(JSON.parse(result.text)).toEqual(wire);
+      expect(result.outputRepresentation).toBe('decoded-json');
+      expect(result.usage).toEqual({status: 'unavailable'});
+      expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow(
+        'Invalid or duplicate topic fact ordinal.',
+      );
+    }),
+  );
+
+  effectIt.effect('returns strict native decoded wire with explicit basis and topic sampling settings', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(64, {sourceCount: 8});
       const wire = makeTopicDraftWireFixture(basis);
@@ -178,19 +372,28 @@ describe('compact topic provider boundary', () => {
           request = value;
         }),
       );
-      const canonical = parseTopicMaintenanceDraft(basis, result.text, {requireParagraphDispositions: true});
+      const canonical = parseTopicMaintenanceDraft(
+        basis,
+        JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(result.text))),
+        {requireParagraphDispositions: true},
+      );
       expect(canonical.draft.paragraphDispositions?.entries).toHaveLength(64);
-      expect(JSON.parse(result.text).paragraphDispositions.entries[0]).toEqual({
+      expect(canonical.draft.paragraphDispositions?.entries[0]).toEqual({
         ordinal: 0,
         beforeHash: basis.paragraphs[0].hash,
         disposition: 'revalidate',
         supportHandles: [basis.handles[1].id],
         rationale: 'Checked.',
       });
-      expect(request).toMatchObject({prompt: 'exact prompt', maxTokens: 4000, seed: 0});
+      expect(request).toMatchObject({
+        prompt: 'exact prompt',
+        maxTokens: 4000,
+        seed: 0,
+        sampling: {temperature: 1, topP: 0.95, topK: 64},
+      });
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(result.outputRepresentation).toBe('decoded-json');
-      expect(result.text).not.toContain('sourceIndices');
+      expect(JSON.parse(result.text)).toEqual(wire);
     }),
   );
 
@@ -200,7 +403,7 @@ describe('compact topic provider boundary', () => {
       Effect.gen(function* () {
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.decision.paragraphDispositions.entries[0].sourceIndices = [99];
+        wire.facts.entries[0].sourceIndices = [99];
         const invalid = yield* runNativeAiTopicDraft(
           {agentContextHome: '/fixture'},
           'prompt',
@@ -214,10 +417,11 @@ describe('compact topic provider boundary', () => {
           if (Schema.is(TopicDraftProviderOutputError)(invalid.failure)) {
             expect(invalid.failure.output.text).toBe(JSON.stringify(wire));
             expect(invalid.failure.output.representation).toBe('decoded-json');
+            expect(invalid.failure.usage).toEqual({status: 'unavailable'});
           }
         }
-        wire.decision.paragraphDispositions.entries[0].sourceIndices = [0];
-        wire.decision.paragraphDispositions.entries[1].ordinal = 0;
+        wire.facts.entries[0].sourceIndices = [0];
+        wire.facts.entries[1].ordinal = 0;
         const semanticInvalid = yield* runNativeAiTopicDraft(
           {agentContextHome: '/fixture'},
           'prompt',
@@ -226,12 +430,16 @@ describe('compact topic provider boundary', () => {
           basis,
         ).pipe(provideNativeOutput(wire));
         expect(() =>
-          parseTopicMaintenanceDraft(basis, semanticInvalid.text, {requireParagraphDispositions: true}),
+          parseTopicMaintenanceDraft(
+            basis,
+            JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(semanticInvalid.text))),
+            {requireParagraphDispositions: true},
+          ),
         ).toThrow();
       }),
   );
 
-  effectIt.effect('hydrates Effect objects through the same explicit basis and preserves measured usage', () =>
+  effectIt.effect('returns strict Effect wire through the same explicit basis and preserves measured usage', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(64, {sourceCount: 8});
       const wire = makeTopicDraftWireFixture(basis);
@@ -255,12 +463,13 @@ describe('compact topic provider boundary', () => {
       const spy = vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
       const result = yield* runEffectAiTopicDraft('prompt', {model: 'fixture'}, topicDraftModelSchema(basis), basis);
       expect(
-        parseTopicMaintenanceDraft(basis, result.text, {requireParagraphDispositions: true}).draft.paragraphDispositions
-          ?.entries,
+        parseTopicMaintenanceDraft(basis, JSON.stringify(decodeTopicDraftModelOutput(basis, JSON.parse(result.text))), {
+          requireParagraphDispositions: true,
+        }).draft.paragraphDispositions?.entries,
       ).toHaveLength(64);
       expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
       expect(result.outputRepresentation).toBe('decoded-json');
-      expect(result.text).not.toContain('sourceIndices');
+      expect(JSON.parse(result.text)).toEqual(wire);
       expect(spy).toHaveBeenCalledWith({config: {max_output_tokens: 4000, strictJsonSchema: true}, model: 'fixture'});
     }),
   );

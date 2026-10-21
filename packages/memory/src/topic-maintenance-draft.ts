@@ -439,7 +439,6 @@ function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasis): Topic
       basis.paragraphs[operation.ordinal as number].role !== 'descriptive' ||
       !boundedText(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
       operation.text !== operation.text.trim() ||
-      operation.text === spans[operation.ordinal as number].text ||
       !boundedText(operation.rationale, 1024) ||
       !boundedStrings(operation.supportHandles, 8, 64) ||
       operation.supportHandles.length === 0 ||
@@ -447,6 +446,8 @@ function validateDraft(input: unknown, basis: TopicMaintenanceDraftBasis): Topic
       operation.supportHandles.some((handle: string) => !known.has(handle) || !handle.startsWith('current:'))
     )
       fail('invalid, overlapping, or unsupported paragraph replacement.');
+    if (operation.text === spans[operation.ordinal as number].text)
+      fail(`paragraph ${operation.ordinal} replacement repeats accepted text; a replacement must change the text.`);
     try {
       if (consolidationSections(operation.text).length !== 1) fail('replacement spans multiple paragraphs.');
     } catch {

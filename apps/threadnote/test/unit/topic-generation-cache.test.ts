@@ -1,3 +1,5 @@
+import {makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
+import {decodeTopicDraftWire} from '../../src/manager/topic_draft_schema.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
@@ -67,38 +69,40 @@ vi.mock('../../src/memory/context/maintenance_inventory.js', async original => (
 
 function fixture() {
   const body = 'Preserve this policy.';
-  const citation = createMemoryCodeCitation({
-    evidenceRetention: 'capsule-retained',
-    extractorSet: 'test',
-    fileContentHash: {algorithm: 'sha256', value: '2'.repeat(64)},
-    path: 'source.ts',
-    repositoryId: '3'.repeat(64),
-    repositoryIdentityKind: 'local',
-    sourceCommit: '1'.repeat(40),
-    sourceDirty: false,
-    sourceSnapshotId: 'cgsn_' + '1'.repeat(40),
-    target: {kind: 'file'},
-    version: 1,
-  });
-  const source = {
-    extractorSet: citation.extractorSet,
-    fileContentHash: citation.fileContentHash.value,
-    path: citation.path,
-    repositoryId: citation.repositoryId,
-    sourceCommit: citation.sourceCommit,
-    sourceDirty: false,
-    sourceSnapshotId: citation.sourceSnapshotId,
-  };
-  const excerpt = {
+  // Two declared sources let [0,0] pass cardinality preflight and reach the duplicate application guard.
+  const citations = ['source.ts', 'other.ts'].map(path =>
+    createMemoryCodeCitation({
+      evidenceRetention: 'capsule-retained',
+      extractorSet: 'test',
+      fileContentHash: {algorithm: 'sha256', value: '2'.repeat(64)},
+      path,
+      repositoryId: '3'.repeat(64),
+      repositoryIdentityKind: 'local',
+      sourceCommit: '1'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: 'cgsn_' + '1'.repeat(40),
+      target: {kind: 'file'},
+      version: 1,
+    }),
+  );
+  const excerpt = (citation: (typeof citations)[number]) => ({
     content: 'const value = 1;',
     excerptHash: sha256HexSync('const value = 1;'),
     fileBytesHash: '2'.repeat(64),
     startLine: 1,
     endLine: 1,
-    source,
+    source: {
+      extractorSet: citation.extractorSet,
+      fileContentHash: citation.fileContentHash.value,
+      path: citation.path,
+      repositoryId: citation.repositoryId,
+      sourceCommit: citation.sourceCommit,
+      sourceDirty: false,
+      sourceSnapshotId: citation.sourceSnapshotId,
+    },
     supportsCitation: true,
     truncated: false,
-  };
+  });
   const packet = readyEvidence({
     version: 1,
     coverage: 'declared-only',
@@ -108,17 +112,21 @@ function fixture() {
     observationRevision: 'b'.repeat(64),
     body,
     paragraphs: [
-      {ordinal: 0, hash: sha256HexSync(body), role: 'normative', support: 'direct', citationIds: [citation.id]},
-    ],
-    sources: [
       {
-        citationId: citation.id,
-        original: citation,
-        current: citation,
-        oldExcerpt: {...excerpt, provenance: 'historical-verified'},
-        newExcerpt: {...excerpt, provenance: 'current-verified'},
+        ordinal: 0,
+        hash: sha256HexSync(body),
+        role: 'normative',
+        support: 'direct',
+        citationIds: citations.map(citation => citation.id),
       },
     ],
+    sources: citations.map(citation => ({
+      citationId: citation.id,
+      original: citation,
+      current: citation,
+      oldExcerpt: {...excerpt(citation), provenance: 'historical-verified'},
+      newExcerpt: {...excerpt(citation), provenance: 'current-verified'},
+    })),
   } as never);
   if (packet.version !== 1) throw new Error('Expected code packet fixture.');
   const basis = basisFromPacket(packet);
@@ -167,7 +175,7 @@ function fixture() {
     [],
     '2026-10-18T00:00:00.000Z',
   );
-  return {body, packet, basis, identity, proposal, review};
+  return {body, packet, basis, identity, proposal, review, wire: makeTopicDraftWireFixture(basis)};
 }
 
 effectIt.effect('returns a matching cached review without allocating any generation receipt', () =>
@@ -192,6 +200,50 @@ effectIt.effect('returns a matching cached review without allocating any generat
     expect(mocks.saveUnderLock).not.toHaveBeenCalled();
   }).pipe(provideTestLayer(ApplicationLayer)),
 );
+
+for (const legacy of ['temperature-zero', 'prompt-v23'] as const) {
+  effectIt.effect('refuses a pending cached review from ' + legacy + ' without relabeling it', () =>
+    Effect.gen(function* () {
+      const {packet, identity, review} = fixture();
+      const oldSettings = review.maintenance!.generation.modelVersion;
+      const cached =
+        legacy === 'prompt-v23'
+          ? {
+              ...review,
+              maintenance: {
+                ...review.maintenance!,
+                generation: {
+                  ...review.maintenance!.generation,
+                  promptVersion: 'topic-maintenance-draft-v23',
+                  modelVersion: `${identity.modelVersion};seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64`,
+                },
+              },
+            }
+          : review;
+      const selected = {
+        ...identity,
+        settings: 'seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64',
+      };
+      mocks.packet.mockReturnValue(Effect.succeed({topicEvidence: packet}));
+      mocks.review.mockReturnValue(Effect.succeed(cached));
+      mocks.identity.mockReturnValue(Effect.succeed(selected));
+      let calls = 0;
+      const error = yield* requestTopicMaintenanceDraft(
+        {agentContextHome: '/unused'} as never,
+        {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai', modelId: 'fixture'},
+        () =>
+          Effect.sync(() => {
+            calls++;
+            throw new Error('No dispatch expected');
+          }),
+      ).pipe(Effect.flip);
+      expect(Schema.is(TopicDraftError)(error) && error.reason).toBe('review-pending');
+      expect(calls).toBe(0);
+      expect(review.maintenance!.generation.modelVersion).toBe(oldSettings);
+      expect(mocks.saveReview).not.toHaveBeenCalled();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+}
 
 function requestFixture() {
   vi.clearAllMocks();
@@ -225,10 +277,15 @@ function requestFixture() {
 effectIt.effect('wires a repaired request to a saved safe summary and all-attempt usage', () =>
   Effect.gen(function* () {
     const value = requestFixture();
+    const firstWire = structuredClone(value.wire);
+    firstWire.decision.reviewedSourceIndices = [0, 0];
+    const firstText = JSON.stringify(decodeTopicDraftWire(value.basis, firstWire));
+    const acceptedText = JSON.stringify(decodeTopicDraftWire(value.basis, value.wire));
     let calls = 0;
     const actual = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
       Effect.sync(() => ({
-        text: ++calls === 1 ? 'private first invalid' : JSON.stringify(value.proposal.draft),
+        text: ++calls === 1 ? firstText : acceptedText,
+        outputRepresentation: 'decoded-json' as const,
         backendIdentity: 'local-ai',
         modelIdentity: 'fixture',
         modelVersion: value.identity.modelVersion,
@@ -241,8 +298,15 @@ effectIt.effect('wires a repaired request to a saved safe summary and all-attemp
     expect(actual.maintenance?.generation.origin).not.toBe('manual');
     const last = value.receipts.at(-1)!;
     expect(last.state).toBe('completed');
-    expect(last.firstFailedOutput?.text).toBe('private first invalid');
-    expect(JSON.stringify(actual)).not.toContain('private first invalid');
+    expect(last.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'accepted']);
+    expect(last.firstFailedOutput).toMatchObject({
+      text: firstText,
+      hash: sha256HexSync(firstText),
+      bytes: new TextEncoder().encode(firstText).byteLength,
+      representation: 'decoded-json',
+      truncated: false,
+    });
+    expect(JSON.stringify(actual)).not.toContain('reviewedSourceIndices');
     expect(mocks.saveReview).toHaveBeenCalledOnce();
   }).pipe(provideTestLayer(ApplicationLayer)),
 );
@@ -255,7 +319,8 @@ effectIt.effect('persists the accepted attempt when the closing source fence ref
       .mockReturnValue(Effect.succeed({topicEvidence: {...value.packet, targetHash: 'f'.repeat(64)}}));
     const failure = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
       Effect.succeed({
-        text: JSON.stringify(value.proposal.draft),
+        text: JSON.stringify(decodeTopicDraftWire(value.basis, value.wire)),
+        outputRepresentation: 'decoded-json' as const,
         backendIdentity: 'local-ai',
         modelIdentity: 'fixture',
         modelVersion: value.identity.modelVersion,
@@ -267,5 +332,34 @@ effectIt.effect('persists the accepted attempt when the closing source fence ref
     expect(last).toMatchObject({state: 'failed', phase: 'closing-fence', attempts: [{status: 'accepted'}]});
     expect(mocks.saveReview).not.toHaveBeenCalled();
     expect(Schema.is(TopicDraftError)(failure) && failure.diagnostics?.receiptId).toBe(last.receiptId);
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
+
+effectIt.effect('refuses an unexpected sampling profile when the selected model has none', () =>
+  Effect.gen(function* () {
+    const value = requestFixture();
+    let calls = 0;
+    const failure = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
+      Effect.sync(() => {
+        calls++;
+        return {
+          text: JSON.stringify(value.wire),
+          backendIdentity: 'local-ai',
+          modelIdentity: 'fixture',
+          modelVersion: value.identity.modelVersion,
+          settings: {
+            maxOutputTokens: 4000 as const,
+            seed: 0 as const,
+            sampling: {profileId: 'unexpected', temperature: 1, topP: 0.95, topK: 64},
+          },
+          usage: {status: 'unavailable' as const},
+        };
+      }),
+    ).pipe(Effect.flip);
+    expect(calls).toBe(1);
+    expect(Schema.is(TopicDraftError)(failure)).toBe(true);
+    expect(value.receipts.at(-1)).toMatchObject({state: 'failed', attempts: [{status: 'provider-output-invalid'}]});
+    expect(mocks.saveReview).not.toHaveBeenCalled();
+    expect(value.receipts.at(-1)?.modelVersion).toBe(`${value.identity.modelVersion};${value.identity.settings}`);
   }).pipe(provideTestLayer(ApplicationLayer)),
 );

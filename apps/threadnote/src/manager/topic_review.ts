@@ -20,6 +20,7 @@ import {
   applyTopicMaintenanceReview,
   decideTopicMaintenanceReview,
   prepareTopicMaintenanceReview,
+  TopicReviewError,
   type TopicReviewDecisionInput,
 } from '../memory/context/maintenance_review.js';
 import {topicMaintenanceCaseId} from '../memory/context/maintenance_topic.js';
@@ -129,7 +130,9 @@ export function projectManagerTopicReview(
   const effectiveProposal = approval?.preview.approvedProposal ?? maintenance.proposal;
   const paragraphCoverage = topicMaintenanceParagraphCoverage(maintenance.basis, effectiveProposal.draft);
   const canFinishVerification =
-    candidate.state === 'applying' && approval?.stage === 'prepared' && identity?.approvedContentMatches === true;
+    identity?.approvedContentMatches === true &&
+    ((candidate.state === 'applying' && approval?.stage === 'prepared') ||
+      (candidate.state === 'applied' && approval?.stage === 'written' && identity.observationMatches));
   const coverageAllowsApply = maintenance.generation.origin === 'manual' || paragraphCoverage.status === 'complete';
   const resolvedCitationIds = resolvedTopicCitationIds(review);
   const canApply =
@@ -246,12 +249,17 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
   const status = yield* readContextMaintenanceStatus(config, review.project, {caseId}).pipe(
     Effect.orElseSucceed(() => undefined),
   );
-  const approvedContentMatches =
-    review.candidates[0]?.state === 'applying' &&
-    review.maintenanceApproval?.stage === 'prepared' &&
-    target.content === review.maintenanceApproval.preview.content;
   const item = status?.cases[0];
+  const approvedContentMatches =
+    ((review.candidates[0]?.state === 'applying' && review.maintenanceApproval?.stage === 'prepared') ||
+      (review.candidates[0]?.state === 'applied' &&
+        review.maintenanceApproval?.stage === 'written' &&
+        item?.evidenceRevision === review.maintenance.basis.observationRevision &&
+        item.subjectContentHashes?.find(subject => subject.uri === target.uri)?.hash ===
+          review.maintenance.basis.targetHash)) &&
+    target.content === review.maintenanceApproval?.preview.content;
   return item?.caseId === caseId &&
+    item.memoryId === target.metadata.memoryId &&
     item.family === 'topic-maintenance' &&
     item.slot === 'declared-support' &&
     item.subjectUri === target.uri &&
@@ -313,13 +321,78 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
   if (request.url.pathname !== '/api/attention/topic-review') return undefined;
   if (request.method === 'GET') {
     const project = request.url.searchParams.get('project') ?? '';
-    const reviewId = request.url.searchParams.get('reviewId') ?? '';
+    const reviewId = request.url.searchParams.get('reviewId');
+    const caseId = request.url.searchParams.get('caseId');
+    const keys = [...request.url.searchParams.keys()];
     if (
       !isManagerProjectName(project) ||
-      !REVIEW.test(reviewId) ||
-      [...request.url.searchParams.keys()].some(key => key !== 'project' && key !== 'reviewId')
+      keys.length !== 2 ||
+      (reviewId === null) === (caseId === null) ||
+      (reviewId === null ? !CASE.test(caseId ?? '') : !REVIEW.test(reviewId)) ||
+      keys.some(key => key !== 'project' && key !== 'reviewId' && key !== 'caseId')
     )
       return invalid('Select an exact project and topic review.');
+    if (caseId !== null) {
+      const status = yield* readContextMaintenanceStatus(request.config, project, {caseId}).pipe(Effect.result);
+      if (Result.isFailure(status)) return missing();
+      const item = status.success.cases[0];
+      if (
+        item?.caseId !== caseId ||
+        item.project !== project ||
+        item.family !== 'topic-maintenance' ||
+        item.slot !== 'declared-support' ||
+        !item.subjectUri?.startsWith(`threadnote://user/${request.config.user}/memories/durable/`)
+      )
+        return missing();
+      const expectedReviewId = `review-${sha256HexSync(`topic-maintenance\0${item.subjectUri}`).slice(0, 24)}`;
+      const loaded = yield* loadCandidateReview(request.config.agentContextHome, expectedReviewId).pipe(Effect.result);
+      if (Result.isFailure(loaded)) return missing();
+      const selected = loaded.success;
+      const approval = selected.maintenanceApproval;
+      const payload = selected.maintenance;
+      if (
+        selected.reviewId !== expectedReviewId ||
+        selected.project !== project ||
+        selected.candidates.length !== 1 ||
+        !payload ||
+        !approval ||
+        payload.basis.targetUri !== item.subjectUri ||
+        payload.basis.observationRevision !== item.evidenceRevision ||
+        payload.basis.targetHash !==
+          item.subjectContentHashes?.find(subject => subject.uri === item.subjectUri)?.hash ||
+        approval.preview.reviewId !== expectedReviewId ||
+        approval.preview.targetUri !== item.subjectUri ||
+        approval.preview.beforeContentHash !== payload.basis.targetHash ||
+        !(
+          (selected.candidates[0].state === 'applying' && approval.stage === 'prepared') ||
+          (selected.candidates[0].state === 'applied' && approval.stage === 'written')
+        )
+      )
+        return missing();
+      const target = (yield* readMemoryRecordsByUri(request.config, [item.subjectUri]).pipe(
+        Effect.orElseSucceed(() => []),
+      ))[0];
+      if (
+        !target ||
+        target.uri !== item.subjectUri ||
+        target.metadata.project !== project ||
+        target.metadata.memoryId !== item.memoryId ||
+        topicMaintenanceCaseId(target) !== caseId ||
+        target.content !== approval.preview.content ||
+        maintenanceContentHash(target.content) !== approval.preview.contentHash
+      )
+        return missing();
+      if (payload.version === 2) {
+        const checked = yield* readTopicMaintenanceDraft(request.config, expectedReviewId).pipe(Effect.result);
+        if (Result.isFailure(checked) || JSON.stringify(checked.success) !== JSON.stringify(selected)) return missing();
+      }
+      const response = yield* topicReviewResponse(request.config, selected);
+      return 'kind' in response.body &&
+        response.body.kind === 'topic-maintenance' &&
+        response.body.canFinishVerification
+        ? response
+        : missing();
+    }
     const review = (yield* listCandidateReviews(request.config.agentContextHome)).find(
       item => item.reviewId === reviewId,
     );
@@ -629,8 +702,19 @@ export const handleManagerTopicReview = Effect.fn('managerTopicReview.handle')(f
         approvalDigest: body.approvalDigest as string,
         approved: true,
       }).pipe(Effect.result);
-  if (Result.isFailure(result))
+  if (Result.isFailure(result)) {
+    if (
+      isApply &&
+      Schema.is(TopicReviewError)(result.failure) &&
+      result.failure.message ===
+        'The approved topic was saved; maintenance verification is pending. Retry finish verification.'
+    )
+      return conflict(
+        'The approved topic was saved. Finish verification to complete this review.',
+        'topic-review-verification-pending',
+      );
     return conflict('The topic review, target, approval, or source changed. Reload the review and preview again.');
+  }
   return yield* topicReviewResponse(request.config, result.success);
 });
 

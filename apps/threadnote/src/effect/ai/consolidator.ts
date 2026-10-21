@@ -5,9 +5,12 @@ import {AiError, LanguageModel} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {generateWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import type {GenerationSampling} from '@threadnote/inference/engine/llama-cpp-engine';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
   RetainedTopicGenerationOutput,
   TopicGenerationUsage,
   retainedTopicGenerationOutput,
@@ -15,10 +18,49 @@ import {
   type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
-  decodeTopicDraftModelOutput,
+  decodeTopicDraftWire,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../manager/topic_draft_schema.js';
+
+export interface DraftGenerationSettings {
+  readonly maxOutputTokens: 4000;
+  readonly seed?: 0;
+  readonly sampling?: GenerationSampling & {readonly profileId: string};
+}
+
+const topicGemmaSampling = Object.freeze({
+  profileId: 'gemma4-e4b-v1',
+  temperature: 1,
+  topP: 0.95,
+  topK: 64,
+});
+
+export function localDraftGenerationSettings(
+  modelId: string,
+  purpose: 'consolidation' | 'topic-maintenance',
+): DraftGenerationSettings {
+  return {
+    maxOutputTokens: 4000,
+    seed: 0,
+    ...(purpose === 'topic-maintenance' && modelId === CORE_GENERATION_MODEL_ID ? {sampling: topicGemmaSampling} : {}),
+  };
+}
+
+export function serializeDraftGenerationSettings(settings: DraftGenerationSettings): string {
+  return [
+    ...(settings.seed === undefined ? [] : [`seed=${settings.seed}`]),
+    `maxTokens=${settings.maxOutputTokens}`,
+    ...(settings.sampling
+      ? [
+          `profile=${settings.sampling.profileId}`,
+          `temperature=${settings.sampling.temperature}`,
+          `topP=${settings.sampling.topP}`,
+          `topK=${settings.sampling.topK}`,
+        ]
+      : []),
+  ].join(';');
+}
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
 export const EFFECT_AI_API_KEY_ENV = 'THREADNOTE_EFFECT_AI_API_KEY';
@@ -49,13 +91,22 @@ export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraft
   },
 ) {}
 
-function decodeTopicDraftProviderOutput(basis: TopicMaintenanceDraftBasis, output: unknown) {
+function decodeTopicDraftProviderOutput(
+  basis: TopicMaintenanceDraftBasis,
+  output: unknown,
+  usage: TopicGenerationUsageV1 = {status: 'unavailable'},
+) {
+  let text: string | undefined;
   try {
-    return JSON.stringify(decodeTopicDraftModelOutput(basis, output));
+    text = JSON.stringify(decodeTopicDraftWire(basis, output));
+    if (new TextEncoder().encode(text).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
+      throw new Error('Topic wire exceeds the output boundary.');
+    return text;
   } catch {
     throw TopicDraftProviderOutputError.make({
       message: 'AI returned a malformed topic maintenance object.',
-      output: retainedTopicGenerationOutput(1, JSON.stringify(output), 'decoded-json'),
+      output: retainedTopicGenerationOutput(1, text ?? JSON.stringify(output), 'decoded-json'),
+      usage,
     });
   }
 }
@@ -211,13 +262,14 @@ export function runEffectAiTopicDraft(
                   : error,
               ),
             );
+          const usage = topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total);
           const text = yield* Effect.try({
-            try: () => decodeTopicDraftProviderOutput(basis, response.value),
+            try: () => decodeTopicDraftProviderOutput(basis, response.value, usage),
             catch: error => error as TopicDraftProviderOutputError,
           });
           return {
             text,
-            usage: topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total),
+            usage,
             outputRepresentation: 'decoded-json' as const,
           };
         }).pipe(Effect.provide(context)),
@@ -232,12 +284,14 @@ const runNativeAiObject = Effect.fn('AiConsolidator.generateNativeObject')(funct
   modelId: string | undefined,
   system: string,
   jsonSchema: Readonly<Record<string, unknown>>,
+  settings: DraftGenerationSettings,
 ) {
   const request = {
     jsonSchema,
-    maxTokens: 4000,
+    maxTokens: settings.maxOutputTokens,
     prompt,
-    seed: 0,
+    seed: settings.seed,
+    ...(settings.sampling ? {sampling: settings.sampling} : {}),
     system,
   };
   const output = yield* modelId === undefined
@@ -272,6 +326,7 @@ export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNat
     modelId,
     system,
     Schema.toJsonSchemaDocument(ConsolidationDraft).schema,
+    localDraftGenerationSettings(modelId ?? '', 'consolidation'),
   );
   if (output === undefined) return undefined;
   const draft = yield* Schema.decodeUnknownEffect(ConsolidationDraft)(output).pipe(
@@ -305,6 +360,7 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
     modelId,
     'Return one complete topic maintenance JSON object matching the supplied schema.',
     topicDraftNativeJsonSchema(schema),
+    localDraftGenerationSettings(modelId, 'topic-maintenance'),
   );
   if (output === undefined)
     return yield* AiConsolidationFailed.make({
