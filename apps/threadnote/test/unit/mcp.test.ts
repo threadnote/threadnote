@@ -380,17 +380,17 @@ describe('JSON MCP host configuration', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('repairs each native omp disable mechanism without dropping unrelated settings', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const baseSystem = yield* SystemInfo;
-        const root = yield* fs.realPath(
-          yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-disabled-'}),
-        );
-        const bin = path.join(root, 'bin');
-        for (const scenario of ['denylist', 'entry', 'both'] as const) {
+  for (const scenario of ['denylist', 'entry', 'both'] as const)
+    effectIt.effect(`repairs native omp ${scenario} disable mechanisms without dropping unrelated settings`, () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const baseSystem = yield* SystemInfo;
+          const root = yield* fs.realPath(
+            yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-json-mcp-omp-disabled-'}),
+          );
+          const bin = path.join(root, 'bin');
           const user = path.join(root, scenario, 'user');
           const agentRoot = path.join(user, '.omp', 'agent');
           const configPath = path.join(agentRoot, 'mcp.json');
@@ -421,10 +421,9 @@ describe('JSON MCP host configuration', () => {
           expect(next.disabledServers, scenario).toEqual(scenario === 'entry' ? undefined : ['unrelated-disabled']);
           expect(next.mcpServers.threadnote.enabled, scenario).toBeUndefined();
           expect(next.unrelated, scenario).toEqual({keep: true});
-        }
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
-  );
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    );
 
   effectIt.effect('keeps an allowlisted omp server current when its entry is disabled', () =>
     Effect.scoped(

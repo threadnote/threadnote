@@ -57,6 +57,10 @@ const selectedIntegrationPackageTests = (changedFile: string) =>
   selectForChangedInput(changedFile).targets.filter(label => /^\/\/packages\/integration-[^:]+:test$/u.test(label));
 
 describe('generated Bazel test contracts', () => {
+  it('selects Windows smoke when its workflow changes', () => {
+    expect(selectForChangedInput('.github/workflows/ci.yml').targets).toContain('//:windows_smoke');
+  });
+
   it('keeps the inventory byte-stable across filesystem enumeration orders', () => {
     const labels = inventory.targets.map(candidate => candidate.label);
     expect(labels).toEqual([...labels].sort());
