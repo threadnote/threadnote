@@ -367,7 +367,7 @@ class Threadnote:
     def remember(self, record, topic, relations, replace=None, deferred=False, dry_run=False):
         if self.workflow is not None:
             return self.workflow.write(record, topic, memory_text(record), [{"type": kind, "uri": uri} for kind, uri in relations], replace, deferred, dry_run)
-        args = ["--kind", record.get("memoryKind", "handoff"), "--project", record["project"], "--topic", topic,
+        args = ["--kind", record["memoryKind"], "--project", record["project"], "--topic", topic,
                 "--status", "active", "--keyword", "dev-plan", "--keyword", record["planId"],
                 "--keyword", record["kind"], "--stdin"]
         if record["kind"] in {"current", "target", "implemented"}:
@@ -517,7 +517,7 @@ def memory_text(record, machine=True):
 
 def record_for(plan, kind, data, title):
     return {"schemaVersion": 1, "planId": plan["id"], "project": plan["project"],
-            "memoryKind": "durable" if kind in {"current", "implemented"} else "handoff",
+            "memoryKind": "durable",
             "kind": kind, "title": title, "data": data}
 
 
@@ -565,28 +565,36 @@ def save(plan, state_path, client, review=None, draft=False, deferred=False):
             record["relations"] = [{"type": kind, "uri": uri} for kind, uri in relations]
             record["citationPolicy"] = "defer" if deferred else "require-current"
             record["runId"] = state["runId"]
-            require(len(memory_text(record).encode()) <= 60000, key + " is too large; narrow or split its content")
-            fingerprint = digest(record)
             old = state["receipts"].get(key)
+            same_storage = False
             if old:
                 observed = load_record(client.read(old["uri"]))
                 require(digest(observed) == old["hash"], "Stored artifact changed outside this draft: " + key)
-                if old["hash"] == fingerprint:
-                    return old["uri"]
+                same_storage = observed.get("memoryKind") == record["memoryKind"]
+                if key == "root" and not same_storage:
+                    state.setdefault("history", {})[old["uri"]] = old["hash"]
+                    record["data"]["priorArtifacts"][old["uri"]] = old["hash"]
+            require(len(memory_text(record).encode()) <= 60000, key + " is too large; narrow or split its content")
+            fingerprint = digest(record)
+            if old and old["hash"] == fingerprint:
+                return old["uri"]
             topic = f'{plan["id"]}-{state["runId"]}-{key}-{fingerprint[:16]}'
             # Root advances only after every new immutable child has been verified.
             if key == "root":
-                topic = plan["id"] + "-" + state["runId"] + "-plan"
+                topic = plan["id"] + "-" + state["runId"] + "-plan-durable"
+            # Native replacement preserves its URI/kind. A legacy handoff root
+            # gets a new durable identity, retaining the old root as history.
+            replacement = old["uri"] if old and key == "root" and same_storage else None
             preview = client.preflight(record, topic, relations,
-                                       replace=old["uri"] if old and key == "root" else None, deferred=deferred)
+                                       replace=replacement, deferred=deferred)
             state["pending"] = {"key": key, "hash": fingerprint, "topic": topic, "record": record, **preview}
             write_json(state_path, state)
             uri = client.remember(record, topic, relations,
-                                  replace=old["uri"] if old and key == "root" else None, deferred=deferred)
+                                  replace=replacement, deferred=deferred)
             state["pending"]["uri"] = uri
             write_json(state_path, state)
             require(digest(load_record(client.read(uri))) == fingerprint, "Memory readback mismatch: " + key)
-            if old and key != "root" and old["uri"] != uri:
+            if old and old["uri"] != uri:
                 state.setdefault("history", {})[old["uri"]] = old["hash"]
             state["receipts"][key] = {"uri": uri, "hash": fingerprint}
             state.pop("pending")

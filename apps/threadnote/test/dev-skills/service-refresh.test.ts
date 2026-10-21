@@ -107,10 +107,10 @@ describe('exact-release enrolled workflow refresh', () => {
     // Two roots plus a repair retry took 23–29s on Windows CI, leaving too little room under 30s.
     process.platform === 'win32' ? 60_000 : undefined,
   );
-  effectIt.effect.prop(
-    'never re-enables disabled or removed consumers during refresh',
-    {removed: Schema.Boolean},
-    ({removed}) =>
+  // Exhaust both states, each under the normal per-test deadline. Repeating four
+  // random Boolean fixtures under one deadline exceeded 30s on Windows CI.
+  for (const removed of [false, true]) {
+    effectIt.effect(`never re-enables ${removed ? 'removed' : 'disabled'} consumers during refresh`, () =>
       Effect.gen(function* () {
         const f = yield* fixture();
         yield* f.run(applyDevSkills(f.config, 'install', selector));
@@ -129,8 +129,8 @@ describe('exact-release enrolled workflow refresh', () => {
         expect(yield* f.fs.readFileString(homeIndexPath(f.path, f.home))).toBe(home);
         expect((yield* release.run(statusDevSkills(f.config, selector))).targets[0].enabled).toBe(false);
       }).pipe(provide),
-    {arbitrary: {runs: 4}},
-  );
+    );
+  }
   effectIt.effect('recovers interrupted opt-out through refresh before comparing the two enrollment indexes', () =>
     Effect.gen(function* () {
       const f = yield* fixture();

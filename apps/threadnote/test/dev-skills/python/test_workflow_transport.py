@@ -154,6 +154,27 @@ class TransportTests(unittest.TestCase):
         uri = other.write(self.record, "desktop-baseline", self.body, [])
         self.assertEqual(other.read(uri)["storageKind"], "durable")
 
+    def test_wrong_storage_kind_blocks_receipt_and_recovers_same_write(self):
+        self.native.profile = "desktop"
+
+        def incorrect_readback(request):
+            result = self.native.response(request)
+            if request["action"] == "read" and result["status"] == "ok":
+                result = {**result, "storageKind": "handoff"}
+            return result
+
+        context = self.directory / "desktop.json"
+        other = wt.WorkflowTransport(context, self.repo, self.home,
+                                     generation_pin="fixture-generation", invoke=incorrect_readback)
+        other.bind("fixture", "feature")
+        with self.assertRaisesRegex(wt.WorkflowError, "different storage kind"):
+            other.write(self.record, "desktop-baseline", self.body, [])
+        self.assertIn("pending", wt.read_json(context))
+        other.invoke = self.native.response
+        other.recover()
+        self.assertEqual(len(self.native.operations), 1)
+        self.assertNotIn("pending", wt.read_json(context))
+
     def test_pending_status_is_only_valid_for_publication_publish(self):
         result = {"protocolVersion": 1, "status": "pending", "approvalDigest": "fixture-digest",
                   "stage": "architecture:create", "message": "Publication remains pending"}

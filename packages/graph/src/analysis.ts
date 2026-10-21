@@ -5,6 +5,7 @@ import {
   positiveInteger,
   resolveBudget,
   resolveLimits,
+  withCodeGraphAnalysisTiming,
   type CodeGraphAnalysisOptions,
   type ResolvedCodeGraphAnalysisBudget,
   type ResolvedCodeGraphAnalysisLimits,
@@ -453,38 +454,50 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
   let released = false;
   let leaseExpiresAt = startedAt + leaseDuration;
   const result = yield* Effect.acquireUseRelease(
-    store
-      .acquireSnapshotLease(options.databasePath, options.snapshot.id, leaseDuration, {waitTimeoutMilliseconds: 0})
-      .pipe(
-        Effect.tap(() =>
-          Clock.currentTimeMillis.pipe(
-            Effect.tap(now =>
-              Effect.sync(() => {
-                leaseExpiresAt = now + leaseDuration;
-              }),
-            ),
-          ),
-        ),
-        Effect.catchIf(Schema.is(CodeGraphStoreBusyError), () =>
-          Effect.fail(
-            CodeGraphAnalysisDeferred.make({
-              message: 'Analysis is deferred because the snapshot lease writer gate is busy. Retry shortly.',
-              reason: 'writer-contention',
+    withCodeGraphAnalysisTiming(
+      options.onTiming,
+      'lease-acquire',
+      store.acquireSnapshotLease(options.databasePath, options.snapshot.id, leaseDuration, {
+        waitTimeoutMilliseconds: 0,
+      }),
+    ).pipe(
+      Effect.tap(() =>
+        Clock.currentTimeMillis.pipe(
+          Effect.tap(now =>
+            Effect.sync(() => {
+              leaseExpiresAt = now + leaseDuration;
             }),
           ),
         ),
       ),
+      Effect.catchIf(Schema.is(CodeGraphStoreBusyError), () =>
+        Effect.fail(
+          CodeGraphAnalysisDeferred.make({
+            message: 'Analysis is deferred because the snapshot lease writer gate is busy. Retry shortly.',
+            reason: 'writer-contention',
+          }),
+        ),
+      ),
+    ),
     () =>
-      store.withSession(
-        options.databasePath,
-        analyzeCodeGraph(store, {
-          ...options,
-          deadlineMilliseconds: options.deadlineMilliseconds ?? startedAt + budget.maxDurationMilliseconds,
-        }),
-        {readOnly: true},
+      withCodeGraphAnalysisTiming(
+        options.onTiming,
+        'read-session',
+        store.withSession(
+          options.databasePath,
+          analyzeCodeGraph(store, {
+            ...options,
+            deadlineMilliseconds: options.deadlineMilliseconds ?? startedAt + budget.maxDurationMilliseconds,
+          }),
+          {readOnly: true},
+        ),
       ),
     lease =>
-      store.releaseSnapshotLease(options.databasePath, lease, {waitTimeoutMilliseconds: 0}).pipe(
+      withCodeGraphAnalysisTiming(
+        options.onTiming,
+        'lease-release',
+        store.releaseSnapshotLease(options.databasePath, lease, {waitTimeoutMilliseconds: 0}),
+      ).pipe(
         Effect.tap(() =>
           Effect.sync(() => {
             released = true;

@@ -4,7 +4,7 @@ import {Database} from 'bun:sqlite';
 import {Clock, DateTime, Deferred, Effect, Exit, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {readCodeGraphBuildStatuses} from '@threadnote/graph/build_status';
-import {CodeGraphIndexer} from '@threadnote/graph/indexer';
+import {CodeGraphIndexer, type CodeGraphIndexOptions} from '@threadnote/graph/indexer';
 import {CODE_GRAPH_MATERIALIZED_SHARD_CACHE_WRITE_RAW_FACT_BYTES_MAXIMUM} from '@threadnote/graph/materialized_shard_cache_admission';
 import {
   codeGraphEffectiveSymbolTermsQueryStatement,
@@ -13,7 +13,11 @@ import {
   type CodeGraphSqliteWriterSettings,
   type CodeGraphSqliteWriterTuning,
 } from '@threadnote/graph/store';
-import {CodeGraphAnalysis, type CodeGraphAnalysisResult} from '@threadnote/graph/analysis';
+import {
+  CodeGraphAnalysis,
+  type CodeGraphAnalysisOptions,
+  type CodeGraphAnalysisResult,
+} from '@threadnote/graph/analysis';
 import {codeGraphAnalysisLimitsForView} from '@threadnote/graph/analysis/render';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {parserWorkerCapacity} from '@threadnote/graph/parser_worker';
@@ -760,6 +764,7 @@ const benchmarkCodeGraph = Effect.scoped(
       (timeline, sampler) =>
         indexer.index({
           cwd: prepared.repository,
+          onTiming: stage => timeline.observeTiming(stage),
           onProgress: progress =>
             observeIndexProgress(timeline, progress).pipe(
               Effect.andThen(sampler?.mark(progress) ?? Effect.void),
@@ -985,6 +990,7 @@ const benchmarkCodeGraph = Effect.scoped(
             (timeline, sampler) =>
               indexer.index({
                 cwd: prepared.repository,
+                onTiming: stage => timeline.observeTiming(stage),
                 onProgress: progress =>
                   observeIndexProgress(timeline, progress).pipe(
                     Effect.andThen(sampler?.mark(progress) ?? Effect.void),
@@ -1131,6 +1137,7 @@ const benchmarkCodeGraph = Effect.scoped(
                   indexer.index({
                     cwd: prepared.repository,
                     incrementalOverlay: false,
+                    onTiming: stage => timeline.observeTiming(stage),
                     onProgress: progress =>
                       observeIndexProgress(timeline, progress).pipe(
                         Effect.andThen(sampler?.mark(progress) ?? Effect.void),
@@ -1244,13 +1251,21 @@ const benchmarkCodeGraph = Effect.scoped(
     }
     const analysisDurations: number[] = [];
     const analysisCpuDurations: number[] = [];
+    const analysisStageTimings = new Map<BenchmarkTimingStage, {wall: number[]; cpu: number[]}>();
     let incrementalAnalysis: CodeGraphAnalysisResult | undefined;
     for (let index = 0; index < Math.min(options.samples, 3); index += 1) {
+      const timings = new BenchmarkStageTimings();
       const started = yield* Clock.currentTimeNanos;
       const processStarted = processTelemetry();
-      const result = yield* analysis.analyze(analysisOptions);
+      const result = yield* analysis.analyze({...analysisOptions, onTiming: stage => timings.observe(stage)});
       analysisDurations.push(Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND);
       analysisCpuDurations.push(cpuMilliseconds(processStarted, processTelemetry()).total);
+      for (const [stage, observation] of timings.observations()) {
+        const samples = analysisStageTimings.get(stage) ?? {wall: [], cpu: []};
+        samples.wall.push(observation.wallMilliseconds);
+        samples.cpu.push(observation.cpuMilliseconds);
+        analysisStageTimings.set(stage, samples);
+      }
       if (result.coverage.topology.state !== 'not-requested' || result.usage.edgeVisits !== 0) {
         return yield* ScriptError.make({
           message: 'Code graph benchmark aggregate analysis unexpectedly executed a detail scan.',
@@ -1470,6 +1485,10 @@ const benchmarkCodeGraph = Effect.scoped(
         ),
         benchmarkMeasurement('whole-graph-structural-analysis', 'milliseconds', analysisDurations),
         benchmarkMeasurement('whole-graph-structural-analysis-process-cpu', 'milliseconds', analysisCpuDurations),
+        ...[...analysisStageTimings].flatMap(([stage, samples]) => [
+          benchmarkMeasurement(`whole-graph-structural-analysis-${stage}`, 'milliseconds', samples.wall),
+          benchmarkMeasurement(`whole-graph-structural-analysis-${stage}-process-cpu`, 'milliseconds', samples.cpu),
+        ]),
         benchmarkMeasurement('first-repository-status-read', 'milliseconds', [coldStatusDuration]),
         benchmarkMeasurement('hot-repository-status-read', 'milliseconds', repositoryStatusDurations),
         benchmarkMeasurement('hot-build-sidecar-status-read', 'milliseconds', sidecarStatusDurations),
@@ -1688,6 +1707,8 @@ const benchmarkCodeGraph = Effect.scoped(
         coldIndexSamples: 1,
         ...(coldVectorMappingDigest === undefined ? {} : {coldVectorMappingDigest}),
         cpuMeasurement: 'process.cpuUsage delta at operation boundary',
+        completionTimingMeasurement:
+          'opt-in path-free stage boundaries; index count/sum/maximum are n=1 aggregates, nested stages overlap; lease releases after activation completion remain included; analysis stages retain the original three samples',
         deferredReadyQueryMeasurement:
           'status + inspect + compact MCP serialization with worktree observation explicitly deferred; excludes maintenance, watcher bookkeeping, and MCP transport',
         effectiveParserMemoryBytes: hardware.effectiveMemoryBytes,
@@ -2107,6 +2128,67 @@ function insertAfterRustPreamble(source: string, statement: string): string {
   return `${source.slice(0, offset)}${statement}${newline}${source.slice(offset)}`;
 }
 
+type BenchmarkIndexTimingStage = Parameters<NonNullable<CodeGraphIndexOptions['onTiming']>>[0];
+type BenchmarkTimingStage =
+  | BenchmarkIndexTimingStage
+  | Parameters<NonNullable<CodeGraphAnalysisOptions['onTiming']>>[0]
+  | 'snapshot-lease-release-after-complete';
+
+interface BenchmarkStageTiming {
+  count: number;
+  cpuMilliseconds: number;
+  maximumWallMilliseconds: number;
+  wallMilliseconds: number;
+}
+
+/** Bounded aggregate diagnostics; no paths, tokens, per-call logs, or retained start records. */
+export class BenchmarkStageTimings {
+  readonly #observations = new Map<BenchmarkTimingStage, BenchmarkStageTiming>();
+
+  observe(stage: BenchmarkTimingStage): Effect.Effect<Effect.Effect<void>> {
+    return Effect.gen({self: this}, function* () {
+      const started = yield* Clock.currentTimeNanos;
+      const cpuStarted = process.cpuUsage();
+      // oxlint-disable-next-line effecttsgo/return-effect-in-gen -- Return deferred completion work for the caller to run after the measured operation.
+      return Clock.currentTimeNanos.pipe(
+        Effect.tap(finished =>
+          Effect.sync(() => {
+            const cpu = process.cpuUsage(cpuStarted);
+            const wallMilliseconds = Math.max(0, Number(finished - started) / NANOSECONDS_PER_MILLISECOND);
+            const previous = this.#observations.get(stage);
+            this.#observations.set(stage, {
+              count: (previous?.count ?? 0) + 1,
+              cpuMilliseconds: (previous?.cpuMilliseconds ?? 0) + (cpu.user + cpu.system) / 1_000,
+              maximumWallMilliseconds: Math.max(previous?.maximumWallMilliseconds ?? 0, wallMilliseconds),
+              wallMilliseconds: (previous?.wallMilliseconds ?? 0) + wallMilliseconds,
+            });
+          }),
+        ),
+        Effect.asVoid,
+      );
+    });
+  }
+
+  observations(): readonly (readonly [BenchmarkTimingStage, Readonly<BenchmarkStageTiming>])[] {
+    return [...this.#observations].map(([stage, observation]) => [stage, {...observation}] as const);
+  }
+
+  measurements(prefix: string): ReturnType<typeof benchmarkMeasurement>[] {
+    return this.observations().flatMap(([stage, observation]) => [
+      benchmarkMeasurement(`${prefix}-completion-${stage}-count-n1`, 'count', [observation.count]),
+      benchmarkMeasurement(`${prefix}-completion-${stage}-wall-total-n1`, 'milliseconds', [
+        observation.wallMilliseconds,
+      ]),
+      benchmarkMeasurement(`${prefix}-completion-${stage}-wall-maximum-n1`, 'milliseconds', [
+        observation.maximumWallMilliseconds,
+      ]),
+      benchmarkMeasurement(`${prefix}-completion-${stage}-process-cpu-total-n1`, 'milliseconds', [
+        observation.cpuMilliseconds,
+      ]),
+    ]);
+  }
+}
+
 type IndexPhasePoint =
   | 'activating:complete'
   | 'activating:promoting'
@@ -2126,6 +2208,8 @@ type IndexPhasePoint =
   | 'waiting:start';
 
 export class IndexPhaseTimeline {
+  readonly #completionTimings = new BenchmarkStageTimings();
+  #activationCompleted = false;
   readonly #activationStages = new Map<
     CodeGraphActivationActivity['stage'],
     {readonly durationMilliseconds: number; readonly rows: number}
@@ -2173,6 +2257,7 @@ export class IndexPhaseTimeline {
     this.#observeHeartbeat(at);
     switch (progress.phase) {
       case 'registering':
+        this.#activationCompleted = false;
         this.#first('registering:start', at, telemetry);
         break;
       case 'waiting':
@@ -2338,13 +2423,30 @@ export class IndexPhaseTimeline {
         else if (progress.subphase === 'writing-and-checkpointing') {
           this.#first('activating:writing-and-checkpointing', at, telemetry);
         } else if (progress.subphase === 'promoting') this.#first('activating:promoting', at, telemetry);
-        else if (progress.subphase === 'complete') this.#set('activating:complete', at, telemetry);
+        else if (progress.subphase === 'complete') {
+          this.#activationCompleted = true;
+          this.#set('activating:complete', at, telemetry);
+        }
         break;
       case 'embedding':
         this.#first('embedding:start', at, telemetry);
         if (progress.completed >= progress.total) this.#set('embedding:complete', at, telemetry);
         break;
     }
+  }
+
+  observeTiming(stage: BenchmarkIndexTimingStage): Effect.Effect<Effect.Effect<void>> {
+    return Effect.suspend(() =>
+      this.#completionTimings.observe(
+        stage === 'snapshot-lease-release' && this.#activationCompleted
+          ? 'snapshot-lease-release-after-complete'
+          : stage,
+      ),
+    );
+  }
+
+  completionTimingMeasurements(prefix: string): ReturnType<typeof benchmarkMeasurement>[] {
+    return this.#completionTimings.measurements(prefix);
   }
 
   finish(at: bigint, telemetry: ProcessTelemetry): void {
@@ -2615,6 +2717,10 @@ export function indexPhaseMeasurements(
   vectors: boolean,
 ): ReturnType<typeof benchmarkMeasurement>[] {
   return [
+    ...timeline.completionTimingMeasurements(prefix),
+    benchmarkMeasurement(`${prefix}-post-activation-completion`, 'milliseconds', [
+      timeline.duration('activating:complete', 'finish'),
+    ]),
     benchmarkMeasurement(`${prefix}-registration-lock-and-database-setup`, 'milliseconds', [
       timeline.duration('start', 'scanning:start', 'materializing:start'),
     ]),
@@ -2820,6 +2926,7 @@ function indexPhaseResourceMeasurements(
     ['materialization', 'materializing:start', 'resolving:references', 'activating:validating-input'],
     ['reference-resolution', 'resolving:references', 'resolving:complete', 'activating:validating-input'],
     ['activation', 'activating:validating-input', 'activating:complete', 'finish'],
+    ['post-activation-completion', 'activating:complete', 'finish', 'finish'],
     ['vector-index', 'embedding:start', 'embedding:complete', 'finish'],
   ] as const satisfies readonly (readonly [string, IndexPhasePoint, IndexPhasePoint, IndexPhasePoint])[];
   return phases.flatMap(([name, from, to, fallback]) => {

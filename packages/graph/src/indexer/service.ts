@@ -72,7 +72,7 @@ import type {
   CodeGraphIndexResourceGate,
   CodeGraphPreparedSpoolBudgetGate,
 } from './types.js';
-import {codeGraphIndexEnsuresVectors} from './types.js';
+import {codeGraphIndexEnsuresVectors, codeGraphIndexTimingStore, withCodeGraphIndexTiming} from './types.js';
 import type {BoundedCodeGraphFact} from '../fact/budget.js';
 import {
   type CodeGraphInventory,
@@ -127,6 +127,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const store = yield* CodeGraphStore;
+      const unobservedStore = store;
       const maintenance = yield* CodeGraphMaintenanceCoordinator;
       const embedding = yield* CodeGraphEmbeddingIndex;
       const languagePacks = yield* CodeGraphLanguagePackRegistry;
@@ -268,6 +269,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       ): Effect.Effect<CodeGraphIndexSummary, unknown> =>
         Effect.scoped(
           Effect.gen(function* () {
+            const store = codeGraphIndexTimingStore(unobservedStore, request.onTiming);
             const initialIdentity = yield* resolveRepositoryIdentity(request.cwd);
             const producer = {
               platform: {
@@ -1381,31 +1383,37 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                       reporter.fail(CodeGraphIndexOperationError.make({message: CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY})),
                     ),
                     Effect.tap(summary =>
-                      Effect.gen(function* () {
-                        if ((yield* observeCodeGraphAdmissionEnvironment(initialIdentity)) !== admissionEnvironment) {
-                          return yield* WorktreeChangedDuringIndex.make({});
-                        }
-                        yield* recordCodeGraphSnapshotAdmission(
-                          layout,
-                          summary.snapshot,
-                          admissionEnvironment,
-                          languagePacks,
-                          ensureVectors,
-                          scopeEvidence === undefined
-                            ? undefined
-                            : {scope: codeGraphScopeAdmissionEvidence(scopeEvidence)},
-                        );
-                        if (scopeEvidence !== undefined) {
-                          yield* store.recordScopeApplicability(
-                            layout.databasePath,
-                            summary.snapshot.id,
-                            scopeEvidence,
-                            scope,
+                      withCodeGraphIndexTiming(
+                        options.onTiming,
+                        'admission',
+                        Effect.gen(function* () {
+                          if ((yield* observeCodeGraphAdmissionEnvironment(initialIdentity)) !== admissionEnvironment) {
+                            return yield* WorktreeChangedDuringIndex.make({});
+                          }
+                          yield* recordCodeGraphSnapshotAdmission(
+                            layout,
+                            summary.snapshot,
+                            admissionEnvironment,
+                            languagePacks,
+                            ensureVectors,
+                            scopeEvidence === undefined
+                              ? undefined
+                              : {scope: codeGraphScopeAdmissionEvidence(scopeEvidence)},
                           );
-                        }
-                      }),
+                          if (scopeEvidence !== undefined) {
+                            yield* store.recordScopeApplicability(
+                              layout.databasePath,
+                              summary.snapshot.id,
+                              scopeEvidence,
+                              scope,
+                            );
+                          }
+                        }),
+                      ),
                     ),
-                    Effect.tap(summary => reporter.complete(summary)),
+                    Effect.tap(summary =>
+                      withCodeGraphIndexTiming(options.onTiming, 'reporter-completion', reporter.complete(summary)),
+                    ),
                     Effect.tapError(cause => reporter.fail(cause)),
                   );
                 return yield* build;
@@ -1429,7 +1437,10 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                     },
                   ],
                   threadnoteHome: request.threadnoteHome,
-                }).pipe(Effect.ignore),
+                }).pipe(
+                  effect => withCodeGraphIndexTiming(options.onTiming, 'lifecycle-opportunity', effect),
+                  Effect.ignore,
+                ),
               ),
             );
             const summary = yield* withSharedCodeGraphRequestGate({
@@ -1455,10 +1466,11 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               yield* drainQueuedGraphShareContributions({
                 identity: initialIdentity,
                 threadnoteHome: request.threadnoteHome,
-              }).pipe(Effect.ignore);
+              }).pipe(effect => withCodeGraphIndexTiming(options.onTiming, 'share-drain', effect), Effect.ignore);
             return summary;
-          }),
+          }).pipe(effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope-body', effect)),
         ).pipe(
+          effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope', effect),
           Effect.provideService(CommandExecutor, command),
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.provideService(FileSystem.FileSystem, fs),

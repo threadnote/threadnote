@@ -21165,6 +21165,7 @@ bun_workspace_test(
         "//:scripts/effect/script.ts",
         "//:scripts/effect/self-contained-source.ts",
         "//:scripts/effect/system-layer.ts",
+        "//:scripts/evaluate-code-graph.ts",
         "//:scripts/finalize-matched-continuation-study.ts",
         "//:scripts/matched-continuation-runtime-integrity.ts",
         "//:scripts/matched-evaluation-codex-adapter.ts",

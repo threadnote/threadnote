@@ -238,6 +238,8 @@ class WorkflowTransport:
             require(observed["state"] == "archived", "Workflow archive readback is not archived")
         else:
             require(observed["state"] == "active", "Workflow write readback is not active")
+            require(observed.get("storageKind") == pending["request"]["storageKind"],
+                    "Workflow write readback has a different storage kind")
         self.state["operations"][pending["key"]] = {"request": pending["request"], "preview": pending["preview"], "result": result}
         self.state.pop("pending", None)
         save_json(self.path, self.state)

@@ -1,6 +1,9 @@
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {join} from '@threadnote/testing/node-path';
-import {Effect} from 'effect';
+import {it as effectIt} from '@effect/vitest';
+import {Cause, Deferred, Effect, Exit, Fiber} from 'effect';
+import {TestClock} from 'effect/testing';
+import {TestError} from '@threadnote/testing/test-error';
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {parseBenchmarkArtifactV1, type BenchmarkArtifactV1} from '@threadnote/evidence/benchmark';
@@ -31,11 +34,73 @@ import {
   parseCodeGraphEvaluationFixtureV1,
 } from '@threadnote/threadnote/evaluation/code-graph';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {observeCodeGraphEvaluationDiagnostic} from '../../../../scripts/evaluate-code-graph.js';
 
 const FIXTURE_ROOT = 'apps/threadnote/test/evaluation/fixtures/code-graph-v1';
 const BASELINE_ROOT = 'apps/threadnote/test/evaluation/baselines/code-graph-v1';
 const POLYGLOT_FIXTURE_ROOT = 'apps/threadnote/test/evaluation/fixtures/code-graph-polyglot-v1';
 const POLYGLOT_BASELINE_ROOT = 'apps/threadnote/test/evaluation/baselines/code-graph-polyglot-v1';
+
+describe('supplemental graph evaluation diagnostics', () => {
+  effectIt.effect('preserves the original quality failure when supplemental reads or formatting fail', () =>
+    Effect.gen(function* () {
+      const original = TestError.make({message: 'original worktree quality failure'});
+      const reads: (() => Effect.Effect<unknown, unknown>)[] = [
+        () => Effect.fail(TestError.make({message: 'diagnostic read failure'})),
+        () => Effect.die('diagnostic defect'),
+        () => {
+          throw new Error('diagnostic factory defect');
+        },
+        () => Effect.succeed('malformed').pipe(Effect.map(value => JSON.parse(value))),
+      ];
+      for (const read of reads) {
+        const observations: unknown[] = [];
+        const exit = yield* observeCodeGraphEvaluationDiagnostic(read).pipe(
+          Effect.tap(value => Effect.sync(() => observations.push(value))),
+          Effect.andThen(Effect.fail(original)),
+          Effect.exit,
+        );
+        expect(observations).toEqual([{state: 'unavailable'}]);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          expect(exit.cause.reasons).toHaveLength(1);
+          const reason = exit.cause.reasons[0];
+          expect(Cause.isFailReason(reason) && reason.error === original).toBe(true);
+        }
+      }
+    }),
+  );
+
+  effectIt.effect('bounds unavailable diagnostics while preserving caller cancellation', () =>
+    Effect.gen(function* () {
+      for (const cancel of [false, true]) {
+        const started = yield* Deferred.make<void>();
+        let published = false;
+        const pending = yield* observeCodeGraphEvaluationDiagnostic(() =>
+          Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+        ).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              published = true;
+            }),
+          ),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        if (cancel) {
+          yield* Fiber.interrupt(pending);
+          const exit = yield* Fiber.await(pending);
+          expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+          expect(published).toBe(false);
+        } else {
+          yield* TestClock.adjust('5 seconds');
+          expect(yield* Fiber.join(pending)).toEqual({state: 'unavailable'});
+          expect(published).toBe(true);
+        }
+      }
+    }),
+  );
+});
 
 describe('code graph evaluation contract', () => {
   const fixture = parseCodeGraphEvaluationFixtureV1(readJson(join(FIXTURE_ROOT, 'fixture.json')));

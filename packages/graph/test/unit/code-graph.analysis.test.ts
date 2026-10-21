@@ -2,7 +2,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import fc from 'fast-check';
 import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
 import {TestError} from '@threadnote/testing/test-error';
-import {Deferred, Effect, Fiber} from 'effect';
+import {Cause, Clock, Deferred, Effect, Exit, Fiber} from 'effect';
 import {describe, expect, it} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {analyzeCodeGraph, analyzeCodeGraphWithLease, type CodeGraphAnalysisLimits} from '@threadnote/graph/analysis';
@@ -393,6 +393,85 @@ describe('code graph analysis', () => {
     }),
   );
 
+  it.effect('attributes lease acquisition, read session and release without moving their boundaries', () =>
+    Effect.gen(function* () {
+      const events: string[] = [];
+      const base = leasedAnalysisStore(pagedAnalysisStore([], []), events);
+      const measured: {stage: string; milliseconds: number}[] = [];
+      const store: CodeGraphStoreShape = {
+        ...base,
+        acquireSnapshotLease: (...args) =>
+          TestClock.adjust(11).pipe(Effect.andThen(base.acquireSnapshotLease(...args))),
+        withSession: (database, effect, options) =>
+          base.withSession(database, TestClock.adjust(17).pipe(Effect.andThen(effect)), options),
+        releaseSnapshotLease: (...args) =>
+          TestClock.adjust(23).pipe(Effect.andThen(base.releaseSnapshotLease(...args))),
+      };
+      const result = yield* analyzeCodeGraphWithLease(store, {
+        databasePath: '/analysis/graph.sqlite',
+        snapshot: analysisSnapshot([], []),
+        onTiming: stage =>
+          Effect.gen(function* () {
+            const started = yield* Clock.currentTimeMillis;
+            // oxlint-disable-next-line effecttsgo/return-effect-in-gen -- Return deferred completion work for the caller to run after the measured operation.
+            return Clock.currentTimeMillis.pipe(
+              Effect.tap(finished =>
+                Effect.sync(() => {
+                  measured.push({stage, milliseconds: finished - started});
+                }),
+              ),
+              Effect.asVoid,
+            );
+          }),
+      });
+      expect(measured).toEqual([
+        {stage: 'lease-acquire', milliseconds: 11},
+        {stage: 'read-session', milliseconds: 17},
+        {stage: 'lease-release', milliseconds: 23},
+      ]);
+      expect(result.leaseCleanup?.state).toBe('released');
+      expect(events).toEqual(['acquire:analysis-snapshot', 'session', 'release:lease-token']);
+    }),
+  );
+
+  fcEffectProp(
+    it,
+    'optional timing failures preserve analysis outcomes and lease ownership',
+    {readFails: fc.boolean(), startFails: fc.boolean(), completionFails: fc.boolean()},
+    ({readFails, startFails, completionFails}) =>
+      Effect.gen(function* () {
+        const events: string[] = [];
+        const symbol = analysisSymbol('timed', '@acme/app', 'src/timed.ts');
+        const failure = CodeGraphStoreBusyError.of('read failed');
+        const base = pagedAnalysisStore([symbol], []);
+        const store = leasedAnalysisStore(
+          readFails ? {...base, loadSymbolPage: () => Effect.fail(failure)} : base,
+          events,
+        );
+        const options = {databasePath: '/analysis/graph.sqlite', snapshot: analysisSnapshot([symbol], [])};
+        const original = yield* analyzeCodeGraphWithLease(store, options).pipe(Effect.exit);
+        const observed = yield* analyzeCodeGraphWithLease(store, {
+          ...options,
+          onTiming: () =>
+            startFails
+              ? Effect.fail(TestError.make({message: 'observer start failed'}))
+              : Effect.succeed(completionFails ? Effect.die('observer completion failed') : Effect.void),
+        }).pipe(Effect.exit);
+        if (readFails) {
+          for (const exit of [original, observed]) {
+            expect(Exit.isFailure(exit)).toBe(true);
+            if (Exit.isFailure(exit)) {
+              expect(exit.cause.reasons).toHaveLength(1);
+              const reason = exit.cause.reasons[0];
+              expect(Cause.isFailReason(reason) && reason.error === failure).toBe(true);
+            }
+          }
+        } else expect(observed).toEqual(original);
+        expect(events.filter(event => event === 'release:lease-token')).toHaveLength(2);
+      }),
+    {fastCheck: {numRuns: 24}},
+  );
+
   it.effect('never writes a missing summary and bounds both lease writer gates', () =>
     Effect.gen(function* () {
       const events: string[] = [];
@@ -429,6 +508,7 @@ describe('code graph analysis', () => {
       const fiber = yield* analyzeCodeGraphWithLease(store, {
         databasePath: '/analysis/graph.sqlite',
         snapshot: analysisSnapshot([], []),
+        onTiming: () => Effect.succeed(Effect.die('observer cleanup defect')),
       }).pipe(Effect.forkChild);
       yield* Deferred.await(started);
       yield* Fiber.interrupt(fiber);
