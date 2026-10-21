@@ -9,10 +9,12 @@ import {
 } from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-id';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {uriSegment} from '@threadnote/workspace/manifest';
+import type {ContextMaintenanceSnapshotDiagnosticV1} from '@threadnote/context/health_maintenance';
 import {localUserMemoriesRoot} from '../migrations.js';
 import {maintenanceSnapshotFailure, withMaintenanceSnapshotDiagnostic} from './maintenance_snapshot.js';
 
@@ -41,6 +43,7 @@ interface Inventory {
   readonly complete: boolean;
   readonly root: string;
   readonly incompleteReason?: InventoryIncompleteReason;
+  readonly diagnostics?: Readonly<Record<string, ContextMaintenanceSnapshotDiagnosticV1>>;
 }
 
 /** Terminal work is bounded independently from the normal discovery name budget. */
@@ -52,6 +55,7 @@ export const contextMaintenanceInventoryAuthorityLimits = {
   readConcurrency: 8,
 } as const;
 type InventoryIncompleteReason =
+  | 'inventory-records-omitted'
   | 'inventory-discovery-incomplete'
   | 'inventory-terminal-catalog-boundary'
   | 'inventory-terminal-byte-boundary'
@@ -63,21 +67,38 @@ type InventoryIncompleteReason =
 export interface ContextMaintenanceInventoryPreparationV2 {
   readonly complete: boolean;
   readonly admittedRecords: number;
+  readonly omittedRecords?: number;
+  readonly diagnostics?: readonly ContextMaintenanceSnapshotDiagnosticV1[];
   readonly incompleteReason?: InventoryIncompleteReason;
 }
 
 export function contextMaintenanceInventoryPreparation(
-  snapshot: {readonly complete: boolean; readonly incompleteReason?: InventoryIncompleteReason},
+  snapshot: {
+    readonly complete: boolean;
+    readonly incompleteReason?: InventoryIncompleteReason;
+    readonly diagnostics?: readonly ContextMaintenanceSnapshotDiagnosticV1[];
+  },
   admittedRecords: number,
 ): ContextMaintenanceInventoryPreparationV2 {
   return {
     complete: snapshot.complete,
     admittedRecords,
+    ...(snapshot.diagnostics?.length
+      ? {omittedRecords: snapshot.diagnostics.length, diagnostics: snapshot.diagnostics.slice(0, 8)}
+      : {}),
     ...(snapshot.incompleteReason === undefined ? {} : {incompleteReason: snapshot.incompleteReason}),
   };
 }
 
-function decodeInventory(raw: string, root: string, user: string): Inventory | undefined {
+function inventoryMemoryUri(path: Path.Path, root: string, user: string, candidate: string): string {
+  return canonicalResourceUri('user', [
+    uriSegment(user),
+    'memories',
+    ...path.relative(root, candidate).split(path.sep),
+  ]);
+}
+
+function decodeInventory(raw: string, root: string, user: string, path: Path.Path): Inventory | undefined {
   const value = JSON.parse(raw) as Partial<Omit<Inventory, 'version'>> & {version?: number; refreshCursor?: number};
   if (
     ![1, 2].includes(value.version ?? 0) ||
@@ -117,6 +138,7 @@ function decodeInventory(raw: string, root: string, user: string): Inventory | u
         entry.uri === uri &&
         uri.startsWith(`threadnote://user/${uriSegment(user)}/memories/`) &&
         contained(entry.path) &&
+        uri === inventoryMemoryUri(path, root, user, entry.path) &&
         typeof entry.signature === 'string' &&
         /^[a-f0-9]{64}$/u.test(entry.hash) &&
         (entry.canonicalContentHash === undefined ||
@@ -131,8 +153,35 @@ function decodeInventory(raw: string, root: string, user: string): Inventory | u
     )
   )
     return undefined;
+  if (
+    value.diagnostics !== undefined &&
+    (value.diagnostics === null ||
+      typeof value.diagnostics !== 'object' ||
+      Array.isArray(value.diagnostics) ||
+      Object.entries(value.diagnostics).some(
+        ([uri, diagnostic]) =>
+          !uri.startsWith(`threadnote://user/${uriSegment(user)}/memories/`) ||
+          parseResourceId(uri).canonicalUri !== uri ||
+          diagnostic?.memoryUri !== uri ||
+          ![
+            'invalid-header',
+            'invalid-utf8',
+            'permission-denied',
+            'record-size-limit',
+            'record-changed',
+            'io-error',
+          ].includes(diagnostic.category),
+      ))
+  )
+    return undefined;
+  const diagnostics = Object.fromEntries(
+    Object.entries(value.diagnostics ?? {}).map(([uri, diagnostic]) => [
+      uri,
+      maintenanceSnapshotFailure(diagnostic.category, 'record-read', uri).diagnostic,
+    ]),
+  );
   // V1 completeness is only a discovery hint; every completed view receives a fresh terminal proof below.
-  return {...value, version: 2} as Inventory;
+  return {...value, version: 2, diagnostics} as Inventory;
 }
 
 const signature = (info: FileSystem.File.Info) => `${Number(info.size)}:${JSON.stringify(info.mtime)}`;
@@ -197,7 +246,6 @@ const persistInventory = Effect.fn('contextMaintenance.persistInventory')(functi
 const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
   fs: FileSystem.FileSystem,
   path: Path.Path,
-  root: string,
   canonicalRoot: string,
   candidate: string,
   uri: string,
@@ -256,9 +304,7 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
         catch: () => maintenanceSnapshotFailure('invalid-utf8', 'record-read', uri),
       });
       const record = parseMemoryDocument(uri, content);
-      const relative = path.relative(root, candidate).split(path.sep).join('/');
-      if (record === undefined && !relative.startsWith('shared/'))
-        return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
+      if (record === undefined) return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
       const entry: InventoryEntry | undefined =
         record !== undefined && (project === undefined || (record.metadata.project ?? 'unscoped') === project)
           ? {
@@ -272,10 +318,43 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
               metadata: record.metadata,
             }
           : undefined;
-      return {entry, bytes};
+      return {entry, bytes, record};
     }),
   ).pipe(withMaintenanceSnapshotDiagnostic('record-read', uri));
 });
+
+export const readContextMaintenanceCanonicalRecord = Effect.fn('contextMaintenance.readCanonicalRecord')(function* (
+  config: RuntimeConfig,
+  uri: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const prefix = `threadnote://user/${uriSegment(config.user)}/memories/`;
+  if (!uri.startsWith(prefix) || isAgentArtifactUri(uri))
+    return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
+  const resource = yield* Effect.try({
+    try: () => parseResourceId(uri),
+    catch: () => maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri),
+  });
+  const relative = resource.segments.slice(2);
+  if (!relative.length) return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
+  const root = yield* localUserMemoriesRoot(config);
+  const canonicalRoot = yield* fs.realPath(root);
+  const canonicalHome = yield* fs.realPath(config.agentContextHome);
+  if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
+    return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
+  const read = yield* readEntry(fs, path, canonicalRoot, path.join(root, ...relative), uri, undefined);
+  if (!read.record) return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
+  return {record: read.record, hash: read.entry!.hash};
+}, withMaintenanceSnapshotDiagnostic('record-read'));
+
+const isolatedReadEntry = (...args: Parameters<typeof readEntry>) =>
+  readEntry(...args).pipe(
+    Effect.catchIf(
+      error => error.diagnostic.category !== 'authority-boundary' && error.diagnostic.category !== 'record-not-regular',
+      error => Effect.succeed({entry: undefined, bytes: 0, record: undefined, diagnostic: error.diagnostic}),
+    ),
+  );
 
 const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(function* (
   config: RuntimeConfig,
@@ -302,6 +381,7 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
         config.account,
       );
       const entries: Record<string, InventoryEntry> = {};
+      const diagnostics: Record<string, ContextMaintenanceSnapshotDiagnosticV1> = {};
       let catalogNames = 0,
         canonicalBytes = 0;
       const incomplete = (incompleteReason: InventoryIncompleteReason) => ({
@@ -328,10 +408,16 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
           catalogNames += names.length;
           if (catalogNames > contextMaintenanceInventoryAuthorityLimits.catalogNames)
             return incomplete('inventory-terminal-catalog-boundary');
-          const item = (directory?: string, entry?: InventoryEntry, incompleteReason?: InventoryIncompleteReason) => ({
+          const item = (
+            directory?: string,
+            entry?: InventoryEntry,
+            incompleteReason?: InventoryIncompleteReason,
+            diagnostic?: ContextMaintenanceSnapshotDiagnosticV1,
+          ) => ({
             directory,
             entry,
             incompleteReason,
+            diagnostic,
           });
           const children = yield* Effect.forEach(
             names,
@@ -339,8 +425,10 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
               Effect.gen(function* () {
                 const candidate = path.join(directory, name);
                 if (!inProject(path, root, candidate, project)) return item();
-                const relative = path.relative(root, candidate).split(path.sep).join('/');
-                const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
+                const uri = yield* Effect.try({
+                  try: () => inventoryMemoryUri(path, root, config.user, candidate),
+                  catch: () => maintenanceSnapshotFailure('authority-boundary', 'authority-check'),
+                });
                 const info = yield* statIfPresent(fs, candidate).pipe(
                   withMaintenanceSnapshotDiagnostic('discovery', uri),
                 );
@@ -352,7 +440,12 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
                   if (info.value.type !== 'File')
                     return yield* maintenanceSnapshotFailure('record-not-regular', 'record-read', uri);
                   if (Number(info.value.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
-                    return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
+                    return item(
+                      undefined,
+                      undefined,
+                      undefined,
+                      maintenanceSnapshotFailure('record-size-limit', 'record-read', uri).diagnostic,
+                    );
                   if (
                     canonicalBytes + Number(info.value.size) >
                     contextMaintenanceInventoryAuthorityLimits.canonicalBytes
@@ -361,8 +454,8 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
                   // Reserve bytes before the first read yield; concurrent handles cannot
                   // jointly exceed the terminal bound. readEntry proves the reserved identity/size.
                   canonicalBytes += Number(info.value.size);
-                  const read = yield* readEntry(fs, path, root, canonicalRoot, candidate, uri, project, info.value);
-                  return item(undefined, read.entry);
+                  const read = yield* isolatedReadEntry(fs, path, canonicalRoot, candidate, uri, project, info.value);
+                  return item(undefined, read.entry, undefined, 'diagnostic' in read ? read.diagnostic : undefined);
                 }
                 return item();
               }),
@@ -370,6 +463,7 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
           );
           for (const child of children) {
             if (child.incompleteReason !== undefined) return incomplete(child.incompleteReason);
+            if (child.diagnostic?.memoryUri) diagnostics[child.diagnostic.memoryUri] = child.diagnostic;
             if (child.directory !== undefined) directories.push(child.directory);
             if (child.entry !== undefined) entries[child.entry.uri] = child.entry;
           }
@@ -380,7 +474,7 @@ const freshAuthority = Effect.fn('contextMaintenance.inventoryFreshAuthority')(f
         (yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account))
       )
         return incomplete('inventory-terminal-generation-race');
-      return {complete: true as const, entries, mutationGeneration, catalogNames, canonicalBytes};
+      return {complete: true as const, entries, diagnostics, mutationGeneration, catalogNames, canonicalBytes};
     }),
   ).pipe(
     Effect.catchIf(isFileLockTimeout, () =>
@@ -424,7 +518,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
   if (cacheStat._tag === 'Some' && Number(cacheStat.value.size) > 32 * 1024 * 1024)
     return yield* maintenanceSnapshotFailure('cache-size-limit', 'inventory-cache');
   const prior = yield* fs.readFileString(file).pipe(
-    Effect.flatMap(raw => Effect.try(() => decodeInventory(raw, root, config.user))),
+    Effect.flatMap(raw => Effect.try(() => decodeInventory(raw, root, config.user, path))),
     Effect.orElseSucceed(() => undefined),
   );
   // Account writes invalidate authority, never the fair discovery cursor. The terminal
@@ -432,8 +526,9 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
   let entries: Record<string, InventoryEntry> = Object.fromEntries(
     Object.entries(prior?.entries ?? {}).filter(([uri]) => !isAgentArtifactUri(uri)),
   );
+  const diagnostics: Record<string, ContextMaintenanceSnapshotDiagnosticV1> = {...prior?.diagnostics};
   const queue: DirectoryPage[] =
-    prior === undefined
+    prior === undefined || (!prior.complete && prior.queue.length === 0)
       ? [{directory: root, offset: 0}]
       : prior.complete
         ? []
@@ -459,19 +554,16 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
           () => Effect.succeed([]),
         ),
       )).sort();
-    if (names.length > contextMaintenanceInventoryAuthorityLimits.catalogNames) {
-      queue.unshift({directory: page.directory, offset: page.offset});
-      incompleteReason = 'inventory-terminal-catalog-boundary';
-      break;
-    }
     let offset = page.offset;
     while (offset < names.length && admitted < budget) {
       const name = names[offset++];
       if (name.startsWith('.')) continue;
       admitted++;
       const candidate = path.join(page.directory, name);
-      const relative = path.relative(root, candidate).split(path.sep).join('/');
-      const uri = `threadnote://user/${uriSegment(config.user)}/memories/${relative}`;
+      const uri = yield* Effect.try({
+        try: () => inventoryMemoryUri(path, root, config.user, candidate),
+        catch: () => maintenanceSnapshotFailure('authority-boundary', 'authority-check'),
+      });
       const info = yield* statIfPresent(fs, candidate).pipe(withMaintenanceSnapshotDiagnostic('discovery', uri));
       if (info._tag === 'None') continue;
       if (!inProject(path, root, candidate, project)) continue;
@@ -486,12 +578,19 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
         yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
         if (entries[uri]?.signature === signature(info.value) && entries[uri]?.canonicalContentHash !== undefined)
           continue;
-        const read = yield* readEntry(fs, path, root, canonicalRoot, candidate, uri, project, info.value);
+        const read = yield* isolatedReadEntry(fs, path, canonicalRoot, candidate, uri, project, info.value);
+        if ('diagnostic' in read) diagnostics[uri] = read.diagnostic;
+        else delete diagnostics[uri];
         if (read.entry === undefined) delete entries[uri];
         else entries[uri] = read.entry;
       }
     }
-    if (offset < names.length) queue.unshift({directory: page.directory, names, offset});
+    if (offset < names.length)
+      queue.unshift({
+        directory: page.directory,
+        ...(names.length <= contextMaintenanceInventoryAuthorityLimits.catalogNames ? {names} : {}),
+        offset,
+      });
   }
   let complete = false;
   let authorityGeneration = generation;
@@ -506,8 +605,10 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     if (authority.complete) {
       entries = authority.entries;
       authorityGeneration = authority.mutationGeneration;
-      complete = true;
-      incompleteReason = undefined;
+      for (const key of Object.keys(diagnostics)) delete diagnostics[key];
+      Object.assign(diagnostics, authority.diagnostics);
+      complete = Object.keys(diagnostics).length === 0;
+      incompleteReason = complete ? undefined : 'inventory-records-omitted';
     } else {
       incompleteReason = authority.incompleteReason;
     }
@@ -527,6 +628,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     complete,
     ...(incompleteReason === undefined ? {} : {incompleteReason}),
     root,
+    diagnostics,
   };
   yield* persistInventory(fs, path, file, inventory);
   if (
@@ -543,6 +645,7 @@ export const prepareContextMaintenanceInventory = Effect.fn('contextMaintenance.
     complete: inventory.complete,
     incompleteReason,
     reconciliation,
+    diagnostics: Object.values(diagnostics),
     generation: sha256HexSync(ordered.map(entry => `${entry.uri}:${entry.hash}`).join('|')),
     hashes: new Map(ordered.map(entry => [entry.uri, entry.hash])),
     canonicalContentHashes: new Map(
