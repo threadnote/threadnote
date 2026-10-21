@@ -14,6 +14,7 @@ import {prewarmLikelyCleanSnapshots, codeGraphWatcherRefreshIndexRequest} from '
 import {CommandExecutor} from '@threadnote/platform/command';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {execFileSync} from '@threadnote/testing/node-child-process';
 import {mkdirSync, writeFileSync} from '@threadnote/testing/node-fs';
@@ -31,7 +32,7 @@ const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root
 
 const fixture = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const parent = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-scoped-stress-'});
+  const parent = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-scoped-stress-');
   const root = join(parent, 'repository');
   yield* fs.makeDirectory(root);
   git(root, 'init', '-q');

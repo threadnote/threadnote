@@ -1,3 +1,4 @@
+import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {runExportPack} from '../../src/memory/commands.js';
@@ -269,7 +270,7 @@ effectIt.effect(
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,
             usage: {status: 'unavailable' as const},
-            settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+            settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
           };
         });
       const request = () =>

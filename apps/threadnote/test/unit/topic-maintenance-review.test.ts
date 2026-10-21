@@ -1,3 +1,4 @@
+import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import {makeTopicDraftWireFixture, topicDraftEvidenceFromPrompt} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect} from 'vitest';
@@ -752,7 +753,7 @@ describe('reviewed personal topic acceptance', () => {
                 modelIdentity: modelId,
                 modelVersion: `${manifest.revision}:${manifest.sha256}`,
                 usage: {status: 'unavailable' as const},
-                settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+                settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
               };
             });
           const fresh = yield* requestTopicMaintenanceDraft(
