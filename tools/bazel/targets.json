@@ -747,6 +747,7 @@
         "apps/threadnote/src/workspace_component.ts",
         "apps/threadnote/test/dev-skills/bundle.test.ts",
         "apps/threadnote/test/dev-skills/dev-manifest.test.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-history.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-readiness.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-recovery.test.ts",
@@ -4172,6 +4173,7 @@
         "apps/threadnote/src/workspace_component.ts",
         "apps/threadnote/test/dev-skills/bundle.test.ts",
         "apps/threadnote/test/dev-skills/dev-manifest.test.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-history.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-readiness.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-recovery.test.ts",
@@ -13779,6 +13781,7 @@
         "apps/threadnote/src/workspace_component.ts",
         "apps/threadnote/test/dev-skills/bundle.test.ts",
         "apps/threadnote/test/dev-skills/dev-manifest.test.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-history.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-readiness.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-recovery.test.ts",
@@ -15296,6 +15299,7 @@
         "apps/threadnote/src/workspace_component.ts",
         "apps/threadnote/test/dev-skills/bundle.test.ts",
         "apps/threadnote/test/dev-skills/dev-manifest.test.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-history.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-readiness.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-recovery.test.ts",
@@ -20780,6 +20784,7 @@
         "//:windows_smoke_inputs"
       ],
       "inputs": [
+        ".github/workflows/ci.yml",
         "apps/threadnote/src/effect/activation_cli.ts",
         "apps/threadnote/src/effect/agents_cli.ts",
         "apps/threadnote/src/effect/ai/consolidator.ts",
@@ -22313,6 +22318,7 @@
         "apps/threadnote/src/workspace_component.ts",
         "apps/threadnote/test/dev-skills/bundle.test.ts",
         "apps/threadnote/test/dev-skills/dev-manifest.test.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-history.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-readiness.test.ts",
         "apps/threadnote/test/dev-skills/lifecycle-recovery.test.ts",
@@ -75744,6 +75750,7 @@
         "apps/threadnote/src/workflow_memory/profile.ts",
         "apps/threadnote/src/workflow_memory/protocol.ts",
         "apps/threadnote/src/workspace_component.ts",
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts",
         "apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/baseline.json",
         "apps/threadnote/test/evaluation/fixtures/topic-maintenance-v1/sequence.json",
@@ -76404,6 +76411,7 @@
         "web-tree-sitter"
       ],
       "entries": [
+        "apps/threadnote/test/dev-skills/files.test.ts",
         "apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts",
         "apps/threadnote/test/unit/context-brief-citation-evaluation.test.ts",
         "apps/threadnote/test/unit/context-brief-citation-rss-observer.test.ts",

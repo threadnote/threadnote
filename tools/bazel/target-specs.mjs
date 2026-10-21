@@ -772,6 +772,7 @@ export const staticTargets = [
     lane: 'windows_smoke',
     dependsOn: ['//:windows_smoke_inputs'],
     inputs: [
+      '.github/workflows/ci.yml',
       ...filesBelow('packages/platform/src'),
       ...filesBelow('apps/threadnote/src/effect'),
       ...filesBelow('apps/threadnote/src/process'),
