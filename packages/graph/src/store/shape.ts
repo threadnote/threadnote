@@ -1,5 +1,6 @@
 import type {Effect, Option} from 'effect';
 import type {ResolvedCodeGraphIndexScope} from '../index_scope.js';
+import type {CodeGraphTraversalEdge} from './internal_models.js';
 import type {CodeGraphScopeApplicabilityEvidence} from '../scope/applicability.js';
 import type {
   StoredCodeGraphScopeApplicability,
@@ -477,6 +478,19 @@ export interface CodeGraphStoreShape {
     direction: 'both' | 'incoming' | 'outgoing',
     limit: number,
     allowedProvenances: readonly CodeGraphProvenance[],
+  ) => Effect.Effect<readonly CodeGraphEdge[], CodeGraphStoreFailure>;
+  readonly traversalEdgesForNodes: (
+    databasePath: string,
+    snapshotId: string,
+    nodeIds: readonly string[],
+    direction: 'both' | 'incoming' | 'outgoing',
+    limit: number,
+    allowedProvenances: readonly CodeGraphProvenance[],
+  ) => Effect.Effect<readonly CodeGraphTraversalEdge[], CodeGraphStoreFailure>;
+  readonly edgesByIds: (
+    databasePath: string,
+    snapshotId: string,
+    ids: readonly string[],
   ) => Effect.Effect<readonly CodeGraphEdge[], CodeGraphStoreFailure>;
   readonly directEdgeBetweenNodes: (
     databasePath: string,

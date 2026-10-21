@@ -1306,12 +1306,12 @@ const recoverDeletedImpactSeeds = Effect.fn('codeGraph.recoverDeletedImpactSeeds
         truncated,
       };
     }
-    const adjacent: CodeGraphEdge[] = [];
+    const adjacent: Array<Pick<CodeGraphEdge, 'sourceId' | 'targetId'>> = [];
     for (let offset = 0; offset < frontier.length && inspectedEdges + adjacent.length < MAX_IMPACT_ANALYSIS_EDGES;) {
       const frontierBatch = frontier.slice(offset, offset + MAX_STORE_ADJACENCY_NODE_IDS);
       offset += frontierBatch.length;
       const remainingEdges = MAX_IMPACT_ANALYSIS_EDGES - inspectedEdges - adjacent.length;
-      const batch = yield* store.edgesForNodes(
+      const batch = yield* store.traversalEdgesForNodes(
         databasePath,
         baseSnapshotId,
         frontierBatch,

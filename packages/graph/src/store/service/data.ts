@@ -35,6 +35,8 @@ import {
   selectStoredSymbols,
   selectEdgePage,
   selectEdgesForNodes,
+  selectTraversalEdgesForNodes,
+  selectEdgesByIds,
   selectDirectEdgeBetweenNodes,
 } from '../queries.js';
 import {selectSnapshotPackProvenance} from '../pack_provenance.js';
@@ -111,6 +113,8 @@ type CodeGraphStoreDataMethods = Pick<
   | 'cachedCommittedFileKeys'
   | 'discardInvalidCachedFacts'
   | 'edgesForNodes'
+  | 'traversalEdgesForNodes'
+  | 'edgesByIds'
   | 'directEdgeBetweenNodes'
   | 'findSymbolsByPathAndName'
   | 'loadCachedFacts'
@@ -430,6 +434,21 @@ export function makeCodeGraphStoreDataMethods(runtime: CodeGraphStoreRuntime): C
           ),
         ),
         Effect.mapError(cause => storeError('load code graph adjacency', cause)),
+      ),
+    traversalEdgesForNodes: (databasePath, snapshotId, nodeIds, direction, limit, allowedProvenances) =>
+      prepare(databasePath).pipe(
+        Effect.andThen(
+          useReadOnlyDatabase(
+            databasePath,
+            selectTraversalEdgesForNodes(snapshotId, nodeIds, direction, limit, allowedProvenances),
+          ),
+        ),
+        Effect.mapError(cause => storeError('load code graph traversal adjacency', cause)),
+      ),
+    edgesByIds: (databasePath, snapshotId, ids) =>
+      prepare(databasePath).pipe(
+        Effect.andThen(useReadOnlyDatabase(databasePath, selectEdgesByIds(snapshotId, ids))),
+        Effect.mapError(cause => storeError('load selected code graph edges', cause)),
       ),
     directEdgeBetweenNodes: (databasePath, snapshotId, sourceId, targetId, allowedProvenances) =>
       prepare(databasePath).pipe(
