@@ -5891,6 +5891,7 @@ bun_workspace_test(
         "//packages/store:src/source-evidence.ts",
         "//packages/testing:package.json",
         "//packages/testing:src/fast-check-property.ts",
+        "//packages/testing:src/fixture-temp-directory.ts",
         "//packages/testing:src/node-child-process.ts",
         "//packages/testing:src/node-fs-promises.ts",
         "//packages/testing:src/node-fs.ts",
