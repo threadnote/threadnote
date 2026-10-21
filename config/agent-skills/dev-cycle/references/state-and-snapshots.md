@@ -59,6 +59,8 @@ The helper writes snapshot artifacts before publishing `snapshot.json` last. An 
 
 Mapped work also records `planPath`, `phaseId`, `planHash`, and its phase delivery ledger (commit/tree/base/PR/watch/experience URIs). Each phase has its own baseline and bounded review history. Do not reuse another phase's base or reset the budget after a push.
 
+The shared plan maps each phase to its `cycleRunId` and absolute `cycleDir`. On a phase transition, preserve the finished session and create a fresh run/baseline for the next phase in its checkout. Update that checkout's active pointer without overwriting the previous cycle. Keep earlier watchers and their consumer ownership in the shared delivery map. A watching PR does not prevent a new phase cycle in another checkout; later feedback resumes the original phase's session and budget.
+
 ## Resume
 
 1. Read the active run/session; verify schema, checkout identity, initial HEAD, fixed base/tree availability, and last completed phase. Preserve incompatible legacy state and explain that it cannot safely resume; start a separate run rather than deleting it.
