@@ -1,3 +1,4 @@
+import {prepareAutomaticMaintenance} from './maintenance_preparation.js';
 import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
 import type {
@@ -72,8 +73,6 @@ import {
 } from '@threadnote/context/health_maintenance';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {CONTEXT_HEALTH_SEMANTIC_ANALYZER_VERSION} from '@threadnote/context/health_semantic';
-import {readSeedManifest} from '@threadnote/workspace/manifest';
-import {expandPath} from '@threadnote/platform/paths';
 import {readMaintenanceMemoryRecords} from '../maintenance/records.js';
 import {
   contextMaintenanceInventoryPreparation,
@@ -294,14 +293,7 @@ export const runContextMaintenance = Effect.fn('contextMaintenance.run')(functio
       );
       const now = DateTime.formatIso(DateTime.makeUnsafe(started));
       const generation = snapshot.success.generation;
-      const manifest = yield* readSeedManifest(config.manifestPath).pipe(Effect.result);
-      const roots = new Map<string, string>();
-      if (Result.isSuccess(manifest)) {
-        for (const project of manifest.success.projects) {
-          const root = yield* expandPath(project.path).pipe(Effect.result);
-          if (Result.isSuccess(root)) roots.set(project.name, root.success);
-        }
-      }
+      const roots = yield* prepareAutomaticMaintenance(config, snapshot.success, options);
       const checkpoints = {...state.checkpoints};
       const caseMap = new Map(state.cases.map(item => [item.caseId, item]));
       const evidencePage = yield* readContextMaintenanceEvidenceRequestPage(

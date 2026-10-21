@@ -282,6 +282,8 @@
     "./memory/context/maintenance": "./src/memory/context/maintenance.ts",
     "./memory/context/maintenance_decisions": "./src/memory/context/maintenance_decisions.ts",
     "./memory/context/maintenance_evidence": "./src/memory/context/maintenance_evidence.ts",
+    "./memory/context/maintenance_preparation": "./src/memory/context/maintenance_preparation.ts",
+    "./memory/context/maintenance_preparation_state": "./src/memory/context/maintenance_preparation_state.ts",
     "./memory/context/maintenance_inventory": "./src/memory/context/maintenance_inventory.ts",
     "./memory/deferred/code_anchor": "./src/memory/deferred/code_anchor.ts",
     "./memory/deferred/code_anchor_checkout": "./src/memory/deferred/code_anchor_checkout.ts",
