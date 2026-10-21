@@ -1,5 +1,4 @@
 import {Data, Schema} from 'effect';
-import {consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
   type TopicMaintenanceDraftBasis,
@@ -46,7 +45,6 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const currentHandles = topicDraftCurrentSourceHandles(basis);
   if (!currentHandles.length) throw new Error('Topic generation requires current evidence.');
   const rationale = Schema.String.check(Schema.isMinLength(1));
-  const quote = rationale.check(Schema.isMaxLength(512));
   const scope = topicDraftPolicyScope(basis);
   const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
   const common = (allowUpdate: boolean) => {
@@ -84,22 +82,11 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       removedClaims: Schema.Array(Schema.String),
     };
   };
-  const witnesses = (required: boolean) =>
-    Schema.Array(
-      Schema.Struct({
-        sourceIndex: scope.behaviorSourceIndices.length ? Schema.Literals(scope.behaviorSourceIndices) : Schema.Int,
-        quote,
-      }),
-    ).check(Schema.isMinLength(required ? 1 : 0), Schema.isMaxLength(scope.behaviorSourceIndices.length ? 8 : 0));
-  const requirement = () => ({
-    normativeOrdinal: Schema.Literals(scope.normativeOrdinals),
-    requirementQuote: quote,
-  });
+  const requirement = () => ({normativeOrdinal: Schema.Literals(scope.normativeOrdinals)});
   const decision = Schema.Union([
     ...(descriptive.length && scope.behaviorSourceIndices.length
       ? [
           Schema.Struct({
-            currentWitnesses: witnesses(true),
             policyAssessment: Schema.Literal('no-conflict-observed'),
             ...common(true),
           }),
@@ -120,9 +107,9 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     ...(scope.normativeOrdinals.length && scope.behaviorSourceIndices.length
       ? [
           Schema.Struct({
-            currentWitnesses: witnesses(true),
             policyAssessment: Schema.Literal('conflict'),
             ...requirement(),
+            currentBehaviorSourceIndex: Schema.Literals(scope.behaviorSourceIndices),
             ...common(false),
           }),
         ]
@@ -130,7 +117,6 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
     ...(scope.normativeOrdinals.length
       ? [
           Schema.Struct({
-            currentWitnesses: witnesses(false),
             policyAssessment: Schema.Literal('undetermined'),
             ...requirement(),
             missingFact: rationale.check(Schema.isMaxLength(256)),
@@ -140,17 +126,26 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
       : []),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(6),
+    version: Schema.Literal(7),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
     paragraphComparisons: Schema.Struct({
       version: Schema.Literal(1),
       entries: Schema.Array(
-        descriptive.length
-          ? Schema.Struct({ordinal: Schema.Literals(descriptive.map(paragraph => paragraph.ordinal)), rationale})
+        descriptive.length || scope.normativeOrdinals.length
+          ? Schema.Struct({
+              ordinal: Schema.Literals([
+                ...descriptive.map(paragraph => paragraph.ordinal),
+                ...scope.normativeOrdinals,
+              ]),
+              rationale,
+            })
           : Schema.String,
-      ).check(Schema.isMinLength(descriptive.length), Schema.isMaxLength(descriptive.length)),
+      ).check(
+        Schema.isMinLength(descriptive.length + scope.normativeOrdinals.length),
+        Schema.isMaxLength(descriptive.length + scope.normativeOrdinals.length),
+      ),
     }),
     decision,
   });
@@ -194,10 +189,6 @@ function wellFormed(text: string) {
   return true;
 }
 
-function exactQuote(source: string, quote: string) {
-  return quote.length > 0 && wellFormed(quote) && source.includes(quote);
-}
-
 export function projectTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
   wire: ReturnType<typeof decodeTopicDraftWire>,
@@ -214,9 +205,11 @@ export function projectTopicDraftWire(
     if (typeof currentEvidence[handle] !== 'string' || !wellFormed(currentEvidence[handle]))
       throw new Error('Verified current topic evidence is unavailable.');
   const eligible = new Set(basis.paragraphs.filter(topicDraftGenerationEligible).map(paragraph => paragraph.ordinal));
+  const normative = new Set(topicDraftPolicyScope(basis).normativeOrdinals);
+  const compared = new Set([...eligible, ...normative]);
   const comparisons = new Map<number, string>();
   for (const entry of paragraphComparisons.entries) {
-    if (typeof entry === 'string' || !eligible.has(entry.ordinal) || comparisons.has(entry.ordinal))
+    if (typeof entry === 'string' || !compared.has(entry.ordinal) || comparisons.has(entry.ordinal))
       return invalid('Invalid or duplicate topic comparison ordinal.');
     if (!wellFormed(entry.rationale) || byteLength(entry.rationale) > 1024)
       invalid('Topic comparison rationale exceeds its UTF-8 scalar or byte bound.');
@@ -226,10 +219,10 @@ export function projectTopicDraftWire(
     typeof entry === 'string' ? -1 : entry.ordinal,
   );
   if (
-    comparisons.size !== eligible.size ||
+    comparisons.size !== compared.size ||
     actionOrdinals.length !== eligible.size ||
     new Set(actionOrdinals).size !== eligible.size ||
-    actionOrdinals.some(ordinal => !comparisons.has(ordinal))
+    actionOrdinals.some(ordinal => !eligible.has(ordinal) || !comparisons.has(ordinal))
   )
     invalid('Topic comparisons and dispositions must cover exactly the eligible ordinals.');
   const currentHandle = (index: number) => {
@@ -237,47 +230,40 @@ export function projectTopicDraftWire(
       return invalid('Invalid topic disposition source index.');
     return current[index];
   };
-  const witnesses = 'currentWitnesses' in decision ? decision.currentWitnesses : [];
-  const witnessPairs = witnesses.map(witness => JSON.stringify([witness.sourceIndex, witness.quote]));
-  if (new Set(witnessPairs).size !== witnessPairs.length) invalid('Duplicate topic current witness pair.');
   if (
     'reviewedSourceIndices' in decision &&
     new Set(decision.reviewedSourceIndices).size !== decision.reviewedSourceIndices.length
   )
     invalid('Duplicate topic assessment source index.');
-  if (witnesses.reduce((total, witness) => total + byteLength(witness.quote), 0) > 512)
-    invalid('Topic current witnesses exceed their UTF-8 byte bound.');
-  for (const witness of witnesses)
-    if (!exactQuote(currentEvidence[currentHandle(witness.sourceIndex)], witness.quote))
-      invalid('Topic current witness is not an exact current excerpt quotation.');
   if ('normativeOrdinal' in decision) {
-    const text = consolidationSections(basis.body)[decision.normativeOrdinal];
-    if (basis.paragraphs[decision.normativeOrdinal]?.role !== 'normative')
+    if (!normative.has(decision.normativeOrdinal))
       invalid('Topic requirement does not select a protected normative paragraph.');
-    if (byteLength(decision.requirementQuote) > 512)
-      invalid('Topic requirement quotation exceeds its UTF-8 byte bound.');
-    if (!exactQuote(text, decision.requirementQuote))
-      invalid('Topic requirement is not an exact normative paragraph quotation.');
   }
+  if (
+    'currentBehaviorSourceIndex' in decision &&
+    !topicDraftPolicyScope(basis).behaviorSourceIndices.includes(decision.currentBehaviorSourceIndex)
+  )
+    invalid('Topic behavior source is outside the trusted policy scope.');
   if ('missingFact' in decision && (!wellFormed(decision.missingFact) || byteLength(decision.missingFact) > 256))
     invalid('Topic missing fact exceeds its UTF-8 scalar or byte bound.');
-  const rationale =
-    decision.policyAssessment === 'source-review'
-      ? 'Checked source currency only; policy compliance not assessed.'
+  const selectedIndices =
+    'reviewedSourceIndices' in decision
+      ? decision.reviewedSourceIndices
       : [
-          witnesses.length
-            ? 'Current evidence:\n' + witnesses.map(witness => `[${witness.sourceIndex}] ${witness.quote}`).join('\n')
-            : 'No current behavior witness selected.',
-          ...('normativeOrdinal' in decision
-            ? [`Protected paragraph ${decision.normativeOrdinal}: ${decision.requirementQuote}`]
-            : []),
-          decision.policyAssessment === 'no-conflict-observed'
-            ? `Assessment: no conflict observed against protected paragraphs ${topicDraftPolicyScope(basis).normativeOrdinals.join(', ') || 'none supplied'}.`
-            : decision.policyAssessment === 'conflict'
-              ? 'Assessment: policy conflict.'
-              : 'Assessment: undetermined.',
-          ...('missingFact' in decision ? [`Missing fact: ${decision.missingFact}`] : []),
-        ].join('\n');
+          ...decision.paragraphDispositions.entries.flatMap(entry =>
+            typeof entry === 'string' ? [] : entry.sourceIndices,
+          ),
+          ...('currentBehaviorSourceIndex' in decision ? [decision.currentBehaviorSourceIndex] : []),
+        ];
+  const rationale = [
+    `Assessment: ${decision.policyAssessment}`,
+    `Current source indices: ${[...new Set(selectedIndices)].sort((a, b) => a - b).join(',')}`,
+    `Normative compared: ${[...normative].sort((a, b) => a - b).join(',')}`,
+    ...('normativeOrdinal' in decision ? [`Selected normative: ${decision.normativeOrdinal}`] : []),
+    ...('currentBehaviorSourceIndex' in decision ? [`Behavior source: ${decision.currentBehaviorSourceIndex}`] : []),
+    ...('normativeOrdinal' in decision ? [`Selected comparison: ${comparisons.get(decision.normativeOrdinal)}`] : []),
+    ...('missingFact' in decision ? [`Missing fact: ${decision.missingFact}`] : []),
+  ].join('\n');
   if (byteLength(rationale) > 2048) invalid('Topic assessment rationale exceeds its UTF-8 byte bound.');
   const unresolvedQuestions =
     decision.policyAssessment === 'conflict'

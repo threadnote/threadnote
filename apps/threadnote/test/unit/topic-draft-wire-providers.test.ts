@@ -136,53 +136,46 @@ describe('compact topic provider boundary', () => {
         }),
       );
     }
-    for (const invalidAssessment of [
-      {currentWitnesses: [{sourceIndex: 0, quote: 'é'.repeat(257)}]},
-      {
-        currentWitnesses: [
-          {sourceIndex: 0, quote: 'Current source 0.'},
-          {sourceIndex: 0, quote: 'Current source 0.'},
-        ],
-      },
-    ]) {
-      it.effect(
-        'returns complete wire and measured usage before application validation: ' + Object.keys(invalidAssessment)[0],
-        () =>
-          Effect.gen(function* () {
-            const basis = makeTopicDraftWireBasis(2);
-            const fixture = makeTopicDraftWireFixture(basis);
-            const wire = {...fixture, decision: {...fixture.decision, ...invalidAssessment}};
-            // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
-            yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
-            const model = Layer.effect(
-              LanguageModel.LanguageModel,
-              LanguageModel.make({
-                generateText: () =>
-                  Effect.succeed([
-                    Response.makePart('text', {text: JSON.stringify(wire)}),
-                    Response.makePart('finish', {
-                      reason: 'stop',
-                      usage: Response.Usage.make({
-                        inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
-                        outputTokens: {total: 3, text: undefined, reasoning: undefined},
-                      }),
+    for (const invalidAssessment of ['comparison-over-byte-limit', 'duplicate-comparison-ordinal'] as const) {
+      it.effect('returns complete wire and measured usage before application validation: ' + invalidAssessment, () =>
+        Effect.gen(function* () {
+          const basis = makeTopicDraftWireBasis(2);
+          const fixture = makeTopicDraftWireFixture(basis);
+          const wire = structuredClone(fixture);
+          if (invalidAssessment === 'comparison-over-byte-limit')
+            wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
+          else wire.paragraphComparisons.entries[1].ordinal = 0;
+          // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
+          yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
+          const model = Layer.effect(
+            LanguageModel.LanguageModel,
+            LanguageModel.make({
+              generateText: () =>
+                Effect.succeed([
+                  Response.makePart('text', {text: JSON.stringify(wire)}),
+                  Response.makePart('finish', {
+                    reason: 'stop',
+                    usage: Response.Usage.make({
+                      inputTokens: {total: 12, uncached: undefined, cacheRead: undefined, cacheWrite: undefined},
+                      outputTokens: {total: 3, text: undefined, reasoning: undefined},
                     }),
-                  ]),
-                streamText: () => Stream.empty,
-              }),
-            );
-            vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
-            const result = yield* runEffectAiTopicDraft(
-              'prompt',
-              {model: 'fixture'},
-              topicDraftModelSchema(basis),
-              basis,
-            );
-            expect(JSON.parse(result.text)).toEqual(wire);
-            expect(result.outputRepresentation).toBe('decoded-json');
-            expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
-            expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow();
-          }),
+                  }),
+                ]),
+              streamText: () => Stream.empty,
+            }),
+          );
+          vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(model);
+          const result = yield* runEffectAiTopicDraft(
+            'prompt',
+            {model: 'fixture'},
+            topicDraftModelSchema(basis),
+            basis,
+          );
+          expect(JSON.parse(result.text)).toEqual(wire);
+          expect(result.outputRepresentation).toBe('decoded-json');
+          expect(result.usage).toEqual({status: 'measured', inputTokens: 12, outputTokens: 3});
+          expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow();
+        }),
       );
     }
     it.effect('preserves only available structured-failure usage and excludes provider metadata', () =>
@@ -274,11 +267,11 @@ describe('compact topic provider boundary', () => {
     );
   }
 
-  effectIt.effect('returns complete native duplicate selection for controller application validation', () =>
+  effectIt.effect('returns complete native duplicate comparison for controller application validation', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(2);
       const wire = makeTopicDraftWireFixture(basis);
-      wire.decision.currentWitnesses = [1, 1].map(sourceIndex => ({sourceIndex, quote: 'Current source 1.'}));
+      wire.paragraphComparisons.entries[1].ordinal = 0;
       const result = yield* runNativeAiTopicDraft(
         {agentContextHome: '/fixture'},
         'prompt',
@@ -290,7 +283,7 @@ describe('compact topic provider boundary', () => {
       expect(result.outputRepresentation).toBe('decoded-json');
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow(
-        'Duplicate topic current witness pair.',
+        'Invalid or duplicate topic comparison ordinal.',
       );
     }),
   );

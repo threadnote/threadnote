@@ -1,6 +1,5 @@
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
-import {consolidationSections} from '@threadnote/memory/consolidation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   validateTopicMaintenanceDraftBasis,
@@ -68,7 +67,9 @@ export interface TopicDraftWireFixture {
   packetDigest: string;
   paragraphComparisons: {version: number; entries: {ordinal: number; rationale: string}[]};
   decision: {
+    /** Legacy fields retained only for strict-rejection fixtures. */
     currentWitnesses?: {sourceIndex: number; quote: string}[];
+    currentBehaviorSourceIndex?: number;
     normativeOrdinal?: number;
     requirementQuote?: string;
     missingFact?: string;
@@ -104,41 +105,31 @@ export function topicDraftEvidenceFromPrompt(prompt: string): Readonly<Record<st
 export function makeTopicDraftWireFixture(
   basis: TopicMaintenanceDraftBasis,
   disposition: 'update' | 'unchanged' | 'unresolved' = 'unchanged',
-  evidence = makeTopicDraftWireEvidence(basis),
+  _evidence = makeTopicDraftWireEvidence(basis),
 ): TopicDraftWireFixture {
   const unresolved = disposition === 'unresolved';
   const eligible = basis.paragraphs.filter(topicDraftGenerationEligible);
   const scope = topicDraftPolicyScope(basis);
   const policyUnknown = unresolved && scope.normativeOrdinals.length > 0;
   const sourceReview = !eligible.length && !policyUnknown;
-  const sourceIndex = scope.behaviorSourceIndices[0];
-  const handle = topicDraftCurrentSourceHandles(basis)[sourceIndex];
   return {
-    version: 6,
+    version: 7,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
     paragraphComparisons: {
       version: 1,
-      entries: eligible.map(paragraph => ({
-        ordinal: paragraph.ordinal,
-        rationale: unresolved ? 'Manual review.' : 'Checked.',
-      })),
+      entries: basis.paragraphs
+        .filter(paragraph => topicDraftGenerationEligible(paragraph) || paragraph.role === 'normative')
+        .map(paragraph => ({
+          ordinal: paragraph.ordinal,
+          rationale: unresolved ? 'Manual review.' : 'Checked.',
+        })),
     },
     decision: {
-      ...(!sourceReview
-        ? {
-            currentWitnesses: policyUnknown
-              ? []
-              : [{sourceIndex, quote: Array.from(evidence[handle]).slice(0, 64).join('')}],
-          }
-        : {}),
       ...(policyUnknown
         ? {
             normativeOrdinal: scope.normativeOrdinals[0],
-            requirementQuote: Array.from(consolidationSections(basis.body)[scope.normativeOrdinals[0]])
-              .slice(0, 64)
-              .join(''),
             missingFact: 'Current applicable behavior is not established.',
           }
         : {}),
