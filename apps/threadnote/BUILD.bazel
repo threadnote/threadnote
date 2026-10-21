@@ -9872,6 +9872,7 @@ bun_workspace_test(
         "//apps/threadnote:src/mcp/composer_attach.ts",
         "//apps/threadnote:src/mcp/install.ts",
         "//apps/threadnote:src/mcp/json_schema_constraints.ts",
+        "//apps/threadnote:src/mcp/memory_code_citation.ts",
         "//apps/threadnote:src/mcp/server/common.ts",
         "//apps/threadnote:src/mcp/server/memory.ts",
         "//apps/threadnote:src/mcp/server/memory_read_recovery.ts",

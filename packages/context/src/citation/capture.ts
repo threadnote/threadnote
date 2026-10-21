@@ -29,7 +29,6 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const LOCAL_SYMBOL_REF = /^cgs_(?:[0-9a-f]{32}|[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const QUALIFIED_SYMBOL_REF = /^cgr_[0-9a-f]{40}$/u;
-const CAPTURE_LEASE_WRITER_OPTIONS = {waitTimeoutMilliseconds: 0} as const;
 
 export const MEMORY_CODE_CITATION_GRAPH_PREPARATION_COMMAND = 'threadnote graph index --no-vectors' as const;
 export const MEMORY_CODE_CITATION_WORKSET_PREPARATION_COMMAND = 'threadnote workset prepare' as const;
@@ -170,6 +169,8 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     readonly retainedAt?: string;
     readonly omitUnresolved?: boolean;
     readonly refs?: readonly string[];
+    /** Foreground adapters may bound lease writer waits; omitted preserves internal/background admission. */
+    readonly writerWaitTimeoutMilliseconds?: number;
   },
 ) {
   const refs = yield* Effect.try({
@@ -243,6 +244,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
         group[0].project,
         input.planOnly === true,
         input.retainedAt,
+        input.writerWaitTimeoutMilliseconds,
       ),
     {concurrency: 4},
   );
@@ -330,6 +332,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   project?: string,
   planOnly = false,
   retainedAt?: string,
+  writerWaitTimeoutMilliseconds?: number,
 ) {
   const query = yield* CodeGraphQueryService;
   const store = yield* CodeGraphStore;
@@ -350,16 +353,15 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   });
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      // Capture is a foreground operation over ready evidence. Joining a
-      // builder's unbounded writer wait here also makes scoped acquisition and
-      // release defer cancellation. A busy writer is retryable before any
-      // memory write; a busy release leaves only this bounded, expiring lease.
+      // Request adapters bound uninterruptible scoped lease admission/release;
+      // internal maintenance retains its existing writer-wait contract. A
+      // denied release leaves only the existing bounded, expiring lease.
+      const leaseWriterOptions = {waitTimeoutMilliseconds: writerWaitTimeoutMilliseconds};
       yield* Effect.acquireRelease(
         store
-          .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, CAPTURE_LEASE_WRITER_OPTIONS)
+          .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
           .pipe(Effect.mapError(error => captureError(cwd, error))),
-        token =>
-          store.releaseSnapshotLease(before.databasePath, token, CAPTURE_LEASE_WRITER_OPTIONS).pipe(Effect.ignore),
+        token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
       );
       const repositoryRoot = yield* fs
         .realPath(before.identity.repoRoot)

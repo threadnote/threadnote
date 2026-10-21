@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import fc from 'fast-check';
 import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -43,6 +43,26 @@ describe('local citation capture fences', () => {
       }),
     );
 
+    test.effect('keeps internal capture waiting for its writer without reading unleased evidence', () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const available = yield* Deferred.make<void>();
+        let evidenceReads = 0;
+        const fixture = yield* captureFixture({
+          writer: {entered, available},
+          onEvidence: () => evidenceReads++,
+        });
+        const capture = yield* fixture.capture().pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        expect(evidenceReads).toBe(0);
+        yield* Deferred.succeed(available, undefined);
+        const citations = yield* Fiber.join(capture);
+        expect(citations).toHaveLength(1);
+        expect(evidenceReads).toBe(1);
+        expect(fixture.leases()).toEqual({acquired: 1, released: 1});
+      }),
+    );
+
     fcEffectProp(
       test,
       'fails closed when local provenance changes at either capture fence',
@@ -79,14 +99,14 @@ describe('local citation capture fences', () => {
             onEvidence: () => evidenceReads++,
           });
           for (let attempt = 0; attempt < denials; attempt++) {
-            const failure = yield* fixture.capture().pipe(Effect.flip);
+            const failure = yield* fixture.capture(0).pipe(Effect.flip);
             expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
             expect(failure).toMatchObject({retryable: true});
             expect(evidenceReads).toBe(0);
             expect(fixture.leases()).toEqual({acquired: 0, released: 0});
           }
-          const first = yield* fixture.capture();
-          const replay = yield* fixture.capture();
+          const first = yield* fixture.capture(0);
+          const replay = yield* fixture.capture(0);
           expect(replay).toEqual(first);
           expect(evidenceReads).toBe(2);
           expect(fixture.leases()).toEqual({acquired: 2, released: 2});
@@ -97,7 +117,7 @@ describe('local citation capture fences', () => {
     test.effect('returns captured evidence when a writer prevents immediate lease release', () =>
       Effect.gen(function* () {
         const fixture = yield* captureFixture({denyRelease: true});
-        const citations = yield* fixture.capture();
+        const citations = yield* fixture.capture(0);
         expect(citations).toHaveLength(1);
         expect(fixture.leases()).toEqual({acquired: 1, released: 1});
         expect(fixture.writerWaits()).toEqual([0, 0]);
@@ -112,6 +132,7 @@ function captureFixture(
     readonly denyRelease?: boolean;
     readonly onEvidence?: () => void;
     readonly statusFor?: (status: CodeGraphStatus) => CodeGraphStatus;
+    readonly writer?: {readonly entered: Deferred.Deferred<void>; readonly available: Deferred.Deferred<void>};
   } = {},
 ) {
   return Effect.gen(function* () {
@@ -164,10 +185,17 @@ function captureFixture(
     } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
     const store = CodeGraphStore.of({
       acquireSnapshotLease: (_database, _snapshot, _duration, writerOptions) =>
-        Effect.suspend(() => {
+        Effect.gen(function* () {
           writerWaits.push(writerOptions?.waitTimeoutMilliseconds);
-          if (deniedAcquisitions-- > 0) return Effect.fail(CodeGraphStoreBusyError.of('fixture writer busy'));
-          return Effect.succeed(`lease-${++acquired}`);
+          if (options.writer) {
+            const denied =
+              writerOptions?.waitTimeoutMilliseconds === 0 && !(yield* Deferred.isDone(options.writer.available));
+            yield* Deferred.succeed(options.writer.entered, undefined);
+            if (denied) return yield* CodeGraphStoreBusyError.of('fixture writer busy');
+            yield* Deferred.await(options.writer.available);
+          }
+          if (deniedAcquisitions-- > 0) return yield* CodeGraphStoreBusyError.of('fixture writer busy');
+          return `lease-${++acquired}`;
         }),
       releaseSnapshotLease: (_database, _token, writerOptions) =>
         Effect.suspend(() => {
@@ -201,12 +229,13 @@ function captureFixture(
         }),
     } satisfies Partial<CodeGraphStoreShape> as unknown as CodeGraphStoreShape);
     return {
-      capture: () =>
+      capture: (writerWaitTimeoutMilliseconds?: number) =>
         captureMemoryCodeCitations(CONFIG, {
           callerCwd: root,
           refs: ['src/value.ts'],
           expectedCallerIdentity: status.identity,
           expectedProjectScope: {kind: 'full'},
+          writerWaitTimeoutMilliseconds,
         }).pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, store)),
       observations: () => observations,
       leases: () => ({acquired, released}),
