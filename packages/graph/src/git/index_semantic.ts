@@ -18,6 +18,7 @@ const GIT_INDEX_SEMANTIC_DIGEST_VERSION = 1;
 export function codeGraphGitIndexSemanticSha256(
   index: Uint8Array,
   objectFormat: 'sha1' | 'sha256',
+  options: {readonly requirePlainWorktreeEntries?: boolean; readonly rejectTrackedIgnoreFiles?: boolean} = {},
 ): string | undefined {
   const objectIdBytes = objectFormat === 'sha1' ? 20 : 32;
   const checksumBytes = objectIdBytes;
@@ -54,6 +55,14 @@ export function codeGraphGitIndexSemanticSha256(
       offset += 2;
     }
 
+    if (
+      options.requirePlainWorktreeEntries === true &&
+      (![0o100644, 0o100755, 0o120000].includes(view.getUint32(entryStart + 24, false)) ||
+        (flags & 0xb000) !== 0 ||
+        extendedFlags !== 0)
+    )
+      return undefined;
+
     let path: Uint8Array<ArrayBufferLike>;
     if (version === 4) {
       const decoded = decodeGitIndexVariableWidthInteger(index, offset, contentEnd);
@@ -78,6 +87,7 @@ export function codeGraphGitIndexSemanticSha256(
         if (index[paddingOffset] !== 0) return undefined;
       }
     }
+    if (options.rejectTrackedIgnoreFiles === true && isGitIgnorePath(path)) return undefined;
     const declaredPathBytes = flags & GIT_INDEX_NAME_LENGTH_MASK;
     if (declaredPathBytes !== GIT_INDEX_NAME_LENGTH_SENTINEL && declaredPathBytes !== path.byteLength) {
       return undefined;
@@ -108,6 +118,15 @@ export function codeGraphGitIndexSemanticSha256(
   }
   if (offset !== contentEnd) return undefined;
   return digest.digest('hex');
+}
+
+function isGitIgnorePath(path: Uint8Array): boolean {
+  const name = '.gitignore';
+  const start = path.lastIndexOf(0x2f) + 1;
+  if (path.byteLength - start !== name.length) return false;
+  for (let index = 0; index < name.length; index += 1)
+    if ((path[start + index] | 0x20) !== name.charCodeAt(index)) return false;
+  return true;
 }
 
 function validGitIndexChecksum(index: Uint8Array, contentEnd: number, objectFormat: 'sha1' | 'sha256'): boolean {

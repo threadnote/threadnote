@@ -880,7 +880,9 @@ export class CodeGraphQueryService extends Context.Service<
                 options?.telemetry,
                 'graph.query.status',
                 'query-repository-identity',
-                resolvePublishedRepositoryIdentityObservation(cwd, expected, options?.observeWorktree !== false),
+                resolvePublishedRepositoryIdentityObservation(cwd, expected, options?.observeWorktree !== false, {
+                  threadnoteHome,
+                }),
               );
               const identity = observation.identity;
               const changed = options?.afterIdentityObserved === undefined ? observation.worktreeChanged : undefined;

@@ -1,5 +1,6 @@
 import {Effect, Option} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
+import type {CodeGraphUntrackedStatusCacheOptions} from '../git/status_cache.js';
 import {worktreeOverlayState} from '../inventory.js';
 import {resolveAndRecordCodeGraphLocalAssociation} from '../local_provenance.js';
 import {withCodeGraphQueryTelemetryStage, type CodeGraphStatusOptions} from './contract.js';
@@ -59,9 +60,10 @@ export function resolvePublishedRepositoryIdentityObservation(
   cwd: string,
   expected: RepositoryIdentityExpectation,
   observeWorktree: boolean,
+  cache?: CodeGraphUntrackedStatusCacheOptions,
 ) {
   return observeWorktree
-    ? resolveRepositoryIdentityForExpectationAndWorktree(cwd, expected).pipe(
+    ? resolveRepositoryIdentityForExpectationAndWorktree(cwd, expected, cache).pipe(
         Effect.map(observation => ({
           ...observation,
           worktreeChanged: observation.worktreeChanged as boolean | undefined,
@@ -111,7 +113,9 @@ export const observeCodeGraphStatusSessionIdentity = Effect.fn('codeGraph.observ
         options.telemetry,
         'graph.query.status',
         'query-repository-identity',
-        resolvePublishedRepositoryIdentityObservation(cwd, expected, options.observeWorktree !== false),
+        resolvePublishedRepositoryIdentityObservation(cwd, expected, options.observeWorktree !== false, {
+          threadnoteHome,
+        }),
       );
   const identity = observation.identity;
   const changed =

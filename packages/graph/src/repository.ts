@@ -3,6 +3,10 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {type CommandExecutor, runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {platformPathFor, SystemInfo} from '@threadnote/platform/system';
+import {
+  worktreeUntrackedStatusWithPrivateCache,
+  type CodeGraphUntrackedStatusCacheOptions,
+} from './git/status_cache.js';
 import {CodeGraphRepositoryError, type RepositoryIdentity, type RepositoryIdentityExpectation} from './types.js';
 
 const IDENTITY_FORMAT_VERSION = 1;
@@ -361,7 +365,10 @@ export const resolvePublishedRepositoryReadFence = Effect.fn('codeGraph.resolveP
       return yield* CodeGraphRepositoryError.make({message: 'Repository identity changed during the graph read.'});
     }
     yield* interlock?.beforeClosingWorktreeObservation?.() ?? Effect.void;
-    const worktree = yield* observeRepositoryReadFenceClosingWorktree(cwd, observed.objectFormat);
+    const worktree = yield* parseRepositoryReadFenceWorktree(
+      yield* readRepositoryReadFenceWorktree(cwd),
+      observed.objectFormat,
+    );
     if (
       worktree.repoRoot !== observed.repoRoot ||
       worktree.gitCommonDirectory !== observed.gitCommonDirectory ||
@@ -373,9 +380,24 @@ export const resolvePublishedRepositoryReadFence = Effect.fn('codeGraph.resolveP
   },
 );
 
+interface RepositoryWorktreeCacheMetadata {
+  readonly repoRoot: string;
+  readonly gitCommonDirectory: string;
+  readonly objectFormat: RepositoryIdentity['objectFormat'];
+  readonly sourceIndex: string;
+}
+
 const observeRepositoryReadFenceClosingWorktree = Effect.fn('codeGraph.observeRepositoryReadFenceClosingWorktree')(
-  function* (cwd: string, objectFormat: RepositoryIdentity['objectFormat']) {
-    return yield* parseRepositoryReadFenceWorktree(yield* readRepositoryReadFenceWorktree(cwd), objectFormat);
+  function* (
+    cwd: string,
+    objectFormat: RepositoryIdentity['objectFormat'],
+    cache?: CodeGraphUntrackedStatusCacheOptions,
+    metadata?: RepositoryWorktreeCacheMetadata,
+  ) {
+    return yield* parseRepositoryReadFenceWorktree(
+      yield* readRepositoryWorktreeWithCache(cwd, cache, metadata),
+      objectFormat,
+    );
   },
 );
 
@@ -393,6 +415,97 @@ const readRepositoryReadFenceWorktree = Effect.fn('codeGraph.readRepositoryReadF
     Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository read fence could not be revalidated.'})),
   );
 });
+
+const readRepositoryWorktreeWithCache = Effect.fn('codeGraph.readRepositoryWorktreeWithCache')(function* (
+  cwd: string,
+  cache?: CodeGraphUntrackedStatusCacheOptions,
+  observedMetadata?: RepositoryWorktreeCacheMetadata,
+) {
+  const system = yield* SystemInfo;
+  const statusArguments = ['status', '--porcelain=v2', '-z', '--branch', '--untracked-files=normal'];
+  const commandOptions = {
+    env: repositoryReadFenceTraceEnvironment(system.environment()),
+    maxOutputBytes: REPOSITORY_STATUS_OBSERVATION_BYTES_MAXIMUM,
+    timeoutMs: 10_000,
+  };
+  const plain = () => runCommandEffect('git', ['--no-optional-locks', '-C', cwd, ...statusArguments], commandOptions);
+  const cached = Effect.gen(function* () {
+    const {repoRoot, gitCommonDirectory, sourceIndex} = observedMetadata!;
+    const identity = {
+      ...observedMetadata!,
+      checkoutId: checkoutIdForGitCommonDirectory(gitCommonDirectory),
+      worktreeId: worktreeIdForRoot(repoRoot),
+    };
+    const result = yield* worktreeUntrackedStatusWithPrivateCache(
+      identity,
+      sourceIndex,
+      cwd,
+      statusArguments,
+      commandOptions,
+      cache!,
+      runCommandEffect(
+        'git',
+        [
+          '--no-optional-locks',
+          '-C',
+          cwd,
+          ...statusArguments.map(argument =>
+            argument === '--untracked-files=normal' ? '--untracked-files=no' : argument,
+          ),
+        ],
+        commandOptions,
+      ),
+    );
+    // The private index may refresh tracked stat entries. Only the canonical
+    // status is authoritative for tracked changes; both child observations
+    // must name the same original caller's checkout and HEAD.
+    const [tracked, untracked] = yield* Effect.all(
+      [
+        parseRepositoryReadFenceWorktree(result.tracked, identity.objectFormat),
+        parseRepositoryReadFenceWorktree(result.untracked, identity.objectFormat),
+      ],
+      {concurrency: 2},
+    );
+    if (
+      tracked.repoRoot !== repoRoot ||
+      tracked.gitCommonDirectory !== gitCommonDirectory ||
+      untracked.repoRoot !== repoRoot ||
+      untracked.gitCommonDirectory !== gitCommonDirectory ||
+      tracked.headCommit !== untracked.headCommit
+    )
+      return yield* CodeGraphRepositoryError.make({message: 'Repository changed during private Git status.'});
+    const records = parseRepositoryUntrackedStatusRecords(result.untracked.stdout);
+    if (records === undefined)
+      return yield* CodeGraphRepositoryError.make({message: 'Private untracked status frame is invalid.'});
+    const stdout = result.tracked.stdout + records.map(record => `${record}\0`).join('');
+    if (new TextEncoder().encode(stdout).byteLength > REPOSITORY_STATUS_OBSERVATION_BYTES_MAXIMUM)
+      return yield* CodeGraphRepositoryError.make({message: 'Combined repository status exceeded its read bound.'});
+    return {...result.tracked, stdout};
+  });
+  return yield* (
+    cache === undefined || observedMetadata === undefined ? plain() : cached.pipe(Effect.catch(() => plain()))
+  ).pipe(
+    Effect.timeout('10 seconds'),
+    Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository read fence could not be revalidated.'})),
+  );
+});
+
+/** @internal Preserve rename source framing while selecting only real untracked records. */
+export function parseRepositoryUntrackedStatusRecords(output: string): readonly string[] | undefined {
+  if (!output.endsWith('\0')) return undefined;
+  const records = output.slice(0, -1).split('\0');
+  const untracked: string[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (record.startsWith('? ')) {
+      if (record.length === 2) return undefined;
+      untracked.push(record);
+    } else if (record.startsWith('2 ')) {
+      if (!records[++index]) return undefined;
+    } else if (!record.startsWith('# ') && !record.startsWith('1 ') && !record.startsWith('u ')) return undefined;
+  }
+  return untracked;
+}
 
 const parseRepositoryReadFenceWorktree = Effect.fn('codeGraph.parseRepositoryReadFenceWorktree')(function* (
   status: {readonly stdout: string; readonly stderr: string},
@@ -533,8 +646,8 @@ export const resolveRepositoryIdentityForExpectation = Effect.fn('codeGraph.reso
  */
 export const resolveRepositoryIdentityForExpectationAndWorktree = Effect.fn(
   'codeGraph.resolveRepositoryIdentityForExpectationAndWorktree',
-)(function* (cwd: string, expected: RepositoryIdentityExpectation) {
-  const observation = yield* resolveExpectedRepositoryIdentity(cwd, expected, true);
+)(function* (cwd: string, expected: RepositoryIdentityExpectation, cache?: CodeGraphUntrackedStatusCacheOptions) {
+  const observation = yield* resolveExpectedRepositoryIdentity(cwd, expected, true, cache);
   return {identity: observation.identity, worktreeChanged: observation.worktreeChanged!};
 });
 
@@ -542,6 +655,7 @@ const resolveExpectedRepositoryIdentity = Effect.fn('codeGraph.resolveExpectedRe
   cwd: string,
   expected: RepositoryIdentityExpectation,
   observeWorktree: boolean,
+  cache?: CodeGraphUntrackedStatusCacheOptions,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -556,11 +670,12 @@ const resolveExpectedRepositoryIdentity = Effect.fn('codeGraph.resolveExpectedRe
     '--git-common-dir',
     '--show-object-format',
     'HEAD',
+    ...(cache === undefined ? [] : ['--git-path', 'index']),
   ]).pipe(
     Effect.mapError(() => CodeGraphRepositoryError.make({message: 'Repository identity could not be revalidated.'})),
   );
   const metadata = metadataResult.stdout.replace(/\r?\n$/u, '').split(/\r?\n/u);
-  if (metadata.length !== 4) {
+  if (metadata.length !== (cache === undefined ? 4 : 5)) {
     return yield* CodeGraphRepositoryError.make({message: 'Git repository identity metadata is invalid.'});
   }
   const repoRoot = yield* fs
@@ -580,9 +695,12 @@ const resolveExpectedRepositoryIdentity = Effect.fn('codeGraph.resolveExpectedRe
     return yield* CodeGraphRepositoryError.make({message: `Unsupported Git object format: ${objectFormat}`});
   }
   const branchOrWorktree = observeWorktree
-    ? observeRepositoryReadFenceClosingWorktree(cwd, objectFormat).pipe(
-        Effect.map(worktree => ({kind: 'worktree' as const, worktree})),
-      )
+    ? observeRepositoryReadFenceClosingWorktree(
+        cwd,
+        objectFormat,
+        cache,
+        cache === undefined ? undefined : {repoRoot, gitCommonDirectory, objectFormat, sourceIndex: metadata[4]},
+      ).pipe(Effect.map(worktree => ({kind: 'worktree' as const, worktree})))
     : observeRepositoryBranch(repoRoot).pipe(Effect.map(branch => ({branch, kind: 'branch' as const})));
   const [ignoreCaseResult, remoteResult, observed] = yield* Effect.all(
     [

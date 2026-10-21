@@ -1,6 +1,13 @@
-import {Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {runBinaryCommandEffect, runCommandEffect} from '@threadnote/platform/command';
+import {
+  runBinaryCommandEffect,
+  runCommandEffect,
+  type CommandOptions,
+  type CommandResult,
+  type CommandExecutionError,
+  CommandExecutor,
+} from '@threadnote/platform/command';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {codeGraphGitIndexSemanticSha256} from './index_semantic.js';
 import type {RepositoryIdentity} from '../types.js';
@@ -10,6 +17,15 @@ export const CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION = 3 as const;
 // whose ordinary status scan is already cheaper than cache initialization.
 export const CODE_GRAPH_GIT_STATUS_CACHE_INDEX_BYTES_MINIMUM = 8 * 1_048_576;
 export const CODE_GRAPH_GIT_STATUS_CACHE_INDEX_BYTES_MAXIMUM = 512 * 1_048_576;
+
+const UNTRACKED_STAT_CONFIGURATION = [
+  '-c',
+  'core.trustctime=true',
+  '-c',
+  'core.checkStat=default',
+  '-c',
+  'core.ignoreStat=false',
+] as const;
 
 const RECEIPT_BYTES_MAXIMUM = 1_024;
 const SEMANTIC_INDEX_OUTPUT_BYTES_MAXIMUM = 128 * 1_048_576;
@@ -34,6 +50,142 @@ type CodeGraphGitIndexIdentity = Omit<CodeGraphGitStatusCacheReceipt, 'sourceInd
 export interface CodeGraphGitStatusCacheOptions {
   readonly minimumIndexBytes?: number;
 }
+
+export interface CodeGraphUntrackedStatusCacheOptions {
+  readonly threadnoteHome: string;
+  readonly minimumIndexBytes?: number;
+}
+
+type UntrackedStatusIdentity = Pick<
+  RepositoryIdentity,
+  'checkoutId' | 'gitCommonDirectory' | 'objectFormat' | 'repoRoot' | 'worktreeId'
+>;
+
+/** Private untracked evidence only. Tracked evidence always comes from the caller's fresh canonical-index status. */
+export const worktreeUntrackedStatusWithPrivateCache = Effect.fn('codeGraph.worktreeUntrackedStatusWithPrivateCache')(
+  function* (
+    identity: UntrackedStatusIdentity,
+    sourceIndex: string,
+    cwd: string,
+    statusArguments: readonly string[],
+    commandOptions: CommandOptions,
+    options: CodeGraphUntrackedStatusCacheOptions,
+    trackedStatus: Effect.Effect<CommandResult, CommandExecutionError, CommandExecutor>,
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    if (yield* fs.exists(path.join(identity.repoRoot, '.gitignore')))
+      return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Ignore rules require canonical status.'});
+    const minimum = options.minimumIndexBytes ?? 1_048_576;
+    if (!Number.isSafeInteger(minimum) || minimum < 0 || !path.isAbsolute(sourceIndex))
+      return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Invalid private untracked-cache source.'});
+    if (Option.isSome(yield* fs.readLink(sourceIndex).pipe(Effect.option)))
+      return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Git index is symbolic.'});
+    const sourceIdentity = codeGraphGitIndexIdentity(yield* fs.stat(sourceIndex));
+    if (sourceIdentity === undefined || sourceIdentity.indexBytes < minimum || sourceIdentity.indexBytes > 16_777_216)
+      return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Git index is outside untracked-cache bounds.'});
+    for (const directory of [path.dirname(sourceIndex), identity.gitCommonDirectory])
+      if (yield* fs.exists(path.join(directory, 'info', 'sparse-checkout')))
+        return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Sparse worktrees use uncached status.'});
+    const privateHome = path.resolve(options.threadnoteHome);
+    const cacheRoot = path.join(
+      privateHome,
+      'indexes',
+      'code-graph',
+      'repositories',
+      identity.checkoutId,
+      'git-untracked-v3',
+      identity.worktreeId,
+    );
+    const cacheExists = yield* fs.exists(cacheRoot);
+    if (cacheExists) yield* ensurePrivateCacheDirectory(fs, path, privateHome, cacheRoot);
+    const prior = cacheExists ? yield* readReceipt(fs, path.join(cacheRoot, 'receipt-v3.json')) : undefined;
+    let sourceSemantic = prior?.sourceIndexSemanticSha256;
+    // Matching v3 receipts prove the unchanged index was already eligible.
+    // Reject new or changed ignore-bearing indexes before private setup/locking.
+    if (sourceSemantic === undefined || prior === undefined || !sameCodeGraphGitIndexIdentity(prior, sourceIdentity)) {
+      sourceSemantic = codeGraphGitIndexSemanticSha256(yield* fs.readFile(sourceIndex), identity.objectFormat, {
+        requirePlainWorktreeEntries: true,
+        rejectTrackedIgnoreFiles: true,
+      });
+      const afterRead = codeGraphGitIndexIdentity(yield* fs.stat(sourceIndex));
+      if (
+        sourceSemantic === undefined ||
+        afterRead === undefined ||
+        !sameCodeGraphGitIndexIdentity(afterRead, sourceIdentity)
+      )
+        return yield* CodeGraphGitStatusCacheUnavailable.make({
+          message: 'Unsupported or changing private-cache index.',
+        });
+    }
+    if (!cacheExists) yield* ensurePrivateCacheDirectory(fs, path, privateHome, cacheRoot);
+    const crypto = yield* Effect.serviceOption(Crypto.Crypto);
+    if (Option.isNone(crypto))
+      return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Private cache lock entropy is unavailable.'});
+    return yield* withExclusiveFileLock(
+      fs,
+      path.join(cacheRoot, '.status.lock'),
+      {...STATUS_CACHE_LOCK_OPTIONS, createParentDirectory: false, waitTimeoutMilliseconds: 0},
+      Effect.gen(function* () {
+        const privateIndex = path.join(cacheRoot, 'index');
+        const receiptPath = path.join(cacheRoot, 'receipt-v3.json');
+        const receipt = yield* readReceipt(fs, receiptPath);
+        const privateIndexAvailable = yield* privateRegularFileWithinBound(fs, privateIndex);
+        const metadataReusable =
+          receipt?.sourceIndexSemanticSha256 !== undefined &&
+          sameCodeGraphGitIndexIdentity(receipt, sourceIdentity) &&
+          privateIndexAvailable;
+        const semantic = sourceSemantic;
+        const reusable = metadataReusable || (privateIndexAvailable && semantic === receipt?.sourceIndexSemanticSha256);
+        if (!reusable) {
+          yield* rejectSymbolicTarget(fs, receiptPath);
+          yield* fs.remove(receiptPath, {force: true});
+          yield* initializePrivateIndex(fs, path, identity, sourceIndex, sourceIdentity, privateIndex, {
+            objectFormat: identity.objectFormat,
+            semantic,
+          });
+        }
+        const untrackedStatus = runCommandEffect(
+          'git',
+          [
+            '-c',
+            'core.splitIndex=false',
+            '-c',
+            'core.untrackedCache=true',
+            '-c',
+            'core.fsmonitor=false',
+            '-c',
+            'core.preloadIndex=false',
+            '-c',
+            'core.sparseCheckout=false',
+            '-c',
+            'index.sparse=false',
+            ...UNTRACKED_STAT_CONFIGURATION,
+            '-C',
+            cwd,
+            ...statusArguments,
+          ],
+          {...commandOptions, trustedGitIndexFile: privateIndex},
+        ).pipe(
+          Effect.ensuring(
+            rejectSymbolicTarget(fs, privateIndex).pipe(Effect.andThen(fs.chmod(privateIndex, 0o600)), Effect.ignore),
+          ),
+        );
+        const [tracked, untracked] = yield* Effect.all([trackedStatus, untrackedStatus], {concurrency: 2});
+        const after = codeGraphGitIndexIdentity(yield* fs.stat(sourceIndex));
+        if (after === undefined || !sameCodeGraphGitIndexIdentity(after, sourceIdentity))
+          return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Git index changed during observation.'});
+        if (!metadataReusable)
+          yield* writeReceipt(fs, path, receiptPath, {
+            ...sourceIdentity,
+            sourceIndexSemanticSha256: semantic,
+            version: CODE_GRAPH_GIT_STATUS_CACHE_RECEIPT_VERSION,
+          });
+        return {tracked, untracked};
+      }),
+    ).pipe(Effect.provideService(Crypto.Crypto, crypto.value));
+  },
+);
 
 class CodeGraphGitStatusCacheUnavailable extends Schema.TaggedError<CodeGraphGitStatusCacheUnavailable>()(
   'CodeGraphGitStatusCacheUnavailable',
@@ -171,7 +323,11 @@ function runCachedStatus(
         ...statusArguments,
       ],
       {maxOutputBytes: 0, timeoutMs: 0, trustedGitIndexFile: privateIndex},
-    ).pipe(Effect.ensuring(fs.chmod(privateIndex, 0o600).pipe(Effect.ignore)));
+    ).pipe(
+      Effect.ensuring(
+        rejectSymbolicTarget(fs, privateIndex).pipe(Effect.andThen(fs.chmod(privateIndex, 0o600)), Effect.ignore),
+      ),
+    );
     const finalSourceIdentity = codeGraphGitIndexIdentity(yield* fs.stat(sourceIndex));
     if (finalSourceIdentity === undefined || !sameCodeGraphGitIndexIdentity(finalSourceIdentity, sourceIdentity)) {
       return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Git index changed during observation.'});
@@ -219,10 +375,11 @@ const observeSourceIndexSemanticSha256 = Effect.fn('codeGraph.observeSourceIndex
 function initializePrivateIndex(
   fs: FileSystem.FileSystem,
   path: Path.Path,
-  identity: RepositoryIdentity,
+  identity: Pick<RepositoryIdentity, 'repoRoot'>,
   sourceIndex: string,
   sourceIdentity: CodeGraphGitIndexIdentity,
   privateIndex: string,
+  untrackedOnly?: {readonly objectFormat: RepositoryIdentity['objectFormat']; readonly semantic: string},
 ) {
   return Effect.gen(function* () {
     const temporary = path.join(path.dirname(privateIndex), '.index.tmp');
@@ -241,13 +398,60 @@ function initializePrivateIndex(
     ) {
       return yield* CodeGraphGitStatusCacheUnavailable.make({message: 'Private Git index copy is incomplete.'});
     }
+    if (
+      untrackedOnly !== undefined &&
+      codeGraphGitIndexSemanticSha256(yield* fs.readFile(temporary), untrackedOnly.objectFormat, {
+        requirePlainWorktreeEntries: true,
+        rejectTrackedIgnoreFiles: true,
+      }) !== untrackedOnly.semantic
+    )
+      return yield* CodeGraphGitStatusCacheUnavailable.make({
+        message: 'Private index semantics changed while copying.',
+      });
     yield* fs.remove(privateIndex, {force: true});
     yield* fs.rename(temporary, privateIndex);
-    yield* runCommandEffect(
+    const initialized = yield* runCommandEffect(
       'git',
-      ['-c', 'core.untrackedCache=true', '-C', identity.repoRoot, 'update-index', '--untracked-cache'],
-      {maxOutputBytes: 16_384, timeoutMs: 30_000, trustedGitIndexFile: privateIndex},
+      [
+        ...(untrackedOnly
+          ? [
+              '-c',
+              'core.splitIndex=false',
+              '-c',
+              'core.fsmonitor=false',
+              '-c',
+              'core.sparseCheckout=false',
+              '-c',
+              'index.sparse=false',
+              ...UNTRACKED_STAT_CONFIGURATION,
+              '-c',
+              'core.ignoreStat=true',
+              '-c',
+              'core.preloadIndex=false',
+            ]
+          : []),
+        '-c',
+        'core.untrackedCache=true',
+        '-C',
+        identity.repoRoot,
+        'update-index',
+        '--untracked-cache',
+        ...(untrackedOnly ? ['--no-fsmonitor', '--really-refresh'] : []),
+      ],
+      {
+        allowFailure: untrackedOnly !== undefined,
+        maxOutputBytes: untrackedOnly ? 65_536 : 16_384,
+        timeoutMs: untrackedOnly ? 10_000 : 30_000,
+        trustedGitIndexFile: privateIndex,
+      },
     );
+    if (untrackedOnly) {
+      if (initialized.exitCode !== 0 && initialized.exitCode !== 1)
+        return yield* CodeGraphGitStatusCacheUnavailable.make({
+          message: 'Private untracked-cache initialization failed.',
+        });
+      return;
+    }
     yield* ensureFsmonitorDaemon(identity);
     yield* runCommandEffect(
       'git',
@@ -258,19 +462,26 @@ function initializePrivateIndex(
     Effect.ensuring(
       fs
         .remove(path.join(path.dirname(privateIndex), '.index.tmp'), {force: true})
-        .pipe(Effect.ignore, Effect.andThen(fs.chmod(privateIndex, 0o600).pipe(Effect.ignore))),
+        .pipe(
+          Effect.ignore,
+          Effect.andThen(
+            rejectSymbolicTarget(fs, privateIndex).pipe(Effect.andThen(fs.chmod(privateIndex, 0o600)), Effect.ignore),
+          ),
+        ),
     ),
   );
 }
 
-const fsmonitorDaemon = (identity: RepositoryIdentity, operation: 'start' | 'status') =>
+const fsmonitorDaemon = (identity: Pick<RepositoryIdentity, 'repoRoot'>, operation: 'start' | 'status') =>
   runCommandEffect('git', ['-c', 'core.fsmonitor=true', '-C', identity.repoRoot, 'fsmonitor--daemon', operation], {
     allowFailure: true,
     maxOutputBytes: 16_384,
     timeoutMs: 30_000,
   });
 
-const ensureFsmonitorDaemon = Effect.fn('codeGraph.ensureFsmonitorDaemon')(function* (identity: RepositoryIdentity) {
+const ensureFsmonitorDaemon = Effect.fn('codeGraph.ensureFsmonitorDaemon')(function* (
+  identity: Pick<RepositoryIdentity, 'repoRoot'>,
+) {
   const observed = yield* fsmonitorDaemon(identity, 'status');
   if (observed.exitCode === 0) return;
   // Another process may start the repository daemon after the failed status
