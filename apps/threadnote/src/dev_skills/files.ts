@@ -41,17 +41,28 @@ export const assertSafePath = Effect.fn('devSkills.safePath')(function* (file: s
     parents.push(current);
     if (path.dirname(current) === current) break;
   }
-  for (const current of parents.reverse()) {
-    const link = yield* fs.readLink(current).pipe(Effect.result);
-    if (link._tag === 'Success')
-      return yield* fail('unsafe-path', `Symbolic links are not owned destinations: ${current}`);
-    if (!['NotFound', 'InvalidArgument', 'Unknown'].includes(link.failure.reason._tag)) return yield* link.failure;
-    const info = yield* statOptional(current);
-    if (info && current !== absolute && info.type !== 'Directory')
-      return yield* fail('unsafe-path', `A destination ancestor is not a directory: ${current}`);
-    if (info && (yield* fs.realPath(current)) !== current)
-      return yield* fail('unsafe-path', `Noncanonical destination ancestor: ${current}`);
-  }
+  parents.reverse();
+  const check = Effect.gen(function* () {
+    for (const current of parents) {
+      const link = yield* fs.readLink(current).pipe(Effect.result);
+      if (link._tag === 'Success')
+        return yield* fail('unsafe-path', `Symbolic links are not owned destinations: ${current}`);
+      if (!['NotFound', 'InvalidArgument', 'Unknown'].includes(link.failure.reason._tag)) return yield* link.failure;
+      const info = yield* statOptional(current);
+      if (info && current !== absolute && info.type !== 'Directory')
+        return yield* fail('unsafe-path', `A destination ancestor is not a directory: ${current}`);
+      if (info && (yield* fs.realPath(current)) !== current)
+        return yield* fail('unsafe-path', `Noncanonical destination ancestor: ${current}`);
+    }
+  });
+  // A concurrent owner can remove a lock after stat. Recheck every ancestor once,
+  // rather than accepting an unchecked replacement or hiding persistent I/O errors.
+  yield* check.pipe(
+    Effect.catchIf(
+      error => PlatformError.isPlatformError(error) && missing(error),
+      () => check,
+    ),
+  );
 });
 export const readOptional = Effect.fn('devSkills.readOptional')(function* (file: string, limit = 8_000_000) {
   yield* assertSafePath(file);
