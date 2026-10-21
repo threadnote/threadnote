@@ -234,15 +234,37 @@ effectIt.effect(
             verified: true,
           }),
       });
+      const expectedEvidence = reviewEvidenceFromPacket(
+        readyEvidence(yield* readContextMaintenancePacket(f.config, f.caseId)),
+      );
       let calls = 0;
       const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, basis) =>
         Effect.sync(() => {
           calls++;
           if (!basis || basis.version !== 2) throw new Error('Expected imported generation basis.');
-          expect(prompt).toContain('current:tnob_');
+          for (const handle of basis.handles) expect(prompt).not.toContain(handle.id);
+          const semantic = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
+          const current = topicDraftEvidenceFromPrompt(prompt, basis);
+          expect(current).toEqual(
+            Object.fromEntries(
+              expectedEvidence.filter(e => e.handleId.startsWith('current:')).map(e => [e.handleId, e.content]),
+            ),
+          );
+          expect(new Set(semantic.historicalSources.map((source: unknown) => JSON.stringify(source))).size).toBe(
+            semantic.historicalSources.length,
+          );
+          for (const source of semantic.sources) {
+            const handle = Object.keys(current)[source.sourceIndex];
+            const prior = expectedEvidence.find(e => e.handleId === handle.replace('current:', 'historical:'))!;
+            expect(
+              source.historicalSourceIndices.map((index: number) => semantic.historicalSources[index].excerpt),
+            ).toEqual([prior.content]);
+          }
           expect(prompt).not.toContain('sourceCommit');
           return {
-            text: JSON.stringify(makeTopicDraftWireFixture(basis, 'unchanged', topicDraftEvidenceFromPrompt(prompt))),
+            text: JSON.stringify(
+              makeTopicDraftWireFixture(basis, 'unchanged', topicDraftEvidenceFromPrompt(prompt, basis)),
+            ),
             backendIdentity: 'local-ai',
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,

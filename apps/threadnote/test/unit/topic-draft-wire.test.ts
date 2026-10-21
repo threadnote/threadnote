@@ -40,8 +40,18 @@ function canonical(basis: TopicMaintenanceDraftBasisV1, wire: unknown, evidence 
   });
 }
 
+function promptSources(basis: TopicMaintenanceDraftBasisV1) {
+  return basis.handles
+    .filter(h => h.variant === 'current')
+    .map(h => ({
+      citationId: h.citationId,
+      oldExcerpt: {source: {path: 'source.ts'}, content: 'Historical source.'},
+      newExcerpt: {source: {path: 'source.ts'}, content: 'Current source.'},
+    }));
+}
+
 describe('single-decision compact topic wire', () => {
-  it('joins exact factual comparisons while requiring the protected union without mutation', () => {
+  it('projects exact factual entries while requiring the protected set without mutation', () => {
     fc.assert(
       fc.property(
         fc.array(fc.constantFrom('update', 'unchanged', 'unresolved'), {minLength: 1, maxLength: 16}),
@@ -52,18 +62,16 @@ describe('single-decision compact topic wire', () => {
           const basis = basisFor(decisions.length + 1, {protectedOrdinal});
           const factualOrdinals = basis.paragraphs.filter(p => p.role === 'descriptive').map(p => p.ordinal);
           const wire = wireFor(basis);
-          wire.paragraphComparisons.entries = basis.paragraphs.map(p => ({
-            ordinal: p.ordinal,
-            rationale: `Evidence ${p.ordinal}.`,
-          }));
-          wire.decision.paragraphDispositions.entries = factualOrdinals.map((ordinal, index) => ({
+          wire.facts.entries = factualOrdinals.map((ordinal, index) => ({
             ordinal,
+            currentBehavior: decisions[index] === 'unresolved' ? null : 'Supported behavior.',
+            rationale: `Evidence ${ordinal}.`,
             disposition: decisions[index],
             sourceIndices: decisions[index] === 'unresolved' ? [] : [ordinal % 3],
             ...(decisions[index] === 'update' ? {text: `Current claim ${ordinal}.`} : {}),
           }));
           const expected = canonical(basis, wire);
-          if (reverse) wire.paragraphComparisons.entries.reverse();
+          if (reverse) wire.normativeComparisons.reverse();
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
           expect(result).toEqual(expected);
@@ -75,12 +83,10 @@ describe('single-decision compact topic wire', () => {
           );
           for (const kind of ['missing', 'duplicate', 'wrong-role', 'action-protected'] as const) {
             const invalid = structuredClone(wire);
-            if (kind === 'missing') invalid.paragraphComparisons.entries.pop();
-            if (kind === 'duplicate')
-              invalid.paragraphComparisons.entries[0].ordinal = invalid.paragraphComparisons.entries[1].ordinal;
-            if (kind === 'wrong-role') invalid.paragraphComparisons.entries[0].ordinal = 999;
-            if (kind === 'action-protected')
-              invalid.decision.paragraphDispositions.entries[0].ordinal = protectedOrdinal;
+            if (kind === 'missing') invalid.facts.entries.pop();
+            if (kind === 'duplicate') invalid.facts.entries.push({...invalid.facts.entries[0]});
+            if (kind === 'wrong-role') invalid.facts.entries[0].ordinal = 999;
+            if (kind === 'action-protected') invalid.facts.entries[0].ordinal = protectedOrdinal;
             expect(() => canonical(basis, invalid)).toThrow();
           }
           expect(JSON.stringify({basis, wire})).toBe(before);
@@ -93,10 +99,10 @@ describe('single-decision compact topic wire', () => {
   it('keeps comparison rationale scalar and UTF-8 bounds at application validation', () => {
     const basis = basisFor(1);
     const wire = wireFor(basis);
-    wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(512);
+    wire.facts.entries[0].rationale = 'é'.repeat(512);
     expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe('é'.repeat(512));
     for (const rationale of ['é'.repeat(513), '\ud83d', '\ude42']) {
-      wire.paragraphComparisons.entries[0].rationale = rationale;
+      wire.facts.entries[0].rationale = rationale;
       expect(() => decodeTopicDraftWire(basis, wire)).not.toThrow();
       expect(() => canonical(basis, wire)).toThrow(TopicDraftApplicationValidationError);
     }
@@ -118,12 +124,12 @@ describe('single-decision compact topic wire', () => {
                   support: roles[ordinal] === 'contextual' ? ('contextual' as const) : ('direct' as const),
                 })),
               };
-              const expectedComparisons = roles.flatMap((role, ordinal) => (role === 'contextual' ? [] : [ordinal]));
+              const expectedComparisons = roles.flatMap((role, ordinal) => (role === 'normative' ? [ordinal] : []));
               const expectedActions = roles.flatMap((role, ordinal) => (role === 'eligible' ? [ordinal] : []));
               const wire = wireFor(basis);
               const before = JSON.stringify({basis, wire});
-              expect(wire.paragraphComparisons.entries.map(entry => entry.ordinal)).toEqual(expectedComparisons);
-              expect(wire.decision.paragraphDispositions.entries.map(entry => entry.ordinal)).toEqual(expectedActions);
+              expect(wire.normativeComparisons.map(entry => entry.ordinal)).toEqual(expectedComparisons);
+              expect(wire.facts.entries.map(entry => entry.ordinal)).toEqual(expectedActions);
               expect(topicDraftNativeJsonSchema(topicDraftModelSchema(basis)).properties).toHaveProperty('decision');
               const result = canonical(basis, wire);
               expect(result.draft.paragraphDispositions?.entries.map(entry => entry.ordinal)).toEqual(expectedActions);
@@ -153,15 +159,15 @@ describe('single-decision compact topic wire', () => {
       })),
     );
     const wire = wireFor(basis, 'unchanged', evidence);
-    wire.paragraphComparisons.entries[0].rationale = 'Current declared limit is 48; the accepted value 32 is stale.';
-    const comparison = JSON.stringify(wire.paragraphComparisons);
+    wire.facts.entries[0].rationale = 'Current declared limit is 48; the accepted value 32 is stale.';
+    const comparison = wire.facts.entries[0].rationale;
     // Model-selected no-conflict does not fabricate a policy gap for an unrelated factual subject.
-    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: 'The limit is 48.'});
+    Object.assign(wire.facts.entries[0], {disposition: 'update', text: 'The limit is 48.'});
     const updated = canonical(basis, wire, evidence);
     expect(updated.body).toBe(`The limit is 48.\n\n${requirement}`);
     expect(updated.draft.outcome).toBe('propose-update');
     expect(updated.draft.unresolvedQuestions).toEqual([]);
-    // The same factual comparison can precede a selected observed violation; the schema forbids its update.
+    // The final gate suppresses a valid provisional update after the protected comparison.
     const conflictEvidence = topicDraftCurrentEvidence(
       basis,
       topicDraftCurrentSourceHandles(basis).map(handleId => ({
@@ -174,14 +180,13 @@ describe('single-decision compact topic wire', () => {
       currentBehaviorSourceIndex: 0,
       normativeOrdinal: 1,
     });
-    expect(() => decodeTopicDraftWire(basis, wire)).toThrow();
-    wire.decision.paragraphDispositions.entries[0] = {ordinal: 0, disposition: 'unresolved', sourceIndices: []};
+    expect(() => decodeTopicDraftWire(basis, wire)).not.toThrow();
     const conflicted = canonical(basis, wire, conflictEvidence);
     expect(conflicted.body).toBe(basis.body);
     expect(conflicted.draft.outcome).toBe('policy-conflict');
     expect(conflicted.draft.operations).toEqual([]);
     expect(conflicted.draft.paragraphDispositions!.entries[0].rationale).toBe(updated.draft.operations[0].rationale);
-    expect(JSON.stringify(wire.paragraphComparisons)).toBe(comparison);
+    expect(wire.facts.entries[0].rationale).toBe(comparison);
   });
 
   it('separates actionable generation from questions while preserving saved canonical compatibility', () => {
@@ -190,7 +195,7 @@ describe('single-decision compact topic wire', () => {
         const basis = basisFor(2);
         const revalidation = wireFor(basis);
         const update = wireFor(basis);
-        Object.assign(update.decision.paragraphDispositions.entries[0], {
+        Object.assign(update.facts.entries[0], {
           disposition: 'update',
           text: 'Updated claim.',
         });
@@ -227,10 +232,29 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
-  it('rejects old wire6 and model-authored quote fields without normalization', () => {
+  it('rejects old wire7 and wire6 and model-authored quote fields without normalization', () => {
     const basis = basisFor(2, {protectedOrdinal: 1});
     const wire = wireFor(basis);
-    expect(() => decodeTopicDraftWire(basis, {...wire, version: 6})).toThrow();
+    for (const version of [6, 7]) expect(() => decodeTopicDraftWire(basis, {...wire, version})).toThrow();
+    const oldWire = {
+      version: 7,
+      targetHash: basis.targetHash,
+      observationRevision: basis.observationRevision,
+      packetDigest: basis.packetDigest,
+      paragraphComparisons: {
+        version: 1,
+        entries: [
+          {ordinal: 0, rationale: 'Old comparison.'},
+          {ordinal: 1, rationale: 'Old policy.'},
+        ],
+      },
+      decision: {
+        policyAssessment: 'no-conflict-observed',
+        removedClaims: [],
+        paragraphDispositions: {version: 1, entries: [{ordinal: 0, disposition: 'unchanged', sourceIndices: [0]}]},
+      },
+    };
+    for (const version of [7, 8]) expect(() => decodeTopicDraftWire(basis, {...oldWire, version})).toThrow();
     for (const field of [
       {currentWitnesses: [{sourceIndex: 0, quote: 'Current source 0.'}]},
       {requirementQuote: 'Claim 1.'},
@@ -269,7 +293,7 @@ describe('single-decision compact topic wire', () => {
   it('compares protected policy without copying every model rationale into canonical text', () => {
     const basis = basisFor(3, {protectedOrdinal: 2});
     const wire = wireFor(basis, 'unresolved');
-    wire.paragraphComparisons.entries.find(e => e.ordinal === 2)!.rationale = 'Selected policy comparison.';
+    wire.normativeComparisons.find(e => e.ordinal === 2)!.rationale = 'Selected policy comparison.';
     const result = canonical(basis, wire);
     expect(result.draft.rationale).toContain('Selected comparison: Selected policy comparison.');
     expect(result.draft.rationale).not.toContain(basis.paragraphs[2].hash);
@@ -302,8 +326,8 @@ describe('single-decision compact topic wire', () => {
   it('retains genuine updates when a repeated-text replacement is repaired to unchanged', () => {
     const basis = basisFor(2);
     const wire = wireFor(basis);
-    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: 'Updated claim.'});
-    const repeated = wire.decision.paragraphDispositions.entries[1];
+    Object.assign(wire.facts.entries[0], {disposition: 'update', text: 'Updated claim.'});
+    const repeated = wire.facts.entries[1];
     Object.assign(repeated, {disposition: 'update', text: 'Claim 1.'});
     const invalid = JSON.stringify(decodeTopicDraftModelOutput(basis, wire));
     let error = '';
@@ -314,7 +338,12 @@ describe('single-decision compact topic wire', () => {
     }
     expect(error).toContain('paragraph 1 replacement repeats accepted text');
     const prompt = topicMaintenanceDraftPrompt(
-      {coverage: 'declared-only', targetUri: basis.targetUri, additionalDependencies: [], sources: []} as never,
+      {
+        coverage: 'declared-only',
+        targetUri: basis.targetUri,
+        additionalDependencies: [],
+        sources: promptSources(basis),
+      } as never,
       basis,
       error,
       invalid,
@@ -333,7 +362,7 @@ describe('single-decision compact topic wire', () => {
   it('does not infer current truth when a stale claim repeats the accepted text', () => {
     const basis = basisFor(1, {sourceCount: 1, firstParagraph: 'The limit is 32.'});
     const wire = wireFor(basis);
-    Object.assign(wire.decision.paragraphDispositions.entries[0], {disposition: 'update', text: basis.body});
+    Object.assign(wire.facts.entries[0], {disposition: 'update', text: basis.body});
     let error = '';
     try {
       canonical(basis, wire);
@@ -391,16 +420,16 @@ describe('single-decision compact topic wire', () => {
               ]),
           };
           const wire = wireFor(basis);
-          for (const entry of wire.decision.paragraphDispositions.entries) entry.sourceIndices = [...indices];
-          if (reverse) wire.decision.paragraphDispositions.entries.reverse();
+          for (const entry of wire.facts.entries) entry.sourceIndices = [...indices];
+          if (reverse) wire.facts.entries.reverse();
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
           expect(result.draft.paragraphDispositions?.entries).toEqual(
-            wire.decision.paragraphDispositions.entries.map(entry => ({
+            wire.facts.entries.map(entry => ({
               ordinal: entry.ordinal,
               beforeHash: basis.paragraphs[entry.ordinal].hash,
               disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition,
-              supportHandles: indices.map(index => current[current.length - 1 - index].id),
+              supportHandles: indices.map(index => topicDraftCurrentSourceHandles(basis)[index]),
               rationale: 'Checked.',
             })),
           );
@@ -422,20 +451,28 @@ describe('single-decision compact topic wire', () => {
   it('keeps the native model schema closed and operations fully bound', () => {
     const basis = basisFor(2);
     const schema = topicDraftNativeJsonSchema(topicDraftModelSchema(basis));
-    const variant =
-      schema.properties.decision.oneOf[0].properties.paragraphDispositions.properties.entries.items.oneOf[0];
-    expect(variant.required).toEqual(['ordinal', 'disposition', 'sourceIndices', 'text']);
+    const variant = schema.properties.facts.properties.entries.items.oneOf[0];
+    expect(variant.required).toEqual([
+      'ordinal',
+      'currentBehavior',
+      'rationale',
+      'disposition',
+      'sourceIndices',
+      'text',
+    ]);
     expect(variant.additionalProperties).toBe(false);
     expect(variant.properties).not.toHaveProperty('beforeHash');
     expect(variant.properties).not.toHaveProperty('supportHandles');
     const wire = wireFor(basis);
-    wire.decision.paragraphDispositions.entries[0] = {
+    wire.facts.entries[0] = {
       ordinal: 0,
+      currentBehavior: 'Supported behavior.',
+      rationale: 'Checked.',
       disposition: 'update',
       text: 'Updated claim.',
       sourceIndices: [1],
     };
-    wire.paragraphComparisons.entries[0].rationale = 'Changed.';
+    wire.facts.entries[0].rationale = 'Changed.';
     expect(canonical(basis, wire).draft.operations).toEqual([
       {
         ordinal: 0,
@@ -462,15 +499,13 @@ describe('single-decision compact topic wire', () => {
         (decisions, sourceCount) => {
           const basis = basisFor(decisions.length, {sourceCount});
           const wire = wireFor(basis);
-          wire.decision.paragraphDispositions.entries = decisions.map((disposition, ordinal) => ({
+          wire.facts.entries = decisions.map((disposition, ordinal) => ({
             ordinal,
+            currentBehavior: disposition === 'unresolved' ? null : 'Supported behavior.',
+            rationale: `Decision ${ordinal}.`,
             disposition,
             sourceIndices: disposition === 'unresolved' ? [] : [ordinal % sourceCount],
             ...(disposition === 'update' ? {text: `Updated claim ${ordinal}.`} : {}),
-          }));
-          wire.paragraphComparisons.entries = decisions.map((_, ordinal) => ({
-            ordinal,
-            rationale: `Decision ${ordinal}.`,
           }));
           const before = JSON.stringify({basis, wire});
           const result = canonical(basis, wire);
@@ -512,7 +547,7 @@ describe('single-decision compact topic wire', () => {
         wire.decision.currentBehaviorSourceIndex = 0;
         delete wire.decision.missingFact;
       }
-      wire.paragraphComparisons.entries.find(e => e.ordinal === 2)!.rationale = 'Applicable protected comparison.';
+      wire.normativeComparisons.find(e => e.ordinal === 2)!.rationale = 'Applicable protected comparison.';
       const before = JSON.stringify({basis, wire});
       const result = canonical(basis, wire);
       expect(result.draft.outcome).toBe(policyAssessment === 'conflict' ? 'policy-conflict' : 'insufficient-evidence');
@@ -521,12 +556,13 @@ describe('single-decision compact topic wire', () => {
       expect(result.draft.operations).toEqual([]);
       expect(result.body).toBe(basis.body);
       expect(JSON.stringify({basis, wire})).toBe(before);
-      Object.assign(wire.decision.paragraphDispositions.entries[0], {
+      Object.assign(wire.facts.entries[0], {
         disposition: 'update',
+        currentBehavior: 'Supported behavior.',
         sourceIndices: [0],
         text: 'Updated claim.',
       });
-      expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
+      expect(canonical(basis, wire).draft.operations).toEqual([]);
     }
   });
 
@@ -580,19 +616,26 @@ describe('single-decision compact topic wire', () => {
     };
     const unknown = wireFor(normativeBasis, 'unresolved');
     unknown.decision.missingFact = 'é'.repeat(128);
-    for (const entry of unknown.paragraphComparisons.entries) entry.rationale = 'é'.repeat(512);
-    unknown.paragraphComparisons.entries[1].rationale = 'UNSELECTED NORMATIVE COMPARISON';
+    for (const entry of unknown.normativeComparisons) entry.rationale = 'é'.repeat(512);
+    unknown.normativeComparisons[1].rationale = 'UNSELECTED NORMATIVE COMPARISON';
     const accepted = canonical(normativeBasis, unknown);
     expect(new TextEncoder().encode(accepted.draft.rationale).byteLength).toBeLessThanOrEqual(1633);
     expect(accepted.draft.rationale).toContain(
       'Normative compared: ' + Array.from({length: 64}, (_, i) => i).join(','),
     );
     expect(accepted.draft.rationale).not.toContain('UNSELECTED NORMATIVE COMPARISON');
-    unknown.paragraphComparisons.entries[0].rationale += 'é';
+    unknown.normativeComparisons[0].rationale += 'é';
     expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
-    unknown.paragraphComparisons.entries[0].rationale = 'é'.repeat(512);
+    unknown.normativeComparisons[0].rationale = 'é'.repeat(512);
     unknown.decision.missingFact += 'é';
     expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
+    for (const malformed of ['\ud83d', '\ude42']) {
+      unknown.decision.missingFact = malformed;
+      expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
+      unknown.decision.missingFact = 'Missing policy fact.';
+      unknown.normativeComparisons[0].rationale = malformed;
+      expect(() => canonical(normativeBasis, unknown)).toThrow(TopicDraftApplicationValidationError);
+    }
   });
 
   it('projects only sorted selected source indices and protected IDs at mixed 64 capacity', () => {
@@ -600,7 +643,7 @@ describe('single-decision compact topic wire', () => {
       fc.property(fc.array(fc.integer({min: 0, max: 7}), {minLength: 63, maxLength: 63}), selections => {
         const basis = basisFor(64, {sourceCount: 8, protectedOrdinal: 63});
         const wire = wireFor(basis);
-        wire.decision.paragraphDispositions.entries.forEach((entry, ordinal) => {
+        wire.facts.entries.forEach((entry, ordinal) => {
           entry.sourceIndices = [selections[ordinal]];
         });
         const before = JSON.stringify({basis, wire});
@@ -619,17 +662,19 @@ describe('single-decision compact topic wire', () => {
   it('cannot hide replacement text behind unchanged or override its derived operation', () => {
     const basis = basisFor(1);
     const wire = wireFor(basis);
-    wire.decision.paragraphDispositions.entries[0] = {
+    wire.facts.entries[0] = {
       ordinal: 0,
+      currentBehavior: 'Supported behavior.',
+      rationale: 'Checked.',
       disposition: 'update',
       sourceIndices: [0],
       text: 'Replacement requires descriptive direct support and project scope.',
     };
-    wire.paragraphComparisons.entries[0].rationale = 'Added scope.';
-    expect(canonical(basis, wire).body).toBe(wire.decision.paragraphDispositions.entries[0].text);
-    wire.decision.paragraphDispositions.entries[0].disposition = 'unchanged';
+    wire.facts.entries[0].rationale = 'Added scope.';
+    expect(canonical(basis, wire).body).toBe(wire.facts.entries[0].text);
+    wire.facts.entries[0].disposition = 'unchanged';
     expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
-    delete wire.decision.paragraphDispositions.entries[0].text;
+    delete wire.facts.entries[0].text;
     Object.assign(wire.decision, {operations: []});
     expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
   });
@@ -638,7 +683,7 @@ describe('single-decision compact topic wire', () => {
     const basis = basisFor(1, {protectedOrdinal: 0});
     const wire = wireFor(basis);
     const result = canonical(basis, wire);
-    expect(wire.paragraphComparisons).toEqual({version: 1, entries: [{ordinal: 0, rationale: 'Checked.'}]});
+    expect(wire.normativeComparisons).toEqual([{ordinal: 0, rationale: 'Checked.'}]);
     expect(result.body).toBe(basis.body);
     expect(result.draft.operations).toEqual([]);
     expect(result.draft.paragraphDispositions?.entries).toEqual([]);
@@ -658,7 +703,7 @@ describe('single-decision compact topic wire', () => {
         })),
       };
       const wire = wireFor(basis);
-      expect(wire.paragraphComparisons.entries).toEqual([]);
+      expect(wire.facts.entries).toEqual([]);
       const result = canonical(basis, wire);
       expect(result.body).toBe(basis.body);
       expect(result.draft.operations).toEqual([]);
@@ -685,11 +730,11 @@ describe('single-decision compact topic wire', () => {
         'targetHash',
         'observationRevision',
         'packetDigest',
-        'paragraphComparisons',
+        'facts',
+        'normativeComparisons',
         'decision',
       ]);
-      for (const variant of schema.properties.decision.oneOf)
-        expect(variant.properties).not.toHaveProperty('paragraphComparisons');
+      for (const variant of schema.properties.decision.oneOf) expect(variant.properties).not.toHaveProperty('facts');
       for (const variant of schema.properties.decision.oneOf)
         expect(Object.keys(variant.properties)[0]).toBe('policyAssessment');
     }
@@ -707,14 +752,14 @@ describe('single-decision compact topic wire', () => {
 
   it('rejects invalid indices and legacy/unknown model fields before hydration', () => {
     const basis = basisFor(1);
-    for (const version of [1, 2, 3, 4, 5])
+    for (const version of [1, 2, 3, 4, 5, 6, 7])
       expect(() => decodeTopicDraftModelOutput(basis, {...wireFor(basis), version})).toThrow();
     const oldTag = wireFor(basis);
-    Object.assign(oldTag.decision.paragraphDispositions.entries[0], {disposition: 'revalidate'});
+    Object.assign(oldTag.facts.entries[0], {disposition: 'revalidate'});
     expect(() => decodeTopicDraftModelOutput(basis, oldTag)).toThrow();
     for (const index of [-1, 3, 1.5, NaN]) {
       const wire = wireFor(basis);
-      wire.decision.paragraphDispositions.entries[0].sourceIndices = [index];
+      wire.facts.entries[0].sourceIndices = [index];
       expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
     }
     fc.assert(
@@ -722,7 +767,7 @@ describe('single-decision compact topic wire', () => {
         const indexedBasis = basisFor(1, {sourceCount});
         for (const index of [sourceCount + excess, -1 - excess]) {
           const wire = wireFor(indexedBasis);
-          wire.decision.paragraphDispositions.entries[0].sourceIndices = [index];
+          wire.facts.entries[0].sourceIndices = [index];
           expect(() => decodeTopicDraftModelOutput(indexedBasis, wire)).toThrow();
         }
       }),
@@ -731,11 +776,11 @@ describe('single-decision compact topic wire', () => {
     for (const extra of [
       {beforeHash: basis.paragraphs[0].hash},
       {supportHandles: [topicDraftCurrentSourceHandles(basis)[0]]},
-      {rationale: 'Rationale belongs only in paragraphComparisons.'},
+      {comparison: 'Unknown comparison field.'},
       {unexpected: true},
     ]) {
       const wire = wireFor(basis);
-      Object.assign(wire.decision.paragraphDispositions.entries[0], extra);
+      Object.assign(wire.facts.entries[0], extra);
       expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
     }
   });
@@ -743,20 +788,20 @@ describe('single-decision compact topic wire', () => {
   it('preserves canonical missing/duplicate/protected/unsupported accounting rejection', () => {
     const basis = basisFor(2);
     const missing = wireFor(basis);
-    missing.decision.paragraphDispositions.entries.pop();
+    missing.facts.entries.pop();
     expect(() => canonical(basis, missing)).toThrow();
     const duplicate = wireFor(basis);
-    duplicate.decision.paragraphDispositions.entries[1].ordinal = 0;
+    duplicate.facts.entries[1].ordinal = 0;
     expect(() => canonical(basis, duplicate)).toThrow();
     const protectedBasis = basisFor(2, {protectedOrdinal: 1});
     const protectedWire = wireFor(protectedBasis);
-    protectedWire.decision.paragraphDispositions.entries[0].ordinal = 1;
+    protectedWire.facts.entries[0].ordinal = 1;
     expect(() => canonical(protectedBasis, protectedWire)).toThrow();
     const empty = wireFor(basis);
-    empty.decision.paragraphDispositions.entries[0].sourceIndices = [];
+    empty.facts.entries[0].sourceIndices = [];
     expect(() => canonical(basis, empty)).toThrow();
     const repeated = wireFor(basis);
-    repeated.decision.paragraphDispositions.entries[0].sourceIndices = [0, 0];
+    repeated.facts.entries[0].sourceIndices = [0, 0];
     expect(() => canonical(basis, repeated)).toThrow();
     const ids = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.citationId);
     const unrelatedBasis = {
@@ -765,11 +810,11 @@ describe('single-decision compact topic wire', () => {
       additionalDependencies: [{kind: 'dependency' as const, citationId: ids[2]}],
     };
     const unrelated = wireFor(unrelatedBasis);
-    unrelated.decision.paragraphDispositions.entries[1].sourceIndices = [1];
-    unrelated.decision.paragraphDispositions.entries[0].sourceIndices = [1];
+    unrelated.facts.entries[1].sourceIndices = [1];
+    unrelated.facts.entries[0].sourceIndices = [1];
     expect(() => decodeTopicDraftModelOutput(unrelatedBasis, unrelated)).toThrow();
     expect(() => canonical(unrelatedBasis, unrelated)).toThrow();
-    unrelated.decision.paragraphDispositions.entries[0].sourceIndices = [2];
+    unrelated.facts.entries[0].sourceIndices = [2];
     expect(() => canonical(unrelatedBasis, unrelated)).not.toThrow();
   });
 
@@ -781,12 +826,14 @@ describe('single-decision compact topic wire', () => {
       normativeOrdinal: 1,
       missingFact: 'What current advice applies?',
     });
-    wire.decision.paragraphDispositions.entries[0] = {
+    wire.facts.entries[0] = {
       ordinal: 0,
+      currentBehavior: 'Supported behavior.',
+      rationale: 'Checked.',
       disposition: 'unresolved',
       sourceIndices: [],
     };
-    wire.paragraphComparisons.entries[0].rationale = 'Manual review.';
+    wire.facts.entries[0].rationale = 'Manual review.';
     const result = canonical(basis, wire);
     expect(result.body).toBe(basis.body);
     expect(result.draft.paragraphDispositions?.entries).toEqual([
@@ -831,9 +878,9 @@ describe('single-decision compact topic wire', () => {
         JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).sources.map(
           (source: {sourceIndex: number}) => source.sourceIndex,
         ),
-      ).toEqual([2, 1, 0]);
+      ).toEqual([0, 1, 2]);
     }
-    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v21');
+    expect(TOPIC_DRAFT_PROMPT_VERSION).toBe('topic-maintenance-draft-v22');
     const wire = wireFor(basisFor(64));
     expect(new TextEncoder().encode(JSON.stringify(wire)).byteLength).toBeLessThan(32 * 1024);
     expect(() =>
@@ -847,8 +894,7 @@ describe('single-decision compact topic wire', () => {
         const basis = basisFor(1, {sourceCount});
         const schema = topicDraftModelSchema(basis);
         const native = topicDraftNativeJsonSchema(schema);
-        const variants =
-          native.properties.decision.oneOf[0].properties.paragraphDispositions.properties.entries.items.oneOf;
+        const variants = native.properties.facts.properties.entries.items.oneOf;
         expect(
           variants.map(
             (variant: {properties: {disposition: {enum: string[]}}}) => variant.properties.disposition.enum[0],
@@ -856,12 +902,12 @@ describe('single-decision compact topic wire', () => {
         ).toEqual(['update', 'unchanged', 'unresolved']);
         for (const disposition of ['update', 'unchanged', 'unresolved'] as const) {
           const wire = wireFor(basis, disposition === 'unresolved' ? 'unresolved' : 'unchanged');
-          wire.decision.paragraphDispositions.entries[0].disposition = disposition;
+          wire.facts.entries[0].disposition = disposition;
           if (disposition === 'update') {
-            wire.decision.paragraphDispositions.entries[0].text = 'Updated claim.';
+            wire.facts.entries[0].text = 'Updated claim.';
           }
           expect(() => canonical(basis, wire)).not.toThrow();
-          wire.decision.paragraphDispositions.entries[0].sourceIndices = disposition === 'unresolved' ? [0] : [];
+          wire.facts.entries[0].sourceIndices = disposition === 'unresolved' ? [0] : [];
           expect(() => decodeTopicDraftModelOutput(basis, wire)).toThrow();
         }
         expect(native.properties.decision.oneOf[0].properties).not.toHaveProperty('reviewedHandles');
@@ -870,7 +916,7 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
-  it('binds candidate indices to their handles while presenting protected requirements first', () => {
+  it('binds candidate indices to trusted handles while presenting accepted paragraphs once in ordinal order', () => {
     fc.assert(
       fc.property(fc.integer({min: 2, max: 64}), fc.integer({min: 1, max: 8}), (count, sourceCount) => {
         const original = basisFor(count, {sourceCount, protectedOrdinal: count - 1});
@@ -878,20 +924,20 @@ describe('single-decision compact topic wire', () => {
         const packet = {
           coverage: 'declared-only',
           targetUri: basis.targetUri,
-          sources: [],
+          sources: promptSources(basis),
         } as never;
         const before = JSON.stringify({basis, packet});
         const prompt = topicMaintenanceDraftPrompt(packet, basis);
         const candidates = JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]);
         const current = topicDraftCurrentSourceHandles(basis);
         for (const candidate of candidates) {
-          expect(candidate.sourceIndices.map((index: number) => current[index])).toEqual(candidate.currentHandles);
-          expect(candidate.currentHandles).toEqual(
+          expect(candidate).not.toHaveProperty('currentHandles');
+          expect(candidate.sourceIndices.map((index: number) => current[index])).toEqual(
             basis.paragraphs[candidate.ordinal].citationIds.map(id => `current:${id}`),
           );
         }
         const paragraphs = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs;
-        expect(paragraphs[0].ordinal).toBe(count - 1);
+        expect(paragraphs[0].ordinal).toBe(0);
         expect(
           paragraphs.map((paragraph: {ordinal: number}) => paragraph.ordinal).sort((a: number, b: number) => a - b),
         ).toEqual(Array.from({length: count}, (_, ordinal) => ordinal));
@@ -901,13 +947,217 @@ describe('single-decision compact topic wire', () => {
     );
   });
 
+  it('suppresses arbitrary valid provisional decisions in every negative policy branch without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('update', 'unchanged', 'unresolved'), {maxLength: 24}),
+        fc.constantFrom('conflict', 'undetermined'),
+        fc.boolean(),
+        (decisions, policyAssessment, reverse) => {
+          const original = basisFor(decisions.length + 2, {sourceCount: 8});
+          const basis = {
+            ...original,
+            paragraphs: original.paragraphs.map(p => ({
+              ...p,
+              role: p.ordinal >= decisions.length ? ('normative' as const) : ('descriptive' as const),
+            })),
+            additionalDependencies: [{kind: 'dependency' as const, citationId: original.paragraphs[0].citationIds[0]}],
+          };
+          const wire = wireFor(basis);
+          wire.facts.entries = decisions.map((disposition, ordinal) => ({
+            ordinal,
+            disposition,
+            currentBehavior: disposition === 'unresolved' ? null : `Current behavior ${ordinal}.`,
+            rationale: `Comparison ${ordinal}.`,
+            sourceIndices: disposition === 'unresolved' ? [] : [ordinal % 8],
+            ...(disposition === 'update' ? {text: `Updated claim ${ordinal}.`} : {}),
+          }));
+          if (reverse) {
+            wire.facts.entries.reverse();
+            wire.normativeComparisons.reverse();
+          }
+          Object.assign(wire.decision, {policyAssessment, normativeOrdinal: decisions.length});
+          delete wire.decision.reviewedSourceIndices;
+          if (policyAssessment === 'conflict') wire.decision.currentBehaviorSourceIndex = 0;
+          else wire.decision.missingFact = 'Material applicable policy fact is unavailable.';
+          const before = JSON.stringify({basis, wire});
+          const result = canonical(basis, wire);
+          expect(result.body).toBe(basis.body);
+          expect(result.draft.operations).toEqual([]);
+          expect(result.draft.reviewedHandles).toEqual([]);
+          expect(result.draft.paragraphDispositions!.entries).toEqual(
+            wire.facts.entries.map(entry => ({
+              ordinal: entry.ordinal,
+              beforeHash: basis.paragraphs[entry.ordinal].hash,
+              disposition: 'unresolved',
+              supportHandles: [],
+              rationale: entry.rationale,
+            })),
+          );
+          for (const alteration of ['missing', 'duplicate', 'wrong-role'] as const) {
+            const bad = structuredClone(wire);
+            if (alteration === 'missing') bad.normativeComparisons.pop();
+            if (alteration === 'duplicate') bad.normativeComparisons[1].ordinal = bad.normativeComparisons[0].ordinal;
+            if (alteration === 'wrong-role') bad.normativeComparisons[0].ordinal = 999;
+            expect(() => canonical(basis, bad)).toThrow();
+          }
+          if (wire.facts.entries.length) {
+            for (const alteration of [
+              'index',
+              'duplicate-index',
+              'protected',
+              'duplicate',
+              'text',
+              'summary',
+            ] as const) {
+              const bad = structuredClone(wire);
+              const fact = bad.facts.entries[0];
+              if (alteration === 'index')
+                Object.assign(fact, {disposition: 'unchanged', currentBehavior: 'Current.', sourceIndices: [99]});
+              if (alteration === 'duplicate-index')
+                Object.assign(fact, {disposition: 'unchanged', currentBehavior: 'Current.', sourceIndices: [0, 0]});
+              if (alteration === 'protected') fact.ordinal = decisions.length;
+              if (alteration === 'duplicate') bad.facts.entries.push({...fact});
+              if (alteration === 'text')
+                Object.assign(fact, {
+                  disposition: 'update',
+                  currentBehavior: 'Current.',
+                  sourceIndices: [0],
+                  text: 'First.\n\nSecond.',
+                });
+              if (alteration === 'summary') fact.currentBehavior = 'é'.repeat(257);
+              expect(() => canonical(basis, bad)).toThrow();
+            }
+          }
+          expect(JSON.stringify({basis, wire})).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('preserves used-source semantics under handle permutations and bijective citation renaming', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom('update', 'unchanged', 'unresolved'), {minLength: 1, maxLength: 16}),
+        fc.shuffledSubarray([0, 1, 2, 3, 4, 5, 6, 7], {minLength: 8, maxLength: 8}),
+        fc.shuffledSubarray(
+          Array.from({length: 16}, (_, i) => i),
+          {minLength: 16, maxLength: 16},
+        ),
+        (decisions, rename, permutation) => {
+          const original = basisFor(decisions.length + 1, {sourceCount: 8, protectedOrdinal: decisions.length});
+          const ids = original.paragraphs[0].citationIds;
+          const basis = {
+            ...original,
+            paragraphs: original.paragraphs.map(p => ({
+              ...p,
+              citationIds: p.role === 'normative' ? ids : [ids[(p.ordinal + 3) % 7], ids[p.ordinal % 7]],
+            })),
+            additionalDependencies: [{kind: 'dependency' as const, citationId: ids[7]}],
+          };
+          const renamed = (id: string) => ids[rename[ids.indexOf(id)]];
+          const other = {
+            ...basis,
+            packetDigest: 'd'.repeat(64),
+            paragraphs: basis.paragraphs.map(p => ({...p, citationIds: p.citationIds.map(renamed)})),
+            additionalDependencies: basis.additionalDependencies.map(d => ({...d, citationId: renamed(d.citationId)})),
+            handles: permutation
+              .map(index => basis.handles[index])
+              .map(h => ({...h, citationId: renamed(h.citationId), id: `${h.variant}:${renamed(h.citationId)}`})),
+          };
+          const semantic = (b: typeof basis, handle: string) => {
+            const id = b.handles.find(h => h.id === handle)!.citationId;
+            return b === basis ? ids.indexOf(id) : rename.indexOf(ids.indexOf(id));
+          };
+          const project = (b: typeof basis) => {
+            // Independent declaration-order model: no production selector computes expected aliases.
+            const declared = [
+              ...new Set([
+                ...b.paragraphs.flatMap(p => p.citationIds),
+                ...b.additionalDependencies.map(d => d.citationId),
+              ]),
+            ];
+            const handles = declared.map(id => `current:${id}`);
+            expect(topicDraftCurrentSourceHandles(b)).toEqual(handles);
+            const wire = wireFor(b);
+            wire.facts.entries.forEach((entry, index) => {
+              entry.disposition = decisions[index];
+              entry.currentBehavior = decisions[index] === 'unresolved' ? null : `Current ${index}.`;
+              entry.sourceIndices =
+                decisions[index] === 'unresolved'
+                  ? []
+                  : [handles.indexOf(`current:${b.paragraphs[index].citationIds[0]}`)];
+              if (entry.disposition === 'update') entry.text = `Updated claim ${index}.`;
+            });
+            const evidence = topicDraftCurrentEvidence(
+              b,
+              handles.map(handleId => ({handleId, content: `Source ${semantic(b, handleId)}.`})),
+            );
+            const result = canonical(b, wire, evidence);
+            const sources = handles.map(handle => ({
+              citationId: b.handles.find(h => h.id === handle)!.citationId,
+              oldExcerpt: {source: {path: `source-${semantic(b, handle)}.ts`}, content: 'Historical.'},
+              newExcerpt: {source: {path: `source-${semantic(b, handle)}.ts`}, content: evidence[handle]},
+            }));
+            const packet = JSON.parse(
+              /^Packet: (.+)$/mu.exec(
+                topicMaintenanceDraftPrompt({coverage: 'declared-only', sources} as never, b),
+              )![1],
+            );
+            for (const paragraph of packet.paragraphs)
+              expect(paragraph.sourceIndices.map((index: number) => packet.sources[index].current.path)).toEqual(
+                b.paragraphs[paragraph.ordinal].citationIds.map(id => `source-${semantic(b, `current:${id}`)}.ts`),
+              );
+            return {
+              body: result.body,
+              outcome: result.draft.outcome,
+              entries: result.draft.paragraphDispositions!.entries.map(e => ({
+                ...e,
+                supportHandles: e.supportHandles.map(h => semantic(b, h)),
+              })),
+              scopeSources: topicDraftPolicyScope(b).behaviorSourceIndices.map(index => semantic(b, handles[index])),
+            };
+          };
+          const before = JSON.stringify({basis, other});
+          expect(project(other)).toEqual(project(basis));
+          expect(JSON.stringify({basis, other})).toBe(before);
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('keeps 512-byte summaries independent of 1024-byte rationales and full replacement capacity', () => {
+    const basis = basisFor(1);
+    const wire = wireFor(basis);
+    wire.facts.entries[0].currentBehavior = 'é'.repeat(256);
+    wire.facts.entries[0].rationale = 'é'.repeat(512);
+    expect(canonical(basis, wire).draft.paragraphDispositions!.entries[0].rationale).toBe('é'.repeat(512));
+    for (const summary of ['é'.repeat(257), '\ud83d', '\ude42', '']) {
+      wire.facts.entries[0].currentBehavior = summary;
+      expect(() => canonical(basis, wire)).toThrow();
+    }
+    wire.facts.entries[0].currentBehavior = null;
+    expect(() => decodeTopicDraftWire(basis, wire)).toThrow();
+    Object.assign(wire.facts.entries[0], {disposition: 'unresolved', sourceIndices: []});
+    expect(() => canonical(basis, wire)).not.toThrow();
+    Object.assign(wire.facts.entries[0], {
+      disposition: 'update',
+      sourceIndices: [0],
+      currentBehavior: 'Current.',
+      text: 'Updated ' + 'x'.repeat(27 * 1024),
+    });
+    expect(canonical(basis, wire).draft.operations[0].text).toBe(wire.facts.entries[0].text);
+  });
+
   it('keeps repair output and validation errors inside single JSON string records', () => {
     const basis = basisFor(1);
     const packet = {
       coverage: 'declared-only',
       targetUri: basis.targetUri,
       additionalDependencies: [],
-      sources: [],
+      sources: promptSources(basis),
     } as never;
     fc.assert(
       fc.property(

@@ -43,8 +43,8 @@ const modelReviewedFixture = Effect.gen(function* () {
   const generate: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, basis) =>
     Effect.sync(() => {
       if (basis?.version !== 2) throw new Error('Expected imported model basis.');
-      const draft = makeTopicDraftWireFixture(basis, 'update', topicDraftEvidenceFromPrompt(prompt));
-      const first = draft.decision.paragraphDispositions.entries.find(entry => entry.ordinal === 0);
+      const draft = makeTopicDraftWireFixture(basis, 'update', topicDraftEvidenceFromPrompt(prompt, basis));
+      const first = draft.facts.entries.find(entry => entry.ordinal === 0);
       if (!first || first.disposition !== 'update') throw new Error('Expected editable imported claim.');
       first.text = 'Model proposed current claim.';
       return {

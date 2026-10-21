@@ -730,19 +730,21 @@ describe('reviewed personal topic acceptance', () => {
                 /^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1],
               );
               const draft = {
-                ...makeTopicDraftWireFixture(currentBasis, 'unchanged', topicDraftEvidenceFromPrompt(prompt)),
+                ...makeTopicDraftWireFixture(
+                  currentBasis,
+                  'unchanged',
+                  topicDraftEvidenceFromPrompt(prompt, currentBasis),
+                ),
                 ...identity,
               };
               draft.decision.removedClaims = ['Request timeout is 60 seconds.'];
-              draft.decision.paragraphDispositions.entries = eligible.map(item => ({
+              draft.facts.entries = eligible.map(item => ({
                 ordinal: item.ordinal,
+                currentBehavior: 'Current supported behavior.',
+                rationale: 'Checked current source.',
                 disposition: item.ordinal === 0 ? 'update' : 'unchanged',
                 sourceIndices: item.sourceIndices,
                 ...(item.ordinal === 0 ? {text: 'Request timeout is 90 seconds.'} : {}),
-              }));
-              draft.paragraphComparisons.entries = eligible.map(item => ({
-                ordinal: item.ordinal,
-                rationale: 'Checked current source.',
               }));
               return {
                 text: JSON.stringify(draft),

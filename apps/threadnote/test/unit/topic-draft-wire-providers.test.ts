@@ -142,9 +142,8 @@ describe('compact topic provider boundary', () => {
           const basis = makeTopicDraftWireBasis(2);
           const fixture = makeTopicDraftWireFixture(basis);
           const wire = structuredClone(fixture);
-          if (invalidAssessment === 'comparison-over-byte-limit')
-            wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
-          else wire.paragraphComparisons.entries[1].ordinal = 0;
+          if (invalidAssessment === 'comparison-over-byte-limit') wire.facts.entries[0].rationale = 'é'.repeat(513);
+          else wire.facts.entries[1].ordinal = 0;
           // This response passes the provider schema; only the application's byte/uniqueness guard rejects it.
           yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
           const model = Layer.effect(
@@ -221,7 +220,7 @@ describe('compact topic provider boundary', () => {
       Effect.gen(function* () {
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.paragraphComparisons.entries[0].rationale = 'x'.repeat(33 * 1024);
+        wire.facts.entries[0].rationale = 'x'.repeat(33 * 1024);
         yield* Schema.decodeUnknownEffect(topicDraftModelSchema(basis), {onExcessProperty: 'error'})(wire);
         if (backend === 'effect') {
           vi.mocked(OpenAiLanguageModel.layer).mockReturnValueOnce(
@@ -271,7 +270,7 @@ describe('compact topic provider boundary', () => {
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(2);
       const wire = makeTopicDraftWireFixture(basis);
-      wire.paragraphComparisons.entries[1].ordinal = 0;
+      wire.facts.entries[1].ordinal = 0;
       const result = yield* runNativeAiTopicDraft(
         {agentContextHome: '/fixture'},
         'prompt',
@@ -283,7 +282,7 @@ describe('compact topic provider boundary', () => {
       expect(result.outputRepresentation).toBe('decoded-json');
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(() => decodeTopicDraftModelOutput(basis, JSON.parse(result.text))).toThrow(
-        'Invalid or duplicate topic comparison ordinal.',
+        'Invalid or duplicate topic fact ordinal.',
       );
     }),
   );
@@ -330,7 +329,7 @@ describe('compact topic provider boundary', () => {
       Effect.gen(function* () {
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.decision.paragraphDispositions.entries[0].sourceIndices = [99];
+        wire.facts.entries[0].sourceIndices = [99];
         const invalid = yield* runNativeAiTopicDraft(
           {agentContextHome: '/fixture'},
           'prompt',
@@ -347,8 +346,8 @@ describe('compact topic provider boundary', () => {
             expect(invalid.failure.usage).toEqual({status: 'unavailable'});
           }
         }
-        wire.decision.paragraphDispositions.entries[0].sourceIndices = [0];
-        wire.decision.paragraphDispositions.entries[1].ordinal = 0;
+        wire.facts.entries[0].sourceIndices = [0];
+        wire.facts.entries[1].ordinal = 0;
         const semanticInvalid = yield* runNativeAiTopicDraft(
           {agentContextHome: '/fixture'},
           'prompt',

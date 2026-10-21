@@ -1,4 +1,5 @@
 import {Data, Schema} from 'effect';
+import {consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
   type TopicMaintenanceDraftBasis,
@@ -19,8 +20,15 @@ export function topicDraftGenerationScopeSupported(basis: TopicMaintenanceDraftB
   );
 }
 
+/** Consumer order is stable under handle permutations and citation renaming for declared sources. */
 export function topicDraftCurrentSourceHandles(basis: TopicMaintenanceDraftBasis) {
-  return basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+  const current = basis.handles.filter(handle => handle.variant === 'current');
+  const byCitation = new Map(current.map(handle => [handle.citationId, handle.id]));
+  const ordered = [
+    ...[...basis.paragraphs].sort((left, right) => left.ordinal - right.ordinal).flatMap(p => p.citationIds),
+    ...basis.additionalDependencies.map(dependency => dependency.citationId),
+  ].flatMap(id => (byCitation.has(id) ? [byCitation.get(id)!] : []));
+  return [...new Set([...ordered, ...current.map(handle => handle.id)])];
 }
 
 /** Trusted selection metadata; policy declarations alone are not observed behavior. */
@@ -29,12 +37,13 @@ export function topicDraftPolicyScope(basis: TopicMaintenanceDraftBasis) {
     ...basis.paragraphs.filter(topicDraftGenerationEligible).flatMap(paragraph => paragraph.citationIds),
     ...basis.additionalDependencies.map(dependency => dependency.citationId),
   ]);
+  const currentById = new Map(basis.handles.map(handle => [handle.id, handle.citationId]));
   return {
     normativeOrdinals: basis.paragraphs
       .filter(paragraph => paragraph.role === 'normative')
       .map(paragraph => paragraph.ordinal),
     behaviorSourceIndices: topicDraftCurrentSourceHandles(basis).flatMap((handle, index) =>
-      behaviorCitations.has(handle.slice('current:'.length)) ? [index] : [],
+      behaviorCitations.has(currentById.get(handle)!) ? [index] : [],
     ),
   };
 }
@@ -47,56 +56,38 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
   const rationale = Schema.String.check(Schema.isMinLength(1));
   const scope = topicDraftPolicyScope(basis);
   const dependencies = basis.additionalDependencies.map(dependency => dependency.citationId);
-  const common = (allowUpdate: boolean) => {
-    const variants = descriptive.flatMap(paragraph => {
-      const allowed = new Set([...paragraph.citationIds, ...dependencies].map(id => `current:${id}`));
-      const indices = currentHandles.flatMap((handle, index) => (allowed.has(handle) ? [index] : []));
-      const sourceIndex = indices.length ? Schema.Literals(indices) : Schema.Int;
-      const dispositions = indices.length
-        ? allowUpdate
-          ? (['update', 'unchanged', 'unresolved'] as const)
-          : (['unchanged', 'unresolved'] as const)
-        : (['unresolved'] as const);
-      return dispositions.map(disposition => {
-        const fields = {
-          ordinal: Schema.Literal(paragraph.ordinal),
-          disposition: Schema.Literal(disposition),
-          sourceIndices: Schema.Array(sourceIndex).check(
-            Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
-            Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
-          ),
-        };
-        return disposition === 'update'
-          ? Schema.Struct({...fields, disposition: Schema.Literal('update'), text: rationale})
-          : Schema.Struct({...fields, disposition: Schema.Literal(disposition)});
-      });
-    });
-    return {
-      paragraphDispositions: Schema.Struct({
-        version: Schema.Literal(1),
-        entries: Schema.Array(Schema.Union(variants.length ? variants : [Schema.String])).check(
-          Schema.isMinLength(descriptive.length),
-          Schema.isMaxLength(descriptive.length),
+  const variants = descriptive.flatMap(paragraph => {
+    const allowed = new Set([...paragraph.citationIds, ...dependencies].map(id => `current:${id}`));
+    const indices = currentHandles.flatMap((handle, index) => (allowed.has(handle) ? [index] : []));
+    const sourceIndex = indices.length ? Schema.Literals(indices) : Schema.Int;
+    const dispositions = indices.length ? (['update', 'unchanged', 'unresolved'] as const) : (['unresolved'] as const);
+    return dispositions.map(disposition => {
+      const fields = {
+        ordinal: Schema.Literal(paragraph.ordinal),
+        currentBehavior: disposition === 'unresolved' ? Schema.Union([rationale, Schema.Null]) : rationale,
+        rationale,
+        disposition: Schema.Literal(disposition),
+        sourceIndices: Schema.Array(sourceIndex).check(
+          Schema.isMinLength(disposition === 'unresolved' ? 0 : 1),
+          Schema.isMaxLength(disposition === 'unresolved' ? 0 : indices.length),
         ),
-      }),
-      removedClaims: Schema.Array(Schema.String),
-    };
-  };
+      };
+      return disposition === 'update'
+        ? Schema.Struct({...fields, disposition: Schema.Literal('update'), text: rationale})
+        : Schema.Struct({...fields, disposition: Schema.Literal(disposition)});
+    });
+  });
+  const common = {removedClaims: Schema.Array(Schema.String)};
   const requirement = () => ({normativeOrdinal: Schema.Literals(scope.normativeOrdinals)});
   const decision = Schema.Union([
     ...(descriptive.length && scope.behaviorSourceIndices.length
-      ? [
-          Schema.Struct({
-            policyAssessment: Schema.Literal('no-conflict-observed'),
-            ...common(true),
-          }),
-        ]
+      ? [Schema.Struct({policyAssessment: Schema.Literal('no-conflict-observed'), ...common})]
       : []),
     ...(!descriptive.length
       ? [
           Schema.Struct({
             policyAssessment: Schema.Literal('source-review'),
-            ...common(false),
+            ...common,
             reviewedSourceIndices: Schema.Array(Schema.Literals(currentHandles.map((_, index) => index))).check(
               Schema.isMinLength(1),
               Schema.isMaxLength(currentHandles.length),
@@ -110,7 +101,7 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
             policyAssessment: Schema.Literal('conflict'),
             ...requirement(),
             currentBehaviorSourceIndex: Schema.Literals(scope.behaviorSourceIndices),
-            ...common(false),
+            ...common,
           }),
         ]
       : []),
@@ -120,33 +111,28 @@ export function topicDraftModelSchema(basis: TopicMaintenanceDraftBasis) {
             policyAssessment: Schema.Literal('undetermined'),
             ...requirement(),
             missingFact: rationale.check(Schema.isMaxLength(256)),
-            ...common(false),
+            ...common,
           }),
         ]
       : []),
   ]);
   return Schema.Struct({
-    version: Schema.Literal(7),
+    version: Schema.Literal(8),
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
-    paragraphComparisons: Schema.Struct({
+    facts: Schema.Struct({
       version: Schema.Literal(1),
-      entries: Schema.Array(
-        descriptive.length || scope.normativeOrdinals.length
-          ? Schema.Struct({
-              ordinal: Schema.Literals([
-                ...descriptive.map(paragraph => paragraph.ordinal),
-                ...scope.normativeOrdinals,
-              ]),
-              rationale,
-            })
-          : Schema.String,
-      ).check(
-        Schema.isMinLength(descriptive.length + scope.normativeOrdinals.length),
-        Schema.isMaxLength(descriptive.length + scope.normativeOrdinals.length),
+      entries: Schema.Array(Schema.Union(variants.length ? variants : [Schema.String])).check(
+        Schema.isMinLength(descriptive.length),
+        Schema.isMaxLength(descriptive.length),
       ),
     }),
+    normativeComparisons: Schema.Array(
+      scope.normativeOrdinals.length
+        ? Schema.Struct({ordinal: Schema.Literals(scope.normativeOrdinals), rationale})
+        : Schema.String,
+    ).check(Schema.isMinLength(scope.normativeOrdinals.length), Schema.isMaxLength(scope.normativeOrdinals.length)),
     decision,
   });
 }
@@ -194,37 +180,60 @@ export function projectTopicDraftWire(
   wire: ReturnType<typeof decodeTopicDraftWire>,
   currentEvidence: Readonly<Record<string, string>>,
 ): TopicMaintenanceDraftV1 {
-  const {paragraphComparisons, decision, ...identity} = wire;
+  const {facts, normativeComparisons, decision, ...identity} = wire;
   const byteLength = (text: string) => new TextEncoder().encode(text).byteLength;
   const invalid = (message: string): never => {
     throw new TopicDraftApplicationValidationError({message});
   };
+  const bounded = (text: string, max: number) => wellFormed(text) && text.trim().length > 0 && byteLength(text) <= max;
   const current = topicDraftCurrentSourceHandles(basis);
   // Context failures are terminal, even if the selected wire does not reference the missing source.
   for (const handle of current)
     if (typeof currentEvidence[handle] !== 'string' || !wellFormed(currentEvidence[handle]))
       throw new Error('Verified current topic evidence is unavailable.');
-  const eligible = new Set(basis.paragraphs.filter(topicDraftGenerationEligible).map(paragraph => paragraph.ordinal));
+  const eligible = new Map(basis.paragraphs.filter(topicDraftGenerationEligible).map(p => [p.ordinal, p]));
   const normative = new Set(topicDraftPolicyScope(basis).normativeOrdinals);
-  const compared = new Set([...eligible, ...normative]);
   const comparisons = new Map<number, string>();
-  for (const entry of paragraphComparisons.entries) {
-    if (typeof entry === 'string' || !compared.has(entry.ordinal) || comparisons.has(entry.ordinal))
+  for (const entry of normativeComparisons) {
+    if (typeof entry === 'string' || !normative.has(entry.ordinal) || comparisons.has(entry.ordinal))
       return invalid('Invalid or duplicate topic comparison ordinal.');
-    if (!wellFormed(entry.rationale) || byteLength(entry.rationale) > 1024)
-      invalid('Topic comparison rationale exceeds its UTF-8 scalar or byte bound.');
+    if (!bounded(entry.rationale, 1024)) invalid('Topic comparison rationale exceeds its UTF-8 scalar or byte bound.');
     comparisons.set(entry.ordinal, entry.rationale);
   }
-  const actionOrdinals = decision.paragraphDispositions.entries.map(entry =>
-    typeof entry === 'string' ? -1 : entry.ordinal,
-  );
-  if (
-    comparisons.size !== compared.size ||
-    actionOrdinals.length !== eligible.size ||
-    new Set(actionOrdinals).size !== eligible.size ||
-    actionOrdinals.some(ordinal => !eligible.has(ordinal) || !comparisons.has(ordinal))
-  )
-    invalid('Topic comparisons and dispositions must cover exactly the eligible ordinals.');
+  if (comparisons.size !== normative.size) invalid('Topic comparisons must cover exactly the protected ordinals.');
+  const seen = new Set<number>();
+  for (const entry of facts.entries) {
+    if (typeof entry === 'string' || !eligible.has(entry.ordinal) || seen.has(entry.ordinal))
+      return invalid('Invalid or duplicate topic fact ordinal.');
+    seen.add(entry.ordinal);
+    if (!bounded(entry.rationale, 1024)) invalid('Topic fact rationale exceeds its UTF-8 scalar or byte bound.');
+    if (entry.currentBehavior === null ? entry.disposition !== 'unresolved' : !bounded(entry.currentBehavior, 512))
+      invalid('Topic current behavior exceeds its UTF-8 scalar or byte bound.');
+    const allowed = new Set(
+      [
+        ...eligible.get(entry.ordinal)!.citationIds,
+        ...basis.additionalDependencies.map(dependency => dependency.citationId),
+      ].map(id => `current:${id}`),
+    );
+    if (
+      new Set(entry.sourceIndices).size !== entry.sourceIndices.length ||
+      entry.sourceIndices.some(index => !Number.isSafeInteger(index) || !allowed.has(current[index])) ||
+      (entry.disposition === 'unresolved' ? entry.sourceIndices.length !== 0 : entry.sourceIndices.length === 0)
+    )
+      invalid('Invalid, duplicate or unsupported topic fact source index.');
+    // Check provisional text even when the final policy gate will discard it; no new replacement byte cap.
+    if (entry.disposition === 'update') {
+      if (!wellFormed(entry.text) || !entry.text.trim() || entry.text !== entry.text.trim())
+        invalid('Invalid topic fact replacement text.');
+      try {
+        if (consolidationSections(entry.text).length !== 1)
+          invalid('Topic fact replacement spans multiple paragraphs.');
+      } catch {
+        invalid('Topic fact replacement spans multiple paragraphs or exceeds the existing body bounds.');
+      }
+    }
+  }
+  if (seen.size !== eligible.size) invalid('Topic facts must cover exactly the eligible ordinals.');
   const currentHandle = (index: number) => {
     if (!Number.isSafeInteger(index) || index < 0 || index >= current.length)
       return invalid('Invalid topic disposition source index.');
@@ -244,15 +253,13 @@ export function projectTopicDraftWire(
     !topicDraftPolicyScope(basis).behaviorSourceIndices.includes(decision.currentBehaviorSourceIndex)
   )
     invalid('Topic behavior source is outside the trusted policy scope.');
-  if ('missingFact' in decision && (!wellFormed(decision.missingFact) || byteLength(decision.missingFact) > 256))
+  if ('missingFact' in decision && !bounded(decision.missingFact, 256))
     invalid('Topic missing fact exceeds its UTF-8 scalar or byte bound.');
   const selectedIndices =
     'reviewedSourceIndices' in decision
       ? decision.reviewedSourceIndices
       : [
-          ...decision.paragraphDispositions.entries.flatMap(entry =>
-            typeof entry === 'string' ? [] : entry.sourceIndices,
-          ),
+          ...facts.entries.flatMap(entry => (typeof entry === 'string' ? [] : entry.sourceIndices)),
           ...('currentBehaviorSourceIndex' in decision ? [decision.currentBehaviorSourceIndex] : []),
         ];
   const rationale = [
@@ -275,17 +282,21 @@ export function projectTopicDraftWire(
         : [];
   const entries: TopicMaintenanceParagraphDispositionV1[] = [];
   const operations: TopicMaintenanceReplaceOperationV1[] = [];
-  for (const entry of decision.paragraphDispositions.entries) {
+  const blocked = decision.policyAssessment === 'conflict' || decision.policyAssessment === 'undetermined';
+  for (const entry of facts.entries) {
     if (typeof entry === 'string' || !basis.paragraphs[entry.ordinal])
       throw new TopicDraftApplicationValidationError({message: 'Invalid topic disposition ordinal.'});
     const fields = {
       ordinal: entry.ordinal,
       beforeHash: basis.paragraphs[entry.ordinal].hash,
-      supportHandles: entry.sourceIndices.map(currentHandle),
-      rationale: comparisons.get(entry.ordinal)!,
+      supportHandles: blocked ? [] : entry.sourceIndices.map(currentHandle),
+      rationale: entry.rationale,
     };
-    entries.push({...fields, disposition: entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition});
-    if (entry.disposition === 'update') operations.push({...fields, text: entry.text});
+    entries.push({
+      ...fields,
+      disposition: blocked ? 'unresolved' : entry.disposition === 'unchanged' ? 'revalidate' : entry.disposition,
+    });
+    if (!blocked && entry.disposition === 'update') operations.push({...fields, text: entry.text});
   }
   const outcome =
     decision.policyAssessment === 'conflict'
@@ -336,6 +347,15 @@ function nativeDisjointUnions(value: unknown): unknown {
       ? (variant as Record<string, unknown>)
       : undefined,
   );
+  // Nullable summaries have disjoint scalar JSON types, rather than an object discriminator.
+  if (
+    entries.length === 2 &&
+    entries.some(entry => entry?.type === 'null') &&
+    entries.some(entry => entry?.type === 'string')
+  ) {
+    const {anyOf, ...rest} = converted;
+    return {...rest, oneOf: anyOf};
+  }
   const discriminatorKeys = ['ordinal', 'policyAssessment', 'disposition'].filter(key =>
     entries.every(entry => {
       const properties = entry?.properties as Record<string, {enum?: readonly unknown[]}> | undefined;
@@ -385,12 +405,15 @@ export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftM
     throw new Error('Topic generation assessments are not mutually exclusive.');
   return {
     ...document,
+    required: document.required as readonly string[],
     properties: {
       ...Object.fromEntries(
         Object.entries(fields ?? {})
-          .filter(([key]) => key !== 'decision')
+          .filter(([key]) => !['decision', 'facts', 'normativeComparisons'].includes(key))
           .map(([key, value]) => [key, nativeDisjointUnions(value)]),
       ),
+      facts: nativeDisjointUnions(fields?.facts) as (typeof branches)[number],
+      normativeComparisons: nativeDisjointUnions(fields?.normativeComparisons) as (typeof branches)[number],
       decision: {oneOf: branches.map(nativeDisjointUnions) as typeof branches},
     },
   };

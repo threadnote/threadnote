@@ -15,6 +15,8 @@ import {
 
 interface ParagraphDecision {
   ordinal: number;
+  currentBehavior: string | null;
+  rationale: string;
   disposition: 'update' | 'unchanged' | 'unresolved';
   sourceIndices: number[];
   text?: string;
@@ -65,7 +67,8 @@ export interface TopicDraftWireFixture {
   targetHash: string;
   observationRevision: string;
   packetDigest: string;
-  paragraphComparisons: {version: number; entries: {ordinal: number; rationale: string}[]};
+  facts: {version: number; entries: ParagraphDecision[]};
+  normativeComparisons: {ordinal: number; rationale: string}[];
   decision: {
     /** Legacy fields retained only for strict-rejection fixtures. */
     currentWitnesses?: {sourceIndex: number; quote: string}[];
@@ -76,7 +79,6 @@ export interface TopicDraftWireFixture {
     policyAssessment: string;
     removedClaims: string[];
     reviewedSourceIndices?: number[];
-    paragraphDispositions: {version: number; entries: ParagraphDecision[]};
   };
 }
 
@@ -90,12 +92,15 @@ export function makeTopicDraftWireEvidence(basis: TopicMaintenanceDraftBasis) {
   );
 }
 
-export function topicDraftEvidenceFromPrompt(prompt: string): Readonly<Record<string, string>> {
+export function topicDraftEvidenceFromPrompt(
+  prompt: string,
+  basis: TopicMaintenanceDraftBasis,
+): Readonly<Record<string, string>> {
   const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
   return Object.freeze(
     Object.fromEntries(
-      packet.sources.map((source: {currentHandle: string; current: {excerpt: string}}) => [
-        source.currentHandle,
+      packet.sources.map((source: {sourceIndex: number; current: {excerpt: string}}) => [
+        topicDraftCurrentSourceHandles(basis)[source.sourceIndex],
         source.current.excerpt,
       ]),
     ),
@@ -113,19 +118,35 @@ export function makeTopicDraftWireFixture(
   const policyUnknown = unresolved && scope.normativeOrdinals.length > 0;
   const sourceReview = !eligible.length && !policyUnknown;
   return {
-    version: 7,
+    version: 8,
     targetHash: basis.targetHash,
     observationRevision: basis.observationRevision,
     packetDigest: basis.packetDigest,
-    paragraphComparisons: {
+    facts: {
       version: 1,
-      entries: basis.paragraphs
-        .filter(paragraph => topicDraftGenerationEligible(paragraph) || paragraph.role === 'normative')
-        .map(paragraph => ({
-          ordinal: paragraph.ordinal,
-          rationale: unresolved ? 'Manual review.' : 'Checked.',
-        })),
+      entries: eligible.map<ParagraphDecision>(paragraph => ({
+        ordinal: paragraph.ordinal,
+        currentBehavior: unresolved ? null : 'Current supported behavior.',
+        rationale: unresolved ? 'Manual review.' : 'Checked.',
+        disposition,
+        sourceIndices: unresolved
+          ? []
+          : [
+              topicDraftCurrentSourceHandles(basis).findIndex(handle =>
+                [...paragraph.citationIds, ...basis.additionalDependencies.map(d => d.citationId)].some(
+                  id => handle === `current:${id}`,
+                ),
+              ),
+            ],
+        ...(disposition === 'update' ? {text: `Current claim ${paragraph.ordinal}.`} : {}),
+      })),
     },
+    normativeComparisons: basis.paragraphs
+      .filter(p => p.role === 'normative')
+      .map(p => ({
+        ordinal: p.ordinal,
+        rationale: unresolved ? 'Manual review.' : 'Checked.',
+      })),
     decision: {
       ...(policyUnknown
         ? {
@@ -136,15 +157,6 @@ export function makeTopicDraftWireFixture(
       policyAssessment: policyUnknown ? 'undetermined' : sourceReview ? 'source-review' : 'no-conflict-observed',
       removedClaims: [],
       ...(sourceReview ? {reviewedSourceIndices: topicDraftCurrentSourceHandles(basis).map((_, index) => index)} : {}),
-      paragraphDispositions: {
-        version: 1,
-        entries: eligible.map<ParagraphDecision>(paragraph => ({
-          ordinal: paragraph.ordinal,
-          disposition,
-          sourceIndices: unresolved ? [] : [0],
-          ...(disposition === 'update' ? {text: `Current claim ${paragraph.ordinal}.`} : {}),
-        })),
-      },
     },
   };
 }

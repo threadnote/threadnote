@@ -44,7 +44,7 @@ describe('private topic generation lifecycle', () => {
         const home = yield* fs.makeTempDirectoryScoped();
         const basis = makeTopicDraftWireBasis(2);
         const wire = makeTopicDraftWireFixture(basis);
-        wire.paragraphComparisons.entries[1].ordinal = 0;
+        wire.facts.entries[1].ordinal = 0;
         const firstWire = JSON.stringify(decodeTopicDraftWire(basis, wire));
         const before = JSON.stringify(wire);
         const summary = yield* withTopicGenerationObservation(home, identity, observation =>

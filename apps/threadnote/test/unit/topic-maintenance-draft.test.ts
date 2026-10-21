@@ -119,8 +119,8 @@ describe('topic maintenance private draft generation', () => {
           );
           if (expected.length)
             expect(
-              branches[0].properties.paragraphDispositions.properties.entries.items.oneOf
-                .filter(
+              topicDraftNativeJsonSchema(topicDraftModelSchema(basis))
+                .properties.facts.properties.entries.items.oneOf.filter(
                   (variant: {properties: {disposition: {enum: string[]}}}) =>
                     variant.properties.disposition.enum[0] === 'update',
                 )
@@ -196,12 +196,12 @@ describe('topic maintenance private draft generation', () => {
         for (const branch of branches) {
           expect(branch.properties).not.toHaveProperty('operations');
           expect(branch.properties).not.toHaveProperty('reviewedHandles');
-          expect(branch.properties.paragraphDispositions.properties.entries).toMatchObject({
+          expect(schema.properties.facts.properties.entries).toMatchObject({
             minItems: count,
             maxItems: count,
           });
-          expect(branch.required).toContain('paragraphDispositions');
-          const variants = branch.properties.paragraphDispositions.properties.entries.items.oneOf;
+          expect(schema.required).toContain('facts');
+          const variants = schema.properties.facts.properties.entries.items.oneOf;
           const updates = variants.filter(
             (variant: {properties: {disposition: {enum: string[]}}}) =>
               variant.properties.disposition.enum[0] === 'update',
@@ -424,32 +424,30 @@ describe('topic maintenance private draft generation', () => {
             const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
             const packet = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]);
             return JSON.stringify({
-              version: 7,
+              version: 8,
               ...identity,
-              paragraphComparisons: {
+              facts: {
                 version: 1,
                 entries: packet.paragraphs
                   .filter(
-                    (item: {role: string; support: string}) =>
-                      item.role === 'normative' || (item.role === 'descriptive' && item.support === 'direct'),
+                    (item: {role: string; support: string}) => item.role === 'descriptive' && item.support === 'direct',
                   )
-                  .map((item: {ordinal: number}) => ({
+                  .map((item: {ordinal: number; sourceIndices: number[]}) => ({
                     ordinal: item.ordinal,
+                    currentBehavior: 'Current supported behavior.',
                     rationale: 'Checked unchanged against current evidence.',
+                    disposition: 'unchanged',
+                    sourceIndices: item.sourceIndices,
                   })),
               },
+              normativeComparisons: packet.paragraphs
+                .filter((item: {role: string}) => item.role === 'normative')
+                .map((item: {ordinal: number}) => ({
+                  ordinal: item.ordinal,
+                  rationale: 'Checked current applicable behavior.',
+                })),
               decision: {
                 policyAssessment: 'no-conflict-observed',
-                paragraphDispositions: {
-                  version: 1,
-                  entries: JSON.parse(/^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1]).map(
-                    (item: {ordinal: number; sourceIndices: number[]}) => ({
-                      ordinal: item.ordinal,
-                      disposition: 'unchanged',
-                      sourceIndices: item.sourceIndices,
-                    }),
-                  ),
-                },
                 removedClaims: [],
               },
             });
@@ -461,24 +459,22 @@ describe('topic maintenance private draft generation', () => {
             expect(paragraph.text).toBe('Request timeout is 30 seconds.');
             expect(evidence.paragraphs[1].text).toBe('This topic describes runtime configuration.');
             expect(prompt).toContain('still-stale facts from earlier events');
-            wire.decision.paragraphDispositions.entries = wire.decision.paragraphDispositions.entries.map(
-              (item: {ordinal: number}) =>
-                item.ordinal === paragraph.ordinal
-                  ? {
-                      ...item,
-                      disposition: 'update',
-                      text: 'Request timeout is 60 seconds.',
-                    }
-                  : item,
+            wire.facts.entries = wire.facts.entries.map((item: {ordinal: number}) =>
+              item.ordinal === paragraph.ordinal
+                ? {
+                    ...item,
+                    disposition: 'update',
+                    text: 'Request timeout is 60 seconds.',
+                  }
+                : item,
             );
-            wire.paragraphComparisons.entries.find(
-              (item: {ordinal: number}) => item.ordinal === paragraph.ordinal,
-            ).rationale = 'The current source states 60 seconds.';
+            wire.facts.entries.find((item: {ordinal: number}) => item.ordinal === paragraph.ordinal).rationale =
+              'The current source states 60 seconds.';
             return JSON.stringify(wire);
           };
           const invalidApplicationJson = (prompt: string) => {
             const wire = JSON.parse(validUpdateJson(prompt));
-            wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
+            wire.facts.entries[0].rationale = 'é'.repeat(513);
             return JSON.stringify(wire);
           };
           const modelResult = (text: string) => ({
@@ -526,8 +522,10 @@ describe('topic maintenance private draft generation', () => {
           const contextualOperation: typeof runSelectedDraft = (_config, _agent, _model, prompt) => {
             const draft = JSON.parse(validJson(prompt));
             const paragraph = JSON.parse(/^Packet: (.+)$/mu.exec(prompt)![1]).paragraphs[1];
-            draft.decision.paragraphDispositions.entries[0] = {
+            draft.facts.entries[0] = {
               ordinal: paragraph.ordinal,
+              currentBehavior: 'Changed behavior.',
+              rationale: 'Current configuration changed.',
               disposition: 'update',
               text: 'This topic now describes changed runtime configuration.',
               sourceIndices: [0],
@@ -699,10 +697,12 @@ describe('topic maintenance private draft generation', () => {
             Effect.sync(() => {
               abstentionCalls += 1;
               const draft = JSON.parse(validJson(prompt));
-              if (abstentionCalls === 1) draft.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
-              draft.decision.paragraphDispositions.entries = draft.decision.paragraphDispositions.entries.map(
-                (item: {ordinal: number}) => ({...item, disposition: 'unresolved', sourceIndices: []}),
-              );
+              if (abstentionCalls === 1) draft.facts.entries[0].rationale = 'é'.repeat(513);
+              draft.facts.entries = draft.facts.entries.map((item: {ordinal: number}) => ({
+                ...item,
+                disposition: 'unresolved',
+                sourceIndices: [],
+              }));
               return remoteResult(JSON.stringify(draft));
             });
           const abstentionReview = yield* remoteRequest(abstentionGenerator);
@@ -972,13 +972,13 @@ const withControllerFixture = <A, E, R>(
       'unchanged',
       schemaModule.topicDraftCurrentEvidence(basis, reviewEvidenceFromPacket(packet.topicEvidence)),
     );
-    valid.decision.paragraphDispositions.entries.forEach((entry, index) => {
+    valid.facts.entries.forEach((entry, index) => {
       entry.disposition = 'update';
       entry.text = index === 0 ? 'Current first fact.' : 'Current second fact.';
       entry.sourceIndices = [index];
     });
     const invalid = structuredClone(valid);
-    invalid.paragraphComparisons.entries[1].ordinal = invalid.paragraphComparisons.entries[0].ordinal;
+    invalid.facts.entries[1].ordinal = invalid.facts.entries[0].ordinal;
     const modelResult = (text: string, call = 1): selectedModule.SelectedDraftResult => ({
       text,
       backendIdentity: 'local-ai',
@@ -1035,10 +1035,9 @@ describe('complete wire controller repair boundary', () => {
         withControllerFixture(f =>
           Effect.gen(function* () {
             const firstWire = structuredClone(violation === 'duplicate' ? f.invalid : f.valid);
-            if (violation === 'utf8') firstWire.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
+            if (violation === 'utf8') firstWire.facts.entries[0].rationale = 'é'.repeat(513);
             if (violation === 'action-duplicate')
-              firstWire.decision.paragraphDispositions.entries[1].ordinal =
-                firstWire.decision.paragraphDispositions.entries[0].ordinal;
+              firstWire.facts.entries[1].ordinal = firstWire.facts.entries[0].ordinal;
             const invalidText = JSON.stringify(schemaModule.decodeTopicDraftWire(f.basis, firstWire));
             const original = JSON.stringify({basis: f.basis, invalid: f.invalid, valid: f.valid});
             let calls = 0;
@@ -1048,10 +1047,10 @@ describe('complete wire controller repair boundary', () => {
                 if (calls === 2) {
                   expect(prompt).toContain(
                     violation === 'duplicate'
-                      ? 'Invalid or duplicate topic comparison ordinal.'
+                      ? 'Invalid or duplicate topic fact ordinal.'
                       : violation === 'utf8'
-                        ? 'Topic comparison rationale exceeds its UTF-8 scalar or byte bound.'
-                        : 'Topic comparisons and dispositions must cover exactly the eligible ordinals.',
+                        ? 'Topic fact rationale exceeds its UTF-8 scalar or byte bound.'
+                        : 'Invalid or duplicate topic fact ordinal.',
                   );
                   expect(prompt).toContain('Prior invalid JSON data:');
                 }
@@ -1128,9 +1127,8 @@ describe('complete wire controller repair boundary', () => {
               const wire = structuredClone(
                 scenario === 'utf8' || scenario === 'canonical-invalid' ? f.valid : f.invalid,
               );
-              if (scenario === 'utf8') wire.paragraphComparisons.entries[0].rationale = 'é'.repeat(513);
-              if (scenario === 'canonical-invalid')
-                wire.decision.paragraphDispositions.entries[0].text = 'Old first fact.';
+              if (scenario === 'utf8') wire.facts.entries[0].rationale = 'é'.repeat(513);
+              if (scenario === 'canonical-invalid') wire.facts.entries[0].text = 'Old first fact.';
               const text = JSON.stringify(wire);
               if (calls === 1) firstText = text;
               return f.modelResult(text, calls);
@@ -1209,8 +1207,8 @@ describe('complete wire controller repair boundary', () => {
                     : {}),
             ...(scenario === 'schema' ? {unexpected: true} : {}),
           };
-          if (scenario === 'missing-comparisons') wire.paragraphComparisons.entries.pop();
-          if (scenario === 'wrong-role-comparison') wire.paragraphComparisons.entries[0].ordinal = 77;
+          if (scenario === 'missing-comparisons') wire.facts.entries.pop();
+          if (scenario === 'wrong-role-comparison') wire.facts.entries[0].ordinal = 77;
           const text =
             scenario === 'malformed'
               ? '{invalid'
