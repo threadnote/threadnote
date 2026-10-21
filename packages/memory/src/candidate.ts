@@ -1479,7 +1479,11 @@ function assertAutomaticReviewEnvelope(review: CandidateReview): void {
   if ((review.version === 5) !== (payload?.version === 3))
     throw CandidateMemoryError.make({message: 'Automatic maintenance requires its closed v5 journal.'});
   if (review.version !== 5) {
-    if (review.candidates.some(candidate => !['durable', 'handoff', 'preference'].includes(candidate.kind)))
+    if (
+      review.candidates.some(
+        candidate => candidate.kind !== undefined && !['durable', 'handoff', 'preference'].includes(candidate.kind),
+      )
+    )
       throw CandidateMemoryError.make({message: 'Generic candidates cannot select ordinary maintenance-only kinds.'});
     return;
   }
