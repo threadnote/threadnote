@@ -18,6 +18,11 @@ const mocks = vi.hoisted(() => ({
   decide: vi.fn(),
   project: vi.fn(),
   caseIdentity: vi.fn(),
+  loadReview: vi.fn(),
+}));
+vi.mock('@threadnote/memory/candidate', async importOriginal => ({
+  ...(await importOriginal<typeof import('@threadnote/memory/candidate')>()),
+  loadCandidateReview: mocks.loadReview,
 }));
 vi.mock('../../src/memory/maintenance/topic_enrollment.js', () => ({
   inspectTopicEnrollment: mocks.inspect,
@@ -49,7 +54,7 @@ const reviewId = `review-${'a'.repeat(24)}`;
 const caseId = `health-case-${'b'.repeat(40)}`;
 const hash = 'c'.repeat(64);
 const uri = 'threadnote://user/tester/memories/durable/topic.md';
-const review = {reviewId, revision: 4, project: 'alpha', maintenance: {basis: {targetUri: uri}}};
+const review = {reviewId, revision: 4, project: 'alpha', maintenance: {version: 1, basis: {targetUri: uri}}};
 type ToolResult = {
   readonly isError?: boolean;
   readonly structuredContent?: Record<string, unknown>;
@@ -75,6 +80,7 @@ beforeEach(() => {
   mocks.enrollmentApply.mockReturnValue(Effect.succeed({status: 'enrolled', targetUri: uri}));
   mocks.draft.mockReturnValue(Effect.succeed(review));
   mocks.view.mockReturnValue(Effect.succeed(review));
+  mocks.loadReview.mockReturnValue(Effect.succeed(review));
   mocks.reviewPreview.mockReturnValue(Effect.succeed(review));
   mocks.reviewApply.mockReturnValue(Effect.succeed(review));
   mocks.decide.mockReturnValue(Effect.succeed(review));
@@ -113,6 +119,7 @@ describe('registered topic MCP adapters', () => {
       expect(mocks.reviewPreview).not.toHaveBeenCalled();
       expect(mocks.reviewApply).not.toHaveBeenCalled();
       expect(mocks.decide).not.toHaveBeenCalled();
+      expect(mocks.loadReview).not.toHaveBeenCalled();
     }),
   );
 
@@ -150,6 +157,7 @@ describe('registered topic MCP adapters', () => {
       expect(mocks.draft).not.toHaveBeenCalled();
       expect(mocks.reviewApply).not.toHaveBeenCalled();
       expect(mocks.enrollmentApply).not.toHaveBeenCalled();
+      expect(mocks.loadReview).not.toHaveBeenCalled();
     }),
   );
 
@@ -174,7 +182,9 @@ describe('registered topic MCP adapters', () => {
         approved: true,
       });
       yield* call('context_maintenance_review', {action: 'defer', reviewId, revision: 4, caseId});
-      expect(mocks.view).toHaveBeenCalledWith(config, reviewId);
+      expect(mocks.view).toHaveBeenCalledWith(config, reviewId, undefined);
+      expect(mocks.loadReview).toHaveBeenCalledTimes(2);
+      expect(mocks.loadReview).toHaveBeenCalledWith(config.agentContextHome, reviewId);
       expect(mocks.reviewPreview).toHaveBeenCalledWith(config, {
         reviewId,
         revision: 4,
