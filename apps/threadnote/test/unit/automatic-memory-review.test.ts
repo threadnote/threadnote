@@ -3,15 +3,19 @@ import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
 import {it as effectIt} from '@effect/vitest';
 import fc from 'fast-check';
-import {describe, expect, it} from 'vitest';
-import {Effect, FileSystem, Path, Result} from 'effect';
+import {describe, expect, it, vi} from 'vitest';
+import {Effect, FileSystem, Path, Ref, Result} from 'effect';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import * as memoryIdentity from '@threadnote/recall/memory/identity';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {prepareMemoryMaintenanceBasis} from '@threadnote/context/memory_maintenance';
-import type {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerStoreTool} from '../../src/mcp/server/store.js';
+import {registerReadTool} from '../../src/mcp/server/recall.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import type {MemoryKind} from '@threadnote/memory/types';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
@@ -45,6 +49,13 @@ import {runContextMaintenance, readContextMaintenancePacket} from '../../src/mem
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+
+function structuredObject(value: unknown): Record<string, unknown> {
+  expect(value).not.toBeNull();
+  expect(typeof value).toBe('object');
+  expect(Array.isArray(value)).toBe(false);
+  return value as Record<string, unknown>;
+}
 
 const fixture = Effect.fn('automaticReview.fixture')(function* (
   kind: MemoryKind = 'durable',
@@ -122,6 +133,74 @@ const fixture = Effect.fn('automaticReview.fixture')(function* (
   return {config, uri, sourceUri, targetPath, sourcePath, content, review, fs, path, home};
 });
 
+const publicRelatedFixture = Effect.fn('automaticReview.publicRelatedFixture')(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const store = yield* ResourceStore;
+  const home = yield* fs.makeTempDirectoryScoped({prefix: 'ordinary-public-related-'});
+  const config: RuntimeConfig = {
+    account: 'local',
+    agentContextHome: home,
+    agentId: 'test',
+    user: 'tester',
+    manifestPath: path.join(home, 'manifest.yaml'),
+  };
+  yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+  const server = new EffectMcpServerAdapter('automatic-related-review-test', '1.0.0', '');
+  registerStoreTool(server, config, 'remember_context', 'Store memory.');
+  registerReadTool(server, config, 'read_context', 'Read memory.');
+  registerContextMaintenanceTools(server, config);
+  const authored = yield* server.invokeTool('remember_context', {
+    kind: 'durable',
+    project: 'fixture',
+    topic: 'source',
+    text: 'The timeout is 60 seconds.',
+    keywords: ['synthetic', 'related-review'],
+  });
+  expect(authored.isError).not.toBe(true);
+  const sourceUri = String(structuredObject(authored.structuredContent).memoryUri);
+  expect(sourceUri).toBe('threadnote://user/tester/memories/durable/projects/fixture/source.md');
+  const target = yield* server.invokeTool('remember_context', {
+    kind: 'durable',
+    project: 'fixture',
+    topic: 'target',
+    text: 'The timeout is 30 seconds.',
+    keywords: ['synthetic', 'related-review'],
+    relations: [{type: 'references', uri: sourceUri}],
+  });
+  expect(target.isError).not.toBe(true);
+  const uri = String(structuredObject(target.structuredContent).memoryUri);
+  expect(uri).toBe('threadnote://user/tester/memories/durable/projects/fixture/target.md');
+  const root = path.join(home, 'data/local/user/tester/memories');
+  const targetPath = path.join(root, 'durable/projects/fixture/target.md');
+  const sourcePath = path.join(root, 'durable/projects/fixture/source.md');
+  const content = yield* fs.readFileString(targetPath);
+  const source = yield* fs.readFileString(sourcePath);
+  const sourceId = parseMemoryDocument(sourceUri, source)!.metadata.memoryId!;
+  const alias = `threadnote://memory/${sourceId}`;
+  expect(sourceId).toMatch(/^tn_[a-z0-9_]+$/u);
+  expect(parseMemoryDocument(uri, content)!.metadata.relations).toEqual([{type: 'references', uri: alias}]);
+  const review = (input: Record<string, unknown>) => server.invokeTool('context_maintenance_review', input);
+  return {
+    fs,
+    path,
+    store,
+    config,
+    server,
+    home,
+    root,
+    uri,
+    sourceUri,
+    targetPath,
+    sourcePath,
+    content,
+    source,
+    sourceId,
+    alias,
+    review,
+  };
+});
+
 function draft(packet: ReturnType<typeof automaticReviewPacket>, text: string, role = 'descriptive') {
   const basis = packet.basis;
   const handle = packet.reviewEvidence[0];
@@ -156,6 +235,218 @@ function draft(packet: ReturnType<typeof automaticReviewPacket>, text: string, r
 }
 
 describe('ordinary memory exact public review', () => {
+  effectIt.effect(
+    'resolves public authored reference aliases through review, cache loss and unchanged manual preview',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* publicRelatedFixture();
+        for (const uri of [f.sourceUri, f.alias]) {
+          const read = yield* f.server.invokeTool('read_context', {uri, responseFormat: 'dual'});
+          expect(read.isError).not.toBe(true);
+          expect(structuredObject(read.structuredContent).content).toBe(f.source);
+        }
+        const inspected = yield* f.review({
+          action: 'automatic-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(f.content),
+        });
+        expect(inspected.isError).not.toBe(true);
+        const packet = inspected.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+        expect(packet.omissions).not.toContain('related-source-unreadable');
+        expect(packet.reviewEvidence).toHaveLength(1);
+        expect(packet.reviewEvidence[0].descriptor.source).toMatchObject({
+          kind: 'memory',
+          uri: f.sourceUri,
+          memoryId: f.sourceId,
+        });
+        expect(packet.basis.reads.filter(read => read.uri === f.sourceUri)).toHaveLength(1);
+        const proposed = yield* f.review({
+          action: 'automatic-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(f.content),
+          draftJson: draft(packet, 'The timeout is 60 seconds.'),
+        });
+        expect(proposed.isError).not.toBe(true);
+        const preview = proposed.structuredContent as unknown as NonNullable<
+          ReturnType<typeof projectAutomaticMemoryReview>
+        >;
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+        const applied = yield* f.review({
+          action: 'apply',
+          reviewId: preview.reviewId,
+          revision: preview.revision,
+          approvalDigest: preview.approval!.approvalDigest,
+          approved: true,
+        });
+        expect(applied.isError).not.toBe(true);
+        const accepted = yield* f.fs.readFileString(f.targetPath);
+        expect(accepted).toBe(preview.approval!.content);
+        const current = parseMemoryDocument(f.uri, accepted)!;
+        expect(current.metadata.relations).toEqual([{type: 'references', uri: f.alias}]);
+        expect(current.metadata.reviewedSupport!.active.sources[0].source).toMatchObject({
+          kind: 'memory',
+          uri: f.sourceUri,
+        });
+        yield* f.fs.remove(f.path.join(f.home, 'context-maintenance/automatic'), {recursive: true, force: true});
+        const rebuiltResult = yield* f.review({
+          action: 'automatic-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(accepted),
+        });
+        expect(rebuiltResult.isError).not.toBe(true);
+        const rebuilt = rebuiltResult.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+        expect(rebuilt.omissions).not.toContain('related-source-unreadable');
+        expect(rebuilt.basis.assessment.coverage.omittedSources).toBe(0);
+        expect(rebuilt.basis.reads).toHaveLength(2);
+        expect(rebuilt.basis.reads.filter(read => read.uri === f.sourceUri)).toHaveLength(1);
+        expect(rebuilt.basis.assessment.evidence.filter(entry => entry.source.kind === 'memory')).toHaveLength(1);
+        const manualResult = yield* f.review({
+          action: 'manual-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(accepted),
+          desiredBody: current.body,
+        });
+        expect(manualResult.isError).not.toBe(true);
+        const manual = manualResult.structuredContent as unknown as NonNullable<
+          ReturnType<typeof projectAutomaticMemoryReview>
+        >;
+        expect(manual.approval!.reviewedSupport.active.paragraphs).toEqual(
+          current.metadata.reviewedSupport!.active.paragraphs,
+        );
+        expect(manual.approval!.reviewedSupport.active.sources).toEqual(
+          current.metadata.reviewedSupport!.active.sources,
+        );
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(accepted);
+        expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const failure of ['missing', 'ambiguous'] as const) {
+    effectIt.effect(`withholds a ${failure} public authored reference alias without changing the target`, () =>
+      Effect.gen(function* () {
+        const f = yield* publicRelatedFixture();
+        const location = {account: f.config.account, home: f.home, user: f.config.user};
+        if (failure === 'missing') yield* f.store.remove(location, f.sourceUri);
+        else
+          yield* f.store.write(
+            location,
+            f.sourceUri.replace('/source.md', '/duplicate.md'),
+            f.source.replace('topic: source', 'topic: duplicate'),
+            {mode: 'create'},
+          );
+        const inspected = yield* f.review({
+          action: 'automatic-preview',
+          uri: f.uri,
+          expectedContentHash: sha256HexSync(f.content),
+        });
+        expect(inspected.isError).not.toBe(true);
+        const packet = inspected.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+        expect(packet.omissions).toContain('related-source-unreadable');
+        expect(packet.reviewEvidence).toHaveLength(0);
+        expect(packet.basis.reads).toHaveLength(1);
+        expect(packet.basis.assessment.coverage.omittedSources).toBe(1);
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect('withholds a public authored alias when its live identity changes after resolution', () =>
+    Effect.gen(function* () {
+      const f = yield* publicRelatedFixture();
+      const changed = yield* Ref.make(false);
+      const resolve = memoryIdentity.resolveMemoryIdentityAliases;
+      const raced = f.source.replace(`memory_id: ${f.sourceId}`, 'memory_id: tn_reused_source_identity');
+      yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi
+            .spyOn(memoryIdentity, 'resolveMemoryIdentityAliases')
+            .mockImplementation((...args) =>
+              resolve(...args).pipe(
+                Effect.tap(routes =>
+                  routes.some(route => route.requestedUri === f.alias)
+                    ? Ref.getAndSet(changed, true).pipe(
+                        Effect.flatMap(alreadyChanged =>
+                          alreadyChanged
+                            ? Effect.void
+                            : f.store.write(
+                                {account: f.config.account, home: f.home, user: f.config.user},
+                                f.sourceUri,
+                                raced,
+                                {mode: 'replace'},
+                              ),
+                        ),
+                      )
+                    : Effect.void,
+                ),
+              ),
+            ),
+        ),
+        () =>
+          Effect.gen(function* () {
+            const inspected = yield* f.review({
+              action: 'automatic-preview',
+              uri: f.uri,
+              expectedContentHash: sha256HexSync(f.content),
+            });
+            expect(yield* Ref.get(changed)).toBe(true);
+            expect(inspected.isError).not.toBe(true);
+            const packet = inspected.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+            expect(packet.omissions).toContain('related-source-unreadable');
+            expect(packet.reviewEvidence).toHaveLength(0);
+            expect(packet.basis.reads).toHaveLength(1);
+            expect(packet.basis.assessment.coverage.omittedSources).toBe(1);
+            expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+            expect(yield* f.fs.readFileString(f.sourcePath)).toBe(raced);
+          }),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('refuses public apply when an authored source identity becomes ambiguous after preview', () =>
+    Effect.gen(function* () {
+      const f = yield* publicRelatedFixture();
+      const inspected = yield* f.review({
+        action: 'automatic-preview',
+        uri: f.uri,
+        expectedContentHash: sha256HexSync(f.content),
+      });
+      expect(inspected.isError).not.toBe(true);
+      const packet = inspected.structuredContent as unknown as ReturnType<typeof automaticReviewPacket>;
+      expect(packet.reviewEvidence).toHaveLength(1);
+      const proposed = yield* f.review({
+        action: 'automatic-preview',
+        uri: f.uri,
+        expectedContentHash: sha256HexSync(f.content),
+        draftJson: draft(packet, 'The timeout is 60 seconds.'),
+      });
+      expect(proposed.isError).not.toBe(true);
+      const preview = proposed.structuredContent as unknown as NonNullable<
+        ReturnType<typeof projectAutomaticMemoryReview>
+      >;
+      const duplicateUri = f.sourceUri.replace('/source.md', '/duplicate.md');
+      yield* f.store.write(
+        {account: f.config.account, home: f.home, user: f.config.user},
+        duplicateUri,
+        f.source.replace('topic: source', 'topic: duplicate'),
+        {mode: 'create'},
+      );
+      const ambiguous = yield* f.server.invokeTool('read_context', {uri: f.alias, responseFormat: 'dual'});
+      expect(ambiguous.isError).toBe(true);
+      expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+      const applied = yield* f.review({
+        action: 'apply',
+        reviewId: preview.reviewId,
+        revision: preview.revision,
+        approvalDigest: preview.approval!.approvalDigest,
+        approved: true,
+      });
+      expect(applied.isError).toBe(true);
+      expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+      expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
   for (const action of ['automatic-preview', 'manual-preview'] as const) {
     effectIt.effect(
       `reviews all seventeen produced handles in a public ${action} request`,

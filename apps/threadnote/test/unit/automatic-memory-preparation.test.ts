@@ -26,6 +26,9 @@ import {
 import {buildTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
 import {createMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
+import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
 import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import type {ContextHealthCitationSourceExcerptV1} from '@threadnote/context/citation_validation';
@@ -38,6 +41,8 @@ import {
   advanceAutomaticPreparation,
   prepareAutomaticMemory,
   readAutomaticCodeEvidence,
+  readLiveAutomaticPreparation,
+  automaticMemorySourceUriScopes,
 } from '@threadnote/threadnote/memory/context/maintenance_preparation';
 import {
   readPreparedMemory,
@@ -237,7 +242,234 @@ function reviewedCodeRecord(roots: readonly MemoryCodeCitationV1[], active: read
   return record('reviewed_code', body, {schemaVersion: 11, codeCitations: roots, reviewedSupport});
 }
 
+const checkRelatedSourceBudget = Effect.fn('test.relatedSourceBudget')(function* (
+  aliases: readonly number[],
+  overflow: boolean,
+  batch = false,
+) {
+  const f = yield* fixture();
+  const body = 'This exact current statement has eight approved sources.';
+  const sources = Array.from({length: 9}, (_, index) => record(`budget_source_${index}`, body));
+  for (const source of sources) yield* f.write(source);
+  const descriptors = sources.slice(0, 8).map(source => {
+    const fragment = memoryMaintenanceFragmentSource(source, 0);
+    return {id: automaticMaintenanceEvidenceId(fragment), source: fragment, scope: 'personal' as const};
+  });
+  const active = createReviewedSupportSnapshot({
+    bodyHash: sha256HexSync(body),
+    paragraphs: [
+      {
+        ordinal: 0,
+        hash: sha256HexSync(body),
+        role: 'descriptive',
+        support: 'direct',
+        evidenceIds: descriptors.map(descriptor => descriptor.id),
+      },
+    ],
+    sources: descriptors,
+    acceptance: {
+      reviewId: 'review-related-budget',
+      approvedAt: NOW,
+      targetBeforeHash: '1'.repeat(64),
+      preparationDigest: '2'.repeat(64),
+      sourceVectorDigest: '3'.repeat(64),
+    },
+  });
+  const target = record('budget_target', body, {
+    schemaVersion: 11,
+    reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
+    relations: [...aliases, ...(overflow ? [8] : [])].map(index => ({
+      type: 'references',
+      uri: memoryIdentityAlias(sources[index].metadata.memoryId!),
+    })),
+  });
+  yield* f.write(target);
+  const live = yield* readLiveAutomaticPreparation(f.config, target.uri);
+  expect(live.prepared.reads).toHaveLength(9);
+  expect(new Set(live.prepared.reads.map(read => read.uri)).size).toBe(9);
+  expect(live.prepared.assessment.evidence).toHaveLength(8);
+  expect(live.prepared.assessment.coverage.omittedSources).toBe(Number(overflow));
+  expect(live.prepared.omissions.includes('related-source-budget')).toBe(overflow);
+  expect(live.prepared.reads.some(read => read.uri === sources[8].uri)).toBe(false);
+  if (batch) {
+    yield* settle(f, 6, 100);
+    const cached = (yield* readPreparedMemory(f.config, target.uri))!;
+    expect(cached.reads).toHaveLength(9);
+    expect(new Set(cached.reads.map(read => read.uri)).size).toBe(9);
+    expect(cached.assessment.coverage.omittedSources).toBe(Number(overflow));
+    expect(cached.omissions.includes('related-source-budget')).toBe(overflow);
+    expect(cached.relevantRevision).toBe(live.prepared.relevantRevision);
+  }
+  expect(yield* f.store.read(f.location, target.uri)).toBe(target.content);
+});
+
 describe('automatic private preparation', () => {
+  effectIt.effect('retains legacy-origin ambiguity, partial inventory, successor and access fences after dedupe', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const body = 'Exact legacy-origin claim.';
+      const origin = record('origin_control', body);
+      const ambiguous = [
+        record('ambiguous_one', body, {memoryId: 'tn_ambiguous_control'}),
+        record('ambiguous_two', body, {memoryId: 'tn_ambiguous_control'}),
+      ];
+      const archived = record('old_control', body, {status: 'archived'});
+      const successor = record('successor_control', body, {relations: [{type: 'supersedes', uri: archived.uri}]});
+      const blocked = record('blocked_control', body, {trust: 'untrusted'});
+      const carrier = record('carrier_control', body, {
+        relations: [
+          {type: 'references', uri: memoryIdentityAlias(origin.metadata.memoryId!)},
+          {type: 'references', uri: memoryIdentityAlias('tn_missing_control')},
+          {type: 'references', uri: memoryIdentityAlias('tn_ambiguous_control')},
+          {type: 'depends_on', uri: archived.uri},
+          {type: 'references', uri: blocked.uri},
+        ],
+      });
+      const reviewed = reviewConsolidation(
+        body,
+        [origin, carrier].map(captureConsolidationSource),
+        [
+          {
+            section: body,
+            disposition: 'direct',
+            supports: [
+              {sourceUri: origin.uri, fragment: 0, citationIds: [], relationIndexes: []},
+              {sourceUri: carrier.uri, fragment: 0, citationIds: [], relationIndexes: [0, 1, 2, 3, 4]},
+            ],
+          },
+        ],
+        {
+          operationId: 'legacy-dedupe-control',
+          cleanup: 'keep',
+          cleanupShared: false,
+          target: {
+            kind: 'durable',
+            status: 'active',
+            project: 'selected',
+            topic: 'legacy_control',
+            sourceAgentClient: 'test',
+          },
+        },
+      );
+      const target = record('legacy_control', body, {
+        consolidation: reviewed.provenance,
+        relations: reviewed.relations,
+      });
+      for (const source of [origin, carrier, ...ambiguous, archived, successor, blocked, target])
+        yield* f.write(source);
+      const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
+      const advance = (complete: boolean, records = snapshot.records) =>
+        Effect.gen(function* () {
+          for (let tick = 0; tick < 3; tick++)
+            yield* advanceAutomaticPreparation(
+              f.config,
+              {...snapshot, records, complete},
+              new Map(),
+              () => Effect.succeed({evidence: [], candidates: [], reads: [], omissions: [], searchedScopes: []}),
+              {maxRecords: 4},
+            );
+        });
+      yield* advance(false);
+      const partial = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(partial.omissions).toContain('related-source-unknown');
+      expect(partial.omissions).toContain('related-source-ambiguous');
+      expect(partial.omissions).toContain('related-source-inactive');
+      expect(partial.omissions).toContain('related-source-policy');
+      expect(partial.reads).toHaveLength(3);
+      expect(new Set(partial.reads.map(read => read.uri))).toEqual(new Set([target.uri, carrier.uri, origin.uri]));
+      yield* advance(true);
+      const complete = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(complete.omissions).toContain('related-source-unavailable');
+      expect(complete.omissions).toContain('related-source-ambiguous');
+      expect(complete.omissions).toContain('related-successor-candidate');
+      expect(complete.omissions).toContain('related-source-policy');
+      expect(new Set(complete.reads.map(read => read.uri))).toEqual(
+        new Set([target.uri, carrier.uri, origin.uri, successor.uri]),
+      );
+      expect(complete.origin?.receipt).toEqual(reviewed.provenance);
+      const timestampOnly = record('origin_control', body, {...origin.metadata, timestamp: '2026-10-22T00:00:00.000Z'});
+      yield* f.write(timestampOnly);
+      yield* advance(
+        true,
+        snapshot.records.map(record => (record.uri === origin.uri ? timestampOnly : record)),
+      );
+      const refreshed = (yield* readPreparedMemory(f.config, target.uri))!;
+      expect(refreshed.reads).not.toEqual(complete.reads);
+      expect(refreshed.relevantRevision).toBe(complete.relevantRevision);
+      expect(refreshed.origin?.receipt).toEqual(reviewed.provenance);
+      expect(yield* f.store.read(f.location, target.uri)).toBe(target.content);
+    }).pipe(TestClock.withLive, provide),
+  );
+
+  effectIt.effect('deduplicates all eight active paths and authored aliases before source budgeting', () =>
+    Effect.gen(function* () {
+      yield* checkRelatedSourceBudget(
+        Array.from({length: 8}, (_, index) => index),
+        false,
+        true,
+      );
+      yield* checkRelatedSourceBudget(
+        Array.from({length: 8}, (_, index) => index),
+        true,
+        true,
+      );
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'canonical read budgets ignore redundant alias subsets and ordering',
+    {
+      aliases: fc.shuffledSubarray(Array.from({length: 8}, (_, index) => index)),
+      overflow: fc.boolean(),
+    },
+    ({aliases, overflow}) =>
+      checkRelatedSourceBudget(aliases, overflow).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 4, seed: 756301}, timeout: 30000},
+  );
+
+  effectIt.effect(
+    'resolves shared identities within the eligible team despite retained private and other-team copies',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const personal = record('scope');
+        const shared = record('scope', personal.body, {
+          visibility: 'shared',
+          authority: 'reviewed_shared',
+          trust: 'approved',
+        });
+        const teamA = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-a/')};
+        const teamB = {...shared, uri: shared.uri.replace('/memories/', '/memories/shared/team-b/')};
+        const privateOnly = record('private_only');
+        for (const source of [personal, teamA, teamB, privateOnly]) yield* f.write(source);
+        const scopes = automaticMemorySourceUriScopes(f.config, teamA);
+        const [resolved] = yield* resolveMemoryIdentityAliases(
+          f.config,
+          [memoryIdentityAlias(personal.metadata.memoryId!)],
+          scopes,
+          {validateNow: true},
+        );
+        expect(resolved.canonicalUri).toBe(teamA.uri);
+        const live = yield* readContextMaintenanceCanonicalRecord(f.config, resolved.canonicalUri);
+        yield* verifyResolvedMemoryIdentity(resolved, live.record.uri, live.record.content);
+        expect(
+          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(privateOnly.metadata.memoryId!)], scopes, {
+            validateNow: true,
+          }).pipe(Effect.flip),
+        ).toMatchObject({reason: 'not-found'});
+        const conflict = {
+          ...record('conflict', 'Conflicting shared projection.', teamA.metadata),
+          uri: teamA.uri.replace('/scope.md', '/conflict.md'),
+        };
+        yield* f.write(conflict);
+        expect(
+          yield* resolveMemoryIdentityAliases(f.config, [memoryIdentityAlias(personal.metadata.memoryId!)], scopes, {
+            validateNow: true,
+          }).pipe(Effect.flip),
+        ).toMatchObject({reason: 'ambiguous'});
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect(
     'roundtrips V2 preparation with sixteen roots/active descriptors and thirty-two exact candidates',
     () =>

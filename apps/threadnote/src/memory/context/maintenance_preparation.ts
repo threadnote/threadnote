@@ -1,5 +1,6 @@
 import {Effect, FileSystem, Option, Path, Result} from 'effect';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -7,9 +8,16 @@ import {
   authorizeAutomaticSharedMemorySource,
 } from '../../git_proposal/topic_maintenance_commands.js';
 import type {ApprovedSourceDescriptorV1} from '@threadnote/memory/reviewed-support';
-import {readSeedManifest} from '@threadnote/workspace/manifest';
+import {readSeedManifest, uriSegment} from '@threadnote/workspace/manifest';
+import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
+import {verifyAuthoredMemoryRelationTargetIdentities} from '../relations.js';
 import {expandPath} from '@threadnote/platform/paths';
-import {isAgentArtifactUri, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  isAgentArtifactUri,
+  isSharedMemoryUri,
+  MAX_MEMORY_RELATIONS,
+  type MemoryRecord,
+} from '@threadnote/memory/document';
 import {MAX_MEMORY_CODE_CITATIONS} from '@threadnote/memory/code/citation';
 import {
   automaticMaintenanceEvidenceId,
@@ -18,7 +26,11 @@ import {
   MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE,
   type AutomaticMaintenanceEvidenceV1,
 } from '@threadnote/memory/automatic-maintenance';
-import {validateConsolidationProvenance, validateConsolidationProvenanceV2} from '@threadnote/memory/consolidation';
+import {
+  MAX_CONSOLIDATION_SOURCES,
+  validateConsolidationProvenance,
+  validateConsolidationProvenanceV2,
+} from '@threadnote/memory/consolidation';
 import {prepareMemoryMaintenanceBasis, memoryMaintenanceFragmentSource} from '@threadnote/context/memory_maintenance';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {captureMemoryCodeCitations, memoryCodeCitationProjectScopeReceipt} from '@threadnote/context/citation/capture';
@@ -46,6 +58,13 @@ type InventorySnapshot = Effect.Success<ReturnType<typeof prepareContextMaintena
 type Candidate = PreparedMemoryV1['candidates'][number];
 type Read = PreparedMemoryV1['reads'][number];
 const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
+const RELATED_SOURCE_BUDGET = 8;
+
+/** Match public memory reads, narrowed to the already eligible team for a shared target. */
+export function automaticMemorySourceUriScopes(config: RuntimeConfig, record: MemoryRecord): readonly string[] {
+  const root = `threadnote://user/${uriSegment(config.user)}/memories`;
+  return [isSharedMemoryUri(record.uri) ? `${root}/shared/${record.uri.split('/shared/')[1].split('/')[0]}` : root];
+}
 
 /** Meaning-bearing policy only: incidental timestamps and other assessments cannot recursively churn support. */
 export function automaticPreparationMemoryContext(record: MemoryRecord) {
@@ -528,11 +547,13 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
         ]),
       ];
       const visited = new Set([uri]);
-      if (refs.length > 8) {
+      // Reviewed-origin references are a subset of the validated receipt's source vector.
+      const selectorBudget = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
+      if (refs.length > selectorBudget) {
         omissions.push('related-source-budget');
-        omittedSources += refs.length - 8;
+        omittedSources += refs.length - selectorBudget;
       }
-      for (const ref of refs.slice(0, 8)) {
+      for (const ref of refs.slice(0, selectorBudget)) {
         const resolved = resolveRelationTarget(snapshot.records, ref);
         if (resolved.state === 'conflicted') {
           omissions.push('related-source-ambiguous');
@@ -562,6 +583,11 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
         }
         if (visited.has(projected.uri)) continue;
         visited.add(projected.uri);
+        if (visited.size - 1 > RELATED_SOURCE_BUDGET) {
+          omissions.push('related-source-budget');
+          omittedSources++;
+          continue;
+        }
         if (projected.metadata.status !== 'active') {
           omissions.push('related-source-inactive');
           omittedSources++;
@@ -739,9 +765,15 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     }
   >();
   const reads: Read[] = [{uri, hash: target.hash}];
-  let omittedSources = Math.max(0, refs.length - 8);
-  const omissions: string[] = [];
-  for (const ref of refs.slice(0, 8)) {
+  // Approved paths and authored aliases can name the same source. Resolve the
+  // bounded selectors before spending the budget on distinct canonical reads.
+  const selectorBudget = RELATED_SOURCE_BUDGET + MAX_MEMORY_RELATIONS;
+  const allowedUriScopes = automaticMemorySourceUriScopes(config, record);
+  const visited = new Set([uri]);
+  const liveSources = new Map<string, MemoryRecord>();
+  let omittedSources = Math.max(0, refs.length - selectorBudget);
+  const omissions: string[] = omittedSources ? ['related-source-budget'] : [];
+  for (const ref of refs.slice(0, selectorBudget)) {
     const stored = record.metadata.reviewedSupport?.active.sources.find(
       entry => entry.source.kind === 'memory' && entry.source.uri === ref,
     );
@@ -749,14 +781,49 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       stored?.source.kind === 'memory' && stored.locator
         ? yield* resolveAutomaticSharedMemorySource(config, stored.source, stored.locator)
         : undefined;
+    const route = portable
+      ? undefined
+      : yield* resolveMemoryIdentityAliases(config, [ref], allowedUriScopes, {
+          validateNow: true,
+        }).pipe(Effect.result);
+    if (route && Result.isFailure(route)) {
+      omittedSources++;
+      omissions.push('related-source-unreadable');
+      continue;
+    }
+    const identity = route && Result.isSuccess(route) ? route.success[0] : undefined;
+    const actualUri = portable ? portable.uri : identity!.canonicalUri;
+    if (!portable && isSharedMemoryUri(uri) && !allowedUriScopes.some(scope => resourceIdIsWithin(actualUri, scope))) {
+      omittedSources++;
+      omissions.push('related-source-policy');
+      continue;
+    }
+    if (visited.has(actualUri)) {
+      const prior = liveSources.get(actualUri);
+      if (identity && prior) {
+        const verified = yield* verifyResolvedMemoryIdentity(identity, actualUri, prior.content).pipe(Effect.result);
+        if (Result.isFailure(verified)) {
+          omittedSources++;
+          omissions.push('related-source-unreadable');
+        }
+      }
+      continue;
+    }
+    visited.add(actualUri);
+    if (visited.size - 1 > RELATED_SOURCE_BUDGET) {
+      omittedSources++;
+      omissions.push('related-source-budget');
+      continue;
+    }
     const selected = portable
       ? Result.succeed({
           record: {...portable.record, uri: ref},
           hash: sha256HexSync(portable.record.content),
-          actualUri: portable.uri,
+          actualUri,
         })
-      : yield* readContextMaintenanceCanonicalRecord(config, ref).pipe(
-          Effect.map(value => ({...value, actualUri: value.record.uri})),
+      : yield* readContextMaintenanceCanonicalRecord(config, actualUri).pipe(
+          Effect.tap(value => verifyResolvedMemoryIdentity(identity!, actualUri, value.record.content)),
+          Effect.map(value => ({...value, actualUri})),
           Effect.result,
         );
     if (Result.isFailure(selected)) {
@@ -792,6 +859,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     if (portable && stored?.source.kind === 'memory')
       portableReads.set(selected.success.actualUri, {source: stored.source, locator: portable.locator});
     sources.push(source);
+    liveSources.set(selected.success.actualUri, source);
     reads.push({uri: selected.success.actualUri, hash: selected.success.hash});
   }
   const code =
@@ -825,6 +893,21 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       : (yield* readContextMaintenanceCanonicalRecord(config, read.uri)).hash;
     if (actual !== read.hash) return yield* new AutomaticPreparationError({reason: 'memory-fence-changed'});
   }
+  yield* verifyAuthoredMemoryRelationTargetIdentities(
+    config,
+    [...liveSources].flatMap(([sourceUri, source]) =>
+      portableReads.has(sourceUri)
+        ? []
+        : [
+            {
+              content: source.content,
+              memoryId: source.metadata.memoryId,
+              uri: sourceUri,
+              allowedUriScopes,
+            },
+          ],
+    ),
+  );
   const identity =
     root && code.candidates.some(candidate => candidate.excerpt?.provenance === 'current-verified')
       ? yield* resolveRepositoryIdentity(root)

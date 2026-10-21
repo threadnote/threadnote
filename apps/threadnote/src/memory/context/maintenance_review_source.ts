@@ -3,12 +3,13 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {resolveAutomaticSharedMemorySource} from '../../git_proposal/topic_maintenance_commands.js';
 import {readSeedManifest} from '@threadnote/workspace/manifest';
+import {verifyAuthoredMemoryRelationTargetIdentities} from '../relations.js';
 import {expandPath} from '@threadnote/platform/paths';
 import {readContextHealthCitationEvidence} from '@threadnote/context/citation_validation';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {assertAutomaticMaintenanceTarget} from '@threadnote/memory/automatic-maintenance';
 import {readContextMaintenanceCanonicalRecord} from './maintenance_inventory.js';
-import {readAutomaticCodeEvidence} from './maintenance_preparation.js';
+import {automaticMemorySourceUriScopes, readAutomaticCodeEvidence} from './maintenance_preparation.js';
 import {AUTOMATIC_PREPARATION_MAPPER} from './maintenance_preparation_state.js';
 import type {AutomaticMaintenanceReviewPayloadV3} from '@threadnote/memory/topic-maintenance-draft';
 import type {MemoryRecord} from '@threadnote/memory/document';
@@ -164,6 +165,7 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
       portableReads.set(resolved.uri, resolved);
       portableReads.set(entry.descriptor.source.uri, resolved);
     }
+  const ordinarySources = [];
   for (const read of review.basis.reads) {
     if (read.uri === record.uri || read.uri.startsWith('code:')) continue;
     const routed = portableReads.get(read.uri);
@@ -179,7 +181,16 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
       current.record.metadata.authority === 'external'
     )
       return yield* fail('A reviewed canonical source or its current access policy changed.');
+    if (!routed)
+      ordinarySources.push({
+        content: current.record.content,
+        memoryId: current.record.metadata.memoryId,
+        uri: current.record.uri,
+        allowedUriScopes: automaticMemorySourceUriScopes(config, record),
+      });
   }
+  // Exact physical bytes alone cannot detect a newly ambiguous stable identity.
+  yield* verifyAuthoredMemoryRelationTargetIdentities(config, ordinarySources);
   const expectedCode = review.basis.reads.filter(read => read.uri.startsWith('code:'));
   if (expectedCode.length) {
     const code = yield* readAutomaticCodeEvidence(config, record, root);
