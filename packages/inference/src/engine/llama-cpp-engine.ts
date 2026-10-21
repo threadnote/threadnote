@@ -48,10 +48,17 @@ export interface LlamaRankingSession {
   ) => Effect.Effect<readonly number[], InferenceInterrupted | RerankingFailed>;
 }
 
+export interface GenerationSampling {
+  readonly temperature: number;
+  readonly topP: number;
+  readonly topK: number;
+}
+
 export interface LlamaStructuredGenerationRequest {
   readonly jsonSchema: Readonly<Record<string, unknown>>;
   readonly maxTokens: number;
   readonly prompt: string;
+  readonly sampling?: GenerationSampling;
   readonly seed?: number;
   readonly system?: string;
 }

@@ -8,15 +8,9 @@ import type {
   ModelNotInstalled,
   NativeRuntimeError,
 } from './errors.js';
-import {LlamaCppEngine} from './llama-cpp-engine.js';
+import {LlamaCppEngine, type LlamaStructuredGenerationRequest} from './llama-cpp-engine.js';
 
-export interface StructuredGenerationRequest {
-  readonly jsonSchema: Readonly<Record<string, unknown>>;
-  readonly maxTokens: number;
-  readonly prompt: string;
-  readonly seed?: number;
-  readonly system?: string;
-}
+export type StructuredGenerationRequest = LlamaStructuredGenerationRequest;
 
 export type StructuredGenerationError =
   | GenerationFailed

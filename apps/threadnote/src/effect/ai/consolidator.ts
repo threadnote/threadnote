@@ -5,6 +5,8 @@ import {AiError, LanguageModel} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {generateWithSelectedLocalModel} from '@threadnote/inference/models/inference';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import type {GenerationSampling} from '@threadnote/inference/engine/llama-cpp-engine';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {
@@ -20,6 +22,45 @@ import {
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../manager/topic_draft_schema.js';
+
+export interface DraftGenerationSettings {
+  readonly maxOutputTokens: 4000;
+  readonly seed?: 0;
+  readonly sampling?: GenerationSampling & {readonly profileId: string};
+}
+
+const topicGemmaSampling = Object.freeze({
+  profileId: 'gemma4-e4b-v1',
+  temperature: 1,
+  topP: 0.95,
+  topK: 64,
+});
+
+export function localDraftGenerationSettings(
+  modelId: string,
+  purpose: 'consolidation' | 'topic-maintenance',
+): DraftGenerationSettings {
+  return {
+    maxOutputTokens: 4000,
+    seed: 0,
+    ...(purpose === 'topic-maintenance' && modelId === CORE_GENERATION_MODEL_ID ? {sampling: topicGemmaSampling} : {}),
+  };
+}
+
+export function serializeDraftGenerationSettings(settings: DraftGenerationSettings): string {
+  return [
+    ...(settings.seed === undefined ? [] : [`seed=${settings.seed}`]),
+    `maxTokens=${settings.maxOutputTokens}`,
+    ...(settings.sampling
+      ? [
+          `profile=${settings.sampling.profileId}`,
+          `temperature=${settings.sampling.temperature}`,
+          `topP=${settings.sampling.topP}`,
+          `topK=${settings.sampling.topK}`,
+        ]
+      : []),
+  ].join(';');
+}
 
 export const EFFECT_AI_ENABLED_ENV = 'THREADNOTE_EFFECT_AI';
 export const EFFECT_AI_API_KEY_ENV = 'THREADNOTE_EFFECT_AI_API_KEY';
@@ -243,12 +284,14 @@ const runNativeAiObject = Effect.fn('AiConsolidator.generateNativeObject')(funct
   modelId: string | undefined,
   system: string,
   jsonSchema: Readonly<Record<string, unknown>>,
+  settings: DraftGenerationSettings,
 ) {
   const request = {
     jsonSchema,
-    maxTokens: 4000,
+    maxTokens: settings.maxOutputTokens,
     prompt,
-    seed: 0,
+    seed: settings.seed,
+    ...(settings.sampling ? {sampling: settings.sampling} : {}),
     system,
   };
   const output = yield* modelId === undefined
@@ -283,6 +326,7 @@ export const runNativeAiConsolidation = Effect.fn('AiConsolidator.consolidateNat
     modelId,
     system,
     Schema.toJsonSchemaDocument(ConsolidationDraft).schema,
+    localDraftGenerationSettings(modelId ?? '', 'consolidation'),
   );
   if (output === undefined) return undefined;
   const draft = yield* Schema.decodeUnknownEffect(ConsolidationDraft)(output).pipe(
@@ -316,6 +360,7 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
     modelId,
     'Return one complete topic maintenance JSON object matching the supplied schema.',
     topicDraftNativeJsonSchema(schema),
+    localDraftGenerationSettings(modelId, 'topic-maintenance'),
   );
   if (output === undefined)
     return yield* AiConsolidationFailed.make({

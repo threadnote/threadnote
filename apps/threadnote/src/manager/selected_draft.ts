@@ -17,6 +17,9 @@ import {ManagerOperationError} from './operation_error.js';
 import {runConsolidationAgentCommand} from './consolidation_agent.js';
 import {
   ensureEffectAiReady,
+  localDraftGenerationSettings,
+  serializeDraftGenerationSettings,
+  type DraftGenerationSettings,
   resolveEffectAiConfiguration,
   runEffectAiConsolidation,
   runEffectAiTopicDraft,
@@ -26,7 +29,7 @@ import {
 } from '../effect/ai/consolidator.js';
 import {topicDraftModelSchema} from './topic_draft_schema.js';
 
-export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v23';
+export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v24';
 export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
 export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
 export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;
@@ -38,7 +41,7 @@ export interface SelectedDraftResult {
   readonly modelVersion?: string;
   readonly usage: TopicGenerationUsageV1;
   readonly outputRepresentation?: 'provider-text' | 'decoded-json';
-  readonly settings: {readonly maxOutputTokens: 4000; readonly seed?: 0};
+  readonly settings: DraftGenerationSettings;
 }
 
 export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError>()('SelectedDraftError', {
@@ -71,7 +74,7 @@ export const selectedTopicDraftIdentity = Effect.fn('topicMaintenance.selectedDr
       model: model.id,
       modelVersion: `${manifest.revision}:${manifest.sha256}`,
       backendIdentity: 'local-ai',
-      settings: 'seed=0;maxTokens=4000',
+      settings: serializeDraftGenerationSettings(localDraftGenerationSettings(model.id, 'topic-maintenance')),
     };
   }
   if (agent === 'effect-ai') {
@@ -83,7 +86,7 @@ export const selectedTopicDraftIdentity = Effect.fn('topicMaintenance.selectedDr
       model: model.id,
       modelVersion: remoteModelVersion(resolved.configuration.apiUrl),
       backendIdentity: resolved.configuration.apiUrl ?? 'effect-ai',
-      settings: 'maxTokens=4000',
+      settings: serializeDraftGenerationSettings({maxOutputTokens: 4000}),
     };
   }
   return yield* fail('Topic maintenance requires a text-only local-ai or explicitly configured effect-ai model.');
@@ -126,7 +129,7 @@ export function runSelectedDraft(
         backendIdentity: 'local-ai',
         modelIdentity: model.id,
         ...(manifest ? {modelVersion: `${manifest.revision}:${manifest.sha256}`} : {}),
-        settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+        settings: localDraftGenerationSettings(model.id, purpose),
       };
     }
     if (agent === 'effect-ai') {

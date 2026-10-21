@@ -41,6 +41,7 @@ import {
   TOPIC_DRAFT_MAX_DURATION_MS,
   type SelectedDraftResult,
 } from '../../manager/selected_draft.js';
+import {serializeDraftGenerationSettings} from '../../effect/ai/consolidator.js';
 import type {ConsolidationAgent} from '../../types.js';
 import {
   decodeTopicDraftWire,
@@ -615,7 +616,7 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
           packetDigest: basis.packetDigest,
           agent: identity.agent,
           model: identity.model,
-          modelVersion: identity.modelVersion,
+          modelVersion: `${identity.modelVersion};${identity.settings}`,
           promptVersion: TOPIC_DRAFT_PROMPT_VERSION,
         },
         observation =>
@@ -639,8 +640,7 @@ export const requestTopicMaintenanceDraft = Effect.fn('topicMaintenance.requestD
                   result.backendIdentity !== identity.backendIdentity ||
                   result.modelIdentity !== identity.model ||
                   result.modelVersion !== identity.modelVersion ||
-                  result.settings.maxOutputTokens !== 4000 ||
-                  (backend === 'local-ai' && result.settings.seed !== 0)
+                  serializeDraftGenerationSettings(result.settings) !== identity.settings
                 )
                   return yield* fail('The selected model or generation settings changed during the draft.');
                 if (bytes(result.text) > TOPIC_DRAFT_MAX_OUTPUT_BYTES)

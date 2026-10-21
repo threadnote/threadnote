@@ -201,6 +201,50 @@ effectIt.effect('returns a matching cached review without allocating any generat
   }).pipe(provideTestLayer(ApplicationLayer)),
 );
 
+for (const legacy of ['temperature-zero', 'prompt-v23'] as const) {
+  effectIt.effect('refuses a pending cached review from ' + legacy + ' without relabeling it', () =>
+    Effect.gen(function* () {
+      const {packet, identity, review} = fixture();
+      const oldSettings = review.maintenance!.generation.modelVersion;
+      const cached =
+        legacy === 'prompt-v23'
+          ? {
+              ...review,
+              maintenance: {
+                ...review.maintenance!,
+                generation: {
+                  ...review.maintenance!.generation,
+                  promptVersion: 'topic-maintenance-draft-v23',
+                  modelVersion: `${identity.modelVersion};seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64`,
+                },
+              },
+            }
+          : review;
+      const selected = {
+        ...identity,
+        settings: 'seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64',
+      };
+      mocks.packet.mockReturnValue(Effect.succeed({topicEvidence: packet}));
+      mocks.review.mockReturnValue(Effect.succeed(cached));
+      mocks.identity.mockReturnValue(Effect.succeed(selected));
+      let calls = 0;
+      const error = yield* requestTopicMaintenanceDraft(
+        {agentContextHome: '/unused'} as never,
+        {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai', modelId: 'fixture'},
+        () =>
+          Effect.sync(() => {
+            calls++;
+            throw new Error('No dispatch expected');
+          }),
+      ).pipe(Effect.flip);
+      expect(Schema.is(TopicDraftError)(error) && error.reason).toBe('review-pending');
+      expect(calls).toBe(0);
+      expect(review.maintenance!.generation.modelVersion).toBe(oldSettings);
+      expect(mocks.saveReview).not.toHaveBeenCalled();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+}
+
 function requestFixture() {
   vi.clearAllMocks();
   const value = fixture();
@@ -288,5 +332,34 @@ effectIt.effect('persists the accepted attempt when the closing source fence ref
     expect(last).toMatchObject({state: 'failed', phase: 'closing-fence', attempts: [{status: 'accepted'}]});
     expect(mocks.saveReview).not.toHaveBeenCalled();
     expect(Schema.is(TopicDraftError)(failure) && failure.diagnostics?.receiptId).toBe(last.receiptId);
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
+
+effectIt.effect('refuses an unexpected sampling profile when the selected model has none', () =>
+  Effect.gen(function* () {
+    const value = requestFixture();
+    let calls = 0;
+    const failure = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
+      Effect.sync(() => {
+        calls++;
+        return {
+          text: JSON.stringify(value.wire),
+          backendIdentity: 'local-ai',
+          modelIdentity: 'fixture',
+          modelVersion: value.identity.modelVersion,
+          settings: {
+            maxOutputTokens: 4000 as const,
+            seed: 0 as const,
+            sampling: {profileId: 'unexpected', temperature: 1, topP: 0.95, topK: 64},
+          },
+          usage: {status: 'unavailable' as const},
+        };
+      }),
+    ).pipe(Effect.flip);
+    expect(calls).toBe(1);
+    expect(Schema.is(TopicDraftError)(failure)).toBe(true);
+    expect(value.receipts.at(-1)).toMatchObject({state: 'failed', attempts: [{status: 'provider-output-invalid'}]});
+    expect(mocks.saveReview).not.toHaveBeenCalled();
+    expect(value.receipts.at(-1)?.modelVersion).toBe(`${value.identity.modelVersion};${value.identity.settings}`);
   }).pipe(provideTestLayer(ApplicationLayer)),
 );

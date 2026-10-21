@@ -8,7 +8,11 @@ import * as inventoryModule from '../../src/memory/context/maintenance_inventory
 import {loadTopicGenerationReceipt, readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
 import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_snapshot.js';
 import {InvalidModelOutput} from '@threadnote/inference/engine/errors';
-import {TopicDraftProviderOutputError} from '../../src/effect/ai/consolidator.js';
+import {
+  TopicDraftProviderOutputError,
+  localDraftGenerationSettings,
+  serializeDraftGenerationSettings,
+} from '../../src/effect/ai/consolidator.js';
 import {TopicDraftError} from '../../src/memory/context/maintenance_draft.js';
 import {makeTopicDraftControllerPacket, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
@@ -483,7 +487,7 @@ describe('topic maintenance private draft generation', () => {
             modelIdentity: modelId,
             modelVersion: `${manifest.revision}:${manifest.sha256}`,
             usage: {status: 'unavailable' as const},
-            settings: {maxOutputTokens: 4000 as const, seed: 0 as const},
+            settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
           });
           let calls = 0;
           const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt) =>
@@ -986,7 +990,7 @@ const withControllerFixture = <A, E, R>(
       modelVersion: 'fixture-v1',
       outputRepresentation: 'decoded-json',
       usage: {status: 'measured', inputTokens: call * 12, outputTokens: call * 3},
-      settings: {maxOutputTokens: 4000, seed: 0},
+      settings: localDraftGenerationSettings(modelId, 'topic-maintenance'),
     });
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => [
@@ -1001,7 +1005,7 @@ const withControllerFixture = <A, E, R>(
             model: modelId,
             modelVersion: 'fixture-v1',
             backendIdentity: 'local-ai',
-            settings: 'seed=0;maxTokens=4000',
+            settings: serializeDraftGenerationSettings(localDraftGenerationSettings(modelId, 'topic-maintenance')),
           }),
         ),
         vi
@@ -1172,6 +1176,11 @@ describe('complete wire controller repair boundary', () => {
     'oversized',
     'model',
     'settings',
+    'sampling-absent',
+    'sampling-profileId',
+    'sampling-temperature',
+    'sampling-topP',
+    'sampling-topK',
     'provider-parse',
     'provider-schema',
     'unsupported',
@@ -1239,6 +1248,21 @@ describe('complete wire controller repair boundary', () => {
                 ...f.modelResult(text),
                 ...(scenario === 'model' ? {modelIdentity: 'wrong'} : {}),
                 ...(scenario === 'settings' ? {settings: {maxOutputTokens: 4000 as const}} : {}),
+                ...(scenario === 'sampling-absent'
+                  ? {settings: {maxOutputTokens: 4000 as const, seed: 0 as const}}
+                  : {}),
+                ...(scenario.startsWith('sampling-') && scenario !== 'sampling-absent'
+                  ? {
+                      settings: {
+                        ...f.modelResult('').settings,
+                        sampling: {
+                          ...f.modelResult('').settings.sampling!,
+                          [scenario.slice('sampling-'.length)]:
+                            scenario === 'sampling-profileId' ? 'different-profile' : -1,
+                        },
+                      },
+                    }
+                  : {}),
               };
             });
           const failure = yield* f

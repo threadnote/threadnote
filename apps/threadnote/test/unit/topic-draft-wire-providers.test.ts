@@ -4,9 +4,10 @@ import {Effect, FileSystem, Layer, Path, Result, Schema, Stream} from 'effect';
 import {AiError, LanguageModel, Response} from 'effect/ai';
 import {OpenAiLanguageModel} from '@effect/ai-openai-compat';
 import {beforeEach, describe, expect, vi} from 'vitest';
+import {CommandExecutor} from '@threadnote/platform/command';
 import {TestError} from '@threadnote/testing/test-error';
-import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
-import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
+import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime, type LocalGenerationRequest} from '@threadnote/inference/engine/local-model-runtime';
 import {
@@ -21,13 +22,20 @@ import {
 import {
   runEffectAiTopicDraft,
   runNativeAiTopicDraft,
+  runNativeAiConsolidation,
+  localDraftGenerationSettings,
+  serializeDraftGenerationSettings,
   TopicDraftProviderOutputError,
 } from '../../src/effect/ai/consolidator.js';
 import {
   decodeTopicDraftModelOutput as decodeModelOutput,
   topicDraftModelSchema,
 } from '../../src/manager/topic_draft_schema.js';
-import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
+import {
+  runSelectedDraft,
+  selectedTopicDraftIdentity,
+  TOPIC_DRAFT_PROMPT_VERSION,
+} from '../../src/manager/selected_draft.js';
 import {
   makeTopicDraftWireBasis,
   makeTopicDraftWireFixture,
@@ -46,12 +54,17 @@ function decodeTopicDraftModelOutput(basis: TopicMaintenanceDraftBasisV1, input:
 
 const manifest = BUILTIN_MODEL_MANIFESTS.find(candidate => candidate.role === 'generation')!;
 const unexpected = () => Effect.die(TestError.make({message: 'Unexpected fixture service call'}));
-function nativeLayer(output: unknown, capture: (request: LocalGenerationRequest) => void = () => {}) {
+function nativeLayer(
+  output: unknown,
+  capture: (request: LocalGenerationRequest) => void = () => {},
+  selectedManifest: LocalModelManifest = manifest,
+) {
   return Layer.mergeAll(
     FileSystem.layerNoop({}),
     Path.layer,
     TestSystemInfoLayer,
-    LocalModelCatalog.layer([manifest]),
+    Layer.succeed(CommandExecutor, {execute: unexpected, executeStreaming: unexpected}),
+    LocalModelCatalog.layer([selectedManifest]),
     Layer.succeed(LocalModelStore, {
       install: unexpected,
       path: () => '/fixture/model.gguf',
@@ -80,10 +93,16 @@ function nativeLayer(output: unknown, capture: (request: LocalGenerationRequest)
   );
 }
 
-function provideNativeOutput(output: unknown, capture?: (request: LocalGenerationRequest) => void) {
+function provideNativeOutput(
+  output: unknown,
+  capture?: (request: LocalGenerationRequest) => void,
+  selectedManifest: LocalModelManifest = manifest,
+) {
   return <A, E, R>(program: Effect.Effect<A, E, R>) =>
     Effect.scoped(
-      Layer.build(nativeLayer(output, capture)).pipe(Effect.flatMap(context => program.pipe(Effect.provide(context)))),
+      Layer.build(nativeLayer(output, capture, selectedManifest)).pipe(
+        Effect.flatMap(context => program.pipe(Effect.provide(context))),
+      ),
     );
 }
 
@@ -266,6 +285,56 @@ describe('compact topic provider boundary', () => {
     );
   }
 
+  effectIt.effect('binds complete E4B settings in selected identity, dispatch and recorded limits', () =>
+    Effect.gen(function* () {
+      const basis = makeTopicDraftWireBasis(1);
+      const model = {id: CORE_GENERATION_MODEL_ID, label: 'Gemma', isDefault: true};
+      const identity = yield* selectedTopicDraftIdentity({} as never, 'local-ai', model);
+      const result = yield* runSelectedDraft(
+        {agentContextHome: '/fixture'} as never,
+        'local-ai',
+        model,
+        'prompt',
+        'topic-maintenance',
+        basis,
+      );
+      expect(result.settings).toEqual({
+        maxOutputTokens: 4000,
+        seed: 0,
+        sampling: {profileId: 'gemma4-e4b-v1', temperature: 1, topP: 0.95, topK: 64},
+      });
+      expect(identity.settings).toBe('seed=0;maxTokens=4000;profile=gemma4-e4b-v1;temperature=1;topP=0.95;topK=64');
+      expect(serializeDraftGenerationSettings(result.settings)).toBe(identity.settings);
+      expect(new TextEncoder().encode(`${identity.modelVersion};${identity.settings}`).byteLength).toBeLessThanOrEqual(
+        256,
+      );
+    }).pipe(provideNativeOutput(makeTopicDraftWireFixture(makeTopicDraftWireBasis(1)))),
+  );
+
+  effectIt.effect('preserves defaults for consolidation and a different generation model', () =>
+    Effect.gen(function* () {
+      const requests: LocalGenerationRequest[] = [];
+      yield* runNativeAiConsolidation({agentContextHome: '/fixture'}, 'prompt', manifest.id).pipe(
+        provideNativeOutput({draft: 'Consolidated.'}, request => requests.push(request)),
+      );
+      const other = {...manifest, id: CORE_GENERATION_MODEL_ID + '-other'};
+      const basis = makeTopicDraftWireBasis(1);
+      yield* runNativeAiTopicDraft(
+        {agentContextHome: '/fixture'},
+        'prompt',
+        other.id,
+        topicDraftModelSchema(basis),
+        basis,
+      ).pipe(provideNativeOutput(makeTopicDraftWireFixture(basis), request => requests.push(request), other));
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request).toMatchObject({maxTokens: 4000, seed: 0});
+        expect(request).not.toHaveProperty('sampling');
+      }
+      expect(localDraftGenerationSettings(other.id, 'topic-maintenance')).toEqual({maxOutputTokens: 4000, seed: 0});
+    }),
+  );
+
   effectIt.effect('returns complete native duplicate comparison for controller application validation', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(2);
@@ -287,7 +356,7 @@ describe('compact topic provider boundary', () => {
     }),
   );
 
-  effectIt.effect('returns strict native decoded wire with explicit basis and unchanged generation settings', () =>
+  effectIt.effect('returns strict native decoded wire with explicit basis and topic sampling settings', () =>
     Effect.gen(function* () {
       const basis = makeTopicDraftWireBasis(64, {sourceCount: 8});
       const wire = makeTopicDraftWireFixture(basis);
@@ -316,7 +385,12 @@ describe('compact topic provider boundary', () => {
         supportHandles: [basis.handles[1].id],
         rationale: 'Checked.',
       });
-      expect(request).toMatchObject({prompt: 'exact prompt', maxTokens: 4000, seed: 0});
+      expect(request).toMatchObject({
+        prompt: 'exact prompt',
+        maxTokens: 4000,
+        seed: 0,
+        sampling: {temperature: 1, topP: 0.95, topK: 64},
+      });
       expect(result.usage).toEqual({status: 'unavailable'});
       expect(result.outputRepresentation).toBe('decoded-json');
       expect(JSON.parse(result.text)).toEqual(wire);
