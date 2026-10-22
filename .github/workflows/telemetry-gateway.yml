@@ -21,15 +21,8 @@ on:
       - 'infra/telemetry-gateway/test/telemetry-gateway-*.test.ts'
   pull_request:
     branches: [main, codex/4.0.0, release/5.0.0]
-    paths:
-      - '.dockerignore'
-      - 'fly.toml'
-      - '.github/workflows/telemetry-delivery-canary.yml'
-      - '.github/workflows/telemetry-gateway.yml'
-      - 'docs/operations/telemetry-production.md'
-      - 'docs/telemetry.md'
-      - 'infra/telemetry-gateway/**'
-      - 'infra/telemetry-gateway/test/telemetry-gateway-*.test.ts'
+    # Branch rules require the completion status on every PR. The classifier
+    # below still decides whether validation is needed for the changed paths.
 
 permissions:
   contents: read
