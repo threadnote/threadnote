@@ -1,15 +1,19 @@
 import {Data, Schema} from 'effect';
-import {consolidationSections} from '@threadnote/memory/consolidation';
+import {consolidationRevision, consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
   type LegacyTopicMaintenanceDraftBasis as TopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasis as AnyTopicMaintenanceDraftBasis,
   type AutomaticMaintenanceDraftBasisV3,
-  parseAutomaticMaintenanceDraft,
+  validateAutomaticMaintenanceDraftBasis,
+  automaticReviewSections,
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
+  type AutomaticMaintenanceDraftV2,
   type TopicMaintenanceDraftV1,
   type TopicMaintenanceParagraphDispositionV1,
   type TopicMaintenanceReplaceOperationV1,
 } from '@threadnote/memory/topic-maintenance-draft';
+import {MAX_TOPIC_MAINTENANCE_BYTES} from '@threadnote/memory/topic-maintenance';
 
 export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasis['paragraphs'][number]) {
   return topicMaintenanceParagraphEligible(paragraph);
@@ -380,7 +384,26 @@ function nativeDisjointUnions(value: unknown): unknown {
 }
 
 /** Convert disjoint schema alternatives to the native grammar's supported oneOf. */
-export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftModelSchema>) {
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+): ReturnType<typeof legacyTopicDraftNativeJsonSchema>;
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+  basis: AnyTopicMaintenanceDraftBasis,
+): Record<string, unknown>;
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+  basis?: AnyTopicMaintenanceDraftBasis,
+) {
+  if (basis?.version !== 3) return legacyTopicDraftNativeJsonSchema(schema);
+  return nativeDisjointUnions(Schema.toJsonSchemaDocument(schema, {onExcessProperty: 'error'}).schema) as Record<
+    string,
+    unknown
+  >;
+}
+
+// The one-argument legacy adapter retains its exact decision validation and shape.
+function legacyTopicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftModelSchema>) {
   const document = Schema.toJsonSchemaDocument(schema, {onExcessProperty: 'error'}).schema as Record<string, unknown>;
   const properties = document.properties;
   const fields =
@@ -424,8 +447,38 @@ export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftM
 
 /** Ordinary generation proposes roles/support in its final review; it does not enroll or approve a memory. */
 export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
-  if (basis.version !== 3) return legacyTopicDraftModelSchema(basis);
+  return basis.version === 3 ? automaticTopicDraftModelSchema(basis) : legacyTopicDraftModelSchema(basis);
+}
+
+function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3) {
   const text = Schema.String;
+  // A missing admitted namespace permits only [], never an unconstrained ID.
+  const admitted = (values: readonly string[]) =>
+    Schema.Array(values.length ? Schema.Literals(values) : text).check(Schema.isMaxLength(Math.min(8, values.length)));
+  const current = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+  const evidence = [
+    ...new Set([...basis.assessment.evidence.map(entry => entry.id), ...basis.handles.map(h => h.citationId)]),
+  ];
+  // maxItems:0 below closes empty paragraph universes without an empty union.
+  const paragraphs = basis.paragraphs.length ? basis.paragraphs : [{ordinal: 0, hash: ''}];
+  const decisions = paragraphs.map(paragraph =>
+    Schema.Struct({
+      ordinal: Schema.Literal(paragraph.ordinal),
+      beforeHash: Schema.Literal(paragraph.hash),
+      role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+      support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+      evidenceIds: admitted(evidence),
+    }),
+  );
+  const operations = paragraphs.map(paragraph =>
+    Schema.Struct({
+      ordinal: Schema.Literal(paragraph.ordinal),
+      beforeHash: Schema.Literal(paragraph.hash),
+      supportHandles: admitted(current),
+      rationale: text,
+      text,
+    }),
+  );
   return Schema.Struct({
     version: Schema.Literal(2),
     kind: Schema.Literal('automatic'),
@@ -434,23 +487,85 @@ export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
     outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
-    operations: Schema.Array(
-      Schema.Struct({ordinal: Schema.Int, beforeHash: text, text, supportHandles: Schema.Array(text), rationale: text}),
+    paragraphDecisions: Schema.Array(Schema.Union(decisions)).check(
+      Schema.isMinLength(basis.paragraphs.length),
+      Schema.isMaxLength(basis.paragraphs.length),
     ),
-    reviewedHandles: Schema.Array(text),
+    operations: Schema.Array(Schema.Union(operations)).check(Schema.isMaxLength(basis.paragraphs.length)),
+    reviewedHandles: Schema.Array(current.length ? Schema.Literals(current) : text).check(
+      Schema.isMaxLength(current.length),
+    ),
     rationale: text,
     unresolvedQuestions: Schema.Array(text),
     removedClaims: Schema.Array(text),
-    paragraphDecisions: Schema.Array(
-      Schema.Struct({
-        ordinal: Schema.Int,
-        beforeHash: text,
-        role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
-        support: Schema.Literals(['direct', 'contextual', 'unresolved']),
-        evidenceIds: Schema.Array(text),
-      }),
-    ),
   });
+}
+
+/** Terminal wire/context preflight only; the memory owner still decides application validity. */
+function decodeAutomaticTopicDraftWire(basisInput: AutomaticMaintenanceDraftBasisV3, input: unknown) {
+  const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
+  const wire = Schema.decodeUnknownSync(automaticTopicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+  const size = (text: string) => new TextEncoder().encode(text).byteLength;
+  const invalid = (): never => {
+    throw new Error('Invalid automatic generation wire identity, coverage or bounds.');
+  };
+  const bounded = (text: string, max: number) => wellFormed(text) && text.length > 0 && size(text) <= max;
+  const strings = (values: readonly string[], count: number, max: number) =>
+    values.length <= count && values.every(value => bounded(value, max));
+  const unique = (values: readonly unknown[]) => new Set(values).size === values.length;
+  const current = new Set(basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id));
+  const evidence = new Set([
+    ...basis.assessment.evidence.map(entry => entry.id),
+    ...basis.handles.map(h => h.citationId),
+  ]);
+  if (
+    size(JSON.stringify(input)) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES ||
+    !bounded(wire.rationale, 2048) ||
+    !strings(wire.reviewedHandles, basis.assessment.version === 2 ? 24 : 16, 80) ||
+    !unique(wire.reviewedHandles) ||
+    wire.reviewedHandles.some(handle => !current.has(handle)) ||
+    !strings(wire.unresolvedQuestions, 16, 512) ||
+    !strings(wire.removedClaims, 64, 512) ||
+    wire.operations.length > basis.paragraphs.length ||
+    !unique(wire.operations.map(operation => operation.ordinal)) ||
+    wire.paragraphDecisions.length !== basis.paragraphs.length
+  )
+    invalid();
+  const sections = automaticReviewSections(basis.body);
+  if (
+    sections.length !== basis.paragraphs.length ||
+    sections.some((text, ordinal) => consolidationRevision(text) !== basis.paragraphs[ordinal].hash)
+  )
+    invalid();
+  let bodyBytes = size(basis.body);
+  for (const operation of wire.operations) {
+    const prior = basis.paragraphs[operation.ordinal];
+    if (
+      !Number.isSafeInteger(operation.ordinal) ||
+      !prior ||
+      operation.beforeHash !== prior.hash ||
+      !bounded(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
+      automaticReviewSections(operation.text).length !== 1 ||
+      !bounded(operation.rationale, 1024) ||
+      !strings(operation.supportHandles, 8, 80) ||
+      !unique(operation.supportHandles) ||
+      operation.supportHandles.some(handle => !current.has(handle))
+    )
+      invalid();
+    bodyBytes += size(operation.text) - size(sections[operation.ordinal]);
+  }
+  if (bodyBytes > MAX_TOPIC_MAINTENANCE_BYTES) invalid();
+  for (const [ordinal, decision] of wire.paragraphDecisions.entries()) {
+    if (
+      decision.ordinal !== ordinal ||
+      decision.beforeHash !== basis.paragraphs[ordinal].hash ||
+      !strings(decision.evidenceIds, 8, 68) ||
+      !unique(decision.evidenceIds) ||
+      decision.evidenceIds.some(id => !evidence.has(id))
+    )
+      invalid();
+  }
+  return wire;
 }
 export function decodeTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
@@ -459,13 +574,14 @@ export function decodeTopicDraftWire(
 export function decodeTopicDraftWire(
   basis: AutomaticMaintenanceDraftBasisV3,
   input: unknown,
-): ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
+): AutomaticMaintenanceDraftV2;
 export function decodeTopicDraftWire(
   basis: AnyTopicMaintenanceDraftBasis,
   input: unknown,
-): ReturnType<typeof decodeLegacyTopicDraftWire> | ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
-export function decodeTopicDraftWire(basis: AnyTopicMaintenanceDraftBasis, input: unknown) {
-  return basis.version === 3
-    ? parseAutomaticMaintenanceDraft(basis, JSON.stringify(input)).draft
-    : decodeLegacyTopicDraftWire(basis, input);
+): ReturnType<typeof decodeLegacyTopicDraftWire> | AutomaticMaintenanceDraftV2;
+export function decodeTopicDraftWire(
+  basis: AnyTopicMaintenanceDraftBasis,
+  input: unknown,
+): ReturnType<typeof decodeLegacyTopicDraftWire> | AutomaticMaintenanceDraftV2 {
+  return basis.version === 3 ? decodeAutomaticTopicDraftWire(basis, input) : decodeLegacyTopicDraftWire(basis, input);
 }

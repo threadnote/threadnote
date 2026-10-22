@@ -82,6 +82,12 @@ export class AiConsolidationFailed extends Schema.TaggedError<AiConsolidationFai
   message: Schema.String,
 }) {}
 
+/** Only final preflights that prove no provider/runtime call can return this outcome. */
+export class DraftProviderUnavailableBeforeDispatch extends Schema.TaggedError<DraftProviderUnavailableBeforeDispatch>()(
+  'DraftProviderUnavailableBeforeDispatch',
+  {backend: Schema.Literals(['local-ai', 'effect-ai']), modelId: Schema.String, message: Schema.String},
+) {}
+
 export class TopicDraftProviderOutputError extends Schema.TaggedError<TopicDraftProviderOutputError>()(
   'TopicDraftProviderOutputError',
   {
@@ -301,13 +307,19 @@ const runNativeAiObject = Effect.fn('AiConsolidator.generateNativeObject')(funct
         const manifest = yield* catalog.get(modelId);
         const store = yield* LocalModelStore;
         const status = yield* store.status(config.agentContextHome, manifest);
-        if (manifest.role !== 'generation' || !status.installed) {
+        if (manifest.role !== 'generation') {
           return yield* AiConsolidationFailed.make({
             cause: modelId,
+            message: 'Select a generation-role model.',
+          });
+        }
+        if (!status.installed)
+          return yield* DraftProviderUnavailableBeforeDispatch.make({
+            backend: 'local-ai',
+            modelId,
             message:
               'This generation model is no longer installed. Install one with `threadnote models` and reload model choices.',
           });
-        }
         const runtime = yield* LocalModelRuntime;
         return yield* runtime.generate({...request, manifest, modelPath: status.path});
       });
@@ -359,7 +371,7 @@ export const runNativeAiTopicDraft = Effect.fn('AiConsolidator.generateNativeTop
     prompt,
     modelId,
     'Return one complete topic maintenance JSON object matching the supplied schema.',
-    topicDraftNativeJsonSchema(schema),
+    topicDraftNativeJsonSchema(schema, basis),
     localDraftGenerationSettings(modelId, 'topic-maintenance'),
   );
   if (output === undefined)

@@ -7,6 +7,7 @@ import {describe, expect, it, vi} from 'vitest';
 import {Effect, FileSystem, Path, Ref, Result} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import * as memoryIdentity from '@threadnote/recall/memory/identity';
+import * as modelDiscovery from '../../src/manager/consolidation_models.js';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {loadCandidateReview} from '@threadnote/memory/candidate';
@@ -49,6 +50,7 @@ import {runContextMaintenance, readContextMaintenancePacket} from '../../src/mem
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {readDraftQueueStatus} from '../../src/memory/context/maintenance_draft_queue.js';
 
 function structuredObject(value: unknown): Record<string, unknown> {
   expect(value).not.toBeNull();
@@ -447,9 +449,15 @@ describe('ordinary memory exact public review', () => {
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
-  for (const action of ['automatic-preview', 'manual-preview'] as const) {
+  for (const [action, overflow] of [
+    ['automatic-preview', false],
+    ['manual-preview', false],
+    ['automatic-preview', true],
+  ] as const) {
     effectIt.effect(
-      `reviews all seventeen produced handles in a public ${action} request`,
+      overflow
+        ? 'refuses actual twenty-five-handle producer before model or quota admission'
+        : `reviews all seventeen produced handles in a public ${action} request`,
       () =>
         Effect.gen(function* () {
           const f = yield* fixture();
@@ -487,11 +495,12 @@ describe('ordinary memory exact public review', () => {
           const roots = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs});
           const metadata = {...parseMemoryDocument(f.uri, f.content)!.metadata, codeCitations: roots};
           const baseline = formatMemoryDocument('MEMORY', metadata, 'The timeout is 30 seconds.');
-          for (const ref of refs)
+          const currentRefs = overflow ? refs.map(ref => `active-${ref}`) : refs;
+          for (const ref of currentRefs)
             yield* f.fs.writeFileString(f.path.join(repository, ref), 'export const timeoutSeconds = 60;\n');
           yield* commit('current');
           yield* index();
-          const current = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs});
+          const current = yield* captureMemoryCodeCitations(f.config, {callerCwd: repository, refs: currentRefs});
           const sources = current.map(citation => {
             const source = {kind: 'code' as const, citation};
             return {id: automaticMaintenanceEvidenceId(source), source, scope: 'repository' as const};
@@ -534,6 +543,49 @@ describe('ordinary memory exact public review', () => {
           expect(packet.isError, JSON.stringify(packet)).not.toBe(true);
           const p = packet.structuredContent;
           expect(p.basis.assessment.version).toBe(2);
+          if (overflow) {
+            expect(p.reviewEvidence).toHaveLength(25);
+            expect(p.reviewEvidence.filter(entry => entry.descriptor.source.kind === 'code')).toHaveLength(24);
+            expect(p.draftRequest.available).toBe(false);
+            const discovery = vi
+              .spyOn(modelDiscovery, 'availableConsolidationModels')
+              .mockImplementation(() => Effect.die(new Error('Over-budget basis reached model discovery.')));
+            let calls = 0;
+            let discoveryCalls = 0;
+            const attempted = yield* requestAutomaticMemoryDraft(
+              f.config,
+              {
+                uri: f.uri,
+                expectedContentHash: sha256HexSync(accepted),
+                sourceCwd: repository,
+                backend: 'local-ai',
+                modelId: 'test-model',
+              },
+              () =>
+                Effect.sync(() => {
+                  calls++;
+                  throw new Error('Over-budget basis reached generation.');
+                }),
+            ).pipe(
+              Effect.result,
+              Effect.ensuring(
+                Effect.sync(() => {
+                  discoveryCalls = discovery.mock.calls.length;
+                  discovery.mockRestore();
+                }),
+              ),
+            );
+            expect(attempted._tag).toBe('Failure');
+            expect(calls).toBe(0);
+            expect(discoveryCalls).toBe(0);
+            const queue = yield* readDraftQueueStatus(f.config);
+            expect(queue.backgroundReservations).toEqual([]);
+            expect(queue.queued).toEqual([]);
+            expect(queue.active).toBeUndefined();
+            expect(yield* f.fs.exists(f.path.join(f.home, 'threadnote/candidates/v1/topic-generation'))).toBe(false);
+            expect(yield* f.fs.readFileString(f.targetPath)).toBe(accepted);
+            return;
+          }
           expect(p.reviewEvidence).toHaveLength(17);
           expect(p.reviewEvidence.filter(entry => entry.handleId.startsWith('accepted:'))).toHaveLength(8);
           expect(p.reviewEvidence.filter(entry => entry.descriptor.source.kind === 'memory')).toHaveLength(1);

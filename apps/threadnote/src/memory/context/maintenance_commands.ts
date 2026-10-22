@@ -10,7 +10,14 @@ import {renderContextMaintenanceStatus} from './maintenance_projection.js';
 import {readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
 import {loadCandidateReview} from '@threadnote/memory/candidate';
 import {captureTopicObsidianEvidence} from './maintenance_obsidian.js';
-import {readTopicMaintenanceDraft, requestTopicMaintenanceDraft, TopicDraftError} from './maintenance_draft.js';
+import {
+  readTopicMaintenanceDraft,
+  requestTopicMaintenanceDraft,
+  runAutomaticMemoryBackground,
+  setAutomaticDraftBackgroundPolicy,
+  TopicDraftError,
+} from './maintenance_draft.js';
+import {runSelectedDraft} from '../../effect/ai/selected_generation.js';
 import {projectTopicReviewDecisionAcknowledgement} from './maintenance_review_projection.js';
 import {
   applyTopicMaintenanceReview,
@@ -58,8 +65,20 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
     readonly fragmentStart?: number;
     readonly fragmentEnd?: number;
     readonly retentionDays?: number;
+    readonly unitsPerHour?: number;
   },
+  generate: typeof runSelectedDraft = runSelectedDraft,
 ) {
+  if (options.action?.startsWith('background-')) {
+    const status = yield* setAutomaticDraftBackgroundPolicy(config, {
+      action: options.action,
+      backend: options.backend,
+      modelId: options.modelId,
+      unitsPerHour: options.unitsPerHour,
+    });
+    yield* writeFinalCliOutput(JSON.stringify(status, null, options.json ? undefined : 2));
+    return;
+  }
   if (options.action === 'draft-receipt')
     return yield* readTopicGenerationReceiptCommand(
       config.agentContextHome,
@@ -160,7 +179,19 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
                               maxRecords: options.maxRecords,
                               caseId: options.caseId,
                             });
-  const output =
+  // Detached ordinary-use wakes run generation only after the assessment's state lock is released.
+  const background =
+    (options.action === undefined || options.action === 'run') &&
+    !options.caseId &&
+    'paused' in result &&
+    !result.paused
+      ? yield* runAutomaticMemoryBackground(
+          config,
+          {project: options.project, maxRecords: options.maxRecords},
+          generate,
+        )
+      : undefined;
+  const projected =
     'candidates' in result && 'maintenance' in result && result.maintenance?.version === 2
       ? (projectTopicReviewDecisionAcknowledgement(
           result,
@@ -168,6 +199,7 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
           options.caseId,
         ) ?? (yield* readTopicMaintenanceDraft(config, result.reviewId)))
       : result;
+  const output = background ? {...projected, background} : projected;
   yield* writeFinalCliOutput(
     options.json
       ? JSON.stringify(output)
