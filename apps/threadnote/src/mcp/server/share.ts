@@ -4,6 +4,7 @@ import {buildOnboardingGuide, gatherOnboardingContext} from '../../onboarding.js
 import {
   ensureSharedDirectoryChain,
   assertSharedWorktreeFileReady,
+  assertShareTeamWritable,
   isInSharedNamespace,
   publishShareGitChange,
   resolveTeam,
@@ -27,6 +28,8 @@ import {
   showShareConflict,
 } from '../../effect/share.js';
 import {withSharedRepositoryLock} from '../../effect/share/lock.js';
+import {ShareOperationError} from '../../share/core.js';
+import {errorMessage} from '@threadnote/platform/errors';
 import {canonicalMemoryDocumentContent} from '@threadnote/memory/document';
 import {sharePublishEligibilityError, sharePublishRelationWarnings} from '../../share/publish_policy.js';
 import {
@@ -193,6 +196,11 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
     if (isInSharedNamespace(config, sourceUri)) {
       return argumentError(`Memory ${sourceUri} is already in the shared namespace.`);
     }
+    const selectedTeam = yield* resolveTeam(config, options.team);
+    yield* Effect.try({
+      try: () => assertShareTeamWritable(selectedTeam, 'publish memories'),
+      catch: cause => ShareOperationError.make({cause, message: errorMessage(cause)}),
+    });
     const hasPendingCodeRefs = yield* hasDeferredCodeAnchorIntent(config, sourceUri);
     if (hasPendingCodeRefs && options.allowUncitedPendingCodeRefs !== true) {
       return argumentError(
@@ -225,8 +233,7 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
     const scrub = applyScrubber(stripped, {redact: options.redact === true});
 
     if (options.preview === true) {
-      const resolved = yield* resolveTeam(config, options.team);
-      const targetUri = sharedUriFor(config, sourceUri, resolved.name);
+      const targetUri = sharedUriFor(config, sourceUri, selectedTeam.name);
       const previewLines = [`PREVIEW source: ${sourceUri}`, `PREVIEW destination: ${targetUri}`];
       if (scrub.blocker) {
         previewLines.push(
@@ -237,7 +244,7 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
       for (const redaction of scrub.redactions) {
         previewLines.push(`PREVIEW redact: ${redaction.count}× ${redaction.name}`);
       }
-      previewLines.push(...(yield* sharePublishRelationWarnings(config, sourceUri, scrub.cleaned, resolved.name)));
+      previewLines.push(...(yield* sharePublishRelationWarnings(config, sourceUri, scrub.cleaned, selectedTeam.name)));
       previewLines.push('-----BEGIN PREVIEW-----');
       previewLines.push(scrub.cleaned);
       previewLines.push('-----END PREVIEW-----');
@@ -252,7 +259,11 @@ export function runSharePublishTool(config: RuntimeConfig, sourceUri: string, op
     const {publication, targetUri} = yield* withSharedRepositoryLock(
       config,
       Effect.gen(function* () {
-        const resolved = yield* resolveTeam(config, options.team);
+        const resolved = yield* resolveTeam(config, selectedTeam.name);
+        yield* Effect.try({
+          try: () => assertShareTeamWritable(resolved, 'publish memories'),
+          catch: cause => ShareOperationError.make({cause, message: errorMessage(cause)}),
+        });
         const targetUri = sharedUriFor(config, sourceUri, resolved.name);
         const relativePath = resourceUriToWorktreeRelative(config, targetUri, resolved.name);
         const commitMessage = options.message ?? `share: publish ${relativePath}`;
