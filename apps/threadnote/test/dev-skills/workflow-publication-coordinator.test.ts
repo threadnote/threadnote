@@ -4,7 +4,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -22,6 +22,7 @@ import {
 } from '../../src/workflow_memory/publication_contract.js';
 import type {WorkflowBinding, WorkflowReadResult} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {publicationDiagnostics} from './workflow-publication-diagnostics.js';
 
 const graph: readonly WorkflowPublicationNode[] = [
   {
@@ -151,32 +152,66 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
 });
 
 describe('approved workflow graph publication', () => {
-  effectIt.effect('publishes and replays the three approved stages before admitting draft retirement', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const preview = yield* f.preview();
-      if (!('stages' in preview)) return yield* Effect.die('Expected preview');
-      expect(preview.stages).toHaveLength(3);
-      expect(preview.nodes.every(node => node.relations.length === 1)).toBe(true);
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
-      expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
-        _tag: 'Failure',
-        failure: {code: 'publication-approval-required'},
-      });
-      yield* f.approve(preview.approvalDigest);
-      const result = yield* f.publish(preview.approvalDigest);
-      expect(result).toMatchObject({status: 'ok', verifiedReadback: true});
-      expect(yield* f.publish(preview.approvalDigest)).toEqual(result);
-      expect(yield* f.guard).toEqual(result);
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
-      const files = (yield* f.git(f.remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout;
-      expect(files).not.toMatch(/handoff|workflow-memory|\.publication/);
-      for (const node of preview.nodes) {
-        const content = yield* readOptionalResource(f.config, node.canonicalUri);
-        expect(parseMemoryDocument(node.canonicalUri, content!)?.metadata.relations).toEqual(node.relations);
-      }
-    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
-  );
+  effectIt.effect('publishes and replays the three approved stages before admitting draft retirement', context => {
+    const diagnostics = publicationDiagnostics();
+    const report = (event: 'aborted' | 'finished') =>
+      process.stderr.write(`WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({event, ...diagnostics.snapshot()})}\n`);
+    const aborted = () => report('aborted');
+    context.signal.addEventListener('abort', aborted, {once: true});
+    context.onTestFinished(() => {
+      context.signal.removeEventListener('abort', aborted);
+      report('finished');
+    });
+    return Effect.gen(function* () {
+      const commands = yield* CommandExecutor;
+      return yield* Effect.gen(function* () {
+        diagnostics.phase('fixture');
+        const f = yield* fixture();
+        diagnostics.phase('preview');
+        const preview = yield* f.preview();
+        if (!('stages' in preview)) return yield* Effect.die('Expected preview');
+        expect(preview.stages).toHaveLength(3);
+        expect(preview.nodes.every(node => node.relations.length === 1)).toBe(true);
+        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        diagnostics.phase('approval-refusal');
+        expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'publication-approval-required'},
+        });
+        diagnostics.phase('approve');
+        yield* f.approve(preview.approvalDigest);
+        diagnostics.phase('publish');
+        const result = yield* f.publish(preview.approvalDigest);
+        expect(result).toMatchObject({status: 'ok', verifiedReadback: true});
+        diagnostics.phase('replay');
+        expect(yield* f.publish(preview.approvalDigest)).toEqual(result);
+        diagnostics.phase('retirement-guard');
+        expect(yield* f.guard).toEqual(result);
+        diagnostics.phase('remote-verification');
+        expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        const files = (yield* f.git(f.remote, ['ls-tree', '-r', '--name-only', 'main'])).stdout;
+        expect(files).not.toMatch(/handoff|workflow-memory|\.publication/);
+        diagnostics.phase('canonical-readback');
+        for (const node of preview.nodes) {
+          const content = yield* readOptionalResource(f.config, node.canonicalUri);
+          expect(parseMemoryDocument(node.canonicalUri, content!)?.metadata.relations).toEqual(node.relations);
+        }
+      }).pipe(
+        Effect.provideService(
+          CommandExecutor,
+          CommandExecutor.of({
+            ...commands,
+            execute: (executable, args, options) =>
+              diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+          }),
+        ),
+      );
+    }).pipe(
+      Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+      TestClock.withLive,
+      provideTestLayer(ApplicationLayer),
+    );
+  });
 
   effectIt.effect('keeps a partially pushed graph pending and resumes its committed stage without duplicates', () =>
     Effect.gen(function* () {
