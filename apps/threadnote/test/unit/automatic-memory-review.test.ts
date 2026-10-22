@@ -51,6 +51,7 @@ import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js'
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readDraftQueueStatus} from '../../src/memory/context/maintenance_draft_queue.js';
+import {compactAutomaticTopicDraftFixture} from '../helpers/topic-draft-wire.js';
 
 function structuredObject(value: unknown): Record<string, unknown> {
   expect(value).not.toBeNull();
@@ -890,7 +891,12 @@ describe('ordinary memory exact public review', () => {
               if (!basis || basis.version !== 3) throw new Error('Expected automatic source basis.');
               const packet = JSON.parse(prompt.split('\n').at(-1)!);
               return {
-                text: draft(packet, packet.reviewEvidence[0].content),
+                text: JSON.stringify(
+                  compactAutomaticTopicDraftFixture(
+                    basis,
+                    JSON.parse(draft({...packet, basis}, packet.reviewEvidence[0].content)),
+                  ),
+                ),
                 backendIdentity: 'local-ai',
                 modelIdentity: modelId,
                 modelVersion: `${manifest.revision}:${manifest.sha256}`,

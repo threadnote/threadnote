@@ -48,6 +48,7 @@ import {
 } from '../../src/memory/context/maintenance.js';
 import {
   automaticReviewPacket,
+  automaticMemoryDraftPrompt,
   readAutomaticDraftBackgroundStatus,
   requestAutomaticMemoryDraft,
   requestAutomaticMemoryReview,
@@ -64,6 +65,17 @@ function object(value: unknown): Record<string, unknown> {
   expect(Array.isArray(value)).toBe(false);
   return value as Record<string, unknown>;
 }
+function automaticPacketFixtureFromPrompt(prompt: string) {
+  const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket> & {
+    targetParagraphs: readonly {ordinal: number; text: string}[];
+  };
+  if (packet.basis.body !== undefined) return packet;
+  return {
+    ...packet,
+    basis: {...packet.basis, body: packet.targetParagraphs.map(paragraph => paragraph.text).join('\n\n')},
+  };
+}
+
 const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body = 'The timeout is 30 seconds.') {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -129,7 +141,7 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body =
       const prompt = args[3];
       const basis = args[5];
       expect(basis?.version).toBe(3);
-      const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket>;
+      const packet = automaticPacketFixtureFromPrompt(prompt);
       const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
       const text = handle?.content ?? packet.basis.body;
       return {
@@ -246,6 +258,45 @@ describe('automatic ordinary-memory background controls', () => {
     );
   }
 
+  effectIt.effect(
+    'presents exact target ordinals and separately numbered sources without duplicating accepted text',
+    () =>
+      Effect.gen(function* () {
+        const body =
+          'The timeout is 30 seconds.\n\nAlways require approval.\n\nAt initialization the timeout was 10 seconds.';
+        const f = yield* fixture(body);
+        yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+        const packet = yield* requestAutomaticMemoryReview(f.config, {
+          uri: f.uri,
+          expectedContentHash: hash(f.content),
+        });
+        if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
+        const before = JSON.stringify(packet);
+        const prompt = automaticMemoryDraftPrompt(packet);
+        const projected = JSON.parse(prompt.split('\n').at(-1)!) as {
+          basis: Record<string, unknown>;
+          targetParagraphs: readonly {ordinal: number; text: string}[];
+        };
+        expect(projected.basis).not.toHaveProperty('body');
+        expect(projected.targetParagraphs).toEqual(body.split('\n\n').map((text, ordinal) => ({ordinal, text})));
+        for (const paragraph of projected.targetParagraphs) expect(prompt.split(paragraph.text)).toHaveLength(2);
+        const tableLine = prompt.split('\n').find(line => line.startsWith('Index tables ('))!;
+        const tables = JSON.parse(tableLine.slice(tableLine.indexOf(': ') + 2)) as {
+          evidenceIds: readonly {evidenceIndex: number; id: string}[];
+          currentHandles: readonly {currentSourceIndex: number; handle: string; matchingEvidenceIndex: number}[];
+        };
+        expect(tables.currentHandles.length).toBeGreaterThan(0);
+        for (const [index, source] of tables.currentHandles.entries()) {
+          expect(source.currentSourceIndex).toBe(index);
+          expect(tables.evidenceIds[source.matchingEvidenceIndex]).toEqual({
+            evidenceIndex: source.matchingEvidenceIndex,
+            id: source.handle.slice('current:'.length),
+          });
+        }
+        expect(JSON.stringify(packet)).toBe(before);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('orders compact native decisions and support before replacement text', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -349,6 +400,8 @@ describe('automatic ordinary-memory background controls', () => {
     'unknown-handle',
     'unknown-support-handle',
     'unknown-evidence-id',
+    'empty-direct-indices',
+    'empty-operation-indices',
     'nv003-prefixed-decision-id',
     'nv004-duplicate-decision-id',
     'rationale-bound',
@@ -409,9 +462,7 @@ describe('automatic ordinary-memory background controls', () => {
               Effect.gen(function* () {
                 calls++;
                 expect(request.prompt).toContain('You are instructed to propose supported corrections');
-                const packet = JSON.parse(request.prompt.split('\n').at(-1)!) as ReturnType<
-                  typeof automaticReviewPacket
-                >;
+                const packet = automaticPacketFixtureFromPrompt(request.prompt);
                 const result = yield* f.generate(
                   f.config,
                   'local-ai',
@@ -450,17 +501,19 @@ describe('automatic ordinary-memory background controls', () => {
                           : wire.operations.map(operation => ({
                               ...operation,
                               text: packet.basis.body,
-                              supportIndices: [],
                               rationale:
                                 'The source contradicts the memory, but there is no instruction to update the memory. The operation is not performed.',
                             })),
                       rationale: 'The memory is retained as is, but the conflict is noted.',
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
-                        ...decision,
-                        role: 'unknown',
-                        support: 'unresolved',
-                        evidenceIndices: [],
-                      })),
+                      paragraphDecisions:
+                        scenario === 'no-change'
+                          ? wire.paragraphDecisions.map(decision => ({
+                              ...decision,
+                              role: 'unknown',
+                              support: 'unresolved',
+                              evidenceIndices: [],
+                            }))
+                          : wire.paragraphDecisions,
                     };
                   }
                   if (scenario === 'target-identity') wire = {...wire, targetHash: hash('stale')};
@@ -497,6 +550,16 @@ describe('automatic ordinary-memory background controls', () => {
                         ...operation,
                         supportIndices: [999],
                       })),
+                    };
+                  if (scenario === 'empty-direct-indices')
+                    wire = {
+                      ...wire,
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({...decision, evidenceIndices: []})),
+                    };
+                  if (scenario === 'empty-operation-indices')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({...operation, supportIndices: []})),
                     };
                   if (scenario === 'unknown-evidence-id')
                     wire = {
@@ -1122,9 +1185,7 @@ describe('automatic ordinary-memory background controls', () => {
                   properties: {version: {enum: [1]}, kind: {enum: ['automatic-model']}},
                 });
                 expect(request.jsonSchema.properties).not.toHaveProperty('decision');
-                const packet = JSON.parse(request.prompt.split('\n').at(-1)!) as ReturnType<
-                  typeof automaticReviewPacket
-                >;
+                const packet = automaticPacketFixtureFromPrompt(request.prompt);
                 const result = yield* f.generate(
                   f.config,
                   'local-ai',
@@ -1632,8 +1693,8 @@ const program = Effect.gen(function* () {
   const installed = LocalModelStore.of({...original, status: (_home, selected) => Effect.succeed({
     installed: true, bytes: selected.size, modelId: selected.id, partialBytes: 0, path: '/synthetic/model.gguf', verified: true,
   })});
-  const generate = (_config, _backend, _model, prompt) => Effect.sync(() => {
-    const packet = JSON.parse(prompt.split('\\n').at(-1));
+  const generate = (_config, _backend, _model, prompt, _purpose, basis) => Effect.sync(() => {
+    const packet = {...JSON.parse(prompt.split('\\n').at(-1)), basis};
     const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
     return {backendIdentity: 'local-ai', modelIdentity: manifest.id,
       modelVersion: manifest.revision + ':' + manifest.sha256, usage: {status: 'unavailable'},

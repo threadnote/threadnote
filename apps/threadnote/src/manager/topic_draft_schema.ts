@@ -363,7 +363,7 @@ function nativeDisjointUnions(value: unknown): unknown {
     const {anyOf, ...rest} = converted;
     return {...rest, oneOf: anyOf};
   }
-  const discriminatorKeys = ['ordinal', 'policyAssessment', 'disposition'].filter(key =>
+  const discriminatorKeys = ['ordinal', 'policyAssessment', 'disposition', 'support'].filter(key =>
     entries.every(entry => {
       const properties = entry?.properties as Record<string, {enum?: readonly unknown[]}> | undefined;
       return properties?.[key]?.enum?.length === 1;
@@ -470,8 +470,9 @@ export function automaticTopicDraftIndexTables(basisInput: AutomaticMaintenanceD
 
 function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3) {
   const tables = automaticTopicDraftIndexTables(basis);
-  const indices = (count: number, max = 8) =>
+  const indices = (count: number, max = 8, min = 0) =>
     Schema.Array(count ? Schema.Literals(Array.from({length: count}, (_, index) => index)) : Schema.Int).check(
+      Schema.isMinLength(min),
       Schema.isMaxLength(Math.min(max, count)),
     );
   const paragraphs = basis.paragraphs.length ? basis.paragraphs : [{ordinal: 0}];
@@ -485,13 +486,18 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
     outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
     paragraphDecisions: Schema.Array(
       Schema.Union(
-        paragraphs.map(paragraph =>
-          Schema.Struct({
-            ordinal: Schema.Literal(paragraph.ordinal),
-            role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
-            support: Schema.Literals(['direct', 'contextual', 'unresolved']),
-            evidenceIndices: indices(tables.evidenceIds.length),
-          }),
+        paragraphs.flatMap(paragraph =>
+          (tables.evidenceIds.length
+            ? (['unresolved', 'direct', 'contextual'] as const)
+            : (['unresolved'] as const)
+          ).map(support =>
+            Schema.Struct({
+              ordinal: Schema.Literal(paragraph.ordinal),
+              role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+              support: Schema.Literal(support),
+              evidenceIndices: support === 'unresolved' ? indices(0) : indices(tables.evidenceIds.length, 8, 1),
+            }),
+          ),
         ),
       ),
     ).check(Schema.isMinLength(basis.paragraphs.length), Schema.isMaxLength(basis.paragraphs.length)),
@@ -500,13 +506,13 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
         paragraphs.map(paragraph =>
           Schema.Struct({
             ordinal: Schema.Literal(paragraph.ordinal),
-            supportIndices: indices(tables.currentHandles.length),
+            supportIndices: indices(tables.currentHandles.length, 8, tables.currentHandles.length ? 1 : 0),
             rationale: text,
             text,
           }),
         ),
       ),
-    ).check(Schema.isMaxLength(basis.paragraphs.length)),
+    ).check(Schema.isMaxLength(tables.currentHandles.length ? basis.paragraphs.length : 0)),
     currentSourceIndices: indices(tables.currentHandles.length, tables.currentHandles.length),
     rationale: text,
     unresolvedQuestions: Schema.Array(text),

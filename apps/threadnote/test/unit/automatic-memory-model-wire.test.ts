@@ -24,7 +24,7 @@ import {
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../src/manager/topic_draft_schema.js';
-import {compactAutomaticTopicDraftFixture} from '../helpers/topic-draft-wire.js';
+import {compactAutomaticTopicDraftFixture, makeTopicDraftWireBasis} from '../helpers/topic-draft-wire.js';
 
 function fixture(count = 3, sources = 2) {
   const uri = 'threadnote://user/tester/memories/durable/projects/fixture/topic.md';
@@ -146,7 +146,8 @@ describe('automatic model-only compact transport', () => {
         fc.integer({min: 1, max: 8}),
         fc.boolean(),
         fc.nat({max: 1024}),
-        (count, sources, reverse, selection) => {
+        fc.constantFrom('direct' as const, 'contextual' as const, 'unresolved' as const),
+        (count, sources, reverse, selection, otherSupport) => {
           const {basis, draft: initial} = fixture(count, sources);
           const ordinal = selection % count;
           const current = basis.handles.filter(handle => handle.variant === 'current');
@@ -154,7 +155,11 @@ describe('automatic model-only compact transport', () => {
             ...initial,
             paragraphDecisions: initial.paragraphDecisions.map((decision, index) => ({
               ...decision,
-              evidenceIds: [current[(selection + index) % sources].citationId],
+              support: index === ordinal ? 'direct' : otherSupport,
+              evidenceIds:
+                index !== ordinal && otherSupport === 'unresolved'
+                  ? []
+                  : [current[(selection + index) % sources].citationId],
             })),
             operations: [
               {
@@ -196,6 +201,114 @@ describe('automatic model-only compact transport', () => {
       ),
       {numRuns: 40, seed: 60106},
     );
+  });
+
+  it('refuses empty direct/contextual decisions and operation support without filling selections', () => {
+    const {basis, wire} = fixture(1, 2);
+    const decision = wire.paragraphDecisions[0];
+    for (const support of ['direct', 'contextual'] as const) {
+      expect(() =>
+        decodeTopicDraftProviderWire(basis, {
+          ...wire,
+          paragraphDecisions: [{...decision, support, evidenceIndices: []}],
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      decodeTopicDraftProviderWire(basis, {
+        ...wire,
+        operations: [{...wire.operations[0], supportIndices: []}],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeTopicDraftProviderWire(basis, {
+        ...wire,
+        paragraphDecisions: [{...decision, support: 'unresolved'}],
+      }),
+    ).toThrow();
+    for (const support of ['contextual', 'unresolved'] as const) {
+      const evidenceIndices = support === 'unresolved' ? [] : decision.evidenceIndices;
+      const proposal = decodeTopicDraftWire(basis, {
+        ...wire,
+        outcome: 'insufficient-evidence',
+        paragraphDecisions: [{...decision, support, evidenceIndices}],
+        operations: [],
+        currentSourceIndices: [],
+      });
+      expect(parseAutomaticMaintenanceDraft(basis, JSON.stringify(proposal)).body).toBe(basis.body);
+    }
+  });
+
+  it('exports disjoint support cardinalities for every native ordinal and closes empty namespaces', () => {
+    type Field = {
+      enum?: readonly unknown[];
+      minItems?: number;
+      maxItems?: number;
+      properties?: Record<string, Field>;
+      items?: Field;
+      oneOf?: readonly Field[];
+    };
+    for (const count of [1, 3, 64]) {
+      for (const sources of [0, 1, 3]) {
+        const {basis} = fixture(count, sources);
+        const native = topicDraftNativeJsonSchema(topicDraftModelSchema(basis), basis) as Field;
+        const fields = native.properties!;
+        const decisions = fields.paragraphDecisions.items!;
+        const variants = decisions.oneOf ?? [decisions];
+        expect(variants).toHaveLength(count * (sources ? 3 : 1));
+        const tags = variants.map(variant => {
+          const p = variant.properties!;
+          const support = p.support.enum![0];
+          expect(p.evidenceIndices.minItems ?? 0).toBe(support === 'unresolved' ? 0 : 1);
+          expect(p.evidenceIndices.maxItems).toBe(support === 'unresolved' ? 0 : Math.min(8, sources * 2));
+          return `${p.ordinal.enum![0]}:${support}`;
+        });
+        expect(new Set(tags).size).toBe(variants.length);
+        expect(fields.operations.maxItems).toBe(sources ? count : 0);
+        const operations = fields.operations.items!;
+        for (const operation of operations.oneOf ?? [operations])
+          expect(operation.properties!.supportIndices.minItems ?? 0).toBe(sources ? 1 : 0);
+      }
+    }
+  });
+
+  it('preserves selective reviewed-current indices while retaining revalidation requirements', () => {
+    const {basis, wire} = fixture(1, 3);
+    for (const currentSourceIndices of [[], wire.currentSourceIndices]) {
+      const proposal = decodeTopicDraftWire(basis, {...wire, currentSourceIndices});
+      expect(parseAutomaticMaintenanceDraft(basis, JSON.stringify(proposal)).changedOrdinals).toEqual([0]);
+    }
+    const revalidation = decodeTopicDraftWire(basis, {
+      ...wire,
+      outcome: 'propose-revalidation',
+      operations: [],
+      currentSourceIndices: [],
+    });
+    expect(() => parseAutomaticMaintenanceDraft(basis, JSON.stringify(revalidation))).toThrow(
+      'outcome differs from its operations',
+    );
+  });
+
+  it('retains exact frozen legacy native schema projections', () => {
+    const cases = [
+      {count: 1, sourceCount: 1, expected: 'e9228a84f4ea4476ba1a50fe80d935440b1e15cf41ad4b70e0429583c76b8a10'},
+      {
+        count: 3,
+        sourceCount: 2,
+        protectedOrdinal: 2,
+        expected: 'b8de46fd722e348dd2391185442b0f90da02d4db60231affcf67d470aeb3cab5',
+      },
+      {
+        count: 64,
+        sourceCount: 8,
+        protectedOrdinal: 63,
+        expected: '0df15b978e862284f4446fbbe465c57296d1f130e80281cfd9ee8cac76eee558',
+      },
+    ];
+    for (const spec of cases) {
+      const basis = makeTopicDraftWireBasis(spec.count, spec);
+      expect(hash(JSON.stringify(topicDraftNativeJsonSchema(topicDraftModelSchema(basis), basis)))).toBe(spec.expected);
+    }
   });
 
   it('never treats the admitted-evidence and current-source indices as one namespace', () => {
