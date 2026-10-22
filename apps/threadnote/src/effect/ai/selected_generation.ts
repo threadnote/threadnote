@@ -1,4 +1,5 @@
 import {Effect, Schema} from 'effect';
+import {AiError} from 'effect/ai';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -51,6 +52,10 @@ export class SelectedDraftError extends Schema.TaggedError<SelectedDraftError>()
   reason: Schema.optionalKey(Schema.Literal('deadline')),
 }) {}
 const fail = (message: string) => SelectedDraftError.make({message});
+export const isTransientDraftProviderFailure = (error: unknown) =>
+  AiError.isAiError(error) &&
+  error.isRetryable &&
+  ['NetworkError', 'RateLimitError', 'InternalProviderError'].includes(error.reason._tag);
 function remoteModelVersion(apiUrl: string | undefined): string {
   let host = 'default';
   if (apiUrl) {

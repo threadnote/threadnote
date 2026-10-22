@@ -4,7 +4,7 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Schema} from 'effect';
+import {Effect, FileSystem, Schema} from 'effect';
 import {TestError} from '@threadnote/testing/test-error';
 import {
   validateTopicGenerationReceipt,
@@ -22,7 +22,7 @@ import {
   readyEvidence,
   TopicDraftError,
 } from '../../src/memory/context/maintenance_draft.js';
-import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/manager/selected_draft.js';
+import {TOPIC_DRAFT_PROMPT_VERSION} from '../../src/effect/ai/selected_generation.js';
 
 const mocks = vi.hoisted(() => ({
   packet: vi.fn(),
@@ -52,8 +52,8 @@ vi.mock('../../src/manager/consolidation_models.js', async original => ({
   ...(await original<typeof import('../../src/manager/consolidation_models.js')>()),
   availableConsolidationModels: () => Effect.succeed([{id: 'fixture', label: 'fixture', isDefault: true}]),
 }));
-vi.mock('../../src/manager/selected_draft.js', async original => ({
-  ...(await original<typeof import('../../src/manager/selected_draft.js')>()),
+vi.mock('../../src/effect/ai/selected_generation.js', async original => ({
+  ...(await original<typeof import('../../src/effect/ai/selected_generation.js')>()),
   selectedTopicDraftIdentity: mocks.identity,
 }));
 
@@ -246,37 +246,42 @@ for (const legacy of ['temperature-zero', 'prompt-v23'] as const) {
 }
 
 function requestFixture() {
-  vi.clearAllMocks();
-  const value = fixture();
-  mocks.packet.mockReturnValue(Effect.succeed({topicEvidence: value.packet}));
-  mocks.review.mockReturnValue(Effect.void);
-  mocks.identity.mockReturnValue(Effect.succeed(value.identity));
-  mocks.records.mockReturnValue(
-    Effect.succeed([
-      {
-        uri: value.basis.targetUri,
-        content: value.body,
-        body: value.body,
-        metadata: {kind: 'durable', status: 'active', project: 'fixture', topic: 'policy'},
-      },
-    ]),
-  );
-  mocks.saveReview.mockReturnValue(Effect.succeed('saved'));
-  const receipts: TopicGenerationReceiptV1[] = [];
-  mocks.saveUnderLock.mockImplementation((_home: string, input: TopicGenerationReceiptV1) =>
-    Effect.sync(() => {
-      receipts.push(validateTopicGenerationReceipt(input));
-      return input.receiptId;
-    }),
-  );
-  const config = {agentContextHome: '/unused'} as never;
-  const input = {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai' as const, modelId: 'fixture'};
-  return {...value, receipts, config, input};
+  return Effect.gen(function* () {
+    vi.clearAllMocks();
+    const value = fixture();
+    mocks.packet.mockReturnValue(Effect.succeed({topicEvidence: value.packet}));
+    mocks.review.mockReturnValue(Effect.void);
+    mocks.identity.mockReturnValue(Effect.succeed(value.identity));
+    mocks.records.mockReturnValue(
+      Effect.succeed([
+        {
+          uri: value.basis.targetUri,
+          content: value.body,
+          body: value.body,
+          metadata: {kind: 'durable', status: 'active', project: 'fixture', topic: 'policy'},
+        },
+      ]),
+    );
+    mocks.saveReview.mockReturnValue(Effect.succeed('saved'));
+    const receipts: TopicGenerationReceiptV1[] = [];
+    mocks.save.mockImplementation((_home: string, input: TopicGenerationReceiptV1) =>
+      Effect.sync(() => {
+        receipts.push(validateTopicGenerationReceipt(input));
+        return input.receiptId;
+      }),
+    );
+    const config = {
+      account: 'local',
+      agentContextHome: yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped(),
+    } as never;
+    const input = {caseId: 'health-case-' + 'c'.repeat(40), backend: 'local-ai' as const, modelId: 'fixture'};
+    return {...value, receipts, config, input};
+  });
 }
 
 effectIt.effect('wires a repaired request to a saved safe summary and all-attempt usage', () =>
   Effect.gen(function* () {
-    const value = requestFixture();
+    const value = yield* requestFixture();
     const firstWire = structuredClone(value.wire);
     firstWire.decision.reviewedSourceIndices = [0, 0];
     const firstText = JSON.stringify(decodeTopicDraftWire(value.basis, firstWire));
@@ -313,7 +318,7 @@ effectIt.effect('wires a repaired request to a saved safe summary and all-attemp
 
 effectIt.effect('persists the accepted attempt when the closing source fence refuses the review', () =>
   Effect.gen(function* () {
-    const value = requestFixture();
+    const value = yield* requestFixture();
     mocks.packet
       .mockReturnValueOnce(Effect.succeed({topicEvidence: value.packet}))
       .mockReturnValue(Effect.succeed({topicEvidence: {...value.packet, targetHash: 'f'.repeat(64)}}));
@@ -337,7 +342,7 @@ effectIt.effect('persists the accepted attempt when the closing source fence ref
 
 effectIt.effect('refuses an unexpected sampling profile when the selected model has none', () =>
   Effect.gen(function* () {
-    const value = requestFixture();
+    const value = yield* requestFixture();
     let calls = 0;
     const failure = yield* requestTopicMaintenanceDraft(value.config, value.input, () =>
       Effect.sync(() => {

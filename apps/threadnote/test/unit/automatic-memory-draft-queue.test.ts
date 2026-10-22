@@ -921,7 +921,7 @@ describe('private durable draft queue', () => {
           yield* fs.writeFileString(
             harness,
             `
-import {Clock, Effect, FileSystem, Layer} from ${module('node_modules/effect/dist/index.js')};
+import {Clock, Console, Effect, FileSystem, Layer} from ${module('node_modules/effect/dist/index.js')};
 import * as BunServices from ${module('node_modules/@effect/platform-bun/dist/BunServices.js')};
 import {TestSystemInfoLayer} from ${module('apps/threadnote/test/helpers/system-layer.ts')};
 import {enqueueDraftWork, readDraftQueueStatus, claimDraftWork, markDraftWorkDispatched, finishDraftWork}
@@ -946,7 +946,7 @@ const program = Effect.gen(function* () {
   if (admitted.state === 'waiting') yield* fs.writeFileString(${JSON.stringify(waiting)}, admitted.reason);
   return {state: admitted.state, reason: admitted.reason};
 });
-console.log(JSON.stringify(await Effect.runPromise(Effect.scoped(program.pipe(Effect.provide(TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer))))))));
+await Effect.runPromise(Effect.scoped(program.pipe(Effect.tap(result => Console.log(JSON.stringify(result))), Effect.provide(TestSystemInfoLayer.pipe(Layer.provideMerge(BunServices.layer))))));
 `,
           );
           const contender = runCommandEffect(system.executablePath, [harness], {allowFailure: true, timeoutMs: 15_000});

@@ -1,6 +1,5 @@
 import {InvalidModelOutput, InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {Cause, Clock, Crypto, Effect, Exit, Option, Schema} from 'effect';
-import {AiError} from 'effect/ai';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {saveTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {
@@ -11,7 +10,7 @@ import {
   type TopicGenerationSummaryV1,
   type TopicGenerationUsageV1,
 } from '@threadnote/memory/topic-maintenance-draft';
-import {SelectedDraftError} from '../../effect/ai/selected_generation.js';
+import {isTransientDraftProviderFailure, SelectedDraftError} from '../../effect/ai/selected_generation.js';
 import {DraftProviderUnavailableBeforeDispatch, TopicDraftProviderOutputError} from '../../effect/ai/consolidator.js';
 
 export class TopicGenerationRequestError extends Schema.TaggedError<TopicGenerationRequestError>()(
@@ -106,11 +105,7 @@ export function withTopicGenerationObservation<A, E, R>(
       if (Exit.isFailure(exit)) {
         if (Cause.hasInterrupts(exit.cause)) return yield* Effect.failCause(exit.cause);
         const original = Cause.findErrorOption(exit.cause);
-        const transient =
-          Option.isSome(original) &&
-          AiError.isAiError(original.value) &&
-          original.value.isRetryable &&
-          ['NetworkError', 'RateLimitError', 'InternalProviderError'].includes(original.value.reason._tag);
+        const transient = Option.isSome(original) && isTransientDraftProviderFailure(original.value);
         // Unknown/provider-output failures are not evidence that redispatch is safe.
         return yield* failed(observation.summary(), transient ? 'transient' : 'terminal');
       }
