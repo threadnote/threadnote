@@ -13,6 +13,7 @@ export function LibraryArticle({
   markdown,
   resource,
   onChanged,
+  onVerifiedUpdate,
   onPrepareGraph,
 }: {
   readonly node: TreeNode;
@@ -20,6 +21,7 @@ export function LibraryArticle({
   readonly markdown: string;
   readonly resource: boolean;
   readonly onChanged?: () => void;
+  readonly onVerifiedUpdate?: () => void;
   readonly onPrepareGraph?: () => void;
 }): React.ReactElement {
   const author = metadata?.sourceAgentClient;
@@ -39,7 +41,7 @@ export function LibraryArticle({
           key={node.uri}
           uri={node.uri}
           project={metadata.project ?? 'unscoped'}
-          onChanged={onChanged}
+          onChanged={onVerifiedUpdate ?? onChanged}
         />
       ) : null}
       <MarkdownViewer markdown={markdown} />

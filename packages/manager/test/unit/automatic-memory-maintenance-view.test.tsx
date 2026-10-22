@@ -330,6 +330,7 @@ it('requires the exact full preview and explicit confirmation; HTTP200 incomplet
 
 it('keeps the Library preview open and refreshes canonical content only after verified apply', async () => {
   const changed = vi.fn();
+  const legacyChanged = vi.fn();
   let current = review();
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     if (String(input).includes('/automatic-memory?'))
@@ -343,16 +344,33 @@ it('keeps the Library preview open and refreshes canonical content only after ve
     }
     return json(current);
   });
-  await render(<AutomaticMemoryPanel project="project" uri={uri} onChanged={changed} />);
+  await render(
+    <LibraryArticle
+      node={{name: 'ordinary.md', uri, relativePath: 'ordinary.md', isDir: false, isSystem: false, isShared: false}}
+      metadata={{
+        kind: 'durable',
+        status: 'active',
+        project: 'project',
+        sourceAgentClient: 'user',
+        timestamp: '2026-10-22T00:00:00Z',
+      }}
+      markdown="Accepted prose."
+      resource={false}
+      onChanged={legacyChanged}
+      onVerifiedUpdate={changed}
+    />,
+  );
   await click('Review update');
   await click('Preview exact update');
   expect(document.querySelector('.automatic-review-exact pre')?.textContent).toContain('exact-provenance');
   expect(document.querySelector('dialog')).not.toBeNull();
   expect(changed).not.toHaveBeenCalled();
+  expect(legacyChanged).not.toHaveBeenCalled();
   expect(button('Confirm and apply').disabled).toBe(true);
   await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
   await click('Confirm and apply');
   expect(changed).toHaveBeenCalledOnce();
+  expect(legacyChanged).not.toHaveBeenCalled();
   expect(document.querySelector('dialog')).toBeNull();
 });
 

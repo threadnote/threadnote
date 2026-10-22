@@ -223,11 +223,15 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     onError: toastMessage,
     onApplied: uri => {
       draftRef.current = undefined;
-      void reloadSelected(uri);
-      void refreshTreeOnly();
-      toastMessage('Memory edit saved and verified');
+      memoryUpdateVerified(uri, 'Memory edit saved and verified');
     },
   });
+  function memoryUpdateVerified(uri: string, message: string): void {
+    void reloadSelected(uri);
+    void refreshTreeOnly();
+    setAttentionRefreshGeneration(generation => generation + 1);
+    toastMessage(message);
+  }
   const [libraryActionBusy, setLibraryActionBusy] = useState(false);
   const [bulkCount, setBulkCount] = useState(0);
   const [libraryDialog, setLibraryDialog] = useState<'details' | 'consolidate'>();
@@ -1860,6 +1864,9 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
                         markdown={markdownPreview}
                         resource={selectedIsResource}
                         onChanged={() => void refreshAll()}
+                        onVerifiedUpdate={() =>
+                          memoryUpdateVerified(selectedNode!.uri, 'Memory update saved and verified')
+                        }
                         onPrepareGraph={() => setPanel('graph')}
                       />
                     ) : selectedIsDir ? (
