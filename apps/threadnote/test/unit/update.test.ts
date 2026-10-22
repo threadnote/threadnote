@@ -734,7 +734,7 @@ describe('standalone updater', () => {
       expect(captured.output).toContain('Threadnote is up to date.');
       expect(captured.output).toContain('run `threadnote repair`, then restart that host once');
       expect(downloadAttempted).toBe(false);
-    }).pipe(provideTestLayer(ApplicationLayer)),
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
   effectIt.effect('refuses a forced same-channel downgrade before downloading or activating it', () =>
@@ -760,7 +760,7 @@ describe('standalone updater', () => {
 
       expect(String(failure)).toContain(`Refusing to downgrade Threadnote ${currentVersion} to ${olderVersion}`);
       expect(downloadAttempted).toBe(false);
-    }),
+    }).pipe(TestClock.withLive),
   );
 
   effectIt.effect('revalidates the active version under the installation lock before a forced reinstall', () =>
@@ -866,7 +866,7 @@ describe('standalone updater', () => {
 
       expect(String(failure)).toContain(`Refusing to downgrade Threadnote ${currentVersion} to ${olderVersion}`);
       expect(downloadAttempted).toBe(false);
-    }),
+    }).pipe(TestClock.withLive),
   );
 
   effectIt.effect('allows an explicit beta-to-stable channel switch to an older stable version', () =>
@@ -988,7 +988,7 @@ describe('standalone updater', () => {
       expect(result.captured.output).toContain(`Installed standalone Threadnote ${latestVersion}`);
       expect(result.active.version).toBe(latestVersion);
       expect(result.launcher).toContain(latestVersion);
-    }),
+    }).pipe(TestClock.withLive),
   );
 
   effectIt.effect('repairs a current launcher and queues Gemma even when workflow refresh needs retry', () =>
