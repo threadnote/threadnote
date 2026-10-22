@@ -238,6 +238,25 @@ describe('automatic ordinary-memory background controls', () => {
             };
             const before = JSON.stringify({basis, wire});
             expect(() => decode(wire)).not.toThrow();
+            // A singleton reference universe cannot admit the observed NV004 duplicate.
+            expect(() =>
+              decode({
+                ...wire,
+                paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                  ...decision,
+                  evidenceIds: [...decision.evidenceIds, ...decision.evidenceIds],
+                })),
+              }),
+            ).toThrow();
+            expect(() =>
+              decode({
+                ...wire,
+                operations: wire.operations.map(operation => ({
+                  ...operation,
+                  supportHandles: [...operation.supportHandles, ...operation.supportHandles],
+                })),
+              }),
+            ).toThrow();
             expect(() =>
               decode({
                 ...wire,
@@ -372,6 +391,7 @@ describe('automatic ordinary-memory background controls', () => {
     'unknown-support-handle',
     'unknown-evidence-id',
     'nv003-prefixed-decision-id',
+    'nv004-duplicate-decision-id',
     'rationale-bound',
     'receipt-save',
   ] as const;
@@ -534,6 +554,14 @@ describe('automatic ordinary-memory background controls', () => {
                       paragraphDecisions: wire.paragraphDecisions.map(decision => ({
                         ...decision,
                         evidenceIds: wire.operations[0].supportHandles,
+                      })),
+                    };
+                  if (scenario === 'nv004-duplicate-decision-id')
+                    wire = {
+                      ...wire,
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                        ...decision,
+                        evidenceIds: [...decision.evidenceIds, ...decision.evidenceIds],
                       })),
                     };
                   if (scenario === 'rationale-bound') wire = {...wire, rationale: 'x'.repeat(2049)};

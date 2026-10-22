@@ -454,7 +454,7 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
   const text = Schema.String;
   // A missing admitted namespace permits only [], never an unconstrained ID.
   const admitted = (values: readonly string[]) =>
-    Schema.Array(values.length ? Schema.Literals(values) : text).check(Schema.isMaxLength(values.length ? 8 : 0));
+    Schema.Array(values.length ? Schema.Literals(values) : text).check(Schema.isMaxLength(Math.min(8, values.length)));
   const current = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
   const evidence = [
     ...new Set([...basis.assessment.evidence.map(entry => entry.id), ...basis.handles.map(h => h.citationId)]),

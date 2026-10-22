@@ -31,7 +31,7 @@ import {
 import {topicDraftModelSchema} from '../../manager/topic_draft_schema.js';
 
 export const TOPIC_DRAFT_PROMPT_VERSION = 'topic-maintenance-draft-v24';
-export const AUTOMATIC_DRAFT_PROMPT_VERSION = 'automatic-memory-v3';
+export const AUTOMATIC_DRAFT_PROMPT_VERSION = 'automatic-memory-v4';
 export const TOPIC_DRAFT_MAX_PROMPT_BYTES = 80 * 1024;
 export const TOPIC_DRAFT_MAX_OUTPUT_BYTES = 32 * 1024;
 export const TOPIC_DRAFT_MAX_DURATION_MS = 120_000;
