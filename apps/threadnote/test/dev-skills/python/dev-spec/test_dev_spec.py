@@ -88,6 +88,20 @@ class SpecClient:
 
 class PlanClient(SpecClient):
     def is_active(self, uri): return self.active(uri)
+    def plan_archive(self, uri):
+        return {"source": uri, "sourceRecordHash": dp.digest(dp.load_record(self.read(uri))),
+                "preview": {"canonicalUri": uri.replace("/active/", "/archived/")}}
+    def validate_archive_plans(self, plans):
+        for plan in plans:
+            observed = self.peek(plan["source"]) or self.peek(plan["preview"]["canonicalUri"])
+            dp.require(observed is not None and dp.digest(dp.load_record(observed)) == plan["sourceRecordHash"],
+                       "Synthetic exact archive source changed")
+    def archive(self, uri, plan=None):
+        dp.require(plan is not None and plan["source"] == uri, "Archive requires its exact admitted plan")
+        self.validate_archive_plans([plan])
+        destination = self.call("archive", [uri]).split("Stored memory: ", 1)[1]
+        dp.require(destination == plan["preview"]["canonicalUri"], "Synthetic archive destination changed")
+        return destination
     def remember(self, record, topic, relations, replace=None, deferred=False):
         return self.backend.write(record, topic, replace, False, dp.memory_text(record))
     def preflight(self, record, topic, relations, replace=None, deferred=False):

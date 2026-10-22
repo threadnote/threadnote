@@ -89,8 +89,10 @@ class NativeFixture:
         existing = self.documents.get(uri)
         expected = request["expectedRevision"]
         if action == "preflight":
-            return {"protocolVersion": 1, "status": "ok", "canonicalUri": uri,
-                    "beforeRevision": existing["revision"] if existing else None}
+            destination = uri.replace("/active/", "/archived/") if request["mutation"] == "archive" else uri
+            return {"protocolVersion": 1, "status": "ok", "canonicalUri": destination,
+                    "beforeRevision": existing["revision"] if existing else None,
+                    **({"bodySha256": existing["bodySha256"]} if existing else {})}
         if operation in self.operations:
             return self.operations[operation]
         if self.fail == "before-mutation":

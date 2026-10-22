@@ -68,6 +68,11 @@ export interface ResourceStoreEntry {
 export type ResourceStoreBoundedRead =
   {readonly content: string; readonly truncated: false} | {readonly truncated: true};
 
+export interface ResourceStoreReadOptions {
+  /** Refuse missing storage roots without creating them. */
+  readonly existingOnly?: boolean;
+}
+
 export interface ResourceStoreWriteOptions {
   readonly expectedFingerprint?: string;
   readonly mode: 'create' | 'replace' | 'upsert';
@@ -176,7 +181,11 @@ export interface ResourceStoreShape {
     mutations: readonly ResourceStoreMutation[],
     check: Effect.Effect<void, E, R>,
   ) => Effect.Effect<void, E | ResourceStoreError, R>;
-  readonly read: (location: ResourceStoreLocation, uri: string) => Effect.Effect<string, ResourceStoreError>;
+  readonly read: (
+    location: ResourceStoreLocation,
+    uri: string,
+    options?: ResourceStoreReadOptions,
+  ) => Effect.Effect<string, ResourceStoreError>;
   readonly readBounded: (
     location: ResourceStoreLocation,
     uri: string,
@@ -268,8 +277,8 @@ function createResourceStoreOperations(
     );
   const visibleEntries = (location: ResourceStoreLocation, entries: readonly ResourceStoreEntry[]) =>
     Effect.filter(entries, entry => externalAllowed(location, entry.uri));
-  const resolve = (location: ResourceStoreLocation, uri: string) =>
-    resolveResourcePath(fs, path, location, uri).pipe(mapIoError('resolve', uri));
+  const resolve = (location: ResourceStoreLocation, uri: string, options?: ResourceStoreReadOptions) =>
+    resolveResourcePath(fs, path, location, uri, options).pipe(mapIoError('resolve', uri));
   const invalidateRecall = (
     location: ResourceStoreLocation,
     includeInactive: boolean,
@@ -563,9 +572,9 @@ function createResourceStoreOperations(
             discard: true,
           }),
     mutateChecked: (location, mutations, check) => mutateResourceChecked(location, mutations, check),
-    read: (location, uri) =>
+    read: (location, uri, options) =>
       Effect.gen(function* () {
-        const resolved = yield* resolve(location, uri);
+        const resolved = yield* resolve(location, uri, options);
         yield* assertExternalAccess(location, resolved.id.canonicalUri);
         yield* verifyExistingPath(fs, path, resolved, 'File');
         const content = yield* fs.readFileString(resolved.path);
@@ -605,7 +614,13 @@ interface ResolvedResourcePath {
   readonly path: string;
 }
 
-function resolveResourcePath(fs: FileSystem.FileSystem, path: Path.Path, location: ResourceStoreLocation, uri: string) {
+function resolveResourcePath(
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  location: ResourceStoreLocation,
+  uri: string,
+  options?: ResourceStoreReadOptions,
+) {
   return Effect.gen(function* () {
     const id = resourceIdWithoutAnchor(parseResourceId(uri));
     const userSegment = uriSegment(location.user);
@@ -637,7 +652,7 @@ function resolveResourcePath(fs: FileSystem.FileSystem, path: Path.Path, locatio
         uri: id.canonicalUri,
       });
     }
-    const realBoundaryRoot = yield* resolveOwnedAccountBoundary(fs, path, location, id.canonicalUri);
+    const realBoundaryRoot = yield* resolveOwnedAccountBoundary(fs, path, location, id.canonicalUri, options);
     return {boundaryRoot: realBoundaryRoot, id, path: path.resolve(realBoundaryRoot, relative)};
   });
 }
@@ -647,10 +662,15 @@ function resolveOwnedAccountBoundary(
   path: Path.Path,
   location: ResourceStoreLocation,
   uri: string,
+  options?: ResourceStoreReadOptions,
 ) {
   return Effect.gen(function* () {
     const logicalHome = path.resolve(location.home);
-    yield* fs.makeDirectory(logicalHome, {recursive: true, mode: 0o700});
+    if (options?.existingOnly) {
+      if (!(yield* fs.exists(logicalHome))) {
+        return yield* ResourceNotFound.make({message: `Resource does not exist: ${uri}`, uri});
+      }
+    } else yield* fs.makeDirectory(logicalHome, {recursive: true, mode: 0o700});
     const realHome = yield* fs.realPath(logicalHome);
     let logicalCurrent = logicalHome;
     let realCurrent = realHome;
@@ -664,6 +684,9 @@ function resolveOwnedAccountBoundary(
         });
       }
       if (!(yield* fs.exists(logicalCurrent))) {
+        if (options?.existingOnly) {
+          return yield* ResourceNotFound.make({message: `Resource does not exist: ${uri}`, uri});
+        }
         // First-use callers may race here. Only an existing entry is recoverable; validation below decides its safety.
         yield* fs.makeDirectory(logicalCurrent, {mode: 0o700}).pipe(
           Effect.catchIf(

@@ -14,6 +14,8 @@ const payloads = [
 const suites = [
   'apps/threadnote/test/dev-skills/python/dev-spec/test_dev_spec.py',
   'apps/threadnote/test/dev-skills/python/dev-plan/test_dev_plan.py',
+  'apps/threadnote/test/dev-skills/python/dev-plan/test_closeout.py',
+  'apps/threadnote/test/dev-skills/python/dev-plan/test_archive_transport.py',
   'apps/threadnote/test/dev-skills/python/dev-cycle/test_dev_cycle.py',
   'apps/threadnote/test/dev-skills/python/dev-cycle/test_phase_state.py',
   'apps/threadnote/test/dev-skills/python/watch-pr/test_watch_pr.py',
