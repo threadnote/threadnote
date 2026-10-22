@@ -13,14 +13,25 @@ import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {selectLocalModel} from '@threadnote/inference/models/selection';
-import {loadCandidateReview, withCandidateReviewLock} from '@threadnote/memory/candidate';
+import {
+  candidateReviewWithState,
+  loadCandidateReview,
+  saveCandidateReview,
+  withCandidateReviewLock,
+} from '@threadnote/memory/candidate';
+import {loadTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
+import type {AutomaticMaintenanceDraftV2} from '@threadnote/memory/topic-maintenance-draft';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import * as consolidatorModule from '../../src/effect/ai/consolidator.js';
-import {selectedTopicDraftIdentity, runSelectedDraft} from '../../src/effect/ai/selected_generation.js';
+import {
+  selectedTopicDraftIdentity,
+  runSelectedDraft,
+  AUTOMATIC_DRAFT_PROMPT_VERSION,
+} from '../../src/effect/ai/selected_generation.js';
 import {registerStoreTool} from '../../src/mcp/server/store.js';
 import {registerReadTool} from '../../src/mcp/server/recall.js';
 import {registerContextMaintenanceTools} from '../../src/mcp/server/context/maintenance.js';
@@ -33,6 +44,7 @@ import {
   automaticReviewPacket,
   readAutomaticDraftBackgroundStatus,
   requestAutomaticMemoryDraft,
+  requestAutomaticMemoryReview,
   runAutomaticMemoryBackground,
   setAutomaticDraftBackgroundPolicy,
 } from '../../src/memory/context/maintenance_draft.js';
@@ -185,6 +197,309 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
 });
 
 describe('automatic ordinary-memory background controls', () => {
+  for (const state of ['pending', 'rejected', 'deferred', 'conflict', 'applying'] as const) {
+    effectIt.effect(`preserves an earlier prompt contract review across the version bump: ${state}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* Effect.gen(function* () {
+          yield* f.prepare;
+          const input = {
+            uri: f.uri,
+            expectedContentHash: hash(f.content),
+            backend: 'local-ai' as const,
+            modelId: f.modelId,
+          };
+          const packet = yield* requestAutomaticMemoryReview(f.config, input);
+          if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
+          const result = yield* f.generate(
+            f.config,
+            'local-ai',
+            {id: f.modelId, label: f.modelId, isDefault: true},
+            JSON.stringify(packet),
+            'topic-maintenance',
+            packet.basis,
+          );
+          const review = yield* requestAutomaticMemoryReview(
+            f.config,
+            {...input, draftJson: result.text},
+            {
+              origin: 'model',
+              agent: 'local-ai',
+              model: f.modelId,
+              promptVersion: 'automatic-memory-v1',
+              attempts: 1,
+              usage: {status: 'unavailable'},
+            },
+          );
+          if (!('reviewId' in review)) return yield* Effect.die('Expected a private review.');
+          const prior = candidateReviewWithState(review, review.candidates[0].candidateId, state);
+          yield* saveCandidateReview(f.home, prior);
+          const blocked = yield* requestAutomaticMemoryDraft(f.config, input, () =>
+            Effect.die('An earlier review must block dispatch.'),
+          ).pipe(Effect.result);
+          expect(Result.isFailure(blocked)).toBe(true);
+          expect(yield* loadCandidateReview(f.home, f.reviewId)).toEqual(prior);
+          expect((yield* readDraftQueueStatus(f.config)).backgroundReservations).toHaveLength(0);
+          expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+        }).pipe(Effect.provideService(LocalModelStore, f.installed));
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+  const nativeWireCases = [
+    'repair',
+    'invalid-second',
+    'repair-provider-unavailable',
+    'repair-manifest-drift',
+    'no-change',
+    'target-identity',
+    'excess-field',
+    'missing-coverage',
+    'duplicate-coverage',
+    'wrong-ordinal',
+    'decision-ordinal',
+    'duplicate-operation',
+    'split-paragraph',
+    'before-hash',
+    'unknown-handle',
+    'unknown-support-handle',
+    'unknown-evidence-id',
+    'rationale-bound',
+    'receipt-save',
+  ] as const;
+  for (const scenario of nativeWireCases) {
+    effectIt.effect(`validates actual selected native automatic output: ${scenario}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        const catalog = yield* LocalModelCatalog;
+        let manifestDrift = false;
+        const currentCatalog = LocalModelCatalog.of({
+          ...catalog,
+          get: id =>
+            catalog
+              .get(id)
+              .pipe(
+                Effect.map(manifest =>
+                  manifestDrift ? {...manifest, revision: hash('changed-manifest').slice(0, 40)} : manifest,
+                ),
+              ),
+        });
+        yield* Effect.gen(function* () {
+          yield* f.prepare;
+          const runtime = yield* LocalModelRuntime;
+          let calls = 0;
+          let firstText: string | undefined;
+          let saveFailed = false;
+          const receiptRoot = f.path.join(f.home, 'threadnote/candidates/v1/topic-generation');
+          const fs = FileSystem.FileSystem.of({
+            ...f.fs,
+            rename: (from, to) => {
+              if (!['receipt-save', 'repair-manifest-drift'].includes(scenario) || !to.startsWith(receiptRoot))
+                return f.fs.rename(from, to);
+              return f.fs.readFileString(from).pipe(
+                Effect.flatMap(text => {
+                  if (scenario === 'repair-manifest-drift')
+                    return f.fs.rename(from, to).pipe(
+                      Effect.tap(() =>
+                        Effect.sync(() => {
+                          if (text.includes('"status":"draft-invalid"')) manifestDrift = true;
+                        }),
+                      ),
+                    );
+                  if (!saveFailed && text.includes('"status":"draft-invalid"')) {
+                    saveFailed = true;
+                    return f.fs.rename(from, f.path.join(f.home, 'absent-directory', 'receipt.json'));
+                  }
+                  return f.fs.rename(from, to);
+                }),
+              );
+            },
+          });
+          const stub = LocalModelRuntime.of({
+            ...runtime,
+            generate: request =>
+              Effect.gen(function* () {
+                calls++;
+                expect(request.prompt).toContain('You are instructed to propose supported corrections');
+                const packet = JSON.parse(request.prompt.split('\n').at(-1)!) as ReturnType<
+                  typeof automaticReviewPacket
+                >;
+                const result = yield* f.generate(
+                  f.config,
+                  'local-ai',
+                  {id: f.modelId, label: f.modelId, isDefault: true},
+                  request.prompt,
+                  'topic-maintenance',
+                  packet.basis,
+                );
+                let wire = JSON.parse(result.text) as AutomaticMaintenanceDraftV2;
+                if (calls === 2) {
+                  expect(request.prompt).toContain('invalid automatic paragraph replacement');
+                  expect(request.prompt).toContain(
+                    JSON.stringify({
+                      validationError: 'Topic maintenance draft: invalid automatic paragraph replacement.',
+                      previousDraft: firstText,
+                    }),
+                  );
+                }
+                if (calls === 1 || scenario === 'invalid-second') {
+                  if (
+                    [
+                      'repair',
+                      'invalid-second',
+                      'repair-provider-unavailable',
+                      'repair-manifest-drift',
+                      'receipt-save',
+                      'no-change',
+                    ].includes(scenario)
+                  ) {
+                    wire = {
+                      ...wire,
+                      outcome: 'insufficient-evidence',
+                      operations:
+                        scenario === 'no-change'
+                          ? []
+                          : wire.operations.map(operation => ({
+                              ...operation,
+                              text: packet.basis.body,
+                              supportHandles: [],
+                              rationale:
+                                'The source contradicts the memory, but there is no instruction to update the memory. The operation is not performed.',
+                            })),
+                      rationale: 'The memory is retained as is, but the conflict is noted.',
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                        ...decision,
+                        role: 'unknown',
+                        support: 'unresolved',
+                        evidenceIds: [],
+                      })),
+                    };
+                  }
+                  if (scenario === 'target-identity') wire = {...wire, targetHash: hash('stale')};
+                  if (scenario === 'missing-coverage') wire = {...wire, paragraphDecisions: []};
+                  if (scenario === 'duplicate-coverage')
+                    wire = {...wire, paragraphDecisions: [...wire.paragraphDecisions, ...wire.paragraphDecisions]};
+                  if (scenario === 'wrong-ordinal')
+                    wire = {...wire, operations: wire.operations.map(operation => ({...operation, ordinal: -1}))};
+                  if (scenario === 'decision-ordinal')
+                    wire = {
+                      ...wire,
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({...decision, ordinal: -1})),
+                    };
+                  if (scenario === 'duplicate-operation')
+                    wire = {...wire, operations: [...wire.operations, ...wire.operations]};
+                  if (scenario === 'split-paragraph')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({
+                        ...operation,
+                        text: operation.text + '\n\nAnother paragraph.',
+                      })),
+                    };
+                  if (scenario === 'before-hash')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({...operation, beforeHash: hash('stale')})),
+                    };
+                  if (scenario === 'unknown-handle')
+                    wire = {...wire, reviewedHandles: [`current:ame_${hash('unknown')}`]};
+                  if (scenario === 'unknown-support-handle')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({
+                        ...operation,
+                        supportHandles: [`current:ame_${hash('unknown')}`],
+                      })),
+                    };
+                  if (scenario === 'unknown-evidence-id')
+                    wire = {
+                      ...wire,
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                        ...decision,
+                        evidenceIds: [`ame_${hash('unknown')}`],
+                      })),
+                    };
+                  if (scenario === 'rationale-bound') wire = {...wire, rationale: 'x'.repeat(2049)};
+                }
+                const output = scenario === 'excess-field' ? {...wire, invented: true} : wire;
+                if (calls === 1) firstText = JSON.stringify(output);
+                return output;
+              }).pipe(Effect.orDie),
+          });
+          const finalStore = LocalModelStore.of({
+            ...f.installed,
+            status: (home, manifest) =>
+              f.installed.status(home, manifest).pipe(
+                Effect.map(status => ({
+                  ...status,
+                  installed: scenario !== 'repair-provider-unavailable' || calls === 0,
+                })),
+              ),
+          });
+          const generate: typeof runSelectedDraft = (...args) =>
+            runSelectedDraft(...args).pipe(
+              Effect.provideService(LocalModelRuntime, stub),
+              Effect.provideService(LocalModelStore, finalStore),
+            );
+          yield* runAutomaticMemoryBackground(f.config, {project: 'fixture'}, generate).pipe(
+            Effect.provideService(FileSystem.FileSystem, fs),
+          );
+          const success = scenario === 'repair' || scenario === 'no-change';
+          expect(calls).toBe(scenario === 'repair' || scenario === 'invalid-second' ? 2 : 1);
+          expect((yield* readDraftQueueStatus(f.config)).backgroundReservations).toHaveLength(1);
+          expect((yield* readDraftQueueTarget(f.config, hash(f.uri)))?.state).toBe(success ? 'completed' : 'failed');
+          expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+          const files = yield* f.fs.readDirectory(receiptRoot);
+          expect(files).toHaveLength(1);
+          const receipt = yield* loadTopicGenerationReceipt(f.home, files[0].replace(/\.json$/u, ''));
+          expect(receipt.promptVersion).toBe(AUTOMATIC_DRAFT_PROMPT_VERSION);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(
+            scenario === 'repair'
+              ? ['draft-invalid', 'accepted']
+              : scenario === 'invalid-second'
+                ? ['draft-invalid', 'draft-invalid']
+                : scenario === 'no-change'
+                  ? ['accepted']
+                  : scenario === 'repair-provider-unavailable'
+                    ? ['draft-invalid', 'not-dispatched']
+                    : scenario === 'repair-manifest-drift'
+                      ? ['draft-invalid']
+                      : scenario === 'receipt-save'
+                        ? ['draft-invalid']
+                        : ['provider-output-invalid'],
+          );
+          if (scenario !== 'no-change') {
+            expect(receipt.firstFailedOutput).toMatchObject({
+              text: firstText,
+              hash: hash(firstText!),
+              bytes: new TextEncoder().encode(firstText).byteLength,
+              representation: 'decoded-json',
+            });
+          }
+          if (success) {
+            const review = yield* loadCandidateReview(f.home, f.reviewId);
+            expect(review.maintenance?.generation).toMatchObject({
+              promptVersion: AUTOMATIC_DRAFT_PROMPT_VERSION,
+              attempts: calls,
+            });
+            expect(review.maintenance?.proposal.body).toBe(
+              scenario === 'repair' ? 'The timeout is 60 seconds.' : 'The timeout is 30 seconds.',
+            );
+          } else {
+            expect(yield* f.fs.exists(f.path.join(f.home, `threadnote/candidates/v1/reviews/${f.reviewId}.json`))).toBe(
+              false,
+            );
+            if (scenario === 'repair-manifest-drift') manifestDrift = false;
+            yield* runAutomaticMemoryBackground(f.config, {project: 'fixture'}, generate);
+            expect(calls).toBe(scenario === 'invalid-second' ? 2 : 1);
+          }
+          if (scenario === 'receipt-save') expect(saveFailed).toBe(true);
+        }).pipe(
+          Effect.provideService(LocalModelStore, f.installed),
+          Effect.provideService(LocalModelCatalog, currentCatalog),
+        );
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
   for (const failure of ['configuration-missing', 'authentication-after-dispatch'] as const) {
     effectIt.effect(`keeps real remote ${failure} distinct from an unused same-identity recovery`, () =>
       Effect.gen(function* () {

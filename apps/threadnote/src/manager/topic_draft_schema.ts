@@ -1,15 +1,19 @@
 import {Data, Schema} from 'effect';
-import {consolidationSections} from '@threadnote/memory/consolidation';
+import {consolidationRevision, consolidationSections} from '@threadnote/memory/consolidation';
 import {
   topicMaintenanceParagraphEligible,
   type LegacyTopicMaintenanceDraftBasis as TopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasis as AnyTopicMaintenanceDraftBasis,
   type AutomaticMaintenanceDraftBasisV3,
-  parseAutomaticMaintenanceDraft,
+  validateAutomaticMaintenanceDraftBasis,
+  automaticReviewSections,
+  MAX_TOPIC_MAINTENANCE_DRAFT_BYTES,
+  type AutomaticMaintenanceDraftV2,
   type TopicMaintenanceDraftV1,
   type TopicMaintenanceParagraphDispositionV1,
   type TopicMaintenanceReplaceOperationV1,
 } from '@threadnote/memory/topic-maintenance-draft';
+import {MAX_TOPIC_MAINTENANCE_BYTES} from '@threadnote/memory/topic-maintenance';
 
 export function topicDraftGenerationEligible(paragraph: TopicMaintenanceDraftBasis['paragraphs'][number]) {
   return topicMaintenanceParagraphEligible(paragraph);
@@ -443,7 +447,10 @@ function legacyTopicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftMo
 
 /** Ordinary generation proposes roles/support in its final review; it does not enroll or approve a memory. */
 export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
-  if (basis.version !== 3) return legacyTopicDraftModelSchema(basis);
+  return basis.version === 3 ? automaticTopicDraftModelSchema(basis) : legacyTopicDraftModelSchema(basis);
+}
+
+function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3) {
   const text = Schema.String;
   return Schema.Struct({
     version: Schema.Literal(2),
@@ -471,6 +478,73 @@ export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
     ),
   });
 }
+
+/** Terminal wire/context preflight only; the memory owner still decides application validity. */
+function decodeAutomaticTopicDraftWire(basisInput: AutomaticMaintenanceDraftBasisV3, input: unknown) {
+  const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
+  const wire = Schema.decodeUnknownSync(automaticTopicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+  const size = (text: string) => new TextEncoder().encode(text).byteLength;
+  const invalid = (): never => {
+    throw new Error('Invalid automatic generation wire identity, coverage or bounds.');
+  };
+  const bounded = (text: string, max: number) => wellFormed(text) && text.length > 0 && size(text) <= max;
+  const strings = (values: readonly string[], count: number, max: number) =>
+    values.length <= count && values.every(value => bounded(value, max));
+  const unique = (values: readonly unknown[]) => new Set(values).size === values.length;
+  const current = new Set(basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id));
+  const evidence = new Set([
+    ...basis.assessment.evidence.map(entry => entry.id),
+    ...basis.handles.map(h => h.citationId),
+  ]);
+  if (
+    size(JSON.stringify(input)) > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES ||
+    !bounded(wire.rationale, 2048) ||
+    !strings(wire.reviewedHandles, basis.assessment.version === 2 ? 24 : 16, 80) ||
+    !unique(wire.reviewedHandles) ||
+    wire.reviewedHandles.some(handle => !current.has(handle)) ||
+    !strings(wire.unresolvedQuestions, 16, 512) ||
+    !strings(wire.removedClaims, 64, 512) ||
+    wire.operations.length > basis.paragraphs.length ||
+    !unique(wire.operations.map(operation => operation.ordinal)) ||
+    wire.paragraphDecisions.length !== basis.paragraphs.length
+  )
+    invalid();
+  const sections = automaticReviewSections(basis.body);
+  if (
+    sections.length !== basis.paragraphs.length ||
+    sections.some((text, ordinal) => consolidationRevision(text) !== basis.paragraphs[ordinal].hash)
+  )
+    invalid();
+  let bodyBytes = size(basis.body);
+  for (const operation of wire.operations) {
+    const prior = basis.paragraphs[operation.ordinal];
+    if (
+      !Number.isSafeInteger(operation.ordinal) ||
+      !prior ||
+      operation.beforeHash !== prior.hash ||
+      !bounded(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
+      automaticReviewSections(operation.text).length !== 1 ||
+      !bounded(operation.rationale, 1024) ||
+      !strings(operation.supportHandles, 8, 80) ||
+      !unique(operation.supportHandles) ||
+      operation.supportHandles.some(handle => !current.has(handle))
+    )
+      invalid();
+    bodyBytes += size(operation.text) - size(sections[operation.ordinal]);
+  }
+  if (bodyBytes > MAX_TOPIC_MAINTENANCE_BYTES) invalid();
+  for (const [ordinal, decision] of wire.paragraphDecisions.entries()) {
+    if (
+      decision.ordinal !== ordinal ||
+      decision.beforeHash !== basis.paragraphs[ordinal].hash ||
+      !strings(decision.evidenceIds, 8, 68) ||
+      !unique(decision.evidenceIds) ||
+      decision.evidenceIds.some(id => !evidence.has(id))
+    )
+      invalid();
+  }
+  return wire;
+}
 export function decodeTopicDraftWire(
   basis: TopicMaintenanceDraftBasis,
   input: unknown,
@@ -478,13 +552,14 @@ export function decodeTopicDraftWire(
 export function decodeTopicDraftWire(
   basis: AutomaticMaintenanceDraftBasisV3,
   input: unknown,
-): ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
+): AutomaticMaintenanceDraftV2;
 export function decodeTopicDraftWire(
   basis: AnyTopicMaintenanceDraftBasis,
   input: unknown,
-): ReturnType<typeof decodeLegacyTopicDraftWire> | ReturnType<typeof parseAutomaticMaintenanceDraft>['draft'];
-export function decodeTopicDraftWire(basis: AnyTopicMaintenanceDraftBasis, input: unknown) {
-  return basis.version === 3
-    ? parseAutomaticMaintenanceDraft(basis, JSON.stringify(input)).draft
-    : decodeLegacyTopicDraftWire(basis, input);
+): ReturnType<typeof decodeLegacyTopicDraftWire> | AutomaticMaintenanceDraftV2;
+export function decodeTopicDraftWire(
+  basis: AnyTopicMaintenanceDraftBasis,
+  input: unknown,
+): ReturnType<typeof decodeLegacyTopicDraftWire> | AutomaticMaintenanceDraftV2 {
+  return basis.version === 3 ? decodeAutomaticTopicDraftWire(basis, input) : decodeLegacyTopicDraftWire(basis, input);
 }

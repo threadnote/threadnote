@@ -24,6 +24,7 @@ import {
   type DraftQueueClaim,
   type DraftQueueWork,
 } from '../../src/memory/context/maintenance_draft_queue.js';
+import {AUTOMATIC_DRAFT_PROMPT_VERSION} from '../../src/effect/ai/selected_generation.js';
 
 const layer = TestCommandExecutorLayer.pipe(
   Layer.provideMerge(TestSystemInfoLayer),
@@ -77,6 +78,41 @@ const decision = (w: DraftQueueWork, action: 'reject' | 'defer' | 'resume') => (
 });
 
 describe('private durable draft queue', () => {
+  fcEffectProp(
+    effectIt,
+    'preserves consumed prompt identities and material decisions across prompt-version rotations',
+    [
+      fc.array(fc.integer({min: 3, max: 12}), {minLength: 1, maxLength: 6}),
+      fc.constantFrom('reject' as const, 'defer' as const),
+    ],
+    ([versions, action]) =>
+      fixture(config =>
+        Effect.gen(function* () {
+          const old = work('prompt-version', 'same-material', {identity: hash('automatic-memory-v1')});
+          const current = {...old, identity: hash(AUTOMATIC_DRAFT_PROMPT_VERSION)};
+          for (const candidate of [old, current]) {
+            expect(yield* enqueueDraftWork(config, candidate)).toEqual({state: 'queued'});
+            const claim = yield* claimed(config);
+            yield* markDraftWorkDispatched(config, claim);
+            yield* finishDraftWork(config, claim, {state: 'failed'});
+          }
+          expect((yield* readDraftQueueStatus(config)).backgroundReservations).toHaveLength(2);
+          for (const candidate of [old, current, old])
+            expect(yield* enqueueDraftWork(config, candidate)).toEqual({state: 'suppressed', reason: 'failed'});
+          yield* recordDraftQueueDecision(config, decision(current, action));
+          for (const version of [1, 2, ...versions]) {
+            const next = {...old, identity: hash(`automatic-memory-v${version}`)};
+            expect(yield* enqueueDraftWork({...config}, next)).toEqual({
+              state: 'suppressed',
+              reason: 'material-decision',
+            });
+            expect((yield* readDraftQueueStatus(config)).backgroundReservations).toHaveLength(2);
+            expect((yield* readDraftQueueTarget(config, old.targetKey))?.decision).toBe(action);
+          }
+        }),
+      ),
+    {fastCheck: {numRuns: 4, seed: 20402}},
+  );
   fcEffectProp(
     effectIt,
     'keeps a committed publication consumed and terminal through policy rotation, cleanup failure and restart',
