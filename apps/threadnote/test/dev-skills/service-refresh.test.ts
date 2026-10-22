@@ -15,6 +15,7 @@ import {devSkillsTestLayer, fixture, snapshot, devSkillsReleaseFixture} from './
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {hash, stableJson} from '../../src/dev_skills/files.js';
 import {consumerId, homeIndexPath, receiptPath, runtimeIndexPath} from '../../src/dev_skills/registry.js';
+import {refreshPropertyDiagnostics} from './service-refresh-diagnostics.js';
 
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer));
@@ -110,25 +111,40 @@ describe('exact-release enrolled workflow refresh', () => {
   effectIt.effect.prop(
     'never re-enables disabled or removed consumers during refresh',
     {removed: Schema.Boolean},
-    ({removed}) =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        yield* f.run(applyDevSkills(f.config, 'install', selector));
-        if (removed) yield* f.run(applyDevSkills(f.config, 'remove', selector));
-        else
-          yield* f.run(
-            ensureDevSkills(f.config, selector, {mode: 'setup', choice: 'disabled', operationId: 'opt-out'}),
-          );
-        const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.5');
-        const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
-        const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
-        yield* release.activate;
-        const home = yield* f.fs.readFileString(homeIndexPath(f.path, f.home));
-        const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
-        expect(result.targets[0].outcome.state).toBe('skipped');
-        expect(yield* f.fs.readFileString(homeIndexPath(f.path, f.home))).toBe(home);
-        expect((yield* release.run(statusDevSkills(f.config, selector))).targets[0].enabled).toBe(false);
-      }).pipe(provide),
+    ({removed}, context) => {
+      const diagnostics = refreshPropertyDiagnostics(context);
+      return diagnostics.observe(
+        removed,
+        Effect.gen(function* () {
+          diagnostics.phase('fixture');
+          const f = yield* fixture();
+          diagnostics.phase('install');
+          yield* f.run(applyDevSkills(f.config, 'install', selector));
+          diagnostics.phase('remove-or-disable');
+          if (removed) yield* f.run(applyDevSkills(f.config, 'remove', selector));
+          else
+            yield* f.run(
+              ensureDevSkills(f.config, selector, {mode: 'setup', choice: 'disabled', operationId: 'opt-out'}),
+            );
+          diagnostics.phase('release');
+          const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.5');
+          diagnostics.phase('preview');
+          const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
+          diagnostics.phase('prepare');
+          const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
+          diagnostics.phase('activate');
+          yield* release.activate;
+          diagnostics.phase('index-read');
+          const home = yield* f.fs.readFileString(homeIndexPath(f.path, f.home));
+          diagnostics.phase('refresh');
+          const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
+          diagnostics.phase('assertions-status');
+          expect(result.targets[0].outcome.state).toBe('skipped');
+          expect(yield* f.fs.readFileString(homeIndexPath(f.path, f.home))).toBe(home);
+          expect((yield* release.run(statusDevSkills(f.config, selector))).targets[0].enabled).toBe(false);
+        }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), provide),
+      );
+    },
     {arbitrary: {runs: 4}},
   );
   effectIt.effect('recovers interrupted opt-out through refresh before comparing the two enrollment indexes', () =>
