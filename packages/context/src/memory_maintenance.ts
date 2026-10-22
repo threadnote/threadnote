@@ -25,6 +25,7 @@ import {
   type TopicMaintenanceSupport,
 } from '@threadnote/memory/topic-maintenance';
 import {MAX_MEMORY_CODE_CITATIONS} from '@threadnote/memory/code/citation';
+import {contextHealthSemanticClaimRole} from './health_semantic.js';
 
 export interface MemoryMaintenanceInferenceV1 {
   readonly ordinal: number;
@@ -191,12 +192,15 @@ export function prepareMemoryMaintenanceBasis(
             currentSupportAuthority: 'provisional',
           };
         }
+        const observedRole = contextHealthSemanticClaimRole(section);
         const protectedRole =
           record.metadata.kind === 'preference'
             ? 'normative'
             : record.metadata.kind === 'incident' || record.metadata.kind === 'handoff'
               ? 'historical'
-              : undefined;
+              : observedRole === 'normative' || observedRole === 'historical'
+                ? observedRole
+                : undefined;
         return {
           ordinal,
           hash: consolidationRevision(section),

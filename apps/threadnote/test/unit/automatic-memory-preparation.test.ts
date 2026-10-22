@@ -1,4 +1,5 @@
 import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
+import {automaticInactiveCodeRootIds} from '../../src/memory/context/maintenance_code_capture.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -43,6 +44,7 @@ import {
   readAutomaticCodeEvidence,
   readLiveAutomaticPreparation,
   automaticMemorySourceUriScopes,
+  selectAutomaticMemorySourceReferences,
 } from '@threadnote/threadnote/memory/context/maintenance_preparation';
 import {
   readPreparedMemory,
@@ -611,6 +613,107 @@ describe('automatic private preparation', () => {
     }).pipe(provide),
   );
 
+  it('separates inactive-root audit transitions from generation while preserving active failures and all input bytes', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 10_000}), fc.boolean(), (value, reverse) => {
+        const initial = codeCitation('symbol');
+        if (initial.target.kind !== 'symbol') throw new Error('Expected symbol fixture');
+        const {id: _id, ...fields} = initial;
+        const text = `export function automaticBoundary() { return ${value};\n}`;
+        const approved = createMemoryCodeCitation({
+          ...fields,
+          fileContentHash: {algorithm: 'sha256', value: sha256HexSync(text)},
+          target: {
+            ...initial.target,
+            signatureHash: {algorithm: 'sha256', value: sha256HexSync('signature')},
+            fragmentHash: {algorithm: 'sha256', value: sha256HexSync(text)},
+          },
+        });
+        const {id: _approvedId, ...approvedFields} = approved;
+        const root = createMemoryCodeCitation({
+          ...approvedFields,
+          fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`old-${text}`)},
+        });
+        const current = createMemoryCodeCitation({
+          ...approvedFields,
+          sourceCommit: 'a'.repeat(40),
+          sourceSnapshotId: `cgsn_${'b'.repeat(40)}`,
+          extractorSet: 'new-extractor-context',
+        });
+        const excerpt = codeExcerpt(current, text, text);
+        const target = reviewedCodeRecord([root], [approved]);
+        const rootId = automaticMaintenanceEvidenceId({kind: 'code', citation: root});
+        const activeId = automaticMaintenanceEvidenceId({kind: 'code', citation: approved});
+        const covered = automaticInactiveCodeRootIds([root], [approved], current, excerpt);
+        expect(covered).toEqual([root.id]);
+        const prepare = (available: boolean, order: boolean, activeFailure = false) => {
+          const evidence = [
+            {
+              id: rootId,
+              source: {kind: 'code' as const, citation: root},
+              scope: 'repository' as const,
+              authority: 'recorded' as const,
+              availability: available ? ('available' as const) : ('unknown' as const),
+            },
+            {
+              id: activeId,
+              source: {kind: 'code' as const, citation: approved},
+              scope: 'repository' as const,
+              authority: 'recorded' as const,
+              availability: 'available' as const,
+            },
+          ];
+          const candidates = [
+            {evidenceId: activeId, text, excerpt},
+            {
+              evidenceId: rootId,
+              text,
+              excerpt: {
+                ...excerpt,
+                provenance: available ? ('current-verified' as const) : ('historical-verified' as const),
+                supportsCitation: false,
+              },
+            },
+          ];
+          const omissions = available ? [] : ['current-code-evidence-unavailable'];
+          const input = {
+            scopeRevision,
+            evidence: order ? [...evidence].reverse() : evidence,
+            candidates: order ? [...candidates].reverse() : candidates,
+            reads: [{uri: `code:${root.id}`, hash: sha256HexSync(String(available))}],
+            omissions: [...omissions, ...(activeFailure ? ['current-code-evidence-unavailable'] : [])],
+            generation: {
+              ignoredEvidenceIds: [rootId],
+              // This identical reason remains attributable to a different, active source.
+              omissions: activeFailure ? ['current-code-evidence-unavailable'] : [],
+            },
+          };
+          const before = JSON.stringify({target, input});
+          const prepared = prepareAutomaticMemory(target, input);
+          expect(JSON.stringify({target, input})).toBe(before);
+          return prepared;
+        };
+        const before = prepare(true, reverse);
+        const after = prepare(false, !reverse);
+        expect(after.relevantRevision).toBe(before.relevantRevision);
+        expect(after.reads).not.toEqual(before.reads);
+        expect(before.omissions).toContain('current-code-citation-unsupported');
+        expect(after.omissions).toContain('current-code-evidence-unavailable');
+        expect(after.assessment.coverage.omittedSources).toBe(before.assessment.coverage.omittedSources + 1);
+        expect(after.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('unknown');
+        expect(prepare(false, reverse, true).relevantRevision).not.toBe(after.relevantRevision);
+        const proofLost = prepareAutomaticMemory(target, {
+          scopeRevision,
+          evidence: after.assessment.evidence,
+          candidates: [],
+          omissions: ['current-code-evidence-unavailable'],
+        });
+        expect(proofLost.relevantRevision).not.toBe(after.relevantRevision);
+      }),
+      {numRuns: 30, seed: 756011},
+    );
+  });
+
   it('invalidates cited file tails beyond the bounded current excerpt without binding incidental snapshots', () => {
     const citation = codeCitation();
     const prefix = Array.from({length: 24}, (_, i) => `const prefix${i} = true;`).join('\n');
@@ -659,7 +762,7 @@ describe('automatic private preparation', () => {
   });
 
   it('review current pins bind actual new bytes even when preparation reused the original private evidence ID', () => {
-    const citation = codeCitation('symbol');
+    const citation = codeCitation('file');
     const excerpt = codeExcerpt(citation, 'export const value = 60;', 'export const value = 60;');
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
     const target = record('current_code', 'Old behavior.', {codeCitations: [citation]});
@@ -908,7 +1011,7 @@ describe('automatic private preparation', () => {
             endLine: actual.endLine,
             fileBytesHash: actual.fileBytesHash,
           });
-          expect(current.descriptor.source.citation.target.kind).toBe('file');
+          expect(current.descriptor.source.citation.target.kind).toBe('symbol');
           expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('historical:'))).toBe(false);
 
           yield* f.write(target);
@@ -960,6 +1063,7 @@ describe('automatic private preparation', () => {
     const v1 = record('output', body, {consolidation: reviewed.provenance, codeCitations: reviewed.codeCitations});
     const origin = prepareAutomaticMemory(v1, {sources: [source], scopeRevision});
     expect(origin.origin?.receipt).toEqual(reviewed.provenance);
+    expect(selectAutomaticMemorySourceReferences(v1)).toEqual({refs: [source.uri], omittedSources: 0});
     expect(origin.assessment.preparation.kind).toBe('derived');
     expect(origin.assessment.paragraphs[0].historicalEvidenceIds).toEqual([]);
     expect(origin.assessment.evidence.some(e => e.source.kind === 'memory')).toBe(true);
@@ -986,6 +1090,7 @@ describe('automatic private preparation', () => {
     });
     const current = prepareAutomaticMemory(maintained, {scopeRevision});
     expect(current.origin?.receipt.version).toBe(2);
+    expect(selectAutomaticMemorySourceReferences(maintained)).toEqual({refs: [source.uri], omittedSources: 0});
     expect(current.origin?.receipt).toMatchObject({
       origin: reviewed.provenance,
       originBody: body,
@@ -1061,6 +1166,208 @@ describe('automatic private preparation', () => {
         ).toBe(true);
       }).pipe(TestClock.withLive, provide),
   );
+
+  effectIt.effect('live review retains unchanged origin-only consolidation sources after another source changes', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const sourceA = record('source_a', 'The canonical memory relation limit is sixteen links.');
+      const sourceB = record('source_b', 'The relation-limit reference is the engineering source for this topic.', {
+        relations: [{type: 'references', uri: sourceA.uri}],
+      });
+      const body = `${sourceA.body}\n\n${sourceB.body}`;
+      const reviewed = reviewConsolidation(
+        body,
+        [captureConsolidationSource(sourceA), captureConsolidationSource(sourceB)],
+        [sourceA, sourceB].map((source, ordinal) => ({
+          section: source.body,
+          disposition: 'direct',
+          supports: [{sourceUri: source.uri, fragment: 0, citationIds: [], relationIndexes: ordinal ? [0] : []}],
+        })),
+        {
+          operationId: 'origin-only-source',
+          cleanup: 'keep',
+          cleanupShared: false,
+          target: {kind: 'durable', status: 'active', project: 'selected', topic: 'output', sourceAgentClient: 'test'},
+        },
+      );
+      const target = record('output', body, {consolidation: reviewed.provenance, relations: reviewed.relations});
+      expect(target.metadata.consolidationError).toBeUndefined();
+      expect(target.metadata.relations).toEqual([{type: 'references', uri: sourceA.uri}]);
+      const currentA = record('source_a', 'The canonical memory relation limit is nineteen links.');
+      const records = [target, currentA, sourceB];
+      for (const source of records) yield* f.write(source);
+      const observations = yield* Effect.forEach(records, source =>
+        Effect.gen(function* () {
+          const file = f.path.join(f.root, source.uri.slice(ROOT.length));
+          return {source, file, info: yield* f.fs.stat(file)};
+        }),
+      );
+      const snapshot = yield* prepareContextMaintenanceInventory(f.config, undefined, 100);
+      const advanced = yield* advanceAutomaticPreparation(
+        f.config,
+        snapshot,
+        new Map(),
+        () => Effect.succeed({evidence: [], candidates: [], reads: [], omissions: [], searchedScopes: []}),
+        {maxRecords: 4},
+      );
+      expect(advanced.failed).toBe(0);
+      const cached = yield* readPreparedMemory(f.config, target.uri);
+      expect(cached).toBeDefined();
+      const currentMemory = (prepared: NonNullable<typeof cached>) =>
+        prepared.assessment.evidence.filter(
+          entry => entry.source.kind === 'memory' && entry.availability === 'available',
+        );
+      expect(currentMemory(cached!).map(entry => entry.source)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'memory',
+            uri: currentA.uri,
+            fragment: expect.objectContaining({hash: sha256HexSync(currentA.body)}),
+          }),
+          expect.objectContaining({
+            kind: 'memory',
+            uri: sourceB.uri,
+            fragment: expect.objectContaining({hash: sha256HexSync(sourceB.body)}),
+          }),
+        ]),
+      );
+      expect(cached!.assessment.paragraphs[1].support).toBe('direct');
+      const live = yield* readLiveAutomaticPreparation(f.config, target.uri);
+      expect(currentMemory(live.prepared)).toEqual(currentMemory(cached!));
+      expect(live.prepared.candidates).toEqual(cached!.candidates);
+      expect(live.prepared.reads).toEqual(cached!.reads);
+      expect(live.prepared.assessment.paragraphs).toEqual(cached!.assessment.paragraphs);
+      expect(live.prepared.origin?.receipt).toEqual(reviewed.provenance);
+      const packet = automaticReviewPacket(live.record, live.prepared);
+      expect(
+        packet.reviewEvidence.some(entry => entry.content === sourceB.body && entry.handleId.startsWith('current:')),
+      ).toBe(true);
+      for (const {source, file, info} of observations) {
+        expect(yield* f.fs.readFileString(file)).toBe(source.content);
+        expect((yield* f.fs.stat(file)).mtime).toEqual(info.mtime);
+      }
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it('selects deterministic origin and active references without mutation or duplicate budget use', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.integer({min: 0, max: 20}), {minLength: 2, maxLength: 4}), ids => {
+        const base = ids.map(id => record(`origin_${id}`));
+        const relations = [...base, record('unrelated')].map(source => ({
+          type: 'references' as const,
+          uri: source.uri,
+        }));
+        const sources = [record(`origin_${ids[0]}`, base[0].body, {relations}), ...base.slice(1)];
+        const body = sources[0].body;
+        const review = (ordered: readonly MemoryRecord[]) =>
+          reviewConsolidation(
+            body,
+            ordered.map(captureConsolidationSource),
+            [
+              {
+                section: body,
+                disposition: 'direct',
+                supports: [
+                  {
+                    sourceUri: sources[0].uri,
+                    fragment: 0,
+                    citationIds: [],
+                    relationIndexes: relations.map((_, index) => index),
+                  },
+                ],
+              },
+            ],
+            {
+              operationId: 'selector-property',
+              cleanup: 'keep',
+              cleanupShared: false,
+              target: {
+                kind: 'durable',
+                status: 'active',
+                project: 'selected',
+                topic: 'output',
+                sourceAgentClient: 'test',
+              },
+            },
+          );
+        const reviewed = review(sources);
+        const legacy = record('output', body, {consolidation: reviewed.provenance, relations: reviewed.relations});
+        expect(legacy.metadata.consolidationError).toBeUndefined();
+        const before = JSON.stringify(legacy);
+        const result = selectAutomaticMemorySourceReferences(legacy);
+        expect(result.refs).toEqual([
+          sources[0].uri,
+          ...sources
+            .slice(1)
+            .map(source => source.uri)
+            .sort(),
+          record('unrelated').uri,
+        ]);
+        expect(new Set(result.refs).size).toBe(result.refs.length);
+        expect(result.omittedSources).toBe(0);
+        const reorderedReview = review([...sources].reverse());
+        const reordered = record('output', body, {
+          consolidation: reorderedReview.provenance,
+          relations: reorderedReview.relations,
+        });
+        expect(reordered.metadata.consolidationError).toBeUndefined();
+        expect(selectAutomaticMemorySourceReferences(reordered)).toEqual(result);
+        expect(JSON.stringify(legacy)).toBe(before);
+
+        const descriptors = sources.slice(1).map(source => {
+          const descriptor = memoryMaintenanceFragmentSource(source, 0);
+          return {id: automaticMaintenanceEvidenceId(descriptor), source: descriptor, scope: 'personal' as const};
+        });
+        const active = createReviewedSupportSnapshot({
+          bodyHash: sha256HexSync(body),
+          paragraphs: [
+            {
+              ordinal: 0,
+              hash: sha256HexSync(body),
+              role: 'descriptive',
+              support: 'direct',
+              evidenceIds: descriptors.map(source => source.id),
+            },
+          ],
+          sources: descriptors,
+          acceptance: {
+            reviewId: 'review-source-selector',
+            approvedAt: NOW,
+            targetBeforeHash: '1'.repeat(64),
+            preparationDigest: '2'.repeat(64),
+            sourceVectorDigest: '3'.repeat(64),
+          },
+        });
+        const approved = record('approved', body, {
+          schemaVersion: 11,
+          relations,
+          reviewedSupport: {type: 'reviewed-memory-support', version: 1, active},
+        });
+        const reversed = record('approved', body, {
+          schemaVersion: 11,
+          relations: [...relations].reverse(),
+          reviewedSupport: {
+            type: 'reviewed-memory-support',
+            version: 1,
+            active: createReviewedSupportSnapshot({...active, sources: [...descriptors].reverse()}),
+          },
+        });
+        expect(approved.metadata.reviewedSupportError).toBeUndefined();
+        expect(reversed.metadata.reviewedSupportError).toBeUndefined();
+        const approvedBefore = JSON.stringify(approved);
+        const selected = selectAutomaticMemorySourceReferences(approved);
+        expect(selected).toEqual(selectAutomaticMemorySourceReferences(reversed));
+        expect(selected.refs).toEqual([
+          ...descriptors.map(source => source.source.uri).sort(),
+          ...[sources[0].uri, record('unrelated').uri].sort(),
+        ]);
+        expect(new Set(selected.refs).size).toBe(selected.refs.length);
+        expect(selected.omittedSources).toBe(0);
+        expect(JSON.stringify(approved)).toBe(approvedBefore);
+      }),
+      {numRuns: 30, seed: 756407},
+    );
+  });
 
   it('keeps relevant source fragment identities independent of incidental metadata and input order', () => {
     fc.assert(

@@ -51,6 +51,7 @@ import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js'
 import type {runSelectedDraft} from '../../src/manager/selected_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readDraftQueueStatus} from '../../src/memory/context/maintenance_draft_queue.js';
+import {compactAutomaticTopicDraftFixture} from '../helpers/topic-draft-wire.js';
 
 function structuredObject(value: unknown): Record<string, unknown> {
   expect(value).not.toBeNull();
@@ -708,6 +709,35 @@ describe('ordinary memory exact public review', () => {
           yield* f.fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
           yield* commit('current');
           yield* index();
+          const state = () =>
+            f.fs.readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json')).pipe(
+              Effect.map(
+                text =>
+                  JSON.parse(text) as {
+                    cases: {
+                      caseId: string;
+                      citationId?: string;
+                      memoryId: string;
+                      family: string;
+                      disposition: string;
+                      reason: string;
+                    }[];
+                  },
+              ),
+            );
+          const activeCitationCases = () =>
+            state().pipe(
+              Effect.map(current =>
+                current.cases.filter(
+                  item =>
+                    item.memoryId === 'tn_target' &&
+                    (item.family === 'citation' || item.family === 'citation-coverage') &&
+                    item.disposition !== 'resolved',
+                ),
+              ),
+            );
+          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(f.config, {cwd: repository});
+          expect((yield* activeCitationCases()).some(item => item.disposition === 'needs-decision')).toBe(true);
           const packet = yield* f.review({
             action: 'automatic-preview',
             uri: f.uri,
@@ -775,6 +805,7 @@ describe('ordinary memory exact public review', () => {
             sourceCwd: repository,
           });
           expect(approved.isError).not.toBe(true);
+          expect(yield* activeCitationCases()).toEqual([]);
           const accepted = yield* f.fs.readFileString(f.targetPath);
           expect(parseMemoryDocument(f.uri, accepted)!.metadata.codeCitations).toEqual([citation]);
           yield* f.fs.writeFileString(f.path.join(repository, 'unrelated.ts'), 'export const untouched = true;\n');
@@ -791,34 +822,7 @@ describe('ordinary memory exact public review', () => {
           expect(manual.structuredContent.approval.reviewedSupport.active.paragraphs[0]).toEqual(
             p.approval.reviewedSupport.active.paragraphs[0],
           );
-          const state = () =>
-            f.fs.readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json')).pipe(
-              Effect.map(
-                text =>
-                  JSON.parse(text) as {
-                    cases: {
-                      caseId: string;
-                      citationId?: string;
-                      memoryId: string;
-                      family: string;
-                      disposition: string;
-                      reason: string;
-                    }[];
-                  },
-              ),
-            );
           for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(f.config, {cwd: repository});
-          const activeCitationCases = () =>
-            state().pipe(
-              Effect.map(current =>
-                current.cases.filter(
-                  item =>
-                    item.memoryId === 'tn_target' &&
-                    (item.family === 'citation' || item.family === 'citation-coverage') &&
-                    item.disposition !== 'resolved',
-                ),
-              ),
-            );
           expect(yield* activeCitationCases()).toEqual([]);
           yield* f.fs.writeFileString(source, 'export const requestTimeoutSeconds = 90;\n');
           yield* commit('new-active-drift');
@@ -890,7 +894,17 @@ describe('ordinary memory exact public review', () => {
               if (!basis || basis.version !== 3) throw new Error('Expected automatic source basis.');
               const packet = JSON.parse(prompt.split('\n').at(-1)!);
               return {
-                text: draft(packet, packet.reviewEvidence[0].content),
+                text: JSON.stringify(
+                  compactAutomaticTopicDraftFixture(
+                    basis,
+                    JSON.parse(
+                      draft(
+                        {...packet, basis, reviewEvidence: packet.currentSources},
+                        packet.currentSources[0].content,
+                      ),
+                    ),
+                  ),
+                ),
                 backendIdentity: 'local-ai',
                 modelIdentity: modelId,
                 modelVersion: `${manifest.revision}:${manifest.sha256}`,

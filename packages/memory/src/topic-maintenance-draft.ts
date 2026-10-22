@@ -1145,6 +1145,25 @@ export function parseAutomaticMaintenanceDraft(
   basisInput: AutomaticMaintenanceDraftBasisV3,
   raw: string,
 ): AutomaticMaintenanceDraftProposalV2 {
+  return parseAutomaticMaintenanceDraftInternal(basisInput, raw, false);
+}
+
+/** Only the compact provider callsite may project fully validated exact repeats. */
+export function parseAutomaticMaintenanceProviderDraft(
+  basisInput: AutomaticMaintenanceDraftBasisV3,
+  raw: string,
+): AutomaticMaintenanceDraftProposalV2 {
+  const original = parseAutomaticMaintenanceDraftInternal(basisInput, raw, true);
+  const sections = automaticReviewSections(basisInput.body);
+  const operations = original.draft.operations.filter(operation => operation.text !== sections[operation.ordinal]);
+  return parseAutomaticMaintenanceDraft(basisInput, JSON.stringify({...original.draft, operations}));
+}
+
+function parseAutomaticMaintenanceDraftInternal(
+  basisInput: AutomaticMaintenanceDraftBasisV3,
+  raw: string,
+  allowExactUnchangedOperations: boolean,
+): AutomaticMaintenanceDraftProposalV2 {
   const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
   if (!boundedText(raw, MAX_AUTOMATIC_REVIEW_BYTES)) fail('automatic proposal is empty or oversized.');
   let input: unknown;
@@ -1189,6 +1208,7 @@ export function parseAutomaticMaintenanceDraft(
   )
     fail('invalid or stale automatic proposal.');
   const manual = input.purpose === 'manual-edit';
+  if (allowExactUnchangedOperations && manual) fail('provider projection requires automatic purpose.');
   if (
     !['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence'].includes(
       input.outcome as string,
@@ -1220,7 +1240,7 @@ export function parseAutomaticMaintenanceDraft(
       !boundedText(operation.text, MAX_TOPIC_MAINTENANCE_BYTES) ||
       operation.text !== operation.text.trim() ||
       automaticReviewSections(operation.text).length !== 1 ||
-      operation.text === oldSections[operation.ordinal as number] ||
+      (!allowExactUnchangedOperations && operation.text === oldSections[operation.ordinal as number]) ||
       !boundedText(operation.rationale, 1024) ||
       !boundedStrings(operation.supportHandles, 8, 80) ||
       !operation.supportHandles.length ||

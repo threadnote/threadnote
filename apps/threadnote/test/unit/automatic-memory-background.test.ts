@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
+import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
 import {AiError} from 'effect/ai';
 import {TestClock} from 'effect/testing';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -20,14 +20,20 @@ import {
   withCandidateReviewLock,
 } from '@threadnote/memory/candidate';
 import {loadTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
-import type {AutomaticMaintenanceDraftV2} from '@threadnote/memory/topic-maintenance-draft';
 import {parseMemoryDocument} from '@threadnote/memory/document';
+import type {AutomaticMaintenanceDraftV2} from '@threadnote/memory/topic-maintenance-draft';
 import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import * as consolidatorModule from '../../src/effect/ai/consolidator.js';
-import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../src/manager/topic_draft_schema.js';
+import {
+  topicDraftModelSchema,
+  topicDraftNativeJsonSchema,
+  decodeTopicDraftWire,
+  type AutomaticTopicDraftModelWire,
+} from '../../src/manager/topic_draft_schema.js';
+import {compactAutomaticTopicDraftFixture} from '../helpers/topic-draft-wire.js';
 import {
   selectedTopicDraftIdentity,
   runSelectedDraft,
@@ -43,6 +49,7 @@ import {
 } from '../../src/memory/context/maintenance.js';
 import {
   automaticReviewPacket,
+  automaticMemoryDraftPrompt,
   readAutomaticDraftBackgroundStatus,
   requestAutomaticMemoryDraft,
   requestAutomaticMemoryReview,
@@ -59,7 +66,20 @@ function object(value: unknown): Record<string, unknown> {
   expect(Array.isArray(value)).toBe(false);
   return value as Record<string, unknown>;
 }
-const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
+function automaticPacketFixtureFromPrompt(prompt: string) {
+  const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket> & {
+    targetParagraphs: readonly {ordinal: number; text: string}[];
+    currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
+  };
+  if (packet.basis.body !== undefined) return packet;
+  return {
+    ...packet,
+    reviewEvidence: packet.currentSources,
+    basis: {...packet.basis, body: packet.targetParagraphs.map(paragraph => paragraph.text).join('\n\n')},
+  };
+}
+
+const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body = 'The timeout is 30 seconds.') {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'ordinary-background-'});
@@ -87,7 +107,7 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
     kind: 'durable',
     project: 'fixture',
     topic: 'a-target',
-    text: 'The timeout is 30 seconds.',
+    text: body,
     relations: [{type: 'references', uri: sourceUri}],
   });
   expect(target.isError).not.toBe(true);
@@ -124,43 +144,45 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
       const prompt = args[3];
       const basis = args[5];
       expect(basis?.version).toBe(3);
-      const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket>;
+      const packet = automaticPacketFixtureFromPrompt(prompt);
       const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
       const text = handle?.content ?? packet.basis.body;
       return {
-        text: JSON.stringify({
-          version: 2,
-          kind: 'automatic',
-          purpose: 'automatic',
-          targetHash: packet.basis.targetHash,
-          observationRevision: packet.basis.observationRevision,
-          packetDigest: packet.basis.packetDigest,
-          outcome: handle ? 'propose-update' : 'insufficient-evidence',
-          paragraphDecisions: [
-            {
-              ordinal: 0,
-              beforeHash: packet.basis.paragraphs[0].hash,
-              role: handle ? 'descriptive' : 'unknown',
-              support: handle ? 'direct' : 'unresolved',
-              evidenceIds: handle ? [handle.descriptor.id] : [],
-            },
-          ],
-          operations: handle
-            ? [
-                {
-                  ordinal: 0,
-                  beforeHash: packet.basis.paragraphs[0].hash,
-                  supportHandles: [handle.handleId],
-                  rationale: 'Use the full current related paragraph.',
-                  text,
-                },
-              ]
-            : [],
-          reviewedHandles: packet.reviewEvidence.map(entry => entry.handleId),
-          rationale: 'Explicit provisional factual paragraph review.',
-          unresolvedQuestions: [],
-          removedClaims: [],
-        }),
+        text: JSON.stringify(
+          compactAutomaticTopicDraftFixture(packet.basis, {
+            version: 2,
+            kind: 'automatic',
+            purpose: 'automatic',
+            targetHash: packet.basis.targetHash,
+            observationRevision: packet.basis.observationRevision,
+            packetDigest: packet.basis.packetDigest,
+            outcome: handle ? 'propose-update' : 'insufficient-evidence',
+            paragraphDecisions: [
+              {
+                ordinal: 0,
+                beforeHash: packet.basis.paragraphs[0].hash,
+                role: handle ? 'descriptive' : 'unknown',
+                support: handle ? 'direct' : 'unresolved',
+                evidenceIds: handle ? [handle.descriptor.id] : [],
+              },
+            ],
+            operations: handle
+              ? [
+                  {
+                    ordinal: 0,
+                    beforeHash: packet.basis.paragraphs[0].hash,
+                    supportHandles: [handle.handleId],
+                    rationale: 'Use the full current related paragraph.',
+                    text,
+                  },
+                ]
+              : [],
+            reviewedHandles: packet.reviewEvidence.map(entry => entry.handleId),
+            rationale: 'Explicit provisional factual paragraph review.',
+            unresolvedQuestions: [],
+            removedClaims: [],
+          }),
+        ),
         backendIdentity: 'local-ai',
         modelIdentity: modelId,
         modelVersion: `${manifest.revision}:${manifest.sha256}`,
@@ -198,133 +220,259 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
 });
 
 describe('automatic ordinary-memory background controls', () => {
-  effectIt.effect('binds automatic generation literals, namespaces and field ordering under bounded permutations', () =>
+  for (const paragraphs of [64, 65]) {
+    effectIt.effect(`checks the ${paragraphs}-paragraph admission boundary before queueing or spending quota`, () =>
+      Effect.gen(function* () {
+        const body = Array.from(
+          {length: paragraphs},
+          (_, ordinal) => `Component ${ordinal} has a timeout of 30 seconds.`,
+        ).join('\n\n');
+        const f = yield* fixture(body);
+        yield* Effect.gen(function* () {
+          yield* f.prepare;
+          const packet = yield* requestAutomaticMemoryReview(f.config, {
+            uri: f.uri,
+            expectedContentHash: hash(f.content),
+          });
+          expect('reviewId' in packet).toBe(false);
+          if ('reviewId' in packet) return;
+          expect(packet.basis.body).toBe(body);
+          expect(packet.basis.paragraphs).toHaveLength(paragraphs === 64 ? 64 : 0);
+          expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('current:'))).toBe(true);
+          expect(packet.draftRequest.available).toBe(paragraphs === 64);
+          if (paragraphs > 64) {
+            expect(packet.basis.assessment.target.paragraphCount).toBeNull();
+            expect(packet.basis.assessment.coverage.omittedParagraphs).toBeNull();
+            expect(packet.draftRequest.waitingReason).toBe('draft-basis-boundary');
+            expect(yield* readPreparedMemory(f.config, f.sourceUri)).toBeUndefined();
+            const generate = vi.fn(f.generate);
+            yield* runAutomaticMemoryBackground(f.config, {project: 'fixture'}, generate);
+            expect(generate).not.toHaveBeenCalled();
+            expect(yield* readDraftQueueTarget(f.config, hash(f.uri))).toBeUndefined();
+            expect((yield* readDraftQueueStatus(f.config)).backgroundReservations).toEqual([]);
+            expect(yield* f.fs.exists(f.path.join(f.home, `threadnote/candidates/v1/reviews/${f.reviewId}.json`))).toBe(
+              false,
+            );
+          }
+          expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+          expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+        }).pipe(Effect.provideService(LocalModelStore, f.installed));
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect(
+    'presents exact target ordinals and separately numbered sources without duplicating accepted text',
+    () =>
+      Effect.gen(function* () {
+        const body =
+          'The timeout is 30 seconds.\n\nAlways require approval.\n\nAt initialization the timeout was 10 seconds.';
+        const f = yield* fixture(body);
+        yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+        const packet = yield* requestAutomaticMemoryReview(f.config, {
+          uri: f.uri,
+          expectedContentHash: hash(f.content),
+        });
+        if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
+        const before = JSON.stringify(packet);
+        const prompt = automaticMemoryDraftPrompt(packet);
+        const projected = JSON.parse(prompt.split('\n').at(-1)!) as {
+          basis: Record<string, unknown>;
+          targetParagraphs: readonly {ordinal: number; text: string}[];
+          currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
+        };
+        expect(projected.basis).not.toHaveProperty('body');
+        expect(projected).not.toHaveProperty('reviewEvidence');
+        expect(projected.currentSources.map(source => source.content)).toEqual(
+          packet.reviewEvidence.filter(source => source.handleId.startsWith('current:')).map(source => source.content),
+        );
+        expect(projected.targetParagraphs.map(({ordinal, text}) => ({ordinal, text}))).toEqual(
+          body.split('\n\n').map((text, ordinal) => ({ordinal, text})),
+        );
+        for (const paragraph of projected.targetParagraphs) expect(prompt.split(paragraph.text)).toHaveLength(2);
+        const tableLine = prompt.split('\n').find(line => line.startsWith('Index tables ('))!;
+        const tables = JSON.parse(tableLine.slice(tableLine.indexOf(': ') + 2)) as {
+          evidenceIds: readonly {evidenceIndex: number; id: string}[];
+          currentHandles: readonly {currentSourceIndex: number; handle: string; matchingEvidenceIndex: number}[];
+        };
+        expect(tables.currentHandles.length).toBeGreaterThan(0);
+        for (const [index, source] of tables.currentHandles.entries()) {
+          expect(source.currentSourceIndex).toBe(index);
+          expect(tables.evidenceIds[source.matchingEvidenceIndex]).toEqual({
+            evidenceIndex: source.matchingEvidenceIndex,
+            id: source.handle.slice('current:'.length),
+          });
+        }
+        expect(JSON.stringify(packet)).toBe(before);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('updates an ordinary current fact while preserving unsupported policy and past values', () =>
+    Effect.gen(function* () {
+      const policy = 'Operators must approve changes.';
+      const history = 'The timeout used  to be 10 seconds.';
+      const f = yield* fixture(`The timeout is 30 seconds.\n\n${policy}\n\n${history}`);
+      yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+      const packet = yield* requestAutomaticMemoryReview(f.config, {uri: f.uri, expectedContentHash: hash(f.content)});
+      if ('reviewId' in packet) return yield* Effect.die('Expected ordinary packet.');
+      expect(packet.basis.paragraphs.map(p => p.role)).toEqual(['unknown', 'normative', 'historical']);
+      expect(packet.basis.paragraphs.every(p => p.currentEvidenceIds.length === 0)).toBe(true);
+      const source = packet.reviewEvidence[0];
+      let calls = 0;
+      const generate: typeof runSelectedDraft = (...args) =>
+        f.generate(...args).pipe(
+          Effect.map(result => {
+            calls++;
+            const draft: AutomaticMaintenanceDraftV2 = {
+              version: 2,
+              kind: 'automatic',
+              purpose: 'automatic',
+              targetHash: packet.basis.targetHash,
+              observationRevision: packet.basis.observationRevision,
+              packetDigest: packet.basis.packetDigest,
+              outcome: 'propose-update',
+              paragraphDecisions: packet.basis.paragraphs.map(p => ({
+                ordinal: p.ordinal,
+                beforeHash: p.hash,
+                role: p.ordinal === 0 ? 'descriptive' : p.role,
+                support: p.ordinal === 0 ? 'direct' : 'unresolved',
+                evidenceIds: p.ordinal === 0 ? [source.descriptor.id] : [],
+              })),
+              operations: [
+                {
+                  ordinal: 0,
+                  beforeHash: packet.basis.paragraphs[0].hash,
+                  text: source.content,
+                  supportHandles: [source.handleId],
+                  rationale: 'The current source supports the factual correction.',
+                },
+              ],
+              reviewedHandles: [source.handleId],
+              rationale: 'Current evidence does not establish policy or past values.',
+              unresolvedQuestions: [],
+              removedClaims: [],
+            };
+            return {...result, text: JSON.stringify(compactAutomaticTopicDraftFixture(packet.basis, draft))};
+          }),
+        );
+      const review = yield* requestAutomaticMemoryDraft(
+        f.config,
+        {
+          uri: f.uri,
+          expectedContentHash: hash(f.content),
+          backend: 'local-ai',
+          modelId: f.modelId,
+        },
+        generate,
+      ).pipe(Effect.provideService(LocalModelStore, f.installed));
+      expect(calls).toBe(1);
+      expect(review.maintenance?.proposal.body).toBe(`The timeout is 60 seconds.\n\n${policy}\n\n${history}`);
+      expect(review.maintenance?.proposal.changedOrdinals).toEqual([0]);
+      if (review.maintenance?.version !== 3) return yield* Effect.die('Expected automatic review.');
+      expect(review.maintenance.proposal.draft.paragraphDecisions.map(p => [p.role, p.support])).toEqual([
+        ['descriptive', 'direct'],
+        ['normative', 'unresolved'],
+        ['historical', 'unresolved'],
+      ]);
+      expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  for (const mode of ['eligible', 'contextual', 'noop-only'] as const) {
+    effectIt.effect(`validates entire provider draft before exact-repeat projection: ${mode}`, () =>
+      Effect.gen(function* () {
+        const unchanged = 'The timeout is 60 seconds.';
+        const f = yield* fixture(`The timeout is 30 seconds.\n\n${unchanged}`);
+        yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+        let calls = 0;
+        let raw = '';
+        const generate: typeof runSelectedDraft = (...args) =>
+          f.generate(...args).pipe(
+            Effect.map(result => {
+              calls++;
+              const wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
+              const basis = args[5];
+              if (basis?.version !== 3) throw new Error('Expected automatic basis.');
+              const repeat = {...wire.operations[0], ordinal: 1, text: unchanged};
+              raw = JSON.stringify({
+                ...wire,
+                paragraphDecisions: basis.paragraphs.map(p => ({
+                  ...wire.paragraphDecisions[0],
+                  ordinal: p.ordinal,
+                  support: mode === 'contextual' && p.ordinal === 1 ? 'contextual' : 'direct',
+                })),
+                operations: mode === 'noop-only' ? [repeat] : [...wire.operations, repeat],
+              });
+              return {...result, text: raw, outputRepresentation: 'decoded-json' as const};
+            }),
+          );
+        const outcome = yield* requestAutomaticMemoryDraft(
+          f.config,
+          {uri: f.uri, expectedContentHash: hash(f.content), backend: 'local-ai', modelId: f.modelId},
+          generate,
+        ).pipe(Effect.provideService(LocalModelStore, f.installed), Effect.result);
+        const files = yield* f.fs.readDirectory(f.path.join(f.home, 'threadnote/candidates/v1/topic-generation'));
+        expect(files).toHaveLength(1);
+        const receipt = yield* loadTopicGenerationReceipt(f.home, files[0].replace(/\.json$/u, ''));
+        expect(receipt.promptVersion).toBe(AUTOMATIC_DRAFT_PROMPT_VERSION);
+        expect(receipt.attempts.at(-1)?.output).toMatchObject({
+          hash: hash(raw),
+          bytes: new TextEncoder().encode(raw).byteLength,
+          representation: 'decoded-json',
+        });
+        expect(JSON.parse(raw).operations).toHaveLength(mode === 'noop-only' ? 1 : 2);
+        if (mode === 'eligible') {
+          expect(
+            Result.isSuccess(outcome),
+            JSON.stringify({
+              calls,
+              attempts: receipt.attempts.map(attempt => attempt.status),
+              error: Result.isFailure(outcome) ? String(outcome.failure) : undefined,
+            }),
+          ).toBe(true);
+          if (Result.isFailure(outcome)) return yield* Effect.die(outcome.failure);
+          expect(calls).toBe(1);
+          expect(outcome.success.maintenance?.proposal.body).toBe(`${unchanged}\n\n${unchanged}`);
+          expect(outcome.success.maintenance?.proposal.changedOrdinals).toEqual([0]);
+          expect(outcome.success.maintenance?.proposal.draft.operations).toHaveLength(1);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['accepted']);
+          expect(receipt.firstFailedOutput).toBeUndefined();
+        } else {
+          expect(Result.isFailure(outcome)).toBe(true);
+          expect(calls).toBe(2);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'draft-invalid']);
+          expect(receipt.firstFailedOutput).toMatchObject({text: raw, hash: hash(raw)});
+          expect(yield* f.fs.exists(f.path.join(f.home, `threadnote/candidates/v1/reviews/${f.reviewId}.json`))).toBe(
+            false,
+          );
+        }
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+        expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
+  effectIt.effect('orders compact native decisions and support before replacement text', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
       yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
       const packet = yield* requestAutomaticMemoryReview(f.config, {uri: f.uri, expectedContentHash: hash(f.content)});
       if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
-      const result = yield* f.generate(
-        f.config,
-        'local-ai',
-        {id: f.modelId, label: f.modelId, isDefault: true},
-        JSON.stringify(packet),
-        'topic-maintenance',
-        packet.basis,
-      );
-      const original = JSON.parse(result.text) as AutomaticMaintenanceDraftV2;
-      const provisional = packet.basis.paragraphs[0];
-      if (provisional.roleAuthority === 'reviewed') return yield* Effect.die('Expected the provisional fixture.');
-      yield* Effect.sync(() =>
-        fc.assert(
-          fc.property(fc.integer({min: 1, max: 6}), fc.boolean(), (count, reverse) => {
-            // Generation-grammar binding property only; final coverage/order remains preflight-owned.
-            const paragraphs = Array.from({length: count}, (_, ordinal) => ({
-              ...provisional,
-              ordinal,
-              hash: hash(`paragraph-${ordinal}`),
-            }));
-            const basis = {...packet.basis, paragraphs: reverse ? [...paragraphs].reverse() : paragraphs};
-            const schema = topicDraftModelSchema(basis);
-            const decode = Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'});
-            const wire = {
-              ...original,
-              paragraphDecisions: paragraphs.map(paragraph => ({
-                ...original.paragraphDecisions[0],
-                ordinal: paragraph.ordinal,
-                beforeHash: paragraph.hash,
-              })),
-              operations: [{...original.operations[0], ordinal: count - 1, beforeHash: paragraphs[count - 1].hash}],
-            };
-            const before = JSON.stringify({basis, wire});
-            expect(() => decode(wire)).not.toThrow();
-            // A singleton reference universe cannot admit the observed NV004 duplicate.
-            expect(() =>
-              decode({
-                ...wire,
-                paragraphDecisions: wire.paragraphDecisions.map(decision => ({
-                  ...decision,
-                  evidenceIds: [...decision.evidenceIds, ...decision.evidenceIds],
-                })),
-              }),
-            ).toThrow();
-            expect(() =>
-              decode({
-                ...wire,
-                operations: wire.operations.map(operation => ({
-                  ...operation,
-                  supportHandles: [...operation.supportHandles, ...operation.supportHandles],
-                })),
-              }),
-            ).toThrow();
-            expect(() =>
-              decode({
-                ...wire,
-                paragraphDecisions: wire.paragraphDecisions.map(decision => ({
-                  ...decision,
-                  evidenceIds: original.operations[0].supportHandles,
-                })),
-              }),
-            ).toThrow();
-            expect(() =>
-              decode({
-                ...wire,
-                operations: [{...wire.operations[0], supportHandles: original.paragraphDecisions[0].evidenceIds}],
-              }),
-            ).toThrow();
-            expect(() => decode({...wire, reviewedHandles: original.paragraphDecisions[0].evidenceIds})).toThrow();
-            expect(() =>
-              decode({...wire, operations: [{...wire.operations[0], beforeHash: hash('unbound-hash')}]}),
-            ).toThrow();
-            if (count > 1)
-              expect(() =>
-                decode({...wire, operations: [{...wire.operations[0], beforeHash: paragraphs[0].hash}]}),
-              ).toThrow();
-            const native = topicDraftNativeJsonSchema(schema, basis);
-            const fields = object(native.properties);
-            expect(Object.keys(fields).indexOf('paragraphDecisions')).toBeLessThan(
-              Object.keys(fields).indexOf('operations'),
-            );
-            const item = object(object(fields.operations).items);
-            const variants = 'oneOf' in item ? (item.oneOf as readonly Record<string, unknown>[]) : [item];
-            for (const variant of variants) {
-              const keys = Object.keys(object(variant.properties));
-              expect(keys.indexOf('supportHandles')).toBeLessThan(keys.indexOf('text'));
-              expect(keys.indexOf('rationale')).toBeLessThan(keys.indexOf('text'));
-            }
-            expect(JSON.stringify({basis, wire})).toBe(before);
-          }),
-          {numRuns: 12, seed: 30303},
-        ),
-      );
-      const noEvidence = {...packet.basis, handles: [], assessment: {...packet.basis.assessment, evidence: []}};
-      const emptySchema = topicDraftModelSchema(noEvidence);
-      const emptyWire = {
-        ...original,
-        operations: [],
-        reviewedHandles: [],
-        paragraphDecisions: original.paragraphDecisions.map(decision => ({
-          ...decision,
-          support: 'unresolved',
-          evidenceIds: [],
-        })),
-      };
-      const decodeEmpty = Schema.decodeUnknownEffect(emptySchema, {onExcessProperty: 'error'});
-      expect(Result.isSuccess(yield* decodeEmpty(emptyWire).pipe(Effect.result))).toBe(true);
-      expect(
-        Result.isFailure(
-          yield* decodeEmpty({...emptyWire, reviewedHandles: original.reviewedHandles}).pipe(Effect.result),
-        ),
-      ).toBe(true);
-      expect(
-        Result.isFailure(
-          yield* decodeEmpty({...emptyWire, paragraphDecisions: original.paragraphDecisions}).pipe(Effect.result),
-        ),
-      ).toBe(true);
-      expect(() => topicDraftNativeJsonSchema(emptySchema, noEvidence)).not.toThrow();
+      const schema = topicDraftModelSchema(packet.basis);
+      const native = topicDraftNativeJsonSchema(schema, packet.basis);
+      const fields = object(native.properties);
+      expect(Object.keys(fields).indexOf('paragraphDecisions')).toBeLessThan(Object.keys(fields).indexOf('operations'));
+      const item = object(object(fields.operations).items);
+      const variants = 'oneOf' in item ? (item.oneOf as readonly Record<string, unknown>[]) : [item];
+      for (const variant of variants) {
+        const keys = Object.keys(object(variant.properties));
+        expect(keys).not.toContain('beforeHash');
+        expect(keys.indexOf('supportIndices')).toBeLessThan(keys.indexOf('text'));
+        expect(keys.indexOf('rationale')).toBeLessThan(keys.indexOf('text'));
+      }
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
-  for (const state of ['pending', 'rejected', 'deferred', 'conflict', 'applying'] as const) {
+  for (const state of ['pending', 'edited', 'previewed', 'rejected', 'deferred', 'conflict', 'applying'] as const) {
     effectIt.effect(`preserves an earlier prompt contract review across the version bump: ${state}`, () =>
       Effect.gen(function* () {
         const f = yield* fixture();
@@ -348,19 +496,36 @@ describe('automatic ordinary-memory background controls', () => {
           );
           const review = yield* requestAutomaticMemoryReview(
             f.config,
-            {...input, draftJson: result.text},
+            {...input, draftJson: JSON.stringify(decodeTopicDraftWire(packet.basis, JSON.parse(result.text)))},
             {
               origin: 'model',
               agent: 'local-ai',
               model: f.modelId,
-              promptVersion: 'automatic-memory-v1',
+              promptVersion: 'automatic-memory-v4',
               attempts: 1,
               usage: {status: 'unavailable'},
             },
           );
           if (!('reviewId' in review)) return yield* Effect.die('Expected a private review.');
-          const prior = candidateReviewWithState(review, review.candidates[0].candidateId, state);
+          let prior = candidateReviewWithState(
+            review,
+            review.candidates[0].candidateId,
+            state === 'edited' || state === 'previewed' ? 'pending' : state,
+          );
           yield* saveCandidateReview(f.home, prior);
+          if (state === 'edited' || state === 'previewed') {
+            const draft = decodeTopicDraftWire(packet.basis, JSON.parse(result.text));
+            const preview = yield* f.server.invokeTool('context_maintenance_review', {
+              action: 'preview',
+              reviewId: prior.reviewId,
+              revision: prior.revision,
+              ...(state === 'edited'
+                ? {editedDraftJson: JSON.stringify({...draft, rationale: 'Explicit edited review.'})}
+                : {}),
+            });
+            expect(preview.isError).not.toBe(true);
+            prior = yield* loadCandidateReview(f.home, f.reviewId);
+          }
           const blocked = yield* requestAutomaticMemoryDraft(f.config, input, () =>
             Effect.die('An earlier review must block dispatch.'),
           ).pipe(Effect.result);
@@ -390,6 +555,8 @@ describe('automatic ordinary-memory background controls', () => {
     'unknown-handle',
     'unknown-support-handle',
     'unknown-evidence-id',
+    'empty-direct-indices',
+    'empty-operation-indices',
     'nv003-prefixed-decision-id',
     'nv004-duplicate-decision-id',
     'rationale-bound',
@@ -417,6 +584,7 @@ describe('automatic ordinary-memory background controls', () => {
           const runtime = yield* LocalModelRuntime;
           let calls = 0;
           let firstText: string | undefined;
+          let lastText: string | undefined;
           let saveFailed = false;
           const receiptRoot = f.path.join(f.home, 'threadnote/candidates/v1/topic-generation');
           const fs = FileSystem.FileSystem.of({
@@ -449,9 +617,7 @@ describe('automatic ordinary-memory background controls', () => {
               Effect.gen(function* () {
                 calls++;
                 expect(request.prompt).toContain('You are instructed to propose supported corrections');
-                const packet = JSON.parse(request.prompt.split('\n').at(-1)!) as ReturnType<
-                  typeof automaticReviewPacket
-                >;
+                const packet = automaticPacketFixtureFromPrompt(request.prompt);
                 const result = yield* f.generate(
                   f.config,
                   'local-ai',
@@ -460,12 +626,13 @@ describe('automatic ordinary-memory background controls', () => {
                   'topic-maintenance',
                   packet.basis,
                 );
-                let wire = JSON.parse(result.text) as AutomaticMaintenanceDraftV2;
+                let wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
                 if (calls === 2) {
-                  expect(request.prompt).toContain('invalid automatic paragraph replacement');
+                  // Exact repeats are validated first; a refusal with operations still violates its outcome.
+                  expect(request.prompt).toContain('automatic outcome differs from its operations');
                   expect(request.prompt).toContain(
                     JSON.stringify({
-                      validationError: 'Topic maintenance draft: invalid automatic paragraph replacement.',
+                      validationError: 'Topic maintenance draft: automatic outcome differs from its operations.',
                       previousDraft: firstText,
                     }),
                   );
@@ -490,17 +657,19 @@ describe('automatic ordinary-memory background controls', () => {
                           : wire.operations.map(operation => ({
                               ...operation,
                               text: packet.basis.body,
-                              supportHandles: [],
                               rationale:
                                 'The source contradicts the memory, but there is no instruction to update the memory. The operation is not performed.',
                             })),
                       rationale: 'The memory is retained as is, but the conflict is noted.',
-                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
-                        ...decision,
-                        role: 'unknown',
-                        support: 'unresolved',
-                        evidenceIds: [],
-                      })),
+                      paragraphDecisions:
+                        scenario === 'no-change'
+                          ? wire.paragraphDecisions.map(decision => ({
+                              ...decision,
+                              role: 'unknown',
+                              support: 'unresolved',
+                              evidenceIndices: [],
+                            }))
+                          : wire.paragraphDecisions,
                     };
                   }
                   if (scenario === 'target-identity') wire = {...wire, targetHash: hash('stale')};
@@ -529,22 +698,31 @@ describe('automatic ordinary-memory background controls', () => {
                       ...wire,
                       operations: wire.operations.map(operation => ({...operation, beforeHash: hash('stale')})),
                     };
-                  if (scenario === 'unknown-handle')
-                    wire = {...wire, reviewedHandles: [`current:ame_${hash('unknown')}`]};
+                  if (scenario === 'unknown-handle') wire = {...wire, currentSourceIndices: [999]};
                   if (scenario === 'unknown-support-handle')
                     wire = {
                       ...wire,
                       operations: wire.operations.map(operation => ({
                         ...operation,
-                        supportHandles: [`current:ame_${hash('unknown')}`],
+                        supportIndices: [999],
                       })),
+                    };
+                  if (scenario === 'empty-direct-indices')
+                    wire = {
+                      ...wire,
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({...decision, evidenceIndices: []})),
+                    };
+                  if (scenario === 'empty-operation-indices')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({...operation, supportIndices: []})),
                     };
                   if (scenario === 'unknown-evidence-id')
                     wire = {
                       ...wire,
                       paragraphDecisions: wire.paragraphDecisions.map(decision => ({
                         ...decision,
-                        evidenceIds: [`ame_${hash('unknown')}`],
+                        evidenceIndices: [999],
                       })),
                     };
                   if (scenario === 'nv003-prefixed-decision-id')
@@ -553,7 +731,7 @@ describe('automatic ordinary-memory background controls', () => {
                       operations: wire.operations.map(operation => ({...operation, text: packet.basis.body})),
                       paragraphDecisions: wire.paragraphDecisions.map(decision => ({
                         ...decision,
-                        evidenceIds: wire.operations[0].supportHandles,
+                        evidenceIndices: [`current:ame_${hash('wrong-namespace')}`] as unknown as number[],
                       })),
                     };
                   if (scenario === 'nv004-duplicate-decision-id')
@@ -561,13 +739,14 @@ describe('automatic ordinary-memory background controls', () => {
                       ...wire,
                       paragraphDecisions: wire.paragraphDecisions.map(decision => ({
                         ...decision,
-                        evidenceIds: [...decision.evidenceIds, ...decision.evidenceIds],
+                        evidenceIndices: [...decision.evidenceIndices, ...decision.evidenceIndices],
                       })),
                     };
                   if (scenario === 'rationale-bound') wire = {...wire, rationale: 'x'.repeat(2049)};
                 }
                 const output = scenario === 'excess-field' ? {...wire, invented: true} : wire;
-                if (calls === 1) firstText = JSON.stringify(output);
+                lastText = JSON.stringify(output);
+                if (calls === 1) firstText = lastText;
                 return output;
               }).pipe(Effect.orDie),
           });
@@ -622,7 +801,18 @@ describe('automatic ordinary-memory background controls', () => {
             });
           }
           if (success) {
+            expect(receipt.attempts.at(-1)?.output).toMatchObject({
+              representation: 'decoded-json',
+              hash: hash(lastText!),
+              bytes: new TextEncoder().encode(lastText).byteLength,
+            });
+            expect(JSON.parse(lastText!).kind).toBe('automatic-model');
             const review = yield* loadCandidateReview(f.home, f.reviewId);
+            expect(review.maintenance?.proposal.draft).toMatchObject({
+              version: 2,
+              kind: 'automatic',
+              purpose: 'automatic',
+            });
             expect(review.maintenance?.generation).toMatchObject({
               promptVersion: AUTOMATIC_DRAFT_PROMPT_VERSION,
               attempts: calls,
@@ -1015,7 +1205,7 @@ describe('automatic ordinary-memory background controls', () => {
               action: 'automatic-preview',
               uri: f.uri,
               expectedContentHash: hash(f.content),
-              draftJson: authored.text,
+              draftJson: JSON.stringify(decodeTopicDraftWire(packet.basis, JSON.parse(authored.text))),
             });
             expect(manual.isError).not.toBe(true);
             expect(
@@ -1148,12 +1338,10 @@ describe('automatic ordinary-memory background controls', () => {
               Effect.gen(function* () {
                 runtimeCalls++;
                 expect(request.jsonSchema).toMatchObject({
-                  properties: {version: {enum: [2]}, kind: {enum: ['automatic']}},
+                  properties: {version: {enum: [1]}, kind: {enum: ['automatic-model']}},
                 });
                 expect(request.jsonSchema.properties).not.toHaveProperty('decision');
-                const packet = JSON.parse(request.prompt.split('\n').at(-1)!) as ReturnType<
-                  typeof automaticReviewPacket
-                >;
+                const packet = automaticPacketFixtureFromPrompt(request.prompt);
                 const result = yield* f.generate(
                   f.config,
                   'local-ai',
@@ -1261,7 +1449,14 @@ describe('automatic ordinary-memory background controls', () => {
             backend: 'local-ai' as const,
             modelId: f.modelId,
           };
-          const draft = yield* requestAutomaticMemoryDraft(f.config, input, f.generate);
+          const frozenGenerate: typeof runSelectedDraft = (...args) =>
+            Effect.gen(function* () {
+              expect(Object.isFrozen(args[5])).toBe(true);
+              expect(Object.isFrozen(args[5]?.paragraphs[0])).toBe(true);
+              expect(Object.isFrozen(args[5]?.handles)).toBe(true);
+              return yield* f.generate(...args);
+            });
+          const draft = yield* requestAutomaticMemoryDraft(f.config, input, frozenGenerate);
           const deferred = yield* f.server.invokeTool('context_maintenance_review', {
             action: 'defer',
             reviewId: draft.reviewId,
@@ -1347,7 +1542,7 @@ describe('automatic ordinary-memory background controls', () => {
             action: 'automatic-preview',
             uri: f.uri,
             expectedContentHash: hash(f.content),
-            draftJson: proposal.text,
+            draftJson: JSON.stringify(decodeTopicDraftWire(packet.basis, JSON.parse(proposal.text))),
           });
           expect(preview.isError).not.toBe(true);
           const rejected = yield* f.server.invokeTool('context_maintenance_review', {
@@ -1643,6 +1838,7 @@ import {LocalModelCatalog} from ${module('packages/inference/src/models/catalog.
 import {cliEffect} from ${module('apps/threadnote/src/threadnote.ts')};
 import {runContextMaintainCommand} from ${module('apps/threadnote/src/memory/context/maintenance_commands.ts')};
 import {localDraftGenerationSettings} from ${module('apps/threadnote/src/effect/ai/consolidator.ts')};
+import {compactAutomaticTopicDraftFixture} from ${module('apps/threadnote/test/helpers/topic-draft-wire.ts')};
 import {writeFile} from 'node:fs/promises';
 const config = ${JSON.stringify(f.config)};
 const args = process.argv.slice(2);
@@ -1653,13 +1849,14 @@ const program = Effect.gen(function* () {
   const installed = LocalModelStore.of({...original, status: (_home, selected) => Effect.succeed({
     installed: true, bytes: selected.size, modelId: selected.id, partialBytes: 0, path: '/synthetic/model.gguf', verified: true,
   })});
-  const generate = (_config, _backend, _model, prompt) => Effect.sync(() => {
-    const packet = JSON.parse(prompt.split('\\n').at(-1));
+  const generate = (_config, _backend, _model, prompt, _purpose, basis) => Effect.sync(() => {
+    const projected = JSON.parse(prompt.split('\\n').at(-1));
+    const packet = {...projected, reviewEvidence: projected.currentSources, basis};
     const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
     return {backendIdentity: 'local-ai', modelIdentity: manifest.id,
       modelVersion: manifest.revision + ':' + manifest.sha256, usage: {status: 'unavailable'},
       settings: localDraftGenerationSettings(manifest.id, 'topic-maintenance'),
-      text: JSON.stringify({version: 2, kind: 'automatic', purpose: 'automatic',
+      text: JSON.stringify(compactAutomaticTopicDraftFixture(packet.basis, {version: 2, kind: 'automatic', purpose: 'automatic',
         targetHash: packet.basis.targetHash, observationRevision: packet.basis.observationRevision,
         packetDigest: packet.basis.packetDigest, outcome: handle ? 'propose-update' : 'insufficient-evidence',
         operations: handle ? [{ordinal: 0, beforeHash: packet.basis.paragraphs[0].hash, text: handle.content,
@@ -1668,7 +1865,7 @@ const program = Effect.gen(function* () {
         unresolvedQuestions: [], removedClaims: [], paragraphDecisions: [{ordinal: 0,
           beforeHash: packet.basis.paragraphs[0].hash, role: handle ? 'descriptive' : 'unknown',
           support: handle ? 'direct' : 'unresolved', evidenceIds: handle ? [handle.descriptor.id] : []}],
-      }),
+      })),
     };
   });
   yield* (child ? runContextMaintainCommand(config, {sourceCwd: config.agentContextHome, maxRecords: 16, json: true}, generate)

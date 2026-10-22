@@ -3,15 +3,138 @@ import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenanceStatusV2,
 } from './contracts.js';
-import {classifyContextHealthFindingV2} from '@threadnote/context/health_maintenance';
-import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
+import {classifyContextHealthFindingV2, contextHealthCitationCaseSlotV2} from '@threadnote/context/health_maintenance';
+import {canonicalMemoryDocumentContent, parseMemoryDocument} from '@threadnote/memory/document';
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {ManagerAutomaticReview, ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 
 type Finding = ManagerContextHealthResponseV1['findings'][number];
+/** Local presentation fence, never a public review payload or persisted authority. */
+type AppliedMaintenanceReceipt = ManagerTopicReviewAppliedV1 & {readonly automaticObservation?: string};
+
+function maintenanceCaseObservation(item: ManagerContextMaintenanceCaseV2): string {
+  return JSON.stringify([
+    item.memoryId,
+    item.family,
+    item.slot,
+    item.subjectUri,
+    item.subjectContentHashes?.map(subject => JSON.stringify([subject.uri, subject.hash])).sort() ?? [],
+  ]);
+}
+function matchesAppliedCase(item: ManagerContextMaintenanceCaseV2, receipt: AppliedMaintenanceReceipt): boolean {
+  return (
+    receipt.project === item.project &&
+    receipt.caseId === item.caseId &&
+    receipt.evidenceRevision === item.evidenceRevision &&
+    (receipt.automaticObservation === undefined || receipt.automaticObservation === maintenanceCaseObservation(item))
+  );
+}
+
+/** A logical anchor names a case; only the frozen report proves its old capture/finding identity. */
+function observedCitationCaptureIds(
+  report: ManagerContextHealthResponseV1 | undefined,
+  review: ManagerAutomaticReview,
+  observed: ManagerContextMaintenanceCaseV2,
+): readonly string[] {
+  if (report?.project !== review.project) return [];
+  const previews = report.recordPreviews.filter(
+    item => item.uri === review.targetUri && item.contentHash === review.targetHash,
+  );
+  if (previews.length !== 1) return [];
+  const findings = report.findings.filter(
+    finding =>
+      finding.caseId === observed.caseId &&
+      finding.caseIdentity?.project === observed.project &&
+      finding.caseIdentity.memoryId === observed.memoryId &&
+      finding.caseIdentity.family === observed.family &&
+      finding.caseIdentity.slot === observed.slot &&
+      finding.repair.subjectUri === review.targetUri &&
+      ['citation-changed', 'citation-missing', 'citation-unknown'].includes(finding.category),
+  );
+  const captures = new Set(
+    previews[0].code
+      .filter(
+        code =>
+          /^tncc_[a-f0-9]{40}$/u.test(code.citationId) &&
+          findings.some(
+            finding =>
+              code.findingIds.includes(finding.id) &&
+              finding.repair.targetUri === `${review.targetUri}#${code.citationId}`,
+          ),
+      )
+      .map(code => code.citationId),
+  );
+  return captures.size === 1 ? [...captures] : [];
+}
+
+/** Adapt only observations frozen before this review's apply into exact existing presentation receipts. */
+export function automaticReviewMaintenanceReceipts(
+  review: ManagerAutomaticReview,
+  observed: readonly ManagerContextMaintenanceCaseV2[],
+  observedReport?: ManagerContextHealthResponseV1,
+): readonly AppliedMaintenanceReceipt[] {
+  const approval = review.approval;
+  if (
+    review.kind !== 'automatic-memory-review' ||
+    review.state !== 'applied' ||
+    review.verified !== true ||
+    approval?.stage !== 'written' ||
+    typeof approval.content !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(review.targetHash) ||
+    sha256HexSync(canonicalMemoryDocumentContent(approval.content)) !== approval.contentHash
+  )
+    return [];
+  try {
+    const record = parseMemoryDocument(review.targetUri, approval.content);
+    if (
+      !record ||
+      record.metadata.project !== review.project ||
+      !record.metadata.reviewedSupport ||
+      record.metadata.reviewedSupportError ||
+      record.metadata.schemaVersion !== 11 ||
+      record.metadata.reviewedSupport.active.acceptance.reviewId !== review.reviewId ||
+      record.metadata.reviewedSupport.active.acceptance.targetBeforeHash !== review.targetHash
+    )
+      return [];
+    const anchors = new Set(currentMemoryCodeCitations(record).map(contextHealthCitationCaseSlotV2));
+    const receipts = new Map<string, AppliedMaintenanceReceipt>();
+    for (const item of observed) {
+      if (
+        item.project !== review.project ||
+        item.memoryId !== (record.metadata.memoryId ?? record.uri) ||
+        item.subjectUri !== review.targetUri ||
+        !item.subjectContentHashes?.some(
+          subject => subject.uri === review.targetUri && subject.hash === review.targetHash,
+        ) ||
+        !['citation', 'current-support'].includes(item.family) ||
+        !/^anchor:tncc_[a-f0-9]{40}$/u.test(item.slot) ||
+        anchors.has(item.slot) ||
+        item.disposition === 'resolved' ||
+        item.disposition === 'retired'
+      )
+        continue;
+      receipts.set(JSON.stringify([item.project, item.caseId, item.evidenceRevision]), {
+        project: item.project,
+        caseId: item.caseId,
+        evidenceRevision: item.evidenceRevision,
+        targetUri: review.targetUri,
+        targetHash: review.targetHash,
+        resolvedCitationIds: observedCitationCaptureIds(observedReport, review, item),
+        automaticObservation: maintenanceCaseObservation(item),
+      });
+    }
+    return [...receipts].sort(([left], [right]) => left.localeCompare(right)).map(([, receipt]) => receipt);
+  } catch {
+    // Malformed written content cannot authorize optimistic removal; the status refresh remains authoritative.
+    return [];
+  }
+}
 
 /** A completed write supersedes only its old record's explicitly refreshed citation slots. */
 export function reconcileAppliedHealthReport(
   report: ManagerContextHealthResponseV1,
-  applied: readonly ManagerTopicReviewAppliedV1[],
+  applied: readonly AppliedMaintenanceReceipt[],
   status?: ManagerContextMaintenanceStatusV2,
 ): ManagerContextHealthResponseV1 {
   const findings = report.findings.filter(
@@ -32,7 +155,7 @@ export function reconcileAppliedHealthReport(
               item.project === receipt.project &&
               item.caseId === receipt.caseId &&
               item.disposition === 'needs-decision' &&
-              item.evidenceRevision !== receipt.evidenceRevision,
+              !matchesAppliedCase(item, receipt),
           )
         )
           return false;
@@ -87,17 +210,9 @@ export function reconcileAppliedHealthReport(
 /** Suppress only the completed source observation, including when an older poll arrives later. */
 export function reconcileAppliedMaintenanceCases(
   status: ManagerContextMaintenanceStatusV2,
-  applied: readonly ManagerTopicReviewAppliedV1[],
+  applied: readonly AppliedMaintenanceReceipt[],
 ): ManagerContextMaintenanceStatusV2 {
-  const cases = status.cases.filter(
-    item =>
-      !applied.some(
-        result =>
-          result.project === item.project &&
-          result.caseId === item.caseId &&
-          result.evidenceRevision === item.evidenceRevision,
-      ),
-  );
+  const cases = status.cases.filter(item => !applied.some(result => matchesAppliedCase(item, result)));
   if (cases.length === status.cases.length) return status;
   const decisions = (items: ManagerContextMaintenanceStatusV2['cases']) =>
     items.filter(item => item.disposition === 'needs-decision');

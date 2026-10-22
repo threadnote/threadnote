@@ -1,7 +1,18 @@
 import fc from 'fast-check';
+import {
+  createMemoryCodeCitation,
+  formatMemoryCodeCitation,
+  preserveMemoryCodeCitationAnchor,
+} from '@threadnote/memory/code/citation';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {automaticMaintenanceEvidenceId} from '@threadnote/memory/automatic-maintenance';
+import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import type {ManagerAutomaticReview} from '@threadnote/manager/attention/topic-contracts';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {describe, expect, it} from 'vitest';
 import {
+  automaticReviewMaintenanceReceipts,
   groupMaintenanceCauses,
   maintenanceStatusLabel,
   mergeMaintenanceStatusPage,
@@ -32,7 +43,420 @@ const caseAt = (index: number): ManagerContextMaintenanceCaseV2 => ({
   events: [],
 });
 
+const automaticCompletion = (hash = 'a'.repeat(64)): ManagerAutomaticReview => {
+  const body = 'The current limit is 9.';
+  const source = {
+    kind: 'code' as const,
+    citation: createMemoryCodeCitation({
+      version: 1,
+      extractorSet: 'test',
+      fileContentHash: {algorithm: 'sha256', value: hash},
+      path: 'limit.ts',
+      repositoryId: 'b'.repeat(64),
+      repositoryIdentityKind: 'local',
+      sourceCommit: 'c'.repeat(40),
+      sourceDirty: false,
+      sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+      target: {kind: 'file'},
+    }),
+  };
+  const id = automaticMaintenanceEvidenceId(source);
+  const active = createReviewedSupportSnapshot({
+    bodyHash: sha256HexSync(body),
+    paragraphs: [{ordinal: 0, hash: sha256HexSync(body), role: 'descriptive', support: 'direct', evidenceIds: [id]}],
+    sources: [{id, source, scope: 'repository'}],
+    acceptance: {
+      reviewId: 'review-automatic',
+      approvedAt: '2026-10-22T00:00:00.000Z',
+      targetBeforeHash: hash,
+      preparationDigest: hash,
+      sourceVectorDigest: hash,
+    },
+  });
+  const reviewedSupport = {type: 'reviewed-memory-support' as const, version: 1 as const, active};
+  const content = `MEMORY\nschema_version: 11\nkind: durable\nproject: threadnote\nmemory_id: memory-0\nreviewed_support: ${JSON.stringify(reviewedSupport)}\n\n${body}`;
+  return {
+    version: 1,
+    kind: 'automatic-memory-review',
+    project: 'threadnote',
+    reviewId: 'review-automatic',
+    revision: 4,
+    state: 'applied',
+    targetUri: 'threadnote://user/test/memories/durable/projects/threadnote/limit.md',
+    targetHash: hash,
+    evidenceRevision: hash,
+    purpose: 'automatic',
+    acceptedBody: 'The current limit is 8.',
+    proposal: {
+      version: 2,
+      kind: 'automatic',
+      body,
+      finalBodyHash: sha256HexSync(body),
+      changedOrdinals: [0],
+      draft: {
+        version: 2,
+        kind: 'automatic',
+        purpose: 'automatic',
+        targetHash: hash,
+        observationRevision: hash,
+        packetDigest: hash,
+        outcome: 'propose-update',
+        operations: [],
+        reviewedHandles: [],
+        rationale: 'Changed source.',
+        unresolvedQuestions: [],
+        removedClaims: [],
+        paragraphDecisions: [],
+      },
+    },
+    sourceEvidence: [],
+    coverage: {
+      outcome: 'complete',
+      scope: 'recorded-only',
+      searchedScopes: [],
+      omittedSources: 0,
+      omittedParagraphs: 0,
+    },
+    canApply: false,
+    canFinishVerification: false,
+    verified: true,
+    approval: {
+      stage: 'written',
+      reviewRevision: 2,
+      approvalDigest: hash,
+      content,
+      contentHash: sha256HexSync(content),
+      metadataDiff: [],
+      reviewedSupport,
+    },
+  };
+};
+
 describe('maintenance presentation', () => {
+  it('binds automatic completion to frozen exact old observations without mutating or hiding newer same-URI evidence', () => {
+    fc.assert(
+      fc.property(
+        fc.record({
+          sameProject: fc.boolean(),
+          sameMemory: fc.boolean(),
+          sameUri: fc.boolean(),
+          sameHash: fc.boolean(),
+          activeAnchor: fc.boolean(),
+          verified: fc.boolean(),
+          written: fc.boolean(),
+          newer: fc.boolean(),
+          sameTargetAtReply: fc.boolean(),
+          partial: fc.boolean(),
+          reverse: fc.boolean(),
+        }),
+        flags => {
+          const review = automaticCompletion();
+          const source = review.approval!.reviewedSupport.active.sources[0].source;
+          if (source.kind !== 'code') throw new Error('Fixture requires actual active code support.');
+          const oldId = `tncc_${'1'.repeat(40)}`;
+          const citationId = flags.activeAnchor ? source.citation.id : oldId;
+          const observed: ManagerContextMaintenanceCaseV2 = {
+            ...caseAt(0),
+            project: flags.sameProject ? review.project : 'other',
+            memoryId: flags.sameMemory ? 'memory-0' : 'other-memory',
+            subjectUri: flags.sameUri ? review.targetUri : 'threadnote://memory/other',
+            subjectContentHashes: [{uri: review.targetUri, hash: flags.sameHash ? review.targetHash : 'f'.repeat(64)}],
+            slot: `anchor:${citationId}`,
+            disposition: 'needs-decision',
+            reason: 'source-changed',
+          };
+          const completed = {
+            ...review,
+            verified: flags.verified,
+            approval: {...review.approval!, stage: flags.written ? ('written' as const) : ('preview' as const)},
+          };
+          const activeCase = {
+            ...observed,
+            caseId: 'active',
+            project: review.project,
+            memoryId: 'memory-0',
+            subjectUri: review.targetUri,
+            slot: `anchor:${source.citation.id}`,
+          };
+          const unrelated = {...observed, caseId: 'same-uri-relation', family: 'relation'};
+          const newerTarget = {
+            ...observed,
+            caseId: 'same-uri-new-target',
+            subjectContentHashes: [{uri: review.targetUri, hash: 'e'.repeat(64)}],
+          };
+          const frozen = [observed, activeCase, unrelated, newerTarget];
+          const current = {
+            ...observed,
+            evidenceRevision: flags.newer ? 'new-source-revision' : observed.evidenceRevision,
+            subjectContentHashes: flags.sameTargetAtReply
+              ? observed.subjectContentHashes
+              : [{uri: review.targetUri, hash: 'd'.repeat(64)}],
+          };
+          const cases = [current, activeCase, unrelated, newerTarget];
+          const status: ManagerContextMaintenanceStatusV2 = {
+            version: 2,
+            generation: 'one',
+            state: 'needs-decision',
+            paused: true,
+            projects: [],
+            cases,
+            receipts: [],
+            omittedCases: flags.partial ? 1 : 0,
+            counts: {'needs-decision': cases.length, decisionMemories: new Set(cases.map(item => item.memoryId)).size},
+          };
+          const before = JSON.stringify({completed, frozen, status});
+          const receipts = automaticReviewMaintenanceReceipts(
+            completed,
+            flags.reverse ? [...frozen].reverse() : frozen,
+          );
+          const resolves =
+            flags.sameProject &&
+            flags.sameMemory &&
+            flags.sameUri &&
+            flags.sameHash &&
+            !flags.activeAnchor &&
+            flags.verified &&
+            flags.written;
+          expect(receipts.map(item => item.caseId)).toEqual(resolves ? [observed.caseId] : []);
+          expect(automaticReviewMaintenanceReceipts(completed, [...frozen].reverse())).toEqual(receipts);
+          const next = reconcileAppliedMaintenanceCases(status, receipts);
+          expect(next.cases).toEqual(resolves && !flags.newer && flags.sameTargetAtReply ? cases.slice(1) : cases);
+          expect(next.counts?.['needs-decision']).toBe(
+            cases.length - Number(resolves && !flags.newer && flags.sameTargetAtReply),
+          );
+          expect(reconcileAppliedMaintenanceCases(next, [...receipts, ...receipts])).toEqual(next);
+          expect(JSON.stringify({completed, frozen, status})).toBe(before);
+        },
+      ),
+      {numRuns: 80},
+    );
+  });
+  it('uses exact frozen capture/report identities after real anchor-preserving recapture, independent of order and without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 100_000}),
+        fc.constantFrom(
+          'exact',
+          'project',
+          'uri',
+          'hash',
+          'case',
+          'memory',
+          'family',
+          'anchor',
+          'capture',
+          'finding',
+          'ambiguous',
+          'missing-identity',
+        ),
+        fc.boolean(),
+        fc.boolean(),
+        (value, mismatch, reverse, partial) => {
+          const capture = (n: number) =>
+            createMemoryCodeCitation({
+              version: 1,
+              extractorSet: 'test',
+              fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`const limit = ${n};`)},
+              path: 'limit.ts',
+              repositoryId: 'b'.repeat(64),
+              repositoryIdentityKind: 'local',
+              sourceCommit: 'c'.repeat(40),
+              sourceDirty: false,
+              sourceSnapshotId: `cgsn_${'d'.repeat(40)}`,
+              target: {kind: 'file'},
+            });
+          const first = capture(value);
+          const recaptured = preserveMemoryCodeCitationAnchor(first, capture(value + 1));
+          expect(recaptured.id).not.toBe(recaptured.anchorId);
+          const uri = automaticCompletion().targetUri;
+          const content = `MEMORY\nschema_version: 11\nkind: durable\nproject: threadnote\nmemory_id: memory-0\ncode_citation: ${formatMemoryCodeCitation(recaptured)}\n\nThe limit is ${value}.`;
+          const record = parseMemoryDocument(uri, content);
+          if (!record) throw new Error('Recaptured record must parse.');
+          const hash = sha256HexSync(content);
+          const review = automaticCompletion(hash);
+          const health = buildContextHealthReport({
+            project: 'threadnote',
+            records: [record],
+            now: new Date('2026-10-22T00:00:00.000Z'),
+            includeFindingCategories: ['citation-changed'],
+            citationValidations: [
+              {
+                uri,
+                receipts: [
+                  {
+                    citationId: recaptured.id,
+                    candidateCount: 1,
+                    coverage: 'current-complete',
+                    kind: 'file',
+                    observedAt: '2026-10-22T00:00:00.000Z',
+                    reason: 'source-changed',
+                    status: 'changed',
+                    strategy: 'file-path',
+                    validatorVersion: 1,
+                  },
+                ],
+              },
+            ],
+          });
+          expect(health.findings).toHaveLength(1);
+          const finding = health.findings[0];
+          expect(finding.caseIdentity?.slot).toBe(`anchor:${first.id}`);
+          const observed: ManagerContextMaintenanceCaseV2 = {
+            ...caseAt(0),
+            caseId: finding.caseId!,
+            slot: finding.caseIdentity!.slot,
+            subjectUri: uri,
+            subjectContentHashes: [{uri, hash}],
+            disposition: 'needs-decision',
+          };
+          const base: ManagerContextHealthResponseV1 = {
+            ...health,
+            omittedFindings: partial ? 1 : 0,
+            repositoryEvidence: {state: 'available'},
+            recordPreviews: [
+              {
+                uri,
+                contentHash: hash,
+                title: 'Limit',
+                kind: 'durable',
+                excerpt: record.body,
+                code: [{citationId: recaptured.id, path: recaptured.path, findingIds: [finding.id]}],
+              },
+            ],
+          };
+          let proof = base;
+          if (mismatch === 'project') proof = {...base, project: 'other'};
+          if (mismatch === 'uri' || mismatch === 'hash' || mismatch === 'capture' || mismatch === 'finding')
+            proof = {
+              ...base,
+              recordPreviews: base.recordPreviews.map(item => ({
+                ...item,
+                ...(mismatch === 'uri' ? {uri: 'threadnote://memory/other'} : {}),
+                ...(mismatch === 'hash' ? {contentHash: 'e'.repeat(64)} : {}),
+                code: item.code.map(code => ({
+                  ...code,
+                  ...(mismatch === 'capture' ? {citationId: first.id} : {}),
+                  ...(mismatch === 'finding' ? {findingIds: ['another-finding']} : {}),
+                })),
+              })),
+            };
+          if (['case', 'memory', 'family', 'anchor', 'missing-identity'].includes(mismatch))
+            proof = {
+              ...base,
+              findings: base.findings.map(item => ({
+                ...item,
+                ...(mismatch === 'case' ? {caseId: 'other-case'} : {}),
+                caseIdentity:
+                  mismatch === 'missing-identity'
+                    ? undefined
+                    : {
+                        ...item.caseIdentity!,
+                        ...(mismatch === 'memory' ? {memoryId: 'other-memory'} : {}),
+                        ...(mismatch === 'family' ? {family: 'relation'} : {}),
+                        ...(mismatch === 'anchor' ? {slot: `anchor:${recaptured.id}`} : {}),
+                      },
+              })),
+            };
+          if (mismatch === 'ambiguous') {
+            const other = capture(value + 2);
+            proof = {
+              ...base,
+              findings: [
+                ...base.findings,
+                {...finding, id: 'ambiguous-capture', repair: {...finding.repair, targetUri: `${uri}#${other.id}`}},
+              ],
+              recordPreviews: base.recordPreviews.map(item => ({
+                ...item,
+                code: [...item.code, {citationId: other.id, path: other.path, findingIds: ['ambiguous-capture']}],
+              })),
+            };
+          }
+          const ordered = reverse
+            ? {
+                ...proof,
+                findings: [...proof.findings].reverse(),
+                recordPreviews: [...proof.recordPreviews]
+                  .reverse()
+                  .map(item => ({...item, code: [...item.code].reverse()})),
+              }
+            : proof;
+          const before = JSON.stringify({review, observed, proof, ordered});
+          const receipts = automaticReviewMaintenanceReceipts(review, [observed], ordered);
+          expect(receipts).toHaveLength(1);
+          expect(receipts[0].resolvedCitationIds).toEqual(mismatch === 'exact' ? [recaptured.id] : []);
+          expect(automaticReviewMaintenanceReceipts(review, [observed], proof)).toEqual(receipts);
+          const next = reconcileAppliedHealthReport(proof, receipts);
+          expect(next.findings).toEqual(mismatch === 'exact' ? [] : proof.findings);
+          expect(next.maintenance?.affectedMemories).toBe(mismatch === 'exact' && !partial ? 0 : 1);
+          expect(reconcileAppliedHealthReport(next, receipts)).toEqual(next);
+          expect(JSON.stringify({review, observed, proof, ordered})).toBe(before);
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
+  it('refuses malformed or misbound automatic written proof and retains unloaded attention counts', () => {
+    const review = automaticCompletion();
+    const citationId = `tncc_${'1'.repeat(40)}`;
+    const observed: ManagerContextMaintenanceCaseV2 = {
+      ...caseAt(0),
+      subjectUri: review.targetUri,
+      subjectContentHashes: [{uri: review.targetUri, hash: review.targetHash}],
+      disposition: 'needs-decision',
+      slot: `anchor:${citationId}`,
+    };
+    const receipts = automaticReviewMaintenanceReceipts(review, [observed]);
+    expect(receipts).toHaveLength(1);
+    for (const changed of [
+      {...observed, subjectContentHashes: [{uri: review.targetUri, hash: 'c'.repeat(64)}]},
+      {...observed, slot: `anchor:tncc_${'2'.repeat(40)}`},
+      {...observed, memoryId: 'new-memory'},
+      {...observed, family: 'relation'},
+    ]) {
+      const status: ManagerContextMaintenanceStatusV2 = {
+        version: 2,
+        generation: 'new-target',
+        state: 'needs-decision',
+        paused: true,
+        projects: [],
+        cases: [changed],
+        receipts: [],
+        counts: {'needs-decision': 1, decisionMemories: 1},
+      };
+      expect(reconcileAppliedMaintenanceCases(status, receipts)).toBe(status);
+    }
+    for (const bad of [
+      {...review, state: 'applying' as const},
+      {...review, reviewId: 'review-other'},
+      {...review, targetHash: 'b'.repeat(64)},
+      {...review, approval: {...review.approval!, contentHash: '0'.repeat(64)}},
+      {
+        ...review,
+        approval: {
+          ...review.approval!,
+          content: 'MEMORY\nkind: durable\n\nUnbound.',
+          contentHash: sha256HexSync('MEMORY\nkind: durable\n\nUnbound.'),
+        },
+      },
+    ])
+      expect(automaticReviewMaintenanceReceipts(bad, [observed])).toEqual([]);
+    const next = reconcileAppliedMaintenanceCases(
+      {
+        version: 2,
+        generation: 'one',
+        state: 'needs-decision',
+        paused: true,
+        projects: [],
+        cases: [observed],
+        receipts: [],
+        omittedCases: 1,
+        counts: {'needs-decision': 2, decisionMemories: 1},
+      },
+      receipts,
+    );
+    expect(next.cases).toEqual([]);
+    expect(next.counts).toEqual({'needs-decision': 1, decisionMemories: 1});
+  });
   it('reconciles only receipt-proven report slots and preserves unrelated findings, hashes and observations', () => {
     fc.assert(
       fc.property(

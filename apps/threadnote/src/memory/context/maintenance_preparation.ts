@@ -37,6 +37,13 @@ import {captureMemoryCodeCitations, memoryCodeCitationProjectScopeReceipt} from 
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {
+  captureAutomaticCurrentSymbol,
+  automaticSymbolSelectorKey,
+  automaticSupportedSymbolMatchesExcerpt,
+  retainAutomaticApprovedSymbolExcerpt,
+  automaticInactiveCodeRootIds,
+} from './maintenance_code_capture.js';
 import {resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
 import {
   readContextMaintenanceCanonicalRecord,
@@ -57,8 +64,23 @@ import {
 type InventorySnapshot = Effect.Success<ReturnType<typeof prepareContextMaintenanceInventory>>;
 type Candidate = PreparedMemoryV1['candidates'][number];
 type Read = PreparedMemoryV1['reads'][number];
+/** Transient scheduling projection. It is never persisted or consumed as source authority. */
+interface CodeGenerationProjection {
+  readonly ignoredEvidenceIds: readonly string[];
+  readonly omissions: readonly string[];
+}
+interface AutomaticCodeEvidence {
+  readonly evidence: AutomaticMaintenanceEvidenceV1[];
+  readonly candidates: Candidate[];
+  readonly reads: Read[];
+  readonly omissions: string[];
+  readonly searchedScopes: string[];
+  readonly generation?: CodeGenerationProjection;
+}
+
 const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
 const RELATED_SOURCE_BUDGET = 8;
+const SOURCE_SELECTOR_BUDGET = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
 
 /** Match public memory reads, narrowed to the already eligible team for a shared target. */
 export function automaticMemorySourceUriScopes(config: RuntimeConfig, record: MemoryRecord): readonly string[] {
@@ -109,6 +131,27 @@ function reviewedOriginSupports(origin: PreparedMemoryV1['origin']) {
   );
 }
 
+/** Select references only; each reader still authorizes and fences distinct canonical sources. */
+export function selectAutomaticMemorySourceReferences(record: MemoryRecord) {
+  const origin = preservedOrigin(record);
+  const original = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
+  const refs = [
+    ...new Set([
+      ...(record.metadata.reviewedSupport?.active.sources ?? [])
+        .flatMap(entry => (entry.source.kind === 'memory' ? [entry.source.uri] : []))
+        .sort(),
+      ...reviewedOriginSupports(origin).map(support => support.sourceUri),
+      ...(original?.sources ?? []).map(source => source.uri).sort(),
+      ...(record.metadata.relations ?? []).map(relation => relation.uri).sort(),
+    ]),
+  ];
+  // Reviewed-origin references are a subset of the validated receipt's source vector.
+  return {
+    refs: refs.slice(0, SOURCE_SELECTOR_BUDGET),
+    omittedSources: Math.max(0, refs.length - SOURCE_SELECTOR_BUDGET),
+  };
+}
+
 function codeRelevantRevision(candidates: readonly Candidate[], evidenceId: string, symbol: boolean) {
   return candidates
     .flatMap(candidate => {
@@ -142,9 +185,16 @@ export function prepareAutomaticMemory(
     readonly searchedScopes?: readonly string[];
     readonly omissions?: readonly string[];
     readonly omittedSources?: number;
+    readonly generation?: CodeGenerationProjection;
   },
 ): PreparedMemoryV1 {
   const omissions = [...(input.omissions ?? [])];
+  const generationOmissions = [...(input.generation?.omissions ?? omissions)];
+  const ignoredEvidenceIds = new Set(input.generation?.ignoredEvidenceIds ?? []);
+  const omit = (reason: string, evidenceId?: string) => {
+    omissions.push(reason);
+    if (evidenceId === undefined || !ignoredEvidenceIds.has(evidenceId)) generationOmissions.push(reason);
+  };
   let omittedSources = input.omittedSources ?? 0;
   const origin = preservedOrigin(record);
   const originSupports = reviewedOriginSupports(origin);
@@ -162,13 +212,13 @@ export function prepareAutomaticMemory(
   const candidateBudget = record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16;
   const sourceContexts: unknown[] = [];
   const sections = automaticMaintenanceSections(record.body);
-  if (!sections) omissions.push('target-paragraph-bounds');
+  if (!sections) omit('target-paragraph-bounds');
   for (const source of [...(input.sources ?? [])].sort(
     (a, b) => Number(originUris.has(b.uri)) - Number(originUris.has(a.uri)) || a.uri.localeCompare(b.uri),
   )) {
     const sourceSections = automaticMaintenanceSections(source.body);
     if (!sourceSections) {
-      omissions.push('source-paragraph-bounds');
+      omit('source-paragraph-bounds');
       omittedSources++;
       continue;
     }
@@ -182,7 +232,7 @@ export function prepareAutomaticMemory(
         const matches = sourceSections.flatMap((text, ordinal) => (text === captured ? [ordinal] : []));
         if (matches.length === 1) preferred.push(matches[0]);
         else {
-          omissions.push(matches.length ? 'origin-current-fragment-ambiguous' : 'origin-current-fragment-unresolved');
+          omit(matches.length ? 'origin-current-fragment-ambiguous' : 'origin-current-fragment-unresolved');
           if (support.fragment < sourceSections.length) preferred.push(support.fragment);
         }
       }
@@ -194,7 +244,7 @@ export function prepareAutomaticMemory(
       const id = automaticMaintenanceEvidenceId(descriptor);
       const existing = evidence.findIndex(item => item.id === id);
       if ((existing < 0 && evidence.length >= evidenceBudget) || candidates.length >= candidateBudget) {
-        omissions.push('evidence-budget');
+        omit('evidence-budget');
         omittedSources++;
         break;
       }
@@ -262,7 +312,7 @@ export function prepareAutomaticMemory(
     record.metadata.consolidationError ||
     record.metadata.sourceEvidenceError
   )
-    omissions.push('malformed-recorded-evidence');
+    omit('malformed-recorded-evidence');
   for (const candidate of candidates) {
     const excerpt = candidate.excerpt;
     if (
@@ -270,8 +320,8 @@ export function prepareAutomaticMemory(
       !evidence.some(item => item.id === candidate.evidenceId && item.source.kind === 'code')
     )
       continue;
-    if (excerpt.truncated) omissions.push('current-code-excerpt-truncated');
-    if (!excerpt.supportsCitation) omissions.push('current-code-citation-unsupported');
+    if (excerpt.truncated) omit('current-code-excerpt-truncated', candidate.evidenceId);
+    if (!excerpt.supportsCitation) omit('current-code-citation-unsupported', candidate.evidenceId);
   }
   const uniqueOmissions = [...new Set(omissions)].sort();
   omittedSources += evidence.filter(item => item.availability !== 'available').length;
@@ -288,6 +338,7 @@ export function prepareAutomaticMemory(
   }).assessment;
   // Evidence IDs include whole canonical hashes. Generation suppression instead binds selected text and relevant policy.
   const semanticEvidence = assessment.evidence
+    .filter(item => !ignoredEvidenceIds.has(item.id))
     .map(item => {
       const candidate = candidates.find(entry => entry.evidenceId === item.id);
       const source = item.source;
@@ -328,7 +379,7 @@ export function prepareAutomaticMemory(
     scopeRevision: input.scopeRevision,
     sources: sourceContexts,
     semanticEvidence,
-    omissions: uniqueOmissions,
+    omissions: [...new Set(generationOmissions)].sort(),
     paragraphs: assessment.paragraphs.map(p => ({
       ordinal: p.ordinal,
       hash: p.hash,
@@ -368,8 +419,16 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
   const omissions: string[] = [];
   const searchedScopes: string[] = [];
   const query = yield* Effect.serviceOption(CodeGraphQueryService);
-  if (Option.isNone(query))
-    return {evidence, candidates, reads, omissions: ['code-service-unavailable'], searchedScopes};
+  if (Option.isNone(query)) {
+    const unavailable: AutomaticCodeEvidence = {
+      evidence,
+      candidates,
+      reads,
+      omissions: ['code-service-unavailable'],
+      searchedScopes,
+    };
+    return unavailable;
+  }
   // Recorded repository routes are independent of configured uncited discovery roots.
   const citations = [...(record.metadata.codeCitations ?? [])];
   for (const descriptor of record.metadata.reviewedSupport?.active.sources ?? []) {
@@ -378,6 +437,13 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       citations.push(source.citation);
   }
   const recordedIds = new Set(citations.map(citation => citation.id));
+  const roots = record.metadata.codeCitations ?? [];
+  const active = (record.metadata.reviewedSupport?.active.sources ?? []).flatMap(descriptor =>
+    descriptor.source.kind === 'code' ? [descriptor.source.citation] : [],
+  );
+  const activeIds = new Set(active.map(citation => citation.id));
+  const ignoredRootIds = new Set<string>();
+  const readOmissions = new Map<string, string[]>();
   if (
     citations.length === 0 &&
     configuredRoot &&
@@ -481,12 +547,126 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
           ]),
         }),
       });
-      if (!result.success.routesComplete) omissions.push('code-routes-partial');
+      if (!result.success.routesComplete) readOmissions.set(citation.id, ['code-routes-partial']);
     }
-    if (!current) omissions.push('current-code-evidence-unavailable');
+    if (!current)
+      readOmissions.set(citation.id, [...(readOmissions.get(citation.id) ?? []), 'current-code-evidence-unavailable']);
   }
   if (citations.length > codeBudget) omissions.push('code-evidence-budget');
-  return {evidence, candidates, reads, omissions, searchedScopes};
+  // Historical pins keep their original validation outcome. A declared symbol selector may independently
+  // capture a new current pin, including when the historical extractor cannot validate the old symbol.
+  const selectors = new Set<string>();
+  for (const citation of citations.slice(0, codeBudget)) {
+    if (!configuredRoot || citation.target.kind !== 'symbol') continue;
+    const selector = automaticSymbolSelectorKey(citation)!;
+    if (selectors.has(selector)) continue;
+    selectors.add(selector);
+    // Proving a retained root irrelevant requires a fresh unique current capture even when its active pin reads.
+    const needsFreshRootProof =
+      active.filter(pin => automaticSymbolSelectorKey(pin) === selector).length === 1 &&
+      roots.some(pin => !activeIds.has(pin.id) && automaticSymbolSelectorKey(pin) === selector);
+    // An unrelated commit/snapshot must not replace a still-supported canonical source identity.
+    if (
+      !needsFreshRootProof &&
+      candidates.some(
+        candidate =>
+          candidate.excerpt &&
+          evidence.some(
+            item =>
+              item.id === candidate.evidenceId &&
+              item.source.kind === 'code' &&
+              automaticSymbolSelectorKey(item.source.citation) === selector &&
+              automaticSupportedSymbolMatchesExcerpt(item.source.citation, candidate.excerpt!),
+          ),
+      )
+    )
+      continue;
+    const current = yield* captureAutomaticCurrentSymbol(
+      config,
+      configuredRoot,
+      citation,
+      record.metadata.project,
+    ).pipe(Effect.option);
+    if (Option.isNone(current) || current.value === undefined) {
+      omissions.push('current-symbol-capture-unavailable');
+      continue;
+    }
+    const captured = current.value;
+    // Only a genuinely approved active pin can retain its identity across changed graph/extractor context.
+    // The independently captured current source must prove every immutable file and typed-symbol field.
+    const retained = (record.metadata.reviewedSupport?.active.sources ?? []).flatMap(descriptor => {
+      if (descriptor.source.kind !== 'code') return [];
+      const approved = descriptor.source.citation;
+      const excerpt = retainAutomaticApprovedSymbolExcerpt(approved, captured.citation, captured.excerpt);
+      return excerpt ? [{approved, excerpt}] : [];
+    });
+    if (retained.length === 1) {
+      const {approved, excerpt} = retained[0];
+      const approvedId = automaticMaintenanceEvidenceId({kind: 'code', citation: approved});
+      const item = evidence.find(entry => entry.id === approvedId);
+      const read = reads.find(entry => entry.uri === `code:${approved.repositoryId}:${approved.id}`);
+      const ownCandidates = candidates.filter(candidate => candidate.evidenceId === approvedId).length;
+      if (
+        item &&
+        read &&
+        candidates.length - ownCandidates <
+          (record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16)
+      ) {
+        evidence[evidence.indexOf(item)] = {...item, availability: 'available'};
+        for (let i = candidates.length - 1; i >= 0; i--)
+          if (candidates[i].evidenceId === approvedId) candidates.splice(i, 1);
+        candidates.push({evidenceId: approvedId, text: excerpt.content, excerpt});
+        reads[reads.indexOf(read)] = {...read, hash: hash({generation: captured.generation, current: excerpt})};
+        readOmissions.delete(approved.id);
+        for (const id of automaticInactiveCodeRootIds(roots, active, captured.citation, captured.excerpt))
+          ignoredRootIds.add(id);
+        continue;
+      }
+    }
+    const id = automaticMaintenanceEvidenceId({kind: 'code', citation: captured.citation});
+    if (evidence.some(item => item.id === id)) continue;
+    if (
+      evidence.length >=
+        (record.metadata.reviewedSupport ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS) ||
+      candidates.length >= (record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16) ||
+      reads.length >= (record.metadata.reviewedSupport ? 32 : 16)
+    ) {
+      omissions.push('code-evidence-budget');
+      continue;
+    }
+    evidence.push({
+      id,
+      source: {kind: 'code', citation: captured.citation},
+      scope: 'repository',
+      authority: 'provisional',
+      availability: 'available',
+    });
+    candidates.push({evidenceId: id, text: captured.excerpt.content, excerpt: captured.excerpt});
+    reads.push({
+      uri: `code:${captured.citation.repositoryId}:${captured.citation.id}`,
+      hash: hash({generation: captured.generation, current: captured.excerpt}),
+    });
+  }
+  // Keep citation attribution until after scheduling projection: another active failure with the same reason remains.
+  const generationOmissions = [
+    ...omissions,
+    ...[...readOmissions].filter(([id]) => !ignoredRootIds.has(id)).flatMap(([, reasons]) => reasons),
+  ];
+  omissions.push(...[...readOmissions.values()].flat());
+  const result: AutomaticCodeEvidence = {
+    evidence,
+    candidates,
+    reads,
+    omissions,
+    searchedScopes,
+    generation: {
+      ignoredEvidenceIds: evidence
+        .filter(item => item.source.kind === 'code' && ignoredRootIds.has(item.source.citation.id))
+        .map(item => item.id),
+      omissions: generationOmissions,
+    },
+  };
+  return result;
 });
 
 /** Called under the existing maintenance state lock; no provider/model readiness or generation path is referenced. */
@@ -532,28 +712,11 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
       const sources: MemoryRecord[] = [];
       const reads: Read[] = [{uri, hash: target.hash}];
       const omissions: string[] = snapshot.complete ? [] : ['inventory-partial'];
-      let omittedSources = 0;
-      const origin = preservedOrigin(target.record);
-      const original = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
-      const reviewedUris = [...new Set(reviewedOriginSupports(origin).map(item => item.sourceUri))];
-      const refs = [
-        ...new Set([
-          ...(target.record.metadata.reviewedSupport?.active.sources ?? []).flatMap(entry =>
-            entry.source.kind === 'memory' ? [entry.source.uri] : [],
-          ),
-          ...reviewedUris,
-          ...(original?.sources ?? []).map(item => item.uri).sort(),
-          ...(target.record.metadata.relations ?? []).map(item => item.uri).sort(),
-        ]),
-      ];
+      const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(target.record);
+      let omittedSources = omittedSelectors;
       const visited = new Set([uri]);
-      // Reviewed-origin references are a subset of the validated receipt's source vector.
-      const selectorBudget = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
-      if (refs.length > selectorBudget) {
-        omissions.push('related-source-budget');
-        omittedSources += refs.length - selectorBudget;
-      }
-      for (const ref of refs.slice(0, selectorBudget)) {
+      if (omittedSelectors) omissions.push('related-source-budget');
+      for (const ref of refs) {
         const resolved = resolveRelationTarget(snapshot.records, ref);
         if (resolved.state === 'conflicted') {
           omissions.push('related-source-ambiguous');
@@ -628,7 +791,7 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
       }
       const root = target.record.metadata.project ? roots.get(target.record.metadata.project) : undefined;
       const codeResult = yield* readCode(target.record, root).pipe(Effect.timeoutOption(2_000));
-      const code = Option.getOrElse(codeResult, () => ({
+      const code: AutomaticCodeEvidence = Option.getOrElse(codeResult, () => ({
         evidence: [],
         candidates: [],
         reads: [],
@@ -650,6 +813,9 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
           scopeRevision,
           searchedScopes: code.searchedScopes,
           omissions: [...omissions, ...code.omissions],
+          ...(code.generation
+            ? {generation: {...code.generation, omissions: [...omissions, ...code.generation.omissions]}}
+            : {}),
           omittedSources,
         }),
       );
@@ -744,14 +910,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
     root = sourceCwd;
   }
-  const refs = [
-    ...new Set([
-      ...(record.metadata.reviewedSupport?.active.sources ?? []).flatMap(item =>
-        item.source.kind === 'memory' ? [item.source.uri] : [],
-      ),
-      ...(record.metadata.relations ?? []).map(item => item.uri),
-    ]),
-  ];
+  const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(record);
   const sources: MemoryRecord[] = [];
   const locators = new Map<string, ApprovedSourceDescriptorV1['locator']>();
   const portableReads = new Map<
@@ -767,13 +926,12 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
   const reads: Read[] = [{uri, hash: target.hash}];
   // Approved paths and authored aliases can name the same source. Resolve the
   // bounded selectors before spending the budget on distinct canonical reads.
-  const selectorBudget = RELATED_SOURCE_BUDGET + MAX_MEMORY_RELATIONS;
   const allowedUriScopes = automaticMemorySourceUriScopes(config, record);
   const visited = new Set([uri]);
   const liveSources = new Map<string, MemoryRecord>();
-  let omittedSources = Math.max(0, refs.length - selectorBudget);
+  let omittedSources = omittedSelectors;
   const omissions: string[] = omittedSources ? ['related-source-budget'] : [];
-  for (const ref of refs.slice(0, selectorBudget)) {
+  for (const ref of refs) {
     const stored = record.metadata.reviewedSupport?.active.sources.find(
       entry => entry.source.kind === 'memory' && entry.source.uri === ref,
     );
@@ -862,7 +1020,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
     liveSources.set(selected.success.actualUri, source);
     reads.push({uri: selected.success.actualUri, hash: selected.success.hash});
   }
-  const code =
+  const code: AutomaticCodeEvidence =
     record.metadata.codeCitations?.length || record.metadata.reviewedSupport?.active.sources.length || root
       ? yield* readAutomaticCodeEvidence(config, record, root)
       : {evidence: [], candidates: [], reads: [], omissions: [], searchedScopes: []};
@@ -881,6 +1039,9 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       scopeRevision,
       searchedScopes: code.searchedScopes,
       omissions: [...omissions, ...code.omissions],
+      ...(code.generation
+        ? {generation: {...code.generation, omissions: [...omissions, ...code.generation.omissions]}}
+        : {}),
       omittedSources,
     }),
   );

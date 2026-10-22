@@ -13,7 +13,12 @@ import {DateTime, Effect, FileSystem, Option, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readMemoryRecordsByUri} from '../../mcp/server/memory.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
-import {maintenanceContentHash, upsertCase} from './maintenance_policy.js';
+import {
+  hasAbsentMaintenanceAnchors,
+  maintenanceContentHash,
+  reconcileAbsentMaintenanceAnchors,
+  upsertCase,
+} from './maintenance_policy.js';
 import {withMaintenancePacketRevision} from './maintenance_packet.js';
 import type {ContextMaintenanceCaseV2, MaintenanceState} from './maintenance.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -577,6 +582,13 @@ export function stateWithAcceptedTopicObservation(
 ): MaintenanceState {
   const cases = state.cases.map(item => (item.caseId === observed.caseId ? observed.item : item));
   return {
+    ...stateWithAcceptedCases(state, cases),
+    topicCheckpoints: {...state.topicCheckpoints, [observed.caseId]: observed.checkpoint},
+  };
+}
+
+function stateWithAcceptedCases(state: MaintenanceState, cases: readonly ContextMaintenanceCaseV2[]): MaintenanceState {
+  return {
     ...state,
     cases,
     state: cases.some(item => item.disposition === 'needs-decision')
@@ -586,7 +598,6 @@ export function stateWithAcceptedTopicObservation(
         : state.state === 'needs-decision' || state.state === 'waiting-evidence'
           ? 'idle'
           : state.state,
-    topicCheckpoints: {...state.topicCheckpoints, [observed.caseId]: observed.checkpoint},
   };
 }
 
@@ -618,7 +629,27 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
         )
           return yield* topicFail('The accepted topic changed before maintenance verification.');
         yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
-        if (payload.version === 3) return yield* complete;
+        const persistAndComplete = (accepted: MaintenanceState) =>
+          Effect.gen(function* () {
+            yield* persist(accepted);
+            const finalFence = yield* Effect.gen(function* () {
+              const persistedTarget = (yield* readMemoryRecordsByUri(config, [original.uri]))[0];
+              if (!persistedTarget || persistedTarget.content !== acceptedContent)
+                return yield* topicFail('The accepted topic changed during maintenance verification.');
+              yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
+            }).pipe(Effect.result);
+            if (Result.isFailure(finalFence)) {
+              yield* persist(state);
+              return yield* Effect.fail(finalFence.failure);
+            }
+            return yield* complete;
+          });
+        if (payload.version === 3) {
+          if (!hasAbsentMaintenanceAnchors(state.cases, current)) return yield* complete;
+          const cases = new Map(state.cases.map(item => [item.caseId, item]));
+          reconcileAbsentMaintenanceAnchors(cases, current, DateTime.formatIso(yield* DateTime.now));
+          return yield* persistAndComplete(stateWithAcceptedCases(state, [...cases.values()]));
+        }
         const caseId = topicMaintenanceCaseId(original);
         const prior = state.cases.find(item => item.caseId === caseId);
         const checkpoint = state.topicCheckpoints?.[caseId];
@@ -662,18 +693,7 @@ export function reconcileAcceptedTopicMaintenanceState<A, E, R, P, Q>(
           prior.sourceSnapshot?.revision === observed.item.sourceSnapshot?.revision
         )
           return yield* complete;
-        yield* persist(stateWithAcceptedTopicObservation(state, observed));
-        const finalFence = yield* Effect.gen(function* () {
-          const persistedTarget = (yield* readMemoryRecordsByUri(config, [original.uri]))[0];
-          if (!persistedTarget || persistedTarget.content !== acceptedContent)
-            return yield* topicFail('The accepted topic changed during maintenance verification.');
-          yield* verifyTopicMaintenanceReviewSource(config, original, payload, sourceCwd);
-        }).pipe(Effect.result);
-        if (Result.isFailure(finalFence)) {
-          yield* persist(state);
-          return yield* Effect.fail(finalFence.failure);
-        }
-        return yield* complete;
+        return yield* persistAndComplete(stateWithAcceptedTopicObservation(state, observed));
       }),
     );
   });
