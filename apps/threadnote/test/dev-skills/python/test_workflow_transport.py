@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,14 +13,17 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-ROOT = Path(__file__).resolve().parents[5]
-SKILLS = ROOT / "config/agent-skills"
-sys.path[:0] = [str(SKILLS / name / "scripts") for name in ("dev-spec", "dev-plan", "dev-cycle")]
+FIXTURES = Path(__file__).resolve().parent
+sys.path.insert(0, str(FIXTURES))
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+SKILLS = configure_product_skills(__file__, 5)
 import workflow_transport as wt
 import dev_spec
 import dev_plan
 import workflow
 import phase_state
+
+assert_product_provenance(SKILLS, "workflow-transport-imports")
 
 
 class NativeFixture:
@@ -304,6 +309,82 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(archive_request["artifactKey"], "feature-plan")
         self.assertEqual(archive_request["sourceRunId"], "writer-123")
 
+    def test_planned_archive_recovery_reuses_exact_admitted_request(self):
+        record = {"schemaVersion": 1, "kind": "root", "runId": "writer-123", "memoryKind": "handoff", "data": {}}
+        body = "Fixture.\n<!-- dev-spec:v1 " + json.dumps(record) + " -->\n"
+        uri = self.transport.write(record, "feature-spec", body, [])
+        plan = self.transport.plan_archive(uri)
+        original = copy.deepcopy(plan)
+        self.native.fail = "after-mutation"
+        with self.assertRaisesRegex(wt.WorkflowError, "after mutation"):
+            self.transport.archive(uri, plan=plan)
+        pending = wt.read_json(self.context)["pending"]
+        self.assertEqual(pending["request"], plan["request"])
+        self.assertEqual(pending["preview"], plan["preview"])
+        archived = self.make_transport().archive(uri, plan=plan)
+        self.assertEqual(archived, plan["preview"]["canonicalUri"])
+        self.assertEqual(self.transport.read(archived)["body"], body)
+        self.assertNotIn(uri, self.native.documents)
+        self.assertNotIn("pending", wt.read_json(self.context))
+        self.assertEqual([call["operationId"] for call in self.native.calls if call["action"] == "archive"],
+                         [plan["request"]["operationId"]])
+        self.assertEqual([call["operationId"] for call in self.native.calls if call["action"] == "recover"],
+                         [plan["request"]["operationId"]])
+        self.assertEqual(plan, original)
+
+    def test_planned_archive_source_header_context_and_generation_fences_property(self):
+        randomizer = random.Random(863)
+        for index in range(20):
+            drift = ("none", "body", "header", "binding", "generation")[index % 5]
+            with self.subTest(index=index, drift=drift):
+                native = NativeFixture(self.repo, self.home, profile="desktop")
+                context = self.directory / ("planned-" + str(index) + ".json")
+                transport = wt.WorkflowTransport(context, self.repo, self.home,
+                                                 generation_pin="fixture-generation", invoke=native.response)
+                transport.bind("fixture", "feature")
+                salt = "".join(randomizer.choice("abc漢🙂") for _ in range(12))
+                record = {"schemaVersion": 1, "kind": "root", "runId": "writer-" + str(index),
+                          "memoryKind": "durable", "data": {"sample": salt}}
+                marker = randomizer.choice(("dev-spec", "dev-plan"))
+                body = salt + "\n<!-- " + marker + ":v1 " + json.dumps(record) + " -->\n"
+                uri = transport.write(record, "planned-" + str(index), body, [])
+                plan = transport.plan_archive(uri)
+                original = copy.deepcopy(plan)
+                self.assertEqual(transport.validate_archive_plans([plan]), {
+                    "bindingId": transport.binding["bindingId"], "generation": "fixture-generation",
+                    "bindingHash": wt.digest(transport.binding)})
+                if drift == "body":
+                    native.documents[uri]["body"] += "Changed source body.\n"
+                    native.documents[uri]["bodySha256"] = wt.body_hash(native.documents[uri]["body"])
+                    native.documents[uri]["revision"] = wt.body_hash(native.documents[uri]["body"] + "native-edit")
+                elif drift == "header":
+                    # The wire revision covers raw native headers independently of its unchanged body digest.
+                    native.documents[uri]["revision"] = wt.body_hash("changed-native-header-" + salt)
+                elif drift in {"binding", "generation"}:
+                    state = wt.read_json(context)
+                    field = randomizer.choice(("account", "user", "agentId", "featureId", "workflowRunId"))
+                    state["binding"]["generation" if drift == "generation" else field] = "changed-" + salt
+                    wt.save_json(context, state)
+                before = copy.deepcopy(native.documents)
+                if drift == "none":
+                    archived = transport.archive(uri, plan=plan)
+                    self.assertEqual(archived, plan["preview"]["canonicalUri"])
+                    self.assertEqual(transport.read(archived)["body"], body)
+                    self.assertEqual(transport.archive(uri, plan=plan), archived)
+                    self.assertNotIn(uri, native.documents)
+                    calls = [call for call in native.calls if call["action"] == "archive"]
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual({key: calls[0][key] for key in plan["request"]}, plan["request"])
+                else:
+                    with self.assertRaises(wt.WorkflowError):
+                        transport.archive(uri, plan=plan)
+                    if drift in {"binding", "generation"}:
+                        with self.assertRaises(wt.WorkflowError):
+                            transport.validate_archive_plans([plan])
+                    self.assertEqual(native.documents, before)
+                    self.assertFalse(any(call["action"] in {"archive", "recover"} for call in native.calls))
+                self.assertEqual(plan, original)
+
     def test_outer_spec_archive_receipt_recovers_lost_returned_uri(self):
         import support
         record = dev_spec.record({"id": "feature", "project": "fixture"}, "root",
@@ -553,6 +634,47 @@ class CloudPublicationTests(unittest.TestCase):
             self.preview()
         self.assertFalse(any(call["action"] == "publication-preview" for call in self.native.calls))
         self.assertTrue(self.originals <= set(self.native.documents))
+
+
+class ImportOrderTests(unittest.TestCase):
+    def test_sibling_transports_preserve_one_shared_module_contract(self):
+        copies = [SKILLS / skill / "scripts/workflow_transport.py" for skill in ("dev-spec", "dev-plan")]
+        self.assertEqual(hashlib.sha256(copies[0].read_bytes()).hexdigest(),
+                         hashlib.sha256(copies[1].read_bytes()).hexdigest())
+
+    def test_both_entrypoint_import_orders_preserve_planned_archive_guards_and_closeout(self):
+        probe = r'''
+import importlib, pathlib, sys, unittest
+sys.dont_write_bytecode = True
+skills, tests, first = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+other = "dev-plan" if first == "dev-spec" else "dev-spec"
+sys.path.insert(0, str(tests))
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+assert configure_product_skills(tests / "test_workflow_transport.py", 5) == skills
+sys.path[:0] = [str(skills / skill / "scripts") for skill in (first, other, "dev-cycle")]
+sys.path.extend([str(tests), str(tests / "dev-spec")])
+for skill in (first, other): importlib.import_module(skill.replace("-", "_"))
+import dev_spec, dev_plan, workflow_transport, test_workflow_transport, test_dev_spec
+assert dev_spec.wt is dev_plan.wt is workflow_transport
+assert pathlib.Path(workflow_transport.__file__).resolve() == (skills / first / "scripts/workflow_transport.py").resolve()
+assert_product_provenance(skills, "transport-order-" + first + "-imports")
+suite = unittest.TestSuite([
+    test_workflow_transport.TransportTests("test_planned_archive_recovery_reuses_exact_admitted_request"),
+    test_workflow_transport.TransportTests("test_planned_archive_source_header_context_and_generation_fences_property"),
+    test_dev_spec.Specs("test_desktop_workflow_transport_reaches_planned_archive_closeout")])
+result = unittest.TextTestRunner(verbosity=2).run(suite)
+assert_product_provenance(skills, "transport-order-" + first + "-complete")
+raise SystemExit(not result.wasSuccessful())
+'''
+        environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        for key in ("DEV_SPEC_NATIVE", "DEV_PLAN_NATIVE"):
+            environment.pop(key, None)
+        for first in ("dev-spec", "dev-plan"):
+            with self.subTest(first=first):
+                result = subprocess.run([sys.executable, "-B", "-c", probe, str(SKILLS), str(FIXTURES), first],
+                                        text=True, encoding="utf-8", capture_output=True, cwd=FIXTURES,
+                                        env=environment, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
