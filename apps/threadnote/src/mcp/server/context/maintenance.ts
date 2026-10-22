@@ -17,6 +17,7 @@ import {
   readTopicMaintenanceDraft,
   requestAutomaticMemoryReview,
   requestAutomaticMemoryDraft,
+  setAutomaticDraftBackgroundPolicy,
 } from '../../../memory/context/maintenance_draft.js';
 import {
   projectTopicReviewDecisionAcknowledgement,
@@ -380,7 +381,27 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
       description:
         'Run one bounded local maintenance tick, pause/resume default automatic work, or CAS-undo an exact retained repair receipt. Shared canonical knowledge remains review controlled; no network or scheduler installation occurs.',
       inputSchema: {
-        action: McpInput.literals(['run', 'pause', 'resume', 'undo', 'retire-anchor'], 'Defaults to run'),
+        action: McpInput.literals(
+          [
+            'run',
+            'pause',
+            'resume',
+            'undo',
+            'retire-anchor',
+            'background-status',
+            'background-pause',
+            'background-resume',
+            'background-provider',
+            'background-budget',
+          ],
+          'Defaults to run',
+        ),
+        backend: McpInput.literals(['local-ai', 'effect-ai'], 'Explicit global background provider'),
+        modelId: McpInput.string('Exact configured remote model for an explicit background grant'),
+        unitsPerHour: McpInput.integer('Explicit remote background logical-unit grant, zero revokes', {
+          minimum: 0,
+          maximum: 4,
+        }),
         callerCwd: McpInput.string('Absolute local repository/worktree evidence root'),
         project: McpInput.string('Optional project; omitted work uses fair home-wide scheduling'),
         maxRecords: McpInput.integer('Bounded work tasks', {minimum: 1, maximum: 100}),
@@ -392,6 +413,15 @@ export function registerContextMaintenanceTools(server: EffectMcpServerAdapter, 
     },
     input =>
       Effect.gen(function* () {
+        if (typeof input.action === 'string' && input.action.startsWith('background-')) {
+          const status = yield* setAutomaticDraftBackgroundPolicy(config, {
+            action: input.action,
+            backend: input.backend,
+            modelId: input.modelId,
+            unitsPerHour: input.unitsPerHour,
+          });
+          return {content: [{type: 'text' as const, text: JSON.stringify(status)}], structuredContent: status};
+        }
         const cwd = input.callerCwd ?? (yield* SystemInfo).currentDirectory();
         if (!(yield* Path.Path).isAbsolute(cwd)) return argumentError('context_maintain callerCwd must be absolute.');
         const result =

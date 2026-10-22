@@ -1,5 +1,6 @@
 import {InvalidModelOutput, InferenceInterrupted} from '@threadnote/inference/engine/errors';
 import {Cause, Clock, Crypto, Effect, Exit, Option, Schema} from 'effect';
+import {AiError} from 'effect/ai';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {saveTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {
@@ -10,20 +11,22 @@ import {
   type TopicGenerationSummaryV1,
   type TopicGenerationUsageV1,
 } from '@threadnote/memory/topic-maintenance-draft';
-import {SelectedDraftError} from '../../manager/selected_draft.js';
-import {TopicDraftProviderOutputError} from '../../effect/ai/consolidator.js';
+import {SelectedDraftError} from '../../effect/ai/selected_generation.js';
+import {DraftProviderUnavailableBeforeDispatch, TopicDraftProviderOutputError} from '../../effect/ai/consolidator.js';
 
 export class TopicGenerationRequestError extends Schema.TaggedError<TopicGenerationRequestError>()(
   'TopicGenerationRequestError',
   {
     message: Schema.String,
     diagnostics: Schema.optionalKey(TopicGenerationSummary),
+    failureKind: Schema.optionalKey(Schema.Literals(['transient', 'terminal'])),
   },
 ) {}
-const failed = (diagnostics?: TopicGenerationSummaryV1) =>
+const failed = (diagnostics?: TopicGenerationSummaryV1, failureKind: 'transient' | 'terminal' = 'terminal') =>
   TopicGenerationRequestError.make({
     message: 'Topic generation failed. Inspect the saved local diagnostics when available.',
     ...(diagnostics ? {diagnostics} : {}),
+    failureKind,
   });
 
 type Identity = Pick<
@@ -49,6 +52,7 @@ export function withTopicGenerationObservation<A, E, R>(
   identity: Identity,
   use: (observation: TopicGenerationObservation) => Effect.Effect<A, E, R>,
   persist: typeof saveTopicGenerationReceipt = saveTopicGenerationReceipt,
+  deadline?: number,
 ) {
   return Effect.uninterruptibleMask(restore =>
     Effect.gen(function* () {
@@ -69,7 +73,31 @@ export function withTopicGenerationObservation<A, E, R>(
         persist,
       );
       yield* observation.save().pipe(Effect.mapError(() => failed()));
-      const exit = yield* Effect.exit(restore(use(observation)));
+      const program = restore(use(observation));
+      // The claim's absolute deadline owns the whole unit. Keeping cancellation
+      // inside this observation preserves its original receipt and attempt timing.
+      const remaining = deadline === undefined ? undefined : Math.max(0, deadline - (yield* Clock.currentTimeMillis));
+      const exit = yield* Effect.exit(
+        remaining === undefined
+          ? program
+          : program.pipe(
+              Effect.timeoutOrElse({
+                duration: remaining,
+                orElse: () =>
+                  Effect.sync(() => observation.deadline()).pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        SelectedDraftError.make({
+                          message: 'Topic maintenance generation exceeded the 120-second deadline.',
+                          reason: 'deadline',
+                        }),
+                      ),
+                    ),
+                  ),
+              }),
+            ),
+      );
+
       observation.close(
         Exit.isSuccess(exit) ? 'completed' : Cause.hasInterrupts(exit.cause) ? 'interrupted' : 'failed',
       );
@@ -77,7 +105,14 @@ export function withTopicGenerationObservation<A, E, R>(
       if (saved._tag === 'Failure') return yield* failed();
       if (Exit.isFailure(exit)) {
         if (Cause.hasInterrupts(exit.cause)) return yield* Effect.failCause(exit.cause);
-        return yield* failed(observation.summary());
+        const original = Cause.findErrorOption(exit.cause);
+        const transient =
+          Option.isSome(original) &&
+          AiError.isAiError(original.value) &&
+          original.value.isRetryable &&
+          ['NetworkError', 'RateLimitError', 'InternalProviderError'].includes(original.value.reason._tag);
+        // Unknown/provider-output failures are not evidence that redispatch is safe.
+        return yield* failed(observation.summary(), transient ? 'transient' : 'terminal');
       }
       return exit.value;
     }),
@@ -191,7 +226,9 @@ export class TopicGenerationObservation {
           return exit.value;
         }
         const failure = Cause.findErrorOption(exit.cause);
-        if (Option.isSome(failure) && Schema.is(TopicDraftProviderOutputError)(failure.value)) {
+        if (Option.isSome(failure) && Schema.is(DraftProviderUnavailableBeforeDispatch)(failure.value)) {
+          this.updateAttempt({status: 'not-dispatched', elapsedMilliseconds: null});
+        } else if (Option.isSome(failure) && Schema.is(TopicDraftProviderOutputError)(failure.value)) {
           this.latestOutput = {...failure.value.output, attempt: ordinal};
           const {hash, bytes, representation} = this.latestOutput;
           this.updateAttempt({

@@ -6,15 +6,16 @@ import type {
   ContextMaintenanceCaseV2,
   ContextMaintenanceReceiptV2,
   ContextMaintenanceReadOptions,
-  ContextMaintenanceStatusV2,
+  MaintenanceState,
   UndoJournal,
-  WorkCheckpoint,
 } from './maintenance_contracts.js';
+import {MaintenancePauseFenceBusy} from './maintenance_contracts.js';
 export type {
   ContextMaintenanceCaseV2,
   ContextMaintenanceReceiptV2,
   ContextMaintenanceReadOptions,
   ContextMaintenanceStatusV2,
+  MaintenanceState,
 } from './maintenance_contracts.js';
 import {
   selectFairMaintenanceWork,
@@ -49,7 +50,7 @@ export {
   duplicateArchiveSafe,
 } from './maintenance_policy.js';
 import {Clock, Crypto, DateTime, Effect, FileSystem, Path, Result, Schema} from 'effect';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -91,11 +92,9 @@ import {
   prepareMaintenanceSemanticProgress,
   readMaintenanceCandidateDecisions,
   runMaintenanceSemanticWindow,
-  type MaintenanceSemanticProgress,
   maintenanceSemanticProgressPending,
   maintenanceSemanticProgressUnsupported,
   selectMaintenanceWorkAndRequestCursor,
-  type MaintenanceWorkSchedule,
 } from './maintenance_decisions.js';
 import {readMemoryRecordsByUri, resourceExists} from '../../mcp/server/memory.js';
 export {runContextMaintainCommand} from './maintenance_commands.js';
@@ -121,7 +120,6 @@ import {
   topicMaintenanceCaseId,
   validTopicMaintenanceCheckpoints,
   TOPIC_MAINTENANCE_FAMILY,
-  type TopicMaintenanceCheckpoint,
   type TopicReviewDecisionInput,
   saveTopicReviewDecision,
 } from './maintenance_topic.js';
@@ -146,18 +144,6 @@ const LOCK = {retryIntervalMilliseconds: 25, staleAfterMilliseconds: 60_000, wai
 export class ContextMaintenanceError extends Schema.TaggedError<ContextMaintenanceError>()('ContextMaintenanceError', {
   message: Schema.String,
 }) {}
-
-export interface MaintenanceState extends ContextMaintenanceStatusV2 {
-  readonly checkpoints: Readonly<Record<string, WorkCheckpoint>>;
-  readonly lastProject?: string;
-  readonly lastTaskByProject?: Readonly<Record<string, string>>;
-  readonly lastWakeAt?: string;
-  readonly policyOverrides?: Readonly<Record<string, string>>;
-  readonly decisionCheckpoints?: Readonly<Record<string, string>>;
-  readonly semanticProgress?: Readonly<Record<string, MaintenanceSemanticProgress>>;
-  readonly workSchedule?: MaintenanceWorkSchedule;
-  readonly topicCheckpoints?: Readonly<Record<string, TopicMaintenanceCheckpoint>>;
-}
 
 export const readContextMaintenanceStatus = Effect.fn('contextMaintenance.status')(function* (
   config: RuntimeConfig,
@@ -227,6 +213,26 @@ export const setContextMaintenancePaused = Effect.fn('contextMaintenance.pause')
     }),
   );
 });
+
+export function withMaintenancePauseFence<A, E, R>(config: RuntimeConfig, publish: Effect.Effect<A, E, R>) {
+  return Effect.suspend(() => {
+    let entered = false;
+    return withStateLock(
+      config,
+      Effect.gen(function* () {
+        entered = true;
+        if ((yield* readState(config)).paused)
+          return yield* fail('Automatic generation is paused with all context maintenance.');
+        return yield* publish;
+      }),
+    ).pipe(
+      Effect.catchIf(
+        error => !entered && isFileLockTimeout(error),
+        () => Effect.fail(MaintenancePauseFenceBusy.make({})),
+      ),
+    );
+  });
+}
 
 export const runContextMaintenance = Effect.fn('contextMaintenance.run')(function* (
   config: RuntimeConfig,

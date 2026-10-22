@@ -391,7 +391,8 @@
     "./value_report/pilot/storage": "./src/value_report/pilot/storage.ts",
     "./value_report/storage": "./src/value_report/storage.ts",
     "./worker_protocol": "./src/worker_protocol.ts",
-    "./workspace_component": "./src/workspace_component.ts"
+    "./workspace_component": "./src/workspace_component.ts",
+    "./effect/ai/selected_generation": "./src/effect/ai/selected_generation.ts"
   },
   "dependencies": {
     "@effect/ai-openai-compat": "4.0.3",

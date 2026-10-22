@@ -380,7 +380,26 @@ function nativeDisjointUnions(value: unknown): unknown {
 }
 
 /** Convert disjoint schema alternatives to the native grammar's supported oneOf. */
-export function topicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftModelSchema>) {
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+): ReturnType<typeof legacyTopicDraftNativeJsonSchema>;
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+  basis: AnyTopicMaintenanceDraftBasis,
+): Record<string, unknown>;
+export function topicDraftNativeJsonSchema(
+  schema: ReturnType<typeof topicDraftModelSchema>,
+  basis?: AnyTopicMaintenanceDraftBasis,
+) {
+  if (basis?.version !== 3) return legacyTopicDraftNativeJsonSchema(schema);
+  return nativeDisjointUnions(Schema.toJsonSchemaDocument(schema, {onExcessProperty: 'error'}).schema) as Record<
+    string,
+    unknown
+  >;
+}
+
+// The one-argument legacy adapter retains its exact decision validation and shape.
+function legacyTopicDraftNativeJsonSchema(schema: ReturnType<typeof topicDraftModelSchema>) {
   const document = Schema.toJsonSchemaDocument(schema, {onExcessProperty: 'error'}).schema as Record<string, unknown>;
   const properties = document.properties;
   const fields =

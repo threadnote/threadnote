@@ -1,3 +1,5 @@
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {recordDraftQueueDecision} from './maintenance_draft_queue.js';
 import {DateTime, Effect, FileSystem, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -344,7 +346,17 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
         )
           return yield* fail('The selected topic case no longer matches this review.');
       }
+      const persistOrdinaryDecision = () =>
+        review.maintenance!.version === 3
+          ? recordDraftQueueDecision(config, {
+              targetKey: sha256HexSync(review.maintenance!.basis.targetUri),
+              targetUri: review.maintenance!.basis.targetUri,
+              materialRevision: review.maintenance!.basis.observationRevision,
+              action: input.action,
+            })
+          : Effect.void;
       if (replay) {
+        yield* persistOrdinaryDecision();
         if (review.maintenance.version !== 3 && review.maintenance.generation.origin !== 'manual')
           yield* reconcile(config, {
             caseId: input.caseId!,
@@ -389,6 +401,9 @@ export const decideTopicMaintenanceReview = Effect.fn('topicMaintenance.decideRe
                 ? undefined
                 : {...review.maintenanceApproval, stage: 'parked' as const},
           };
+      // Persist user intent first: diagnostic review pruning must never erase a current decision.
+      // If the review write then fails, its exact public replay completes the same decision.
+      yield* persistOrdinaryDecision();
       yield* saveCandidateReview(config.agentContextHome, decided);
       if (decided.maintenance!.version !== 3 && decided.maintenance!.generation.origin !== 'manual')
         yield* reconcile(config, {
