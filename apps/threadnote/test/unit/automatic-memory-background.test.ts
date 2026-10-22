@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result} from 'effect';
+import {Cause, Clock, Deferred, Effect, Fiber, FileSystem, Path, Result, Schema} from 'effect';
 import {AiError} from 'effect/ai';
 import {TestClock} from 'effect/testing';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -27,6 +27,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
 import {localDraftGenerationSettings} from '../../src/effect/ai/consolidator.js';
 import * as consolidatorModule from '../../src/effect/ai/consolidator.js';
+import {topicDraftModelSchema, topicDraftNativeJsonSchema} from '../../src/manager/topic_draft_schema.js';
 import {
   selectedTopicDraftIdentity,
   runSelectedDraft,
@@ -135,21 +136,6 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
           observationRevision: packet.basis.observationRevision,
           packetDigest: packet.basis.packetDigest,
           outcome: handle ? 'propose-update' : 'insufficient-evidence',
-          operations: handle
-            ? [
-                {
-                  ordinal: 0,
-                  beforeHash: packet.basis.paragraphs[0].hash,
-                  text,
-                  supportHandles: [handle.handleId],
-                  rationale: 'Use the full current related paragraph.',
-                },
-              ]
-            : [],
-          reviewedHandles: packet.reviewEvidence.map(entry => entry.handleId),
-          rationale: 'Explicit provisional factual paragraph review.',
-          unresolvedQuestions: [],
-          removedClaims: [],
           paragraphDecisions: [
             {
               ordinal: 0,
@@ -159,6 +145,21 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
               evidenceIds: handle ? [handle.descriptor.id] : [],
             },
           ],
+          operations: handle
+            ? [
+                {
+                  ordinal: 0,
+                  beforeHash: packet.basis.paragraphs[0].hash,
+                  supportHandles: [handle.handleId],
+                  rationale: 'Use the full current related paragraph.',
+                  text,
+                },
+              ]
+            : [],
+          reviewedHandles: packet.reviewEvidence.map(entry => entry.handleId),
+          rationale: 'Explicit provisional factual paragraph review.',
+          unresolvedQuestions: [],
+          removedClaims: [],
         }),
         backendIdentity: 'local-ai',
         modelIdentity: modelId,
@@ -197,6 +198,113 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* () {
 });
 
 describe('automatic ordinary-memory background controls', () => {
+  effectIt.effect('binds automatic generation literals, namespaces and field ordering under bounded permutations', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+      const packet = yield* requestAutomaticMemoryReview(f.config, {uri: f.uri, expectedContentHash: hash(f.content)});
+      if ('reviewId' in packet) return yield* Effect.die('Expected a source packet.');
+      const result = yield* f.generate(
+        f.config,
+        'local-ai',
+        {id: f.modelId, label: f.modelId, isDefault: true},
+        JSON.stringify(packet),
+        'topic-maintenance',
+        packet.basis,
+      );
+      const original = JSON.parse(result.text) as AutomaticMaintenanceDraftV2;
+      const provisional = packet.basis.paragraphs[0];
+      if (provisional.roleAuthority === 'reviewed') return yield* Effect.die('Expected the provisional fixture.');
+      yield* Effect.sync(() =>
+        fc.assert(
+          fc.property(fc.integer({min: 1, max: 6}), fc.boolean(), (count, reverse) => {
+            // Generation-grammar binding property only; final coverage/order remains preflight-owned.
+            const paragraphs = Array.from({length: count}, (_, ordinal) => ({
+              ...provisional,
+              ordinal,
+              hash: hash(`paragraph-${ordinal}`),
+            }));
+            const basis = {...packet.basis, paragraphs: reverse ? [...paragraphs].reverse() : paragraphs};
+            const schema = topicDraftModelSchema(basis);
+            const decode = Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'});
+            const wire = {
+              ...original,
+              paragraphDecisions: paragraphs.map(paragraph => ({
+                ...original.paragraphDecisions[0],
+                ordinal: paragraph.ordinal,
+                beforeHash: paragraph.hash,
+              })),
+              operations: [{...original.operations[0], ordinal: count - 1, beforeHash: paragraphs[count - 1].hash}],
+            };
+            const before = JSON.stringify({basis, wire});
+            expect(() => decode(wire)).not.toThrow();
+            expect(() =>
+              decode({
+                ...wire,
+                paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                  ...decision,
+                  evidenceIds: original.operations[0].supportHandles,
+                })),
+              }),
+            ).toThrow();
+            expect(() =>
+              decode({
+                ...wire,
+                operations: [{...wire.operations[0], supportHandles: original.paragraphDecisions[0].evidenceIds}],
+              }),
+            ).toThrow();
+            expect(() => decode({...wire, reviewedHandles: original.paragraphDecisions[0].evidenceIds})).toThrow();
+            expect(() =>
+              decode({...wire, operations: [{...wire.operations[0], beforeHash: hash('unbound-hash')}]}),
+            ).toThrow();
+            if (count > 1)
+              expect(() =>
+                decode({...wire, operations: [{...wire.operations[0], beforeHash: paragraphs[0].hash}]}),
+              ).toThrow();
+            const native = topicDraftNativeJsonSchema(schema, basis);
+            const fields = object(native.properties);
+            expect(Object.keys(fields).indexOf('paragraphDecisions')).toBeLessThan(
+              Object.keys(fields).indexOf('operations'),
+            );
+            const item = object(object(fields.operations).items);
+            const variants = 'oneOf' in item ? (item.oneOf as readonly Record<string, unknown>[]) : [item];
+            for (const variant of variants) {
+              const keys = Object.keys(object(variant.properties));
+              expect(keys.indexOf('supportHandles')).toBeLessThan(keys.indexOf('text'));
+              expect(keys.indexOf('rationale')).toBeLessThan(keys.indexOf('text'));
+            }
+            expect(JSON.stringify({basis, wire})).toBe(before);
+          }),
+          {numRuns: 12, seed: 30303},
+        ),
+      );
+      const noEvidence = {...packet.basis, handles: [], assessment: {...packet.basis.assessment, evidence: []}};
+      const emptySchema = topicDraftModelSchema(noEvidence);
+      const emptyWire = {
+        ...original,
+        operations: [],
+        reviewedHandles: [],
+        paragraphDecisions: original.paragraphDecisions.map(decision => ({
+          ...decision,
+          support: 'unresolved',
+          evidenceIds: [],
+        })),
+      };
+      const decodeEmpty = Schema.decodeUnknownEffect(emptySchema, {onExcessProperty: 'error'});
+      expect(Result.isSuccess(yield* decodeEmpty(emptyWire).pipe(Effect.result))).toBe(true);
+      expect(
+        Result.isFailure(
+          yield* decodeEmpty({...emptyWire, reviewedHandles: original.reviewedHandles}).pipe(Effect.result),
+        ),
+      ).toBe(true);
+      expect(
+        Result.isFailure(
+          yield* decodeEmpty({...emptyWire, paragraphDecisions: original.paragraphDecisions}).pipe(Effect.result),
+        ),
+      ).toBe(true);
+      expect(() => topicDraftNativeJsonSchema(emptySchema, noEvidence)).not.toThrow();
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   for (const state of ['pending', 'rejected', 'deferred', 'conflict', 'applying'] as const) {
     effectIt.effect(`preserves an earlier prompt contract review across the version bump: ${state}`, () =>
       Effect.gen(function* () {
@@ -263,6 +371,7 @@ describe('automatic ordinary-memory background controls', () => {
     'unknown-handle',
     'unknown-support-handle',
     'unknown-evidence-id',
+    'nv003-prefixed-decision-id',
     'rationale-bound',
     'receipt-save',
   ] as const;
@@ -416,6 +525,15 @@ describe('automatic ordinary-memory background controls', () => {
                       paragraphDecisions: wire.paragraphDecisions.map(decision => ({
                         ...decision,
                         evidenceIds: [`ame_${hash('unknown')}`],
+                      })),
+                    };
+                  if (scenario === 'nv003-prefixed-decision-id')
+                    wire = {
+                      ...wire,
+                      operations: wire.operations.map(operation => ({...operation, text: packet.basis.body})),
+                      paragraphDecisions: wire.paragraphDecisions.map(decision => ({
+                        ...decision,
+                        evidenceIds: wire.operations[0].supportHandles,
                       })),
                     };
                   if (scenario === 'rationale-bound') wire = {...wire, rationale: 'x'.repeat(2049)};

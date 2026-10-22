@@ -452,6 +452,33 @@ export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
 
 function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3) {
   const text = Schema.String;
+  // A missing admitted namespace permits only [], never an unconstrained ID.
+  const admitted = (values: readonly string[]) =>
+    Schema.Array(values.length ? Schema.Literals(values) : text).check(Schema.isMaxLength(values.length ? 8 : 0));
+  const current = basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id);
+  const evidence = [
+    ...new Set([...basis.assessment.evidence.map(entry => entry.id), ...basis.handles.map(h => h.citationId)]),
+  ];
+  // maxItems:0 below closes empty paragraph universes without an empty union.
+  const paragraphs = basis.paragraphs.length ? basis.paragraphs : [{ordinal: 0, hash: ''}];
+  const decisions = paragraphs.map(paragraph =>
+    Schema.Struct({
+      ordinal: Schema.Literal(paragraph.ordinal),
+      beforeHash: Schema.Literal(paragraph.hash),
+      role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+      support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+      evidenceIds: admitted(evidence),
+    }),
+  );
+  const operations = paragraphs.map(paragraph =>
+    Schema.Struct({
+      ordinal: Schema.Literal(paragraph.ordinal),
+      beforeHash: Schema.Literal(paragraph.hash),
+      supportHandles: admitted(current),
+      rationale: text,
+      text,
+    }),
+  );
   return Schema.Struct({
     version: Schema.Literal(2),
     kind: Schema.Literal('automatic'),
@@ -460,22 +487,17 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
     outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
-    operations: Schema.Array(
-      Schema.Struct({ordinal: Schema.Int, beforeHash: text, text, supportHandles: Schema.Array(text), rationale: text}),
+    paragraphDecisions: Schema.Array(Schema.Union(decisions)).check(
+      Schema.isMinLength(basis.paragraphs.length),
+      Schema.isMaxLength(basis.paragraphs.length),
     ),
-    reviewedHandles: Schema.Array(text),
+    operations: Schema.Array(Schema.Union(operations)).check(Schema.isMaxLength(basis.paragraphs.length)),
+    reviewedHandles: Schema.Array(current.length ? Schema.Literals(current) : text).check(
+      Schema.isMaxLength(current.length),
+    ),
     rationale: text,
     unresolvedQuestions: Schema.Array(text),
     removedClaims: Schema.Array(text),
-    paragraphDecisions: Schema.Array(
-      Schema.Struct({
-        ordinal: Schema.Int,
-        beforeHash: text,
-        role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
-        support: Schema.Literals(['direct', 'contextual', 'unresolved']),
-        evidenceIds: Schema.Array(text),
-      }),
-    ),
   });
 }
 
