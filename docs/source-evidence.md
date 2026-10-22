@@ -40,7 +40,17 @@ Pins expire 90 days after acceptance by default; `retentionDays` accepts 1–365
 
 Only sanitized imported chunks are retained. The 512 KiB chunk limit and 8192-byte fragment limit keep acceptance bounded; large source documents may require choosing a smaller imported chunk.
 
-## Maintained private notes
+## Automatic ordinary-memory updates
+
+Ordinary memory assessment and bounded background drafts work without enrollment or an Obsidian source. Threadnote
+uses accessible evidence and keeps missing, partial or unavailable support explicit. A prepared draft requires a full
+content and support preview plus explicit confirmation before changing the saved memory. Shared ownership and
+source access still apply. See [automatic memory care](memory-code-citations.md#automatic-memory-care).
+
+The specialized note and dependency workflows below remain available for their existing explicit capture and
+metadata approvals; they are not prerequisites for ordinary automatic assessment.
+
+## Advanced maintained private notes
 
 The first imported maintenance adapter supports an already-derived private
 Obsidian memory backed by exactly one note and source instance. Enroll its
@@ -53,7 +63,7 @@ and nested evidence. See the [note maintenance workflow](obsidian.md#review-a-ch
 
 ## Review additional code dependencies
 
-A private code topic's ordinary maintenance observes only its declared support.
+A legacy enrolled code topic's declared-source maintenance observes only its declared support.
 New files are not discovered or added automatically. Dependency expansion is a
 separate metadata approval: it leaves every paragraph, support decision, origin
 citation and accepted mapping intact.

@@ -6,6 +6,39 @@ against an already-ready current graph and returns a disposable validation recei
 
 Code citations are optional. Existing uncited memories remain recallable after upgrading.
 
+## Automatic memory care
+
+Existing and new ordinary memories are assessed automatically. There is no per-memory enrollment step and no
+Obsidian requirement. Citations, reviewed consolidation evidence and memory references help identify support;
+an uncited memory can also be assessed, with missing or partial evidence kept visible.
+
+Ordinary use advances bounded background preparation. When accessible current evidence supports a change and the
+selected generation provider is available, Threadnote prepares a private draft within its background budget.
+Library shows assessment and support; Context Health lists prepared updates. Waiting for a model, budget or source
+access does not mean the memory has been verified. **Generate now** is an optional explicit action.
+
+Review the complete proposed body and support metadata before confirming Apply. Applying closes the review and removes
+its ready item only after a verified canonical write. An independent unsaved Library edit stays available for reconciliation.
+Editing already reviewed content also requires an exact preview and marks affected support unresolved; initial approval
+history remains intact. Policy and historical paragraphs are protected from automatic replacement.
+
+Automatic drafts have bounded input and output. Targets beyond 64 paragraphs or the automatic body limit remain
+available for manual review without spending generation quota. Source checks cover only inspected evidence;
+approved support is not a claim that every project source or every statement is current. Shared and read-only memories
+retain their owner and publication permissions.
+
+Inspect or pause background drafting without changing the separate all-maintenance pause:
+
+```sh
+threadnote context maintain --action background-status --json
+threadnote context maintain --action background-pause --json
+threadnote context maintain --action background-resume --json
+```
+
+The default local background budget is four generation units per rolling hour. Existing explicit provider/model
+choices are preserved; remote background use requires a separate finite grant. Pausing, deferring or rejecting work
+does not apply a proposal or reset its quota history. Advanced enrolled-topic workflows remain compatible.
+
 ## Consolidation in Manager
 
 Consolidation reviews evidence against the final draft, one paragraph at a time. Choose direct support, context only,

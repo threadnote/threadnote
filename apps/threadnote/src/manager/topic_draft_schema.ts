@@ -450,7 +450,120 @@ export function topicDraftModelSchema(basis: AnyTopicMaintenanceDraftBasis) {
   return basis.version === 3 ? automaticTopicDraftModelSchema(basis) : legacyTopicDraftModelSchema(basis);
 }
 
+/** Separate, stable namespaces shared by the model schema, prompt and hydration. */
+export function automaticTopicDraftIndexTables(basisInput: AutomaticMaintenanceDraftBasisV3) {
+  const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
+  return Object.freeze({
+    evidenceIds: Object.freeze(
+      [
+        ...new Set([
+          ...basis.assessment.evidence.map(entry => entry.id),
+          ...basis.handles.map(handle => handle.citationId),
+        ]),
+      ].sort(),
+    ),
+    currentHandles: Object.freeze(
+      [...new Set(basis.handles.filter(handle => handle.variant === 'current').map(handle => handle.id))].sort(),
+    ),
+  });
+}
+
 function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3) {
+  const tables = automaticTopicDraftIndexTables(basis);
+  const indices = (count: number, max = 8) =>
+    Schema.Array(count ? Schema.Literals(Array.from({length: count}, (_, index) => index)) : Schema.Int).check(
+      Schema.isMaxLength(Math.min(max, count)),
+    );
+  const paragraphs = basis.paragraphs.length ? basis.paragraphs : [{ordinal: 0}];
+  const text = Schema.String;
+  return Schema.Struct({
+    version: Schema.Literal(1),
+    kind: Schema.Literal('automatic-model'),
+    targetHash: Schema.Literal(basis.targetHash),
+    observationRevision: Schema.Literal(basis.observationRevision),
+    packetDigest: Schema.Literal(basis.packetDigest),
+    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
+    paragraphDecisions: Schema.Array(
+      Schema.Union(
+        paragraphs.map(paragraph =>
+          Schema.Struct({
+            ordinal: Schema.Literal(paragraph.ordinal),
+            role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+            support: Schema.Literals(['direct', 'contextual', 'unresolved']),
+            evidenceIndices: indices(tables.evidenceIds.length),
+          }),
+        ),
+      ),
+    ).check(Schema.isMinLength(basis.paragraphs.length), Schema.isMaxLength(basis.paragraphs.length)),
+    operations: Schema.Array(
+      Schema.Union(
+        paragraphs.map(paragraph =>
+          Schema.Struct({
+            ordinal: Schema.Literal(paragraph.ordinal),
+            supportIndices: indices(tables.currentHandles.length),
+            rationale: text,
+            text,
+          }),
+        ),
+      ),
+    ).check(Schema.isMaxLength(basis.paragraphs.length)),
+    currentSourceIndices: indices(tables.currentHandles.length, tables.currentHandles.length),
+    rationale: text,
+    unresolvedQuestions: Schema.Array(text),
+    removedClaims: Schema.Array(text),
+  });
+}
+
+/** Provider output stays compact; no runtime-expanded projection is labelled provider output. */
+function decodeAutomaticTopicDraftModelWire(basis: AutomaticMaintenanceDraftBasisV3, input: unknown) {
+  const wire = Schema.decodeUnknownSync(automaticTopicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+  const unique = (values: readonly number[]) => new Set(values).size === values.length;
+  if (
+    new TextEncoder().encode(JSON.stringify(input)).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES ||
+    wire.paragraphDecisions.some(
+      (decision, ordinal) => decision.ordinal !== ordinal || !unique(decision.evidenceIndices),
+    ) ||
+    !unique(wire.operations.map(operation => operation.ordinal)) ||
+    wire.operations.some(operation => !unique(operation.supportIndices)) ||
+    !unique(wire.currentSourceIndices)
+  )
+    throw new Error('Invalid automatic model wire coverage or indices.');
+  return wire;
+}
+
+export type AutomaticTopicDraftModelWire = ReturnType<typeof decodeAutomaticTopicDraftModelWire>;
+
+/** Strict provider-only shape. Public authored canonical V2 is accepted only by its existing route. */
+export function decodeTopicDraftProviderWire(basis: AnyTopicMaintenanceDraftBasis, input: unknown) {
+  return basis.version === 3
+    ? decodeAutomaticTopicDraftModelWire(basis, input)
+    : decodeLegacyTopicDraftWire(basis, input);
+}
+
+function hydrateAutomaticTopicDraftWire(basis: AutomaticMaintenanceDraftBasisV3, input: unknown) {
+  const wire = decodeAutomaticTopicDraftModelWire(basis, input);
+  const tables = automaticTopicDraftIndexTables(basis);
+  const {currentSourceIndices, ...decisions} = wire;
+  return decodeAutomaticTopicDraftWire(basis, {
+    ...decisions,
+    version: 2,
+    kind: 'automatic',
+    purpose: 'automatic',
+    paragraphDecisions: wire.paragraphDecisions.map(({evidenceIndices, ...decision}) => ({
+      ...decision,
+      beforeHash: basis.paragraphs[decision.ordinal].hash,
+      evidenceIds: evidenceIndices.map(index => tables.evidenceIds[index]),
+    })),
+    operations: wire.operations.map(({supportIndices, ...operation}) => ({
+      ...operation,
+      beforeHash: basis.paragraphs[operation.ordinal].hash,
+      supportHandles: supportIndices.map(index => tables.currentHandles[index]),
+    })),
+    reviewedHandles: currentSourceIndices.map(index => tables.currentHandles[index]),
+  });
+}
+
+function automaticTopicDraftCanonicalSchema(basis: AutomaticMaintenanceDraftBasisV3) {
   const text = Schema.String;
   // A missing admitted namespace permits only [], never an unconstrained ID.
   const admitted = (values: readonly string[]) =>
@@ -504,7 +617,7 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
 /** Terminal wire/context preflight only; the memory owner still decides application validity. */
 function decodeAutomaticTopicDraftWire(basisInput: AutomaticMaintenanceDraftBasisV3, input: unknown) {
   const basis = validateAutomaticMaintenanceDraftBasis(basisInput);
-  const wire = Schema.decodeUnknownSync(automaticTopicDraftModelSchema(basis), {onExcessProperty: 'error'})(input);
+  const wire = Schema.decodeUnknownSync(automaticTopicDraftCanonicalSchema(basis), {onExcessProperty: 'error'})(input);
   const size = (text: string) => new TextEncoder().encode(text).byteLength;
   const invalid = (): never => {
     throw new Error('Invalid automatic generation wire identity, coverage or bounds.');
@@ -583,5 +696,5 @@ export function decodeTopicDraftWire(
   basis: AnyTopicMaintenanceDraftBasis,
   input: unknown,
 ): ReturnType<typeof decodeLegacyTopicDraftWire> | AutomaticMaintenanceDraftV2 {
-  return basis.version === 3 ? decodeAutomaticTopicDraftWire(basis, input) : decodeLegacyTopicDraftWire(basis, input);
+  return basis.version === 3 ? hydrateAutomaticTopicDraftWire(basis, input) : decodeLegacyTopicDraftWire(basis, input);
 }

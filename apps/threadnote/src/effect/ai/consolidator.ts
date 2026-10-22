@@ -18,7 +18,7 @@ import {
   type TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
-  decodeTopicDraftWire,
+  decodeTopicDraftProviderWire,
   topicDraftModelSchema,
   topicDraftNativeJsonSchema,
 } from '../../manager/topic_draft_schema.js';
@@ -104,7 +104,8 @@ function decodeTopicDraftProviderOutput(
 ) {
   let text: string | undefined;
   try {
-    text = JSON.stringify(decodeTopicDraftWire(basis, output));
+    const decoded = decodeTopicDraftProviderWire(basis, output);
+    text = JSON.stringify(basis.version === 3 ? output : decoded);
     if (new TextEncoder().encode(text).byteLength > MAX_TOPIC_MAINTENANCE_DRAFT_BYTES)
       throw new Error('Topic wire exceeds the output boundary.');
     return text;
@@ -270,7 +271,14 @@ export function runEffectAiTopicDraft(
             );
           const usage = topicDraftProviderUsage(response.usage.inputTokens.total, response.usage.outputTokens.total);
           const text = yield* Effect.try({
-            try: () => decodeTopicDraftProviderOutput(basis, response.value, usage),
+            // generateObject may strip excess keys while decoding response.value. Validate
+            // the original returned JSON so the automatic provider boundary stays closed.
+            try: () =>
+              decodeTopicDraftProviderOutput(
+                basis,
+                basis.version === 3 ? JSON.parse(response.text) : response.value,
+                usage,
+              ),
             catch: error => error as TopicDraftProviderOutputError,
           });
           return {
