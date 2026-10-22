@@ -378,6 +378,80 @@ describe('automatic ordinary-memory background controls', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  for (const mode of ['eligible', 'contextual', 'noop-only'] as const) {
+    effectIt.effect(`validates entire provider draft before exact-repeat projection: ${mode}`, () =>
+      Effect.gen(function* () {
+        const unchanged = 'The timeout is 60 seconds.';
+        const f = yield* fixture(`The timeout is 30 seconds.\n\n${unchanged}`);
+        yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+        let calls = 0;
+        let raw = '';
+        const generate: typeof runSelectedDraft = (...args) =>
+          f.generate(...args).pipe(
+            Effect.map(result => {
+              calls++;
+              const wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
+              const basis = args[5];
+              if (basis?.version !== 3) throw new Error('Expected automatic basis.');
+              const repeat = {...wire.operations[0], ordinal: 1, text: unchanged};
+              raw = JSON.stringify({
+                ...wire,
+                paragraphDecisions: basis.paragraphs.map(p => ({
+                  ...wire.paragraphDecisions[0],
+                  ordinal: p.ordinal,
+                  support: mode === 'contextual' && p.ordinal === 1 ? 'contextual' : 'direct',
+                })),
+                operations: mode === 'noop-only' ? [repeat] : [...wire.operations, repeat],
+              });
+              return {...result, text: raw, outputRepresentation: 'decoded-json' as const};
+            }),
+          );
+        const outcome = yield* requestAutomaticMemoryDraft(
+          f.config,
+          {uri: f.uri, expectedContentHash: hash(f.content), backend: 'local-ai', modelId: f.modelId},
+          generate,
+        ).pipe(Effect.provideService(LocalModelStore, f.installed), Effect.result);
+        const files = yield* f.fs.readDirectory(f.path.join(f.home, 'threadnote/candidates/v1/topic-generation'));
+        expect(files).toHaveLength(1);
+        const receipt = yield* loadTopicGenerationReceipt(f.home, files[0].replace(/\.json$/u, ''));
+        expect(receipt.promptVersion).toBe(AUTOMATIC_DRAFT_PROMPT_VERSION);
+        expect(receipt.attempts.at(-1)?.output).toMatchObject({
+          hash: hash(raw),
+          bytes: new TextEncoder().encode(raw).byteLength,
+          representation: 'decoded-json',
+        });
+        expect(JSON.parse(raw).operations).toHaveLength(mode === 'noop-only' ? 1 : 2);
+        if (mode === 'eligible') {
+          expect(
+            Result.isSuccess(outcome),
+            JSON.stringify({
+              calls,
+              attempts: receipt.attempts.map(attempt => attempt.status),
+              error: Result.isFailure(outcome) ? String(outcome.failure) : undefined,
+            }),
+          ).toBe(true);
+          if (Result.isFailure(outcome)) return yield* Effect.die(outcome.failure);
+          expect(calls).toBe(1);
+          expect(outcome.success.maintenance?.proposal.body).toBe(`${unchanged}\n\n${unchanged}`);
+          expect(outcome.success.maintenance?.proposal.changedOrdinals).toEqual([0]);
+          expect(outcome.success.maintenance?.proposal.draft.operations).toHaveLength(1);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['accepted']);
+          expect(receipt.firstFailedOutput).toBeUndefined();
+        } else {
+          expect(Result.isFailure(outcome)).toBe(true);
+          expect(calls).toBe(2);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'draft-invalid']);
+          expect(receipt.firstFailedOutput).toMatchObject({text: raw, hash: hash(raw)});
+          expect(yield* f.fs.exists(f.path.join(f.home, `threadnote/candidates/v1/reviews/${f.reviewId}.json`))).toBe(
+            false,
+          );
+        }
+        expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+        expect(yield* f.fs.readFileString(f.sourcePath)).toBe(f.source);
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    );
+  }
+
   effectIt.effect('orders compact native decisions and support before replacement text', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
@@ -554,10 +628,11 @@ describe('automatic ordinary-memory background controls', () => {
                 );
                 let wire = JSON.parse(result.text) as AutomaticTopicDraftModelWire;
                 if (calls === 2) {
-                  expect(request.prompt).toContain('invalid automatic paragraph replacement');
+                  // Exact repeats are validated first; a refusal with operations still violates its outcome.
+                  expect(request.prompt).toContain('automatic outcome differs from its operations');
                   expect(request.prompt).toContain(
                     JSON.stringify({
-                      validationError: 'Topic maintenance draft: invalid automatic paragraph replacement.',
+                      validationError: 'Topic maintenance draft: automatic outcome differs from its operations.',
                       previousDraft: firstText,
                     }),
                   );

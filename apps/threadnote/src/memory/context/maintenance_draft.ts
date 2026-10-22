@@ -45,6 +45,7 @@ import {
   type TopicMaintenanceGenerationReceiptV1,
   type AutomaticMaintenanceReviewEvidenceV3,
   parseAutomaticMaintenanceDraft,
+  parseAutomaticMaintenanceProviderDraft,
   validateAutomaticMaintenanceReview,
   validateAutomaticMaintenanceDraftBasis,
   automaticReviewSections,
@@ -1551,7 +1552,7 @@ export const requestAutomaticMemoryDraft = Effect.fn('automaticMaintenance.reque
               catch: () => fail('The selected model returned an invalid automatic generation wire.'),
             });
             const parsed = yield* Effect.try({
-              try: () => parseAutomaticMaintenanceDraft(packet.basis, JSON.stringify(canonical)),
+              try: () => parseAutomaticMaintenanceProviderDraft(packet.basis, JSON.stringify(canonical)),
               catch: cause => {
                 // Recognize only this memory-owned application validation call.
                 if (cause instanceof Error && cause.message.startsWith('Topic maintenance draft: '))
