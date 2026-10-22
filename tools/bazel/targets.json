@@ -1957,6 +1957,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "infra/telemetry-gateway/threadnote-anonymous-telemetry-dashboard.json",
         "package.json",
         "packages/context/package.json",
@@ -3564,6 +3565,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "infra/telemetry-gateway/threadnote-anonymous-telemetry-dashboard.json",
         "package.json",
         "packages/graph/package.json",
@@ -3701,7 +3703,8 @@
       "entries": [
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
-        "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts"
+        "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts"
       ],
       "env": {},
       "timeout": null,
@@ -5254,6 +5257,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "infra/telemetry-gateway/threadnote-anonymous-telemetry-dashboard.json",
         "package.json",
         "packages/context/package.json",
@@ -16358,6 +16362,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "package.json",
         "packages/context/package.json",
         "packages/context/src/agent_view_text.ts",
@@ -23553,6 +23558,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "infra/telemetry-gateway/threadnote-anonymous-telemetry-dashboard.json",
         "package.json",
         "packages/context/package.json",
@@ -80189,6 +80195,7 @@
         "infra/telemetry-gateway/test/telemetry-dashboard-provisioning.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-contract.test.ts",
         "infra/telemetry-gateway/test/telemetry-gateway-dashboard.test.ts",
+        "infra/telemetry-gateway/test/telemetry-gateway-required-check.test.ts",
         "infra/telemetry-gateway/threadnote-anonymous-telemetry-dashboard.json"
       ],
       "npm": []
