@@ -64,6 +64,7 @@ type Candidate = PreparedMemoryV1['candidates'][number];
 type Read = PreparedMemoryV1['reads'][number];
 const hash = (value: unknown) => sha256HexSync(JSON.stringify(value));
 const RELATED_SOURCE_BUDGET = 8;
+const SOURCE_SELECTOR_BUDGET = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
 
 /** Match public memory reads, narrowed to the already eligible team for a shared target. */
 export function automaticMemorySourceUriScopes(config: RuntimeConfig, record: MemoryRecord): readonly string[] {
@@ -112,6 +113,27 @@ function reviewedOriginSupports(origin: PreparedMemoryV1['origin']) {
       .flatMap(review => review.supports)
       .sort((a, b) => a.sourceUri.localeCompare(b.sourceUri) || a.fragment - b.fragment) ?? []
   );
+}
+
+/** Select references only; each reader still authorizes and fences distinct canonical sources. */
+export function selectAutomaticMemorySourceReferences(record: MemoryRecord) {
+  const origin = preservedOrigin(record);
+  const original = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
+  const refs = [
+    ...new Set([
+      ...(record.metadata.reviewedSupport?.active.sources ?? [])
+        .flatMap(entry => (entry.source.kind === 'memory' ? [entry.source.uri] : []))
+        .sort(),
+      ...reviewedOriginSupports(origin).map(support => support.sourceUri),
+      ...(original?.sources ?? []).map(source => source.uri).sort(),
+      ...(record.metadata.relations ?? []).map(relation => relation.uri).sort(),
+    ]),
+  ];
+  // Reviewed-origin references are a subset of the validated receipt's source vector.
+  return {
+    refs: refs.slice(0, SOURCE_SELECTOR_BUDGET),
+    omittedSources: Math.max(0, refs.length - SOURCE_SELECTOR_BUDGET),
+  };
 }
 
 function codeRelevantRevision(candidates: readonly Candidate[], evidenceId: string, symbol: boolean) {
@@ -595,28 +617,11 @@ export const advanceAutomaticPreparation = Effect.fn('automaticPreparation.advan
       const sources: MemoryRecord[] = [];
       const reads: Read[] = [{uri, hash: target.hash}];
       const omissions: string[] = snapshot.complete ? [] : ['inventory-partial'];
-      let omittedSources = 0;
-      const origin = preservedOrigin(target.record);
-      const original = origin?.receipt.version === 2 ? origin.receipt.origin : origin?.receipt;
-      const reviewedUris = [...new Set(reviewedOriginSupports(origin).map(item => item.sourceUri))];
-      const refs = [
-        ...new Set([
-          ...(target.record.metadata.reviewedSupport?.active.sources ?? []).flatMap(entry =>
-            entry.source.kind === 'memory' ? [entry.source.uri] : [],
-          ),
-          ...reviewedUris,
-          ...(original?.sources ?? []).map(item => item.uri).sort(),
-          ...(target.record.metadata.relations ?? []).map(item => item.uri).sort(),
-        ]),
-      ];
+      const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(target.record);
+      let omittedSources = omittedSelectors;
       const visited = new Set([uri]);
-      // Reviewed-origin references are a subset of the validated receipt's source vector.
-      const selectorBudget = RELATED_SOURCE_BUDGET + MAX_CONSOLIDATION_SOURCES + MAX_MEMORY_RELATIONS;
-      if (refs.length > selectorBudget) {
-        omissions.push('related-source-budget');
-        omittedSources += refs.length - selectorBudget;
-      }
-      for (const ref of refs.slice(0, selectorBudget)) {
+      if (omittedSelectors) omissions.push('related-source-budget');
+      for (const ref of refs) {
         const resolved = resolveRelationTarget(snapshot.records, ref);
         if (resolved.state === 'conflicted') {
           omissions.push('related-source-ambiguous');
@@ -807,14 +812,7 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
       return yield* new AutomaticPreparationError({reason: 'code-fence-changed'});
     root = sourceCwd;
   }
-  const refs = [
-    ...new Set([
-      ...(record.metadata.reviewedSupport?.active.sources ?? []).flatMap(item =>
-        item.source.kind === 'memory' ? [item.source.uri] : [],
-      ),
-      ...(record.metadata.relations ?? []).map(item => item.uri),
-    ]),
-  ];
+  const {refs, omittedSources: omittedSelectors} = selectAutomaticMemorySourceReferences(record);
   const sources: MemoryRecord[] = [];
   const locators = new Map<string, ApprovedSourceDescriptorV1['locator']>();
   const portableReads = new Map<
@@ -830,13 +828,12 @@ export const readLiveAutomaticPreparation = Effect.fn('automaticPreparation.read
   const reads: Read[] = [{uri, hash: target.hash}];
   // Approved paths and authored aliases can name the same source. Resolve the
   // bounded selectors before spending the budget on distinct canonical reads.
-  const selectorBudget = RELATED_SOURCE_BUDGET + MAX_MEMORY_RELATIONS;
   const allowedUriScopes = automaticMemorySourceUriScopes(config, record);
   const visited = new Set([uri]);
   const liveSources = new Map<string, MemoryRecord>();
-  let omittedSources = Math.max(0, refs.length - selectorBudget);
+  let omittedSources = omittedSelectors;
   const omissions: string[] = omittedSources ? ['related-source-budget'] : [];
-  for (const ref of refs.slice(0, selectorBudget)) {
+  for (const ref of refs) {
     const stored = record.metadata.reviewedSupport?.active.sources.find(
       entry => entry.source.kind === 'memory' && entry.source.uri === ref,
     );
