@@ -11,6 +11,7 @@ import {assertAutomaticMaintenanceTarget} from '@threadnote/memory/automatic-mai
 import {readContextMaintenanceCanonicalRecord} from './maintenance_inventory.js';
 import {automaticMemorySourceUriScopes, readAutomaticCodeEvidence} from './maintenance_preparation.js';
 import {AUTOMATIC_PREPARATION_MAPPER} from './maintenance_preparation_state.js';
+import {automaticSupportedSymbolMatchesExcerpt} from './maintenance_code_capture.js';
 import type {AutomaticMaintenanceReviewPayloadV3} from '@threadnote/memory/topic-maintenance-draft';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
@@ -192,8 +193,9 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
   // Exact physical bytes alone cannot detect a newly ambiguous stable identity.
   yield* verifyAuthoredMemoryRelationTargetIdentities(config, ordinarySources);
   const expectedCode = review.basis.reads.filter(read => read.uri.startsWith('code:'));
+  let code: Effect.Success<ReturnType<typeof readAutomaticCodeEvidence>> | undefined;
   if (expectedCode.length) {
-    const code = yield* readAutomaticCodeEvidence(config, record, root);
+    code = yield* readAutomaticCodeEvidence(config, record, root);
     if (
       JSON.stringify([...code.reads].sort((a, b) => a.uri.localeCompare(b.uri))) !==
       JSON.stringify([...expectedCode].sort((a, b) => a.uri.localeCompare(b.uri)))
@@ -235,18 +237,47 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
           maximumBytes: 32 * 1024,
         },
       );
-      if (
-        !selected.excerpts.some(
-          excerpt =>
-            excerpt.provenance === 'current-verified' &&
-            excerpt.supportsCitation &&
-            excerpt.fileBytesHash === entry.codeExcerpt!.fileBytesHash &&
-            excerpt.content === entry.content &&
-            excerpt.excerptHash === entry.contentHash &&
-            excerpt.source.sourceDirty === source.citation.sourceDirty,
-        )
-      )
-        return yield* fail('The exact reviewed current code bytes or authority changed.');
+      const exactBytes = (excerpt: (typeof selected.excerpts)[number]) =>
+        excerpt.provenance === 'current-verified' &&
+        excerpt.supportsCitation &&
+        excerpt.fileBytesHash === entry.codeExcerpt!.fileBytesHash &&
+        excerpt.content === entry.content &&
+        excerpt.excerptHash === entry.contentHash &&
+        excerpt.source.sourceDirty === source.citation.sourceDirty;
+      if (!selected.excerpts.some(exactBytes)) {
+        // A retained approved pin may need a separately fenced current proof after extractor-context drift.
+        // Only the just-reconstructed exact code vector is authoritative here, never persisted cache/review proof.
+        const active = (record.metadata.reviewedSupport?.active.sources ?? []).filter(
+          descriptor =>
+            descriptor.id === entry.descriptor.id &&
+            descriptor.scope === entry.descriptor.scope &&
+            descriptor.source.kind === 'code' &&
+            descriptor.source.citation.id === source.citation.id &&
+            JSON.stringify(descriptor.locator ?? null) === JSON.stringify(entry.descriptor.locator ?? null),
+        );
+        const own = code?.evidence.find(
+          evidence =>
+            evidence.id === entry.descriptor.id &&
+            evidence.source.kind === 'code' &&
+            evidence.source.citation.id === source.citation.id &&
+            evidence.availability === 'available' &&
+            evidence.authority === 'recorded',
+        );
+        const supported =
+          active.length === 1 &&
+          own &&
+          code?.candidates.some(
+            candidate =>
+              candidate.evidenceId === own.id &&
+              candidate.excerpt &&
+              !candidate.excerpt.truncated &&
+              candidate.excerpt.startLine === entry.codeExcerpt!.startLine &&
+              candidate.excerpt.endLine === entry.codeExcerpt!.endLine &&
+              exactBytes(candidate.excerpt) &&
+              automaticSupportedSymbolMatchesExcerpt(source.citation, candidate.excerpt),
+          );
+        if (!supported) return yield* fail('The exact reviewed current code bytes or authority changed.');
+      }
       // A verified configured-caller route deliberately reports incomplete global route discovery.
       // Its positive current evidence is authoritative here; unrelated global inventory is not required.
     } else return yield* fail('Imported support requires its explicit retained-evidence provider review.');

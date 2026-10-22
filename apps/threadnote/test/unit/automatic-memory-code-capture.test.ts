@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -18,6 +18,8 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {
   automaticCurrentSymbolMatchesExcerpt,
+  automaticSupportedSymbolMatchesExcerpt,
+  retainAutomaticApprovedSymbolExcerpt,
   captureAutomaticCurrentSymbol,
   exactAutomaticCurrentSymbol,
 } from '../../src/memory/context/maintenance_code_capture.js';
@@ -31,6 +33,7 @@ import {
   prepareTopicMaintenanceReview,
   applyTopicMaintenanceReview,
 } from '../../src/memory/context/maintenance_review.js';
+import {verifyAutomaticMaintenanceReviewSource} from '../../src/memory/context/maintenance_review_source.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
 const selectorPin = () =>
@@ -53,6 +56,7 @@ const selectorPin = () =>
       qualifiedName: 'limit',
       span: {line: 1, column: 14, endLine: 1, endColumn: 23},
       fragmentHash: {algorithm: 'sha256', value: '6'.repeat(64)},
+      signatureHash: {algorithm: 'sha256', value: '7'.repeat(64)},
       fragmentCanonicalization: 'utf8-source-span-v1',
     },
   });
@@ -70,6 +74,97 @@ const symbol = (overrides: Partial<CodeGraphSymbol> = {}): CodeGraphSymbol => ({
 });
 
 describe('automatic current symbol capture', () => {
+  it('retains an approved identity only with exact independent current proof across unrelated context changes', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: 10_000}), context => {
+        const approved = selectorPin();
+        const {id: _id, ...fields} = approved;
+        const current = createMemoryCodeCitation({
+          ...fields,
+          sourceCommit: sha256HexSync(`commit-${context}`).slice(0, 40),
+          sourceSnapshotId: `cgsn_${sha256HexSync(`snapshot-${context}`).slice(0, 40)}`,
+          extractorSet: `current-context-${context}`,
+        });
+        const excerpt = {
+          content: 'export const limit = 7;',
+          startLine: 1,
+          endLine: 1,
+          excerptHash: sha256HexSync('export const limit = 7;'),
+          fileBytesHash: '4'.repeat(64),
+          provenance: 'current-verified' as const,
+          supportsCitation: true,
+          truncated: false,
+          source: {
+            repositoryId: current.repositoryId,
+            path: current.path,
+            sourceDirty: false,
+            sourceCommit: current.sourceCommit,
+            sourceSnapshotId: current.sourceSnapshotId,
+            extractorSet: current.extractorSet,
+            fileContentHash: current.fileContentHash.value,
+          },
+        };
+        const before = JSON.stringify({approved, current, excerpt});
+        expect(automaticSupportedSymbolMatchesExcerpt(approved, excerpt)).toBe(false);
+        const retained = retainAutomaticApprovedSymbolExcerpt(approved, current, excerpt)!;
+        expect(retained).toBeDefined();
+        expect(automaticSupportedSymbolMatchesExcerpt(approved, retained)).toBe(true);
+        expect(retained.source).toEqual(excerpt.source);
+        expect(retained.automaticApprovedSymbolProof?.approvedCitationId).toBe(approved.id);
+        expect(retained.automaticApprovedSymbolProof?.currentCitation).toEqual(current);
+        expect(retainAutomaticApprovedSymbolExcerpt(approved, current, {...excerpt, truncated: true})).toBeUndefined();
+        expect(
+          retainAutomaticApprovedSymbolExcerpt(approved, current, {...excerpt, supportsCitation: false}),
+        ).toBeUndefined();
+        expect(
+          retainAutomaticApprovedSymbolExcerpt(approved, current, {...excerpt, provenance: 'historical-verified'}),
+        ).toBeUndefined();
+        if (current.target.kind !== 'symbol') throw new Error('Expected symbol');
+        const symbolTarget = current.target;
+        const changes = [
+          {...current, sourceDirty: true},
+          {...current, repositoryId: 'a'.repeat(64)},
+          {...current, repositoryIdentityKind: 'remote' as const},
+          {...current, path: 'other.ts'},
+          {...current, fileContentHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
+          ...[
+            {nodeId: `cgs_${'a'.repeat(32)}`},
+            {name: 'other'},
+            {qualifiedName: 'other'},
+            {language: 'javascript'},
+            {symbolKind: 'function'},
+            {signatureHash: undefined},
+            {signatureHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
+            {fragmentHash: {algorithm: 'sha256' as const, value: 'a'.repeat(64)}},
+            ...(['line', 'column', 'endLine', 'endColumn'] as const).map(coordinate => ({
+              span: {
+                ...symbolTarget.span,
+                [coordinate]: symbolTarget.span[coordinate] + 1,
+              },
+            })),
+          ].map(change => ({...current, target: {...current.target, ...change}})),
+        ];
+        for (const changed of changes)
+          expect(retainAutomaticApprovedSymbolExcerpt(approved, changed, excerpt)).toBeUndefined();
+        const wrongProof = {
+          ...retained,
+          automaticApprovedSymbolProof: {...retained.automaticApprovedSymbolProof!, approvedCitationId: current.id},
+        };
+        expect(automaticSupportedSymbolMatchesExcerpt(approved, wrongProof)).toBe(false);
+        const malformedProof = {
+          ...retained,
+          automaticApprovedSymbolProof: {
+            ...retained.automaticApprovedSymbolProof!,
+            currentCitation: {...current, id: approved.id},
+          },
+        };
+        expect(automaticSupportedSymbolMatchesExcerpt(approved, malformedProof)).toBe(false);
+        expect(JSON.stringify({approved, current, excerpt})).toBe(before);
+      }),
+      {numRuns: 40},
+    );
+  });
+
   it('binds each same-file symbol excerpt to its own evidence ID and fragment independently of ordering', () => {
     const first = selectorPin();
     if (first.target.kind !== 'symbol') throw new Error('Expected symbol fixture');
@@ -428,7 +523,7 @@ describe('automatic current symbol capture', () => {
           approved: true,
           sourceCwd: repository,
         });
-        const approved = yield* fs.readFileString(canonicalPath(config));
+        let approved = yield* fs.readFileString(canonicalPath(config));
         expect(approved).toBe(exact.content);
         expect(parseMemoryDocument(uri, approved)!.metadata.codeCitations).toEqual([historical]);
         const accepted = yield* readLiveAutomaticPreparation(config, uri, repository);
@@ -442,7 +537,10 @@ describe('automatic current symbol capture', () => {
           p.reviewEvidence.filter(e => e.handleId.startsWith('current:'));
         expect(currentEntries(acceptedPacket)).toHaveLength(1);
         expect(currentEntries(acceptedPacket)[0].descriptor).toEqual(exact.reviewedSupport.active.sources[0]);
-        yield* fs.writeFileString(path.join(repository, 'unrelated.ts'), 'export const untouched = true;\n');
+        yield* fs.writeFileString(
+          path.join(repository, 'unrelated.txt'),
+          'Unrelated prose expands extractor context.\n',
+        );
         yield* commit();
         yield* index(config);
         const unchanged = yield* readLiveAutomaticPreparation(config, uri, repository);
@@ -460,6 +558,86 @@ describe('automatic current symbol capture', () => {
         expect(currentEntries(unchangedPacket).map(e => e.descriptor)).toEqual(
           currentEntries(acceptedPacket).map(e => e.descriptor),
         );
+        const activeSource = exact.reviewedSupport.active.sources[0].source;
+        if (activeSource.kind !== 'code') throw new Error('Expected approved code source');
+        const retainedCandidate = unchanged.prepared.candidates.find(
+          candidate =>
+            candidate.evidenceId === exact.reviewedSupport.active.sources[0].id &&
+            candidate.excerpt?.provenance === 'current-verified',
+        );
+        expect(retainedCandidate?.excerpt?.source.extractorSet).not.toBe(activeSource.citation.extractorSet);
+        expect(automaticSupportedSymbolMatchesExcerpt(activeSource.citation, retainedCandidate!.excerpt!)).toBe(true);
+        // The private proof survives the ordinary bounded cache round trip without changing canonical history.
+        yield* writePreparedMemory(config, unchanged.prepared);
+        const cached = yield* readPreparedMemory(config, uri);
+        expect(cached).toEqual(unchanged.prepared);
+        expect(currentEntries(automaticReviewPacket(unchanged.record, cached!)).map(e => e.descriptor)).toEqual(
+          currentEntries(acceptedPacket).map(e => e.descriptor),
+        );
+        expect(yield* fs.readFileString(canonicalPath(config))).toBe(approved);
+        // Retention must also remain usable by a subsequent exact review, preview and apply.
+        const sameBodyReview = yield* requestAutomaticMemoryReview(config, {
+          uri,
+          expectedContentHash: sha256HexSync(approved),
+          sourceCwd: repository,
+          desiredBody: unchanged.record.body,
+        });
+        if (!('reviewId' in sameBodyReview) || sameBodyReview.maintenance?.version !== 3)
+          throw new Error('Expected genuine subsequent automatic review');
+        const payload = sameBodyReview.maintenance;
+        const malformed = {
+          ...payload,
+          reviewEvidence: payload.reviewEvidence.map(entry =>
+            entry.codeExcerpt
+              ? {
+                  ...entry,
+                  codeExcerpt: {...entry.codeExcerpt, startLine: entry.codeExcerpt.startLine + 1},
+                }
+              : entry,
+          ),
+        };
+        expect(
+          Result.isFailure(
+            yield* verifyAutomaticMaintenanceReviewSource(config, unchanged.record, malformed, repository).pipe(
+              Effect.result,
+            ),
+          ),
+        ).toBe(true);
+        // The final verifier reconstructs fresh proof; changed real bytes cannot reuse that approval.
+        yield* Effect.acquireUseRelease(
+          fs.readFileString(source),
+          () =>
+            Effect.gen(function* () {
+              yield* fs.writeFileString(source, sourceBody(6));
+              expect(
+                Result.isFailure(
+                  yield* verifyAutomaticMaintenanceReviewSource(config, unchanged.record, payload, repository).pipe(
+                    Effect.result,
+                  ),
+                ),
+              ).toBe(true);
+              expect(yield* fs.readFileString(canonicalPath(config))).toBe(approved);
+            }),
+          bytes => fs.writeFileString(source, bytes).pipe(Effect.orDie),
+        );
+        const sameBodyPreview = yield* prepareTopicMaintenanceReview(config, {
+          reviewId: sameBodyReview.reviewId,
+          revision: sameBodyReview.revision,
+          sourceCwd: repository,
+        });
+        if (sameBodyPreview.maintenanceApproval?.version !== 3) throw new Error('Expected exact subsequent preview');
+        const sameBodyExact = sameBodyPreview.maintenanceApproval.preview;
+        expect(sameBodyExact.reviewedSupport.active.sources).toEqual(exact.reviewedSupport.active.sources);
+        yield* applyTopicMaintenanceReview(config, {
+          reviewId: sameBodyPreview.reviewId,
+          revision: sameBodyPreview.revision,
+          approvalDigest: sameBodyExact.approvalDigest,
+          approved: true,
+          sourceCwd: repository,
+        });
+        approved = yield* fs.readFileString(canonicalPath(config));
+        expect(approved).toBe(sameBodyExact.content);
+        expect(parseMemoryDocument(uri, approved)!.body).toBe(unchanged.record.body);
         // Only the genuine approved canonical document crosses homes. Rebuild graph in the same repository.
         yield* fs.makeDirectory(path.dirname(canonicalPath(fresh)), {recursive: true});
         yield* fs.writeFileString(canonicalPath(fresh), approved);
@@ -502,5 +680,6 @@ describe('automatic current symbol capture', () => {
           false,
         );
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    {timeout: 60_000},
   );
 });

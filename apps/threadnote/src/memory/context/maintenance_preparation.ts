@@ -41,6 +41,7 @@ import {
   captureAutomaticCurrentSymbol,
   automaticSymbolSelectorKey,
   automaticSupportedSymbolMatchesExcerpt,
+  retainAutomaticApprovedSymbolExcerpt,
 } from './maintenance_code_capture.js';
 import {resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
 import {
@@ -405,6 +406,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       citations.push(source.citation);
   }
   const recordedIds = new Set(citations.map(citation => citation.id));
+  const readOmissions = new Map<string, string[]>();
   if (
     citations.length === 0 &&
     configuredRoot &&
@@ -508,9 +510,10 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
           ]),
         }),
       });
-      if (!result.success.routesComplete) omissions.push('code-routes-partial');
+      if (!result.success.routesComplete) readOmissions.set(citation.id, ['code-routes-partial']);
     }
-    if (!current) omissions.push('current-code-evidence-unavailable');
+    if (!current)
+      readOmissions.set(citation.id, [...(readOmissions.get(citation.id) ?? []), 'current-code-evidence-unavailable']);
   }
   if (citations.length > codeBudget) omissions.push('code-evidence-budget');
   // Historical pins keep their original validation outcome. A declared symbol selector may independently
@@ -547,6 +550,35 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       continue;
     }
     const captured = current.value;
+    // Only a genuinely approved active pin can retain its identity across changed graph/extractor context.
+    // The independently captured current source must prove every immutable file and typed-symbol field.
+    const retained = (record.metadata.reviewedSupport?.active.sources ?? []).flatMap(descriptor => {
+      if (descriptor.source.kind !== 'code') return [];
+      const approved = descriptor.source.citation;
+      const excerpt = retainAutomaticApprovedSymbolExcerpt(approved, captured.citation, captured.excerpt);
+      return excerpt ? [{approved, excerpt}] : [];
+    });
+    if (retained.length === 1) {
+      const {approved, excerpt} = retained[0];
+      const approvedId = automaticMaintenanceEvidenceId({kind: 'code', citation: approved});
+      const item = evidence.find(entry => entry.id === approvedId);
+      const read = reads.find(entry => entry.uri === `code:${approved.repositoryId}:${approved.id}`);
+      const ownCandidates = candidates.filter(candidate => candidate.evidenceId === approvedId).length;
+      if (
+        item &&
+        read &&
+        candidates.length - ownCandidates <
+          (record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16)
+      ) {
+        evidence[evidence.indexOf(item)] = {...item, availability: 'available'};
+        for (let i = candidates.length - 1; i >= 0; i--)
+          if (candidates[i].evidenceId === approvedId) candidates.splice(i, 1);
+        candidates.push({evidenceId: approvedId, text: excerpt.content, excerpt});
+        reads[reads.indexOf(read)] = {...read, hash: hash({generation: captured.generation, current: excerpt})};
+        readOmissions.delete(approved.id);
+        continue;
+      }
+    }
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation: captured.citation});
     if (evidence.some(item => item.id === id)) continue;
     if (
@@ -571,6 +603,7 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
       hash: hash({generation: captured.generation, current: captured.excerpt}),
     });
   }
+  omissions.push(...[...readOmissions.values()].flat());
   return {evidence, candidates, reads, omissions, searchedScopes};
 });
 

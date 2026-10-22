@@ -1,6 +1,6 @@
 import {Effect} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
+import {assertMemoryCodeCitation, type MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {CodeGraphSymbol} from '@threadnote/graph/types';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
@@ -44,8 +44,8 @@ export function automaticSymbolSelectorKey(citation: MemoryCodeCitationV1) {
     : undefined;
 }
 
-/** Normal current validation can retain the exact old descriptor when the symbol still matches. */
-export function automaticSupportedSymbolMatchesExcerpt(
+/** Ordinary citation validation stays extractor-bound, including historical pins. */
+function normallySupportedSymbolMatchesExcerpt(
   citation: MemoryCodeCitationV1,
   excerpt: ContextHealthCitationSourceExcerptV1,
 ) {
@@ -62,6 +62,72 @@ export function automaticSupportedSymbolMatchesExcerpt(
   );
 }
 
+/** Strict identity comparison after the existing unique, scoped, clean current capture. */
+export function unchangedAutomaticApprovedSymbol(approved: MemoryCodeCitationV1, current: MemoryCodeCitationV1) {
+  const a = approved.target,
+    b = current.target;
+  return (
+    a.kind === 'symbol' &&
+    b.kind === 'symbol' &&
+    approved.sourceDirty === false &&
+    current.sourceDirty === false &&
+    approved.repositoryIdentityKind === current.repositoryIdentityKind &&
+    automaticSymbolSelectorKey(approved) === automaticSymbolSelectorKey(current) &&
+    approved.fileContentHash.value === current.fileContentHash.value &&
+    a.nodeId === b.nodeId &&
+    a.signatureHash !== undefined &&
+    b.signatureHash !== undefined &&
+    a.signatureHash.value === b.signatureHash.value &&
+    a.fragmentHash.value === b.fragmentHash.value &&
+    a.fragmentCanonicalization === b.fragmentCanonicalization &&
+    a.span.line === b.span.line &&
+    a.span.column === b.span.column &&
+    a.span.endLine === b.span.endLine &&
+    a.span.endColumn === b.span.endColumn
+  );
+}
+
+interface ApprovedCurrentSymbolProof {
+  readonly version: 1;
+  readonly approvedCitationId: string;
+  readonly currentCitation: MemoryCodeCitationV1;
+}
+type ApprovedCurrentSymbolExcerpt = ContextHealthCitationSourceExcerptV1 & {
+  readonly automaticApprovedSymbolProof?: ApprovedCurrentSymbolProof;
+};
+
+/** Private current proof; neither the historical pin nor fresh source metadata is rewritten. */
+export function retainAutomaticApprovedSymbolExcerpt(
+  approved: MemoryCodeCitationV1,
+  current: MemoryCodeCitationV1,
+  excerpt: ContextHealthCitationSourceExcerptV1,
+): ApprovedCurrentSymbolExcerpt | undefined {
+  if (!unchangedAutomaticApprovedSymbol(approved, current) || !automaticCurrentSymbolMatchesExcerpt(current, excerpt))
+    return undefined;
+  return {
+    ...excerpt,
+    automaticApprovedSymbolProof: {version: 1, approvedCitationId: approved.id, currentCitation: current},
+  };
+}
+
+/** A changed extractor context requires an explicit independent current proof for the exact approved identity. */
+export function automaticSupportedSymbolMatchesExcerpt(
+  citation: MemoryCodeCitationV1,
+  excerpt: ContextHealthCitationSourceExcerptV1,
+) {
+  if (normallySupportedSymbolMatchesExcerpt(citation, excerpt)) return true;
+  const proof = (excerpt as ApprovedCurrentSymbolExcerpt).automaticApprovedSymbolProof;
+  if (proof?.version !== 1 || proof.approvedCitationId !== citation.id) return false;
+  try {
+    const current = assertMemoryCodeCitation(proof.currentCitation);
+    return (
+      unchangedAutomaticApprovedSymbol(citation, current) && automaticCurrentSymbolMatchesExcerpt(current, excerpt)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Newly captured pins additionally match every current source identity; history is never relabelled. */
 export function automaticCurrentSymbolMatchesExcerpt(
   citation: MemoryCodeCitationV1,
@@ -69,7 +135,7 @@ export function automaticCurrentSymbolMatchesExcerpt(
 ) {
   const target = citation.target;
   return (
-    automaticSupportedSymbolMatchesExcerpt(citation, excerpt) &&
+    normallySupportedSymbolMatchesExcerpt(citation, excerpt) &&
     target.kind === 'symbol' &&
     citation.sourceCommit === excerpt.source.sourceCommit &&
     citation.sourceSnapshotId === excerpt.source.sourceSnapshotId &&
