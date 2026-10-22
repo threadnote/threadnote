@@ -58,16 +58,20 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     );
     const privateAccess = new Set<string>();
     for (const review of reviews) {
-      if (review.maintenance?.version !== 2) continue;
+      if (review.maintenance?.version !== 2 && review.maintenance?.version !== 3) continue;
       const checked = yield* readTopicMaintenanceDraft(request.config, review.reviewId).pipe(Effect.result);
       if (Result.isSuccess(checked) && JSON.stringify(checked.success) === JSON.stringify(review))
         privateAccess.add(review.reviewId);
     }
     const items = reviews
       .map(review => {
-        const withheld = review.maintenance?.version === 2 && !privateAccess.has(review.reviewId);
+        const withheld =
+          (review.maintenance?.version === 2 || review.maintenance?.version === 3) &&
+          !privateAccess.has(review.reviewId);
         return {
-          ...(review.maintenance ? {kind: 'topic-maintenance' as const} : {}),
+          ...(review.maintenance
+            ? {kind: review.maintenance.version === 3 ? ('automatic-memory' as const) : ('topic-maintenance' as const)}
+            : {}),
           candidates: review.candidates
             .filter(candidate =>
               view === 'history'

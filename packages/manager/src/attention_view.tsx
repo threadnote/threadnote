@@ -10,6 +10,7 @@ import type {
 } from '@threadnote/manager/attention/contracts';
 import {ContextMaintenanceView} from './attention/maintenance_view.js';
 import {TopicReviewDialog} from './attention/topic_review.js';
+import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
 
@@ -69,7 +70,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     reviewId: string;
     candidateId: string;
     project: string;
-    kind?: 'topic-maintenance';
+    kind?: 'topic-maintenance' | 'automatic-memory';
     view: 'pending' | 'deferred' | 'history';
   }>();
   const [generation, setGeneration] = useState(0);
@@ -186,15 +187,15 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       >
                         {candidate.state}
                       </ReviewBadge>
-                      {review.kind !== 'topic-maintenance' ? (
+                      {!review.kind ? (
                         <>
                           <span>{candidate.recommendation.replaceAll('_', ' ')}</span>
                           <span>{Math.round(candidate.confidence * 100)}% confidence</span>
                         </>
                       ) : null}
                     </div>
-                    {review.kind === 'topic-maintenance' ? (
-                      <p>Compare the accepted topic, its proposed update, and the current source before deciding.</p>
+                    {review.kind ? (
+                      <p>Compare the accepted memory, its proposed update, and the current source before deciding.</p>
                     ) : (
                       <div className="review-proposal-preview">
                         <div className="review-content-label">
@@ -218,12 +219,16 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                       }
                       type="button"
                     >
-                      <strong>{view === 'history' ? 'View review details →' : 'Review and decide →'}</strong>
+                      <strong>
+                        {view === 'history'
+                          ? 'View review details →'
+                          : review.kind === 'automatic-memory'
+                            ? 'Review update →'
+                            : 'Review and decide →'}
+                      </strong>
                     </button>
                     <p className="muted">{candidate.reason}</p>
-                    {candidate.targetUri && review.kind !== 'topic-maintenance' ? (
-                      <code>{candidate.targetUri}</code>
-                    ) : null}
+                    {candidate.targetUri && !review.kind ? <code>{candidate.targetUri}</code> : null}
                   </section>
                 ))}
               </div>
@@ -239,7 +244,20 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           </button>
         </footer>
       ) : null}
-      {activeSelection?.kind === 'topic-maintenance' ? (
+      {activeSelection?.kind === 'automatic-memory' ? (
+        <AutomaticMemoryReviewDialog
+          key={`${activeSelection.project}:${activeSelection.reviewId}`}
+          project={activeSelection.project}
+          reviewId={activeSelection.reviewId}
+          onClose={() => setSelected(undefined)}
+          onChanged={() => setGeneration(value => value + 1)}
+          onApplied={() => {
+            setNotice('Memory update saved and verified.');
+            setSelected(undefined);
+            setGeneration(value => value + 1);
+          }}
+        />
+      ) : activeSelection?.kind === 'topic-maintenance' ? (
         <TopicReviewDialog
           key={`${activeSelection.project}:${activeSelection.reviewId}`}
           project={activeSelection.project}

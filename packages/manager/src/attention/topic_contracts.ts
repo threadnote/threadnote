@@ -4,6 +4,89 @@ import type {
   TopicMaintenanceParagraphCoverageV1,
 } from '@threadnote/memory/topic-maintenance-draft';
 import type {TopicMaintenanceParagraphV1, TopicMaintenanceDependencyV1} from '@threadnote/memory/topic-maintenance';
+import type {AutomaticMaintenanceAssessment} from '@threadnote/memory/automatic-maintenance';
+import type {
+  AutomaticMaintenanceDraftProposalV2,
+  AutomaticMaintenanceReviewEvidenceV3,
+} from '@threadnote/memory/topic-maintenance-draft';
+import type {ReviewedMemorySupportV1} from '@threadnote/memory/reviewed-support';
+
+/** Presentation only: preparation and review capabilities remain owned by the existing controllers. */
+export interface ManagerAutomaticMemoryItem {
+  readonly uri: string;
+  readonly title: string;
+  readonly targetHash: string;
+  readonly state:
+    | 'preparing'
+    | 'queued'
+    | 'generating'
+    | 'waiting-model'
+    | 'waiting-budget'
+    | 'paused'
+    | 'policy'
+    | 'retry'
+    | 'failed'
+    | 'ready'
+    | 'reviewed'
+    | 'unknown'
+    | 'deferred'
+    | 'verification';
+  readonly reason?: string;
+  readonly nextEligibleAt?: number;
+  readonly retryCount?: number;
+  readonly reviewId?: string;
+  readonly evidenceRevision?: string;
+  readonly coverage: AutomaticMaintenanceAssessment['coverage'];
+  readonly paragraphs: readonly {
+    readonly ordinal: number;
+    readonly role: string;
+    readonly authority: string;
+    readonly support: string;
+  }[];
+  readonly route: 'personal-review' | 'shared-owner-review' | 'read-only' | 'excluded';
+  readonly legacyUncited: boolean;
+  readonly canGenerate?: boolean;
+}
+export interface ManagerAutomaticMemoryStatus {
+  readonly version: 1;
+  readonly project: string;
+  readonly items: readonly ManagerAutomaticMemoryItem[];
+  readonly omitted: number;
+  readonly incomplete?: boolean;
+  readonly unavailableRecords?: number;
+  readonly nextCursor?: string;
+}
+export interface ManagerAutomaticReview {
+  readonly version: 1;
+  readonly kind: 'automatic-memory-review';
+  readonly project: string;
+  readonly reviewId: string;
+  readonly revision: number;
+  readonly state: ManagerTopicReviewV1['state'];
+  readonly targetUri: string;
+  readonly targetHash: string;
+  readonly evidenceRevision: string;
+  readonly purpose: 'automatic' | 'manual-edit';
+  readonly acceptedBody: string;
+  readonly proposal: AutomaticMaintenanceDraftProposalV2;
+  readonly sourceEvidence: readonly AutomaticMaintenanceReviewEvidenceV3[];
+  readonly coverage: AutomaticMaintenanceAssessment['coverage'];
+  readonly approval?: {
+    readonly stage: 'preview' | 'parked' | 'prepared' | 'written' | 'conflict';
+    readonly reviewRevision: number;
+    readonly approvalDigest: string;
+    readonly content: string;
+    readonly contentHash: string;
+    readonly metadataDiff: readonly {readonly field: string; readonly beforeHash: string; readonly afterHash: string}[];
+    readonly reviewedSupport: ReviewedMemorySupportV1;
+  };
+  readonly canApply: boolean;
+  readonly canFinishVerification: boolean;
+  /** True only after exact readback and persisted writer/maintenance completion. */
+  readonly verified: boolean;
+  readonly ownerProposal?: {readonly instructions: string; readonly publicationApprovalRequired: boolean};
+}
+export type ManagerAutomaticReviewResponse = ManagerAutomaticReview | ManagerTopicReviewRecoveryV1;
 
 /** Recovery metadata never carries accepted memory, source, proposal or approval text. */
 export interface ManagerTopicReviewRecoveryV1 {

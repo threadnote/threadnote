@@ -108,6 +108,7 @@ import {collectDoctorChecks, runRepair, runStart} from '../lifecycle.js';
 import {runSeed, runSeedSkills} from '../seeding.js';
 import {readManagerRuntimeState} from './state.js';
 import {handleManagerWorkflowRequest} from './workflow.js';
+import {handleManagerAutomaticMemory} from './automatic_memory.js';
 import {handleManagerProcessRequest} from './processes.js';
 import {handleManagerDevSkillsRequest} from './dev_skills.js';
 import {handleManagerSharingConflictRequest} from './sharing_conflicts.js';
@@ -568,6 +569,7 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
     return;
   }
   for (const handler of [
+    handleManagerAutomaticMemory,
     handleManagerDevSkillsRequest,
     handleManagerSharingConflictRequest,
     handleManagerIntegrationRequest,

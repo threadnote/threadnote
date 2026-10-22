@@ -1,4 +1,5 @@
 import {requestGraphAdministrationAction} from './graph/index_action.js';
+import {useManualSupportEdit} from './attention/manual_edit.js';
 import {ConsolidationPanel} from './consolidation_review.js';
 import {
   MAX_CONSOLIDATION_SOURCES,
@@ -124,14 +125,12 @@ import {
   tabTitle,
   uniqueSelectorValues,
 } from '@threadnote/manager/ui/support';
-
 export {
   graphAdministrationActionLabel,
   managerProjectOptions,
   pruneSelectedMemoryUris,
   selectableMemoryUris,
 } from '@threadnote/manager/ui/support';
-
 import type {
   ConsolidationJobResponse as ConsolidationJob,
   TreeResponse,
@@ -154,18 +153,15 @@ export type {
   TargetForm,
   TreeNode,
 } from '@threadnote/manager/ui/contracts';
-
 type NavTreeTab = 'memories' | 'resources';
 type AgentClient = 'claude' | 'codex' | 'copilot' | 'cursor' | 'effect-ai' | 'local-ai';
 type MemoryViewMode = 'edit' | 'preview';
-
 interface AgentOption {
   readonly available: boolean;
   readonly command?: string;
   readonly id: AgentClient;
   readonly label: string;
 }
-
 interface StateResponse {
   readonly agents: readonly AgentOption[];
   readonly autoUpdate: {
@@ -188,9 +184,7 @@ interface StateResponse {
   readonly updateAvailable: boolean;
   readonly version: string;
 }
-
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
-
 function App({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [panel, setPanel] = useState<PanelName>('home');
@@ -223,6 +217,17 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [filter, setFilter] = useState('');
   const [libraryScope, setLibraryScope] = useState<LibraryScope>('local');
   const [savingMemory, setSavingMemory] = useState(false);
+  const saveOwned = useRef(false);
+  const manualEdit = useManualSupportEdit({
+    selectedUri,
+    onError: toastMessage,
+    onApplied: uri => {
+      draftRef.current = undefined;
+      void reloadSelected(uri);
+      void refreshTreeOnly();
+      toastMessage('Memory edit saved and verified');
+    },
+  });
   const [libraryActionBusy, setLibraryActionBusy] = useState(false);
   const [bulkCount, setBulkCount] = useState(0);
   const [libraryDialog, setLibraryDialog] = useState<'details' | 'consolidate'>();
@@ -234,7 +239,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [toast, setToast] = useState('');
   const [output, setOutput] = useState('');
   const [workspaceProject, setWorkspaceProject] = useState('');
-
   const [target, setTarget] = useState<TargetForm>({
     kind: 'durable',
     project: '',
@@ -260,11 +264,9 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [contextHealthDecisionCount, onHealthDecisionCountChange] = useContextHealthDecisionCount();
   const [libraryError, setLibraryError] = useState('');
-
   useEffect(() => {
     void refreshAll();
   }, []);
-
   useEffect(() => {
     const timer = window.setInterval(() => {
       void api<{readonly status: 'ok'}>('/api/health').then(
@@ -276,7 +278,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     }, 3_000);
     return () => window.clearInterval(timer);
   }, [availability.runtime]);
-
   useEffect(() => {
     if (panel === 'doctor') {
       void loadDoctor(false);
@@ -285,7 +286,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       void refreshGraphDiagnostics({analyze: false, deep: false}, false);
     }
   }, [panel]);
-
   useEffect(() => {
     if (panel !== 'graph') return;
     let cancelled = false;
@@ -366,7 +366,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [panel]);
-
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (draftRef.current || (creatingMemory && content.trim())) event.preventDefault();
@@ -374,11 +373,9 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [creatingMemory, content]);
-
   useEffect(() => {
     setSelectedUris(current => reconcileMemorySelection(current, scopedTree));
   }, [scopedTree]);
-
   useEffect(() => {
     if (!selectedUri) {
       dispatchAvailability('selection-cleared');
@@ -433,7 +430,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       cancelled = true;
     };
   }, [resourceTree, selectedUri, tree]);
-
   useEffect(() => {
     const firstAvailable =
       state?.agents.find(item => item.available && item.id === 'local-ai') ??
@@ -442,7 +438,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       setAgent(firstAvailable.id);
     }
   }, [state]);
-
   const selectedNode = useMemo(
     () => (selectedUri ? findNodeInTrees([tree, resourceTree], selectedUri) : undefined),
     [resourceTree, selectedUri, tree],
@@ -469,7 +464,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     () => uniqueSelectorValues(['default', ...shares.map(share => share.name), target.team]),
     [shares, target.team],
   );
-
   async function refreshAll(): Promise<void> {
     let nextTree: TreeResponse | undefined;
     const failures = await settleManagerRefreshTasks([
@@ -735,8 +729,14 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   }
 
   async function saveCurrent(): Promise<void> {
-    if (savingMemory) return;
+    if (saveOwned.current || manualEdit.pending) return;
+    saveOwned.current = true;
     setSavingMemory(true);
+    if (await manualEdit.preview(memory, content, target.project)) {
+      saveOwned.current = false;
+      setSavingMemory(false);
+      return;
+    }
     await runAction('Saved memory', () =>
       api<{readonly output?: string}>('/api/memory/save', {
         kind: target.kind,
@@ -752,6 +752,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       }),
     );
     setSavingMemory(false);
+    saveOwned.current = false;
   }
 
   async function newMemory(): Promise<void> {
@@ -1318,6 +1319,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const doctorBusy = doctorAction !== undefined;
   const selectedHasPendingCanonical = pendingCanonical !== undefined && pendingCanonical.node.uri === selectedUri;
   const controlsBlocked =
+    manualEdit.pending ||
     bulkAction !== undefined ||
     savingMemory ||
     libraryActionBusy ||
@@ -1971,6 +1973,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
         </div>
       ) : null}
       {toast ? <div className="toast">{toast}</div> : null}
+      {manualEdit.dialog}
     </div>
   );
 }
