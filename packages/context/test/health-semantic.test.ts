@@ -1,6 +1,6 @@
 import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {analyzeContextHealthSemantics} from '../src/health_semantic.js';
+import {analyzeContextHealthSemantics, contextHealthSemanticClaimRole} from '../src/health_semantic.js';
 import type {MemoryMetadata, MemoryRecord} from '@threadnote/memory/document';
 
 function record(name: string, body: string, metadata: Partial<MemoryMetadata> = {}): MemoryRecord {
@@ -25,6 +25,29 @@ function analyze(left: string, right: string, a: Partial<MemoryMetadata> = {}, b
 const interval = {validFrom: '2026-01-01', validTo: '2027-01-01'};
 
 describe('scoped English semantic review', () => {
+  it('shares positive role evidence without claiming factual support for unrecognized prose', () => {
+    expect(contextHealthSemanticClaimRole('The initial cache size was seven entries.')).toBe('historical');
+    expect(contextHealthSemanticClaimRole('Operators must approve cache changes.')).toBe('normative');
+    expect(contextHealthSemanticClaimRole('The cache size is seven entries.', ['History'])).toBe('historical');
+    expect(contextHealthSemanticClaimRole('Uncertain prose.')).toBe('descriptive');
+    const analysis = analyze('The cache size was seven entries.', 'The cache size is nine entries.');
+    expect(analysis.completeness.unsupportedClaims).toBe(2);
+    expect(analysis.contradictions).toEqual([]);
+  });
+  it('preserves positive historical roles across horizontal whitespace', () => {
+    expect(contextHealthSemanticClaimRole('The timeout used  to be 10 seconds.')).toBe('historical');
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom(' ', '\t', '\u00a0'), {minLength: 1, maxLength: 8}),
+        fc.integer({min: 1, max: 1000}),
+        (spacing, value) => {
+          const text = `The cache size used${spacing.join('')}to be ${value} entries.`;
+          expect(contextHealthSemanticClaimRole(text)).toBe('historical');
+        },
+      ),
+      {numRuns: 40, seed: 61102},
+    );
+  });
   it('preserves project, lifecycle, and durable-kind isolation', () => {
     const positive = record('positive', 'Deployments must use signed artifacts.');
     const negative = record('negative', 'Deployments must not use signed artifacts.');

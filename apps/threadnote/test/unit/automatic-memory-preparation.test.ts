@@ -1,4 +1,5 @@
 import {automaticReviewPacket} from '../../src/memory/context/maintenance_draft.js';
+import {automaticInactiveCodeRootIds} from '../../src/memory/context/maintenance_code_capture.js';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it as effectIt} from '@effect/vitest';
 import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
@@ -611,6 +612,107 @@ describe('automatic private preparation', () => {
       }
     }).pipe(provide),
   );
+
+  it('separates inactive-root audit transitions from generation while preserving active failures and all input bytes', () => {
+    fc.assert(
+      fc.property(fc.integer({min: 1, max: 10_000}), fc.boolean(), (value, reverse) => {
+        const initial = codeCitation('symbol');
+        if (initial.target.kind !== 'symbol') throw new Error('Expected symbol fixture');
+        const {id: _id, ...fields} = initial;
+        const text = `export function automaticBoundary() { return ${value};\n}`;
+        const approved = createMemoryCodeCitation({
+          ...fields,
+          fileContentHash: {algorithm: 'sha256', value: sha256HexSync(text)},
+          target: {
+            ...initial.target,
+            signatureHash: {algorithm: 'sha256', value: sha256HexSync('signature')},
+            fragmentHash: {algorithm: 'sha256', value: sha256HexSync(text)},
+          },
+        });
+        const {id: _approvedId, ...approvedFields} = approved;
+        const root = createMemoryCodeCitation({
+          ...approvedFields,
+          fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`old-${text}`)},
+        });
+        const current = createMemoryCodeCitation({
+          ...approvedFields,
+          sourceCommit: 'a'.repeat(40),
+          sourceSnapshotId: `cgsn_${'b'.repeat(40)}`,
+          extractorSet: 'new-extractor-context',
+        });
+        const excerpt = codeExcerpt(current, text, text);
+        const target = reviewedCodeRecord([root], [approved]);
+        const rootId = automaticMaintenanceEvidenceId({kind: 'code', citation: root});
+        const activeId = automaticMaintenanceEvidenceId({kind: 'code', citation: approved});
+        const covered = automaticInactiveCodeRootIds([root], [approved], current, excerpt);
+        expect(covered).toEqual([root.id]);
+        const prepare = (available: boolean, order: boolean, activeFailure = false) => {
+          const evidence = [
+            {
+              id: rootId,
+              source: {kind: 'code' as const, citation: root},
+              scope: 'repository' as const,
+              authority: 'recorded' as const,
+              availability: available ? ('available' as const) : ('unknown' as const),
+            },
+            {
+              id: activeId,
+              source: {kind: 'code' as const, citation: approved},
+              scope: 'repository' as const,
+              authority: 'recorded' as const,
+              availability: 'available' as const,
+            },
+          ];
+          const candidates = [
+            {evidenceId: activeId, text, excerpt},
+            {
+              evidenceId: rootId,
+              text,
+              excerpt: {
+                ...excerpt,
+                provenance: available ? ('current-verified' as const) : ('historical-verified' as const),
+                supportsCitation: false,
+              },
+            },
+          ];
+          const omissions = available ? [] : ['current-code-evidence-unavailable'];
+          const input = {
+            scopeRevision,
+            evidence: order ? [...evidence].reverse() : evidence,
+            candidates: order ? [...candidates].reverse() : candidates,
+            reads: [{uri: `code:${root.id}`, hash: sha256HexSync(String(available))}],
+            omissions: [...omissions, ...(activeFailure ? ['current-code-evidence-unavailable'] : [])],
+            generation: {
+              ignoredEvidenceIds: [rootId],
+              // This identical reason remains attributable to a different, active source.
+              omissions: activeFailure ? ['current-code-evidence-unavailable'] : [],
+            },
+          };
+          const before = JSON.stringify({target, input});
+          const prepared = prepareAutomaticMemory(target, input);
+          expect(JSON.stringify({target, input})).toBe(before);
+          return prepared;
+        };
+        const before = prepare(true, reverse);
+        const after = prepare(false, !reverse);
+        expect(after.relevantRevision).toBe(before.relevantRevision);
+        expect(after.reads).not.toEqual(before.reads);
+        expect(before.omissions).toContain('current-code-citation-unsupported');
+        expect(after.omissions).toContain('current-code-evidence-unavailable');
+        expect(after.assessment.coverage.omittedSources).toBe(before.assessment.coverage.omittedSources + 1);
+        expect(after.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('unknown');
+        expect(prepare(false, reverse, true).relevantRevision).not.toBe(after.relevantRevision);
+        const proofLost = prepareAutomaticMemory(target, {
+          scopeRevision,
+          evidence: after.assessment.evidence,
+          candidates: [],
+          omissions: ['current-code-evidence-unavailable'],
+        });
+        expect(proofLost.relevantRevision).not.toBe(after.relevantRevision);
+      }),
+      {numRuns: 30, seed: 756011},
+    );
+  });
 
   it('invalidates cited file tails beyond the bounded current excerpt without binding incidental snapshots', () => {
     const citation = codeCitation();

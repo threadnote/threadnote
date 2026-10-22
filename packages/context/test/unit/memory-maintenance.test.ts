@@ -380,6 +380,48 @@ describe('automatic memory maintenance evidence projection', () => {
     expect(prepareMemoryMaintenanceBasis(record('Unknown text.')).assessment.paragraphs[0].role).toBe('unknown');
   });
 
+  it('protects positive ordinary policy/history roles without promoting facts or inventing support', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 1000}),
+        fc.boolean(),
+        fc.constantFrom(' ', '  ', '\t', ' \t ', '\u00a0'),
+        (value, reverse, spacing) => {
+          const texts = [
+            `The cache limit is ${value} entries.`,
+            'Operators must approve cache changes.',
+            `At initialization the cache limit was ${value} entries.`,
+            `The cache limit used${spacing}to be ${value} entries.`,
+          ];
+          const roles = reverse
+            ? ['historical', 'historical', 'normative', 'unknown']
+            : ['unknown', 'normative', 'historical', 'historical'];
+          const input = freeze(record((reverse ? [...texts].reverse() : texts).join('\n\n')));
+          const before = JSON.stringify(input);
+          const evidence = currentEvidence();
+          const assessment = prepareMemoryMaintenanceBasis(input, {
+            evidence: [evidence],
+            inferences: [0, 1, 2, 3].map(ordinal => ({
+              ordinal,
+              role: 'unknown',
+              support: 'unresolved',
+              currentEvidenceIds: [],
+            })),
+          }).assessment;
+          expect(assessment.paragraphs.map(p => p.role)).toEqual(roles);
+          for (const p of assessment.paragraphs) {
+            expect(p.roleAuthority).toBe('provisional');
+            expect(p.currentEvidenceIds).toEqual([]);
+            expect(p.acceptedEvidenceIds).toEqual([]);
+            expect(p.support).toBe('unresolved');
+          }
+          expect(JSON.stringify(input)).toBe(before);
+        },
+      ),
+      {numRuns: 30, seed: 61101},
+    );
+  });
+
   it('distinguishes shared owner review, read-only assessment and inactive/artifact exclusions', () => {
     const evidence = currentEvidence();
     const options = {

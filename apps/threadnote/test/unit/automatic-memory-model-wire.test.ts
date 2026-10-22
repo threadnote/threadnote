@@ -139,6 +139,101 @@ function fixture(count = 3, sources = 2) {
 }
 
 describe('automatic model-only compact transport', () => {
+  it('cannot rewrite or invent support for a protected ordinal under arbitrary model decisions', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 16}),
+        fc.nat({max: 1000}),
+        fc.constantFrom('normative' as const, 'historical' as const),
+        fc.boolean(),
+        (count, selection, role, reverse) => {
+          const {basis, wire} = fixture(count, 3);
+          const ordinal = selection % count;
+          const paragraphs = basis.paragraphs.map(p => (p.ordinal === ordinal ? {...p, role} : p));
+          const protectedBasis = validateAutomaticMaintenanceDraftBasis({
+            ...basis,
+            paragraphs,
+            handles: reverse ? [...basis.handles].reverse() : basis.handles,
+            assessment: {...basis.assessment, paragraphs},
+          });
+          const safe = {
+            ...wire,
+            outcome: 'insufficient-evidence',
+            operations: [],
+            paragraphDecisions: wire.paragraphDecisions.map((p, i) =>
+              i === ordinal ? {...p, role, support: 'unresolved', evidenceIndices: []} : p,
+            ),
+          };
+          const before = JSON.stringify(protectedBasis);
+          const canonical = decodeTopicDraftWire(protectedBasis, safe);
+          expect(parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(canonical)).body).toBe(basis.body);
+          const changed = (decision: Record<string, unknown>) => ({
+            ...safe,
+            paragraphDecisions: safe.paragraphDecisions.map((p, i) => (i === ordinal ? {...p, ...decision} : p)),
+          });
+          for (const bad of [
+            changed({role: 'descriptive'}),
+            changed({support: 'direct', evidenceIndices: wire.paragraphDecisions[ordinal].evidenceIndices}),
+            changed({support: 'contextual', evidenceIndices: wire.paragraphDecisions[ordinal].evidenceIndices}),
+            {...safe, outcome: 'propose-update', operations: [{...wire.operations[0], ordinal}]},
+          ]) {
+            expect(() => Schema.decodeUnknownSync(topicDraftModelSchema(protectedBasis))(bad)).toThrow();
+            expect(() => decodeTopicDraftProviderWire(protectedBasis, bad)).toThrow();
+            expect(() => decodeTopicDraftWire(protectedBasis, bad)).toThrow();
+          }
+          expect(JSON.stringify(protectedBasis)).toBe(before);
+        },
+      ),
+      {numRuns: 35, seed: 61102},
+    );
+  });
+
+  it('permits only the exact frozen current support mapping for a protected paragraph', () => {
+    const {basis, wire} = fixture(1, 3);
+    const id = basis.assessment.evidence[0].id;
+    const paragraphs = basis.paragraphs.map(p => ({
+      ...p,
+      role: 'historical' as const,
+      support: 'contextual' as const,
+      currentEvidenceIds: [id],
+      currentSupport: 'contextual' as const,
+    }));
+    const protectedBasis = validateAutomaticMaintenanceDraftBasis({
+      ...basis,
+      paragraphs,
+      assessment: {...basis.assessment, paragraphs},
+      handles: [...basis.handles, {id: `current:${id}`, citationId: id, variant: 'current'}],
+    });
+    const indices = automaticTopicDraftIndexTables(protectedBasis);
+    const supported = {
+      ...wire,
+      outcome: 'propose-revalidation',
+      operations: [],
+      paragraphDecisions: [
+        {ordinal: 0, role: 'historical', support: 'contextual', evidenceIndices: [indices.evidenceIds.indexOf(id)]},
+      ],
+      currentSourceIndices: [indices.currentHandles.indexOf(`current:${id}`)],
+    };
+    expect(
+      parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(decodeTopicDraftWire(protectedBasis, supported)))
+        .body,
+    ).toBe(basis.body);
+    expect(() =>
+      decodeTopicDraftWire(protectedBasis, {
+        ...supported,
+        paragraphDecisions: [{...supported.paragraphDecisions[0], support: 'direct'}],
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeTopicDraftWire(protectedBasis, {
+        ...supported,
+        paragraphDecisions: [
+          {...supported.paragraphDecisions[0], evidenceIndices: wire.paragraphDecisions[0].evidenceIndices},
+        ],
+      }),
+    ).toThrow();
+  });
+
   it('hydrates independent canonical decisions without mutation, including permutations and separate namespaces', () => {
     fc.assert(
       fc.property(
@@ -402,13 +497,16 @@ describe('automatic model-only compact transport', () => {
         paragraphs,
         assessment: {...basis.assessment, paragraphs},
       });
-      const proposed = decodeTopicDraftWire(protectedBasis, wire);
-      if (role === 'unknown')
-        expect(() => parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(proposed))).not.toThrow();
-      else
-        expect(() => parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(proposed))).toThrow(
+      if (role === 'unknown') {
+        expect(() => decodeTopicDraftWire(protectedBasis, wire)).not.toThrow();
+        expect(() => parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(fixture().draft))).not.toThrow();
+      } else {
+        expect(() => decodeTopicDraftWire(protectedBasis, wire)).toThrow();
+        // Public authored canonical V2 still reaches the unchanged final memory-owned guard.
+        expect(() => parseAutomaticMaintenanceDraft(protectedBasis, JSON.stringify(fixture().draft))).toThrow(
           'protected approved role',
         );
+      }
     }
   });
   it('preserves established reviewed unknown roles during model hydration and application', () => {
@@ -428,8 +526,10 @@ describe('automatic model-only compact transport', () => {
         paragraphs,
       },
     });
-    const proposed = decodeTopicDraftWire(reviewed, wire);
-    expect(() => parseAutomaticMaintenanceDraft(reviewed, JSON.stringify(proposed))).toThrow('protected approved role');
+    expect(() => decodeTopicDraftWire(reviewed, wire)).toThrow();
+    expect(() => parseAutomaticMaintenanceDraft(reviewed, JSON.stringify(fixture().draft))).toThrow(
+      'protected approved role',
+    );
   });
 
   for (const scenario of [

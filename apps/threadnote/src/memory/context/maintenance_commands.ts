@@ -166,7 +166,12 @@ export const runContextMaintainCommand = Effect.fn('contextMaintenance.command')
                       expectedContentHash: options.expectedContentHash ?? '',
                     })
                   : options.action === 'packet'
-                    ? yield* readContextMaintenancePacket(config, options.caseId ?? '', options)
+                    ? yield* readContextMaintenancePacket(config, options.caseId ?? '', {
+                        citationId: options.citationId,
+                        memoryUri: options.memoryUri,
+                        startLine: options.startLine,
+                        maximumLines: options.maximumLines,
+                      })
                     : options.action === 'status'
                       ? yield* readContextMaintenanceStatus(config, options.project, options)
                       : options.action === 'pause' || options.action === 'resume'

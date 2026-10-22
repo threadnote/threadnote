@@ -110,6 +110,29 @@ export function retainAutomaticApprovedSymbolExcerpt(
   };
 }
 
+/** Scheduling-only coverage, derived from a fresh capture rather than a persisted excerpt proof. */
+export function automaticInactiveCodeRootIds(
+  roots: readonly MemoryCodeCitationV1[],
+  active: readonly MemoryCodeCitationV1[],
+  current: MemoryCodeCitationV1,
+  excerpt: ContextHealthCitationSourceExcerptV1,
+): readonly string[] {
+  const selector = automaticSymbolSelectorKey(current);
+  if (!selector) return [];
+  const approved = active.filter(citation => automaticSymbolSelectorKey(citation) === selector);
+  if (approved.length !== 1 || !retainAutomaticApprovedSymbolExcerpt(approved[0], current, excerpt)) return [];
+  const activeIds = new Set(active.map(citation => citation.id));
+  return roots
+    .filter(
+      citation =>
+        !activeIds.has(citation.id) &&
+        citation.repositoryIdentityKind === current.repositoryIdentityKind &&
+        automaticSymbolSelectorKey(citation) === selector,
+    )
+    .map(citation => citation.id)
+    .sort();
+}
+
 /** A changed extractor context requires an explicit independent current proof for the exact approved identity. */
 export function automaticSupportedSymbolMatchesExcerpt(
   citation: MemoryCodeCitationV1,

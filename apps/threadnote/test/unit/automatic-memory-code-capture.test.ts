@@ -22,6 +22,7 @@ import {
   retainAutomaticApprovedSymbolExcerpt,
   captureAutomaticCurrentSymbol,
   exactAutomaticCurrentSymbol,
+  automaticInactiveCodeRootIds,
 } from '../../src/memory/context/maintenance_code_capture.js';
 import {automaticReviewPacket, requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
 import {
@@ -104,7 +105,17 @@ describe('automatic current symbol capture', () => {
             fileContentHash: current.fileContentHash.value,
           },
         };
-        const before = JSON.stringify({approved, current, excerpt});
+        const root = createMemoryCodeCitation({
+          ...fields,
+          fileContentHash: {algorithm: 'sha256', value: '9'.repeat(64)},
+        });
+        const ambiguous = createMemoryCodeCitation({...fields, sourceCommit: 'a'.repeat(40)});
+        const before = JSON.stringify({approved, current, excerpt, root, ambiguous});
+        expect(automaticInactiveCodeRootIds([root], [approved], current, excerpt)).toEqual([root.id]);
+        expect(automaticInactiveCodeRootIds([root], [], current, excerpt)).toEqual([]);
+        expect(automaticInactiveCodeRootIds([root], [approved, ambiguous], current, excerpt)).toEqual([]);
+        expect(automaticInactiveCodeRootIds([approved], [approved], current, excerpt)).toEqual([]);
+        expect(automaticInactiveCodeRootIds([root], [approved], current, {...excerpt, truncated: true})).toEqual([]);
         expect(automaticSupportedSymbolMatchesExcerpt(approved, excerpt)).toBe(false);
         const retained = retainAutomaticApprovedSymbolExcerpt(approved, current, excerpt)!;
         expect(retained).toBeDefined();
@@ -112,6 +123,8 @@ describe('automatic current symbol capture', () => {
         expect(retained.source).toEqual(excerpt.source);
         expect(retained.automaticApprovedSymbolProof?.approvedCitationId).toBe(approved.id);
         expect(retained.automaticApprovedSymbolProof?.currentCitation).toEqual(current);
+        // A serialized retained proof cannot replace the independently fresh current citation argument.
+        expect(automaticInactiveCodeRootIds([root], [approved], approved, retained)).toEqual([]);
         expect(retainAutomaticApprovedSymbolExcerpt(approved, current, {...excerpt, truncated: true})).toBeUndefined();
         expect(
           retainAutomaticApprovedSymbolExcerpt(approved, current, {...excerpt, supportsCitation: false}),
@@ -144,8 +157,10 @@ describe('automatic current symbol capture', () => {
             })),
           ].map(change => ({...current, target: {...current.target, ...change}})),
         ];
-        for (const changed of changes)
+        for (const changed of changes) {
           expect(retainAutomaticApprovedSymbolExcerpt(approved, changed, excerpt)).toBeUndefined();
+          expect(automaticInactiveCodeRootIds([root], [approved], changed, excerpt)).toEqual([]);
+        }
         const wrongProof = {
           ...retained,
           automaticApprovedSymbolProof: {...retained.automaticApprovedSymbolProof!, approvedCitationId: current.id},
@@ -159,7 +174,7 @@ describe('automatic current symbol capture', () => {
           },
         };
         expect(automaticSupportedSymbolMatchesExcerpt(approved, malformedProof)).toBe(false);
-        expect(JSON.stringify({approved, current, excerpt})).toBe(before);
+        expect(JSON.stringify({approved, current, excerpt, root, ambiguous})).toBe(before);
       }),
       {numRuns: 40},
     );
@@ -343,9 +358,12 @@ describe('automatic current symbol capture', () => {
     );
   });
 
-  effectIt.effect(
-    'persists bounded current symbol support through real approval and canonical-only fresh-home drift',
-    () =>
+  effectIt.effect.each([
+    {previousExtractor: true, label: 'previous extractor'},
+    {previousExtractor: false, label: 'genuine old pin8 to approved9'},
+  ])(
+    'persists bounded current symbol support through real approval and canonical-only fresh-home drift ($label)',
+    ({previousExtractor}) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem,
           path = yield* Path.Path;
@@ -411,7 +429,10 @@ describe('automatic current symbol capture', () => {
         expect(capturedOld.target.kind).toBe('symbol');
         // A previous runtime's extractor is deliberately unavailable in the fresh current graph.
         const {id: _oldId, ...oldFields} = capturedOld;
-        const historical = createMemoryCodeCitation({...oldFields, extractorSet: 'previous-extractor-version'});
+        const historical = previousExtractor
+          ? createMemoryCodeCitation({...oldFields, extractorSet: 'previous-extractor-version'})
+          : capturedOld;
+        const factor = previousExtractor ? 7 : 9;
         const historicalBefore = JSON.stringify(historical);
         const uri = 'threadnote://user/tester/memories/durable/projects/fixture/target.md';
         const canonicalPath = (c: RuntimeConfig) =>
@@ -433,11 +454,11 @@ describe('automatic current symbol capture', () => {
         );
         yield* fs.makeDirectory(path.dirname(canonicalPath(config)), {recursive: true});
         yield* fs.writeFileString(canonicalPath(config), content);
-        yield* fs.writeFileString(source, sourceBody(7));
+        yield* fs.writeFileString(source, sourceBody(factor));
         yield* commit();
         yield* index(config);
         const captured = yield* captureAutomaticCurrentSymbol(config, repository, historical, 'fixture');
-        expect(captured?.excerpt.content).toBe('export const limit = 7 * 1_024;');
+        expect(captured?.excerpt.content).toBe(`export const limit = ${factor} * 1_024;`);
         expect(captured?.citation.target.kind).toBe('symbol');
         expect(JSON.stringify(historical)).toBe(historicalBefore);
         const wrongRepository = createMemoryCodeCitation({...oldFields, repositoryId: 'f'.repeat(64)});
@@ -450,13 +471,15 @@ describe('automatic current symbol capture', () => {
           historical,
           {symbolSpanOnly: true},
         );
-        expect(oldEvidence.excerpts.some(e => e.provenance === 'current-verified')).toBe(false);
+        expect(oldEvidence.excerpts.some(e => e.provenance === 'current-verified')).toBe(!previousExtractor);
+        if (!previousExtractor)
+          expect(oldEvidence.excerpts.find(e => e.provenance === 'current-verified')?.supportsCitation).toBe(false);
         const live = yield* readLiveAutomaticPreparation(config, uri, repository);
         expect(
           live.prepared.assessment.evidence.find(
             e => e.source.kind === 'code' && e.source.citation.id === historical.id,
           )?.availability,
-        ).toBe('unknown');
+        ).toBe(previousExtractor ? 'unknown' : 'available');
         const packet = automaticReviewPacket(live.record, live.prepared, live.locators, live.repositoryIdentity);
         expect(packet.draftRequest.available).toBe(true);
         const entry = packet.reviewEvidence.find(
@@ -465,7 +488,7 @@ describe('automatic current symbol capture', () => {
             e.descriptor.source.kind === 'code' &&
             e.descriptor.source.citation.target.kind === 'symbol',
         )!;
-        expect(entry.content).toBe('export const limit = 7 * 1_024;');
+        expect(entry.content).toBe(`export const limit = ${factor} * 1_024;`);
         const basis = packet.basis;
         const proposed = yield* requestAutomaticMemoryReview(config, {
           uri,
@@ -494,7 +517,7 @@ describe('automatic current symbol capture', () => {
                 beforeHash: basis.paragraphs[0].hash,
                 supportHandles: [entry.handleId],
                 rationale: 'Exact current definition.',
-                text: 'The limit is 7168 bytes.',
+                text: `The limit is ${factor * 1024} bytes.`,
               },
             ],
             reviewedHandles: [entry.handleId],
@@ -537,6 +560,30 @@ describe('automatic current symbol capture', () => {
           p.reviewEvidence.filter(e => e.handleId.startsWith('current:'));
         expect(currentEntries(acceptedPacket)).toHaveLength(1);
         expect(currentEntries(acceptedPacket)[0].descriptor).toEqual(exact.reviewedSupport.active.sources[0]);
+        const unchangedState = () =>
+          Effect.gen(function* () {
+            const files = [canonicalPath(config)];
+            for (const directory of ['candidates', 'draft-queue']) {
+              const root = path.join(home, 'threadnote', directory);
+              if (!(yield* fs.exists(root))) continue;
+              for (const name of yield* fs.readDirectory(root, {recursive: true})) {
+                const file = path.join(root, name);
+                if ((yield* fs.stat(file)).type === 'File') files.push(file);
+              }
+            }
+            return yield* Effect.forEach(files.sort(), file =>
+              Effect.gen(function* () {
+                const info = yield* fs.stat(file);
+                return {
+                  file,
+                  hash: sha256HexSync(yield* fs.readFileString(file)),
+                  inode: info.ino,
+                  mtime: info.mtime,
+                };
+              }),
+            );
+          });
+        const beforeUnrelated = yield* unchangedState();
         yield* fs.writeFileString(
           path.join(repository, 'unrelated.txt'),
           'Unrelated prose expands extractor context.\n',
@@ -552,6 +599,19 @@ describe('automatic current symbol capture', () => {
         );
         // Scheduling suppresses unchanged relevantRevision; HEAD/snapshot churn cannot introduce another pin.
         expect(unchanged.prepared.relevantRevision).toBe(accepted.prepared.relevantRevision);
+        expect(unchanged.prepared.reads).not.toEqual(accepted.prepared.reads);
+        expect(unchangedPacket.basis.packetDigest).not.toBe(acceptedPacket.basis.packetDigest);
+        if (!previousExtractor) {
+          const rootId = automaticMaintenanceEvidenceId({kind: 'code', citation: historical});
+          expect(accepted.prepared.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('available');
+          expect(unchanged.prepared.assessment.evidence.find(e => e.id === rootId)?.availability).toBe('unknown');
+          expect(accepted.prepared.omissions).toContain('current-code-citation-unsupported');
+          expect(unchanged.prepared.omissions).toContain('current-code-evidence-unavailable');
+          expect(unchanged.prepared.assessment.coverage.omittedSources).toBe(
+            accepted.prepared.assessment.coverage.omittedSources + 1,
+          );
+        }
+        expect(yield* unchangedState()).toEqual(beforeUnrelated);
         expect(unchanged.prepared.assessment.evidence.map(e => e.id)).toEqual(
           accepted.prepared.assessment.evidence.map(e => e.id),
         );
@@ -654,7 +714,7 @@ describe('automatic current symbol capture', () => {
           rebuilt.locators,
           rebuilt.repositoryIdentity,
         );
-        expect(next.basis.body).toBe('The limit is 7168 bytes.');
+        expect(next.basis.body).toBe(`The limit is ${factor * 1024} bytes.`);
         expect(next.draftRequest.available).toBe(true);
         expect(next.reviewEvidence.filter(e => e.handleId.startsWith('current:'))).toHaveLength(1);
         expect(

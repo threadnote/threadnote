@@ -21,6 +21,7 @@ import {
 } from '@threadnote/memory/candidate';
 import {loadTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {parseMemoryDocument} from '@threadnote/memory/document';
+import type {AutomaticMaintenanceDraftV2} from '@threadnote/memory/topic-maintenance-draft';
 import {sha256HexSync as hash} from '@threadnote/platform/sha256';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
@@ -68,10 +69,12 @@ function object(value: unknown): Record<string, unknown> {
 function automaticPacketFixtureFromPrompt(prompt: string) {
   const packet = JSON.parse(prompt.split('\n').at(-1)!) as ReturnType<typeof automaticReviewPacket> & {
     targetParagraphs: readonly {ordinal: number; text: string}[];
+    currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
   };
   if (packet.basis.body !== undefined) return packet;
   return {
     ...packet,
+    reviewEvidence: packet.currentSources,
     basis: {...packet.basis, body: packet.targetParagraphs.map(paragraph => paragraph.text).join('\n\n')},
   };
 }
@@ -276,9 +279,16 @@ describe('automatic ordinary-memory background controls', () => {
         const projected = JSON.parse(prompt.split('\n').at(-1)!) as {
           basis: Record<string, unknown>;
           targetParagraphs: readonly {ordinal: number; text: string}[];
+          currentSources: ReturnType<typeof automaticReviewPacket>['reviewEvidence'];
         };
         expect(projected.basis).not.toHaveProperty('body');
-        expect(projected.targetParagraphs).toEqual(body.split('\n\n').map((text, ordinal) => ({ordinal, text})));
+        expect(projected).not.toHaveProperty('reviewEvidence');
+        expect(projected.currentSources.map(source => source.content)).toEqual(
+          packet.reviewEvidence.filter(source => source.handleId.startsWith('current:')).map(source => source.content),
+        );
+        expect(projected.targetParagraphs.map(({ordinal, text}) => ({ordinal, text}))).toEqual(
+          body.split('\n\n').map((text, ordinal) => ({ordinal, text})),
+        );
         for (const paragraph of projected.targetParagraphs) expect(prompt.split(paragraph.text)).toHaveLength(2);
         const tableLine = prompt.split('\n').find(line => line.startsWith('Index tables ('))!;
         const tables = JSON.parse(tableLine.slice(tableLine.indexOf(': ') + 2)) as {
@@ -295,6 +305,77 @@ describe('automatic ordinary-memory background controls', () => {
         }
         expect(JSON.stringify(packet)).toBe(before);
       }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect('updates an ordinary current fact while preserving unsupported policy and past values', () =>
+    Effect.gen(function* () {
+      const policy = 'Operators must approve changes.';
+      const history = 'The timeout used  to be 10 seconds.';
+      const f = yield* fixture(`The timeout is 30 seconds.\n\n${policy}\n\n${history}`);
+      yield* f.prepare.pipe(Effect.provideService(LocalModelStore, f.installed));
+      const packet = yield* requestAutomaticMemoryReview(f.config, {uri: f.uri, expectedContentHash: hash(f.content)});
+      if ('reviewId' in packet) return yield* Effect.die('Expected ordinary packet.');
+      expect(packet.basis.paragraphs.map(p => p.role)).toEqual(['unknown', 'normative', 'historical']);
+      expect(packet.basis.paragraphs.every(p => p.currentEvidenceIds.length === 0)).toBe(true);
+      const source = packet.reviewEvidence[0];
+      let calls = 0;
+      const generate: typeof runSelectedDraft = (...args) =>
+        f.generate(...args).pipe(
+          Effect.map(result => {
+            calls++;
+            const draft: AutomaticMaintenanceDraftV2 = {
+              version: 2,
+              kind: 'automatic',
+              purpose: 'automatic',
+              targetHash: packet.basis.targetHash,
+              observationRevision: packet.basis.observationRevision,
+              packetDigest: packet.basis.packetDigest,
+              outcome: 'propose-update',
+              paragraphDecisions: packet.basis.paragraphs.map(p => ({
+                ordinal: p.ordinal,
+                beforeHash: p.hash,
+                role: p.ordinal === 0 ? 'descriptive' : p.role,
+                support: p.ordinal === 0 ? 'direct' : 'unresolved',
+                evidenceIds: p.ordinal === 0 ? [source.descriptor.id] : [],
+              })),
+              operations: [
+                {
+                  ordinal: 0,
+                  beforeHash: packet.basis.paragraphs[0].hash,
+                  text: source.content,
+                  supportHandles: [source.handleId],
+                  rationale: 'The current source supports the factual correction.',
+                },
+              ],
+              reviewedHandles: [source.handleId],
+              rationale: 'Current evidence does not establish policy or past values.',
+              unresolvedQuestions: [],
+              removedClaims: [],
+            };
+            return {...result, text: JSON.stringify(compactAutomaticTopicDraftFixture(packet.basis, draft))};
+          }),
+        );
+      const review = yield* requestAutomaticMemoryDraft(
+        f.config,
+        {
+          uri: f.uri,
+          expectedContentHash: hash(f.content),
+          backend: 'local-ai',
+          modelId: f.modelId,
+        },
+        generate,
+      ).pipe(Effect.provideService(LocalModelStore, f.installed));
+      expect(calls).toBe(1);
+      expect(review.maintenance?.proposal.body).toBe(`The timeout is 60 seconds.\n\n${policy}\n\n${history}`);
+      expect(review.maintenance?.proposal.changedOrdinals).toEqual([0]);
+      if (review.maintenance?.version !== 3) return yield* Effect.die('Expected automatic review.');
+      expect(review.maintenance.proposal.draft.paragraphDecisions.map(p => [p.role, p.support])).toEqual([
+        ['descriptive', 'direct'],
+        ['normative', 'unresolved'],
+        ['historical', 'unresolved'],
+      ]);
+      expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+    }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
   effectIt.effect('orders compact native decisions and support before replacement text', () =>
@@ -1694,7 +1775,8 @@ const program = Effect.gen(function* () {
     installed: true, bytes: selected.size, modelId: selected.id, partialBytes: 0, path: '/synthetic/model.gguf', verified: true,
   })});
   const generate = (_config, _backend, _model, prompt, _purpose, basis) => Effect.sync(() => {
-    const packet = {...JSON.parse(prompt.split('\\n').at(-1)), basis};
+    const projected = JSON.parse(prompt.split('\\n').at(-1));
+    const packet = {...projected, reviewEvidence: projected.currentSources, basis};
     const handle = packet.reviewEvidence.find(entry => entry.descriptor.source.kind === 'memory');
     return {backendIdentity: 'local-ai', modelIdentity: manifest.id,
       modelVersion: manifest.revision + ':' + manifest.sha256, usage: {status: 'unavailable'},

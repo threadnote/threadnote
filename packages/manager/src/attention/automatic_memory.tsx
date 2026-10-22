@@ -66,6 +66,8 @@ export function AutomaticMemoryPanel(props: {
   readonly project: string;
   readonly uri?: string;
   readonly onChanged?: () => void;
+  readonly onReview?: (reviewId: string) => void;
+  readonly onApplied?: (review: ManagerAutomaticReview) => void;
   readonly onSummaryChange?: (
     project: string,
     summary: {readonly ready: number; readonly pending: boolean} | undefined,
@@ -111,10 +113,10 @@ export function AutomaticMemoryPanel(props: {
         if (result.version !== 1 || result.project !== props.project || !Array.isArray(result.items))
           throw new Error('Automatic memory status is unavailable. Refresh Manager.');
         setStatus(result);
+        const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
         summary.current?.(props.project, {
-          ready: result.items.filter(item => item.state === 'ready' || item.state === 'verification').length,
-          pending:
-            result.incomplete === true || result.omitted > 0 || result.items.some(item => item.state !== 'reviewed'),
+          ready: retained.filter(item => item.state === 'ready' || item.state === 'verification').length,
+          pending: result.incomplete === true || result.omitted > 0 || retained.some(item => item.state !== 'reviewed'),
         });
         setError('');
       } catch (cause) {
@@ -128,6 +130,10 @@ export function AutomaticMemoryPanel(props: {
       window.clearTimeout(timer);
     };
   }, [requestSelection, refresh, props.project, props.uri, afterUri]);
+  function openReview(reviewId: string) {
+    props.onReview?.(reviewId);
+    setSelected(reviewId);
+  }
   const current =
     status?.project === props.project ? reconcileAutomaticMemoryItems(status.items, props.project, applied) : [];
   const groups = automaticMemoryGroups(current, !!props.uri);
@@ -207,7 +213,7 @@ export function AutomaticMemoryPanel(props: {
             <button
               type="button"
               className={item.state === 'ready' || item.state === 'verification' ? 'primary' : undefined}
-              onClick={() => setSelected(item.reviewId)}
+              onClick={() => openReview(item.reviewId!)}
             >
               <Sparkles size={15} />
               {item.state === 'verification'
@@ -224,7 +230,7 @@ export function AutomaticMemoryPanel(props: {
               key={`${props.project}:${item.uri}:${item.targetHash}`}
               project={props.project}
               item={item}
-              onReady={setSelected}
+              onReady={openReview}
             />
           ) : null}
         </article>
@@ -304,6 +310,7 @@ export function AutomaticMemoryPanel(props: {
             setSelected(undefined);
             setNotice('The exact approved document and its support were saved.');
             setRefresh(value => value + 1);
+            props.onApplied?.(result);
             props.onChanged?.();
           }}
         />

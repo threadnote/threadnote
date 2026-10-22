@@ -475,7 +475,21 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
       Schema.isMinLength(min),
       Schema.isMaxLength(Math.min(max, count)),
     );
-  const paragraphs = basis.paragraphs.length ? basis.paragraphs : [{ordinal: 0}];
+  const paragraphs = basis.paragraphs.length
+    ? basis.paragraphs
+    : [
+        {
+          ordinal: 0,
+          role: 'unknown' as const,
+          roleAuthority: 'provisional' as const,
+          currentEvidenceIds: [],
+          currentSupport: 'unresolved' as const,
+        },
+      ];
+  // The memory-owned parser uses this same protection predicate. This narrows only provider choices.
+  const protectedRole = (paragraph: (typeof paragraphs)[number]) =>
+    paragraph.roleAuthority !== 'provisional' || ['normative', 'historical'].includes(paragraph.role);
+  const replaceable = paragraphs.filter(paragraph => !protectedRole(paragraph) || paragraph.role === 'descriptive');
   const text = Schema.String;
   return Schema.Struct({
     version: Schema.Literal(1),
@@ -487,25 +501,48 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
     unresolvedQuestions: Schema.Array(text),
     paragraphDecisions: Schema.Array(
       Schema.Union(
-        paragraphs.flatMap(paragraph =>
-          (tables.evidenceIds.length
-            ? (['unresolved', 'direct', 'contextual'] as const)
-            : (['unresolved'] as const)
+        paragraphs.flatMap(paragraph => {
+          const protectedSupport = protectedRole(paragraph) && paragraph.role !== 'descriptive';
+          const frozenIndices =
+            paragraph.currentSupport !== 'unresolved' &&
+            paragraph.currentEvidenceIds.length &&
+            paragraph.currentEvidenceIds.length <= 8 &&
+            paragraph.currentEvidenceIds.every(id => tables.currentHandles.includes(`current:${id}`))
+              ? paragraph.currentEvidenceIds.map(id => tables.evidenceIds.indexOf(id))
+              : [];
+          return (
+            protectedSupport
+              ? frozenIndices.length
+                ? (['unresolved', paragraph.currentSupport] as const)
+                : (['unresolved'] as const)
+              : tables.evidenceIds.length
+                ? (['unresolved', 'direct', 'contextual'] as const)
+                : (['unresolved'] as const)
           ).map(support =>
             Schema.Struct({
               ordinal: Schema.Literal(paragraph.ordinal),
-              role: Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
+              role: protectedRole(paragraph)
+                ? Schema.Literal(paragraph.role)
+                : Schema.Literals(['descriptive', 'normative', 'historical', 'unknown']),
               support: Schema.Literal(support),
-              evidenceIndices: support === 'unresolved' ? indices(0) : indices(tables.evidenceIds.length, 8, 1),
+              evidenceIndices:
+                support === 'unresolved'
+                  ? indices(0)
+                  : protectedSupport
+                    ? Schema.Array(Schema.Literals(frozenIndices)).check(
+                        Schema.isMinLength(frozenIndices.length),
+                        Schema.isMaxLength(frozenIndices.length),
+                      )
+                    : indices(tables.evidenceIds.length, 8, 1),
             }),
-          ),
-        ),
+          );
+        }),
       ),
     ).check(Schema.isMinLength(basis.paragraphs.length), Schema.isMaxLength(basis.paragraphs.length)),
     outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
     operations: Schema.Array(
       Schema.Union(
-        paragraphs.map(paragraph =>
+        (replaceable.length ? replaceable : paragraphs.slice(0, 1)).map(paragraph =>
           Schema.Struct({
             ordinal: Schema.Literal(paragraph.ordinal),
             supportIndices: indices(tables.currentHandles.length, 8, tables.currentHandles.length ? 1 : 0),
@@ -514,7 +551,9 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
           }),
         ),
       ),
-    ).check(Schema.isMaxLength(tables.currentHandles.length ? basis.paragraphs.length : 0)),
+    ).check(
+      Schema.isMaxLength(tables.currentHandles.length ? Math.min(basis.paragraphs.length, replaceable.length) : 0),
+    ),
     currentSourceIndices: indices(tables.currentHandles.length, tables.currentHandles.length),
     removedClaims: Schema.Array(text),
   });

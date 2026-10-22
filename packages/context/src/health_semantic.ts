@@ -388,19 +388,27 @@ function environmentWords(value: string): string[] {
   );
 }
 
+/** Bounded English role evidence; a descriptive result does not establish factual support or authority. */
+export function contextHealthSemanticClaimRole(
+  text: string,
+  headings: readonly string[] = [],
+): ContextHealthSemanticClaimReferenceV2['role'] {
+  const value = text.toLowerCase().replace(/\s+/gu, ' ');
+  return /\b(?:history|historical|previous(?:ly)?|formerly)\b/iu.test(headings.join(' ')) ||
+    /\b(?:was|were|used to)\b/u.test(value)
+    ? 'historical'
+    : /\b(?:must|shall|required)\b/u.test(value)
+      ? 'normative'
+      : 'descriptive';
+}
+
 function parseClaim(text: string, headings: readonly string[]): ParsedClaim {
   const value = text
     .toLowerCase()
     .replace(/[.!?]$/u, '')
     .replace(/\s+/gu, ' ')
     .trim();
-  const role =
-    /\b(?:history|historical|previous(?:ly)?|formerly)\b/iu.test(headings.join(' ')) ||
-    /\b(?:was|were|used to)\b/u.test(value)
-      ? 'historical'
-      : /\b(?:must|shall|required)\b/u.test(value)
-        ? 'normative'
-        : 'descriptive';
+  const role = contextHealthSemanticClaimRole(value, headings);
   const unsupported: ParsedClaim = {role, extraction: 'unsupported'};
   if (
     /\b(?:maybe|approximately|about|usually|sometimes|unless|except|if|when|could|might|may|should|either)\b/u.test(

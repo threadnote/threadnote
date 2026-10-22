@@ -2,9 +2,14 @@ import {ShieldCheck} from 'lucide-react';
 import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
-import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceStatusV2} from './contracts.js';
+import type {
+  ManagerContextHealthResponseV1,
+  ManagerContextMaintenanceStatusV2,
+  ManagerContextMaintenanceCaseV2,
+} from './contracts.js';
 import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 import {
+  automaticReviewMaintenanceReceipts,
   groupMaintenanceCauses,
   healthDecisionGroups,
   healthDecisionTask,
@@ -56,6 +61,15 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [appliedCases, setAppliedCases] = useState<readonly ManagerTopicReviewAppliedV1[]>([]);
+  const automaticObservation = useRef<
+    | {
+        project: string;
+        reviewId: string;
+        cases: readonly ManagerContextMaintenanceCaseV2[];
+        report: ManagerContextHealthResponseV1;
+      }
+    | undefined
+  >(undefined);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
   if (activeProject.current !== props.project) {
@@ -316,6 +330,28 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         key={props.project}
         project={props.project}
         onChanged={props.onChanged}
+        onReview={reviewId => {
+          automaticObservation.current = {
+            project: props.project,
+            reviewId,
+            cases: structuredClone(status?.cases ?? []),
+            report: structuredClone(report),
+          };
+        }}
+        onApplied={result => {
+          const observed = automaticObservation.current;
+          if (
+            !mounted.current ||
+            activeProject.current !== result.project ||
+            observed?.project !== result.project ||
+            observed.reviewId !== result.reviewId
+          )
+            return;
+          const receipts = automaticReviewMaintenanceReceipts(result, observed.cases, observed.report);
+          mutationEpoch.current += 1;
+          setAppliedCases(previous => [...previous, ...receipts]);
+          setRefresh(value => value + 1);
+        }}
         onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
       />
       <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
