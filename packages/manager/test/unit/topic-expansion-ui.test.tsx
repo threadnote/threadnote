@@ -96,6 +96,8 @@ beforeEach(() => {
     vi.fn(async (request: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(request), 'http://manager.test');
       if (!init?.method || init.method === 'GET') {
+        if (url.pathname === '/api/attention/automatic-memory')
+          return response({version: 1, project: url.searchParams.get('project'), items: [], omitted: 0});
         await readGate;
         return response(initial(url.searchParams.get('uri')!, url.searchParams.get('project')!));
       }
@@ -309,6 +311,14 @@ const node: TreeNode = {
   relativePath: 'projects/fixture/topic.md',
   uri,
 };
+function expectOnlyAutomaticStatusRead() {
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch).toHaveBeenCalledWith(
+    `/api/attention/automatic-memory?project=fixture&uri=${encodeURIComponent(uri)}`,
+    expect.objectContaining({method: 'GET', body: undefined}),
+  );
+  expect(posted).toEqual([]);
+}
 it.each([
   {name: 'legacy code', topicMaintenance: {version: 1}, visible: true},
   {name: 'retained code', topicMaintenance: {version: 2}, visible: true},
@@ -327,8 +337,9 @@ it.each([
     ),
   );
   expect(document.body.textContent?.includes('Review code dependency scope')).toBe(item.visible);
-  expect(document.body.textContent).toContain('Topic updates from an Obsidian note');
-  expect(fetch).not.toHaveBeenCalled();
+  expect(document.body.textContent).toContain('Automatic memory care');
+  expect(document.body.textContent).not.toContain('Topic updates from an Obsidian note');
+  expectOnlyAutomaticStatusRead();
 });
 it.each([{isShared: true}, {isSystem: true}, {resource: true}, {archived: true}])(
   'withholds the expansion entrypoint for ineligible library state %j',
@@ -348,7 +359,8 @@ it.each([{isShared: true}, {isSystem: true}, {resource: true}, {archived: true}]
       ),
     );
     expect(document.body.textContent).not.toContain('Review code dependency scope');
-    expect(fetch).not.toHaveBeenCalled();
+    if (state.isShared) expectOnlyAutomaticStatusRead();
+    else expect(fetch).not.toHaveBeenCalled();
   },
 );
 

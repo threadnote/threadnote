@@ -3,8 +3,9 @@ import {FileText, LockKeyhole, UserRound, Users} from 'lucide-react';
 import type {MemoryMetadata, TreeNode} from './ui/contracts.js';
 import {MarkdownViewer} from './ui/controls.js';
 import {libraryItemTitle} from './library_model.js';
-import {TopicEnrollmentPanel} from './attention/topic_enrollment.js';
+import {AutomaticMemoryPanel} from './attention/automatic_memory.js';
 import {TopicExpansionPanel} from './attention/topic_expansion.js';
+import {isAgentArtifactUri} from '@threadnote/memory/document';
 
 export function LibraryArticle({
   node,
@@ -12,6 +13,7 @@ export function LibraryArticle({
   markdown,
   resource,
   onChanged,
+  onVerifiedUpdate,
   onPrepareGraph,
 }: {
   readonly node: TreeNode;
@@ -19,6 +21,7 @@ export function LibraryArticle({
   readonly markdown: string;
   readonly resource: boolean;
   readonly onChanged?: () => void;
+  readonly onVerifiedUpdate?: () => void;
   readonly onPrepareGraph?: () => void;
 }): React.ReactElement {
   const author = metadata?.sourceAgentClient;
@@ -33,15 +36,15 @@ export function LibraryArticle({
         </span>
       </div>
       <h2>{libraryItemTitle(node)}</h2>
-      <MarkdownViewer markdown={markdown} />
-      {!resource &&
-      !node.isShared &&
-      !node.isSystem &&
-      metadata?.kind === 'durable' &&
-      metadata.status === 'active' &&
-      metadata.project ? (
-        <TopicEnrollmentPanel key={node.uri} uri={node.uri} onChanged={onChanged} />
+      {!resource && !node.isSystem && !isAgentArtifactUri(node.uri) && metadata?.status === 'active' ? (
+        <AutomaticMemoryPanel
+          key={node.uri}
+          uri={node.uri}
+          project={metadata.project ?? 'unscoped'}
+          onChanged={onVerifiedUpdate ?? onChanged}
+        />
       ) : null}
+      <MarkdownViewer markdown={markdown} />
       {!resource &&
       !node.isShared &&
       !node.isSystem &&

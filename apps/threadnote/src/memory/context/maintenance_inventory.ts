@@ -252,13 +252,14 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
   uri: string,
   project: string | undefined,
   expectedInfo?: FileSystem.File.Info,
+  maxBytes: number = contextMaintenanceInventoryAuthorityLimits.recordBytes,
 ) {
   yield* checkAuthority(fs, path, canonicalRoot, candidate, uri);
   return yield* Effect.scoped(
     Effect.gen(function* () {
       const before = expectedInfo ?? (yield* fs.stat(candidate));
       if (before.type !== 'File') return yield* maintenanceSnapshotFailure('record-not-regular', 'record-read', uri);
-      if (Number(before.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
+      if (Number(before.size) > maxBytes)
         return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
       const handle = yield* fs.open(candidate, {flag: 'r'});
       const opened = yield* handle.stat;
@@ -270,16 +271,21 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
         signature(opened) !== signature(before)
       )
         return yield* maintenanceSnapshotFailure('record-changed', 'record-read', uri);
-      if (Number(opened.size) > contextMaintenanceInventoryAuthorityLimits.recordBytes)
+      if (Number(opened.size) > maxBytes)
         return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
       const chunks: Uint8Array[] = [];
       let bytes = 0;
       for (;;) {
-        const chunk = yield* handle.readAlloc(Math.min(64 * 1024, Number(opened.size) - bytes + 1));
+        if (bytes === maxBytes) {
+          const end = yield* handle.stat;
+          if (Number(end.size) !== bytes)
+            return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
+          break;
+        }
+        const chunk = yield* handle.readAlloc(Math.min(64 * 1024, Number(opened.size) - bytes + 1, maxBytes - bytes));
         if (Option.isNone(chunk)) break;
         bytes += chunk.value.length;
-        if (bytes > contextMaintenanceInventoryAuthorityLimits.recordBytes)
-          return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
+        if (bytes > maxBytes) return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
         if (bytes > Number(opened.size)) return yield* maintenanceSnapshotFailure('record-changed', 'record-read', uri);
         chunks.push(chunk.value);
       }
@@ -334,6 +340,7 @@ const readEntry = Effect.fn('contextMaintenance.inventoryReadEntry')(function* (
 export const readContextMaintenanceCanonicalRecord = Effect.fn('contextMaintenance.readCanonicalRecord')(function* (
   config: RuntimeConfig,
   uri: string,
+  options: {readonly maxBytes?: number} = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -351,10 +358,112 @@ export const readContextMaintenanceCanonicalRecord = Effect.fn('contextMaintenan
   const canonicalHome = yield* fs.realPath(config.agentContextHome);
   if (!canonicalRoot.startsWith(`${canonicalHome}${path.sep}`))
     return yield* maintenanceSnapshotFailure('authority-boundary', 'authority-check', uri);
-  const read = yield* readEntry(fs, path, canonicalRoot, path.join(root, ...relative), uri, undefined);
+  const maxBytes = options.maxBytes ?? contextMaintenanceInventoryAuthorityLimits.recordBytes;
+  if (
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > contextMaintenanceInventoryAuthorityLimits.recordBytes
+  )
+    return yield* maintenanceSnapshotFailure('record-size-limit', 'record-read', uri);
+  const read = yield* readEntry(
+    fs,
+    path,
+    canonicalRoot,
+    path.join(root, ...relative),
+    uri,
+    undefined,
+    undefined,
+    maxBytes,
+  );
   if (!read.record) return yield* maintenanceSnapshotFailure('invalid-header', 'record-read', uri);
-  return {record: read.record, hash: read.entry!.hash};
+  return {record: read.record, hash: read.entry!.hash, bytes: read.bytes};
 }, withMaintenanceSnapshotDiagnostic('record-read'));
+
+/** Disposable, paged discovery hints only. No traversal, writes or approval authority. */
+export const readContextMaintenanceInventoryPage = Effect.fn('contextMaintenance.readInventoryPage')(function* (
+  config: RuntimeConfig,
+  project: string,
+  options: {readonly afterUri?: string; readonly limit?: number} = {},
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* localUserMemoriesRoot(config);
+  const generation = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
+  let remainingBytes: number = contextMaintenanceInventoryAuthorityLimits.canonicalBytes;
+  let bounded = false;
+  const inventories: Inventory[] = [];
+  for (const scope of [project, undefined]) {
+    if (inventories.some(inventory => inventory.complete && inventory.mutationGeneration === generation)) break;
+    const file = path.join(
+      config.agentContextHome,
+      'context-maintenance',
+      'inventory',
+      `${sha256HexSync(scope ?? '*')}.json`,
+    );
+    const loaded = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const info = yield* fs.stat(file);
+        if (info.type !== 'File' || Number(info.size) > remainingBytes) {
+          bounded = true;
+          return undefined;
+        }
+        const handle = yield* fs.open(file, {flag: 'r'});
+        const opened = yield* handle.stat;
+        if (opened.type !== 'File' || Number(opened.size) > remainingBytes) {
+          bounded = true;
+          return undefined;
+        }
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        while (size < Number(opened.size)) {
+          const chunk = yield* handle.readAlloc(Math.min(64 * 1024, Number(opened.size) - size, remainingBytes));
+          if (Option.isNone(chunk) || chunk.value.length === 0) return undefined;
+          remainingBytes -= chunk.value.length;
+          size += chunk.value.length;
+          chunks.push(chunk.value);
+        }
+        if (signature(yield* handle.stat) !== signature(opened)) return undefined;
+        const bytes = new Uint8Array(size);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
+        return yield* Effect.try(() =>
+          decodeInventory(new TextDecoder('utf-8', {fatal: true}).decode(bytes), root, config.user, path),
+        );
+      }),
+    ).pipe(Effect.orElseSucceed(() => undefined));
+    if (loaded) inventories.push(loaded);
+  }
+  const entries = new Map<string, InventoryEntry>();
+  for (const inventory of inventories)
+    for (const entry of Object.values(inventory.entries)) {
+      if (inventory.mutationGeneration === generation || !entries.has(entry.uri)) entries.set(entry.uri, entry);
+    }
+  const eligible = [...entries.values()]
+    .filter(
+      entry =>
+        (entry.metadata.project ?? 'unscoped') === project &&
+        entry.metadata.status === 'active' &&
+        !isAgentArtifactUri(entry.uri) &&
+        (!entry.metadata.topicMaintenance || entry.metadata.reviewedSupport),
+    )
+    .sort((left, right) => left.uri.localeCompare(right.uri));
+  const limit = Math.max(1, Math.min(128, Number.isSafeInteger(options.limit) ? options.limit! : 32));
+  const remaining = eligible.filter(
+    entry => options.afterUri === undefined || entry.uri.localeCompare(options.afterUri) > 0,
+  );
+  const page = remaining.slice(0, limit);
+  return {
+    uris: page.map(entry => entry.uri),
+    total: eligible.length,
+    omitted: Math.max(0, eligible.length - page.length),
+    ...(remaining.length > page.length ? {nextCursor: page.at(-1)!.uri} : {}),
+    incomplete:
+      bounded || !inventories.some(inventory => inventory.complete && inventory.mutationGeneration === generation),
+  };
+});
 
 const isolatedReadEntry = (...args: Parameters<typeof readEntry>) =>
   readEntry(...args).pipe(

@@ -738,6 +738,7 @@ bun_test(
         "//apps/threadnote:src/manager/activation.ts",
         "//apps/threadnote:src/manager/attention.ts",
         "//apps/threadnote:src/manager/attention_actions.ts",
+        "//apps/threadnote:src/manager/automatic_memory.ts",
         "//apps/threadnote:src/manager/consolidation.ts",
         "//apps/threadnote:src/manager/consolidation_agent.ts",
         "//apps/threadnote:src/manager/consolidation_models.ts",

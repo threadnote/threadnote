@@ -22,6 +22,7 @@ import {HealthDetail} from '../attention_details.js';
 import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialogs.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {AutomaticMemoryPanel} from './automatic_memory.js';
 
 interface Props {
   readonly project: string;
@@ -46,6 +47,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [automatic, setAutomatic] = useState<{project: string; ready: number; pending: boolean}>();
   const [conflictSubjectUri, setConflictSubjectUri] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -238,16 +240,18 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     status?.page?.caseNextCursor !== undefined &&
     (status.counts?.['needs-decision'] ?? Infinity) >
       cases.filter(item => item.disposition === 'needs-decision').length;
-  const decisionCount = Math.max(
-    summary?.affectedMemories ?? 0,
-    status?.counts?.decisionMemories ?? 0,
-    groups.length,
-    new Set(
-      status?.cases
-        .filter(item => item.project === props.project && item.disposition === 'needs-decision')
-        .map(item => item.memoryId) ?? [],
-    ).size,
-  );
+  const decisionCount =
+    (automatic?.project === props.project ? automatic.ready : 0) +
+    Math.max(
+      summary?.affectedMemories ?? 0,
+      status?.counts?.decisionMemories ?? 0,
+      groups.length,
+      new Set(
+        status?.cases
+          .filter(item => item.project === props.project && item.disposition === 'needs-decision')
+          .map(item => item.memoryId) ?? [],
+      ).size,
+    );
   const onDecisionCountChange = props.onDecisionCountChange;
   const completeDecisionCount = status?.counts?.decisionMemories === undefined ? undefined : decisionCount;
   useEffect(() => {
@@ -308,6 +312,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     status?.counts?.[disposition] ?? cases.filter(item => item.disposition === disposition).length;
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
+      <AutomaticMemoryPanel
+        key={props.project}
+        project={props.project}
+        onChanged={props.onChanged}
+        onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
+      />
       <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
         {(
           [
@@ -333,7 +343,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         <ShieldCheck />
         {maintenanceStatusLabel({
           decisions: decisionCount,
-          coverage,
+          coverage: automatic?.project === props.project && !automatic.pending ? coverage : 'partial',
           paused: status?.paused ?? false,
           state: status?.state,
         })}

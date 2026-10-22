@@ -10337,3 +10337,110 @@ h4 {
     display: none;
   }
 }
+
+/* Automatic assessment and explicit review share the existing review palette. */
+.automatic-memory-panel {
+  margin-block: 1.25rem;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.automatic-memory-heading,
+.automatic-memory-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.automatic-memory-heading h3,
+.automatic-memory-card h4 {
+  margin: 0.3rem 0;
+}
+.automatic-memory-card {
+  margin-top: 0.9rem;
+  padding: 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.automatic-memory-card.is-ready {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.automatic-memory-card > button {
+  margin-top: 0.9rem;
+}
+.automatic-memory-card .attention-tags {
+  margin-block: 0.75rem;
+}
+.automatic-memory-spinner {
+  display: inline-block;
+  flex: none;
+  vertical-align: middle;
+  animation: automatic-memory-spin 1.2s linear infinite;
+}
+@keyframes automatic-memory-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.automatic-review-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  margin-block: 1.25rem;
+}
+.automatic-review-dialog section {
+  margin-block: 1.4rem;
+}
+.automatic-review-dialog .review-disclosure {
+  margin-block: 0.65rem;
+}
+.automatic-review-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 34rem;
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.automatic-review-dialog code {
+  overflow-wrap: anywhere;
+}
+.automatic-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.8rem;
+  padding-block: 1.25rem;
+  border-top: 1px solid var(--line);
+}
+.automatic-review-actions .review-confirmation {
+  flex-basis: 100%;
+}
+.automatic-review-roles .attention-tags {
+  padding-block: 0.45rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .automatic-memory-spinner {
+    animation: none;
+  }
+}
+@media (max-width: 680px) {
+  .automatic-memory-panel,
+  .automatic-memory-card {
+    padding: 0.9rem;
+  }
+  .automatic-memory-heading,
+  .automatic-memory-card > header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .automatic-review-comparison {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .automatic-review-actions > button {
+    width: 100%;
+  }
+}
