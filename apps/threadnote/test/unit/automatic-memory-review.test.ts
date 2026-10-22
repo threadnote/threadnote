@@ -897,7 +897,12 @@ describe('ordinary memory exact public review', () => {
                 text: JSON.stringify(
                   compactAutomaticTopicDraftFixture(
                     basis,
-                    JSON.parse(draft({...packet, basis}, packet.reviewEvidence[0].content)),
+                    JSON.parse(
+                      draft(
+                        {...packet, basis, reviewEvidence: packet.currentSources},
+                        packet.currentSources[0].content,
+                      ),
+                    ),
                   ),
                 ),
                 backendIdentity: 'local-ai',
