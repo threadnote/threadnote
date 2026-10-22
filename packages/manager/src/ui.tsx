@@ -1804,7 +1804,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
                     </div>
                     {pendingCanonical && selectedUri === pendingCanonical.node.uri ? (
                       <div className="manager-draft-reconcile" role="alert">
-                        <p>The record changed while Manager was disconnected. Your unsaved draft is preserved.</p>
+                        <p>The saved record changed. Your unsaved draft is preserved.</p>
                         <details>
                           <summary>Review the reloaded record</summary>
                           <pre>{pendingCanonical.content}</pre>
