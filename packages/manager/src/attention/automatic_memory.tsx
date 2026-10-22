@@ -297,7 +297,6 @@ export function AutomaticMemoryPanel(props: {
           onChanged={() => {
             mutation.current++;
             setRefresh(value => value + 1);
-            props.onChanged?.();
           }}
           onApplied={result => {
             mutation.current++;

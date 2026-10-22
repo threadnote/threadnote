@@ -328,6 +328,34 @@ it('requires the exact full preview and explicit confirmation; HTTP200 incomplet
   expect(close).toHaveBeenCalledOnce();
 });
 
+it('keeps the Library preview open and refreshes canonical content only after verified apply', async () => {
+  const changed = vi.fn();
+  let current = review();
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes('/automatic-memory?'))
+      return json({version: 1, project: 'project', omitted: 0, items: [item({state: 'ready', reviewId})]});
+    if (init?.body) {
+      const body = JSON.parse(String(init.body)) as {action: string};
+      current =
+        body.action === 'preview'
+          ? review({revision: 2, approval: approval(), canApply: true})
+          : review({revision: 3, state: 'applied', approval: {...approval(), stage: 'written'}, verified: true});
+    }
+    return json(current);
+  });
+  await render(<AutomaticMemoryPanel project="project" uri={uri} onChanged={changed} />);
+  await click('Review update');
+  await click('Preview exact update');
+  expect(document.querySelector('.automatic-review-exact pre')?.textContent).toContain('exact-provenance');
+  expect(document.querySelector('dialog')).not.toBeNull();
+  expect(changed).not.toHaveBeenCalled();
+  expect(button('Confirm and apply').disabled).toBe(true);
+  await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+  await click('Confirm and apply');
+  expect(changed).toHaveBeenCalledOnce();
+  expect(document.querySelector('dialog')).toBeNull();
+});
+
 it('freezes preview controls synchronously and ignores a delayed response after target selection changes', async () => {
   const delayed = Promise.withResolvers<Response>();
   const applied = vi.fn();
