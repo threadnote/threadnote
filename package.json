@@ -148,7 +148,7 @@
     "@vitest/coverage-istanbul": "5.0.3",
     "@vscode/tree-sitter-wasm": "0.3.1",
     "fast-check": "4.10.2",
-    "happy-dom": "20.14.6",
+    "happy-dom": "21.0.3",
     "husky": "^9.1.7",
     "mitata": "1.0.34",
     "oxlint": "1.87.0",
