@@ -709,6 +709,35 @@ describe('ordinary memory exact public review', () => {
           yield* f.fs.writeFileString(source, 'export const requestTimeoutSeconds = 60;\n');
           yield* commit('current');
           yield* index();
+          const state = () =>
+            f.fs.readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json')).pipe(
+              Effect.map(
+                text =>
+                  JSON.parse(text) as {
+                    cases: {
+                      caseId: string;
+                      citationId?: string;
+                      memoryId: string;
+                      family: string;
+                      disposition: string;
+                      reason: string;
+                    }[];
+                  },
+              ),
+            );
+          const activeCitationCases = () =>
+            state().pipe(
+              Effect.map(current =>
+                current.cases.filter(
+                  item =>
+                    item.memoryId === 'tn_target' &&
+                    (item.family === 'citation' || item.family === 'citation-coverage') &&
+                    item.disposition !== 'resolved',
+                ),
+              ),
+            );
+          for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(f.config, {cwd: repository});
+          expect((yield* activeCitationCases()).some(item => item.disposition === 'needs-decision')).toBe(true);
           const packet = yield* f.review({
             action: 'automatic-preview',
             uri: f.uri,
@@ -776,6 +805,7 @@ describe('ordinary memory exact public review', () => {
             sourceCwd: repository,
           });
           expect(approved.isError).not.toBe(true);
+          expect(yield* activeCitationCases()).toEqual([]);
           const accepted = yield* f.fs.readFileString(f.targetPath);
           expect(parseMemoryDocument(f.uri, accepted)!.metadata.codeCitations).toEqual([citation]);
           yield* f.fs.writeFileString(f.path.join(repository, 'unrelated.ts'), 'export const untouched = true;\n');
@@ -792,34 +822,7 @@ describe('ordinary memory exact public review', () => {
           expect(manual.structuredContent.approval.reviewedSupport.active.paragraphs[0]).toEqual(
             p.approval.reviewedSupport.active.paragraphs[0],
           );
-          const state = () =>
-            f.fs.readFileString(f.path.join(f.home, 'context-maintenance/state-v2.json')).pipe(
-              Effect.map(
-                text =>
-                  JSON.parse(text) as {
-                    cases: {
-                      caseId: string;
-                      citationId?: string;
-                      memoryId: string;
-                      family: string;
-                      disposition: string;
-                      reason: string;
-                    }[];
-                  },
-              ),
-            );
           for (let tick = 0; tick < 8; tick++) yield* runContextMaintenance(f.config, {cwd: repository});
-          const activeCitationCases = () =>
-            state().pipe(
-              Effect.map(current =>
-                current.cases.filter(
-                  item =>
-                    item.memoryId === 'tn_target' &&
-                    (item.family === 'citation' || item.family === 'citation-coverage') &&
-                    item.disposition !== 'resolved',
-                ),
-              ),
-            );
           expect(yield* activeCitationCases()).toEqual([]);
           yield* f.fs.writeFileString(source, 'export const requestTimeoutSeconds = 90;\n');
           yield* commit('new-active-drift');

@@ -659,7 +659,7 @@ describe('automatic private preparation', () => {
   });
 
   it('review current pins bind actual new bytes even when preparation reused the original private evidence ID', () => {
-    const citation = codeCitation('symbol');
+    const citation = codeCitation('file');
     const excerpt = codeExcerpt(citation, 'export const value = 60;', 'export const value = 60;');
     const id = automaticMaintenanceEvidenceId({kind: 'code', citation});
     const target = record('current_code', 'Old behavior.', {codeCitations: [citation]});
@@ -908,7 +908,7 @@ describe('automatic private preparation', () => {
             endLine: actual.endLine,
             fileBytesHash: actual.fileBytesHash,
           });
-          expect(current.descriptor.source.citation.target.kind).toBe('file');
+          expect(current.descriptor.source.citation.target.kind).toBe('symbol');
           expect(packet.reviewEvidence.some(entry => entry.handleId.startsWith('historical:'))).toBe(false);
 
           yield* f.write(target);

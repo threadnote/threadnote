@@ -483,7 +483,8 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
     targetHash: Schema.Literal(basis.targetHash),
     observationRevision: Schema.Literal(basis.observationRevision),
     packetDigest: Schema.Literal(basis.packetDigest),
-    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
+    rationale: text,
+    unresolvedQuestions: Schema.Array(text),
     paragraphDecisions: Schema.Array(
       Schema.Union(
         paragraphs.flatMap(paragraph =>
@@ -501,6 +502,7 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
         ),
       ),
     ).check(Schema.isMinLength(basis.paragraphs.length), Schema.isMaxLength(basis.paragraphs.length)),
+    outcome: Schema.Literals(['propose-update', 'propose-revalidation', 'policy-conflict', 'insufficient-evidence']),
     operations: Schema.Array(
       Schema.Union(
         paragraphs.map(paragraph =>
@@ -514,8 +516,6 @@ function automaticTopicDraftModelSchema(basis: AutomaticMaintenanceDraftBasisV3)
       ),
     ).check(Schema.isMaxLength(tables.currentHandles.length ? basis.paragraphs.length : 0)),
     currentSourceIndices: indices(tables.currentHandles.length, tables.currentHandles.length),
-    rationale: text,
-    unresolvedQuestions: Schema.Array(text),
     removedClaims: Schema.Array(text),
   });
 }

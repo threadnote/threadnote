@@ -253,6 +253,11 @@ describe('automatic model-only compact transport', () => {
         const {basis} = fixture(count, sources);
         const native = topicDraftNativeJsonSchema(topicDraftModelSchema(basis), basis) as Field;
         const fields = native.properties!;
+        const order = Object.keys(fields);
+        expect(order.indexOf('rationale')).toBeLessThan(order.indexOf('unresolvedQuestions'));
+        expect(order.indexOf('unresolvedQuestions')).toBeLessThan(order.indexOf('paragraphDecisions'));
+        expect(order.indexOf('paragraphDecisions')).toBeLessThan(order.indexOf('outcome'));
+        expect(order.indexOf('outcome')).toBeLessThan(order.indexOf('operations'));
         const decisions = fields.paragraphDecisions.items!;
         const variants = decisions.oneOf ?? [decisions];
         expect(variants).toHaveLength(count * (sources ? 3 : 1));

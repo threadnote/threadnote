@@ -37,6 +37,11 @@ import {captureMemoryCodeCitations, memoryCodeCitationProjectScopeReceipt} from 
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {
+  captureAutomaticCurrentSymbol,
+  automaticSymbolSelectorKey,
+  automaticSupportedSymbolMatchesExcerpt,
+} from './maintenance_code_capture.js';
 import {resolveRelationTarget, resolveMaintenanceRelationPolicy} from './maintenance_policy.js';
 import {
   readContextMaintenanceCanonicalRecord,
@@ -486,6 +491,64 @@ export const readAutomaticCodeEvidence = Effect.fn('automaticPreparation.readCod
     if (!current) omissions.push('current-code-evidence-unavailable');
   }
   if (citations.length > codeBudget) omissions.push('code-evidence-budget');
+  // Historical pins keep their original validation outcome. A declared symbol selector may independently
+  // capture a new current pin, including when the historical extractor cannot validate the old symbol.
+  const selectors = new Set<string>();
+  for (const citation of citations.slice(0, codeBudget)) {
+    if (!configuredRoot || citation.target.kind !== 'symbol') continue;
+    const selector = automaticSymbolSelectorKey(citation)!;
+    if (selectors.has(selector)) continue;
+    selectors.add(selector);
+    // An unrelated commit/snapshot must not replace a still-supported canonical source identity.
+    if (
+      candidates.some(
+        candidate =>
+          candidate.excerpt &&
+          evidence.some(
+            item =>
+              item.id === candidate.evidenceId &&
+              item.source.kind === 'code' &&
+              automaticSymbolSelectorKey(item.source.citation) === selector &&
+              automaticSupportedSymbolMatchesExcerpt(item.source.citation, candidate.excerpt!),
+          ),
+      )
+    )
+      continue;
+    const current = yield* captureAutomaticCurrentSymbol(
+      config,
+      configuredRoot,
+      citation,
+      record.metadata.project,
+    ).pipe(Effect.option);
+    if (Option.isNone(current) || current.value === undefined) {
+      omissions.push('current-symbol-capture-unavailable');
+      continue;
+    }
+    const captured = current.value;
+    const id = automaticMaintenanceEvidenceId({kind: 'code', citation: captured.citation});
+    if (evidence.some(item => item.id === id)) continue;
+    if (
+      evidence.length >=
+        (record.metadata.reviewedSupport ? MAX_AUTOMATIC_MAINTENANCE_V2_EVIDENCE : MAX_MEMORY_CODE_CITATIONS) ||
+      candidates.length >= (record.metadata.reviewedSupport ? AUTOMATIC_PREPARATION_V2_MAX_CANDIDATES : 16) ||
+      reads.length >= (record.metadata.reviewedSupport ? 32 : 16)
+    ) {
+      omissions.push('code-evidence-budget');
+      continue;
+    }
+    evidence.push({
+      id,
+      source: {kind: 'code', citation: captured.citation},
+      scope: 'repository',
+      authority: 'provisional',
+      availability: 'available',
+    });
+    candidates.push({evidenceId: id, text: captured.excerpt.content, excerpt: captured.excerpt});
+    reads.push({
+      uri: `code:${captured.citation.repositoryId}:${captured.citation.id}`,
+      hash: hash({generation: captured.generation, current: captured.excerpt}),
+    });
+  }
   return {evidence, candidates, reads, omissions, searchedScopes};
 });
 
