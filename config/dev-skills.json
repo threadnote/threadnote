@@ -30,6 +30,7 @@
         "references/contract.md",
         "references/review.md",
         "references/sources.md",
+        "scripts/archive_transport.py",
         "scripts/closeout.py",
         "scripts/cloud_closeout.py",
         "scripts/dev_plan.py",

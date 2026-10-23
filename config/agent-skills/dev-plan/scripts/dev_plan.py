@@ -325,10 +325,12 @@ def canonical(raw):
 
 
 class Threadnote:
-    def __init__(self, repo=None, home=None, **workflow_options):
+    def __init__(self, repo=None, home=None, archive_runtime_policy=None, **workflow_options):
         self.repo, self.home = repo, home
         self.workflow_options = workflow_options
         self.workflow = None
+        self.archive_runtime_policy = archive_runtime_policy
+        self.legacy_archive = None
         wt.attach_explicit(self)
 
     def call(self, command, args, text=None):
@@ -399,9 +401,33 @@ class Threadnote:
         before = self.peek(uri)
         return {"expectedUri": uri, "beforeHash": digest(before) if before is not None else None}
 
-    def archive(self, uri):
+    def _archive_transport(self):
+        wt.require(self.workflow is None and not self.workflow_options.get("workflow_context"),
+                   "Structured workflows require their existing pinned archive transport")
+        wt.require_desktop_legacy(self.home)
+        if self.legacy_archive is None:
+            from archive_transport import LegacyArchiveTransport
+            self.legacy_archive = LegacyArchiveTransport(self, self.archive_runtime_policy)
+        return self.legacy_archive
+
+    def plan_archive(self, uri):
         if self.workflow is not None:
-            return self.workflow.archive(uri)
+            require(self.archive_runtime_policy is None, "Structured workflows retain their original owning runtime")
+            return self.workflow.plan_archive(uri)
+        return self._archive_transport().plan_archive(uri)
+
+    def validate_archive_plans(self, plans):
+        if self.workflow is not None:
+            require(self.archive_runtime_policy is None, "Structured workflows retain their original owning runtime")
+            return self.workflow.validate_archive_plans(plans)
+        return self._archive_transport().validate_archive_plans(plans)
+
+    def archive(self, uri, plan=None):
+        if self.workflow is not None:
+            require(self.archive_runtime_policy is None, "Structured workflows retain their original owning runtime")
+            return self.workflow.archive(uri, plan=plan)
+        if plan is not None:
+            return self._archive_transport().archive(uri, plan)
         output = self.call("archive", [uri])
         match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
         require(match, "Archive did not return its exact destination")
@@ -475,12 +501,21 @@ def memory_text(record, machine=True):
             lines += bullets("Invariants", data["invariants"])
             lines += bullets("Uncertainties", data["unknowns"])
             if kind == "implemented":
+                require(data.get("archiveMapPresentation") in (None, "summary-v1"),
+                        "Unsupported implemented archive-map presentation")
                 lines += bullets("Final contracts", data.get("contracts", []))
                 lines += bullets("Deviations from design", data.get("deviations", []))
                 lines += bullets("Superseded architecture",
                                  [f"[{key}]({uri})" for key, uri in sorted(data.get("supersededArchitecture", {}).items())])
-                lines += bullets("Archived planning history",
-                                 [f"[{key}]({uri})" for key, uri in sorted(data.get("archiveMap", {}).items())])
+                if data.get("archiveMapPresentation") == "summary-v1":
+                    count = len(data.get("archiveMap", {}))
+                    lines += bullets("Archived planning history", [
+                        f"{count} archived planning artifacts. Full source-to-archive links are retained "
+                        "in the structured archiveMap." ] if count else [])
+                else:
+                    # Preserve exact rendering of existing records: load_record verifies both forms.
+                    lines += bullets("Archived planning history",
+                                     [f"[{key}]({uri})" for key, uri in sorted(data.get("archiveMap", {}).items())])
         else:
             lines += bullets("Contracts", data["contracts"])
             lines += bullets("Decisions", [d["choice"] + " — " + d["rationale"] for d in data["decisions"]])

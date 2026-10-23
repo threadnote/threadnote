@@ -18,6 +18,7 @@ import {fixture, devSkillsTestLayer, snapshot} from './service-fixture.js';
 import {runSetupWith, SetupOperationError, type SetupOperationOutcome} from '../../src/setup/index.js';
 import {setupRepositorySourceHash} from '../../src/setup/runtime.js';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
 
 effectIt.effect(
   'public agents install composes current core, explicit opt-out and persistent disabled enrollment',
@@ -71,18 +72,33 @@ fcEffectProp(
   effectIt,
   'repeated default setup cannot re-enable explicit opt-out',
   {repetitions: fc.integer({min: 1, max: 5})},
-  ({repetitions}) =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const core = () => Effect.void;
-      yield* f.run(
-        composeWorkflowSetup(f.config, {agent: 'codex'}, {apply: true, noDevSkills: true, key: 'disabled'}, core),
-      );
-      for (let i = 0; i < repetitions; i++)
-        yield* f.run(composeWorkflowSetup(f.config, {agent: 'codex'}, {apply: true, key: `default-${i}`}, core));
-      const status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
-      expect(status.targets[0]).toMatchObject({enabled: false, enrolled: false});
-    }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
+  ({repetitions}, context) => {
+    const diagnostics = workflowPropertyDiagnostics(context, 'setup-opt-out');
+    return diagnostics.observe(
+      repetitions,
+      Effect.gen(function* () {
+        diagnostics.phase('fixture');
+        const f = yield* fixture();
+        const core = () => Effect.void;
+        diagnostics.phase('explicit-opt-out');
+        yield* f.run(
+          composeWorkflowSetup(f.config, {agent: 'codex'}, {apply: true, noDevSkills: true, key: 'disabled'}, core),
+        );
+        for (let i = 0; i < repetitions; i++) {
+          diagnostics.phase('default-setup', i);
+          yield* f.run(composeWorkflowSetup(f.config, {agent: 'codex'}, {apply: true, key: `default-${i}`}, core));
+        }
+        diagnostics.phase('status');
+        const status = yield* f.run(statusDevSkills(f.config, {agent: 'codex'}));
+        diagnostics.phase('assertion');
+        expect(status.targets[0]).toMatchObject({enabled: false, enrolled: false});
+      }).pipe(
+        Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))),
+        TestClock.withLive,
+        provideTestLayer(devSkillsTestLayer),
+      ),
+    );
+  },
   {fastCheck: {numRuns: 8}},
 );
 

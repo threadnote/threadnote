@@ -585,7 +585,11 @@ async function applicationProgram(arguments_: readonly string[], isMcpServer: bo
     import('./threadnote.js'),
   ]);
   const invocation = inspectCliInvocation(arguments_);
-  if (invocation.operation === 'dev-skills' || invocation.observationalUpdate === true) {
+  if (
+    invocation.operation === 'dev-skills' ||
+    invocation.operation === 'memory-archive' ||
+    invocation.observationalUpdate === true
+  ) {
     // The lifecycle service owns mutation locks after validation. Read-only and
     // rejected requests must not create process registrations or release leases.
     // Bundle loading captures verified bytes before staging, so installation

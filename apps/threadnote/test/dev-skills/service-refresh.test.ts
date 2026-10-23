@@ -145,7 +145,8 @@ describe('exact-release enrolled workflow refresh', () => {
         }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), provide),
       );
     },
-    {arbitrary: {runs: 4}},
+    // Four real-filesystem refresh runs share one outer property deadline on Windows.
+    {arbitrary: {runs: 4}, ...(process.platform === 'win32' ? {timeout: 120_000} : {})},
   );
   effectIt.effect('recovers interrupted opt-out through refresh before comparing the two enrollment indexes', () =>
     Effect.gen(function* () {

@@ -5,6 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from product_skills_fixture import configure_product_skills, assert_product_provenance
 PRODUCT_SKILLS = configure_product_skills(__file__, 6)
+# Match the dev-plan entrypoint's sibling import resolution, including its own transport.
+sys.path.insert(0, str(PRODUCT_SKILLS / "dev-plan/scripts"))
 
 import copy
 import json
@@ -61,6 +63,27 @@ class MemoryClient:
         uri = replace or "threadnote://user/test/memories/active/" + topic + ".md"
         before = self.peek(uri)
         return {"expectedUri": uri, "beforeHash": dp.digest(before) if before is not None else None}
+
+    def plan_archive(self, uri):
+        # Exact in-memory native plan; normal examples still verify citation/readback ordering.
+        return {"transport": "fixture-native-v1", "source": uri,
+                "sourceRecordHash": dp.digest(dp.load_record(self.read(uri))),
+                "preview": {"canonicalUri": uri.replace("/active/", "/archived/")}}
+
+    def validate_archive_plans(self, plans):
+        for plan in plans:
+            uri = plan["source"]
+            observed = self.peek(uri) or self.peek(plan["preview"]["canonicalUri"])
+            dp.require(observed is not None and dp.digest(dp.load_record(observed)) == plan["sourceRecordHash"],
+                       "Native planned source changed")
+
+    def archive(self, uri, plan=None):
+        dp.require(plan is not None and plan["source"] == uri, "Archive needs its exact admitted plan")
+        self.validate_archive_plans([plan])
+        output = self.call("archive", [uri])
+        archived = re.search(r"Stored memory: (threadnote://[^\s]+)", output).group(1)
+        dp.require(archived == plan["preview"]["canonicalUri"], "Native archive destination drift")
+        return archived
 
     def call(self, command, args, text=None):
         uri = args[0]
