@@ -7,6 +7,7 @@
     "./resource/lock": "./src/resource/lock.ts",
     "./resource/mutation_generation": "./src/resource/mutation_generation.ts",
     "./resource/recall-invalidation": "./src/resource/recall-invalidation.ts",
+    "./resource/settled_revision": "./src/resource/settled_revision.ts",
     "./resource-id": "./src/resource-id.ts",
     "./resource-segment": "./src/resource-segment.ts",
     "./resource-store": "./src/resource-store.ts",

@@ -1,6 +1,5 @@
 import {startAutomaticModelSetupScheduler} from '../models/setup_lifecycle.js';
 import {MANAGER_STATIC_FILES as STATIC_FILES} from './static-files.js';
-import * as BunHttpServer from '@effect/platform-bun/BunHttpServer';
 import {
   Cause,
   Console,
@@ -23,6 +22,9 @@ import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
+import {makeManagerLive, managerLiveHttpLayer, readManagerLiveProjects, type ManagerLive} from './live.js';
+import {makeManagerLiveSources, ManagerLiveChangeHints} from './live_sources.js';
+import {contextMaintenanceStatePath} from '../memory/context/maintenance.js';
 import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
 import {
   captureConsolidationSource,
@@ -273,6 +275,7 @@ interface ReadTreeOptions {
 }
 
 interface ApiContext {
+  readonly live?: ManagerLive;
   readonly automaticCompactionStatus?: Ref.Ref<CodeGraphAutomaticCompactionStatus>;
   readonly config: RuntimeConfig;
   readonly jobs: Map<string, ConsolidationJob>;
@@ -344,7 +347,7 @@ interface BulkItemResult {
 export function runManage(config: RuntimeConfig, options: ManageOptions) {
   return Effect.scoped(
     assertManagerSourceAssets().pipe(
-      Effect.andThen(Layer.build(BunHttpServer.layer({hostname: '127.0.0.1', port: options.uiPort ?? 0}))),
+      Effect.andThen(Layer.build(managerLiveHttpLayer(options.uiPort ?? 0))),
       Effect.flatMap(context =>
         Effect.gen(function* () {
           if (yield* codeGraphMaintenanceIntentActive(config.agentContextHome)) {
@@ -363,16 +366,33 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
           const automaticCompactionStatus = yield* Ref.make<CodeGraphAutomaticCompactionStatus>({state: 'idle'});
           const worksetScope = yield* Scope.Scope;
           const server = yield* HttpServer.HttpServer;
-          yield* Effect.addFinalizer(() => releaseManagerGraphSnapshotLeases());
-          yield* server.serve(
-            createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope}),
-          );
-          yield* startManagerContextSchedulers(config, automaticCompactionStatus);
-          yield* startAutomaticModelSetupScheduler(config.agentContextHome);
           const actualPort =
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port
               : (options.uiPort ?? 0);
+          const live = yield* makeManagerLive({
+            origin: `http://127.0.0.1:${actualPort}`,
+            token,
+            projects: readManagerLiveProjects(yield* FileSystem.FileSystem, config.manifestPath),
+          });
+          const sources = yield* makeManagerLiveSources({
+            home: config.agentContextHome,
+            account: config.account,
+            maintenanceStatePath: yield* contextMaintenanceStatePath(config),
+            manifestPath: config.manifestPath,
+            onScopeChange: live.invalidateScope,
+            onInvalidate: live.publish,
+          });
+          yield* Effect.addFinalizer(() => releaseManagerGraphSnapshotLeases());
+          yield* server.serve(
+            createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope, live}).pipe(
+              Effect.provideService(ManagerLiveChangeHints, sources.hints),
+            ),
+          );
+          yield* startManagerContextSchedulers(config, automaticCompactionStatus).pipe(
+            Effect.provideService(ManagerLiveChangeHints, sources.hints),
+          );
+          yield* startAutomaticModelSetupScheduler(config.agentContextHome);
           const url = managerLoopbackUrl(actualPort, token);
           yield* Console.log(`Threadnote manager: ${url}`);
           yield* Console.log('Press Ctrl-C to stop the manager.');
@@ -391,11 +411,18 @@ export function createManagerServer(context: ApiContext) {
     Effect.gen(function* () {
       const response: ManagerResponseSink = {};
       const incoming = yield* HttpServerRequest.HttpServerRequest;
+      if (context.live) {
+        const liveResponse = yield* context.live.handle(incoming);
+        if (liveResponse !== undefined) return liveResponse;
+      }
       const boundedRequest =
         new URL(request.url, 'http://127.0.0.1').pathname === '/api/models/setup'
           ? {...request, body: readManagerModelSetupBody(incoming)}
           : request;
       yield* handleRequestEffect(context, boundedRequest, response);
+      if (request.method === 'POST' && response.response && response.response.status < 300) {
+        yield* (yield* ManagerLiveChangeHints).canonical.pipe(Effect.ignoreCause);
+      }
       return response.response;
     }),
   );

@@ -1,0 +1,70 @@
+import {Schema} from 'effect';
+
+export const MANAGER_LIVE_VERSION = 1;
+export const MANAGER_LIVE_LIMITS = {
+  connections: 16,
+  tickets: 64,
+  ticketLifetimeMilliseconds: 30_000,
+  subscriptions: 32,
+  pendingResources: 16,
+  messageBytes: 8_192,
+  incomingFrames: 8,
+  bufferedBytes: 65_536,
+  heartbeatMilliseconds: 15_000,
+  clientTimeoutMilliseconds: 45_000,
+} as const;
+
+/**
+ * The welcome frame is the capability list; a schema name alone is not support.
+ * context-maintenance invalidates its status GET, not evidence packets/actions.
+ * context-health stays unadvertised until repository source coverage is ready.
+ */
+export const ManagerLiveTopic = Schema.Literals(['context-health', 'context-maintenance']);
+export type ManagerLiveTopic = typeof ManagerLiveTopic.Type;
+export const ManagerLiveResource = Schema.Struct({
+  topic: ManagerLiveTopic,
+  project: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+});
+export type ManagerLiveResource = typeof ManagerLiveResource.Type;
+const sequence = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}));
+const generation = Schema.Int.check(Schema.isBetween({minimum: 1, maximum: Number.MAX_SAFE_INTEGER}));
+const opaque = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128));
+const version = Schema.Literal(MANAGER_LIVE_VERSION);
+
+export const ManagerLiveClientFrame = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal('subscribe'),
+    version,
+    generation,
+    resources: Schema.Array(ManagerLiveResource).check(Schema.isMaxLength(MANAGER_LIVE_LIMITS.subscriptions)),
+  }),
+  Schema.Struct({type: Schema.Literal('heartbeat'), version}),
+]);
+export type ManagerLiveClientFrame = typeof ManagerLiveClientFrame.Type;
+
+export const ManagerLiveServerFrame = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal('welcome'),
+    version,
+    epoch: opaque,
+    topics: Schema.Array(ManagerLiveTopic),
+    heartbeatMilliseconds: Schema.Finite,
+  }),
+  Schema.Struct({type: Schema.Literal('subscribed'), version, epoch: opaque, generation, startingSequence: sequence}),
+  Schema.Struct({
+    type: Schema.Literal('invalidation'),
+    version,
+    epoch: opaque,
+    generation,
+    sequence,
+    resource: ManagerLiveResource,
+    revision: opaque,
+  }),
+  Schema.Struct({type: Schema.Literal('reset'), version, epoch: opaque, generation, sequence}),
+  Schema.Struct({type: Schema.Literal('heartbeat'), version, epoch: opaque}),
+]);
+export type ManagerLiveServerFrame = typeof ManagerLiveServerFrame.Type;
+
+export function managerLiveResourceKey(resource: ManagerLiveResource): string {
+  return JSON.stringify([resource.topic, resource.project]);
+}
