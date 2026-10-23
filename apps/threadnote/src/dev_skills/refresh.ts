@@ -202,6 +202,18 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                   );
                 return yield* withHomeLease(ownConfig, coordinator, lease =>
                   Effect.gen(function* () {
+                    // An interrupted physical mutation can change both indexes. Resume
+                    // its original consumer before interpreting consent; ordinary opt-outs
+                    // still skip without creating a physical lock or destination.
+                    if (originalId === member.consumerId)
+                      yield* withPhysicalLock(
+                        root,
+                        recoverTransaction({
+                          home: enrollment.home,
+                          installationRoot: context.root,
+                          target: enrollment.target,
+                        }),
+                      );
                     // The home lease first recovers a validated enablement journal.
                     // Only its recovered indexes may authorize a skip or a write.
                     const recovered = yield* enrollmentContext(ownConfig);
