@@ -38,10 +38,12 @@ For `delivery: pr`, repeat this sequence until no eligible phase remains:
 1. Select an eligible phase and create its fresh cycle, or resume its recorded unfinished cycle.
 2. Implement, review, fix and validate that phase against its own acceptance. Run `ready` and preserve its evidence.
 3. Commit the validated phase and record its head, pass the publication gate against that commit, then open the phase's draft PR. Record the actual PR URL/head/base; a local validation result or planned PR URL does not complete delivery.
-4. Start watch-pr and record its live consumer and state directory. Verify the handoff before advancing; a detached collector without a consumer is insufficient.
-5. Save the phase handoff, run `next`, and immediately start the returned phase's separate cycle. CI and review continue in the background; do not wait for green or merge, or ask the user to authorize the already-approved next phase again.
+4. Start watch-pr and verify its live consumer and state directory. Save the PR readback and watcher handoff in a delivery receipt, then run `record-delivery`. A detached collector without a consumer is insufficient; the current orchestrator can be the consumer while it continues the plan.
+5. Save the phase handoff and run `next`. Start the returned phase's separate cycle only for `action: implement`. CI and review continue in the background; do not wait for green or merge, or ask the user to authorize the already-approved next phase again.
 
-`next` selects implementation eligibility only; it does not prove that the preceding phase was published or that a watcher owns its feedback. Check those delivery receipts before using its result to advance. For `local` or `commit` delivery, complete the requested local/commit boundary instead of creating a PR or watcher. Explicit user phase limits still apply.
+`next` returns `action: deliver` for the first locally completed phase with a missing or stale delivery receipt, including independent phases and the final phase. Finish that phase's delivery before implementing another. `packet` and `check-phase` also reject new work while this handoff is pending, so a cached packet cannot bypass the gate. `action: implement` permits the returned phase; `blocked` means reconcile unfinished/stale work; `complete` means all requested local delivery boundaries are recorded, not that every PR is CI-green or merged.
+
+Keep the delivery mode agreed for the plan. Do not switch `pr` to `local`/`commit`, relabel a phase, or invent receipt fields to advance. Existing PR authorization persists across phases. For an explicitly local plan, validation completes the boundary; commit-only delivery needs the verified commit receipt but no PR/watcher. Explicit user phase limits still apply.
 
 If `next` returns no phase, inspect the map: stale/blocked/unfinished phases mean blocked progress, not plan completion. Pending CI may remain after all phase cycles are delivered. Keep watching those PRs, and preserve the distinction between delivered, CI-green and merged. A publication or watcher failure remains an unfinished phase handoff; report the concrete blocker rather than marking the plan complete.
 
@@ -77,7 +79,49 @@ python3 "$SKILL_DIR/scripts/phase_state.py" ready --plan "$RUN_DIR/plan.json" \
 
 `ready` checks live source identity, exact acceptance coverage, successful check evidence, working product state and matching phase/plan/review identity; it marks the phase locally `validated`. It cannot prove a claimed check actually ran: keep command evidence and independent review. It never marks published, CI-green or merged.
 
-Maintain dynamic fields: `cycleRunId`, `cycleDir`, `worktree`, `baseSha`, `headSha`, `validatedTree`, `prUrl`, `watchStateDir`, `watchWorkerId`, `heartbeatId`, `learning.memoryUris`, `handledDeliveryIds`, and checkpoint/iteration budget. These do not alter the static plan hash. Keep manual test steps/fixture details in phase validation/delivery records for concrete closeout instructions.
+## Record delivery before advancing
+
+Capture the actual commit/tree verification, PR readback and live watcher ownership in a private JSON receipt. The helper checks identity and completeness; it does not query GitHub or prove that a reported consumer is alive. The orchestrator must perform those reads, retain their evidence, and verify ownership again on resume. Pending CI is allowed. A planned URL, a `published` label or a detached process alone is not a receipt.
+
+```json
+{
+  "phaseId": "foundation",
+  "delivery": "pr",
+  "planHash": "current plan definition hash",
+  "headSha": "verified committed phase SHA",
+  "validatedTree": "validated source tree",
+  "commitEvidence": "path to commit/tree readback",
+  "pr": {
+    "url": "https://github.com/OWNER/REPO/pull/NUMBER",
+    "headSha": "verified committed phase SHA",
+    "branch": "feature/parser-foundation",
+    "baseBranch": "main",
+    "state": "open",
+    "evidence": "path to current PR URL/head/base readback"
+  },
+  "watch": {
+    "prUrl": "https://github.com/OWNER/REPO/pull/NUMBER",
+    "headSha": "verified committed phase SHA",
+    "stateDir": "/absolute/private/watch-state",
+    "consumerKind": "orchestrator",
+    "consumerId": "current run or worker/heartbeat ID",
+    "status": "active",
+    "evidence": "path to confirmed live consumer handoff"
+  }
+}
+```
+
+`consumerKind` is `worker`, `heartbeat` or `orchestrator`. For `delivery: commit`, omit `pr` and `watch`. A confirmed merged phase can use `pr.state: merged` without an active watcher; reconcile the phase's merged state from actual PR evidence first. Older plans without receipts must capture existing delivery evidence before advancing; do not recreate an existing PR.
+
+```sh
+python3 "$SKILL_DIR/scripts/phase_state.py" record-delivery --plan "$RUN_DIR/plan.json" \
+  --phase "$PHASE_ID" --receipt "$PHASE_DIR/delivery-receipt.json"
+python3 "$SKILL_DIR/scripts/phase_state.py" next --plan "$RUN_DIR/plan.json"
+```
+
+For PR delivery, `record-delivery` also checks the publication gate before recording the handoff. New validation or invalidation clears the old delivery receipt; a changed head, tree, plan, PR identity or watcher handoff requires fresh evidence. A publication/watcher blocker remains unfinished delivery, with its concrete reason recorded; it is not permission to start the next phase.
+
+Maintain dynamic fields: `cycleRunId`, `cycleDir`, `worktree`, `baseSha`, `headSha`, `validatedTree`, `deliveryReceipt`, `prUrl`, `watchStateDir`, `watchWorkerId`, `heartbeatId`, `learning.memoryUris`, `handledDeliveryIds`, and checkpoint/iteration budget. These do not alter the static plan hash. Keep manual test steps/fixture details in phase validation/delivery records for concrete closeout instructions.
 
 On a parent failure, unexpected head, changed base or rejected assumption:
 

@@ -4,11 +4,13 @@ import sys
 sys.dont_write_bytecode = True
 
 import argparse
+import copy
 import fnmatch
 import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from dev_cycle import check, read_json, require, validate_review, write_json
 
@@ -106,16 +108,103 @@ def eligible(phase, by_id):
     return all(by_id[key].get("status") in READY for key in phase["dependsOn"])
 
 
+def check_delivery(plan, phase, receipt=None):
+    require(phase.get("status") in READY, "Phase needs current local validation before delivery")
+    if plan["delivery"] == "local":
+        return
+    stored_receipt = receipt is None
+    receipt = phase.get("deliveryReceipt") if stored_receipt else receipt
+    require(isinstance(receipt, dict), "Record the completed phase delivery with record-delivery")
+    require(receipt.get("phaseId") == phase["id"] and receipt.get("delivery") == plan["delivery"]
+            and receipt.get("planHash") == definition_hash(plan), "Delivery receipt belongs to another phase, mode, or plan")
+    for key in ("headSha", "validatedTree"):
+        text(phase.get(key), "phase " + key)
+        require(receipt.get(key) == phase[key], "Delivery receipt has stale " + key)
+    text(receipt.get("commitEvidence"), "verified commit/tree evidence")
+    if plan["delivery"] == "commit":
+        return
+    pr = receipt.get("pr")
+    require(isinstance(pr, dict), "Missing verified phase PR")
+    url = urlsplit(text(pr.get("url"), "phase PR URL"))
+    require(url.scheme == "https" and url.netloc and url.path, "Use the actual HTTPS phase PR URL")
+    if stored_receipt:
+        require(pr["url"] == phase.get("prUrl"), "Delivery receipt targets a different phase PR")
+    require(pr.get("headSha") == phase["headSha"] and pr.get("branch") == phase["branch"]
+            and pr.get("baseBranch") == phase["baseBranch"], "PR receipt does not match phase head/branch/base")
+    require(pr.get("state") in ("open", "merged"), "Phase PR must be open or confirmed merged")
+    text(pr.get("evidence"), "PR readback evidence")
+    if pr["state"] == "merged":
+        require(phase.get("status") == "merged", "Reconcile the confirmed merge before recording delivery")
+        return
+    require(phase.get("status") != "merged", "Merged phase has an open PR receipt")
+    watch = receipt.get("watch")
+    require(isinstance(watch, dict) and watch.get("status") == "active", "Start watch-pr with an owned consumer")
+    require(watch.get("prUrl") == pr["url"] and watch.get("headSha") == phase["headSha"],
+            "Watcher receipt targets another PR or head")
+    require(Path(text(watch.get("stateDir"), "watcher state directory")).is_absolute(),
+            "Watcher state directory must be absolute")
+    require(watch.get("consumerKind") in ("worker", "heartbeat", "orchestrator"), "Missing watcher consumer kind")
+    text(watch.get("consumerId"), "live watcher consumer ID")
+    text(watch.get("evidence"), "watcher ownership verification evidence")
+
+
+def pending_delivery(plan):
+    validate_plan(plan)
+    if plan["delivery"] == "local":
+        return None
+    for phase in plan["phases"]:
+        if phase.get("status") in READY or (phase.get("status") == "blocked" and phase.get("validatedTree")):
+            try:
+                check_delivery(plan, phase)
+            except ValueError as error:
+                return {"action": "deliver", "phase": phase, "reason": str(error)}
+    return None
+
+
+def require_delivered_phases(plan, phase=None):
+    # Current validated phases can resume their own review/fix/delivery work.
+    if phase is not None and phase.get("status") in READY:
+        return
+    pending = pending_delivery(plan)
+    require(pending is None, "Finish delivery of phase " + (pending["phase"]["id"] + ": " + pending["reason"]
+                                                           if pending else "") + " before starting another phase")
+
+
 def next_phase(plan):
     by_id = validate_plan(plan)
+    require_delivered_phases(plan)
     return next((phase for phase in plan["phases"]
                  if phase.get("status", "pending") in {"pending", "active"} and eligible(phase, by_id)), None)
+
+
+def next_action(plan):
+    pending = pending_delivery(plan)
+    if pending:
+        return pending
+    phase = next_phase(plan)
+    action = "implement" if phase else "complete" if all(p.get("status") in READY for p in plan["phases"]) else "blocked"
+    return {"action": action, "phase": phase}
+
+
+def record_delivery(plan, phase_id, receipt):
+    phase = validate_plan(plan).get(phase_id)
+    require(phase is not None, "Unknown phase")
+    check_delivery(plan, phase, receipt)
+    if plan["delivery"] == "pr" and phase["status"] != "merged":
+        publication_gate(plan, phase_id)
+    phase["deliveryReceipt"] = copy.deepcopy(receipt)
+    if plan["delivery"] == "pr":
+        phase["prUrl"] = receipt["pr"]["url"]
+        if phase["status"] != "merged":
+            phase["status"] = "published"
+    return {"phase": phase_id, "status": "delivered", "delivery": plan["delivery"]}
 
 
 def make_packet(plan, phase_id, memories):
     by_id = validate_plan(plan)
     require(phase_id in by_id, "Unknown phase")
     phase = by_id[phase_id]
+    require_delivered_phases(plan, phase)
     require(eligible(phase, by_id) and phase.get("status", "pending") not in {"stale", "blocked"},
             "Phase has unvalidated/stale dependencies or needs reconciliation")
     uris = list(dict.fromkeys(plan.get("planMemoryUris", []) + phase["memoryUris"]))
@@ -133,6 +222,7 @@ def check_scope(plan, packet, files):
     require(packet["planHash"] == definition_hash(plan), "Plan definition drift; reconcile before proceeding")
     phase = validate_plan(plan)[packet["phase"]["id"]]
     require(phase.get("status") not in {"stale", "blocked"}, "Reconcile the invalidated phase first")
+    require_delivered_phases(plan, phase)
     require(eligible(phase, validate_plan(plan)), "A phase dependency is no longer validated")
     for file in files:
         path = Path(file)
@@ -172,6 +262,7 @@ def invalidate(plan, phase_id, reason):
             "Merged changes need a new corrective phase, not history rewriting")
     for key in affected:
         by_id[key].update(status="stale", invalidationReason=reason)
+        by_id[key].pop("deliveryReceipt", None)
     return sorted(affected)
 
 
@@ -288,11 +379,13 @@ def closeout_packet(proposals):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("validate-plan", "next", "packet", "check-phase", "ready", "invalidate"):
+    for name in ("validate-plan", "next", "packet", "check-phase", "ready", "invalidate", "record-delivery"):
         command = commands.add_parser(name)
         command.add_argument("--plan", type=Path, required=True)
-        if name in {"packet", "invalidate"}:
+        if name in {"packet", "invalidate", "record-delivery"}:
             command.add_argument("--phase", required=True)
+        if name == "record-delivery":
+            command.add_argument("--receipt", type=Path, required=True)
         if name == "packet":
             command.add_argument("--memories", type=Path)
             command.add_argument("--output", type=Path, required=True)
@@ -335,7 +428,10 @@ def main():
             if args.command == "validate-plan":
                 result = {"planHash": definition_hash(plan), "phases": list(by_id)}
             elif args.command == "next":
-                result = {"phase": next_phase(plan)}
+                result = next_action(plan)
+            elif args.command == "record-delivery":
+                result = record_delivery(plan, args.phase, read_json(args.receipt))
+                write_json(args.plan, plan)
             elif args.command == "packet":
                 result = make_packet(plan, args.phase, read_json(args.memories) if args.memories else {})
                 args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -360,6 +456,7 @@ def main():
                                 "Review belongs to a different phase, plan revision, or source tree")
                     else:
                         text(args.review_skipped, "review skip reason")
+                    phase.pop("deliveryReceipt", None)
                     phase.update(status="validated", validatedTree=snapshot["tree"],
                                  validationFile=str(args.validation.resolve()),
                                  validationHash=hashlib.sha256(args.validation.read_bytes()).hexdigest(),
