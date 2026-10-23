@@ -1865,6 +1865,7 @@ bun_test(
         "//apps/threadnote:src/workflow_memory/protocol.ts",
         "//apps/threadnote:src/workflow_memory/publication.ts",
         "//apps/threadnote:src/workflow_memory/publication_contract.ts",
+        "//apps/threadnote:src/workflow_memory/scopes.ts",
         "//apps/threadnote:src/workspace_component.ts",
         "//apps/threadnote:test/evaluation/baselines/code-graph-v1/beta30-staging-development.json",
         "//apps/threadnote:test/evaluation/baselines/code-graph-v1/budgets.json",

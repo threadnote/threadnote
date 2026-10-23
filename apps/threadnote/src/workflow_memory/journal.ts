@@ -14,6 +14,7 @@ import {
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
+import {readWorkflowSharedRoots} from './scopes.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -122,8 +123,9 @@ export const reconcileManifest = Effect.fn('workflowMemory.reconcileManifest')(f
 ) {
   const store = yield* ResourceStore;
   const current = yield* readOptionalResource(config, state.manifestUri);
+  const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
   yield* Effect.try({
-    try: () => assertWorkflowJournalIntegrity(state, current),
+    try: () => assertWorkflowJournalIntegrity(state, current, sharedRoots),
     catch: cause =>
       Schema.is(WorkflowMemoryError)(cause)
         ? cause
@@ -192,25 +194,32 @@ const workflowTransition = (
   manifestCommitted: false,
 });
 
-const validateTransition = (previous: WorkflowJournal, prepared: WorkflowJournal) =>
-  Effect.try({
-    try: () => assertWorkflowJournalIntegrity(prepared, previous.manifestContent),
+const validateTransition = Effect.fn('workflowMemory.validateTransition')(function* (
+  config: RuntimeConfig,
+  previous: WorkflowJournal,
+  prepared: WorkflowJournal,
+) {
+  const sharedRoots = yield* readWorkflowSharedRoots(config, prepared.binding);
+  yield* Effect.try({
+    try: () => assertWorkflowJournalIntegrity(prepared, previous.manifestContent, sharedRoots),
     catch: () =>
       workflowError(
         'operation-transition-conflict',
         'This operation would invalidate workflow ownership or unfinished intent. Recover the existing operations first.',
       ),
   });
+});
 
 /** Admit the completion image before writing intent or touching native artifacts. */
 export const assertWorkflowTransition = Effect.fn('workflowMemory.transition')(function* (
+  config: RuntimeConfig,
   previous: WorkflowJournal,
   updated: WorkflowJournal,
 ) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
   yield* validateWorkflowInput(() => serializeWorkflowJournal(prepared));
   yield* validateWorkflowInput(() => serializeWorkflowJournal({...prepared, manifestCommitted: true}));
-  yield* validateTransition(previous, prepared);
+  yield* validateTransition(config, previous, prepared);
 });
 
 export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(function* (
@@ -219,7 +228,7 @@ export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(fun
   updated: WorkflowJournal,
 ) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
-  yield* validateTransition(previous, prepared);
+  yield* validateTransition(config, previous, prepared);
   yield* writeJournalFile(config, prepared);
   yield* reconcileManifest(config, prepared, true);
   const committed = {...prepared, manifestCommitted: true};
