@@ -1,6 +1,21 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {LoaderCircle, RefreshCw, Sparkles} from 'lucide-react';
-import {ReviewBadge, ReviewNotice} from '../review_presentation.js';
+import {
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  BadgeCheck,
+  CircleHelp,
+  Clock3,
+  FolderSearch,
+  Info,
+  LoaderCircle,
+  Pause,
+  RefreshCw,
+  ShieldAlert,
+  Sparkles,
+  type LucideIcon,
+} from 'lucide-react';
+import {ReviewBadge, ReviewNotice, type ReviewTone} from '../review_presentation.js';
 import {api, errorMessage} from '../ui/support.js';
 import type {
   ManagerAutomaticMemoryItem,
@@ -29,21 +44,30 @@ export function reconcileAutomaticMemoryItems(
   );
 }
 
-const labels: Record<ManagerAutomaticMemoryItem['state'], string> = {
-  preparing: 'Preparing evidence',
-  queued: 'Queued',
-  generating: 'Generating draft',
-  'waiting-model': 'Model setup needed',
-  'waiting-budget': 'Waiting for generation budget',
-  paused: 'Automatic preparation paused',
-  policy: 'Waiting for policy or source access',
-  retry: 'Waiting for one bounded retry',
-  failed: 'Draft preparation stopped',
-  ready: 'Ready to review',
-  reviewed: 'Approved support recorded',
-  unknown: 'Coverage unknown',
-  deferred: 'Review deferred',
-  verification: 'Finish verification',
+const states: Record<
+  ManagerAutomaticMemoryItem['state'],
+  {readonly label: string; readonly tone: ReviewTone; readonly icon: LucideIcon}
+> = {
+  preparing: {label: 'Preparing evidence', tone: 'info', icon: LoaderCircle},
+  queued: {label: 'Queued', tone: 'info', icon: Clock3},
+  generating: {label: 'Generating draft', tone: 'info', icon: LoaderCircle},
+  'waiting-model': {label: 'Model setup needed', tone: 'warning', icon: AlertTriangle},
+  'waiting-budget': {label: 'Waiting for generation budget', tone: 'neutral', icon: Clock3},
+  paused: {label: 'Automatic preparation paused', tone: 'neutral', icon: Pause},
+  policy: {label: 'Waiting for policy or source access', tone: 'warning', icon: ShieldAlert},
+  retry: {label: 'Waiting for one bounded retry', tone: 'warning', icon: RefreshCw},
+  failed: {label: 'Draft preparation stopped', tone: 'danger', icon: AlertTriangle},
+  ready: {label: 'Ready to review', tone: 'proposal', icon: Sparkles},
+  reviewed: {label: 'Approved support recorded', tone: 'info', icon: BadgeCheck},
+  unknown: {label: 'Coverage unknown', tone: 'neutral', icon: CircleHelp},
+  deferred: {label: 'Review deferred', tone: 'neutral', icon: Clock3},
+  verification: {label: 'Finish verification', tone: 'warning', icon: ShieldAlert},
+};
+
+const coverageScopes = {
+  'recorded-only': 'Recorded sources only',
+  'bounded-search': 'Bounded source search',
+  none: 'Sources not yet assessed',
 };
 
 /** Stable, nonmutating grouping: an uncited backlog is one coverage item, never many alarms. */
@@ -140,9 +164,14 @@ export function AutomaticMemoryPanel(props: {
   return (
     <section className="automatic-memory-panel" aria-label="Automatic memory updates">
       <header className="automatic-memory-heading">
-        <div>
-          <span className="attention-kicker">Automatic memory care</span>
-          <h3>{props.uri ? 'Assessment & support' : 'Prepared updates'}</h3>
+        <div className="automatic-memory-title">
+          <span className="automatic-memory-heading-icon" aria-hidden="true">
+            <Sparkles size={21} />
+          </span>
+          <div>
+            <span className="attention-kicker">Automatic memory care</span>
+            <h3>{props.uri ? 'Assessment & support' : 'Prepared updates'}</h3>
+          </div>
         </div>
         <button
           type="button"
@@ -168,78 +197,95 @@ export function AutomaticMemoryPanel(props: {
           <LoaderCircle className="automatic-memory-spinner" size={16} /> Loading automatic assessment…
         </p>
       ) : null}
-      {groups.items.map(item => (
-        <article className={`automatic-memory-card${item.state === 'ready' ? ' is-ready' : ''}`} key={item.uri}>
-          <header>
-            <h4>{item.title}</h4>
-            <ReviewBadge tone={item.state === 'ready' ? 'proposal' : item.state === 'failed' ? 'warning' : 'neutral'}>
-              {['preparing', 'generating', 'queued'].includes(item.state) ? (
-                <LoaderCircle className="automatic-memory-spinner" size={13} />
+      {groups.items.map(item => {
+        const state = states[item.state];
+        const Icon = state.icon;
+        return (
+          <article className="automatic-memory-card" data-state={item.state} data-tone={state.tone} key={item.uri}>
+            <header>
+              <h4>{item.title}</h4>
+              <ReviewBadge tone={state.tone}>
+                <Icon
+                  className={['preparing', 'generating'].includes(item.state) ? 'automatic-memory-spinner' : undefined}
+                  size={14}
+                  aria-hidden="true"
+                />
+                {state.label}
+              </ReviewBadge>
+            </header>
+            <div className="automatic-memory-source-summary">
+              <ReviewBadge tone={item.coverage.outcome === 'partial' ? 'warning' : 'neutral'}>
+                <FolderSearch size={13} aria-hidden="true" />
+                {item.coverage.outcome === 'unknown' ? 'Coverage unknown' : `${item.coverage.outcome} coverage`}
+              </ReviewBadge>
+              <span>{coverageScopes[item.coverage.scope]}</span>
+              {item.coverage.omittedSources > 0 ? (
+                <span className="automatic-memory-omitted">
+                  {item.coverage.omittedSources} omitted {item.coverage.omittedSources === 1 ? 'source' : 'sources'}
+                </span>
               ) : null}
-              {labels[item.state]}
-            </ReviewBadge>
-          </header>
-          <p className="muted">
-            {item.coverage.outcome} coverage · {item.coverage.scope.replaceAll('-', ' ')} ·{' '}
-            {item.coverage.omittedSources} omitted sources
-          </p>
-          {item.reason ? <p>{item.reason.replaceAll('-', ' ')}</p> : null}
-          {item.nextEligibleAt !== undefined ? (
-            <p className="muted">
-              Next eligible: {new Date(item.nextEligibleAt).toLocaleString()}
-              {item.retryCount !== undefined ? ` · retry ${item.retryCount}/1` : ''}
-            </p>
-          ) : null}
-          {item.paragraphs.length ? (
-            <div className="attention-tags">
-              {[...new Set(item.paragraphs.map(p => `${p.authority} ${p.role} · ${p.support}`))].map(label => (
-                <ReviewBadge key={label} tone="neutral">
-                  {label}
-                </ReviewBadge>
-              ))}
             </div>
-          ) : (
-            <p className="muted">Roles and source support have not been assessed.</p>
-          )}
-          {item.route === 'shared-owner-review' ? (
-            <p>
-              Shared memory: an authorized team owner reviews the exact proposal; publication requires separate
-              approval.
-            </p>
-          ) : item.route === 'read-only' ? (
-            <p>Read-only source. Ask its authorized owner to review this memory.</p>
-          ) : null}
-          {item.reviewId ? (
-            <button
-              type="button"
-              className={item.state === 'ready' || item.state === 'verification' ? 'primary' : undefined}
-              onClick={() => openReview(item.reviewId!)}
-            >
-              <Sparkles size={15} />
-              {item.state === 'verification'
-                ? 'Finish verification'
-                : item.state === 'deferred'
-                  ? 'Open deferred review'
-                  : 'Review update'}
-            </button>
-          ) : item.state === 'failed' ? (
-            <p>Refresh source access or model setup, then wait for changed evidence. Automatic retries are finite.</p>
-          ) : null}
-          {item.canGenerate && !item.reviewId && item.route === 'personal-review' ? (
-            <AutomaticGenerate
-              key={`${props.project}:${item.uri}:${item.targetHash}`}
-              project={props.project}
-              item={item}
-              onReady={openReview}
-            />
-          ) : null}
-        </article>
-      ))}
+            {item.reason ? <p>{item.reason.replaceAll('-', ' ')}</p> : null}
+            {item.nextEligibleAt !== undefined ? (
+              <p className="muted">
+                Next eligible: {new Date(item.nextEligibleAt).toLocaleString()}
+                {item.retryCount !== undefined ? ` · retry ${item.retryCount}/1` : ''}
+              </p>
+            ) : null}
+            {item.paragraphs.length ? (
+              <div className="attention-tags">
+                {[...new Set(item.paragraphs.map(p => `${p.authority} ${p.role} · ${p.support}`))].map(label => (
+                  <ReviewBadge key={label} tone="neutral">
+                    {label}
+                  </ReviewBadge>
+                ))}
+              </div>
+            ) : (
+              <p className="muted">Roles and source support have not been assessed.</p>
+            )}
+            {item.route === 'shared-owner-review' ? (
+              <p>
+                Shared memory: an authorized team owner reviews the exact proposal; publication requires separate
+                approval.
+              </p>
+            ) : item.route === 'read-only' ? (
+              <p>Read-only source. Ask its authorized owner to review this memory.</p>
+            ) : null}
+            {item.reviewId ? (
+              <button
+                type="button"
+                className={item.state === 'ready' || item.state === 'verification' ? 'primary' : undefined}
+                onClick={() => openReview(item.reviewId!)}
+              >
+                <Sparkles size={15} />
+                {item.state === 'verification'
+                  ? 'Finish verification'
+                  : item.state === 'deferred'
+                    ? 'Open deferred review'
+                    : 'Review update'}
+              </button>
+            ) : item.state === 'failed' ? (
+              <p>Refresh source access or model setup, then wait for changed evidence. Automatic retries are finite.</p>
+            ) : null}
+            {item.canGenerate && !item.reviewId && item.route === 'personal-review' ? (
+              <AutomaticGenerate
+                key={`${props.project}:${item.uri}:${item.targetHash}`}
+                project={props.project}
+                item={item}
+                onReady={openReview}
+              />
+            ) : null}
+          </article>
+        );
+      })}
       {groups.coverage.length ? (
         <details className="review-disclosure automatic-memory-coverage">
           <summary>
-            {groups.coverage.length} older or uncited{' '}
-            {groups.coverage.length === 1 ? 'memory awaits' : 'memories await'} source coverage
+            <FolderSearch size={18} aria-hidden="true" />
+            <span>
+              <strong>{groups.coverage.length} older or uncited</strong>{' '}
+              {groups.coverage.length === 1 ? 'memory awaits' : 'memories await'} source coverage
+            </span>
           </summary>
           <p>
             Automatic checks continue during normal use. Missing or unknown support does not mean current or verified.
@@ -247,14 +293,19 @@ export function AutomaticMemoryPanel(props: {
           <ul>
             {groups.coverage.map(item => (
               <li key={item.uri}>
-                {item.title} · {labels[item.state]} · {item.coverage.outcome}
+                {item.title} · {states[item.state].label} · {item.coverage.outcome}
               </li>
             ))}
           </ul>
         </details>
       ) : null}
       {status?.omitted ? (
-        <p className="muted">{status.omitted} additional memories are outside this bounded view.</p>
+        <p className="automatic-memory-limit">
+          <Info size={15} aria-hidden="true" />
+          <span>
+            <strong>{status.omitted} additional memories</strong> are outside this bounded view.
+          </span>
+        </p>
       ) : null}
       {status?.incomplete ? (
         <p className="muted" role="status">
@@ -265,30 +316,37 @@ export function AutomaticMemoryPanel(props: {
         </p>
       ) : null}
       {!props.uri && status && (cursors.length > 1 || status.nextCursor) ? (
-        <nav className="automatic-review-actions" aria-label="Memory update pages">
-          <button
-            type="button"
-            disabled={cursors.length < 2}
-            onClick={() => {
-              setStatus(undefined);
-              setPagination({selection, cursors: cursors.slice(0, -1)});
-            }}
-          >
-            Previous memories
-          </button>
-          <span className="muted">Page {cursors.length} · ready reviews appear first on each page.</span>
-          <button
-            type="button"
-            disabled={!status.nextCursor}
-            onClick={() => {
-              if (status.nextCursor) {
+        <nav className="automatic-memory-pagination" aria-label="Memory update pages">
+          <div className="automatic-memory-page-info">
+            <strong>Page {cursors.length}</strong>
+            <span>Ready reviews appear first on each page.</span>
+          </div>
+          <div className="automatic-memory-page-buttons">
+            <button
+              type="button"
+              disabled={cursors.length < 2}
+              onClick={() => {
                 setStatus(undefined);
-                setPagination({selection, cursors: [...cursors, status.nextCursor]});
-              }
-            }}
-          >
-            Next memories
-          </button>
+                setPagination({selection, cursors: cursors.slice(0, -1)});
+              }}
+            >
+              <ArrowLeft size={15} aria-hidden="true" />
+              Previous memories
+            </button>
+            <button
+              type="button"
+              disabled={!status.nextCursor}
+              onClick={() => {
+                if (status.nextCursor) {
+                  setStatus(undefined);
+                  setPagination({selection, cursors: [...cursors, status.nextCursor]});
+                }
+              }}
+            >
+              Next memories
+              <ArrowRight size={15} aria-hidden="true" />
+            </button>
+          </div>
         </nav>
       ) : null}
       {status && !current.length ? (

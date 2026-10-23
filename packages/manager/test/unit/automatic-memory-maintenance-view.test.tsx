@@ -191,6 +191,11 @@ it('shows ordinary new and upgraded unenrolled memories with truthful progress a
     'policy',
     'retry',
     'failed',
+    'preparing',
+    'reviewed',
+    'unknown',
+    'deferred',
+    'verification',
   ];
   vi.stubGlobal('fetch', async () =>
     json({
@@ -227,6 +232,31 @@ it('shows ordinary new and upgraded unenrolled memories with truthful progress a
     expect(document.body.textContent).toContain(text);
   expect(document.body.textContent).not.toMatch(/\d+%|Generate|Enroll|up to date/u);
   expect(document.querySelectorAll('.automatic-memory-coverage')).toHaveLength(1);
+  const tones = {
+    preparing: 'info',
+    queued: 'info',
+    generating: 'info',
+    ready: 'proposal',
+    reviewed: 'info',
+    'waiting-model': 'warning',
+    'waiting-budget': 'neutral',
+    paused: 'neutral',
+    policy: 'warning',
+    retry: 'warning',
+    failed: 'danger',
+    unknown: 'neutral',
+    deferred: 'neutral',
+    verification: 'warning',
+  };
+  for (const [state, tone] of Object.entries(tones)) {
+    const card = document.querySelector(`.automatic-memory-card[data-state="${state}"]`)!;
+    expect(card.getAttribute('data-tone')).toBe(tone);
+    expect(card.querySelector('header .review-badge')?.getAttribute('data-tone')).toBe(tone);
+    expect(card.querySelector('header .review-badge svg')?.getAttribute('aria-hidden')).toBe('true');
+    expect(card.querySelector('.automatic-memory-source-summary .review-badge')?.getAttribute('data-tone')).toBe(
+      'neutral',
+    );
+  }
 });
 
 it('reconciles only the exact verified project, review, target and evidence, idempotently', () => {
@@ -723,7 +753,7 @@ it('navigates bounded pages to a late ready review and resets the cursor when th
   const summary = vi.fn();
   await render(<AutomaticMemoryPanel project="project" onSummaryChange={summary} />);
   expect(document.body.textContent).toContain('Coverage is still being assessed');
-  expect(document.body.textContent).toContain('ready reviews appear first on each page');
+  expect(document.body.textContent).toContain('Ready reviews appear first on each page');
   await click('Next memories');
   expect(calls.at(-1)?.searchParams.get('afterUri')).toBe(uri);
   expect(document.body.textContent).toContain('Late ready proposal');
