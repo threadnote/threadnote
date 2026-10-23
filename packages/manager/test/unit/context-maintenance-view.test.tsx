@@ -13,6 +13,7 @@ import {
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
+import {HealthDetail} from '../../src/attention_details.js';
 import {TopicReviewContent} from '../../src/attention/topic_review.js';
 import type {ManagerTopicReviewV1, ManagerAutomaticReview} from '@threadnote/manager/attention/topic-contracts';
 import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
@@ -21,6 +22,7 @@ import type {
   ManagerContextHealthResponseV1,
   ManagerContextMaintenanceStatusV2,
 } from '@threadnote/manager/attention/contracts';
+import {ManagerLiveProvider, useManagerLiveResource} from '../../src/live/provider.js';
 
 let root: Root | undefined;
 beforeEach(() => {
@@ -134,6 +136,121 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it('keeps the explicit legacy health fallback current while a project stays open', async () => {
+    vi.useFakeTimers();
+    const fetch = vi.fn(
+      async (input: string) =>
+        new Response(JSON.stringify(input.startsWith('/api/context-health?') ? report() : status())),
+    );
+    vi.stubGlobal('fetch', fetch);
+    await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+    const healthReads = () => fetch.mock.calls.filter(([path]) => path.startsWith('/api/context-health?')).length;
+    expect(healthReads()).toBe(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(healthReads()).toBe(2);
+  });
+  it('keeps a stale review frozen until an explicit successful evidence read', async () => {
+    const finding = {
+      id: 'citation-one',
+      category: 'citation-changed',
+      uris: ['threadnote://memory/one'],
+      repair: {subjectUri: 'threadnote://memory/one', targetUri: 'threadnote://memory/one'},
+    } as unknown as ManagerContextHealthResponseV1['findings'][number];
+    const fetch = vi.fn(async () => new Response(JSON.stringify({...report(), findings: [finding]})));
+    vi.stubGlobal('fetch', fetch);
+    const detail = (stale: boolean) => (
+      <HealthDetail
+        finding={finding}
+        project="threadnote"
+        repairsAvailable
+        stale={stale}
+        onChanged={() => undefined}
+        onClose={() => undefined}
+        onOpenLibrary={() => undefined}
+      />
+    );
+    await render(detail(true));
+    const preview = () =>
+      [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(button =>
+        button.textContent?.includes('Preview repair'),
+      );
+    expect(preview()?.disabled).toBe(true);
+    await act(async () => root?.render(detail(false)));
+    expect(preview()?.disabled).toBe(true);
+    const revalidate = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(button =>
+      button.textContent?.includes('Revalidate review evidence'),
+    );
+    await act(async () => revalidate?.click());
+    expect(preview()?.disabled).toBe(false);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/context-health?project=threadnote'),
+      expect.anything(),
+    );
+  });
+  it('shares an ACK-gated maintenance read across mounted consumers and closes the tab socket', async () => {
+    class Socket {
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: {data: string}) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      sent: Array<{generation: number; type: string}> = [];
+      closed = false;
+      send(value: string) {
+        this.sent.push(JSON.parse(value));
+      }
+      close() {
+        this.closed = true;
+      }
+      emit(value: Record<string, unknown>) {
+        this.onmessage?.({data: JSON.stringify({version: 1, ...value})});
+      }
+    }
+    const sockets: Socket[] = [];
+    vi.stubGlobal(
+      'WebSocket',
+      class extends Socket {
+        constructor() {
+          super();
+          sockets.push(this);
+        }
+      },
+    );
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ticket: 'one'}), {status: 200})),
+    );
+    const reader = vi.fn(async () => ({count: 1}));
+    function Consumer() {
+      const {snapshot} = useManagerLiveResource('context-maintenance', 'threadnote', reader);
+      return <span>{snapshot.status}</span>;
+    }
+    await render(
+      <ManagerLiveProvider account="local">
+        <Consumer />
+        <Consumer />
+      </ManagerLiveProvider>,
+    );
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    const socket = sockets[0];
+    await act(async () => {
+      socket.readyState = 1;
+      socket.onopen?.();
+      socket.emit({type: 'welcome', epoch: 'one', topics: ['context-maintenance'], heartbeatMilliseconds: 15_000});
+    });
+    expect(reader).not.toHaveBeenCalled();
+    const subscribe = socket.sent.find(value => value.type === 'subscribe');
+    expect(subscribe).toBeDefined();
+    await act(async () => {
+      socket.emit({type: 'subscribed', epoch: 'one', generation: subscribe!.generation, startingSequence: 0});
+    });
+    expect(reader).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('ready');
+    await act(async () => root?.unmount());
+    root = undefined;
+    expect(socket.closed).toBe(true);
+  });
   it.each([
     {result: 'verified', retain: 'none'},
     {result: 'verified', retain: 'relation'},

@@ -50,7 +50,14 @@ export const ManagerLiveServerFrame = Schema.Union([
     topics: Schema.Array(ManagerLiveTopic),
     heartbeatMilliseconds: Schema.Finite,
   }),
-  Schema.Struct({type: Schema.Literal('subscribed'), version, epoch: opaque, generation, startingSequence: sequence}),
+  Schema.Struct({
+    type: Schema.Literal('subscribed'),
+    version,
+    epoch: opaque,
+    generation,
+    startingSequence: sequence,
+    unavailable: Schema.optionalKey(Schema.Array(ManagerLiveResource).check(Schema.isMaxLength(32))),
+  }),
   Schema.Struct({
     type: Schema.Literal('invalidation'),
     version,
@@ -61,6 +68,15 @@ export const ManagerLiveServerFrame = Schema.Union([
     revision: opaque,
   }),
   Schema.Struct({type: Schema.Literal('reset'), version, epoch: opaque, generation, sequence}),
+  Schema.Struct({
+    type: Schema.Literal('availability'),
+    version,
+    epoch: opaque,
+    generation,
+    sequence,
+    resource: ManagerLiveResource,
+    available: Schema.Boolean,
+  }),
   Schema.Struct({type: Schema.Literal('heartbeat'), version, epoch: opaque}),
 ]);
 export type ManagerLiveServerFrame = typeof ManagerLiveServerFrame.Type;

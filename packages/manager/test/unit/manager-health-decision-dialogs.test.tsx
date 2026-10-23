@@ -3,6 +3,7 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from '../../src/attention/maintenance_dialogs.js';
+import {HealthDetail} from '../../src/attention_details.js';
 import type {ManagerContextMaintenanceCaseV2} from '../../src/attention/contracts.js';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
@@ -234,6 +235,41 @@ it('keeps preview and confirmation with the agent action in one conflict-resolut
   expect(changed).toHaveBeenCalledOnce();
   expect(close).toHaveBeenCalledOnce();
   expect(fetch.mock.calls.filter(([path]) => path.endsWith('/apply'))).toHaveLength(1);
+});
+
+it('uses the existing conflict-action footer for a health finding during stale review', async () => {
+  const memory = (name: string, body: string): MemoryRecord => ({
+    uri: `threadnote://memory/${name}`,
+    body,
+    content: body,
+    headerTitle: 'MEMORY',
+    metadata: {
+      kind: 'durable',
+      project: 'threadnote',
+      status: 'active',
+      sourceAgentClient: 'test',
+      timestamp: '2026-01-01',
+    },
+  });
+  const finding = buildContextHealthReport({
+    project: 'threadnote',
+    records: [memory('a', 'Timeout is 60 seconds.'), memory('b', 'Timeout must be 30 seconds.')],
+    now: new Date('2026-06-01'),
+  }).findings[0];
+  await render(
+    <HealthDetail
+      project="threadnote"
+      finding={finding}
+      repairsAvailable={false}
+      stale
+      onClose={() => undefined}
+      onChanged={() => undefined}
+      onOpenLibrary={() => undefined}
+    />,
+  );
+  expect(document.querySelectorAll('dialog footer')).toHaveLength(1);
+  expect(document.querySelector('dialog footer')?.getAttribute('aria-label')).toBe('Conflict resolution actions');
+  expect(document.querySelector('dialog footer')?.textContent).toContain('Revalidate review evidence');
 });
 
 it('reviews the chosen memory in a case spanning several subjects and preserves that choice in its task', async () => {

@@ -16,9 +16,8 @@ import {
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseSeedManifest} from '@threadnote/workspace/manifest';
 
-// Only status has complete producer coverage in this additive rollout. Health
-// reports and evidence packets also depend on current repository source files.
-const topics: readonly ManagerLiveTopic[] = ['context-maintenance'];
+// Maintenance status is always available. Health is advertised only when its
+// source broker is installed by the Manager composition root.
 const limits = MANAGER_LIVE_LIMITS;
 export const managerLiveWebSocketOptions = {
   maxPayloadLength: limits.messageBytes,
@@ -72,6 +71,17 @@ export function makeManagerLiveMailbox() {
       }
       return reset || pending.size > 0;
     },
+    dirtyResource: (resource: ManagerLiveResource, revision: string) => {
+      const key = managerLiveResourceKey(resource);
+      const subscribed = resources.get(key);
+      if (subscribed === undefined || reset) return reset;
+      pending.set(key, {resource: subscribed, revision});
+      if (pending.size > limits.pendingResources) {
+        pending.clear();
+        reset = true;
+      }
+      return true;
+    },
     drain: () => {
       const result = {reset, invalidations: [...pending.values()]};
       reset = false;
@@ -83,8 +93,10 @@ export function makeManagerLiveMailbox() {
 }
 
 interface LiveConnection {
+  readonly key: string;
   readonly incoming: Queue.Queue<string>;
   readonly mailbox: ReturnType<typeof makeManagerLiveMailbox>;
+  readonly availability: Map<string, {resource: ManagerLiveResource; available: boolean}>;
   readonly wake: PubSub.PubSub<void>;
   readonly close: Effect.Effect<void>;
   generation: number;
@@ -96,11 +108,18 @@ export interface ManagerLiveOptions {
   readonly token: string;
   /** A bounded account-local manifest read; no corpus or graph discovery. */
   readonly projects: Effect.Effect<ReadonlySet<string>, unknown>;
+  readonly health?: {
+    readonly subscribe: (connectionKey: string, projects: readonly string[]) => Effect.Effect<readonly string[], never>;
+    readonly release: (connectionKey: string) => Effect.Effect<void, never>;
+  };
 }
 
 export const makeManagerLive = Effect.fn('manager.live.make')(function* (options: ManagerLiveOptions) {
   const crypto = yield* Crypto.Crypto;
   const epoch = yield* crypto.randomUUIDv4();
+  const topics: readonly ManagerLiveTopic[] = options.health
+    ? ['context-maintenance', 'context-health']
+    : ['context-maintenance'];
   const origin = new URL(options.origin);
   const tickets = new Map<string, number>();
   const connections = new Set<LiveConnection>();
@@ -127,10 +146,13 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
         const gate = yield* Semaphore.make(1);
         const wake = yield* PubSub.sliding<void>({capacity: 1, replay: 1});
         const incoming = yield* Queue.dropping<string>(limits.incomingFrames);
+        const connectionKey = yield* crypto.randomUUIDv4();
         const close = writer.write(new Socket.CloseEvent(1008, 'Live session closed')).pipe(Effect.ignoreCause);
         const connection: LiveConnection = {
+          key: connectionKey,
           incoming,
           mailbox: makeManagerLiveMailbox(),
+          availability: new Map(),
           wake,
           close,
           generation: 0,
@@ -140,6 +162,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           Effect.sync(() => connections.add(connection)),
           () =>
             Effect.sync(() => connections.delete(connection)).pipe(
+              Effect.andThen(options.health?.release(connectionKey) ?? Effect.void),
               Effect.andThen(PubSub.shutdown(wake)),
               Effect.andThen(Queue.shutdown(incoming)),
               Effect.andThen(close),
@@ -179,7 +202,19 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
             return yield* refused();
           yield* gate.withPermits(1)(
             Effect.gen(function* () {
+              // Install the filter before broker registration. Broker callbacks
+              // may publish synchronously; the gate holds their flush until ACK.
               connection.mailbox.replace(frame.resources);
+              connection.availability.clear();
+              const healthProjects = [
+                ...new Set(
+                  frame.resources
+                    .filter(resource => resource.topic === 'context-health')
+                    .map(resource => resource.project),
+                ),
+              ];
+              const unavailable =
+                options.health === undefined ? [] : yield* options.health.subscribe(connectionKey, healthProjects);
               connection.generation = frame.generation;
               // Filters are live before this barrier; flush uses the same gate.
               yield* send({
@@ -188,6 +223,9 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
                 epoch,
                 generation: frame.generation,
                 startingSequence: connection.sequence,
+                ...(unavailable.length > 0
+                  ? {unavailable: unavailable.map(project => ({topic: 'context-health' as const, project}))}
+                  : {}),
               });
             }),
           );
@@ -213,6 +251,10 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
               for (const invalidation of batch.invalidations)
                 yield* send({...common, type: 'invalidation', sequence: ++connection.sequence, ...invalidation});
             }
+            const availability = [...connection.availability.values()];
+            connection.availability.clear();
+            for (const item of availability)
+              yield* send({...common, type: 'availability', sequence: ++connection.sequence, ...item});
           }),
         );
         const output = Stream.fromPubSub(wake).pipe(
@@ -288,9 +330,32 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
         if (connection.mailbox.dirty(changed, opaqueRevision)) yield* PubSub.publish(connection.wake, undefined);
     }).pipe(Effect.ignoreCause);
 
+  const publishResource = (resource: ManagerLiveResource, revision: string) =>
+    Effect.gen(function* () {
+      const opaqueRevision = sha256HexSync(revision);
+      for (const connection of connections)
+        if (connection.mailbox.dirtyResource(resource, opaqueRevision))
+          yield* PubSub.publish(connection.wake, undefined);
+    }).pipe(Effect.ignoreCause);
+
+  const publishAvailability = (project: string, available: boolean) =>
+    Effect.gen(function* () {
+      const resource: ManagerLiveResource = {topic: 'context-health', project};
+      const key = managerLiveResourceKey(resource);
+      for (const connection of connections) {
+        if (!connection.mailbox.resources().some(subscribed => managerLiveResourceKey(subscribed) === key)) continue;
+        connection.availability.set(key, {resource, available});
+        // A connection can subscribe to at most 32 resources, so this map is
+        // bounded independently of invalidation coalescing and reset state.
+        yield* PubSub.publish(connection.wake, undefined);
+      }
+    }).pipe(Effect.ignoreCause);
+
   return {
     handle,
     publish,
+    publishResource,
+    publishAvailability,
     invalidateScope: Effect.sync(() => tickets.clear()).pipe(
       Effect.andThen(
         Effect.suspend(() => Effect.forEach([...connections], connection => connection.close, {discard: true})),

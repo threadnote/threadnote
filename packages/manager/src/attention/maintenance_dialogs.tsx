@@ -2,11 +2,12 @@ import {SemanticResolutionReview} from './semantic_comparison.js';
 import {TopicReviewContent} from './topic_review.js';
 import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 import {Copy, ExternalLink, RefreshCw} from 'lucide-react';
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
+import {Schema} from 'effect';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
 import {MemoryExcerpt} from '../review_presentation.js';
 import {memoryDocumentParts} from '../library_model.js';
-import {api, errorMessage} from '../ui/support.js';
+import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenancePacketV2,
@@ -73,6 +74,7 @@ export function MaintenanceCaseDialog(props: {
   readonly onTask: (task: string) => void;
   readonly onChanged?: () => void;
   readonly onApplied?: (result: ManagerTopicReviewAppliedV1) => void;
+  readonly stale?: boolean;
 }): React.ReactElement {
   const [caseId, setCaseId] = useState(props.caseId);
   const [item, setItem] = useState(props.initialCase);
@@ -81,11 +83,22 @@ export function MaintenanceCaseDialog(props: {
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
   const [selection, setSelection] = useState<{memoryUri: string; citationId: string}>();
+  const [frozen, setFrozen] = useState(false);
+  const [redactedScopes, setRedactedScopes] = useState<ReadonlySet<string>>(() => new Set());
+  const scopeKey = JSON.stringify([props.project, caseId]);
+  const staleRef = useRef(props.stale);
+  const explicitRevalidation = useRef(false);
+  staleRef.current = props.stale;
+  useEffect(() => {
+    if (props.stale) setFrozen(true);
+  }, [props.stale]);
+  const reviewFrozen = !!props.stale || frozen;
   useEffect(() => {
     const controller = new AbortController();
+    const revalidating = explicitRevalidation.current;
     setLoading(true);
     setError('');
-    setPacket(undefined);
+    if (!revalidating) setPacket(undefined);
     const current = () => !controller.signal.aborted;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
     async function load() {
@@ -93,7 +106,15 @@ export function MaintenanceCaseDialog(props: {
         const path = `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(caseId)}`;
         const details = await api<ManagerContextMaintenanceStatusV2>(`${path}&view=status`, undefined, options);
         if (!current()) return;
-        setItem(details.cases?.find(value => value.caseId === caseId));
+        const currentCase = details.cases?.find(value => value.caseId === caseId);
+        if (revalidating && !currentCase) {
+          setPacket(undefined);
+          setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
+          setFrozen(true);
+          setError('This case is no longer available. Close and reopen it to review current evidence.');
+          return;
+        }
+        setItem(currentCase);
         const selectedUri = selection?.memoryUri ?? props.memoryUri;
         const result = await api<ManagerContextMaintenancePacketV2>(
           `${path}${selectedUri ? `&memoryUri=${encodeURIComponent(selectedUri)}` : ''}${selection ? `&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
@@ -103,16 +124,72 @@ export function MaintenanceCaseDialog(props: {
         if (!current()) return;
         if (result.version !== 2 || result.project !== props.project || result.caseId !== caseId)
           throw new Error('The selected maintenance case changed. Refresh its evidence.');
-        setPacket(result);
+        if (revalidating && result.topicEvidence?.version === 2 && result.topicEvidence.outcome === 'unavailable') {
+          setPacket(undefined);
+          setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
+          setFrozen(true);
+          setError('Private source access is unavailable. Close this review and refresh source access.');
+          return;
+        }
+        if (revalidating && packet) {
+          const sameEvidence =
+            currentCase?.evidenceRevision === result.evidenceRevision &&
+            result.evidenceRevision === packet.evidenceRevision &&
+            result.expectedContentHash === packet.expectedContentHash &&
+            result.reviewId === packet.reviewId &&
+            result.topicEvidence?.outcome === packet.topicEvidence?.outcome &&
+            result.topicEvidence?.observationRevision === packet.topicEvidence?.observationRevision &&
+            result.topicEvidence?.targetHash === packet.topicEvidence?.targetHash;
+          if (!sameEvidence) {
+            setFrozen(true);
+            setError('This case changed. Close and reopen it to review current evidence.');
+            return;
+          }
+        } else {
+          setPacket(result);
+        }
+        setRedactedScopes(scopes => {
+          if (!scopes.has(scopeKey)) return scopes;
+          const next = new Set(scopes);
+          next.delete(scopeKey);
+          return next;
+        });
+        if (revalidating && !staleRef.current) setFrozen(false);
       } catch (cause) {
-        if (current()) setError(errorMessage(cause));
+        if (current()) {
+          if (revalidating && Schema.is(ManagerApiError)(cause) && [403, 404, 409].includes(cause.status)) {
+            setPacket(undefined);
+            setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
+            setFrozen(true);
+          }
+          setError(errorMessage(cause));
+        }
       } finally {
-        if (current()) setLoading(false);
+        if (current()) {
+          explicitRevalidation.current = false;
+          setLoading(false);
+        }
       }
     }
     void load();
     return () => controller.abort();
   }, [props.project, props.memoryUri, caseId, refresh, selection]);
+  const revalidate = (
+    <p role={reviewFrozen ? 'alert' : undefined} style={{visibility: reviewFrozen ? 'visible' : 'hidden'}}>
+      This review is paused because its evidence may have changed. If revalidation stays unavailable, close and reopen
+      the case. {error ? `${error} ` : ''}
+      <button
+        type="button"
+        disabled={!reviewFrozen || loading || !!props.stale}
+        onClick={() => {
+          explicitRevalidation.current = true;
+          setRefresh(value => value + 1);
+        }}
+      >
+        Revalidate review evidence
+      </button>
+    </p>
+  );
   const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
   const reason = packet?.reason ?? item?.reason;
   const semanticReview = packet?.semanticEvidence !== undefined || item?.family === 'semantic-contradiction';
@@ -139,16 +216,27 @@ export function MaintenanceCaseDialog(props: {
   );
   if (topicReview)
     return (
-      <DetailModal title="Review topic update" onClose={props.onClose} className="topic-review-dialog">
-        <TopicReviewContent
-          project={props.project}
-          caseId={caseId}
-          initialPacket={packet}
-          onChanged={() => props.onChanged?.()}
-          onApplied={props.onApplied}
-          onClose={props.onClose}
-          onOpenLibrary={props.onOpenLibrary}
-        />
+      <DetailModal
+        title="Review topic update"
+        onClose={props.onClose}
+        className="topic-review-dialog"
+        footer={revalidate}
+      >
+        {!redactedScopes.has(scopeKey) ? (
+          <TopicReviewContent
+            key={scopeKey}
+            project={props.project}
+            caseId={caseId}
+            initialPacket={packet}
+            onChanged={() => props.onChanged?.()}
+            onApplied={props.onApplied}
+            onClose={props.onClose}
+            onOpenLibrary={props.onOpenLibrary}
+            writesDisabled={reviewFrozen}
+          />
+        ) : (
+          <p role={error ? 'alert' : 'status'}>{error || 'Loading review evidence…'}</p>
+        )}
       </DetailModal>
     );
   return (
@@ -156,6 +244,7 @@ export function MaintenanceCaseDialog(props: {
       title={semanticReview ? 'Compare conflicting memories' : (props.title ?? maintenanceMemoryTitle(uri))}
       onClose={props.onClose}
       className={`health-case-dialog${semanticReview ? ' semantic-review-dialog' : ''}`}
+      footer={packet?.semanticEvidence ? undefined : revalidate}
     >
       {(props.relatedCases?.length ?? 0) > 1 ? (
         <label className="health-case-selector">
@@ -165,6 +254,8 @@ export function MaintenanceCaseDialog(props: {
             value={caseId}
             onChange={event => {
               setSelection(undefined);
+              setPacket(undefined);
+              setFrozen(false);
               setCaseId(event.target.value);
               setItem(props.relatedCases?.find(value => value.caseId === event.target.value));
             }}
@@ -233,6 +324,8 @@ export function MaintenanceCaseDialog(props: {
                 onRefresh={() => setRefresh(value => value + 1)}
                 secondaryAction={reviewWithAgent}
                 ownerInstructions={packet.ownerProposal?.publication.instructions}
+                writesDisabled={reviewFrozen}
+                reviewNotice={revalidate}
               />
             ) : null}
             <div className="health-evidence-comparison">

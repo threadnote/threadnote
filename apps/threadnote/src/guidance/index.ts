@@ -453,6 +453,39 @@ export const guidanceHealthEvidence = Effect.fn('guidance.healthEvidence')(funct
   return evidence.filter((value): value is GuidanceHealthEvidenceV1 => value !== undefined);
 });
 
+/** Finite exact files read by guidanceHealthEvidence for this registered root. */
+export const guidanceHealthObservationPaths = Effect.fn('guidance.healthObservationPaths')(function* (
+  config: RuntimeConfig,
+  project: string,
+  cwd: string,
+) {
+  const root = yield* projectRoot(cwd);
+  const repository = yield* resolveRepositoryIdentity(root).pipe(
+    Effect.catchTag('CodeGraphRepositoryError', error =>
+      error.message.startsWith('Not a Git repository') ? Effect.void : Effect.fail(error),
+    ),
+  );
+  if (repository === undefined)
+    return [] as readonly {readonly receiptPaths: readonly string[]; readonly targetPath: string}[];
+  const path = yield* Path.Path;
+  return yield* Effect.forEach(guidanceProjectionAdapters(), adapter =>
+    Effect.gen(function* () {
+      const relative = guidanceContract(adapter).projection.relativePath;
+      const identity = guidanceTargetIdentity(repository.worktreeId, root, relative);
+      return {
+        receiptPaths: [
+          receiptPath(path, config.agentContextHome, repository.repositoryId, identity),
+          legacyConsumptionPath(path, config.agentContextHome, repository.repositoryId, identity),
+          ...(LEGACY_GUIDANCE_SURFACES_BY_TARGET[relative] ?? []).map(surface =>
+            legacyReceiptPath(path, config.agentContextHome, repository.repositoryId, project, surface),
+          ),
+        ],
+        targetPath: yield* safeTarget(root, relative),
+      };
+    }),
+  );
+});
+
 export const guidanceSourceUrisForChangedPaths = Effect.fn('guidance.changedPathSources')(function* (
   config: RuntimeConfig,
   project: string,

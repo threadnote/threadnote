@@ -1,7 +1,7 @@
 import {ShieldCheck} from 'lucide-react';
 import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import type {
   ManagerContextHealthResponseV1,
   ManagerContextMaintenanceStatusV2,
@@ -28,6 +28,7 @@ import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialogs.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import {AutomaticMemoryPanel} from './automatic_memory.js';
+import {useManagerLiveResource} from '../live/provider.js';
 
 interface Props {
   readonly project: string;
@@ -42,15 +43,30 @@ interface Props {
   readonly onLoadMore: () => void;
   readonly reportError?: string;
   readonly onRefresh?: () => void;
+  readonly healthLiveStale?: boolean;
+  readonly healthLegacy?: boolean;
+  readonly healthFallback?: boolean;
 }
 
 export function ContextMaintenanceView(props: Props): React.ReactElement {
+  const readStatus = useCallback(
+    (signal: AbortSignal) =>
+      api<ManagerContextMaintenanceStatusV2>(
+        `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}`,
+        undefined,
+        {signal, timeoutMilliseconds: 10_000},
+      ),
+    [props.project],
+  );
+  const live = useManagerLiveResource('context-maintenance', props.project, readStatus);
+  const legacyStatus = !live.active || live.snapshot.status === 'unsupported';
   const [tab, setTab] = useState<'decisions' | 'recovery' | 'history' | 'hygiene'>('decisions');
   const [snapshot, setSnapshot] = useState<{
     project: string;
     status: ManagerContextMaintenanceStatusV2;
   }>();
   const [error, setError] = useState('');
+  const [legacyStatusFreshProject, setLegacyStatusFreshProject] = useState<string>();
   const [notice, setNotice] = useState('');
   const [automatic, setAutomatic] = useState<{project: string; ready: number; pending: boolean}>();
   const [conflictSubjectUri, setConflictSubjectUri] = useState<string>();
@@ -58,7 +74,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [refresh, setRefresh] = useState(0);
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [task, setTask] = useState('');
-  const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
+  const [inspectedCase, setInspectedCase] = useState<{
+    caseId: string;
+    memoryUri?: string;
+    title?: string;
+    evidenceRevision?: string;
+  }>();
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [appliedCases, setAppliedCases] = useState<readonly ManagerTopicReviewAppliedV1[]>([]);
   const automaticObservation = useRef<
@@ -78,6 +99,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }
   const mounted = useRef(true);
   const mutationEpoch = useRef(0);
+  const lastLiveRefresh = useRef({project: props.project, refresh});
   const actionBusy = useRef(false);
   const onChanged = useRef(props.onChanged);
   onChanged.current = props.onChanged;
@@ -85,6 +107,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const status =
     snapshot?.project === props.project ? reconcileAppliedMaintenanceCases(snapshot.status, appliedCases) : undefined;
   const report = reconcileAppliedHealthReport(props.report, appliedCases, status);
+  const statusUnconfirmed =
+    live.active && live.snapshot.status !== 'ready' && !(legacyStatus && legacyStatusFreshProject === props.project);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -100,6 +124,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setLoadingHistory(false);
   }, [props.project]);
   useEffect(() => {
+    setLegacyStatusFreshProject(undefined);
+  }, [legacyStatus, props.project]);
+  useEffect(() => {
+    if (!legacyStatus) return;
     let cancelled = false;
     let timer: number | undefined;
     setError('');
@@ -136,19 +164,25 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 : result,
           };
         });
+        setLegacyStatusFreshProject(props.project);
         setError('');
         const reportRevision = JSON.stringify([
           result.generation,
           result.page?.generation,
           result.projects.find(item => item.project === props.project),
         ]);
-        if (lastReportRevision.current !== undefined && lastReportRevision.current !== reportRevision)
+        if (
+          props.healthLegacy !== false &&
+          lastReportRevision.current !== undefined &&
+          lastReportRevision.current !== reportRevision
+        )
           onChanged.current();
         lastReportRevision.current = reportRevision;
         if (!result.paused && result.state !== 'failed')
           timer = window.setTimeout(() => void poll(), result.state === 'running' ? 1_000 : 30_000);
       } catch (cause) {
         if (!cancelled && mutationEpoch.current === epoch) {
+          setLegacyStatusFreshProject(undefined);
           setError(errorMessage(cause));
           timer = window.setTimeout(() => void poll(), 30_000);
         }
@@ -159,7 +193,50 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [props.project, refresh]);
+  }, [props.project, refresh, legacyStatus]);
+  useEffect(() => {
+    if (legacyStatus || live.snapshot.status !== 'ready' || actionBusy.current) return;
+    const result = live.snapshot.data;
+    if (result.version !== 2) {
+      setError('Maintenance status is unavailable. Refresh after updating Threadnote.');
+      return;
+    }
+    setSnapshot(previous => {
+      const old = previous?.project === props.project ? previous.status : undefined;
+      return {
+        project: props.project,
+        status:
+          old?.page !== undefined && old.page.generation === result.page?.generation
+            ? {
+                ...result,
+                cases: old.cases,
+                receipts: old.receipts,
+                page: old.page,
+                omittedCases: old.omittedCases,
+                omittedReceipts: old.omittedReceipts,
+              }
+            : result,
+      };
+    });
+    setError('');
+    const reportRevision = JSON.stringify([
+      result.generation,
+      result.page?.generation,
+      result.projects.find(item => item.project === props.project),
+    ]);
+    if (
+      props.healthLegacy !== false &&
+      lastReportRevision.current !== undefined &&
+      lastReportRevision.current !== reportRevision
+    )
+      onChanged.current();
+    lastReportRevision.current = reportRevision;
+  }, [legacyStatus, live.snapshot, props.project]);
+  useEffect(() => {
+    const previous = lastLiveRefresh.current;
+    lastLiveRefresh.current = {project: props.project, refresh};
+    if (previous.project === props.project && previous.refresh !== refresh && !legacyStatus) live.invalidate();
+  }, [props.project, refresh, legacyStatus]);
 
   function refreshEvidence() {
     setNotice('');
@@ -194,7 +271,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       if ('version' in result) {
         setSnapshot({project, status: result});
         if (action === 'run-now') onChanged.current();
-        if (action === 'resume' || action === 'run-now') setRefresh(value => value + 1);
+        if (legacyStatus && (action === 'resume' || action === 'run-now')) setRefresh(value => value + 1);
       } else if (result.status === 'conflict') {
         setError(maintenanceUndoConflictMessage(result.reason));
         setConflictSubjectUri(status?.receipts.find(item => item.receiptId === receiptId)?.subjectUri);
@@ -204,7 +281,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             ? 'This change was already undone.'
             : 'Change undone after checking the current memory.',
         );
-        setRefresh(value => value + 1);
+        if (legacyStatus) setRefresh(value => value + 1);
         onChanged.current();
       }
     } catch (cause) {
@@ -218,6 +295,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       if (mounted.current && activeProject.current === project && projectEpoch.current === epoch) {
         setBusy(false);
         actionBusy.current = false;
+        if (!legacyStatus) live.invalidate();
       }
     }
   }
@@ -456,6 +534,25 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             Refresh evidence from the first page
           </button>
         </p>
+      ) : null}
+      {statusUnconfirmed ? (
+        <p role="status">
+          Live maintenance updates are interrupted. The displayed evidence may be older than the current project.
+          <button type="button" onClick={() => setRefresh(value => value + 1)}>
+            Retry live status
+          </button>
+        </p>
+      ) : null}
+      {live.active && legacyStatus && legacyStatusFreshProject === props.project ? (
+        <p role="status">Live maintenance updates are unavailable; this view checks for changes periodically.</p>
+      ) : null}
+      {props.healthLiveStale ? (
+        <p role="status">
+          Context health evidence is being refreshed. Open reviews are paused until current evidence is checked.
+        </p>
+      ) : null}
+      {props.healthFallback ? (
+        <p role="status">Live context health updates are unavailable; this view checks for changes every 30 seconds.</p>
       ) : null}
       {error ? (
         <p role="alert">
@@ -783,6 +880,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                       caseId: group.cases[0].caseId,
                       memoryUri: group.uri,
                       title: group.preview?.title,
+                      evidenceRevision: group.cases[0].evidenceRevision,
                     })
                   }
                 >
@@ -933,7 +1031,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             <p key={item.caseId}>
               {item.disposition.replaceAll('-', ' ')}: {item.reason.replaceAll('-', ' ')} · {item.attemptCount} attempts
               · last checked {item.lastChecked}{' '}
-              <button type="button" onClick={() => setInspectedCase({caseId: item.caseId})}>
+              <button
+                type="button"
+                onClick={() => setInspectedCase({caseId: item.caseId, evidenceRevision: item.evidenceRevision})}
+              >
                 Inspect exact case and evidence
               </button>
             </p>
@@ -980,6 +1081,13 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             )?.cases
           }
           title={inspectedCase.title}
+          stale={
+            !!props.healthLiveStale ||
+            statusUnconfirmed ||
+            (inspectedCase.evidenceRevision !== undefined &&
+              cases.find(item => item.caseId === inspectedCase.caseId)?.evidenceRevision !==
+                inspectedCase.evidenceRevision)
+          }
           onClose={() => setInspectedCase(undefined)}
           onChanged={refreshAfterDecision}
           onApplied={result => {
@@ -1016,6 +1124,11 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           finding={selected}
           memoryPreview={report.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
           repairsAvailable={report.repositoryEvidence.state === 'available'}
+          stale={
+            !!props.healthLiveStale ||
+            statusUnconfirmed ||
+            JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
+          }
           onClose={() => setSelected(undefined)}
           onChanged={refreshAfterDecision}
           onRefresh={refreshEvidence}

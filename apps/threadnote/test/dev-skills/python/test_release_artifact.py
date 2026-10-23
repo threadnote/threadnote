@@ -19,6 +19,51 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 
+class PreviewObservationLock(unittest.TestCase):
+    def test_nested_observation_preserves_inventory_and_releases_both_locks(self):
+        paths = ("data/context-maintenance/state-v2.json.lock", "data/locks/resources/local/mutations.lock")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in paths:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+            tokens = set()
+            for _ in range(24):
+                with release.hold_observation_lock(root, paths[0], "maintenance"), \
+                        release.hold_observation_lock(root, paths[1], "account mutation"):
+                    before = release.inventory(root)
+                    for name in paths:
+                        owner = json.loads((root / name).read_text())
+                        self.assertEqual(owner["processId"], os.getpid())
+                        self.assertNotIn(owner["token"], tokens)
+                        tokens.add(owner["token"])
+                    self.assertEqual(release.inventory(root), before)
+                self.assertTrue(all(not (root / name).exists() for name in paths))
+
+    def test_cleanup_preserves_foreign_owner_and_original_body_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for replacement in (None, "foreign owner\n"):
+                with self.subTest(replacement=replacement):
+                    with self.assertRaisesRegex(ValueError, "original preview failure"):
+                        with release.hold_observation_lock(root, "lock", "fixture"):
+                            if replacement is not None:
+                                (root / "lock").write_text(replacement)
+                            raise ValueError("original preview failure")
+                    if replacement is None:
+                        self.assertFalse((root / "lock").exists())
+                    else:
+                        self.assertEqual((root / "lock").read_text(), replacement)
+                        (root / "lock").unlink()
+
+    def test_successful_body_cannot_conceal_lost_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(RuntimeError, "lost ownership"):
+                with release.hold_observation_lock(root, "lock", "fixture"):
+                    (root / "lock").write_text("foreign owner\n")
+            self.assertEqual((root / "lock").read_text(), "foreign owner\n")
+
+
 class ReleaseOutput(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="release-output-test-")

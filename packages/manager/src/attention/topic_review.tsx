@@ -39,6 +39,7 @@ interface TopicReviewProps {
   readonly onApplied?: (result: ManagerTopicReviewAppliedV1) => void;
   readonly onClose: () => void;
   readonly onOpenLibrary: (uri: string) => void;
+  readonly writesDisabled?: boolean;
 }
 
 const ReviewRecovery = Schema.Struct({
@@ -330,10 +331,12 @@ export function TopicReviewContent(
     !loading &&
     !busy &&
     !!modelSelection.model &&
-    (!review || review.state === 'pending');
+    (!review || review.state === 'pending') &&
+    !props.writesDisabled;
 
   async function captureEvidence(start: number, end: number, retentionDays: number) {
     if (
+      props.writesDisabled ||
       busy ||
       loading ||
       mutationInFlight.current !== undefined ||
@@ -398,7 +401,7 @@ export function TopicReviewContent(
   }
 
   async function mutate(action: Exclude<ManagerTopicReviewActionV1, {readonly action: 'capture'}>) {
-    if (busy || loading || mutationInFlight.current !== undefined) return;
+    if (props.writesDisabled || busy || loading || mutationInFlight.current !== undefined) return;
     const epoch = ++operationEpoch.current;
     mutationInFlight.current = epoch;
     setBusy(true);
@@ -647,7 +650,7 @@ export function TopicReviewContent(
           <button
             type="button"
             className="danger"
-            disabled={busy || loading}
+            disabled={busy || loading || props.writesDisabled}
             onClick={() =>
               void mutate({
                 action: 'reject',
@@ -812,7 +815,7 @@ export function TopicReviewContent(
             <TopicSourceEvidence
               topic={topic}
               capture={{
-                disabled: busy || loading,
+                disabled: busy || loading || !!props.writesDisabled,
                 onCapture: (start, end, days) => void captureEvidence(start, end, days),
               }}
             />
@@ -898,7 +901,10 @@ export function TopicReviewContent(
       {!review && topic ? (
         <TopicSourceEvidence
           topic={topic}
-          capture={{disabled: busy || loading, onCapture: (start, end, days) => void captureEvidence(start, end, days)}}
+          capture={{
+            disabled: busy || loading || !!props.writesDisabled,
+            onCapture: (start, end, days) => void captureEvidence(start, end, days),
+          }}
         />
       ) : null}
       <details className="review-disclosure topic-generation-settings" open={!review}>
@@ -965,7 +971,7 @@ export function TopicReviewContent(
           <>
             <button
               type="button"
-              disabled={!canPreview}
+              disabled={!canPreview || props.writesDisabled}
               onClick={() =>
                 review &&
                 void mutate({
@@ -982,7 +988,7 @@ export function TopicReviewContent(
             <button
               type="button"
               className="primary"
-              disabled={!canApply}
+              disabled={!canApply || props.writesDisabled}
               onClick={() =>
                 approval &&
                 void mutate({
@@ -1003,7 +1009,7 @@ export function TopicReviewContent(
             </button>
             <button
               type="button"
-              disabled={busy || loading || (review.generation.origin !== 'manual' && !caseId)}
+              disabled={busy || loading || props.writesDisabled || (review.generation.origin !== 'manual' && !caseId)}
               onClick={() =>
                 void mutate({
                   action: 'defer',
@@ -1019,7 +1025,7 @@ export function TopicReviewContent(
             <button
               type="button"
               className="danger"
-              disabled={busy || loading || (review.generation.origin !== 'manual' && !caseId)}
+              disabled={busy || loading || props.writesDisabled || (review.generation.origin !== 'manual' && !caseId)}
               onClick={() =>
                 void mutate({
                   action: 'reject',
@@ -1037,7 +1043,13 @@ export function TopicReviewContent(
         {review?.state === 'deferred' && (
           <button
             type="button"
-            disabled={busy || loading || !observationMatches || (review.generation.origin !== 'manual' && !caseId)}
+            disabled={
+              busy ||
+              loading ||
+              props.writesDisabled ||
+              !observationMatches ||
+              (review.generation.origin !== 'manual' && !caseId)
+            }
             onClick={() =>
               void mutate({
                 action: 'resume',
@@ -1057,7 +1069,7 @@ export function TopicReviewContent(
             <button
               type="button"
               className="primary"
-              disabled={!canResumeAcceptance}
+              disabled={!canResumeAcceptance || props.writesDisabled}
               onClick={() =>
                 void mutate({
                   action: 'apply',
@@ -1076,7 +1088,7 @@ export function TopicReviewContent(
           <button
             type="button"
             className="danger"
-            disabled={busy || loading || !caseId}
+            disabled={busy || loading || !caseId || props.writesDisabled}
             onClick={() =>
               void mutate({
                 action: 'reject',
