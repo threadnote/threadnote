@@ -115,7 +115,9 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
   const scheduleReconnect = () => {
     if (!running || reconnectTimer) return;
     const delay = Math.min(30_000, 500 * 2 ** Math.min(attempt++, 6));
-    const jitter = options.random?.() ?? crypto.getRandomValues(new Uint32Array(1))[0] / 0x1_0000_0000;
+    // This browser callback has no Effect runtime; jitter never forms a security identifier.
+    // oxlint-disable-next-line effecttsgo/global-random
+    const jitter = options.random?.() ?? Math.random();
     reconnectTimer = setTimeout(
       () => {
         reconnectTimer = undefined;
