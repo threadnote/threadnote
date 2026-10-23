@@ -1,5 +1,5 @@
 import React from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, {defaultUrlTransform} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {ManagerAutocompleteInput} from '@threadnote/manager/dialog';
 import {isMemoryKind, isMemoryStatus} from './support.js';
@@ -128,10 +128,39 @@ export function DropdownSelect(props: {
   );
 }
 
-export function MarkdownViewer(props: {readonly markdown: string}): React.ReactElement {
+function isMemoryLink(uri: string): boolean {
+  return /^threadnote:\/\/(?:memory\/[^/?#\s]+|user\/[^/?#\s]+\/memories\/[^?#\s]+)$/.test(uri);
+}
+
+export function MarkdownViewer(props: {
+  readonly markdown: string;
+  readonly onOpenMemory?: (uri: string) => void;
+}): React.ReactElement {
   return (
     <article className="markdown-viewer">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={{pre: MarkdownCodeBlock}}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        urlTransform={(url, key, node) =>
+          props.onOpenMemory && node.tagName === 'a' && key === 'href' && isMemoryLink(url)
+            ? url
+            : defaultUrlTransform(url)
+        }
+        components={{
+          pre: MarkdownCodeBlock,
+          a: ({node: _node, href, ...anchorProps}) => (
+            <a
+              {...anchorProps}
+              href={href}
+              onClick={event => {
+                if (props.onOpenMemory && href && isMemoryLink(href)) {
+                  event.preventDefault();
+                  props.onOpenMemory(href);
+                }
+              }}
+            />
+          ),
+        }}
+      >
         {props.markdown || '_No content_'}
       </ReactMarkdown>
     </article>
