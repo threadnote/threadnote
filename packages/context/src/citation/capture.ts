@@ -169,6 +169,8 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
     readonly retainedAt?: string;
     readonly omitUnresolved?: boolean;
     readonly refs?: readonly string[];
+    /** Foreground adapters may bound lease writer waits; omitted preserves internal/background admission. */
+    readonly writerWaitTimeoutMilliseconds?: number;
   },
 ) {
   const refs = yield* Effect.try({
@@ -242,6 +244,7 @@ export const captureMemoryCodeCitations = Effect.fn('memoryCodeCitation.capture'
         group[0].project,
         input.planOnly === true,
         input.retainedAt,
+        input.writerWaitTimeoutMilliseconds,
       ),
     {concurrency: 4},
   );
@@ -329,6 +332,7 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   project?: string,
   planOnly = false,
   retainedAt?: string,
+  writerWaitTimeoutMilliseconds?: number,
 ) {
   const query = yield* CodeGraphQueryService;
   const store = yield* CodeGraphStore;
@@ -349,8 +353,15 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   });
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      yield* Effect.acquireRelease(store.acquireSnapshotLease(before.databasePath, snapshot.id, 60_000), token =>
-        store.releaseSnapshotLease(before.databasePath, token).pipe(Effect.ignore),
+      // Request adapters bound uninterruptible scoped lease admission/release;
+      // internal maintenance retains its existing writer-wait contract. A
+      // denied release leaves only the existing bounded, expiring lease.
+      const leaseWriterOptions = {waitTimeoutMilliseconds: writerWaitTimeoutMilliseconds};
+      yield* Effect.acquireRelease(
+        store
+          .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
+          .pipe(Effect.mapError(error => captureError(cwd, error))),
+        token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
       );
       const repositoryRoot = yield* fs
         .realPath(before.identity.repoRoot)

@@ -119,13 +119,14 @@ export function projectManagerTopicReview(
 ): ManagerTopicReviewV1 | undefined {
   const maintenance = review.maintenance;
   const candidate = review.candidates[0];
-  if (!maintenance || !candidate || review.candidates.length !== 1) return undefined;
+  if (!maintenance || maintenance.version === 3 || !candidate || review.candidates.length !== 1) return undefined;
   if (
     maintenance.version === 2 &&
     (identity?.importedAccess?.reviewId !== review.reviewId || identity.importedAccess.revision !== review.revision)
   )
     return undefined;
   const approval = review.maintenanceApproval;
+  if (approval?.version === 3) return undefined;
   const currentCase = maintenance.generation.origin === 'manual' || identity?.observationMatches === true;
   const effectiveProposal = approval?.preview.approvedProposal ?? maintenance.proposal;
   const paragraphCoverage = topicMaintenanceParagraphCoverage(maintenance.basis, effectiveProposal.draft);
@@ -229,6 +230,7 @@ export const managerTopicReviewCaseIdentity = Effect.fn('managerTopicReview.case
   review: CandidateReview,
 ) {
   if (!review.maintenance) return undefined;
+  if (review.maintenance?.version === 3) return undefined;
   const imported = review.maintenance.version === 2;
   if (imported) {
     const checked = yield* readTopicMaintenanceDraft(config, review.reviewId).pipe(Effect.result);

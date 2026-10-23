@@ -1,3 +1,4 @@
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {DateTime, Effect, Result} from 'effect';
 import {
   collectContextMaintenanceCitationEvidence,
@@ -98,7 +99,12 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
   const now = yield* DateTime.nowAsDate;
   const includedUris = options.includeFindingUris === undefined ? undefined : new Set(options.includeFindingUris);
   const evidenceRecords = includedUris === undefined ? records : records.filter(record => includedUris.has(record.uri));
-  const citationRecords = options.citationRecords ?? evidenceRecords;
+  const citationRecords =
+    options.citationRecords ??
+    evidenceRecords.map(record => ({
+      ...record,
+      metadata: {...record.metadata, codeCitations: currentMemoryCodeCitations(record)},
+    }));
   const citationResult =
     options.evidenceMode === 'worker' && options.workerEvidence !== undefined
       ? Result.succeed(
@@ -136,8 +142,9 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
     guidanceEvidence,
     citationValidations,
     citationCoverage: contextHealthCitationCoverageV2({
-      records: options.citationRecords ?? evidenceRecords,
+      records: citationRecords,
       validations: citationValidations,
+      citationSelection: 'provided',
     }),
     duplicateCorpus: options.duplicateCorpus,
     includeCitationCoverageFindings: options.includeCitationCoverageFindings,

@@ -8,6 +8,7 @@ import {uriSegment} from '@threadnote/workspace/manifest';
 import {
   canonicalMemoryDocumentContent,
   declaresTopicMaintenanceHeader,
+  declaresReviewedSupportHeader,
   parseMemoryDocument,
   parseMemoryRelationValue,
 } from '@threadnote/memory/document';
@@ -901,10 +902,10 @@ export function stripPersonalProvenance(
 
 /** Shared publication, ingest, and replace: keep identity-alias relations, drop local projection URIs. */
 export function stripPersonalProvenanceForSharedPublication(content: string): string {
-  if (declaresTopicMaintenanceHeader(content))
+  if (declaresTopicMaintenanceHeader(content) || declaresReviewedSupportHeader(content))
     throw ShareOperationError.make({
       message:
-        'Enrolled topics require the reviewed existing-target Git proposal path; generic publication cannot project their provenance.',
+        'Approved maintenance provenance requires the reviewed existing-target Git proposal path; generic publication cannot project it.',
     });
   return stripPersonalProvenance(content, {preserveStableMemoryRelations: true});
 }
@@ -1107,7 +1108,8 @@ const prepareSharedInboundContentEffect = Effect.fn('share.prepareSharedInboundC
 function prepareSharedInboundContent(uri: string, rawContent: string): string {
   const canonical = canonicalMemoryDocumentContent(rawContent);
   const enrolled = declaresTopicMaintenanceHeader(canonical);
-  const record = enrolled ? parseMemoryDocument(uri, canonical) : undefined;
+  const reviewed = declaresReviewedSupportHeader(canonical);
+  const record = enrolled || reviewed ? parseMemoryDocument(uri, canonical) : undefined;
   if (
     enrolled &&
     (!record?.metadata.topicMaintenance ||
@@ -1120,10 +1122,20 @@ function prepareSharedInboundContent(uri: string, rawContent: string): string {
     throw ShareOperationError.make({
       message: `Refusing to ingest ${uri}: enrolled shared topics must retain valid public provenance.`,
     });
+  if (
+    reviewed &&
+    (!record?.metadata.reviewedSupport ||
+      record.metadata.reviewedSupportError ||
+      record.metadata.visibility !== 'shared')
+  )
+    throw ShareOperationError.make({
+      message: `Refusing to ingest ${uri}: reviewed shared memories must retain valid public approved support.`,
+    });
   // This is already-public Git content, not a personal-to-shared projection. Retain its reviewed origin and identity.
-  const stripped = record?.metadata.topicMaintenance
-    ? canonical
-    : stripPersonalProvenanceForSharedPublication(canonical);
+  const stripped =
+    record?.metadata.topicMaintenance || record?.metadata.reviewedSupport
+      ? canonical
+      : stripPersonalProvenanceForSharedPublication(canonical);
   const citationBlocker = memoryCodeCitationContentSharingBlocker(uri, stripped);
   if (citationBlocker) {
     throw ShareOperationError.make({

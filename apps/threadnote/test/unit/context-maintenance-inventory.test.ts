@@ -18,6 +18,7 @@ import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {
   contextMaintenanceInventoryAuthorityLimits,
   prepareContextMaintenanceInventory,
+  readContextMaintenanceCanonicalRecord,
 } from '@threadnote/threadnote/memory/context/maintenance_inventory';
 
 const systemLayer = SystemInfo.layer.pipe(
@@ -105,6 +106,61 @@ const settle = (f: Effect.Success<ReturnType<typeof fixture>>, budget: number, n
   });
 
 describe('maintenance inventory authority and fairness', () => {
+  effectIt.effect('canonical encoded names resolve the same physical record as ResourceStore', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture([]);
+      const names = ['a b.md', 'a%20b.md', 'café.md', '100%.md'];
+      const stored = new Map<string, string>();
+      for (const [index, name] of names.entries()) {
+        const encoded = canonicalResourceUri('user', ['tester', 'memories', 'durable', 'projects', 'selected', name]);
+        const text = content(index, 'selected', `Distinct body for ${name}`);
+        yield* f.store.write(f.location, encoded, text, {mode: 'create'});
+        stored.set(encoded, yield* f.store.read(f.location, encoded));
+      }
+      const inventory = yield* f.prepare(100);
+      expect(inventory.records.map(record => record.uri).sort()).toEqual([...stored.keys()].sort());
+      for (const [encoded, text] of stored) {
+        const observed = yield* readContextMaintenanceCanonicalRecord(f.config, encoded);
+        expect(observed.record.uri).toBe(encoded);
+        expect(observed.record.content).toBe(text);
+        expect(observed.hash).toBe(sha256HexSync(text));
+      }
+      const cacheFile = f.path.join(f.home, 'context-maintenance', 'inventory', `${sha256HexSync('selected')}.json`);
+      const cached = JSON.parse(yield* f.fs.readFileString(cacheFile));
+      const literalPercent = canonicalResourceUri('user', [
+        'tester',
+        'memories',
+        'durable',
+        'projects',
+        'selected',
+        'a%20b.md',
+      ]);
+      const rawSpelling = literalPercent.replace('a%2520b.md', 'a%20b.md');
+      cached.entries = {
+        [rawSpelling]: {
+          ...cached.entries[literalPercent],
+          uri: rawSpelling,
+          metadata: {...cached.entries[literalPercent].metadata, memoryId: 'tn_wrong_raw_hint'},
+        },
+      };
+      yield* f.fs.writeFileString(cacheFile, JSON.stringify(cached));
+      const resumed = yield* f.prepare(1);
+      expect(resumed.records.some(record => record.metadata.memoryId === 'tn_wrong_raw_hint')).toBe(false);
+      let rebuilt = resumed;
+      for (let tick = 0; tick < 20 && !rebuilt.complete; tick++) rebuilt = yield* f.prepare(1);
+      expect(rebuilt.complete).toBe(true);
+      expect(rebuilt.records.map(record => record.uri).sort()).toEqual([...stored.keys()].sort());
+      for (const suffix of ['..%2fescape.md', '%2e%2e/escape.md', 'a%5cb.md', '%00.md']) {
+        const result = yield* readContextMaintenanceCanonicalRecord(
+          f.config,
+          `${uri(0).slice(0, uri(0).lastIndexOf('/') + 1)}${suffix}`,
+        ).pipe(Effect.result);
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result)) expect(result.failure.diagnostic.category).toBe('authority-boundary');
+      }
+    }).pipe(provide),
+  );
+
   effectIt.effect('retains a named project through complete and resumed inventory without mixing colliding slugs', () =>
     Effect.gen(function* () {
       const f = yield* fixture([]);
@@ -287,18 +343,113 @@ describe('maintenance inventory authority and fairness', () => {
               )
             : f.fs.open(file, options),
       });
-      const result = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped), Effect.result);
-      expect(Result.isFailure(result)).toBe(true);
-      if (Result.isFailure(result)) {
-        expect(result.failure).toMatchObject({
-          diagnostic: {category: 'permission-denied', stage: 'record-read', memoryUri: uri(0), retryable: false},
-        });
-        expect(JSON.stringify(result.failure)).not.toContain('Synthetic secret');
-        expect(JSON.stringify(result.failure)).not.toContain('/synthetic/private/path');
-      }
+      const result = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped));
+      expect(result.complete).toBe(false);
+      expect(result.diagnostics).toContainEqual(
+        expect.objectContaining({
+          category: 'permission-denied',
+          stage: 'record-read',
+          memoryUri: uri(0),
+          retryable: false,
+        }),
+      );
+      expect(JSON.stringify(result.diagnostics)).not.toContain('Synthetic secret');
+      expect(JSON.stringify(result.diagnostics)).not.toContain('/synthetic/private/path');
       expect(yield* f.fs.readFileString(f.recordPath(0))).toBe(content(0));
     }).pipe(TestClock.withLive, provide),
   );
+
+  fcEffectProp(
+    effectIt,
+    'shared ancillary classification preserves bytes and never hides malformed canonical headers',
+    {
+      ending: fc.constantFrom('\n', '\r\n', '\r'),
+      prefix: fc.constantFrom('', ' \t', '\ufeff\n'),
+      kind: fc.constantFrom('durable' as const, 'preference' as const, 'handoff' as const),
+      malformed: fc.constantFrom('MEMORY\nkind: unsupported', 'MEMORY\nstatus: active'),
+      body: fc.array(fc.constantFrom('a', 'b', 'λ', '\n', ' '), {maxLength: 64}),
+    },
+    ({ending, prefix, kind, malformed, body}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture([0]);
+        const directory = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories', 'shared', 'default');
+        yield* f.fs.makeDirectory(directory, {recursive: true});
+        const sharedUri = (name: string) => `threadnote://user/tester/memories/shared/default/${name}.md`;
+        const guide = `${prefix}---\ntitle: Guide\n---\n${body.join('')}`.replace(/\n/gu, ending);
+        const canonical = `${prefix}${content(2).replace('kind: durable', `kind: ${kind}`)}`.replace(/\n/gu, ending);
+        yield* f.fs.writeFileString(f.path.join(directory, 'guide.md'), guide);
+        yield* f.fs.writeFileString(f.path.join(directory, 'canonical.md'), canonical);
+        const ready = yield* f.prepare(100);
+        expect(ready.complete).toBe(true);
+        expect(ready.records.map(record => record.uri).sort()).toEqual([uri(0), sharedUri('canonical')].sort());
+        expect(ready.records.find(record => record.uri === sharedUri('canonical'))?.metadata.kind).toBe(kind);
+        const direct = yield* readContextMaintenanceCanonicalRecord(f.config, sharedUri('guide')).pipe(Effect.result);
+        expect(Result.isFailure(direct)).toBe(true);
+        if (Result.isFailure(direct)) expect(direct.failure.diagnostic.category).toBe('invalid-header');
+        const broken = `${prefix}${malformed}\n\n${body.join('')}`.replace(/\n/gu, ending);
+        yield* f.fs.writeFileString(f.path.join(directory, 'broken.md'), broken);
+        const partial = yield* f.prepare(100);
+        expect(partial.complete).toBe(false);
+        expect(partial.diagnostics).toEqual([
+          expect.objectContaining({category: 'invalid-header', memoryUri: sharedUri('broken'), retryable: false}),
+        ]);
+        expect(partial.records.map(record => record.uri).sort()).toEqual([uri(0), sharedUri('canonical')].sort());
+        for (const [name, bytes] of [
+          ['guide', guide],
+          ['canonical', canonical],
+          ['broken', broken],
+        ])
+          expect(Array.from(yield* f.fs.readFile(f.path.join(directory, `${name}.md`)))).toEqual(
+            Array.from(new TextEncoder().encode(bytes)),
+          );
+      }).pipe(TestClock.withLive, provide),
+    {fastCheck: {numRuns: 16, seed: 80512}},
+  );
+
+  for (const failure of ['invalid-utf8', 'record-size-limit', 'permission-denied'] as const)
+    effectIt.effect(`shared ancillary paths retain ${failure} diagnostics before classification`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture([0]);
+        const directory = f.path.join(f.home, 'data', 'local', 'user', 'tester', 'memories', 'shared', 'default');
+        yield* f.fs.makeDirectory(directory, {recursive: true});
+        const file = f.path.join(directory, 'guide.md');
+        const raw =
+          failure === 'invalid-utf8'
+            ? new Uint8Array([0xff])
+            : failure === 'record-size-limit'
+              ? new Uint8Array(contextMaintenanceInventoryAuthorityLimits.recordBytes + 1)
+              : new TextEncoder().encode('---\ntitle: Guide\n---\nAncillary docs.');
+        yield* f.fs.writeFile(file, raw);
+        const wrapped = FileSystem.FileSystem.of({
+          ...f.fs,
+          open: (candidate, options) =>
+            candidate === file && failure === 'permission-denied'
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    _tag: 'PermissionDenied',
+                    module: 'FileSystem',
+                    method: 'open',
+                    description: 'Synthetic private error.',
+                    pathOrDescriptor: '/synthetic/private/path',
+                  }),
+                )
+              : f.fs.open(candidate, options),
+        });
+        const partial = yield* f.prepare(100).pipe(Effect.provideService(FileSystem.FileSystem, wrapped));
+        expect(partial.complete).toBe(false);
+        expect(partial.records.map(record => record.uri)).toEqual([uri(0)]);
+        expect(partial.diagnostics).toEqual([
+          expect.objectContaining({
+            category: failure,
+            stage: 'record-read',
+            memoryUri: 'threadnote://user/tester/memories/shared/default/guide.md',
+          }),
+        ]);
+        expect(JSON.stringify(partial.diagnostics)).not.toContain('Synthetic private');
+        expect(JSON.stringify(partial.diagnostics)).not.toContain('/synthetic/private/path');
+        expect(Array.from(yield* f.fs.readFile(file))).toEqual(Array.from(raw));
+      }).pipe(TestClock.withLive, provide),
+    );
 
   fcEffectProp(
     effectIt,
@@ -312,16 +463,17 @@ describe('maintenance inventory authority and fairness', () => {
           ? new Uint8Array([0xff, ...new TextEncoder().encode(body)])
           : new TextEncoder().encode(`Malformed synthetic header.\n${body}`);
         yield* f.fs.writeFile(f.recordPath(0), raw);
-        const result = yield* f.prepare(100).pipe(Effect.result);
-        expect(Result.isFailure(result)).toBe(true);
-        if (Result.isFailure(result))
-          expect(result.failure).toMatchObject({
-            diagnostic: {
-              category: invalidUtf8 ? 'invalid-utf8' : 'invalid-header',
-              memoryUri: uri(0),
-              retryable: false,
-            },
-          });
+        const result = yield* f.prepare(100);
+        expect(result.complete).toBe(false);
+        expect(result.diagnostics).toContainEqual(
+          expect.objectContaining({
+            category: invalidUtf8 ? 'invalid-utf8' : 'invalid-header',
+            memoryUri: uri(0),
+            retryable: false,
+          }),
+        );
+        expect(result.records.map(record => record.uri)).toContain(uri(1));
+        expect(result.records.map(record => record.uri)).not.toContain(uri(0));
         expect(Array.from(yield* f.fs.readFile(f.recordPath(0)))).toEqual(Array.from(raw));
         expect(yield* f.fs.readFileString(f.recordPath(1))).toBe(content(1));
       }).pipe(TestClock.withLive, provide),
@@ -508,8 +660,11 @@ describe('maintenance inventory authority and fairness', () => {
       const f = yield* fixture([0]);
       yield* settle(f, 8);
       yield* f.store.write(f.location, uri(0), 'not a memory', {mode: 'replace'});
-      const unreadable = yield* f.prepare(8).pipe(Effect.result);
-      expect(Result.isFailure(unreadable)).toBe(true);
+      const unreadable = yield* f.prepare(8);
+      expect(unreadable.complete).toBe(false);
+      expect(unreadable.diagnostics).toContainEqual(
+        expect.objectContaining({category: 'invalid-header', memoryUri: uri(0)}),
+      );
       yield* f.store.write(f.location, uri(0), content(0), {mode: 'replace'});
       const outside = yield* f.fs.makeTempDirectoryScoped({prefix: 'inventory-outside-'});
       const external = f.path.join(outside, 'outside.md');
@@ -582,13 +737,13 @@ describe('maintenance inventory authority and fairness', () => {
         content(0, 'selected', 'x'.repeat(contextMaintenanceInventoryAuthorityLimits.recordBytes)),
         {mode: 'replace'},
       );
-      const oversized = yield* f.prepare(100).pipe(Effect.result);
-      expect(Result.isFailure(oversized)).toBe(true);
-      if (Result.isFailure(oversized))
-        expect(oversized.failure).toMatchObject({
-          diagnostic: {category: 'record-size-limit', memoryUri: uri(0), retryable: false},
-        });
-    }).pipe(TestClock.withLive, provide),
+      const oversized = yield* f.prepare(100);
+      expect(oversized.complete).toBe(false);
+      expect(oversized.diagnostics).toContainEqual(
+        expect.objectContaining({category: 'record-size-limit', memoryUri: uri(0), retryable: false}),
+      );
+      expect(oversized.records.some(record => record.uri === uri(1))).toBe(true);
+    }).pipe(provide),
   );
 
   fcEffectProp(

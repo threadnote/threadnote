@@ -3,12 +3,19 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import {buildContextHealthReport} from '@threadnote/context/health';
-import type {MemoryRecord} from '@threadnote/memory/document';
+import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
+import {
+  createMemoryCodeCitation,
+  formatMemoryCodeCitation,
+  preserveMemoryCodeCitationAnchor,
+} from '@threadnote/memory/code/citation';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
 import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
 import {TopicReviewContent} from '../../src/attention/topic_review.js';
-import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
+import type {ManagerTopicReviewV1, ManagerAutomaticReview} from '@threadnote/manager/attention/topic-contracts';
+import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   ManagerContextHealthResponseV1,
   ManagerContextMaintenanceStatusV2,
@@ -126,6 +133,292 @@ const props = {
 };
 
 describe('context maintenance view', () => {
+  it.each([
+    {result: 'verified', retain: 'none'},
+    {result: 'verified', retain: 'relation'},
+    {result: 'verified', retain: 'newer'},
+    {result: 'verified', retain: 'new-hash'},
+    {result: 'refused', retain: 'none'},
+    {result: 'unverified', retain: 'none'},
+  ] as const)(
+    'reconciles automatic attention immediately with paused status and held stale responses ($result/$retain)',
+    async ({result, retain}) => {
+      vi.useFakeTimers();
+      const uri = 'threadnote://user/test/memories/durable/projects/threadnote/limit.md';
+      const capture = (value: number) =>
+        createMemoryCodeCitation({
+          version: 1,
+          extractorSet: 'test',
+          fileContentHash: {algorithm: 'sha256', value: sha256HexSync(`const limit = ${value};`)},
+          path: 'limit.ts',
+          repositoryId: 'b'.repeat(64),
+          repositoryIdentityKind: 'local',
+          sourceCommit: String(value).repeat(40),
+          sourceDirty: false,
+          sourceSnapshotId: `cgsn_${String(value).repeat(40)}`,
+          target: {kind: 'file'},
+        });
+      const original = capture(8);
+      const recaptured = preserveMemoryCodeCitationAnchor(original, capture(9));
+      expect(recaptured.anchorId).toBe(original.id);
+      expect(recaptured.id).not.toBe(original.id);
+      const citationId = recaptured.id;
+      const before = `MEMORY\nschema_version: 11\nkind: durable\nproject: threadnote\nmemory_id: tn_limit\ncode_citation: ${formatMemoryCodeCitation(recaptured)}\n\nThe limit is 8.`;
+      const record = parseMemoryDocument(uri, before);
+      if (!record) throw new Error('Recaptured canonical fixture did not parse.');
+      expect(record.metadata.codeCitations).toEqual([recaptured]);
+      const hash = sha256HexSync(before);
+      const oldReport = buildContextHealthReport({
+        project: 'threadnote',
+        records: [record],
+        now: new Date('2026-10-22T00:00:00.000Z'),
+        includeFindingCategories: ['citation-changed'],
+        citationValidations: [
+          {
+            uri,
+            receipts: [
+              {
+                citationId,
+                candidateCount: 1,
+                coverage: 'current-complete',
+                kind: 'file',
+                observedAt: '2026-10-22T00:00:00.000Z',
+                reason: 'source-changed',
+                status: 'changed',
+                strategy: 'file-path',
+                validatorVersion: 1,
+              },
+            ],
+          },
+        ],
+      });
+      expect(oldReport.findings).toHaveLength(1);
+      const oldFinding = oldReport.findings[0];
+      expect(oldFinding.caseIdentity?.slot).toBe(`anchor:${original.id}`);
+      expect(oldFinding.repair.targetUri).toBe(`${uri}#${recaptured.id}`);
+      const body = 'The limit is 9.';
+      const active = createReviewedSupportSnapshot({
+        bodyHash: sha256HexSync(body),
+        paragraphs: [{ordinal: 0, hash: sha256HexSync(body), role: 'unknown', support: 'unresolved', evidenceIds: []}],
+        sources: [],
+        acceptance: {
+          reviewId: 'review-automatic',
+          approvedAt: '2026-10-22T00:00:00.000Z',
+          targetBeforeHash: hash,
+          preparationDigest: hash,
+          sourceVectorDigest: hash,
+        },
+      });
+      const reviewedSupport = {type: 'reviewed-memory-support' as const, version: 1 as const, active};
+      const content = `MEMORY\nschema_version: 11\nkind: durable\nproject: threadnote\nmemory_id: tn_limit\ncode_citation: ${formatMemoryCodeCitation(recaptured)}\nreviewed_support: ${JSON.stringify(reviewedSupport)}\n\n${body}`;
+      const written: ManagerAutomaticReview = {
+        version: 1,
+        kind: 'automatic-memory-review',
+        project: 'threadnote',
+        reviewId: 'review-automatic',
+        revision: 4,
+        state: 'applied',
+        targetUri: uri,
+        targetHash: hash,
+        evidenceRevision: hash,
+        purpose: 'automatic',
+        acceptedBody: 'The limit is 8.',
+        proposal: {
+          version: 2,
+          kind: 'automatic',
+          body,
+          finalBodyHash: sha256HexSync(body),
+          changedOrdinals: [0],
+          draft: {
+            version: 2,
+            kind: 'automatic',
+            purpose: 'automatic',
+            targetHash: hash,
+            observationRevision: hash,
+            packetDigest: hash,
+            outcome: 'propose-update',
+            operations: [],
+            reviewedHandles: [],
+            rationale: 'Changed source.',
+            unresolvedQuestions: [],
+            removedClaims: [],
+            paragraphDecisions: [],
+          },
+        },
+        sourceEvidence: [],
+        coverage: {
+          outcome: 'complete',
+          scope: 'recorded-only',
+          searchedScopes: [],
+          omittedSources: 0,
+          omittedParagraphs: 0,
+        },
+        canApply: false,
+        canFinishVerification: false,
+        verified: result === 'verified',
+        approval: {
+          stage: 'written',
+          reviewRevision: 2,
+          approvalDigest: hash,
+          content,
+          contentHash: sha256HexSync(content),
+          metadataDiff: [],
+          reviewedSupport,
+        },
+      };
+      const observation = {
+        caseId: oldFinding.caseId!,
+        project: 'threadnote',
+        memoryId: 'tn_limit',
+        family: 'citation',
+        slot: oldFinding.caseIdentity!.slot,
+        evidenceRevision: 'b'.repeat(64),
+        subjectUri: uri,
+        subjectContentHashes: [{uri, hash}],
+        disposition: 'needs-decision' as const,
+        reason: 'source-changed',
+        firstSeen: 'now',
+        lastSeen: 'now',
+        lastChecked: 'now',
+        attemptCount: 1,
+        events: [],
+      };
+      const staleStatus: ManagerContextMaintenanceStatusV2 = {
+        ...status(),
+        paused: true,
+        cases: [
+          observation,
+          ...(retain === 'relation' ? [{...observation, caseId: 'unrelated-relation', family: 'relation'}] : []),
+        ],
+        counts: {decisionMemories: 1, 'needs-decision': retain === 'relation' ? 2 : 1},
+      };
+      const staleReport: ManagerContextHealthResponseV1 = {
+        ...oldReport,
+        repositoryEvidence: {state: 'available'},
+        recordPreviews: [
+          {
+            uri,
+            title: 'Limit',
+            kind: 'durable',
+            excerpt: record.body,
+            contentHash: hash,
+            code: [{citationId, path: recaptured.path, findingIds: [oldFinding.id]}],
+          },
+        ],
+      };
+      let applying = false;
+      let statusReads = 0;
+      let reportReads = 0;
+      const lateStatus = Promise.withResolvers<Response>();
+      const lateReport = Promise.withResolvers<Response>();
+      const response = (value: unknown, code = 200) => new Response(JSON.stringify(value), {status: code});
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (url.pathname === '/api/shares/conflicts') return response({conflicts: []});
+        if (url.pathname === '/api/context-health') {
+          reportReads += 1;
+          return reportReads > 1 ? lateReport.promise : response(staleReport);
+        }
+        if (url.pathname === '/api/attention/context-maintenance') {
+          statusReads += 1;
+          return statusReads > 1 ? lateStatus.promise : response(staleStatus);
+        }
+        if (url.pathname === '/api/attention/automatic-memory')
+          return response({
+            version: 1,
+            project: 'threadnote',
+            omitted: 0,
+            items: [
+              {
+                uri,
+                title: 'Limit',
+                targetHash: hash,
+                state: 'ready',
+                reviewId: written.reviewId,
+                evidenceRevision: hash,
+                coverage: written.coverage,
+                paragraphs: [],
+                route: 'personal-review',
+                legacyUncited: false,
+              },
+            ],
+          });
+        if (url.pathname === '/api/attention/automatic-review') {
+          if (init?.method === 'POST') {
+            applying = true;
+            return result === 'refused' ? response({error: 'The exact source changed.'}, 409) : response(written);
+          }
+          return response({
+            ...written,
+            state: 'pending',
+            verified: false,
+            canApply: true,
+            approval: {...written.approval!, stage: 'preview'},
+          });
+        }
+        throw new Error(`Unexpected request: ${url.pathname}`);
+      });
+      const counts: (number | undefined)[] = [];
+      await render(
+        <ContextHealthPanel
+          {...props}
+          project="threadnote"
+          refreshGeneration={0}
+          onDecisionCountChange={(_project, count) => counts.push(count)}
+        />,
+      );
+      expect(document.querySelectorAll('.health-decision-card')).toHaveLength(1);
+      const click = async (text: string) => {
+        const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+          item => item.textContent?.trim() === text,
+        );
+        expect(button, text).toBeDefined();
+        await act(async () => button!.click());
+      };
+      await click('Review update');
+      await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
+      await click('Confirm and apply');
+      expect(applying).toBe(true);
+      if (result === 'verified') {
+        expect(document.querySelector('dialog')).toBeNull();
+        expect(document.body.textContent).toContain('Update saved and verified');
+        expect(document.querySelector('.automatic-memory-card')).toBeNull();
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(retain === 'relation' ? 1 : 0);
+        expect(counts.at(-1)).toBe(retain === 'relation' ? 1 : 0);
+        expect(statusReads).toBe(2);
+        expect(reportReads).toBe(2);
+      } else {
+        expect(document.querySelector('dialog')).not.toBeNull();
+        expect(document.querySelectorAll('.health-decision-card')).toHaveLength(1);
+        expect(counts.at(-1)).toBeGreaterThan(0);
+        expect(document.body.textContent).not.toContain('Update saved and verified');
+      }
+      await act(async () => {
+        lateStatus.resolve(
+          response(
+            retain === 'newer'
+              ? {
+                  ...staleStatus,
+                  generation: 'newer-source',
+                  cases: [{...observation, evidenceRevision: 'new-source-revision'}],
+                }
+              : retain === 'new-hash'
+                ? {
+                    ...staleStatus,
+                    generation: 'new-target-hash',
+                    cases: [{...observation, subjectContentHashes: [{uri, hash: 'c'.repeat(64)}]}],
+                  }
+                : staleStatus,
+          ),
+        );
+        lateReport.resolve(response(staleReport));
+      });
+      expect(document.querySelectorAll('.health-decision-card')).toHaveLength(
+        result === 'verified' && retain === 'none' ? 0 : 1,
+      );
+      if (result === 'verified') expect(counts.at(-1)).toBe(retain === 'none' ? 0 : 1);
+    },
+  );
   it.each([404, 409])('falls back to the ordinary topic packet only after case selector %s', async statusCode => {
     const requests: string[] = [];
     vi.stubGlobal(

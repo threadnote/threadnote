@@ -1,4 +1,5 @@
 import {Effect, Schema} from 'effect';
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {canonicalMemoryDocumentContent, isSharedMemoryUri, type MemoryRecord} from '@threadnote/memory/document';
 import {memoryCodeCitationAnchorId} from '@threadnote/memory/code/citation';
@@ -84,7 +85,13 @@ export function buildContextMaintenancePacket<E, R>(
   assertCurrent: Effect.Effect<void, E, R>,
 ) {
   return Effect.gen(function* () {
-    const {item, record, corpus, callerCwd} = input;
+    const {item, callerCwd} = input;
+    const citationRecord = (record: MemoryRecord) => ({
+      ...record,
+      metadata: {...record.metadata, codeCitations: currentMemoryCodeCitations(record)},
+    });
+    const record = citationRecord(input.record);
+    const corpus = input.corpus.map(citationRecord);
     if (
       (input.selection?.startLine !== undefined &&
         (!Number.isSafeInteger(input.selection.startLine) || input.selection.startLine < 1)) ||
@@ -127,7 +134,11 @@ export function buildContextMaintenancePacket<E, R>(
       })),
     );
     const shared = isSharedMemoryUri(record.uri);
+    const approvedSupport =
+      record.metadata.reviewedSupport !== undefined &&
+      ['citation', 'citation-coverage', 'current-support'].includes(item.family);
     const canReviewRetirement =
+      !approvedSupport &&
       !shared &&
       item.citationId !== undefined &&
       ['deleted', 'changed', 'unknown'].includes(item.anchorEvidence?.status ?? '') &&
@@ -163,7 +174,8 @@ export function buildContextMaintenancePacket<E, R>(
               message: 'The shared base changed. Refresh the owner proposal.',
             });
         }
-        const ownerProposal = shared ? sharedMaintenanceOwnerProposal(record, corpus, sharedBase) : undefined;
+        const ownerProposal =
+          shared && !approvedSupport ? sharedMaintenanceOwnerProposal(record, corpus, sharedBase) : undefined;
         return {
           version: 2 as const,
           caseId: item.caseId,
@@ -230,6 +242,19 @@ export function buildContextMaintenancePacket<E, R>(
           budget: {maximumExcerptBytes: 4_000, maximumExcerptLines: 24, maximumSelectedEdits: 32},
           ...(evidence === undefined ? {} : {evidence}),
           ...(ownerProposal === undefined ? {} : {ownerProposal}),
+          ...(approvedSupport
+            ? {
+                reviewRoute: {
+                  operation: 'context_maintenance_review' as const,
+                  action: 'automatic-preview' as const,
+                  uri: record.uri,
+                  expectedContentHash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
+                  sourceCwd: callerCwd,
+                  manualAction: 'manual-preview',
+                  publicationOperation: shared ? 'share_propose' : undefined,
+                },
+              }
+            : {}),
           ...(canRetire
             ? {
                 retirement: {
@@ -252,52 +277,67 @@ export function buildContextMaintenancePacket<E, R>(
             instructions:
               'Read exact citation IDs from the selected memory pointer, then request this case packet with that citationId and memoryUri. Excerpts are bounded to 4000 bytes; maximumLines is at most 24. Original case and subject revisions are checked before and after the read.',
           },
-          choices: shared
+          choices: approvedSupport
             ? [
-                'Inspect the exact selected canonical edits',
-                'Ask the shared owner to review the proposal',
-                'Keep valid historical relations',
+                'Read current code and the exact approved paragraph support',
+                'Request the full ordinary-memory review preview',
+                'Approve the exact update, or explicitly author a manual support-aware edit',
               ]
-            : item.family === 'review-overdue'
+            : shared
               ? [
-                  'Review the current claim and supporting evidence',
-                  'Update the review date through a reviewed metadata change',
-                  'Archive a superseded claim after review',
+                  'Inspect the exact selected canonical edits',
+                  'Ask the shared owner to review the proposal',
+                  'Keep valid historical relations',
                 ]
-              : item.family === 'semantic-contradiction'
+              : item.family === 'review-overdue'
                 ? [
-                    'Read both source claims, inherited context, and exact revisions',
-                    'Compare overlapping scope, validity, and descriptive or policy roles',
-                    'Preserve compatible rules and history; review any correction explicitly',
+                    'Review the current claim and supporting evidence',
+                    'Update the review date through a reviewed metadata change',
+                    'Archive a superseded claim after review',
                   ]
-                : citation === undefined
+                : item.family === 'semantic-contradiction'
                   ? [
-                      'Review the current record and exact target',
-                      'Preview an exact reviewed repair',
-                      'Keep valid historical evidence',
+                      'Read both source claims, inherited context, and exact revisions',
+                      'Compare overlapping scope, validity, and descriptive or policy roles',
+                      'Preserve compatible rules and history; review any correction explicitly',
                     ]
-                  : [
-                      'Compare the current claim with bounded current and historical source',
-                      'Preserve verified historical provenance',
-                      'Review retirement of an unsupported anchor or claim',
-                    ],
-          allowedOperations: shared
+                  : citation === undefined
+                    ? [
+                        'Review the current record and exact target',
+                        'Preview an exact reviewed repair',
+                        'Keep valid historical evidence',
+                      ]
+                    : [
+                        'Compare the current claim with bounded current and historical source',
+                        'Preserve verified historical provenance',
+                        'Review retirement of an unsupported anchor or claim',
+                      ],
+          allowedOperations: approvedSupport
             ? [
                 'read_context',
-                'review_session_context',
-                'list_memory_candidates',
-                'apply_memory_candidates',
-                'share_propose',
+                'context_maintenance_packet',
+                'context_maintenance_review',
+                ...(shared ? ['share_propose'] : []),
               ]
-            : [
-                'read_context',
-                'context_health_repair_preview',
-                'context_health_repair_apply',
-                ...(canRetire ? ['context_maintain'] : []),
-              ],
-          instructions: shared
-            ? ownerProposal!.publication.instructions
-            : 'Read the exact memory and target. Current excerpts support the citation only when supportsCitation is true; historical excerpts preserve original provenance only. A new hash cannot validate old prose. Preview and apply only a supported exact revision within the authorized personal scope.',
+            : shared
+              ? [
+                  'read_context',
+                  'review_session_context',
+                  'list_memory_candidates',
+                  'apply_memory_candidates',
+                  'share_propose',
+                ]
+              : [
+                  'read_context',
+                  'context_health_repair_preview',
+                  'context_health_repair_apply',
+                  ...(canRetire ? ['context_maintain'] : []),
+                ],
+          instructions: approvedSupport
+            ? 'Compare the approved paragraph mapping with exact current evidence. Request context_maintenance_review action=automatic-preview with this exact URI and baseline hash; use manual-preview with the full user-authored desiredBody for a manual edit. Review the full document, role/support changes and source bindings before explicit approval. Shared owners separately review and approve share_propose. Immutable root citations remain history.'
+            : shared
+              ? ownerProposal!.publication.instructions
+              : 'Read the exact memory and target. Current excerpts support the citation only when supportsCitation is true; historical excerpts preserve original provenance only. A new hash cannot validate old prose. Preview and apply only a supported exact revision within the authorized personal scope.',
         };
       }),
     );

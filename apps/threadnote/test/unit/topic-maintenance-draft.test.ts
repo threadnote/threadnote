@@ -2,7 +2,7 @@ import * as candidateGenerationModule from '@threadnote/memory/candidate-generat
 import * as maintenanceModule from '../../src/memory/context/maintenance.js';
 import * as memoryModule from '../../src/mcp/server/memory.js';
 import * as modelModule from '../../src/manager/consolidation_models.js';
-import * as selectedModule from '../../src/manager/selected_draft.js';
+import * as selectedModule from '../../src/effect/ai/selected_generation.js';
 import * as schemaModule from '../../src/manager/topic_draft_schema.js';
 import * as inventoryModule from '../../src/memory/context/maintenance_inventory.js';
 import {loadTopicGenerationReceipt, readTopicGenerationSummary} from '@threadnote/memory/candidate-generation';
@@ -10,10 +10,12 @@ import {maintenanceSnapshotFailure} from '../../src/memory/context/maintenance_s
 import {InvalidModelOutput} from '@threadnote/inference/engine/errors';
 import {
   TopicDraftProviderOutputError,
+  DraftProviderUnavailableBeforeDispatch,
   localDraftGenerationSettings,
   serializeDraftGenerationSettings,
 } from '../../src/effect/ai/consolidator.js';
 import {TopicDraftError} from '../../src/memory/context/maintenance_draft.js';
+import {readDraftQueueTarget} from '../../src/memory/context/maintenance_draft_queue.js';
 import {makeTopicDraftControllerPacket, makeTopicDraftWireFixture} from '../helpers/topic-draft-wire.js';
 import {it as effectIt} from '@effect/vitest';
 import {describe, expect, it, vi} from 'vitest';
@@ -1032,6 +1034,98 @@ const withControllerFixture = <A, E, R>(
   });
 
 describe('complete wire controller repair boundary', () => {
+  for (const state of ['conflict', 'deferred', 'rejected'] as const)
+    for (const sameMaterial of [true, false])
+      effectIt.effect(`refuses ${state} review before source reconstruction: same material ${sameMaterial}`, () =>
+        withControllerFixture(f =>
+          Effect.gen(function* () {
+            const review = yield* f.request(() => Effect.succeed(f.modelResult(JSON.stringify(f.valid))));
+            const decided = candidateReviewWithState(review, review.candidates[0].candidateId, state);
+            yield* saveCandidateReview(f.config.agentContextHome, decided);
+            const queueBefore = yield* readDraftQueueTarget(f.config, sha256HexSync(f.basis.targetUri));
+            const status = yield* readContextMaintenanceStatus(f.config);
+            const packet = vi.mocked(maintenanceModule.readContextMaintenancePacket);
+            packet.mockClear();
+            packet.mockReturnValue(
+              Effect.fail(maintenanceModule.ContextMaintenanceError.make({message: 'Source reconstruction required.'})),
+            );
+            const caseStatus = {
+              ...status,
+              cases: [
+                {
+                  caseId: f.caseId,
+                  project: 'fixture',
+                  memoryId: f.record.metadata.memoryId!,
+                  family: 'topic-maintenance',
+                  slot: 'declared-support',
+                  evidenceRevision: sameMaterial ? f.basis.observationRevision : 'changed-material',
+                  disposition: 'needs-decision' as const,
+                  reason: 'topic-review-required',
+                  firstSeen: '2026-10-16T00:00:00.000Z',
+                  lastSeen: '2026-10-16T00:00:00.000Z',
+                  lastChecked: '2026-10-16T00:00:00.000Z',
+                  attemptCount: 0,
+                  subjectContentHashes: [{uri: f.basis.targetUri, hash: f.basis.targetHash}],
+                  events: [],
+                },
+              ],
+            };
+            yield* Effect.acquireUseRelease(
+              Effect.sync(() =>
+                vi.spyOn(maintenanceModule, 'readContextMaintenanceStatus').mockReturnValue(Effect.succeed(caseStatus)),
+              ),
+              () =>
+                Effect.gen(function* () {
+                  const failure = yield* f
+                    .request(() => Effect.die('A blocked review must not dispatch.'))
+                    .pipe(Effect.flip);
+                  const refused = state === 'conflict' || sameMaterial;
+                  expect(failure).toMatchObject(
+                    refused ? {reason: `review-${state}`} : {message: 'Source reconstruction required.'},
+                  );
+                  expect(packet).toHaveBeenCalledTimes(refused ? 0 : 1);
+                  expect(yield* loadCandidateReviewOptional(f.config.agentContextHome, review.reviewId)).toEqual(
+                    decided,
+                  );
+                  expect(yield* readDraftQueueTarget(f.config, sha256HexSync(f.basis.targetUri))).toEqual(queueBefore);
+                }),
+              spy => Effect.sync(() => spy.mockRestore()),
+            );
+          }),
+        ).pipe(provideTestLayer(ApplicationLayer)),
+      );
+
+  effectIt.effect(
+    'does not turn a consumed first attempt into availability waiting when repair loses its provider',
+    () =>
+      withControllerFixture(f =>
+        Effect.gen(function* () {
+          let calls = 0;
+          const generate: typeof runSelectedDraft = () =>
+            Effect.gen(function* () {
+              calls++;
+              if (calls === 1) return f.modelResult(JSON.stringify(f.invalid));
+              return yield* DraftProviderUnavailableBeforeDispatch.make({
+                backend: 'local-ai',
+                modelId,
+                message: 'Final repair preflight has no installed model.',
+              });
+            });
+          const failure = yield* f.request(generate).pipe(Effect.flip);
+          expect(calls).toBe(2);
+          expect(yield* readDraftQueueTarget(f.config, sha256HexSync(f.basis.targetUri))).toMatchObject({
+            state: 'failed',
+          });
+          if (!Schema.is(TopicDraftError)(failure) || !failure.diagnostics)
+            throw new Error('Expected observed failure.');
+          const receipt = yield* loadTopicGenerationReceipt(f.config.agentContextHome, failure.diagnostics.receiptId);
+          expect(receipt.attempts.map(attempt => attempt.status)).toEqual(['draft-invalid', 'not-dispatched']);
+          expect(receipt.firstFailedOutput?.text).toBe(JSON.stringify(f.invalid));
+          expect(yield* listCandidateReviews(f.config.agentContextHome)).toEqual([]);
+        }),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   for (const violation of ['duplicate', 'utf8', 'action-duplicate'] as const)
     effectIt.effect(
       'repairs complete ' + violation + ' assessment without losing either factual update or protected bytes',
@@ -1062,7 +1156,9 @@ describe('complete wire controller repair boundary', () => {
               });
             const review = yield* f.request(generate);
             expect(calls).toBe(2);
-            const proposal = review.maintenance!.proposal;
+            const payload = review.maintenance;
+            if (payload?.version !== 1) throw new Error('Expected the frozen legacy code draft.');
+            const proposal = payload.proposal;
             expect(proposal.body).toBe('Current first fact.\n\nCurrent second fact.\n\nProtected requirement.');
             expect(proposal.changedOrdinals).toEqual([0, 1]);
             expect(proposal.draft.operations.map(operation => operation.supportHandles)).toEqual([
@@ -1354,11 +1450,11 @@ describe('complete wire controller repair boundary', () => {
     effectIt.effect('does not dispatch repair after a required observation save fails: ' + failSave, () =>
       withControllerFixture(f =>
         Effect.gen(function* () {
-          const persist = candidateGenerationModule.saveTopicGenerationReceiptUnderLock;
+          const persist = candidateGenerationModule.saveTopicGenerationReceipt;
           let saves = 0;
           let calls = 0;
           const spy = vi
-            .spyOn(candidateGenerationModule, 'saveTopicGenerationReceiptUnderLock')
+            .spyOn(candidateGenerationModule, 'saveTopicGenerationReceipt')
             .mockImplementation((...args) => {
               saves++;
               return saves === failSave ? Effect.die('Fixture persistence failure.') : persist(...args);

@@ -423,6 +423,11 @@ export function makeContextMaintainCommand<E, R>(
           'draft-reject',
           'draft-defer',
           'draft-resume',
+          'background-status',
+          'background-pause',
+          'background-resume',
+          'background-provider',
+          'background-budget',
         ],
         'Local maintenance action',
         'run',
@@ -440,6 +445,11 @@ export function makeContextMaintainCommand<E, R>(
       ),
       caseId: optionalString('case-id', 'Exact citation case refresh, bounded agent packet, or status selector'),
       backend: optionalString('backend', 'Selected text-only topic draft backend: local-ai or effect-ai'),
+      unitsPerHour: optional(
+        integerFlag('background-units').pipe(
+          Flag.withSchema(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 4}))),
+        ),
+      ),
       modelId: optionalString('model-id', 'Exact selected generation model ID'),
       regenerate: boolean('regenerate', 'Explicitly replace a prior topic draft revision'),
       reviewId: optionalString('review-id', 'Exact private topic draft review ID for draft-view'),

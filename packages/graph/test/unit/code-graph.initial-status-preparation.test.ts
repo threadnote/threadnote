@@ -275,8 +275,10 @@ it('parses complete index-bearing metadata without accepting malformed frames or
         objectFormat,
         headCommit: 'a'.repeat(objectFormat === 'sha1' ? 40 : 64),
         sourceIndex: `/index/${part}/index`,
+        branch: {state: 'current', branch: 'feature/topic'},
       };
-      const frame = `${Object.values(expected).join('\n')}\n`;
+      const {branch, ...metadata} = expected;
+      const frame = `${Object.values(metadata).join('\n')}\n${branch.branch}\n`;
       const bytes = utf8.encode(frame);
       const before = bytes.slice();
       expect(parseRepositoryIdentityMetadata(bytes, true)).toEqual(expected);
@@ -300,6 +302,8 @@ it('parses complete index-bearing metadata without accepting malformed frames or
   );
   const prefix = `/repo\n/common\n/git\nsha1\n${'a'.repeat(40)}\n`;
   const exactIndex = '/' + 'i'.repeat(16_384 - 2);
-  expect(parseRepositoryIdentityMetadata(utf8.encode(prefix + exactIndex + '\n'), true)?.sourceIndex).toBe(exactIndex);
-  expect(parseRepositoryIdentityMetadata(utf8.encode(prefix + exactIndex + 'i\n'), true)).toBeUndefined();
+  expect(parseRepositoryIdentityMetadata(utf8.encode(prefix + exactIndex + '\nmain\n'), true)?.sourceIndex).toBe(
+    exactIndex,
+  );
+  expect(parseRepositoryIdentityMetadata(utf8.encode(prefix + exactIndex + 'i\nmain\n'), true)).toBeUndefined();
 });

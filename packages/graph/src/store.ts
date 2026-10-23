@@ -175,3 +175,5 @@ export class CodeGraphStore extends Context.Service<CodeGraphStore, CodeGraphSto
     }),
   );
 }
+
+export type {CodeGraphLeaseTimingObserver} from './store/lease_timing.js';

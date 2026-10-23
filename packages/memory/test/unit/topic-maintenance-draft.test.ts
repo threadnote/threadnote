@@ -5,11 +5,21 @@ import {parseCandidateReview} from '../../src/candidate.js';
 import {createMemoryCodeCitation} from '../../src/code/citation.js';
 import {consolidationRevision, consolidationSections} from '../../src/consolidation.js';
 import {
+  automaticMaintenanceCapabilities,
+  automaticMaintenanceEvidenceId,
+  type AutomaticMaintenanceAssessmentV1,
+  type AutomaticMaintenanceParagraphV1,
+} from '../../src/automatic-maintenance.js';
+import {
+  parseAutomaticMaintenanceDraft,
+  parseAutomaticMaintenanceProviderDraft,
   parseTopicMaintenanceDraft,
   topicMaintenanceParagraphCoverage,
   validateTopicMaintenanceDraftBasis,
   validateTopicMaintenanceReviewEvidence,
   validateTopicMaintenanceReviewPayload,
+  validateAutomaticMaintenanceDraftBasis,
+  type AutomaticMaintenanceDraftV2,
   type TopicMaintenanceDraftBasisV1,
   type TopicMaintenanceDraftV1,
 } from '../../src/topic-maintenance-draft.js';
@@ -655,6 +665,298 @@ describe('topic maintenance draft contract', () => {
         },
       ),
       {numRuns: 80},
+    );
+  });
+});
+
+function automaticProviderFixture(
+  body = 'Alpha.\n\nBeta.',
+  roles: readonly AutomaticMaintenanceParagraphV1['role'][] = [],
+  establishedOrdinal?: number,
+) {
+  const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/provider-topic.md';
+  const evidence = [0, 1].map(index => {
+    const source = {
+      kind: 'memory' as const,
+      uri: uri.replace('provider-topic.md', `source-${index}.md`),
+      canonicalHash: consolidationRevision(`Source ${index}.`),
+      fragment: {ordinal: 0, hash: consolidationRevision(`Evidence ${index}.`), startOffset: 0, endOffset: 11},
+    };
+    return {
+      id: automaticMaintenanceEvidenceId(source),
+      source,
+      scope: 'personal' as const,
+      authority: 'provisional' as const,
+      availability: 'available' as const,
+    };
+  });
+  const paragraphs: readonly AutomaticMaintenanceParagraphV1[] = consolidationSections(body).map((text, ordinal) => ({
+    ordinal,
+    hash: consolidationRevision(text),
+    role: roles[ordinal] ?? 'unknown',
+    roleAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
+    support: 'unresolved',
+    supportAuthority: ordinal === establishedOrdinal ? 'legacy-approved' : 'provisional',
+    historicalEvidenceIds: [],
+    acceptedEvidenceIds: [],
+    currentEvidenceIds: [],
+    currentSupport: 'unresolved',
+    currentSupportAuthority: 'provisional',
+  }));
+  const target = {
+    uri,
+    kind: 'durable' as const,
+    status: 'active' as const,
+    canonicalHash: 'a'.repeat(64),
+    bodyHash: consolidationRevision(body),
+    paragraphCount: paragraphs.length,
+    visibility: 'personal' as const,
+    readOnly: false,
+    artifact: false,
+  };
+  const coverage = {
+    outcome: 'complete' as const,
+    scope: 'recorded-only' as const,
+    searchedScopes: [],
+    omittedSources: 0,
+    omittedParagraphs: 0,
+  };
+  const assessment: AutomaticMaintenanceAssessmentV1 = {
+    version: 1,
+    preparation:
+      establishedOrdinal === undefined
+        ? {version: 1, kind: 'derived'}
+        : {version: 1, kind: 'legacy-approved', manifestVersion: 1, manifestHash: 'f'.repeat(64)},
+    target,
+    paragraphs,
+    evidence,
+    dependencies: [],
+    coverage,
+    capabilities: automaticMaintenanceCapabilities(target, paragraphs, evidence, coverage),
+  };
+  const basis = validateAutomaticMaintenanceDraftBasis({
+    version: 3,
+    kind: 'automatic',
+    targetUri: uri,
+    targetHash: target.canonicalHash,
+    body,
+    assessment,
+    paragraphs,
+    reads: [],
+    observationRevision: 'b'.repeat(64),
+    packetDigest: 'c'.repeat(64),
+    scopeRevision: 'd'.repeat(64),
+    additionalDependencies: [],
+    handles: evidence.map(item => ({id: `current:${item.id}`, citationId: item.id, variant: 'current'})),
+  });
+  const operation = (ordinal: number, text: string) => ({
+    ordinal,
+    beforeHash: paragraphs[ordinal].hash,
+    text,
+    supportHandles: [basis.handles[0].id],
+    rationale: 'Exact admitted current support.',
+  });
+  const draft: AutomaticMaintenanceDraftV2 = {
+    version: 2,
+    kind: 'automatic',
+    purpose: 'automatic',
+    targetHash: basis.targetHash,
+    observationRevision: basis.observationRevision,
+    packetDigest: basis.packetDigest,
+    outcome: 'propose-update',
+    operations: [operation(0, 'Changed claim.')],
+    paragraphDecisions: paragraphs.map(p => ({
+      ordinal: p.ordinal,
+      beforeHash: p.hash,
+      role: 'descriptive',
+      support: 'direct',
+      evidenceIds: [evidence[0].id],
+    })),
+    reviewedHandles: [basis.handles[0].id],
+    rationale: 'Human preview still required.',
+    unresolvedQuestions: [],
+    removedClaims: [],
+  };
+  return {basis, draft, operation};
+}
+
+describe('automatic compact provider exact repeats', () => {
+  it('projects only fully validated repeats while public parsing stays strict', () => {
+    const {basis, draft, operation} = automaticProviderFixture();
+    const mixed = {...draft, operations: [...draft.operations, operation(1, 'Beta.')]};
+    const original = JSON.stringify({basis, mixed});
+    expect(() => parseAutomaticMaintenanceDraft(basis, JSON.stringify(mixed))).toThrow(/replacement/);
+    const result = parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(mixed));
+    expect(result.body).toBe('Changed claim.\n\nBeta.');
+    expect(result.changedOrdinals).toEqual([0]);
+    expect(result.draft).toEqual(draft);
+    expect(JSON.stringify({basis, mixed})).toBe(original);
+  });
+
+  it('cannot hide invalid repeated operations beside a real replacement', () => {
+    const {basis, draft, operation} = automaticProviderFixture();
+    const repeat = operation(1, 'Beta.');
+    const invalid = [
+      {...repeat, beforeHash: 'f'.repeat(64)},
+      {...repeat, ordinal: 9},
+      {...repeat, supportHandles: []},
+      {...repeat, supportHandles: [...repeat.supportHandles, ...repeat.supportHandles]},
+      {...repeat, supportHandles: [basis.handles[1].id]},
+      {...repeat, supportHandles: [basis.handles[0].id.replace('current:', 'accepted:')]},
+      {...repeat, authority: 'verified'},
+      {...repeat, rationale: ''},
+      {...repeat, rationale: 'x'.repeat(1025)},
+      {...repeat, text: ' Beta.'},
+      {...repeat, text: 'Beta. '},
+      {...repeat, text: 'Beta.\n\nExtra.'},
+    ];
+    const original = JSON.stringify({basis, draft});
+    for (const bad of invalid)
+      expect(() =>
+        parseAutomaticMaintenanceProviderDraft(
+          basis,
+          JSON.stringify({...draft, operations: [...draft.operations, bad]}),
+        ),
+      ).toThrow();
+    for (const role of ['unknown', 'normative', 'historical'] as const)
+      expect(() =>
+        parseAutomaticMaintenanceProviderDraft(
+          basis,
+          JSON.stringify({
+            ...draft,
+            operations: [...draft.operations, repeat],
+            paragraphDecisions: draft.paragraphDecisions.map((d, i) => (i === 1 ? {...d, role} : d)),
+          }),
+        ),
+      ).toThrow();
+    for (const support of ['contextual', 'unresolved'] as const)
+      expect(() =>
+        parseAutomaticMaintenanceProviderDraft(
+          basis,
+          JSON.stringify({
+            ...draft,
+            operations: [...draft.operations, repeat],
+            paragraphDecisions: draft.paragraphDecisions.map((d, i) =>
+              i === 1 ? {...d, support, evidenceIds: support === 'unresolved' ? [] : d.evidenceIds} : d,
+            ),
+          }),
+        ),
+      ).toThrow();
+    const triple = automaticProviderFixture('Alpha.\n\nBeta.\n\nGamma.');
+    expect(() =>
+      parseAutomaticMaintenanceProviderDraft(
+        triple.basis,
+        JSON.stringify({...triple.draft, operations: [...triple.draft.operations, repeat, repeat]}),
+      ),
+    ).toThrow();
+    expect(JSON.stringify({basis, draft})).toBe(original);
+  });
+
+  it('preserves protected basis roles and all original identity and byte bounds', () => {
+    for (const role of ['normative', 'historical', 'unknown'] as const) {
+      const f = automaticProviderFixture('Alpha.\n\nBeta.', ['unknown', role], role === 'unknown' ? 1 : undefined);
+      expect(() =>
+        parseAutomaticMaintenanceProviderDraft(
+          f.basis,
+          JSON.stringify({...f.draft, operations: [...f.draft.operations, f.operation(1, 'Beta.')]}),
+        ),
+      ).toThrow(/protected|descriptive/);
+    }
+    const {basis, draft, operation} = automaticProviderFixture();
+    const mixed = {...draft, operations: [...draft.operations, operation(1, 'Beta.')]};
+    for (const patch of [
+      {targetHash: 'f'.repeat(64)},
+      {observationRevision: 'f'.repeat(64)},
+      {packetDigest: 'f'.repeat(64)},
+      {authority: 'verified'},
+      {rationale: 'x'.repeat(32 * 1024)},
+      {paragraphDecisions: [...draft.paragraphDecisions].reverse()},
+      {
+        paragraphDecisions: draft.paragraphDecisions.map(d => ({
+          ...d,
+          evidenceIds: [...d.evidenceIds, ...d.evidenceIds],
+        })),
+      },
+    ])
+      expect(() => parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify({...mixed, ...patch}))).toThrow();
+  });
+
+  it('rejects noop-only and non-update operations without converting outcomes or manual purpose', () => {
+    const {basis, draft, operation} = automaticProviderFixture();
+    for (const outcome of [
+      'propose-update',
+      'propose-revalidation',
+      'policy-conflict',
+      'insufficient-evidence',
+    ] as const)
+      expect(() =>
+        parseAutomaticMaintenanceProviderDraft(
+          basis,
+          JSON.stringify({...draft, outcome, operations: [operation(1, 'Beta.')]}),
+        ),
+      ).toThrow(/outcome/);
+    const revalidation = {...draft, outcome: 'propose-revalidation', operations: []};
+    expect(parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(revalidation))).toEqual(
+      parseAutomaticMaintenanceDraft(basis, JSON.stringify(revalidation)),
+    );
+    const manual = {
+      ...draft,
+      purpose: 'manual-edit',
+      desiredBody: basis.body,
+      operations: [],
+      paragraphDecisions: basis.paragraphs.map(p => ({
+        ordinal: p.ordinal,
+        beforeHash: p.hash,
+        role: 'unknown',
+        support: 'unresolved',
+        evidenceIds: [],
+      })),
+    };
+    expect(parseAutomaticMaintenanceDraft(basis, JSON.stringify(manual)).body).toBe(basis.body);
+    expect(() => parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(manual))).toThrow(/automatic purpose/);
+  });
+
+  it('preserves untouched byte geometry and never folds Unicode equivalents into repeats', () => {
+    const spaced = automaticProviderFixture('  Alpha.  \n \n\tBeta. \n');
+    expect(
+      parseAutomaticMaintenanceProviderDraft(
+        spaced.basis,
+        JSON.stringify({...spaced.draft, operations: [...spaced.draft.operations, spaced.operation(1, 'Beta.')]}),
+      ).body,
+    ).toBe('  Changed claim.  \n \n\tBeta. \n');
+    const unicode = automaticProviderFixture('Alpha.\n\nCaf\u00e9.');
+    const result = parseAutomaticMaintenanceProviderDraft(
+      unicode.basis,
+      JSON.stringify({
+        ...unicode.draft,
+        operations: [...unicode.draft.operations, unicode.operation(1, 'Cafe\u0301.')],
+      }),
+    );
+    expect(result.body).toBe('Changed claim.\n\nCafe\u0301.');
+    expect(result.changedOrdinals).toEqual([0, 1]);
+  });
+
+  it('preserves independently expected body and decisions across mixed operation orders without mutation', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.stringMatching(/^[a-z]{1,16}$/u), {minLength: 2, maxLength: 12}),
+        fc.array(fc.boolean(), {minLength: 12, maxLength: 12}),
+        (sections, selected) => {
+          const {basis, draft, operation} = automaticProviderFixture(sections.join('\n\n'));
+          const repeats = sections.flatMap((text, ordinal) =>
+            ordinal > 0 && selected[ordinal] ? [operation(ordinal, text)] : [],
+          );
+          const mixed = {...draft, operations: [...draft.operations, ...repeats].reverse()};
+          const original = JSON.stringify({basis, mixed});
+          const result = parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(mixed));
+          expect(result.body).toBe(['Changed claim.', ...sections.slice(1)].join('\n\n'));
+          expect(result.changedOrdinals).toEqual([0]);
+          expect(result.draft).toEqual(draft);
+          expect(parseAutomaticMaintenanceProviderDraft(basis, JSON.stringify(result.draft))).toEqual(result);
+          expect(JSON.stringify({basis, mixed})).toBe(original);
+        },
+      ),
+      {numRuns: 40},
     );
   });
 });

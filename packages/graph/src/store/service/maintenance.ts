@@ -1,3 +1,4 @@
+import {withCodeGraphLeaseTiming} from '../lease_timing.js';
 import {Crypto, Effect, FileSystem, Path} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -235,23 +236,57 @@ export function makeCodeGraphStoreMaintenanceMethods(runtime: CodeGraphStoreRunt
         Effect.mapError(cause => storeError('run routine code graph maintenance', cause)),
       ),
     releaseSnapshotLease: (databasePath, token, options) =>
-      fs.exists(databasePath).pipe(
+      withCodeGraphLeaseTiming(options?.onTiming, 'exists', fs.exists(databasePath)).pipe(
         Effect.flatMap(exists =>
           exists
-            ? withWriterGate(
-                databasePath,
-                useDatabase(
+            ? withCodeGraphLeaseTiming(
+                options?.onTiming,
+                'writer-gate',
+                withWriterGate(
                   databasePath,
-                  Effect.gen(function* () {
-                    const sql = yield* SqlClient.SqlClient;
-                    yield* ensureLeaseSchemaInitialized(databasePath, sql, false);
-                    const retired = yield* releaseSnapshotLease(token);
-                    return retired ? yield* pruneRetiredSnapshotRowsPage() : {deleted: 0, remaining: false};
-                  }),
+                  withCodeGraphLeaseTiming(
+                    options?.onTiming,
+                    'session',
+                    useDatabase(
+                      databasePath,
+                      withCodeGraphLeaseTiming(
+                        options?.onTiming,
+                        'session-body',
+                        Effect.gen(function* () {
+                          const sql = yield* SqlClient.SqlClient;
+                          yield* withCodeGraphLeaseTiming(
+                            options?.onTiming,
+                            'schema',
+                            ensureLeaseSchemaInitialized(databasePath, sql, false),
+                          );
+                          const retired = yield* withCodeGraphLeaseTiming(
+                            options?.onTiming,
+                            'lease-sql',
+                            releaseSnapshotLease(token, options?.onTiming),
+                          );
+                          return retired
+                            ? yield* withCodeGraphLeaseTiming(
+                                options?.onTiming,
+                                'prune',
+                                pruneRetiredSnapshotRowsPage(),
+                              )
+                            : {deleted: 0, remaining: false};
+                        }),
+                      ),
+                    ),
+                  ),
+                  options?.waitTimeoutMilliseconds,
                 ),
-                options?.waitTimeoutMilliseconds,
               ).pipe(
-                Effect.tap(cleanup => (cleanup.remaining ? scheduleRoutinePhysicalCleanup(databasePath) : Effect.void)),
+                Effect.tap(cleanup =>
+                  cleanup.remaining
+                    ? withCodeGraphLeaseTiming(
+                        options?.onTiming,
+                        'schedule',
+                        scheduleRoutinePhysicalCleanup(databasePath),
+                      )
+                    : Effect.void,
+                ),
                 Effect.asVoid,
               )
             : Effect.void,

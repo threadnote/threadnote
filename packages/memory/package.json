@@ -8,6 +8,7 @@
     "./code/citation": "./src/code/citation.ts",
     "./code/citation-policy": "./src/code/citation-policy.ts",
     "./document": "./src/document.ts",
+    "./reviewed-support": "./src/reviewed-support.ts",
     "./hygiene": "./src/hygiene.ts",
     "./hygiene/provenance": "./src/hygiene/provenance.ts",
     "./identity-alias": "./src/identity-alias.ts",
@@ -36,7 +37,8 @@
     "./topic-maintenance-acceptance": "./src/topic-maintenance-acceptance.ts",
     "./topic-maintenance-draft": "./src/topic-maintenance-draft.ts",
     "./types": "./src/types.ts",
-    "./candidate-generation": "./src/candidate-generation.ts"
+    "./candidate-generation": "./src/candidate-generation.ts",
+    "./automatic-maintenance": "./src/automatic-maintenance.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

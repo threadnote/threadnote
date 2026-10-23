@@ -1,3 +1,4 @@
+import {reviewedSupportReplacementError} from './reviewed-support.js';
 import {
   assertMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
@@ -614,9 +615,11 @@ function proposeEnrollmentWithManifest<M extends TopicMaintenanceManifest>(recor
 
 export function topicMaintenanceReplacementError(
   current: MemoryRecord | undefined,
-  next: Pick<MemoryRecord, 'body' | 'metadata'>,
+  next: Pick<MemoryRecord, 'body' | 'metadata'> & Partial<Pick<MemoryRecord, 'content'>>,
   enrollment?: TopicMaintenanceManifestV1 | TopicMaintenanceObsidianManifestV3,
 ): string | undefined {
+  const reviewedError = reviewedSupportReplacementError(current, next);
+  if (reviewedError) return reviewedError;
   if (!current) return undefined;
   if (current.metadata.topicMaintenanceError || next.metadata.topicMaintenanceError)
     return 'Topic maintenance metadata is malformed or stale; repair the enrolled topic before replacement.';

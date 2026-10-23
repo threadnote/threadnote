@@ -1171,6 +1171,8 @@ describe('code graph release evidence', () => {
         [
           ...requiredReleaseMeasurements(PRODUCTION_RELEASE_EVIDENCE_MEASUREMENTS),
           benchmarkMeasurement('cold-index', 'milliseconds', [coldIndexMilliseconds]),
+          benchmarkMeasurement('whole-graph-structural-analysis', 'milliseconds', [77]),
+          benchmarkMeasurement('whole-graph-structural-analysis-process-cpu', 'milliseconds', [10]),
           benchmarkMeasurement('hot-exact-lexical-query', 'milliseconds', [coldIndexMilliseconds + 200]),
           benchmarkMeasurement('hot-query-process-cpu', 'milliseconds', [coldIndexMilliseconds + 100]),
           benchmarkMeasurement('mcp-impact-duration', 'milliseconds', [coldIndexMilliseconds + 50]),
@@ -1238,6 +1240,134 @@ describe('code graph release evidence', () => {
       governed(110, 'cold-resolving-references'),
     ];
     const ratchet = createCodeGraphProductionRatchet(artifacts);
+
+    const completionDiagnosticNames = [
+      ...['cold', 'one-file-reindex', 'same-overlay-reference'].flatMap(prefix => [
+        ...[
+          'admission',
+          'database-session',
+          'database-session-body',
+          'index-scope',
+          'index-scope-body',
+          'lifecycle-opportunity',
+          'reporter-completion',
+          'share-drain',
+          'snapshot-lease-release',
+          'snapshot-lease-release-after-complete',
+        ].flatMap(stage =>
+          ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'].map(
+            statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
+          ),
+        ),
+        `${prefix}-post-activation-completion`,
+        `${prefix}-post-activation-completion-process-cpu-n1`,
+      ]),
+      ...['lease-acquire', 'read-session', 'lease-release'].flatMap(stage => [
+        `whole-graph-structural-analysis-${stage}`,
+        `whole-graph-structural-analysis-${stage}-process-cpu`,
+      ]),
+    ];
+    expect(new Set(completionDiagnosticNames).size).toBe(132);
+    const withCompletionDiagnostics = (
+      artifact: BenchmarkArtifactV1,
+      values: readonly number[] = completionDiagnosticNames.map(() => 100_000),
+    ): BenchmarkArtifactV1 => ({
+      ...artifact,
+      metadata: {...artifact.metadata, analysisLeaseDiagnostics: JSON.stringify({version: 1, samples: []})},
+      measurements: [
+        ...artifact.measurements,
+        ...completionDiagnosticNames.map((name, index) =>
+          benchmarkMeasurement(name, name.endsWith('-count-n1') ? 'count' : 'milliseconds', [
+            values[index],
+            values[index] + 1,
+            values[index] + 2,
+          ]),
+        ),
+      ],
+    });
+    const originalArtifacts = structuredClone(artifacts);
+    const diagnosticArtifacts = artifacts.map(artifact => withCompletionDiagnostics(artifact));
+    expect(createCodeGraphProductionRatchet(diagnosticArtifacts)).toEqual(ratchet);
+    for (const name of ['whole-graph-structural-analysis', 'whole-graph-structural-analysis-process-cpu']) {
+      expect(ratchet.measurements[name]).toBeDefined();
+      const maximum = ratchet.measurements[name].p95Maximum!;
+      expect(() =>
+        enforceCodeGraphBenchmarkRatchet(
+          {
+            ...diagnosticArtifacts[0],
+            measurements: diagnosticArtifacts[0].measurements.map(measurement =>
+              measurement.name === name ? benchmarkMeasurement(name, 'milliseconds', [maximum + 1]) : measurement,
+            ),
+          },
+          ratchet,
+        ),
+      ).toThrow(new RegExp(name, 'u'));
+    }
+    for (const artifact of diagnosticArtifacts) {
+      expect(() => enforceCodeGraphBenchmarkRatchet(artifact, ratchet)).not.toThrow();
+      expect(artifact.measurements.slice(-132).map(measurement => measurement.name)).toEqual(completionDiagnosticNames);
+    }
+    fc.assert(
+      fc.property(fc.array(fc.nat({max: 1_000_000}), {minLength: 132, maxLength: 132}), values => {
+        const observed = artifacts.map(artifact => withCompletionDiagnostics(artifact, values));
+        expect(createCodeGraphProductionRatchet(observed)).toEqual(ratchet);
+        expect(() => enforceCodeGraphBenchmarkRatchet(observed[0], ratchet)).not.toThrow();
+      }),
+      {numRuns: 25},
+    );
+    expect(artifacts).toEqual(originalArtifacts);
+    for (const name of [
+      'bootstrap-completion-admission-count-n1',
+      'cold-completion-admissions-count-n1',
+      'cold-completion-admission-count-n2',
+      'cold-completion-admission-wall-total',
+      'cold-post-activation-completion-process-cpu',
+      'whole-graph-structural-analysis-read-sessions',
+    ]) {
+      expect(() =>
+        enforceCodeGraphBenchmarkRatchet(
+          {
+            ...diagnosticArtifacts[0],
+            measurements: [...diagnosticArtifacts[0].measurements, benchmarkMeasurement(name, 'count', [1])],
+          },
+          ratchet,
+        ),
+      ).toThrow(/stable production measurement set changed/u);
+    }
+    fc.assert(
+      fc.property(fc.stringMatching(/^[a-z]{1,16}$/u), suffix => {
+        const name = `cold-completion-future-${suffix}-count-n1`;
+        expect(() =>
+          enforceCodeGraphBenchmarkRatchet(
+            {
+              ...diagnosticArtifacts[0],
+              measurements: [...diagnosticArtifacts[0].measurements, benchmarkMeasurement(name, 'count', [1])],
+            },
+            ratchet,
+          ),
+        ).toThrow(/stable production measurement set changed/u);
+      }),
+      {numRuns: 25},
+    );
+    for (const duplicated of [diagnosticArtifacts[0].measurements[0], diagnosticArtifacts[0].measurements.at(-1)!]) {
+      const duplicate = {
+        ...diagnosticArtifacts[0],
+        measurements: [...diagnosticArtifacts[0].measurements, duplicated],
+      };
+      expect(() => createCodeGraphProductionRatchet([duplicate, ...diagnosticArtifacts.slice(1)])).toThrow(
+        /unique assessed measurement names/u,
+      );
+      expect(() => enforceCodeGraphBenchmarkRatchet(duplicate, ratchet)).toThrow(/unique assessed measurement names/u);
+    }
+    const malformed = {
+      ...diagnosticArtifacts[0],
+      measurements: diagnosticArtifacts[0].measurements.map(measurement =>
+        measurement.name === completionDiagnosticNames[0] ? {...measurement, samples: 0} : measurement,
+      ),
+    };
+    expect(() => createCodeGraphProductionRatchet([malformed, ...diagnosticArtifacts.slice(1)])).toThrow(
+      /at least one integer sample/u,
+    );
 
     const cleanRebuilds = artifacts.map((artifact, index) => ({
       ...artifact,
@@ -1608,6 +1738,31 @@ describe('code graph release evidence', () => {
 
     expect(() => enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet)).toThrow(/cold-index/u);
     expect(() => enforceCodeGraphBenchmarkRatchet(noisyCandidate, githubHostedRatchet, pairedControl)).not.toThrow();
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(withCompletionDiagnostics(noisyCandidate), githubHostedRatchet),
+    ).toThrow(/cold-index/u);
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(withCompletionDiagnostics(noisyCandidate), githubHostedRatchet, pairedControl),
+    ).not.toThrow();
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(withCompletionDiagnostics(noisyCandidate), githubHostedRatchet, {
+        ...pairedControl,
+        artifact: withCompletionDiagnostics(pairedControlArtifact),
+        initialCandidateArtifact: withCompletionDiagnostics(pairedInitialCandidateArtifact),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      enforceCodeGraphBenchmarkRatchet(withCompletionDiagnostics(noisyCandidate), githubHostedRatchet, {
+        ...pairedControl,
+        artifact: {
+          ...pairedControlArtifact,
+          measurements: [
+            ...pairedControlArtifact.measurements,
+            benchmarkMeasurement('cold-completion-future-stage-count-n1', 'count', [1]),
+          ],
+        },
+      }),
+    ).toThrow(/paired control assessed measurement set does not match/u);
     const bootstrapProcessCountName = 'bootstrap-external-process-count-peak-observed-n1';
     const bootstrapProcessCountLimit: CodeGraphBenchmarkMeasurementRatchetV1 = {
       maximum: 4,

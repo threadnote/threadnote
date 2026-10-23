@@ -1,3 +1,4 @@
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {Clock, DateTime, Effect, FileSystem, Option, Path, Result} from 'effect';
 import {canonicalMemoryDocumentContent, type MemoryRecord} from '@threadnote/memory/document';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -20,6 +21,25 @@ import {
 } from './maintenance_evidence.js';
 import type {ContextMaintenanceCaseV2} from './maintenance.js';
 import {maintenanceCitationAdmissionCurrent, recordSourceRevision} from './maintenance_source.js';
+import {readContextMaintenanceCanonicalRecord} from './maintenance_inventory.js';
+
+/** Inventory records omit bodies; reviewed authority is selected only after its exact canonical reread. */
+export const readMaintenanceInventorySubjects = Effect.fn('contextMaintenance.inventorySubjects')(function* (
+  config: RuntimeConfig,
+  records: readonly MemoryRecord[],
+  hashes: ReadonlyMap<string, string>,
+) {
+  return yield* Effect.forEach(
+    records,
+    record =>
+      record.metadata.reviewedSupport || record.metadata.reviewedSupportError
+        ? readContextMaintenanceCanonicalRecord(config, record.uri).pipe(
+            Effect.map(current => (current.hash === hashes.get(record.uri) ? current.record : undefined)),
+          )
+        : Effect.succeed(record),
+    {concurrency: 4},
+  );
+});
 
 export interface MaintenanceWorkerTask {
   readonly record: MemoryRecord;
@@ -79,7 +99,7 @@ export function planMaintenanceWorkerBatches<T extends MaintenanceWorkerTask>(ta
 }
 
 function maintenanceTaskCitations(task: MaintenanceWorkerTask, record: MemoryRecord) {
-  const citations = record.metadata.codeCitations?.slice(task.chunk * 64, (task.chunk + 1) * 64) ?? [];
+  const citations = currentMemoryCodeCitations(record).slice(task.chunk * 64, (task.chunk + 1) * 64);
   return task.citationIds === undefined
     ? citations
     : citations.filter(citation => task.citationIds!.includes(citation.id));
@@ -326,7 +346,7 @@ export function maintenanceWorkerRecordValidations(evidence: MaintenanceWorkerEv
     (record.metadata.project ?? 'unscoped') !== evidence.project
   )
     return [];
-  const ids = new Set((record.metadata.codeCitations ?? []).map(citation => citation.id));
+  const ids = new Set(currentMemoryCodeCitations(record).map(citation => citation.id));
   return evidence.validations
     .filter(validation => validation.uri === record.uri)
     .map(validation => ({...validation, receipts: validation.receipts.filter(receipt => ids.has(receipt.citationId))}));
@@ -419,7 +439,7 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
   const completed = new Set<string>();
   for (const uri of selected) {
     const record = byUri.get(uri);
-    if (record !== undefined && (record.metadata.codeCitations?.length ?? 0) > 0) continue;
+    if (record !== undefined && currentMemoryCodeCitations(record).length > 0) continue;
     if (yield* requestedSubjectObsolete(config, uri, inventory, inventoryComplete)) {
       yield* clearContextMaintenanceEvidenceRequest(
         config,
@@ -437,7 +457,7 @@ export const runRequestedMaintenanceProjection = Effect.fn('contextMaintenance.r
     return record === undefined ||
       record.metadata.status !== 'active' ||
       record.metadata.project !== request.project ||
-      (record.metadata.codeCitations?.length ?? 0) === 0 ||
+      currentMemoryCodeCitations(record).length === 0 ||
       (record.metadata.citationErrors?.length ?? 0) > 0
       ? []
       : [{record, project: request.project, chunk: 0, key: uri}];
@@ -519,7 +539,7 @@ const requestedSubjectObsolete = Effect.fn('contextMaintenance.requestedSubjectO
   const after = yield* readCanonicalMutationGeneration(fs, path, config.agentContextHome, config.account);
   return (
     current !== undefined &&
-    (current.metadata.status !== 'active' || (current.metadata.codeCitations?.length ?? 0) === 0) &&
+    (current.metadata.status !== 'active' || currentMemoryCodeCitations(current).length === 0) &&
     (current.metadata.citationErrors?.length ?? 0) === 0 &&
     Option.isSome(last) &&
     first.success.size === last.value.size &&

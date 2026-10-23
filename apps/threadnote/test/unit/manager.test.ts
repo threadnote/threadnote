@@ -57,7 +57,11 @@ import {
   type RepositoryIdentity,
 } from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
-import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {
+  createMemoryCodeCitation,
+  MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
+} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -1004,7 +1008,7 @@ describe('manager http API', () => {
 
       const futureExisting = original.replace(
         'status: active',
-        `status: active\nschema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+        `status: active\nschema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
       );
       await writeFile(memoryPath, futureExisting);
       const rejectedExisting = await requestSave(original.replace('feature notes', 'replacement notes'));

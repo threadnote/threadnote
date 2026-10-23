@@ -29,7 +29,11 @@ import {selectLocalModel} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {loadRecallIndex} from '@threadnote/recall/index';
 import {prepareRecallSections} from '@threadnote/recall/runtime';
-import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {
+  createMemoryCodeCitation,
+  MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
+} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations, recordMemoryRelocation} from '@threadnote/memory/relocation';
@@ -501,7 +505,7 @@ describe('native memory workflow', () => {
           'status: active',
           'project: threadnote',
           `topic: ${futureTopic}`,
-          `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           'future_writer_field: preserve-me',
           '',
           'Future-owned content must remain unchanged.',
@@ -1359,7 +1363,7 @@ describe('native memory workflow', () => {
               relativeUri: 'cited.md',
               content: memory('Future writer.').replace(
                 'schema_version: 7',
-                `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+                `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
               ),
             },
           ]);

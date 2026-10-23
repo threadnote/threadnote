@@ -1,3 +1,4 @@
+import type {CodeGraphLeaseTimingObserver} from '../store/lease_timing.js';
 import {Effect} from 'effect';
 import type {CodeGraphProvenance, CodeGraphSnapshot} from '../types.js';
 
@@ -26,6 +27,11 @@ export interface CodeGraphAnalysisLimits {
 }
 
 export interface CodeGraphAnalysisOptions {
+  /** @internal Paired lease substage boundaries for diagnostics only. */
+  readonly onLeaseTiming?: (
+    operation: 'acquire' | 'release',
+    ...event: Parameters<CodeGraphLeaseTimingObserver>
+  ) => void;
   /** @internal Optional path-free benchmark observer; returns completion work without owning the analysis. */
   readonly onTiming?: (
     stage: 'lease-acquire' | 'read-session' | 'lease-release',

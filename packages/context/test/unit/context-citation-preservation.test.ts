@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path, Schema, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -68,7 +68,7 @@ const fixture = (dirty = false, capturedSource?: string) =>
     const identity = yield* resolveRepositoryIdentity(cwd);
     yield* recordVerifiedCodeGraphLocalAssociation(home, identity);
     const layout = codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId);
-    const status: CodeGraphStatus = {
+    let status: CodeGraphStatus = {
       databasePath: layout.databasePath,
       freshness: 'current',
       identity,
@@ -93,9 +93,25 @@ const fixture = (dirty = false, capturedSource?: string) =>
     let historicalSymbols: readonly CodeGraphSymbol[] = [];
     let leases = 0;
     let releases = 0;
+    const reads = {status: 0, historicalSnapshot: 0, capsule: 0, historicalGit: 0};
+    let changeSnapshotAt: number | undefined;
+    const readStatus = () =>
+      Effect.suspend(() => {
+        reads.status++;
+        if (reads.status === changeSnapshotAt)
+          status = {...status, readySnapshot: {...status.readySnapshot!, id: `cgsn_${'d'.repeat(40)}`}};
+        return available ? Effect.succeed(status) : Effect.fail('unavailable');
+      });
+    const tracer = Tracer.make({
+      span(options) {
+        if (options.name === 'codeGraph.readRetainedCitationEvidence') reads.capsule++;
+        if (options.name === 'contextHealth.readHistoricalGitCitationBytes') reads.historicalGit++;
+        return new Tracer.NativeSpan(options);
+      },
+    });
     const query = CodeGraphQueryService.of({
-      status: () => (available ? Effect.succeed(status) : Effect.fail('unavailable')),
-      statusForPublishedIdentity: () => (available ? Effect.succeed(status) : Effect.fail('unavailable')),
+      status: readStatus,
+      statusForPublishedIdentity: readStatus,
     } as unknown as CodeGraphQueryService['Service']);
     const store = CodeGraphStore.of({
       acquireSnapshotLease: () => Effect.sync(() => `lease-${++leases}`),
@@ -103,7 +119,11 @@ const fixture = (dirty = false, capturedSource?: string) =>
         Effect.sync(() => {
           releases++;
         }),
-      readySnapshotById: () => Effect.succeed(historicalSnapshotAvailable ? status.readySnapshot : undefined),
+      readySnapshotById: () =>
+        Effect.sync(() => {
+          reads.historicalSnapshot++;
+          return historicalSnapshotAvailable ? status.readySnapshot : undefined;
+        }),
       readySnapshotForCommit: () => Effect.void,
       effectiveSnapshotCitationEvidence: () =>
         Effect.sync(() => {
@@ -149,7 +169,11 @@ const fixture = (dirty = false, capturedSource?: string) =>
     };
     const citation = createMemoryCodeCitation(citationInput);
     const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-      effect.pipe(Effect.provideService(CodeGraphQueryService, query), Effect.provideService(CodeGraphStore, store));
+      effect.pipe(
+        Effect.provideService(CodeGraphQueryService, query),
+        Effect.provideService(CodeGraphStore, store),
+        Effect.withTracer(tracer),
+      );
     const check = (anchor: MemoryCodeCitationV1) =>
       provide(
         validateContextHealthMemoryCitations(config, {callerCwd: cwd, kind: 'repository'}, [
@@ -192,11 +216,86 @@ const fixture = (dirty = false, capturedSource?: string) =>
         available = false;
       },
       leaseCounts: () => ({leases, releases}),
+      readCounts: () => ({...reads}),
+      resetReadCounts: () => {
+        for (const key of Object.keys(reads) as (keyof typeof reads)[]) reads[key] = 0;
+      },
+      changeSnapshotOnRead: (ordinal: number) => {
+        changeSnapshotAt = ordinal;
+      },
     };
   });
 
 describe('citation proof before source retirement', () => {
   effectIt.layer(platform)(it => {
+    it.effect.prop(
+      'projects requested evidence exactly from default-both reads without executing the other provenance',
+      {
+        maximumBytes: Schema.Int.check(Schema.isBetween({minimum: 32, maximum: 128})),
+        maximumLines: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 3})),
+        startLine: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 2})),
+        dirty: Schema.Boolean,
+      },
+      ({dirty, ...options}) =>
+        Effect.gen(function* () {
+          const data = yield* fixture(dirty, source + '// supporting detail 🌱\n');
+          yield* data.provide(captureMemoryCodeCitations(data.config, {callerCwd: data.cwd, refs: ['source.ts']}));
+          const scope = {callerCwd: data.cwd, kind: 'repository' as const};
+          const read = (purpose?: 'both' | 'historical' | 'current') =>
+            data.provide(readContextHealthCitationEvidence(data.config, scope, data.citation, {...options, purpose}));
+          const both = yield* read();
+          expect(yield* read('both')).toEqual(both);
+          for (const purpose of ['historical', 'current'] as const) {
+            data.resetReadCounts();
+            const selected = yield* read(purpose);
+            const expected = both.excerpts.filter(item => item.provenance === `${purpose}-verified`);
+            expect(selected.excerpts).toEqual(expected);
+            expect(selected.excerpts.length).toBeGreaterThan(0);
+            expect(selected).toMatchObject({
+              citationId: both.citationId,
+              generation: both.generation,
+              routesComplete: both.routesComplete,
+              coverage: 'available',
+            });
+            if (purpose === 'historical') {
+              expect(data.readCounts().status).toBe(0);
+              expect(selected.attemptedSteps).not.toContain('current-source');
+            } else {
+              expect(data.readCounts()).toEqual({status: 2, historicalSnapshot: 0, capsule: 0, historicalGit: 0});
+              expect(selected.attemptedSteps).not.toContain('retained-capsule');
+            }
+            expect(data.leaseCounts().leases).toBe(data.leaseCounts().releases);
+          }
+        }).pipe(TestClock.withLive),
+      {arbitrary: {runs: 8, seed: 756013}},
+    );
+
+    it.effect('keeps requested-provenance failures separate and closes the current snapshot fence', () =>
+      Effect.gen(function* () {
+        const data = yield* fixture();
+        const scope = {callerCwd: data.cwd, kind: 'repository' as const};
+        const forged = createMemoryCodeCitation({
+          ...data.citationInput,
+          fileContentHash: {algorithm: 'sha256', value: 'f'.repeat(64)},
+        });
+        const missing = yield* data.provide(
+          readContextHealthCitationEvidence(data.config, scope, forged, {purpose: 'historical'}),
+        );
+        expect(missing.coverage).toBe('unavailable');
+        expect(missing.excerpts).toEqual([]);
+        expect(data.readCounts().status).toBe(0);
+        data.resetReadCounts();
+        data.changeSnapshotOnRead(2);
+        const raced = yield* data.provide(
+          readContextHealthCitationEvidence(data.config, scope, data.citation, {purpose: 'current'}),
+        );
+        expect(raced.excerpts).toEqual([]);
+        expect(raced.coverage).toBe('unavailable');
+        expect(data.readCounts()).toEqual({status: 2, historicalSnapshot: 0, capsule: 0, historicalGit: 0});
+        expect(data.leaseCounts().leases).toBe(data.leaseCounts().releases);
+      }).pipe(TestClock.withLive),
+    );
+
     it.effect('reads fenced current bytes and refuses false-current source after a byte race', () =>
       TestClock.withLive(
         Effect.gen(function* () {

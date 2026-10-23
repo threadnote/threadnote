@@ -165,6 +165,168 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   expect(container.textContent).not.toContain('Saved body');
 });
 
+it('preserves an independent unsaved draft when an automatic update is applied and verified', async () => {
+  Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = true;
+  });
+  vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = false;
+  });
+  vi.spyOn(window, 'setInterval').mockImplementation(() => setTimeout(() => undefined, 0));
+  const rootUri = 'threadnote://user/test/memories';
+  const uri = `${rootUri}/durable/projects/project/ordinary.md`;
+  const hash = 'a'.repeat(64);
+  const reviewId = `review-${'a'.repeat(24)}`;
+  const node: TreeNode = {
+    name: 'ordinary.md',
+    uri,
+    relativePath: 'durable/projects/project/ordinary.md',
+    isDir: false,
+    isSystem: false,
+    isShared: false,
+    metadata: {
+      kind: 'durable',
+      status: 'active',
+      project: 'project',
+      topic: 'Ordinary memory',
+      sourceAgentClient: 'user',
+      timestamp: '2026-10-22T00:00:00Z',
+    },
+  };
+  const accepted = 'MEMORY\nkind: durable\n\nAccepted prose.';
+  const updated = 'MEMORY\nkind: durable\nreviewed_support: exact-provenance\n\nAutomatically updated prose.';
+  const authored = 'My independent unsaved authored draft.';
+  let canonical = accepted;
+  const coverage = {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 1, omittedParagraphs: 0};
+  const pendingReview = {
+    version: 1,
+    kind: 'automatic-memory-review',
+    project: 'project',
+    reviewId,
+    revision: 1,
+    state: 'pending',
+    targetUri: uri,
+    targetHash: hash,
+    evidenceRevision: hash,
+    purpose: 'automatic',
+    acceptedBody: 'Accepted prose.',
+    proposal: {body: 'Automatically updated prose.', draft: {paragraphDecisions: [], rationale: 'Updated source.'}},
+    sourceEvidence: [],
+    coverage,
+    canApply: false,
+    canFinishVerification: false,
+    verified: false,
+  };
+  const approval = {
+    stage: 'preview',
+    reviewRevision: 2,
+    approvalDigest: hash,
+    content: updated,
+    contentHash: hash,
+    metadataDiff: [],
+    reviewedSupport: {},
+  };
+  let current: Record<string, unknown> = pendingReview;
+  const actions: Record<string, unknown>[] = [];
+  const json = (body: unknown) => new Response(JSON.stringify(body), {headers: {'content-type': 'application/json'}});
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), 'http://localhost');
+    if (url.pathname === '/api/state')
+      return json({
+        agents: [],
+        config: {user: 'test', account: 'local'},
+        autoUpdate: {effectivePolicy: 'notify'},
+        version: 'fixture',
+      });
+    if (url.pathname === '/api/tree')
+      return json({tree: {...node, name: 'memories', uri: rootUri, relativePath: '', isDir: true, children: [node]}});
+    if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
+    if (url.pathname === '/api/shares') return json({shares: []});
+    if (url.pathname === '/api/home')
+      return json({version: 1, project: '', lanes: [], handoffs: [], stats: {memories: 1}});
+    if (url.pathname === '/api/memory') return json({node, content: canonical, record: {metadata: node.metadata}});
+    if (url.pathname === '/api/attention/automatic-memory')
+      return json({
+        version: 1,
+        project: 'project',
+        omitted: 0,
+        items:
+          canonical === accepted
+            ? [
+                {
+                  uri,
+                  title: 'Ordinary memory',
+                  targetHash: hash,
+                  state: 'ready',
+                  coverage,
+                  paragraphs: [],
+                  route: 'personal-review',
+                  legacyUncited: false,
+                  reviewId,
+                },
+              ]
+            : [],
+      });
+    if (url.pathname === '/api/attention/automatic-review') {
+      if (init?.body) {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        actions.push(body);
+        if (body.action === 'preview') current = {...pendingReview, revision: 2, approval, canApply: true};
+        if (body.action === 'apply') {
+          canonical = updated;
+          current = {
+            ...pendingReview,
+            revision: 3,
+            state: 'applied',
+            approval: {...approval, stage: 'written'},
+            verified: true,
+          };
+        }
+      }
+      return json(current);
+    }
+    return json({});
+  });
+  const container = document.createElement('div');
+  container.id = 'root';
+  document.body.append(container);
+  await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
+  const button = (label: string) =>
+    [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+      item => item.textContent?.trim() === label || item.querySelector('strong')?.textContent === label,
+    )!;
+  const click = async (label: string) => {
+    await act(async () => button(label).click());
+  };
+  await click('Library');
+  await click('Ordinary memory');
+  await click('Edit');
+  await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, authored);
+  await click('Back to Library');
+  await click('Review update');
+  await click('Preview exact update');
+  expect(container.querySelector('.automatic-review-exact pre')?.textContent).toBe(updated);
+  expect(canonical).toBe(accepted);
+  expect(button('Confirm and apply').disabled).toBe(true);
+  await act(async () => container.querySelector<HTMLInputElement>('.review-confirmation input')!.click());
+  await click('Confirm and apply');
+  expect(actions).toEqual([
+    {action: 'preview', project: 'project', reviewId, revision: 1},
+    {action: 'apply', project: 'project', reviewId, revision: 2, approvalDigest: hash, approved: true},
+  ]);
+  expect(canonical).toBe(updated);
+  expect(container.textContent).toContain('Memory update saved and verified');
+  expect(container.querySelector('.manager-draft-reconcile pre')?.textContent).toBe(updated);
+  expect(button('Keep my draft')).toBeDefined();
+  expect(button('Load reloaded record')).toBeDefined();
+  expect(container.querySelector('.library-article')?.textContent).toContain(authored);
+  await click('Keep my draft');
+  expect(container.querySelector('.manager-draft-reconcile')).toBeNull();
+  await click('Edit');
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')?.value).toBe(authored);
+});
+
 async function fill(input: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
   await act(async () => {
     const prototype = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;

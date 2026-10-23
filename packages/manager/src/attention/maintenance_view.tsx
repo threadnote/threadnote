@@ -2,9 +2,14 @@ import {ShieldCheck} from 'lucide-react';
 import {WorkspaceUtilities} from '../workspace_utilities.js';
 import {Schema} from 'effect';
 import React, {useEffect, useRef, useState} from 'react';
-import type {ManagerContextHealthResponseV1, ManagerContextMaintenanceStatusV2} from './contracts.js';
+import type {
+  ManagerContextHealthResponseV1,
+  ManagerContextMaintenanceStatusV2,
+  ManagerContextMaintenanceCaseV2,
+} from './contracts.js';
 import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
 import {
+  automaticReviewMaintenanceReceipts,
   groupMaintenanceCauses,
   healthDecisionGroups,
   healthDecisionTask,
@@ -22,6 +27,7 @@ import {HealthDetail} from '../attention_details.js';
 import {MemoryExcerpt, ReviewBadge} from '../review_presentation.js';
 import {MaintenanceCaseDialog, MaintenanceTaskDialog} from './maintenance_dialogs.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {AutomaticMemoryPanel} from './automatic_memory.js';
 
 interface Props {
   readonly project: string;
@@ -46,6 +52,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [automatic, setAutomatic] = useState<{project: string; ready: number; pending: boolean}>();
   const [conflictSubjectUri, setConflictSubjectUri] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -54,6 +61,15 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const [inspectedCase, setInspectedCase] = useState<{caseId: string; memoryUri?: string; title?: string}>();
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [appliedCases, setAppliedCases] = useState<readonly ManagerTopicReviewAppliedV1[]>([]);
+  const automaticObservation = useRef<
+    | {
+        project: string;
+        reviewId: string;
+        cases: readonly ManagerContextMaintenanceCaseV2[];
+        report: ManagerContextHealthResponseV1;
+      }
+    | undefined
+  >(undefined);
   const activeProject = useRef(props.project);
   const projectEpoch = useRef(0);
   if (activeProject.current !== props.project) {
@@ -238,16 +254,18 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     status?.page?.caseNextCursor !== undefined &&
     (status.counts?.['needs-decision'] ?? Infinity) >
       cases.filter(item => item.disposition === 'needs-decision').length;
-  const decisionCount = Math.max(
-    summary?.affectedMemories ?? 0,
-    status?.counts?.decisionMemories ?? 0,
-    groups.length,
-    new Set(
-      status?.cases
-        .filter(item => item.project === props.project && item.disposition === 'needs-decision')
-        .map(item => item.memoryId) ?? [],
-    ).size,
-  );
+  const decisionCount =
+    (automatic?.project === props.project ? automatic.ready : 0) +
+    Math.max(
+      summary?.affectedMemories ?? 0,
+      status?.counts?.decisionMemories ?? 0,
+      groups.length,
+      new Set(
+        status?.cases
+          .filter(item => item.project === props.project && item.disposition === 'needs-decision')
+          .map(item => item.memoryId) ?? [],
+      ).size,
+    );
   const onDecisionCountChange = props.onDecisionCountChange;
   const completeDecisionCount = status?.counts?.decisionMemories === undefined ? undefined : decisionCount;
   useEffect(() => {
@@ -308,6 +326,34 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     status?.counts?.[disposition] ?? cases.filter(item => item.disposition === disposition).length;
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
+      <AutomaticMemoryPanel
+        key={props.project}
+        project={props.project}
+        onChanged={props.onChanged}
+        onReview={reviewId => {
+          automaticObservation.current = {
+            project: props.project,
+            reviewId,
+            cases: structuredClone(status?.cases ?? []),
+            report: structuredClone(report),
+          };
+        }}
+        onApplied={result => {
+          const observed = automaticObservation.current;
+          if (
+            !mounted.current ||
+            activeProject.current !== result.project ||
+            observed?.project !== result.project ||
+            observed.reviewId !== result.reviewId
+          )
+            return;
+          const receipts = automaticReviewMaintenanceReceipts(result, observed.cases, observed.report);
+          mutationEpoch.current += 1;
+          setAppliedCases(previous => [...previous, ...receipts]);
+          setRefresh(value => value + 1);
+        }}
+        onSummaryChange={(project, summary) => setAutomatic(summary ? {project, ...summary} : undefined)}
+      />
       <div className="workspace-tabs" role="tablist" aria-label="Context Health sections">
         {(
           [
@@ -333,7 +379,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         <ShieldCheck />
         {maintenanceStatusLabel({
           decisions: decisionCount,
-          coverage,
+          coverage: automatic?.project === props.project && !automatic.pending ? coverage : 'partial',
           paused: status?.paused ?? false,
           state: status?.state,
         })}

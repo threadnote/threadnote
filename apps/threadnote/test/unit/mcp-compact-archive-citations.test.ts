@@ -5,7 +5,11 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {ArchiveAction} from '@threadnote/memory/hygiene';
 import {archiveMemoryForCompact, resourceStoreLocation} from '@threadnote/threadnote/mcp/server/memory';
-import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {
+  createMemoryCodeCitation,
+  MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
+} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
@@ -85,8 +89,8 @@ describe('MCP compact archive citation persistence', () => {
       Effect.gen(function* () {
         const {config, location, store} = yield* compactArchiveFixture();
         const futureSchemaLines = [
-          `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
-          `  schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+          `  schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
         ];
 
         for (const [index, schemaLine] of futureSchemaLines.entries()) {

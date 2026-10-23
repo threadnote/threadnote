@@ -6,6 +6,7 @@ import {buildCompactPlan} from '@threadnote/memory/hygiene';
 import type {CandidateComparison} from '@threadnote/memory/candidate';
 import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
 import {validateTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
+import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
 import {
   analyzeContextHealthSemantics,
   type ContextHealthSemanticCompletenessV2,
@@ -341,12 +342,20 @@ function citationFindings(
   includeCoverageFindings: boolean,
 ): readonly ContextHealthFindingV1[] {
   const retainedByUri = new Map(records.map(record => [record.uri, retainedTopicCitationIds(record)]));
+  const currentByUri = new Map(
+    records
+      .filter(
+        record => record.metadata.reviewedSupport !== undefined || record.metadata.reviewedSupportError !== undefined,
+      )
+      .map(record => [record.uri, new Set(currentMemoryCodeCitations(record).map(citation => citation.id))]),
+  );
   return validations
     .filter(validation => retainedByUri.has(validation.uri))
     .flatMap(validation =>
       validation.receipts.flatMap(receipt =>
-        (receipt.status === 'changed' || receipt.status === 'deleted') &&
-        retainedByUri.get(validation.uri)!.has(receipt.citationId)
+        (currentByUri.has(validation.uri) && !currentByUri.get(validation.uri)!.has(receipt.citationId)) ||
+        ((receipt.status === 'changed' || receipt.status === 'deleted') &&
+          retainedByUri.get(validation.uri)!.has(receipt.citationId))
           ? []
           : citationFinding(validation.uri, receipt, includeCoverageFindings),
       ),

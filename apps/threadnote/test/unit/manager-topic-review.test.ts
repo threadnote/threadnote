@@ -652,12 +652,14 @@ describe('Manager topic review adapter', () => {
     'offers final verification for a legacy prepared review only after exact approved-byte readback',
     () =>
       Effect.gen(function* () {
-        const {paragraphDispositions: _accounting, ...legacyDraft} = review.maintenance!.proposal.draft;
+        const payload = review.maintenance;
+        if (payload?.version !== 1) throw new Error('Expected the frozen legacy code review.');
+        const {paragraphDispositions: _accounting, ...legacyDraft} = payload.proposal.draft;
         const legacy = {
           ...review,
           revision: 4,
           candidates: [{...review.candidates[0], state: 'applying' as const}],
-          maintenance: {...review.maintenance!, proposal: {...review.maintenance!.proposal, draft: legacyDraft}},
+          maintenance: {...payload, proposal: {...payload.proposal, draft: legacyDraft}},
           maintenanceApproval: {...review.maintenanceApproval!, stage: 'prepared' as const},
         };
         mocks.list.mockReturnValue(Effect.succeed([legacy]));
@@ -1143,15 +1145,17 @@ describe('topic projection invariant', () => {
   );
   effectIt.effect('projects the persisted approved proposal while preserving the generated draft', () =>
     Effect.sync(() => {
+      const payload = review.maintenance;
+      if (payload?.version !== 1) throw new Error('Expected the frozen legacy code review.');
       const approval = review.maintenanceApproval;
       if (approval?.version !== 1) throw new Error('Expected a code review approval fixture.');
       const editedDraft = {
-        ...review.maintenance!.proposal.draft,
+        ...payload.proposal.draft,
         rationale: 'First edit',
         unresolvedQuestions: ['Second edit'],
       };
       const approvedProposal = {
-        ...review.maintenance!.proposal,
+        ...payload.proposal,
         draft: editedDraft,
         body: 'Approved edited body',
         finalBodyHash: 'e'.repeat(64),
@@ -1171,7 +1175,7 @@ describe('topic projection invariant', () => {
         finalBodyHash: 'e'.repeat(64),
         changedOrdinals: [0],
       });
-      expect(review.maintenance!.proposal.draft.rationale).toBe('Current');
+      expect(payload.proposal.draft.rationale).toBe('Current');
       expect(JSON.stringify(projected)).not.toContain('PRIVATE BASELINE');
     }),
   );

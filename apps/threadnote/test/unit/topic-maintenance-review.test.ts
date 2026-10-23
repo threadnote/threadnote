@@ -434,6 +434,7 @@ describe('reviewed personal topic acceptance', () => {
           expect(preview.beforeContent).toBe(accepted);
           expect(preview.content).toContain('The request timeout is 60 seconds.');
           expect(preview.content).toContain('Requests time out after 60 seconds.');
+          if (preview.version !== 1) throw new Error('Expected the frozen legacy code preview.');
           expect(preview.manifest.version).toBe(2);
           expect(yield* fs.readFileString(memory)).toBe(accepted);
           const apply = () =>
@@ -725,7 +726,8 @@ describe('reviewed personal topic acceptance', () => {
           });
           const generator: typeof runSelectedDraft = (_config, _agent, _model, prompt, _purpose, currentBasis) =>
             Effect.sync(() => {
-              if (!currentBasis) throw new Error('Expected current generation basis.');
+              if (!currentBasis || currentBasis.version === 3)
+                throw new Error('Expected the frozen legacy generation basis.');
               const identity = JSON.parse(/^Identity: (.+)$/mu.exec(prompt)![1]);
               const eligible: {ordinal: number; sourceIndices: number[]}[] = JSON.parse(
                 /^Replaceable direct descriptive paragraphs: (.+)$/mu.exec(prompt)![1],
@@ -772,6 +774,8 @@ describe('reviewed personal topic acceptance', () => {
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
         }),
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
-    90_000,
+    // Covers sequential CLI/Manager/MCP preview, crash-recovery and replay scenarios.
+    // This outer harness ceiling leaves per-command and product deadlines unchanged.
+    180_000,
   );
 });

@@ -4,7 +4,9 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   validateTopicMaintenanceDraftBasis,
   type TopicMaintenanceDraftBasisV1,
-  type TopicMaintenanceDraftBasis,
+  type AutomaticMaintenanceDraftBasisV3,
+  type AutomaticMaintenanceDraftV2,
+  type LegacyTopicMaintenanceDraftBasis as TopicMaintenanceDraftBasis,
 } from '@threadnote/memory/topic-maintenance-draft';
 import {
   topicDraftCurrentEvidence,
@@ -265,5 +267,31 @@ export function makeTopicDraftControllerPacket() {
       allowedOperations: [],
       instructions: 'Review exact evidence.',
     },
+  };
+}
+
+/** Independent test encoder; provider fixtures must use the distinct compact wire. */
+export function compactAutomaticTopicDraftFixture(
+  basis: AutomaticMaintenanceDraftBasisV3,
+  draft: AutomaticMaintenanceDraftV2,
+) {
+  const evidence = [
+    ...new Set([...basis.assessment.evidence.map(entry => entry.id), ...basis.handles.map(h => h.citationId)]),
+  ].sort();
+  const current = [...new Set(basis.handles.filter(h => h.variant === 'current').map(h => h.id))].sort();
+  const {purpose: _purpose, reviewedHandles, paragraphDecisions, operations, ...rest} = draft;
+  return {
+    ...rest,
+    version: 1 as const,
+    kind: 'automatic-model' as const,
+    paragraphDecisions: paragraphDecisions.map(({beforeHash: _beforeHash, evidenceIds, ...decision}) => ({
+      ...decision,
+      evidenceIndices: evidenceIds.map(id => evidence.indexOf(id)),
+    })),
+    operations: operations.map(({beforeHash: _beforeHash, supportHandles, ...operation}) => ({
+      ...operation,
+      supportIndices: supportHandles.map(handle => current.indexOf(handle)),
+    })),
+    currentSourceIndices: reviewedHandles.map(handle => current.indexOf(handle)),
   };
 }

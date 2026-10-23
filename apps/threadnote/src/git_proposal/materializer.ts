@@ -1,8 +1,12 @@
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {declaresTopicMaintenanceHeader} from '@threadnote/memory/document';
+import {declaresTopicMaintenanceHeader, declaresReviewedSupportHeader} from '@threadnote/memory/document';
 import {verifyKnowledgeDeltaGitProposalV1} from './knowledge_delta.js';
-import {verifyTopicMaintenanceGitProposal, type GitProposal} from './topic_maintenance_proposal.js';
+import {
+  verifyAutomaticMaintenanceGitProposal,
+  verifyTopicMaintenanceGitProposal,
+  type GitProposal,
+} from './topic_maintenance_proposal.js';
 
 export class KnowledgeDeltaGitMaterializerError extends Schema.TaggedError<KnowledgeDeltaGitMaterializerError>()(
   'KnowledgeDeltaGitMaterializerError',
@@ -27,12 +31,17 @@ export function planKnowledgeDeltaGitMaterializationV1(
   proposal: GitProposal,
   state: KnowledgeDeltaGitMaterializerStateV1,
 ): KnowledgeDeltaGitMaterializationPlanV1 {
-  if (proposal.version === 2) verifyTopicMaintenanceGitProposal(proposal);
+  if (proposal.version === 3) verifyAutomaticMaintenanceGitProposal(proposal);
+  else if (proposal.version === 2) verifyTopicMaintenanceGitProposal(proposal);
   else verifyKnowledgeDeltaGitProposalV1(proposal);
   if (state.repositoryId !== proposal.target.repositoryId) fail('Proposal repository binding changed.');
   if (state.baseCommit !== proposal.base.expectedCommit) fail('Proposal base commit changed.');
   for (const file of proposal.files) {
     const current = state.files[file.path];
+    if (proposal.version !== 3 && current !== undefined && declaresReviewedSupportHeader(current))
+      fail(
+        'Legacy proposals cannot replace a shared target with approved reviewed support; use the automatic review variant.',
+      );
     if (proposal.version === 1 && current !== undefined && declaresTopicMaintenanceHeader(current))
       fail('Legacy V1 proposals cannot replace an enrolled shared target; use the reviewed maintenance variant.');
     if (file.targetPrecondition.state === 'absent') {

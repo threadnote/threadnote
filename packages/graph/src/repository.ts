@@ -12,7 +12,9 @@ import {CodeGraphRepositoryError, type RepositoryIdentity, type RepositoryIdenti
 const IDENTITY_FORMAT_VERSION = 1;
 const GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM = 16 * 1_024;
 const GIT_TEXT_OUTPUT_BYTES_MAXIMUM = 2 * 1_048_576;
-const REPOSITORY_METADATA_BYTES_MAXIMUM = GIT_TEXT_OUTPUT_BYTES_MAXIMUM + GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM + 128;
+const GIT_BRANCH_BYTES_MAXIMUM = 1_024;
+const REPOSITORY_METADATA_BYTES_MAXIMUM =
+  GIT_TEXT_OUTPUT_BYTES_MAXIMUM + GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM + GIT_BRANCH_BYTES_MAXIMUM + 129;
 const REPOSITORY_STATUS_OBSERVATION_BYTES_MAXIMUM = 64 * 1_024;
 
 export const CODE_GRAPH_WORKTREE_REGISTRY_LIMITS = {
@@ -72,6 +74,9 @@ export const resolveRepositoryIdentityDetail = Effect.fn('codeGraph.resolveRepos
       '--show-object-format',
       'HEAD',
       ...(observeMetadata === undefined ? [] : ['--git-path', 'index']),
+      // symbolic-ref --short uses loose shortening regardless of warnAmbiguousRefs.
+      '--abbrev-ref=loose',
+      'HEAD',
     ],
     {
       maxOutputBytes:
@@ -164,7 +169,7 @@ const resolveRepositoryIdentityDetailFromObservation = Effect.fn(
         : Effect.succeed({exitCode: 0, stdout: metadata.headCommit}),
       runGit(repoRoot, ['config', '--bool', 'core.ignorecase'], true),
       runGit(repoRoot, ['remote', 'get-url', 'origin'], true),
-      observeRepositoryBranch(repoRoot),
+      metadata?.branch === undefined ? observeRepositoryBranch(repoRoot) : Effect.succeed(metadata.branch),
     ],
     {concurrency: 6},
   );
@@ -210,6 +215,7 @@ export interface RepositoryIdentityMetadata {
   readonly objectFormat: 'sha1' | 'sha256';
   readonly headCommit: string;
   readonly sourceIndex?: string;
+  readonly branch?: {readonly state: 'current'; readonly branch: string} | {readonly state: 'detached'};
 }
 
 /** @internal Share discovery with a scoped worktree read that independently binds the original caller. */
@@ -232,12 +238,21 @@ export function parseRepositoryIdentityMetadata(
     if (!decoded.endsWith('\n')) return undefined;
     const records = decoded.slice(0, -1).split('\n');
     if (
-      records.length !== (includeIndex ? 6 : 5) ||
+      records.length !== (includeIndex ? 7 : 6) ||
       records.some(record => !record || record.includes('\0') || record.includes('\r'))
     ) {
       return undefined;
     }
-    const [repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit, sourceIndex] = records;
+    const [repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit] = records;
+    const sourceIndex = includeIndex ? records[5] : undefined;
+    const branchName = records[includeIndex ? 6 : 5];
+    const branch =
+      branchName === 'HEAD'
+        ? {state: 'detached' as const}
+        : normalizeRepositoryBranchName(branchName) === branchName
+          ? {state: 'current' as const, branch: branchName}
+          : undefined;
+    if (branch === undefined) return undefined;
     // Full discovery trims the root output. Preserve that behavior by declining
     // the fast path for roots whose edge whitespace would select a different path.
     if (repoRoot !== repoRoot.trim() || byteLength(`${repoRoot}\n`) > GIT_TEXT_OUTPUT_BYTES_MAXIMUM) return undefined;
@@ -245,7 +260,15 @@ export function parseRepositoryIdentityMetadata(
     if (objectFormat !== 'sha1' && objectFormat !== 'sha256') return undefined;
     if (!(objectFormat === 'sha1' ? /^[0-9a-f]{40}$/u : /^[0-9a-f]{64}$/u).test(headCommit)) return undefined;
     if (includeIndex && byteLength(`${sourceIndex}\n`) > GIT_DIRECTORY_OUTPUT_BYTES_MAXIMUM) return undefined;
-    return {repoRoot, commonDirectory, gitDirectory, objectFormat, headCommit, ...(includeIndex ? {sourceIndex} : {})};
+    return {
+      repoRoot,
+      commonDirectory,
+      gitDirectory,
+      objectFormat,
+      headCommit,
+      ...(includeIndex ? {sourceIndex} : {}),
+      branch,
+    };
   } catch {
     return undefined;
   }
@@ -254,7 +277,7 @@ export function parseRepositoryIdentityMetadata(
 export function normalizeRepositoryBranchName(value: string): string | undefined {
   const branch = value.trim();
   return branch.length > 0 &&
-    new TextEncoder().encode(branch).byteLength <= 1_024 &&
+    new TextEncoder().encode(branch).byteLength <= GIT_BRANCH_BYTES_MAXIMUM &&
     !hasControlCharacter(branch) &&
     !/\p{Bidi_Control}/u.test(branch)
     ? branch

@@ -4,7 +4,7 @@ import {describe} from 'vitest';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {preparePersonalMemoryWrite, writeDurableMemory} from '@threadnote/threadnote/mcp/server/memory';
-import {MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
+import {MEMORY_SCHEMA_VERSION, MAX_SUPPORTED_MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
 import {recordMemoryRelocation} from '@threadnote/memory/relocation';
@@ -166,7 +166,10 @@ describe('MCP personal-memory schema rewrite guard', () => {
         };
         const original = formatMemoryDocument('MEMORY', metadata, 'Writer A observed schema v4.');
         const future = original
-          .replace(`schema_version: ${MEMORY_SCHEMA_VERSION}`, `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`)
+          .replace(
+            `schema_version: ${MEMORY_SCHEMA_VERSION}`,
+            `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
+          )
           .replace('\n\n', '\nfuture_writer_field: preserve-me\n\n');
         const store = yield* ResourceStore;
         const location = {account: config.account, home: config.agentContextHome, user: config.user};

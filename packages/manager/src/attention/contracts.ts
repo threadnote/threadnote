@@ -68,7 +68,7 @@ export interface ManagerReviewCandidateV1 {
 }
 
 export interface ManagerReviewInboxItemV1 {
-  readonly kind?: 'topic-maintenance';
+  readonly kind?: 'topic-maintenance' | 'automatic-memory';
   readonly candidates: readonly ManagerReviewCandidateV1[];
   readonly createdAt: string;
   readonly project: string;

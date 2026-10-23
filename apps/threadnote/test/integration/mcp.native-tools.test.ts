@@ -15,6 +15,7 @@ import {
   createMemoryCodeCitation,
   MAX_MEMORY_CODE_CITATIONS,
   MEMORY_SCHEMA_VERSION,
+  MAX_SUPPORTED_MEMORY_SCHEMA_VERSION,
 } from '@threadnote/memory/code/citation';
 import {
   canonicalMemoryDocumentContent,
@@ -4849,18 +4850,18 @@ describe('Threadnote MCP toolsets', () => {
           {
             message: 'newer than supported',
             topic: 'public-archive-future',
-            versionLine: `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+            versionLine: `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           },
           {
             message: 'newer than supported',
             topic: 'public-archive-indented-future',
-            versionLine: `  schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+            versionLine: `  schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           },
           {
             message: 'newer than supported',
             newline: '\r',
             topic: 'public-archive-cr-future',
-            versionLine: `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+            versionLine: `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           },
           {
             extraLine: '  code_citation: {not-json}',
@@ -4953,7 +4954,7 @@ describe('Threadnote MCP toolsets', () => {
           'status: active',
           'project: threadnote',
           `topic: ${futureTopic}`,
-          `schema_version: ${MEMORY_SCHEMA_VERSION + 1}`,
+          `schema_version: ${MAX_SUPPORTED_MEMORY_SCHEMA_VERSION + 1}`,
           'future_writer_field: preserve-me',
           '',
           'Future-owned content must remain unchanged.',

@@ -1,3 +1,4 @@
+import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Database} from 'bun:sqlite';
@@ -1252,14 +1253,21 @@ const benchmarkCodeGraph = Effect.scoped(
     const analysisDurations: number[] = [];
     const analysisCpuDurations: number[] = [];
     const analysisStageTimings = new Map<BenchmarkTimingStage, {wall: number[]; cpu: number[]}>();
+    const analysisLeaseTraces: ReturnType<BenchmarkLeaseTrace['report']>[] = [];
     let incrementalAnalysis: CodeGraphAnalysisResult | undefined;
     for (let index = 0; index < Math.min(options.samples, 3); index += 1) {
       const timings = new BenchmarkStageTimings();
+      const leaseTrace = new BenchmarkLeaseTrace();
       const started = yield* Clock.currentTimeNanos;
       const processStarted = processTelemetry();
-      const result = yield* analysis.analyze({...analysisOptions, onTiming: stage => timings.observe(stage)});
+      const result = yield* analysis.analyze({
+        ...analysisOptions,
+        onTiming: stage => timings.observe(stage),
+        onLeaseTiming: (operation, stage, boundary) => leaseTrace.observe(operation, stage, boundary),
+      });
       analysisDurations.push(Number((yield* Clock.currentTimeNanos) - started) / NANOSECONDS_PER_MILLISECOND);
       analysisCpuDurations.push(cpuMilliseconds(processStarted, processTelemetry()).total);
+      analysisLeaseTraces.push(leaseTrace.report());
       for (const [stage, observation] of timings.observations()) {
         const samples = analysisStageTimings.get(stage) ?? {wall: [], cpu: []};
         samples.wall.push(observation.wallMilliseconds);
@@ -1703,6 +1711,12 @@ const benchmarkCodeGraph = Effect.scoped(
           ? {oneFileReindexFallbackReason: incremental.materialization.fallbackReason}
           : {}),
         analysisSamples: analysisDurations.length,
+        analysisLeaseDiagnostics: JSON.stringify({
+          version: 1,
+          samples: analysisLeaseTraces,
+          interpretation:
+            'Paired nested diagnostic boundaries per original sample; not assessed metrics. Writer-gate minus session separates lock acquisition/release; session minus body separates SQLite open/close. Includes observer overhead.',
+        }),
         analysisCoverage: 'complete',
         coldIndexSamples: 1,
         ...(coldVectorMappingDigest === undefined ? {} : {coldVectorMappingDigest}),
@@ -7219,6 +7233,37 @@ export function createCodeGraphProductionRatchet(values: readonly BenchmarkArtif
   };
 }
 
+// These observer-only subdivisions were added after the frozen production
+// ratchet. Keep their complete observations in the artifact, while the original
+// enclosing operation wall/CPU/resource measurements remain assessed. Enumerate
+// the finite contract so a new stage, statistic, or prefix still fails closed.
+const PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS = new Set([
+  ...(['cold', 'one-file-reindex', 'same-overlay-reference'] as const).flatMap(prefix => [
+    ...[
+      'admission',
+      'database-session',
+      'database-session-body',
+      'index-scope',
+      'index-scope-body',
+      'lifecycle-opportunity',
+      'reporter-completion',
+      'share-drain',
+      'snapshot-lease-release',
+      'snapshot-lease-release-after-complete',
+    ].flatMap(stage =>
+      ['count', 'process-cpu-total', 'wall-maximum', 'wall-total'].map(
+        statistic => `${prefix}-completion-${stage}-${statistic}-n1`,
+      ),
+    ),
+    `${prefix}-post-activation-completion`,
+    `${prefix}-post-activation-completion-process-cpu-n1`,
+  ]),
+  ...['lease-acquire', 'read-session', 'lease-release'].flatMap(stage => [
+    `whole-graph-structural-analysis-${stage}`,
+    `whole-graph-structural-analysis-${stage}-process-cpu`,
+  ]),
+]);
+
 function productionRatchetMeasurements(
   artifact: BenchmarkArtifactV1,
 ): readonly BenchmarkArtifactV1['measurements'][number][] {
@@ -7231,7 +7276,7 @@ function productionRatchetMeasurements(
   if (new Set(names).size !== names.length) {
     throw ScriptError.make({message: 'Production ratchet artifacts require unique assessed measurement names.'});
   }
-  return retained;
+  return retained.filter(measurement => !PRODUCTION_RATCHET_COMPLETION_DIAGNOSTICS.has(measurement.name));
 }
 
 function unstableProductionRatchetMeasurement(name: string): boolean {

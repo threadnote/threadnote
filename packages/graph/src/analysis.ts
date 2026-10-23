@@ -459,6 +459,9 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
       'lease-acquire',
       store.acquireSnapshotLease(options.databasePath, options.snapshot.id, leaseDuration, {
         waitTimeoutMilliseconds: 0,
+        ...(options.onLeaseTiming
+          ? {onTiming: (stage, boundary) => options.onLeaseTiming!('acquire', stage, boundary)}
+          : {}),
       }),
     ).pipe(
       Effect.tap(() =>
@@ -496,7 +499,12 @@ export const analyzeCodeGraphWithLease = Effect.fn('codeGraph.analyzeWithSnapsho
       withCodeGraphAnalysisTiming(
         options.onTiming,
         'lease-release',
-        store.releaseSnapshotLease(options.databasePath, lease, {waitTimeoutMilliseconds: 0}),
+        store.releaseSnapshotLease(options.databasePath, lease, {
+          waitTimeoutMilliseconds: 0,
+          ...(options.onLeaseTiming
+            ? {onTiming: (stage, boundary) => options.onLeaseTiming!('release', stage, boundary)}
+            : {}),
+        }),
       ).pipe(
         Effect.tap(() =>
           Effect.sync(() => {
