@@ -213,24 +213,64 @@ describe('approved workflow graph publication', () => {
     );
   });
 
-  effectIt.effect('keeps a partially pushed graph pending and resumes its committed stage without duplicates', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const preview = yield* f.preview();
-      const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
-      // Allow architecture, reject spec. No production state enters the shared repository.
-      yield* f.fs.writeFileString(hook, '#!/bin/sh\n[ "$(git rev-list --count refs/heads/main)" -lt 2 ]\n', {
-        mode: 0o700,
+  effectIt.effect(
+    'keeps a partially pushed graph pending and resumes its committed stage without duplicates',
+    context => {
+      const diagnostics = publicationDiagnostics();
+      const report = (event: 'aborted' | 'finished') =>
+        process.stderr.write(
+          `WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({test: 'partial-push', event, ...diagnostics.snapshot()})}\n`,
+        );
+      const aborted = () => report('aborted');
+      context.signal.addEventListener('abort', aborted, {once: true});
+      context.onTestFinished(() => {
+        context.signal.removeEventListener('abort', aborted);
+        report('finished');
       });
-      yield* f.approve(preview.approvalDigest);
-      const pending = yield* f.publish(preview.approvalDigest);
-      expect(pending).toMatchObject({status: 'pending', stage: 'spec:create', committed: {version: 1}});
-      expect(yield* f.guard.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
-      yield* f.fs.remove(hook);
-      expect(yield* f.publish(preview.approvalDigest)).toMatchObject({status: 'ok', verifiedReadback: true});
-      expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
-      expect(yield* f.guard).toMatchObject({verifiedReadback: true});
-    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+      return Effect.gen(function* () {
+        const commands = yield* CommandExecutor;
+        return yield* Effect.gen(function* () {
+          diagnostics.phase('fixture');
+          const f = yield* fixture();
+          diagnostics.phase('preview');
+          const preview = yield* f.preview();
+          diagnostics.phase('hook-install');
+          const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
+          // Allow architecture, reject spec. No production state enters the shared repository.
+          yield* f.fs.writeFileString(hook, '#!/bin/sh\n[ "$(git rev-list --count refs/heads/main)" -lt 2 ]\n', {
+            mode: 0o700,
+          });
+          diagnostics.phase('approve');
+          yield* f.approve(preview.approvalDigest);
+          diagnostics.phase('publish');
+          const pending = yield* f.publish(preview.approvalDigest);
+          expect(pending).toMatchObject({status: 'pending', stage: 'spec:create', committed: {version: 1}});
+          diagnostics.phase('pending-guard');
+          expect(yield* f.guard.pipe(Effect.result)).toMatchObject({_tag: 'Failure'});
+          diagnostics.phase('hook-removal');
+          yield* f.fs.remove(hook);
+          diagnostics.phase('resume');
+          expect(yield* f.publish(preview.approvalDigest)).toMatchObject({status: 'ok', verifiedReadback: true});
+          diagnostics.phase('remote-verification');
+          expect((yield* f.git(f.remote, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+          diagnostics.phase('retirement-guard');
+          expect(yield* f.guard).toMatchObject({verifiedReadback: true});
+        }).pipe(
+          Effect.provideService(
+            CommandExecutor,
+            CommandExecutor.of({
+              ...commands,
+              execute: (executable, args, options) =>
+                diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+            }),
+          ),
+        );
+      }).pipe(
+        Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+        TestClock.withLive,
+        provideTestLayer(ApplicationLayer),
+      );
+    },
   );
 
   effectIt.effect('invalidates approval on content changes and supports a standalone final node', () =>
