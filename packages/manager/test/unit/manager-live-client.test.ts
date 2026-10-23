@@ -1,7 +1,7 @@
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {createManagerLiveClient} from '../../src/live/client.js';
-import type {ManagerLiveResource} from '../../src/live/contracts.js';
+import {MANAGER_LIVE_LIMITS, type ManagerLiveResource} from '../../src/live/contracts.js';
 
 const resource: ManagerLiveResource = {topic: 'context-health', project: 'one'};
 const other: ManagerLiveResource = {topic: 'context-health', project: 'two'};
@@ -87,6 +87,274 @@ describe('Manager live client', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it('shares one wire resource across local queries and fences each removed query', async () => {
+    const h = harness();
+    const pending = deferred<number>();
+    const first = vi.fn(() => pending.promise);
+    const second = vi.fn(async () => 2);
+    const releaseFirst = h.client.subscribeQuery(resource, 'first', first, () => {});
+    const releaseSecond = h.client.subscribeQuery(resource, 'second', second, () => {});
+    h.client.start();
+    await flush();
+    const socket = h.sockets[0];
+    socket.open();
+    expect(socket.sent.at(-1)?.resources).toEqual([resource]);
+    expect(first).not.toHaveBeenCalled();
+    socket.ack();
+    await flush();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(h.client.getQuerySnapshot(resource, 'second')).toEqual({status: 'ready', data: 2});
+    releaseFirst();
+    pending.resolve(1);
+    await flush();
+    expect(h.client.getQuerySnapshot(resource, 'first')).toEqual({status: 'loading'});
+    expect(socket.sent.filter(value => value.type === 'subscribe')).toHaveLength(1);
+    releaseSecond();
+    expect(socket.sent.at(-1)?.resources).toEqual([]);
+    h.client.stop();
+  });
+
+  it('invalidates all local variants with one follow-up each and fences availability and sequence gaps', async () => {
+    const h = harness();
+    const pending = [deferred<number>(), deferred<number>()];
+    const readers = [vi.fn(() => pending[0].promise), vi.fn(() => pending[1].promise)];
+    h.client.subscribeQuery(resource, 'a', readers[0], () => {});
+    h.client.subscribeQuery(resource, 'b', readers[1], () => {});
+    h.client.start();
+    await flush();
+    const socket = h.sockets[0];
+    socket.open();
+    socket.ack();
+    await flush();
+    expect(readers.map(reader => reader.mock.calls.length)).toEqual([1, 1]);
+    for (let sequence = 1; sequence <= 100; sequence++)
+      socket.emit(
+        frame('invalidation', {
+          epoch: 'epoch-one',
+          generation: socket.lastGeneration(),
+          sequence,
+          resource,
+          revision: 'same',
+        }),
+      );
+    expect(h.client.getQuerySnapshot(resource, 'a').status).toBe('loading');
+    pending[0].resolve(1);
+    pending[1].resolve(2);
+    await flush();
+    expect(readers.map(reader => reader.mock.calls.length)).toEqual([2, 2]);
+    socket.emit(
+      frame('availability', {
+        epoch: 'epoch-one',
+        generation: socket.lastGeneration(),
+        sequence: 101,
+        resource,
+        available: false,
+      }),
+    );
+    expect(h.client.getQuerySnapshot(resource, 'a').status).toBe('unsupported');
+    expect(h.client.getQuerySnapshot(resource, 'b').status).toBe('unsupported');
+    socket.emit(
+      frame('availability', {
+        epoch: 'epoch-one',
+        generation: socket.lastGeneration(),
+        sequence: 102,
+        resource,
+        available: true,
+      }),
+    );
+    expect(socket.sent.filter(value => value.type === 'subscribe')).toHaveLength(2);
+    const before = readers.map(reader => reader.mock.calls.length);
+    socket.emit(
+      frame('invalidation', {
+        epoch: 'epoch-one',
+        generation: socket.lastGeneration(),
+        sequence: 104,
+        resource,
+        revision: 'gap',
+      }),
+    );
+    socket.ack();
+    await flush();
+    expect(readers.map(reader => reader.mock.calls.length)).toEqual(before.map(count => count + 1));
+    h.client.stop();
+  });
+
+  it('enforces independent wire-group and local-query caps and frees both after final listeners', () => {
+    const h = harness();
+    const releases = Array.from({length: MANAGER_LIVE_LIMITS.queries}, (_, index) =>
+      h.client.subscribeQuery(
+        resource,
+        `query:${index}`,
+        async () => index,
+        () => {},
+      ),
+    );
+    expect(() =>
+      h.client.subscribeQuery(
+        resource,
+        'overflow',
+        async () => 0,
+        () => {},
+      ),
+    ).toThrow('Too many live queries');
+    releases[0]();
+    const replacement = h.client.subscribeQuery(
+      resource,
+      'replacement',
+      async () => 0,
+      () => {},
+    );
+    for (const release of releases.slice(1)) release();
+    replacement();
+    const groups = Array.from({length: MANAGER_LIVE_LIMITS.subscriptions}, (_, index) =>
+      h.client.subscribe(
+        {topic: 'home', project: `project-${index}`},
+        async () => index,
+        () => {},
+      ),
+    );
+    expect(() =>
+      h.client.subscribe(
+        {topic: 'home', project: 'overflow'},
+        async () => 0,
+        () => {},
+      ),
+    ).toThrow('Too many live resources');
+    for (const release of groups) release();
+    expect(() =>
+      h.client.subscribe(
+        {topic: 'home', project: 'after-release'},
+        async () => 0,
+        () => {},
+      ),
+    ).not.toThrow();
+    h.client.stop();
+  });
+
+  it('preserves an independent grouped-query scope and latest-value model across generated schedules', async () => {
+    const operations = fc.array(
+      fc.record({
+        action: fc.constantFrom('mount', 'unmount', 'change', 'gap', 'ack', 'resolve', 'scope'),
+        group: fc.integer({min: 0, max: 1}),
+        query: fc.integer({min: 0, max: 1}),
+      }),
+      {minLength: 8, maxLength: 28},
+    );
+    await fc.assert(
+      fc.asyncProperty(operations, async schedule => {
+        const h = harness();
+        const groups: ManagerLiveResource[] = [resource, {topic: 'worksets', scope: 'account'}];
+        const mounted = new Map<string, () => void>();
+        const latest = [0, 0];
+        let scope = 0;
+        let sequence = 0;
+        let acknowledged = false;
+        const reads: Array<{
+          group: number;
+          query: number;
+          signal: AbortSignal;
+          value: {scope: number; revision: number; query: number};
+          pending: ReturnType<typeof deferred<{scope: number; revision: number; query: number}>>;
+          settled: boolean;
+        }> = [];
+        const key = (group: number, query: number) => `${group}:${query}`;
+        const reader = (group: number, query: number) => (signal: AbortSignal) => {
+          const row = {
+            group,
+            query,
+            signal,
+            value: {scope, revision: latest[group], query},
+            pending: deferred<{scope: number; revision: number; query: number}>(),
+            settled: false,
+          };
+          reads.push(row);
+          return row.pending.promise;
+        };
+        const mount = (group: number, query: number) => {
+          const id = key(group, query);
+          if (!mounted.has(id))
+            mounted.set(
+              id,
+              h.client.subscribeQuery(groups[group], id, reader(group, query), () => {}),
+            );
+        };
+        mount(0, 0);
+        h.client.start();
+        await flush();
+        let socket = h.sockets[0];
+        socket.open(['context-health', 'worksets']);
+        try {
+          for (const {action, group, query} of schedule) {
+            if (action === 'mount') mount(group, query);
+            else if (action === 'unmount') {
+              mounted.get(key(group, query))?.();
+              mounted.delete(key(group, query));
+            } else if (action === 'ack') {
+              socket.ack(undefined, sequence);
+              acknowledged = true;
+            } else if (action === 'change' || action === 'gap') {
+              latest[group]++;
+              if (acknowledged) {
+                sequence += action === 'gap' ? 2 : 1;
+                socket.emit(
+                  frame('invalidation', {
+                    epoch: 'epoch-one',
+                    generation: socket.lastGeneration(),
+                    sequence,
+                    resource: groups[group],
+                    revision: String(latest[group]),
+                  }),
+                );
+                if (action === 'gap') acknowledged = false;
+              }
+            } else if (action === 'resolve') {
+              const row = reads.find(candidate => !candidate.settled);
+              if (row) {
+                row.settled = true;
+                row.pending.resolve(row.value);
+              }
+            } else {
+              for (const release of mounted.values()) release();
+              mounted.clear();
+              scope++;
+              latest[0] = latest[1] = 0;
+              h.client.setScope(`account-${scope}`);
+              mount(group, query);
+              await flush();
+              socket = h.sockets.at(-1)!;
+              socket.open(['context-health', 'worksets']);
+              sequence = 0;
+              acknowledged = false;
+            }
+            await flush();
+            const expectedGroups = new Set([...mounted.keys()].map(id => Number(id[0])));
+            const sent = socket.sent.filter(value => value.type === 'subscribe').at(-1);
+            expect(
+              ((sent?.resources ?? []) as ManagerLiveResource[]).map(value => JSON.stringify(value)).sort(),
+            ).toEqual([...expectedGroups].map(index => JSON.stringify(groups[index])).sort());
+            for (let g = 0; g < 2; g++)
+              for (let q = 0; q < 2; q++) {
+                const snapshot = h.client.getQuerySnapshot<{scope: number; revision: number; query: number}>(
+                  groups[g],
+                  key(g, q),
+                );
+                if (!mounted.has(key(g, q))) expect(snapshot.status).toBe('loading');
+                if (snapshot.status === 'ready') expect(snapshot.data).toEqual({scope, revision: latest[g], query: q});
+                expect(
+                  reads.filter(row => row.group === g && row.query === q && !row.settled && !row.signal.aborted).length,
+                ).toBeLessThanOrEqual(1);
+              }
+          }
+        } finally {
+          h.client.stop();
+          for (const row of reads) row.pending.resolve(row.value);
+          await flush();
+        }
+      }),
+      {numRuns: 24},
+    );
   });
 
   it('waits for the current ACK, then stays idle for 60 seconds without recurring business reads', async () => {

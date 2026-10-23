@@ -1,7 +1,7 @@
 import {Clock, Console, Crypto, DateTime, Effect, Fiber, FileSystem, Option, Path, Schema, Semaphore} from 'effect';
 import {writeFinalCliOutput} from '../effect/cli/output.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {SystemInfo} from '@threadnote/platform/system';
+import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
 import {readLiveStandaloneProcessLeases} from './standalone_lease.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {orderThreadnoteProcessesByAttention} from './attention.js';
@@ -17,6 +17,16 @@ const PROCESS_MEMORY_QUERY_TIMEOUT_MS = 5_000;
 const PROCESS_REGISTRATION_RECONCILE_MILLISECONDS = 30_000;
 const PROCESS_REGISTRATION_REPAIR_WARNING_LIMIT = 3;
 const SAFE_OPERATION = /^[a-z][a-z0-9-]{0,47}$/;
+
+/** Stream the private registration directory, retaining at most the scan cap. */
+export const readBoundedProcessRegistrationNames = Effect.fn('processDiagnostics.boundedNames')(function* (
+  directory: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (!(yield* fs.exists(directory))) return {names: [] as string[], truncated: false};
+  const page = yield* runtimeTextDirectoryNamePage(directory, PROCESS_DIAGNOSTICS_SCAN_LIMIT).pipe(Effect.orDie);
+  return {names: page.names.filter(name => /^[1-9]\d*\.json$/.test(name)).sort(), truncated: page.overflow};
+});
 
 export type ThreadnoteProcessRole =
   | 'cli'
@@ -257,9 +267,12 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
   const releaseLeases = releaseLeaseDiagnostics.leases;
 
   const directory = processDiagnosticsDirectory(path, config.agentContextHome);
-  const names = yield* fs.readDirectory(directory).pipe(Effect.orElseSucceed(() => [] as string[]));
-  const eligibleNames = names.filter(name => /^[1-9]\d*\.json$/.test(name));
-  const candidateNames = eligibleNames.slice(0, PROCESS_DIAGNOSTICS_SCAN_LIMIT);
+  // Bound enumeration before allocating names. A larger registry is reported
+  // as truncated so live sampling can decline complete coverage.
+  const scan = yield* readBoundedProcessRegistrationNames(directory).pipe(
+    Effect.catchCause(() => Effect.succeed({names: [] as string[], truncated: true})),
+  );
+  const candidateNames = scan.names;
   const files = yield* Effect.forEach(
     candidateNames,
     name =>
@@ -365,9 +378,7 @@ const readThreadnoteProcessSnapshot = Effect.fn('processDiagnostics.readSnapshot
     processes: sorted,
     schemaVersion: PROCESS_DIAGNOSTICS_SCHEMA_VERSION,
     truncated:
-      releaseLeaseDiagnostics.truncated ||
-      live.length + legacy.length > PROCESS_DIAGNOSTICS_LIMIT ||
-      candidateNames.length < eligibleNames.length,
+      releaseLeaseDiagnostics.truncated || live.length + legacy.length > PROCESS_DIAGNOSTICS_LIMIT || scan.truncated,
   } satisfies ThreadnoteProcessDiagnostics;
   return {diagnostics, registrations: new Map(live.map(value => [value.processId, value] as const))};
 });

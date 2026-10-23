@@ -22,6 +22,12 @@ class InstallationOperationError extends Schema.TaggedError<InstallationOperatio
 ) {}
 
 const ACTIVE_RELEASE_FILE = 'active-release.json';
+/** Exact installed-pointer metadata input for Manager's local status observer. */
+export const installedActiveReleaseObservationPath = Effect.fn('installations.activeObservationPath')(function* () {
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  return path.join(installationRoot(path, system), ACTIVE_RELEASE_FILE);
+});
 const ACTIVE_RELEASE_BACKUP_FILE = 'active-release.previous.json';
 const ACTIVE_RELEASE_JOURNAL_FILE = 'active-release.promotion.json';
 const PROMOTION_JOURNAL_VERSION = 1 as const;

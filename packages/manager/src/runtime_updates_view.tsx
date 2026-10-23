@@ -4,6 +4,7 @@ import {api, errorMessage} from './ui/support.js';
 import {MarkdownViewer} from './ui/controls.js';
 import type {RuntimeReleaseNotes, RuntimeUpdates} from './update_contracts.js';
 import {ModelSetupPanel} from './model_setup.js';
+import {useManagerLiveQuery} from './live/provider.js';
 
 const endpoint = '/api/runtime/updates';
 
@@ -14,11 +15,20 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
   const [generation, setGeneration] = useState(0);
   const changed = useRef(onChanged);
   changed.current = onChanged;
+  const live = useManagerLiveQuery<RuntimeUpdates>({topic: 'runtime-updates', scope: 'account'}, 'status', signal =>
+    api<RuntimeUpdates>(endpoint + '?view=status', undefined, {signal, timeoutMilliseconds: 10_000}),
+  );
+  const fallback = !live.active || live.snapshot.status === 'unsupported';
+  const completed = useRef<string | undefined>(undefined);
+  const previousAutomaticRunning = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     setBusy('Loading updates');
     void api<RuntimeUpdates>(endpoint, undefined, {signal: controller.signal, timeoutMilliseconds: 20_000})
-      .then(setData)
+      .then(next => {
+        if (next.automaticRunning) previousAutomaticRunning.current = true;
+        setData(next);
+      })
       .catch(cause => {
         if (!controller.signal.aborted) setError(errorMessage(cause));
       })
@@ -29,7 +39,24 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
   }, [generation]);
   const running = data?.job?.status === 'running' || data?.automaticRunning;
   useEffect(() => {
-    if (!running) return;
+    if (fallback || live.snapshot.status !== 'ready') return;
+    const next = live.snapshot.data;
+    setData(next);
+    const identity = next.job ? JSON.stringify([next.job.status, next.job.message, next.installedVersion]) : undefined;
+    let terminal = false;
+    if (identity && next.job?.status !== 'running' && completed.current !== identity) {
+      completed.current = identity;
+      terminal = true;
+    }
+    if (previousAutomaticRunning.current && !next.automaticRunning) terminal = true;
+    if (terminal) {
+      setGeneration(value => value + 1);
+      changed.current();
+    }
+    previousAutomaticRunning.current = next.automaticRunning;
+  }, [fallback, live.snapshot]);
+  useEffect(() => {
+    if (!running || !fallback) return;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     async function poll(): Promise<void> {
@@ -56,7 +83,7 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
       controller.abort();
       clearTimeout(timer);
     };
-  }, [running]);
+  }, [running, fallback]);
   async function act(action: 'check' | 'policy' | 'update'): Promise<void> {
     if (busy || running) return;
     setBusy(
@@ -74,6 +101,7 @@ export function RuntimeUpdatesPanel({onChanged}: {readonly onChanged: () => void
         {timeoutMilliseconds: 20_000},
       );
       setData(next);
+      live.invalidate();
       if (action === 'policy') changed.current();
     } catch (cause) {
       setError(errorMessage(cause));

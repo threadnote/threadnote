@@ -24,6 +24,7 @@ import type {
 } from './topic_contracts.js';
 import {AutomaticMemoryReviewDialog, automaticReviewIsVerified} from './automatic_review.js';
 import {AutomaticGenerate} from './automatic_generate.js';
+import {useManagerLiveQuery} from '../live/provider.js';
 
 export function reconcileAutomaticMemoryItems(
   items: readonly ManagerAutomaticMemoryItem[],
@@ -97,10 +98,11 @@ export function AutomaticMemoryPanel(props: {
     summary: {readonly ready: number; readonly pending: boolean} | undefined,
   ) => void;
 }) {
-  const [status, setStatus] = useState<ManagerAutomaticMemoryStatus>();
+  const [statusState, setStatusState] = useState<{selection: string; value: ManagerAutomaticMemoryStatus}>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [refresh, setRefresh] = useState(0);
+  const previousRefresh = useRef(0);
   const [selected, setSelected] = useState<string>();
   const [applied, setApplied] = useState<readonly ManagerAutomaticReview[]>([]);
   const selection = JSON.stringify([props.project, props.uri]);
@@ -111,6 +113,20 @@ export function AutomaticMemoryPanel(props: {
   const cursors = pagination.selection === selection ? pagination.cursors : [undefined];
   const afterUri = cursors.at(-1);
   const requestSelection = JSON.stringify([selection, afterUri]);
+  const status = statusState?.selection === requestSelection ? statusState.value : undefined;
+  const setStatus = (next: ManagerAutomaticMemoryStatus | undefined) =>
+    setStatusState(next ? {selection: requestSelection, value: next} : undefined);
+  const live = useManagerLiveQuery<ManagerAutomaticMemoryStatus>(
+    props.project ? {topic: 'automatic-memory', project: props.project} : undefined,
+    props.uri ? JSON.stringify(['uri', props.project, props.uri]) : JSON.stringify(['page', props.project, afterUri]),
+    signal =>
+      api<ManagerAutomaticMemoryStatus>(
+        `/api/attention/automatic-memory?project=${encodeURIComponent(props.project)}${props.uri ? `&uri=${encodeURIComponent(props.uri)}` : afterUri ? `&afterUri=${encodeURIComponent(afterUri)}` : ''}`,
+        undefined,
+        {signal},
+      ),
+  );
+  const fallback = !live.active || live.snapshot.status === 'unsupported';
   const active = useRef(requestSelection);
   active.current = requestSelection;
   const mutation = useRef(0);
@@ -121,6 +137,7 @@ export function AutomaticMemoryPanel(props: {
     setNotice('');
   }, [selection]);
   useEffect(() => {
+    if (!fallback) return;
     const controller = new AbortController();
     let timer: number | undefined;
     setStatus(undefined);
@@ -153,7 +170,29 @@ export function AutomaticMemoryPanel(props: {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [requestSelection, refresh, props.project, props.uri, afterUri]);
+  }, [requestSelection, refresh, props.project, props.uri, afterUri, fallback]);
+  useEffect(() => {
+    if (fallback) return;
+    if (live.snapshot.status === 'error') {
+      setError(errorMessage(live.snapshot.error));
+      return;
+    }
+    if (live.snapshot.status !== 'ready') return;
+    const result = live.snapshot.data;
+    if (result.version !== 1 || result.project !== props.project || !Array.isArray(result.items)) return;
+    setStatus(result);
+    const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
+    summary.current?.(props.project, {
+      ready: retained.filter(item => item.state === 'ready' || item.state === 'verification').length,
+      pending: result.incomplete === true || result.omitted > 0 || retained.some(item => item.state !== 'reviewed'),
+    });
+    setError('');
+  }, [fallback, live.snapshot, requestSelection, props.project]);
+  useEffect(() => {
+    if (previousRefresh.current === refresh) return;
+    previousRefresh.current = refresh;
+    if (!fallback) live.invalidate();
+  }, [refresh]);
   function openReview(reviewId: string) {
     props.onReview?.(reviewId);
     setSelected(reviewId);

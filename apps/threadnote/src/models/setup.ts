@@ -1,4 +1,4 @@
-import {Cause, Clock, Console, Crypto, Effect, FileSystem, Path, Schema} from 'effect';
+import {Cause, Clock, Console, Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
 import {runDetachedCommandEffect} from '@threadnote/platform/command';
@@ -8,7 +8,7 @@ import {CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {LocalModelStore, ModelStoreIoFailed, type LocalModelStoreError} from '@threadnote/inference/models/store';
 import {InsufficientDiskSpace, ModelChecksumMismatch, ModelDownloadFailed} from '@threadnote/inference/engine/errors';
-import {inspectModelSelection} from '@threadnote/inference/models/selection';
+import {inspectModelSelection, parseModelSelection} from '@threadnote/inference/models/selection';
 import {
   modelSetupFileIdentity,
   ModelSetupConflict,
@@ -117,6 +117,94 @@ const receiptIsCurrent = Effect.fn('models.setup.receiptIsCurrent')(function* (
 });
 
 /** Read-only, bounded public projection; no process launch, full digest verification, or native runtime. */
+/** Exact metadata inputs for the Manager observer; no model bytes are read. */
+export const modelSetupObservationPaths = Effect.fn('models.setup.observationPaths')(function* (home: string) {
+  const path = yield* Path.Path;
+  const catalog = yield* LocalModelCatalog;
+  const store = yield* LocalModelStore;
+  const manifest = yield* catalog.get(CORE_GENERATION_MODEL_ID);
+  return [
+    path.join(home, 'models', 'setup.json'),
+    path.join(home, 'models', 'selection.json'),
+    store.path(home, manifest),
+  ] as const;
+});
+
+/** Selection-sensitive provider inputs; a new selection recomputes artifact paths. */
+const inspectBoundedObservationSelection = Effect.fn('models.observationSelection')(function* (home: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const file = path.join(home, 'models', 'selection.json');
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const handle = yield* fs.open(file, {flag: 'r'}).pipe(
+        Effect.catchIf(
+          error => PlatformError.isPlatformError(error) && error.reason._tag === 'NotFound',
+          () => Effect.void,
+        ),
+      );
+      if (!handle) return {status: 'missing'} as const;
+      const stat = yield* handle.stat;
+      if (stat.type !== 'File' || Number(stat.size) > 65_536)
+        return yield* Effect.die(new Error('Oversized model selection'));
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      while (length <= 65_536) {
+        const chunk = yield* handle.readAlloc(Math.min(16_384, 65_537 - length));
+        if (Option.isNone(chunk)) break;
+        length += chunk.value.length;
+        if (length > 65_536) return yield* Effect.die(new Error('Oversized model selection'));
+        chunks.push(chunk.value);
+      }
+      const after = yield* handle.stat;
+      if (
+        length !== Number(stat.size) ||
+        Number(after.size) !== Number(stat.size) ||
+        Option.getOrUndefined(after.mtime)?.getTime() !== Option.getOrUndefined(stat.mtime)?.getTime()
+      )
+        return yield* Effect.die(new Error('Changed model selection'));
+      const bytes = new Uint8Array(length);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return parseModelSelection(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+    }),
+  );
+});
+
+export const modelProviderObservationPaths = Effect.fn('models.provider.observationPaths')(function* (home: string) {
+  const path = yield* Path.Path;
+  const catalog = yield* LocalModelCatalog;
+  const store = yield* LocalModelStore;
+  const selection = yield* inspectBoundedObservationSelection(home);
+  const selectedIds =
+    selection.status === 'valid'
+      ? Object.values(selection.selection.roles).filter((id): id is string => typeof id === 'string')
+      : [];
+  const artifacts = yield* Effect.forEach([...new Set(selectedIds)].slice(0, 8), id =>
+    Effect.map(catalog.get(id), manifest => store.path(home, manifest)),
+  );
+  return [path.join(home, 'models', 'selection.json'), ...artifacts] as const;
+});
+
+/** Generation inputs used by background drafts, including the default model. */
+export const selectedGenerationObservationPaths = Effect.fn('models.generation.observationPaths')(function* (
+  home: string,
+) {
+  const path = yield* Path.Path;
+  const catalog = yield* LocalModelCatalog;
+  const store = yield* LocalModelStore;
+  const selection = yield* inspectBoundedObservationSelection(home);
+  const selectedId = selection.status === 'valid' ? selection.selection.roles.generation : undefined;
+  const ids = [...new Set([CORE_GENERATION_MODEL_ID, ...(selectedId ? [selectedId] : [])])];
+  const artifacts = yield* Effect.forEach(ids, id =>
+    Effect.map(catalog.get(id), manifest => store.path(home, manifest)),
+  );
+  return [path.join(home, 'models', 'setup.json'), path.join(home, 'models', 'selection.json'), ...artifacts] as const;
+});
+
 export const readModelSetupStatus = Effect.fn('models.setup.status')(function* (home: string) {
   const catalog = yield* LocalModelCatalog;
   const manifest = yield* catalog.get(CORE_GENERATION_MODEL_ID);

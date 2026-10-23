@@ -22,10 +22,12 @@ import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
-import {managerLiveHttpLayer, readManagerLiveProjects, type ManagerLive} from './live.js';
-import {makeManagerLiveSources, ManagerLiveChangeHints} from './live_sources.js';
-import {makeHealthEnabledManagerLive, ManagerHealthObservationHints} from './live_health_sources.js';
-import {contextMaintenanceStatePath} from '../memory/context/maintenance.js';
+import {managerLiveHttpLayer, type ManagerLive} from './live.js';
+import {ManagerLiveChangeHints} from './live_sources.js';
+import {ManagerHealthObservationHints} from './live_health_sources.js';
+import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
+import {makeManagerLiveObservationRuntime} from './live_observation_runtime.js';
+import {ManagerConsumerClockHints} from './live_consumer_sources.js';
 import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
 import {
   captureConsolidationSource,
@@ -371,27 +373,30 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port
               : (options.uiPort ?? 0);
-          const {live, healthHints} = yield* makeHealthEnabledManagerLive(config, {
-            origin: `http://127.0.0.1:${actualPort}`,
-            token,
-            projects: readManagerLiveProjects(yield* FileSystem.FileSystem, config.manifestPath),
-          });
-          const sources = yield* makeManagerLiveSources({
-            home: config.agentContextHome,
-            account: config.account,
-            maintenanceStatePath: yield* contextMaintenanceStatePath(config),
-            manifestPath: config.manifestPath,
-            onScopeChange: live.invalidateScope,
-            onInvalidate: live.publish,
-          });
+          const {
+            graph,
+            project: projectObservation,
+            observations,
+            live,
+            healthHints,
+            sources,
+          } = yield* makeManagerLiveObservationRuntime(config, actualPort, token);
           yield* Effect.addFinalizer(() => releaseManagerGraphSnapshotLeases());
           yield* server.serve(
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope, live}).pipe(
               Effect.provideService(ManagerLiveChangeHints, sources.hints),
-              Effect.provideService(ManagerHealthObservationHints, healthHints),
+              Effect.provideService(ManagerHealthObservationHints, {
+                register: (project, input) =>
+                  Effect.all(
+                    [healthHints.register(project, input), projectObservation.healthHints.register(project, input)],
+                    {discard: true},
+                  ),
+              }),
+              Effect.provideService(ManagerLiveConsumerChangeHints, observations.hints),
+              Effect.provideService(ManagerConsumerClockHints, projectObservation.clockHints),
             ),
           );
-          yield* startManagerContextSchedulers(config, automaticCompactionStatus).pipe(
+          yield* startManagerContextSchedulers(config, automaticCompactionStatus, graph.compactionChanged).pipe(
             Effect.provideService(ManagerLiveChangeHints, sources.hints),
           );
           yield* startAutomaticModelSetupScheduler(config.agentContextHome);

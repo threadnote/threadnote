@@ -185,10 +185,7 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     acknowledged = false;
     staleAll();
     armHandshake();
-    const resources = store
-      .values()
-      .filter(supported)
-      .map(entry => entry.resource);
+    const resources = store.resources().filter(resource => topics.has(resource.topic));
     pendingGeneration = ++generation;
     send({type: 'subscribe', version: MANAGER_LIVE_VERSION, generation: pendingGeneration, resources});
   };
@@ -247,22 +244,24 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
     if (frame.sequence <= sequence) return;
     if (frame.sequence !== sequence + 1 || frame.type === 'reset') return subscribeFrame();
     sequence = frame.sequence;
-    const entry = store.get(frame.resource);
-    if (!entry) return;
+    const entries = store.queries(frame.resource);
+    if (!entries.length) return;
     if (frame.type === 'availability') {
       if (!frame.available) {
-        entry.available = false;
-        fence(entry);
-        update(entry, 'unsupported');
+        for (const entry of entries) {
+          entry.available = false;
+          fence(entry);
+          update(entry, 'unsupported');
+        }
       } else {
-        entry.available = true;
+        for (const entry of entries) entry.available = true;
         subscribeFrame();
       }
       return;
     }
     // Sequence numbers deduplicate delivery. Content revisions can legitimately
     // recur, including while a new subscription's snapshot is in flight.
-    dirty(entry);
+    for (const entry of entries) dirty(entry);
   };
   const connect = async () => {
     if (!running) return;
@@ -344,20 +343,33 @@ export function createManagerLiveClient(options: ManagerLiveClientOptions) {
       }
     },
     subscribe<T>(resource: ManagerLiveResource, reader: (signal: AbortSignal) => Promise<T>, listener: () => void) {
-      const existed = store.get(resource);
-      const entry = store.add(resource, reader, listener);
+      return this.subscribeQuery(resource, '', reader, listener);
+    },
+    subscribeQuery<T>(
+      resource: ManagerLiveResource,
+      queryKey: string,
+      reader: (signal: AbortSignal) => Promise<T>,
+      listener: () => void,
+    ) {
+      const existed = store.has(resource);
+      const entry = store.add(resource, queryKey, reader, listener);
       if (!existed && epoch && socket?.readyState === 1) subscribeFrame();
-      if ((epoch && !supported(entry)) || (connection === 'unsupported' && !epoch)) update(entry, 'unsupported');
+      else if (acknowledged && supported(entry) && entry.available) read(entry);
+      if ((epoch && (!supported(entry) || !entry.available)) || (connection === 'unsupported' && !epoch))
+        update(entry, 'unsupported');
       return () => {
         if (store.remove(entry, listener) && epoch && socket?.readyState === 1) subscribeFrame();
       };
     },
     getSnapshot<T>(resource: ManagerLiveResource): ManagerLiveSnapshot<T> {
-      return (store.get(resource)?.snapshot ?? emptySnapshot) as ManagerLiveSnapshot<T>;
+      return this.getQuerySnapshot<T>(resource, '');
     },
-    invalidate(resource: ManagerLiveResource) {
-      const entry = store.get(resource);
-      if (entry) dirty(entry);
+    getQuerySnapshot<T>(resource: ManagerLiveResource, queryKey: string): ManagerLiveSnapshot<T> {
+      return (store.get(resource, queryKey)?.snapshot ?? emptySnapshot) as ManagerLiveSnapshot<T>;
+    },
+    invalidate(resource: ManagerLiveResource, queryKey?: string) {
+      for (const entry of queryKey === undefined ? store.queries(resource) : [store.get(resource, queryKey)])
+        if (entry) dirty(entry);
     },
     revalidate() {
       for (const entry of store.values()) dirty(entry);

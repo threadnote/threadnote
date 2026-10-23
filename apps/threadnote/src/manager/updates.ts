@@ -19,6 +19,7 @@ import {readAutoUpdateStatus, runAutoUpdatePolicyCommand} from '../release/auto_
 import {fetchThreadnoteReleaseNotes, releaseForVersion, releasesBetween, type ReleaseNote} from '../release/notes.js';
 import {captureConsoleWithoutProgress} from '../effect/console.js';
 import {managerFeatureError} from './feature_errors.js';
+import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
 
 interface UpdateRequest {
   readonly body: Effect.Effect<Record<string, unknown>, unknown>;
@@ -139,6 +140,7 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
     sessions.set(context.key, session);
   }
   const currentSession = session;
+  const updateHint = (yield* ManagerLiveConsumerChangeHints).publish({topic: 'runtime-updates', scope: 'account'});
   const body = request.method === 'POST' ? yield* request.body : {};
   const action = body.action;
   let local = yield* readLocalUpdateState();
@@ -149,6 +151,7 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
       if (body.policy !== 'automatic' && body.policy !== 'notify') throw new Error('Choose a valid update policy.');
       yield* captureConsoleWithoutProgress(runAutoUpdatePolicyCommand(body.policy));
       local = yield* readLocalUpdateState();
+      yield* updateHint;
     } else if (action === 'update') {
       if (currentSession.starting || currentSession.job?.status === 'running') {
         return {status: 202, body: response(local, currentSession)};
@@ -159,6 +162,7 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
       // The CLI rechecks eligibility and takes the installation lock before writing.
       currentSession.starting = true;
       currentSession.job = {status: 'running', message: 'Downloading and installing Threadnote…'};
+      yield* updateHint;
       const worker = captureConsoleWithoutProgress(runUpdate(request.config, {yes: true})).pipe(
         Effect.matchCauseEffect({
           onSuccess: result =>
@@ -169,12 +173,12 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
                 message: 'Update finished. New Threadnote sessions will use the installed version.',
                 output: redactSensitiveText(result.output).slice(-16_000),
               };
-            }),
+            }).pipe(Effect.andThen(updateHint)),
           onFailure: cause =>
             Effect.sync(() => {
               currentSession.snapshot = undefined;
               currentSession.job = {status: 'failed', message: readableError(Cause.squash(cause))};
-            }),
+            }).pipe(Effect.andThen(updateHint)),
         }),
       );
       yield* worker.pipe(
@@ -198,6 +202,7 @@ const routeUpdates = Effect.fn('managerUpdates.handleRequest')(function* (reques
       Effect.tap(snapshot => Effect.sync(() => (currentSession.snapshot = snapshot))),
       Effect.ensuring(Effect.sync(() => (currentSession.checking = false))),
     );
+    yield* updateHint;
   }
   return {status: 200, body: response(local, currentSession)};
 });

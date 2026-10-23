@@ -9,13 +9,20 @@ import {testHttpFetch} from '@threadnote/testing/http-fetch';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {HttpService} from '@threadnote/platform/http';
 import {SystemInfo} from '@threadnote/platform/system';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {BUILTIN_MODEL_MANIFESTS, CORE_GENERATION_MODEL_ID} from '@threadnote/inference/models/builtin';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
-import {initialModelSetupState, modelSetupFileIdentity, modelSetupJob} from '@threadnote/inference/models/setup';
+import {
+  initialModelSetupState,
+  modelSetupFileIdentity,
+  modelSetupJob,
+  sameModelSetupFile,
+} from '@threadnote/inference/models/setup';
 import {handleManagerModelSetupRequest} from '../../src/manager/model_setup.js';
 import {discoverLocalConsolidationModels} from '../../src/manager/consolidation_models.js';
 import {readModelSetupStatus, runModelSetupCommand} from '../../src/models/setup.js';
+import {makeManagerLiveConsumerObservation} from '../../src/manager/live_consumer_observation.js';
 import {captureConsole} from '../../src/effect/console.js';
 import {TestSystemInfoLayer} from '../helpers/system-layer.js';
 import {startManagerTestServer} from '../helpers/manager-test-server.js';
@@ -88,10 +95,58 @@ const fixture = (environment: NodeJS.ProcessEnv = {}) =>
       };
       yield* fs.writeFileString(path.join(home, 'models/setup.json'), JSON.stringify(state));
     });
-    return {fs, path, home, manifest, services, request, ready, launches: () => launches};
+    return {
+      fs,
+      path,
+      home,
+      manifest,
+      artifact: store.path(home, manifest),
+      services,
+      request,
+      ready,
+      launches: () => launches,
+    };
   });
 
 describe('Manager setup adapter', () => {
+  effectIt.effect('invalidates ready setup when artifact ctime changes without mtime or size changing', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      yield* f.ready;
+      const before = yield* modelSetupFileIdentity(f.artifact);
+      expect(before).toBeDefined();
+      expect((yield* readModelSetupStatus(f.home).pipe(Effect.provide(f.services))).artifactReady).toBe(true);
+      const revisions: string[] = [];
+      const broker = yield* makeManagerLiveConsumerObservation(
+        {agentContextHome: f.home} as RuntimeConfig,
+        {
+          onInvalidate: (_resource, revision) =>
+            Effect.sync(() => {
+              revisions.push(revision);
+            }),
+          onAvailability: () => Effect.void,
+        },
+        {
+          modelPaths: [
+            f.path.join(f.home, 'models', 'setup.json'),
+            f.path.join(f.home, 'models', 'selection.json'),
+            f.artifact,
+          ],
+        },
+      ).pipe(Effect.provide(f.services));
+      const resource = {topic: 'model-setup' as const, scope: 'account' as const};
+      expect(yield* broker.subscribe('setup', [resource])).toEqual([]);
+      yield* Effect.addFinalizer(() => f.fs.chmod(f.artifact, 0o600).pipe(Effect.orDie));
+      yield* f.fs.chmod(f.artifact, 0o444);
+      const after = yield* modelSetupFileIdentity(f.artifact);
+      expect(after?.modifiedAtNs).toBe(before?.modifiedAtNs);
+      expect(before && after && sameModelSetupFile(before, after)).toBe(false);
+      const status = yield* readModelSetupStatus(f.home).pipe(Effect.provide(f.services));
+      expect(status).toMatchObject({artifactReady: false, effectiveDefault: false, reason: 'artifact-changed'});
+      yield* broker.reconcileNow;
+      expect(revisions).toHaveLength(1);
+    }).pipe(providePlatform),
+  );
   effectIt.effect('authenticates before evaluating even a malformed body or touching a missing home', () =>
     Effect.gen(function* () {
       const f = yield* fixture();

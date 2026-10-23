@@ -571,6 +571,9 @@ const autoUpdateStatePath = Effect.fn('autoUpdate.statePath')(function* () {
   return path.join(installationRoot(path, system), AUTO_UPDATE_STATE_FILE);
 });
 
+/** Exact durable status input for Manager's local runtime update observer. */
+export const autoUpdateObservationPath = autoUpdateStatePath;
+
 const autoUpdateLockPath = Effect.fn('autoUpdate.lockPath')(function* () {
   const path = yield* Path.Path;
   const system = yield* SystemInfo;

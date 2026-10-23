@@ -95,6 +95,7 @@ export const collectManagerHomeResponse = Effect.fn('managerHome.collectResponse
     return yield* observe(
       sources.health(request.config, project, activeProjectRecords(corpus.success, project), root.success.cwd, {
         relationCorpus: corpus.success,
+        liveObservation: true,
       }),
     );
   });

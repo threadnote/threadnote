@@ -35,6 +35,7 @@ import {
   projectTopicReviewDecisionAcknowledgement,
 } from '../memory/context/maintenance_review_projection.js';
 import {isManagerProjectName} from './project/name.js';
+import {ManagerConsumerClockHints} from './live_consumer_sources.js';
 
 const HASH = /^[a-f0-9]{64}$/u;
 const REVIEW = /^review-[a-f0-9]{24}$/u;
@@ -134,6 +135,7 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
     ? {uris: [selectedUri], total: 1, omitted: 0, incomplete: false, nextCursor: undefined}
     : yield* readContextMaintenanceInventoryPage(config, project, {afterUri});
   const background = yield* readAutomaticDraftBackgroundStatus(config);
+  yield* (yield* ManagerConsumerClockHints).register('automatic-memory', project, background.nextEligibleAt);
   const items: ManagerAutomaticMemoryItem[] = [];
   let remainingBytes: number = contextMaintenanceInventoryAuthorityLimits.canonicalBytes;
   let lastUri: string | undefined;

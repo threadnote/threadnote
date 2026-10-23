@@ -46,6 +46,11 @@ export interface AutomaticPreparationCursorV1 {
 
 const preparationPath = (path: Path.Path, config: RuntimeConfig, key: string) =>
   path.join(config.agentContextHome, 'context-maintenance', 'automatic', `${sha256HexSync(key)}.json`);
+export const automaticPreparationObservationDirectory = Effect.fn('automaticPreparation.observationDirectory')(
+  function* (config: RuntimeConfig) {
+    return (yield* Path.Path).join(config.agentContextHome, 'context-maintenance', 'automatic');
+  },
+);
 const readCache = Effect.fn('automaticPreparation.readCache')(function* (config: RuntimeConfig, key: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;

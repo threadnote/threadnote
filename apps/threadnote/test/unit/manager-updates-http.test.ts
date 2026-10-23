@@ -2,11 +2,17 @@ import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import {testHttpFetch} from '@threadnote/testing/http-fetch';
-import {Effect} from 'effect';
+import {Effect, Scope} from 'effect';
+import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {startManagerTestServer, type ManagerTestServer} from '../helpers/manager-test-server.js';
 import type {RuntimeUpdates} from '@threadnote/manager/update-contracts';
+import {handleManagerUpdateRequest} from '../../src/manager/updates.js';
+import {ManagerLiveConsumerChangeHints} from '../../src/manager/live_consumer_observation.js';
+import {ApplicationLayer} from '../../src/effect/runtime.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import type {RuntimeConfig} from '@threadnote/workspace/config';
 
 const mock = vi.hoisted(() => ({
   running: '5.1.0',
@@ -184,3 +190,51 @@ it('uses the beta channel and prevents replacing development installations', asy
   expect((await request({action: 'update', confirm: true})).status).toBe(409);
   expect(mock.update).not.toHaveBeenCalled();
 });
+
+effectIt.effect('publishes runtime policy, check, and both update terminal transitions after state changes', () =>
+  Effect.gen(function* () {
+    const config = {
+      account: 'local',
+      agentContextHome: home,
+      agentId: 'threadnote',
+      user: 'tester',
+      manifestPath: join(home, 'manifest.yaml'),
+    } satisfies RuntimeConfig;
+    const scope = yield* Scope.make();
+    const key = {};
+    const observed: Array<{job?: string; policy: string; checked: boolean}> = [];
+    const call = (method: 'GET' | 'POST', body: Record<string, unknown> = {}) =>
+      handleManagerUpdateRequest({
+        body: Effect.succeed(body),
+        config,
+        jobContext: {key, scope},
+        method,
+        url: new URL('http://manager.test/api/runtime/updates' + (method === 'GET' ? '?view=status' : '')),
+      });
+    const hints = ManagerLiveConsumerChangeHints.of({
+      publish: resource =>
+        Effect.gen(function* () {
+          expect(resource).toEqual({topic: 'runtime-updates', scope: 'account'});
+          const result = yield* call('GET').pipe(provideTestLayer(ApplicationLayer), Effect.orDie);
+          const status = result?.body as RuntimeUpdates;
+          observed.push({job: status.job?.status, policy: status.policy, checked: status.checkedAt !== undefined});
+        }),
+    });
+    yield* Effect.gen(function* () {
+      expect((yield* call('POST', {action: 'policy', policy: 'notify', confirm: true}))?.status).toBe(200);
+      expect(observed.at(-1)).toMatchObject({policy: 'notify'});
+      expect((yield* call('POST', {action: 'check'}))?.status).toBe(200);
+      expect(observed.at(-1)).toMatchObject({checked: true});
+      expect((yield* call('POST', {action: 'update', confirm: true}))?.status).toBe(202);
+      expect(observed.some(item => item.job === 'running')).toBe(true);
+      for (let attempt = 0; attempt < 50 && !observed.some(item => item.job === 'completed'); attempt++)
+        yield* Effect.yieldNow;
+      expect(observed.at(-1)?.job).toBe('completed');
+      mock.update.mockImplementation(() => Effect.fail(TestError.make({message: 'simulated update failure'})));
+      expect((yield* call('POST', {action: 'update', confirm: true}))?.status).toBe(202);
+      for (let attempt = 0; attempt < 50 && !observed.some(item => item.job === 'failed'); attempt++)
+        yield* Effect.yieldNow;
+      expect(observed.at(-1)?.job).toBe('failed');
+    }).pipe(Effect.provideService(ManagerLiveConsumerChangeHints, hints));
+  }).pipe(provideTestLayer(ApplicationLayer)),
+);
