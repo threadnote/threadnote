@@ -4,6 +4,7 @@ import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {
   applyDevSkills,
+  ensureDevSkills,
   prepareDevSkillsRefresh,
   previewDevSkillsRefresh,
   runDevSkillsRefresh,
@@ -113,5 +114,26 @@ for (const conflict of ['missing-receipt', 'different-owner', 'third-party-edit'
       expect(yield* snapshot(f.host)).toEqual(before);
       expect(yield* f.fs.readFileString(homeIndexPath(f.path, f.home))).toBe(home);
       expect(yield* f.fs.readFileString(runtimeIndexPath(f.path, f.runtime))).toBe(runtime);
+    }).pipe(provide),
+  );
+
+for (const removed of [false, true])
+  effectIt.effect(`does not recreate an absent root for an opted-out consumer (removed=${removed})`, () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const installed = yield* f.run(applyDevSkills(f.config, 'install', selector));
+      if (removed) yield* f.run(applyDevSkills(f.config, 'remove', selector));
+      else
+        yield* f.run(ensureDevSkills(f.config, selector, {mode: 'setup', choice: 'disabled', operationId: 'opt-out'}));
+      yield* f.fs.remove(installed.target.skillRoot, {recursive: true});
+      const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.7');
+      const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
+      const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
+      yield* release.activate;
+      const before = yield* snapshot(f.host);
+      const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
+      expect(result.repairRequired).toBe(false);
+      expect(result.targets[0].outcome.state).toBe('skipped');
+      expect(yield* snapshot(f.host)).toEqual(before);
     }).pipe(provide),
   );
