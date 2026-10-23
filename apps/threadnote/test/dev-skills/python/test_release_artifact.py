@@ -194,5 +194,68 @@ class ReleaseOutput(unittest.TestCase):
         self.assertFalse((report.with_suffix(".provenance") / "suite-native.log.stderr.bin").exists())
 
 
+class ReleasePreviewFence(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="release-preview-fence-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.lock = self.root / "data/locks/resources/local/mutations.lock"
+
+    def test_owned_version1_token_is_exclusive_live_flushed_and_removed(self):
+        with patch.object(release.os, "open", wraps=os.open) as opened, \
+                patch.object(release.os, "fsync", wraps=os.fsync) as flushed:
+            with release.hold_account_mutation_lock(self.root):
+                token = json.loads(self.lock.read_text())
+                self.assertEqual(set(token), {"version", "processId", "token"})
+                self.assertEqual(token["version"], 1)
+                self.assertEqual(token["processId"], os.getpid())
+                self.assertRegex(token["token"], r"^[a-f0-9]{32}$")
+                self.assertEqual(opened.call_args.args[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                self.assertEqual(opened.call_args.args[2], 0o600)
+                self.assertEqual(flushed.call_count, 1)
+                with self.assertRaises(FileExistsError):
+                    os.open(self.lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        self.assertFalse(self.lock.exists())
+
+    def test_body_failure_preserves_original_exception_and_releases_owned_token(self):
+        original = RuntimeError("original preview refusal")
+        with self.assertRaises(RuntimeError) as caught:
+            with release.hold_account_mutation_lock(self.root):
+                raise original
+        self.assertIs(caught.exception, original)
+        self.assertFalse(self.lock.exists())
+
+    def test_foreign_replacement_refuses_and_is_never_removed(self):
+        foreign = '{"version":1,"processId":1,"token":"foreign"}\n'
+        with self.assertRaisesRegex(RuntimeError, "lost ownership of the account mutation lock"):
+            with release.hold_account_mutation_lock(self.root):
+                self.lock.write_text(foreign)
+        self.assertEqual(self.lock.read_text(), foreign)
+
+    def test_body_failure_with_foreign_replacement_preserves_both(self):
+        original = ValueError("original assertion")
+        foreign = '{"version":1,"processId":1,"token":"foreign"}\n'
+        with self.assertRaises(ValueError) as caught:
+            with release.hold_account_mutation_lock(self.root):
+                self.lock.write_text(foreign)
+                raise original
+        self.assertIs(caught.exception, original)
+        self.assertEqual(self.lock.read_text(), foreign)
+
+    def test_bounded_contention_never_steals_an_existing_owner(self):
+        self.lock.parent.mkdir(parents=True)
+        foreign = '{"version":1,"processId":' + str(os.getpid()) + ',"token":"foreign"}\n'
+        self.lock.write_text(foreign)
+        before = release.inventory(self.root)
+        with patch.object(release.time, "monotonic", side_effect=[0, 11]), \
+                patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Account mutation lock did not become available"):
+                with release.hold_account_mutation_lock(self.root):
+                    self.fail("Foreign owner was admitted")
+        self.assertEqual(self.lock.read_text(), foreign)
+        self.assertEqual(release.inventory(self.root), before)
+        sleep.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

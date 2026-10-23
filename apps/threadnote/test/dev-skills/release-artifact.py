@@ -169,6 +169,47 @@ def hold_maintenance_state_lock(root):
                 raise
 
 
+@contextlib.contextmanager
+def hold_account_mutation_lock(root):
+    """Fence independent settled readers while observing the complete preview filesystem image."""
+    lock = root / "data/locks/resources/local/mutations.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    token = json.dumps({"version": 1, "processId": os.getpid(), "token": uuid.uuid4().hex}) + "\n"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            require(time.monotonic() < deadline, "Account mutation lock did not become available")
+            time.sleep(0.01)
+
+    body_failed = False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(token)
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield
+        try:
+            still_owned = lock.read_text(encoding="utf-8") == token
+        except FileNotFoundError:
+            still_owned = False
+        require(still_owned, "Fixture lost ownership of the account mutation lock")
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        try:
+            if lock.read_text(encoding="utf-8") == token:
+                lock.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            if not body_failed:
+                raise
+
+
 def wait_for_compaction_scheduler(root, manager):
     """Wait for the persistent startup lock, rather than sampling its creation mid-preview."""
     lock = root / "data/locks/indexes/code-graph/automatic-compaction-scheduler.lock"
@@ -251,7 +292,7 @@ def manager_checks_while_paused(root, binary, environment, checks):
             selector = {"agent": "antigravity-cli", "scope": "user"}
             for action in ("install", "update", "remove"):
                 # Capture only user/data/runtime state; Manager's diagnostic log is expected to change.
-                with hold_maintenance_state_lock(root):
+                with hold_maintenance_state_lock(root), hold_account_mutation_lock(root):
                     before = {name: inventory(root / name) for name in ("user", "data", "runtime")}
                     preview = request("/api/dev-skills/preview", {"action": action, "selector": selector})
                     require(preview["canApply"], "Manager preview blocked: " + json.dumps(preview["issues"]))
