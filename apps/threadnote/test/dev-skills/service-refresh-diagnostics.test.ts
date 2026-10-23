@@ -156,6 +156,58 @@ effectIt.effect('registers once per property context and captures abort before t
   }),
 );
 
+effectIt.effect('labels one unavailable-home evaluation without inventing a generated removed value', () =>
+  Effect.gen(function* () {
+    const test = lifecycle();
+    const writes: string[] = [];
+    let time = 0;
+    const diagnostics = refreshPropertyDiagnostics(test.context, {
+      now: () => time,
+      scope: 'dev-skills-refresh-unavailable-home',
+      write: line => {
+        writes.push(line);
+      },
+    });
+    expect(
+      yield* diagnostics.observe(
+        undefined,
+        Effect.sync(() => {
+          diagnostics.phase('index-read');
+          time = 7;
+          diagnostics.phase('restore-home-index');
+          test.controller.abort('private-abort-reason');
+          time = 11;
+          return 42;
+        }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown')))),
+      ),
+    ).toBe(42);
+    test.finish();
+    expect(writes).toHaveLength(2);
+    const [aborted, finished] = writes.map(line => JSON.parse(line.slice('SERVICE_REFRESH_DIAGNOSTICS '.length)));
+    expect(aborted).toMatchObject({
+      event: 'aborted',
+      scope: 'dev-skills-refresh-unavailable-home',
+      startedEvaluations: 1,
+      completedEvaluations: 0,
+      activeEvaluation: {ordinal: 1},
+      phase: 'restore-home-index',
+    });
+    expect(aborted.activeEvaluation).not.toHaveProperty('removed');
+    expect(finished).toMatchObject({
+      event: 'finished',
+      scope: 'dev-skills-refresh-unavailable-home',
+      startedEvaluations: 1,
+      completedEvaluations: 1,
+      successfulEvaluations: 1,
+      activeEvaluation: null,
+      phase: 'between-evaluations',
+      recent: [{ordinal: 1, outcome: 'Success', interrupted: false}],
+    });
+    expect(finished.recent[0]).not.toHaveProperty('removed');
+    expect(writes.join('')).not.toContain('private-abort-reason');
+  }),
+);
+
 effectIt.effect('cleans up listeners and isolates reused contexts and already aborted attempts', () =>
   Effect.gen(function* () {
     const test = lifecycle();

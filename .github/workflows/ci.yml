@@ -220,7 +220,9 @@ jobs:
         with:
           python-version: '3.10'
       - name: Install workflow inspection prerequisite
-        run: choco install ripgrep --no-progress --yes
+        shell: pwsh
+        timeout-minutes: 5
+        run: python -B tools/ci/windows-workflow-prerequisites.py
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -308,7 +310,9 @@ jobs:
         run: command -v rg || brew install ripgrep
       - name: Windows workflow prerequisites
         if: runner.os == 'Windows'
-        run: choco install ripgrep --no-progress --yes
+        shell: pwsh
+        timeout-minutes: 5
+        run: python -B tools/ci/windows-workflow-prerequisites.py
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}

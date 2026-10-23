@@ -10,15 +10,20 @@ type Phase =
   | 'prepare'
   | 'activate'
   | 'index-read'
+  | 'restore-home-index'
   | 'refresh'
   | 'assertions-status'
   | 'teardown'
   | 'between-evaluations';
 
-type Evaluation = {ordinal: number; removed: boolean; startedMs: number};
+type DiagnosticScope = 'dev-skills-refresh-property' | 'dev-skills-refresh-unavailable-home';
+type Evaluation = {ordinal: number; removed?: boolean; startedMs: number};
 const historyLimit = 16;
 
-export const refreshDiagnostics = (now = () => performance.now()) => {
+export const refreshDiagnostics = (
+  now = () => performance.now(),
+  scope: DiagnosticScope = 'dev-skills-refresh-property',
+) => {
   const start = now();
   const elapsed = () => Math.round(now() - start);
   let phase: Phase = 'between-evaluations';
@@ -42,11 +47,15 @@ export const refreshDiagnostics = (now = () => performance.now()) => {
       phase = next;
     },
     // Each invocation is an evaluation; the runner can also invoke it while shrinking.
-    observe: <A, E, R>(removed: boolean, program: Effect.Effect<A, E, R>) =>
+    observe: <A, E, R>(removed: boolean | undefined, program: Effect.Effect<A, E, R>) =>
       Effect.suspend(() => {
         const at = elapsed();
         closePhase(at);
-        const evaluation = {ordinal: ++startedEvaluations, removed, startedMs: at};
+        const evaluation = {
+          ordinal: ++startedEvaluations,
+          ...(removed === undefined ? {} : {removed}),
+          startedMs: at,
+        };
         active = evaluation;
         phase = 'provisioning';
         return program.pipe(
@@ -73,7 +82,7 @@ export const refreshDiagnostics = (now = () => performance.now()) => {
       const at = elapsed();
       return {
         version: 1,
-        scope: 'dev-skills-refresh-property',
+        scope,
         elapsedOrigin: 'observer-created',
         elapsedMs: at,
         startedEvaluations,
@@ -97,19 +106,19 @@ const observers = new WeakMap<TestLifecycle, ReturnType<typeof refreshDiagnostic
 
 export const refreshPropertyDiagnostics = (
   context: TestLifecycle,
-  options: {now?: () => number; write?: (line: string) => void} = {},
+  options: {now?: () => number; scope?: DiagnosticScope; write?: (line: string) => void} = {},
 ) => {
   const existing = observers.get(context);
   if (existing) return existing;
-  // The first property callback creates this observer; earlier runner time is unobserved.
-  const diagnostics = refreshDiagnostics(options.now);
+  // The first test callback creates this observer; earlier runner time is unobserved.
+  const diagnostics = refreshDiagnostics(options.now, options.scope);
   observers.set(context, diagnostics);
   const write = options.write ?? (line => process.stderr.write(line));
   const report = (event: 'aborted' | 'finished') => {
     try {
       write(`SERVICE_REFRESH_DIAGNOSTICS ${JSON.stringify({event, ...diagnostics.snapshot()})}\n`);
     } catch {
-      // A diagnostic sink must not replace the property's result or interruption.
+      // A diagnostic sink must not replace the test's result or interruption.
     }
   };
   const aborted = () => report('aborted');
