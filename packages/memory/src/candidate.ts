@@ -2,12 +2,12 @@ import {
   validateTopicDependencyExpansionJournal,
   type TopicDependencyExpansionJournal,
 } from './topic-maintenance-expansion.js';
-import {Clock, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Clock, Crypto, Effect, FileSystem, Option, Path, Result, Schema} from 'effect';
 import {topicMaintenanceObsidianCitationId} from './topic-maintenance.js';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {safeChildDirectoryNames, scanFilesWithinBoundary} from '@threadnote/platform/safe_scan';
-import {SystemInfo} from '@threadnote/platform/system';
+import {runtimeTextDirectoryNamePage, SystemInfo} from '@threadnote/platform/system';
 import {parseMarkdownHeadingLine} from '@threadnote/platform/string-boundaries';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {canonicalMemoryDocumentContent, parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
@@ -210,6 +210,7 @@ const MAX_CANDIDATE_AUDIT_EVENTS = 5_000;
 const MAX_CANDIDATE_REVIEW_AUDIT_EVENTS = 100;
 const MAX_CANDIDATE_REVIEW_BYTES = 512 * 1_024;
 const MAX_CANDIDATE_REVIEWS = 500;
+const MAX_CANDIDATE_REVIEW_OBSERVATION_ENTRIES = 1_024;
 const MAX_CLOSEOUT_ITEMS_PER_FIELD = 32;
 const MAX_CLOSEOUT_ITEM_CHARACTERS = 2_000;
 const MAX_CLOSEOUT_SCALAR_CHARACTERS = 4_000;
@@ -754,14 +755,11 @@ export const loadCandidateReviewOptional = Effect.fn('candidate.loadReviewOption
 export const listCandidateReviews = Effect.fn('candidate.listReviews')(function* (agentContextHome: string) {
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
-  const directory = pathService.join(agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews');
+  const directory = candidateReviewDirectory(pathService, agentContextHome);
   const entries = yield* fs.readDirectory(directory).pipe(Effect.option);
   if (entries._tag === 'None') return [];
   const reviews = yield* Effect.forEach(
-    entries.value
-      .filter(name => name.endsWith('.json') && !name.startsWith('.'))
-      .sort()
-      .slice(-MAX_CANDIDATE_REVIEWS),
+    selectedCandidateReviewNames(entries.value),
     name =>
       Effect.gen(function* () {
         const raw = yield* fs.readFileString(pathService.join(directory, name));
@@ -778,6 +776,43 @@ export const listCandidateReviews = Effect.fn('candidate.listReviews')(function*
       (left, right) => left.createdAt.localeCompare(right.createdAt) || left.reviewId.localeCompare(right.reviewId),
     );
 });
+
+/**
+ * Exact files selected by listCandidateReviews, without reading review bodies.
+ * The native directory iterator stops at the entry cap before materializing
+ * an unbounded directory, then applies the report's exact last-500 selection.
+ */
+export const candidateReviewObservationPaths = Effect.fn('candidate.reviewObservationPaths')(function* (
+  agentContextHome: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const pathService = yield* Path.Path;
+  const directory = candidateReviewDirectory(pathService, agentContextHome);
+  if (Option.isSome(yield* fs.readLink(directory).pipe(Effect.option)))
+    return {state: 'unavailable' as const, directory, reason: 'read-error' as const};
+  const entries = yield* (yield* fs.exists(directory))
+    ? runtimeTextDirectoryNamePage(directory, MAX_CANDIDATE_REVIEW_OBSERVATION_ENTRIES).pipe(Effect.result)
+    : Effect.succeed(Result.succeed({names: [] as string[], overflow: false}));
+  if (Result.isFailure(entries)) return {state: 'unavailable' as const, directory, reason: 'read-error' as const};
+  if (entries.success.overflow)
+    return {state: 'unavailable' as const, directory, reason: 'directory-entry-limit' as const};
+  return {
+    state: 'ready' as const,
+    directory,
+    files: selectedCandidateReviewNames(entries.success.names).map(name => pathService.join(directory, name)),
+  };
+});
+
+function selectedCandidateReviewNames(entries: readonly string[]): readonly string[] {
+  return entries
+    .filter(name => name.endsWith('.json') && !name.startsWith('.'))
+    .sort()
+    .slice(-MAX_CANDIDATE_REVIEWS);
+}
+
+function candidateReviewDirectory(pathService: Path.Path, agentContextHome: string): string {
+  return pathService.join(agentContextHome, 'threadnote', 'candidates', 'v1', 'reviews');
+}
 
 export const appendCandidateAudit = Effect.fn('candidate.appendAudit')(function* (
   agentContextHome: string,

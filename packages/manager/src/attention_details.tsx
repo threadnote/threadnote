@@ -1,7 +1,7 @@
 import {SemanticResolutionReview} from './attention/semantic_comparison.js';
 import {ArrowRight, BookOpen, FileCode2, Sparkles} from 'lucide-react';
 import {MemoryExcerpt, ReviewBadge, ReviewNotice} from './review_presentation.js';
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import type {CandidateReview} from '@threadnote/memory/candidate';
 import {isSharedMemoryUri} from '@threadnote/memory/document';
@@ -309,11 +309,19 @@ export function HealthDetail(props: {
   readonly onChanged: () => void;
   readonly onRefresh?: () => void;
   readonly onOpenLibrary: (uri?: string) => void;
+  readonly stale?: boolean;
 }): React.ReactElement {
   const [proposal, setProposal] = useState<RepairProposal>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [frozen, setFrozen] = useState(false);
+  const staleRef = useRef(props.stale);
+  staleRef.current = props.stale;
+  useEffect(() => {
+    if (props.stale) setFrozen(true);
+  }, [props.stale]);
+  const reviewFrozen = !!props.stale || frozen;
   const finding = props.finding;
   const sourceUri =
     finding.repair.subjectUri ?? finding.uris.find(uri => uri !== finding.repair.targetUri && !uri.includes('#'));
@@ -323,6 +331,7 @@ export function HealthDetail(props: {
     proposal?.mutation.kind !== 'replace-citation' ||
     (proposal.mutation.citationId !== undefined && proposal.mutation.replacement !== undefined);
   async function preview(): Promise<void> {
+    if (reviewFrozen) return;
     setBusy(true);
     setError('');
     setProposal(undefined);
@@ -342,7 +351,7 @@ export function HealthDetail(props: {
     }
   }
   async function apply(): Promise<void> {
-    if (!proposal || busy) return;
+    if (!proposal || busy || reviewFrozen) return;
     setBusy(true);
     setError('');
     try {
@@ -365,9 +374,46 @@ export function HealthDetail(props: {
       setBusy(false);
     }
   }
+  async function revalidate(): Promise<void> {
+    if (busy || props.stale) return;
+    setBusy(true);
+    setError('');
+    try {
+      const current = await api<ManagerContextHealthResponseV1>(
+        `/api/context-health?project=${encodeURIComponent(props.project)}`,
+      );
+      const sameFinding = current.findings.find(item => item.id === finding.id);
+      if (!sameFinding || JSON.stringify(sameFinding) !== JSON.stringify(finding)) {
+        setError('This decision changed. Close and reopen it to review current evidence.');
+        return;
+      }
+      if (!staleRef.current) {
+        setProposal(undefined);
+        setFrozen(false);
+      }
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const frozenNotice = (
+    <p role={reviewFrozen ? 'alert' : undefined} style={{visibility: reviewFrozen ? 'visible' : 'hidden'}}>
+      This review is paused because its evidence may have changed. If revalidation stays unavailable, close and reopen
+      the decision.{' '}
+      <button type="button" disabled={!reviewFrozen || busy || !!props.stale} onClick={() => void revalidate()}>
+        Revalidate review evidence
+      </button>
+    </p>
+  );
   if (finding.category === 'semantic-contradiction') {
     return (
-      <DetailModal title="Compare conflicting memories" onClose={props.onClose} className="semantic-review-dialog">
+      <DetailModal
+        title="Compare conflicting memories"
+        onClose={props.onClose}
+        className="semantic-review-dialog"
+        footer={finding.semanticEvidence ? undefined : frozenNotice}
+      >
         {finding.semanticEvidence ? (
           <SemanticResolutionReview
             project={props.project}
@@ -381,6 +427,8 @@ export function HealthDetail(props: {
               (props.onRefresh ?? props.onChanged)();
               props.onClose();
             }}
+            writesDisabled={reviewFrozen}
+            reviewNotice={frozenNotice}
           />
         ) : (
           <>
@@ -402,30 +450,33 @@ export function HealthDetail(props: {
       title={finding.category.replaceAll('-', ' ').replace(/^./u, letter => letter.toUpperCase())}
       onClose={props.onClose}
       footer={
-        !props.repairsAvailable && finding.category.startsWith('citation-') ? undefined : proposal ? (
-          proposal.mutation.kind === 'review-only' ? undefined : (
+        <>
+          {frozenNotice}
+          {!props.repairsAvailable && finding.category.startsWith('citation-') ? undefined : proposal ? (
+            proposal.mutation.kind === 'review-only' ? undefined : (
+              <>
+                <span className="muted">Apply only when the memory still matches the evidence.</span>
+                <button
+                  className="primary"
+                  disabled={busy || !citationEvidenceReady || reviewFrozen}
+                  onClick={() => void apply()}
+                  type="button"
+                >
+                  {repairActionLabel(proposal.mutation.kind)}
+                  <ArrowRight size={15} aria-hidden="true" />
+                </button>
+              </>
+            )
+          ) : (
             <>
-              <span className="muted">Apply only when the memory still matches the evidence.</span>
-              <button
-                className="primary"
-                disabled={busy || !citationEvidenceReady}
-                onClick={() => void apply()}
-                type="button"
-              >
-                {repairActionLabel(proposal.mutation.kind)}
-                <ArrowRight size={15} aria-hidden="true" />
+              <span className="muted">Review the proposed change before applying it.</span>
+              <button className="primary" disabled={busy || reviewFrozen} onClick={() => void preview()} type="button">
+                <Sparkles size={15} aria-hidden="true" />
+                {busy ? 'Preparing preview…' : 'Preview repair'}
               </button>
             </>
-          )
-        ) : (
-          <>
-            <span className="muted">Review the proposed change before applying it.</span>
-            <button className="primary" disabled={busy} onClick={() => void preview()} type="button">
-              <Sparkles size={15} aria-hidden="true" />
-              {busy ? 'Preparing preview…' : 'Preview repair'}
-            </button>
-          </>
-        )
+          )}
+        </>
       }
     >
       <div className="health-repair-intro">

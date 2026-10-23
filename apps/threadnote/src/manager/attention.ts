@@ -132,6 +132,7 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
     after: selector?.after,
     duplicateCorpus: records,
     relationCorpus: corpus,
+    liveObservation: selector?.after === undefined,
   });
   return {
     body: {

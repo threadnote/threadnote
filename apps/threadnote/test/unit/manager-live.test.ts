@@ -19,7 +19,8 @@ import {
 } from '@threadnote/store/resource/mutation_generation';
 import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource/settled_revision';
 import {makeCanonicalRevisionObservation, makeManagerLiveSources} from '../../src/manager/live_sources.js';
-import {makeManagerLive, makeManagerLiveMailbox} from '../../src/manager/live.js';
+import {makeManagerHealthLiveRegistry} from '../../src/manager/live_health_sources.js';
+import {makeManagerLive, makeManagerLiveMailbox, type ManagerLiveOptions} from '../../src/manager/live.js';
 import {MANAGER_LIVE_LIMITS, ManagerLiveServerFrame} from '@threadnote/manager/live/contracts';
 import {TestError} from '@threadnote/testing/test-error';
 
@@ -407,8 +408,206 @@ describe('Manager canonical live observation', () => {
   );
 });
 
+describe('Manager health live registry', () => {
+  effectIt.effect(
+    'starts unavailable, recovers on report registration, and reconciles changed probes without watch events',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        let revision = 'first';
+        let reads = 0;
+        const invalidations: string[] = [];
+        const availability: boolean[] = [];
+        const ready = yield* Deferred.make<void>();
+        const registry = yield* makeManagerHealthLiveRegistry({
+          observe: () =>
+            Effect.sync(() => {
+              reads++;
+              return {revision, directories: ['/synthetic/health']};
+            }),
+          onInvalidate: (_project, next) =>
+            Effect.sync(() => {
+              invalidations.push(next);
+            }),
+          onAvailability: (_project, available) =>
+            Effect.sync(() => {
+              availability.push(available);
+            }).pipe(Effect.andThen(Deferred.succeed(ready, undefined)), Effect.asVoid),
+        }).pipe(Effect.provideService(FileSystem.FileSystem, {...fs, watch: () => Stream.never}));
+        expect(yield* registry.subscribe('connection', ['one'])).toEqual(['one']);
+        yield* registry.hints.register('one', {cwd: '/synthetic/one', citations: []});
+        yield* Deferred.await(ready);
+        expect(availability).toEqual([true]);
+        expect(reads).toBe(1);
+        expect(invalidations).toEqual([]);
+        yield* TestClock.adjust('60 seconds');
+        expect(invalidations).toEqual([]);
+        revision = 'second';
+        yield* TestClock.adjust('30 seconds');
+        expect(invalidations).toEqual(['second']);
+        expect(reads).toBeGreaterThanOrEqual(2);
+        yield* registry.release('connection');
+      }).pipe(provideLayer),
+  );
+
+  effectIt.effect('reports probe loss and recovery, and fires each clock deadline only once', () =>
+    Effect.gen(function* () {
+      let revision: string | undefined = 'first';
+      const invalidations: string[] = [];
+      const availability: boolean[] = [];
+      const registry = yield* makeManagerHealthLiveRegistry({
+        observe: () => Effect.sync(() => (revision === undefined ? undefined : {revision, directories: []})),
+        onInvalidate: (_project, value) =>
+          Effect.sync(() => {
+            invalidations.push(value);
+          }),
+        onAvailability: (_project, value) =>
+          Effect.sync(() => {
+            availability.push(value);
+          }),
+      });
+      expect(yield* registry.subscribe('connection', ['one'])).toEqual(['one']);
+      yield* registry.hints.register('one', {cwd: '/synthetic/one', citations: [], nextChangeAt: 5_000});
+      for (let i = 0; i < 20 && availability.length === 0; i++) yield* Effect.yieldNow;
+      expect(availability).toEqual([true]);
+      yield* TestClock.adjust('5 seconds');
+      expect(invalidations).toEqual(['clock:5000']);
+      yield* TestClock.adjust('60 seconds');
+      expect(invalidations).toEqual(['clock:5000']);
+      revision = undefined;
+      yield* TestClock.adjust('30 seconds');
+      expect(availability).toEqual([true, false]);
+      revision = 'recovered';
+      yield* TestClock.adjust('30 seconds');
+      expect(availability).toEqual([true, false, true]);
+      expect(invalidations).toEqual(['clock:5000']);
+      yield* registry.release('connection');
+    }).pipe(provideLayer),
+  );
+
+  effectIt.effect('does not restart an unchanged input and removes the final project and watch', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      let reads = 0;
+      const ready = yield* Deferred.make<void>();
+      const registry = yield* makeManagerHealthLiveRegistry({
+        observe: () =>
+          Effect.sync(() => {
+            reads++;
+            return {revision: 'stable', directories: ['/synthetic/health']};
+          }),
+        onInvalidate: () => Effect.void,
+        onAvailability: () => Deferred.succeed(ready, undefined).pipe(Effect.asVoid),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, {...fs, watch: () => Stream.never}));
+      yield* registry.subscribe('connection', ['one']);
+      const input = {cwd: '/synthetic/one', citations: []};
+      yield* registry.hints.register('one', input);
+      yield* Deferred.await(ready);
+      const before = reads;
+      yield* registry.hints.register('one', {...input});
+      for (let i = 0; i < 10; i++) yield* Effect.yieldNow;
+      expect(reads).toBe(before);
+      expect((yield* registry.diagnostics).watches).toBe(1);
+      yield* registry.release('connection');
+      for (let i = 0; i < 20 && (yield* registry.diagnostics).watches !== 0; i++) yield* Effect.yieldNow;
+      expect(yield* registry.diagnostics).toMatchObject({projects: 0, connections: 0, watches: 0});
+    }).pipe(provideLayer),
+  );
+
+  effectIt.effect('discards a probe result after release or input replacement', () =>
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>();
+      const firstRelease = yield* Deferred.make<void>();
+      const secondReady = yield* Deferred.make<void>();
+      const seen: string[] = [];
+      const registry = yield* makeManagerHealthLiveRegistry({
+        observe: (_project, input) =>
+          input.cwd === '/first'
+            ? Deferred.succeed(firstStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(firstRelease)),
+                Effect.as({revision: 'stale', directories: []}),
+              )
+            : Effect.succeed({revision: 'fresh', directories: []}),
+        onInvalidate: (_project, value) =>
+          Effect.sync(() => {
+            seen.push(value);
+          }),
+        onAvailability: (_project, value) =>
+          value ? Deferred.succeed(secondReady, undefined).pipe(Effect.asVoid) : Effect.void,
+      });
+      yield* registry.subscribe('connection', ['one']);
+      yield* registry.hints.register('one', {cwd: '/first', citations: []});
+      yield* Deferred.await(firstStarted);
+      yield* registry.hints.register('one', {cwd: '/second', citations: []});
+      yield* Deferred.succeed(firstRelease, undefined);
+      yield* Deferred.await(secondReady);
+      expect(seen).toEqual([]);
+      yield* registry.release('connection');
+      const releasedStarted = yield* Deferred.make<void>();
+      const releasedGate = yield* Deferred.make<void>();
+      const second = yield* makeManagerHealthLiveRegistry({
+        observe: () =>
+          Deferred.succeed(releasedStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releasedGate)),
+            Effect.as({revision: 'late', directories: []}),
+          ),
+        onInvalidate: (_project, value) =>
+          Effect.sync(() => {
+            seen.push(value);
+          }),
+        onAvailability: () =>
+          Effect.sync(() => {
+            seen.push('availability');
+          }),
+      });
+      yield* second.subscribe('other', ['one']);
+      yield* second.hints.register('one', {cwd: '/first', citations: []});
+      yield* Deferred.await(releasedStarted);
+      yield* second.release('other');
+      yield* Deferred.succeed(releasedGate, undefined);
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow;
+      expect(seen).toEqual([]);
+      expect((yield* second.diagnostics).projects).toBe(0);
+    }).pipe(provideLayer),
+  );
+
+  effectIt.effect('caps registered projects at eight and runs at most two probes concurrently', () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>();
+      const twoStarted = yield* Deferred.make<void>();
+      let active = 0;
+      let maximum = 0;
+      const registry = yield* makeManagerHealthLiveRegistry({
+        observe: () =>
+          Effect.gen(function* () {
+            active++;
+            maximum = Math.max(maximum, active);
+            if (active === 2) yield* Deferred.succeed(twoStarted, undefined);
+            yield* Deferred.await(gate);
+            active--;
+            return {revision: 'ready', directories: []};
+          }),
+        onInvalidate: () => Effect.void,
+        onAvailability: () => Effect.void,
+      });
+      const names = Array.from({length: 9}, (_, index) => `project-${index}`);
+      expect(yield* registry.subscribe('connection', names)).toEqual(names);
+      expect((yield* registry.diagnostics).projects).toBe(8);
+      for (const project of names) yield* registry.hints.register(project, {cwd: `/${project}`, citations: []});
+      yield* Deferred.await(twoStarted);
+      expect(maximum).toBe(2);
+      yield* Deferred.succeed(gate, undefined);
+      for (let i = 0; i < 40 && active !== 0; i++) yield* Effect.yieldNow;
+      expect(maximum).toBe(2);
+      expect((yield* registry.diagnostics).projects).toBe(8);
+      yield* registry.release('connection');
+    }).pipe(provideLayer),
+  );
+});
+
 const serveLive = Effect.fn('test.managerLive.serve')(function* (
   projects: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set(['one', 'two'])),
+  health?: ManagerLiveOptions['health'],
 ) {
   const context = yield* Layer.build(
     BunHttpServer.layer({
@@ -428,6 +627,7 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
     origin,
     token: 'synthetic-live-token',
     projects,
+    health,
   });
   yield* server.serve(
     Effect.gen(function* () {
@@ -577,6 +777,130 @@ describe('Manager live protocol', () => {
         resources: [{topic: 'context-health', project: 'one'}],
       });
       expect((yield* Effect.result(client.next))._tag).toBe('Failure');
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('advertises configured health and acknowledges unavailable projects once', () =>
+    Effect.gen(function* () {
+      const subscriptions: {key: string; projects: readonly string[]}[] = [];
+      const server = yield* serveLive(undefined, {
+        subscribe: (key, projects) =>
+          Effect.sync(() => {
+            subscriptions.push({key, projects});
+            return ['two'];
+          }),
+        release: () => Effect.void,
+      });
+      const client = yield* server.connect((yield* server.ticket).ticket);
+      expect(yield* client.next).toMatchObject({type: 'welcome', topics: ['context-maintenance', 'context-health']});
+      yield* client.send({
+        type: 'subscribe',
+        version: 1,
+        generation: 1,
+        resources: [
+          {topic: 'context-health', project: 'one'},
+          {topic: 'context-health', project: 'two'},
+          {topic: 'context-health', project: 'one'},
+          {topic: 'context-maintenance', project: 'one'},
+        ],
+      });
+      expect(yield* client.next).toMatchObject({
+        type: 'subscribed',
+        generation: 1,
+        unavailable: [{topic: 'context-health', project: 'two'}],
+      });
+      expect(subscriptions).toHaveLength(1);
+      expect(subscriptions[0]?.projects).toEqual(['one', 'two']);
+      expect(subscriptions[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('queues registration availability behind ACK and publishes only to matching health scopes', () =>
+    Effect.gen(function* () {
+      let duringSubscribe: Effect.Effect<void> = Effect.void;
+      const server = yield* serveLive(undefined, {
+        subscribe: () => duringSubscribe.pipe(Effect.as([])),
+        release: () => Effect.void,
+      });
+      duringSubscribe = server.live.publishAvailability('one', false);
+      const first = yield* server.connect((yield* server.ticket).ticket);
+      yield* first.next;
+      yield* first.send({
+        type: 'subscribe',
+        version: 1,
+        generation: 1,
+        resources: [{topic: 'context-health', project: 'one'}],
+      });
+      expect(yield* first.next).toMatchObject({type: 'subscribed', generation: 1, startingSequence: 0});
+      expect(yield* first.next).toMatchObject({
+        type: 'availability',
+        generation: 1,
+        sequence: 1,
+        resource: {topic: 'context-health', project: 'one'},
+        available: false,
+      });
+      duringSubscribe = Effect.void;
+      const second = yield* server.connect((yield* server.ticket).ticket);
+      yield* second.next;
+      yield* second.send({
+        type: 'subscribe',
+        version: 1,
+        generation: 1,
+        resources: [{topic: 'context-health', project: 'two'}],
+      });
+      expect(yield* second.next).toMatchObject({type: 'subscribed'});
+      yield* server.live.publishResource({topic: 'context-health', project: 'one'}, 'one-revision');
+      expect(yield* first.next).toMatchObject({
+        type: 'invalidation',
+        generation: 1,
+        sequence: 2,
+        resource: {topic: 'context-health', project: 'one'},
+      });
+      expect(yield* second.next.pipe(Effect.timeoutOption('80 millis'))).toMatchObject({_tag: 'None'});
+      yield* server.live.publishAvailability('two', false);
+      expect(yield* second.next).toMatchObject({
+        type: 'availability',
+        generation: 1,
+        sequence: 1,
+        resource: {topic: 'context-health', project: 'two'},
+        available: false,
+      });
+      // No cross-project frame may be buffered for the first subscriber.
+      yield* server.live.publishAvailability('one', true);
+      expect(yield* first.next).toMatchObject({type: 'availability', sequence: 3, available: true});
+    }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('releases each internal connection key after disconnect and scope invalidation', () =>
+    Effect.gen(function* () {
+      const subscribed: string[] = [];
+      const released: string[] = [];
+      const server = yield* serveLive(undefined, {
+        subscribe: key =>
+          Effect.sync(() => {
+            subscribed.push(key);
+            return [];
+          }),
+        release: key =>
+          Effect.sync(() => {
+            released.push(key);
+          }),
+      });
+      const first = yield* server.connect((yield* server.ticket).ticket);
+      yield* first.next;
+      yield* first.send({type: 'subscribe', version: 1, generation: 1, resources: []});
+      yield* first.next;
+      yield* first.close;
+      for (let i = 0; i < 100 && released.length < 1; i++) yield* Effect.sleep(10);
+      expect(released).toEqual([subscribed[0]]);
+      const second = yield* server.connect((yield* server.ticket).ticket);
+      yield* second.next;
+      yield* second.send({type: 'subscribe', version: 1, generation: 1, resources: []});
+      yield* second.next;
+      yield* server.live.invalidateScope;
+      for (let i = 0; i < 100 && released.length < 2; i++) yield* Effect.sleep(10);
+      expect(new Set(subscribed).size).toBe(2);
+      expect(released).toEqual(subscribed);
     }).pipe(Effect.timeout('5 seconds'), TestClock.withLive, provideLayer),
   );
 

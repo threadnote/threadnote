@@ -2,7 +2,7 @@ import type {
   ContextBriefCitationValidationReceiptV2,
   ContextBriefMemoryCitationValidationV2,
 } from '@threadnote/context/types';
-import {buildCompactPlan} from '@threadnote/memory/hygiene';
+import {buildCompactPlan, nextCompactPlanClockBoundary} from '@threadnote/memory/hygiene';
 import type {CandidateComparison} from '@threadnote/memory/candidate';
 import {isAgentArtifactUri, type MemoryRecord} from '@threadnote/memory/document';
 import {validateTopicMaintenanceManifest} from '@threadnote/memory/topic-maintenance';
@@ -132,6 +132,26 @@ export interface ContextHealthReportV1 {
   readonly semanticCompleteness: ContextHealthSemanticCompletenessV2;
   readonly status: 'clean' | 'findings' | 'unknown';
   readonly version: typeof CONTEXT_HEALTH_REPORT_VERSION;
+}
+
+/** First future instant at which the loaded memories may change health by time alone. */
+export function nextContextHealthChangeAt(
+  input: Pick<ContextHealthReportInputV1, 'records' | 'duplicateCorpus' | 'project' | 'now'>,
+): number | undefined {
+  const now = input.now.getTime();
+  if (!Number.isFinite(now)) return undefined;
+  let next = nextCompactPlanClockBoundary(input.duplicateCorpus ?? input.records, input.project, input.now);
+  for (const record of input.records) {
+    if (record.metadata.status !== 'active' || record.metadata.project !== input.project) continue;
+    const reviewAfter = record.metadata.reviewAfter;
+    for (const boundary of [
+      timestamp(record.metadata.validTo),
+      reviewAfter === undefined ? undefined : (timestamp(reviewAfter) ?? timestamp(`${reviewAfter}T00:00:00.000Z`)),
+    ]) {
+      if (boundary !== undefined && boundary > now && (next === undefined || boundary < next)) next = boundary;
+    }
+  }
+  return next;
 }
 
 /** A pure, evidence-driven maintenance planner. It only describes reviewable repairs. */

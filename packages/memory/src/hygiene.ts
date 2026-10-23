@@ -111,6 +111,35 @@ const TERMINAL_HANDOFF_STATUSES = new Set([
   'superseded',
 ]);
 
+/** Earliest future handoff-age threshold used by buildCompactPlan. */
+export function nextCompactPlanClockBoundary(
+  records: readonly MemoryRecord[],
+  project: string,
+  now: Date,
+): number | undefined {
+  const nowMilliseconds = now.getTime();
+  if (!Number.isFinite(nowMilliseconds)) return undefined;
+  let next: number | undefined;
+  for (const record of records) {
+    const grouped = groupableRecord(record);
+    if (
+      grouped?.project !== project ||
+      record.metadata.kind !== 'handoff' ||
+      !isPersonalMemoryUri(record.uri) ||
+      hasExpiredValidity(record, now)
+    )
+      continue;
+    const observedAt = memoryObservedAt(record);
+    if (observedAt === undefined) continue;
+    for (const age of [HANDOFF_TERMINAL_RETENTION_MS, HANDOFF_REVIEW_AGE_MS, HANDOFF_MAXIMUM_ACTIVE_AGE_MS]) {
+      const boundary = observedAt + age;
+      if (Number.isFinite(boundary) && boundary > nowMilliseconds && (next === undefined || boundary < next))
+        next = boundary;
+    }
+  }
+  return next;
+}
+
 export function buildCompactPlan(records: readonly MemoryRecord[], options: CompactPlanOptions): CompactPlan {
   const now = options.now ?? new Date();
   const groupedRecords = records
@@ -652,16 +681,20 @@ function timestampMs(record: MemoryRecord): number {
 
 function memoryAgeMilliseconds(record: MemoryRecord, now: Date): number | undefined {
   const nowMilliseconds = now.getTime();
+  const observedAt = memoryObservedAt(record);
+  if (!Number.isFinite(nowMilliseconds) || observedAt === undefined || observedAt > nowMilliseconds) {
+    return undefined;
+  }
+  return nowMilliseconds - observedAt;
+}
+
+function memoryObservedAt(record: MemoryRecord): number | undefined {
   const observations = [
     parseTimestamp(record.metadata.timestamp),
     parseTimestamp(record.metadata.updatedAt),
     parseTimestamp(record.metadata.lastReviewed),
   ].filter((value): value is number => value !== undefined);
-  const observedAt = observations.length > 0 ? Math.max(...observations) : undefined;
-  if (!Number.isFinite(nowMilliseconds) || observedAt === undefined || observedAt > nowMilliseconds) {
-    return undefined;
-  }
-  return nowMilliseconds - observedAt;
+  return observations.length > 0 ? Math.max(...observations) : undefined;
 }
 
 function hasExpiredValidity(record: MemoryRecord, now: Date): boolean {

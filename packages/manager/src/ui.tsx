@@ -39,6 +39,7 @@ import {DevSkillsPanel} from './dev_skills/view.js';
 import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 import {ManagerProcessesProvider} from './process/live.js';
+import {ManagerLiveProvider} from './live/provider.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
@@ -268,6 +269,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [contextHealthDecisionCount, onHealthDecisionCountChange] = useContextHealthDecisionCount();
   const [libraryError, setLibraryError] = useState('');
+  const account = state?.config.account;
   useEffect(() => {
     void refreshAll();
   }, []);
@@ -1403,8 +1405,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       {!selectedIsResource && !creatingMemory ? consolidationPanel() : null}
     </aside>
   );
-
-  return (
+  const app = (
     <div className={`app${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}`} style={appStyle}>
       <ManagerNavigation
         project={workspaceProject}
@@ -1578,7 +1579,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
               refreshGeneration={attentionRefreshGeneration}
             />
           ) : null}
-
           {panel === 'context' ? (
             <section className="panel context-panel is-active">
               <ContextPanel projectOptions={projectOptions} refreshGeneration={attentionRefreshGeneration} />
@@ -1983,8 +1983,8 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       {manualEdit.dialog}
     </div>
   );
+  return <ManagerLiveProvider account={account} key={account} children={app} />;
 }
-
 export function mountManager({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): void {
   const root = document.getElementById('root');
   if (!root) {

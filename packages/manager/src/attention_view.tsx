@@ -1,7 +1,7 @@
 import {MarkdownViewer} from './ui/controls.js';
 import {Sparkles} from 'lucide-react';
 import {MemoryExcerpt, ReviewBadge} from './review_presentation.js';
-import React, {useEffect, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useRef, useState} from 'react';
 import type {
   ManagerCitationRepairJobResponseV1,
   ManagerCitationRepairJobV1,
@@ -13,6 +13,7 @@ import {TopicReviewDialog} from './attention/topic_review.js';
 import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
+import {useManagerLiveResource} from './live/provider.js';
 
 interface AttentionPanelProps {
   readonly onOpenLibrary: (uri?: string) => void;
@@ -287,15 +288,28 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
 }
 
 export function ContextHealthPanel(props: AttentionPanelProps): React.ReactElement {
+  const readHealth = useCallback(
+    (signal: AbortSignal) =>
+      api<ManagerContextHealthResponseV1>(
+        `/api/context-health?project=${encodeURIComponent(props.project)}`,
+        undefined,
+        {signal, timeoutMilliseconds: 8_000},
+      ),
+    [props.project],
+  );
+  const live = useManagerLiveResource('context-health', props.project, readHealth);
+  const legacyHealth = !live.active || live.snapshot.status === 'unsupported';
   const [selected, setSelected] = useState<ManagerContextHealthResponseV1['findings'][number]>();
   const [generation, setGeneration] = useState(0);
   const requestEpoch = useRef(0);
   const requestController = useRef<AbortController | undefined>(undefined);
-  const [report, setReport] = useState<ManagerContextHealthResponseV1>();
+  const [storedReport, setReport] = useState<ManagerContextHealthResponseV1>();
+  const report = storedReport?.project === props.project ? storedReport : undefined;
   const [nextCursor, setNextCursor] = useState<string>();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [fallbackFreshProject, setFallbackFreshProject] = useState<string>();
   const [citationRepairOpen, setCitationRepairOpen] = useState(false);
   const [citationRepairJob, setCitationRepairJob] = useState<ManagerCitationRepairJobV1>();
   const [citationRepairJobError, setCitationRepairJobError] = useState('');
@@ -305,13 +319,25 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   const citationRepairJobProjectEpoch = useRef(0);
   const citationRepairJobProject = useRef('');
   const refreshedCitationRepairJobId = useRef<string | undefined>(undefined);
+  const liveRefresh = useRef({project: props.project, external: props.refreshGeneration, local: generation});
   useEffect(() => {
     requestEpoch.current += 1;
+    requestController.current?.abort();
     setSelected(undefined);
     setCitationRepairOpen(false);
+    setReport(undefined);
+    setNextCursor(undefined);
+    setError('');
+    setLoadingMore(false);
+    setFallbackFreshProject(undefined);
+  }, [props.project]);
+  useEffect(() => {
+    setFallbackFreshProject(undefined);
+  }, [legacyHealth, props.project]);
+  useEffect(() => {
+    if (!legacyHealth) return;
+    requestEpoch.current += 1;
     if (!props.project) {
-      setReport(undefined);
-      setNextCursor(undefined);
       return;
     }
     let cancelled = false;
@@ -320,31 +346,70 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
     setLoading(true);
     setLoadingMore(false);
     setError('');
-    void api<ManagerContextHealthResponseV1>(
-      `/api/context-health?project=${encodeURIComponent(props.project)}`,
-      undefined,
-      {
-        signal: controller.signal,
-        timeoutMilliseconds: 8_000,
-      },
-    )
-      .then(result => {
-        if (!cancelled && result.project === props.project) {
-          setReport(result);
-          setNextCursor(result.nextCursor);
-        }
-      })
-      .catch(cause => {
-        if (!cancelled) setError(errorMessage(cause));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const poll = () => {
+      requestEpoch.current += 1;
+      setLoadingMore(false);
+      void readHealth(controller.signal)
+        .then(result => {
+          if (!cancelled && result.project === props.project) {
+            setReport(result);
+            setNextCursor(result.nextCursor);
+            setFallbackFreshProject(props.project);
+            setError('');
+          }
+        })
+        .catch(cause => {
+          if (!cancelled) {
+            setFallbackFreshProject(undefined);
+            setError(errorMessage(cause));
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setLoading(false);
+            timer = window.setTimeout(poll, 30_000);
+          }
+        });
+    };
+    let timer: number | undefined;
+    poll();
     return () => {
       cancelled = true;
       controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [props.project, props.refreshGeneration, generation]);
+  }, [props.project, props.refreshGeneration, generation, legacyHealth, readHealth]);
+  useEffect(() => {
+    if (legacyHealth || live.snapshot.status !== 'ready' || live.snapshot.data.project !== props.project) return;
+    requestEpoch.current += 1;
+    requestController.current?.abort();
+    requestController.current = new AbortController();
+    setReport(live.snapshot.data);
+    setNextCursor(live.snapshot.data.nextCursor);
+    setError('');
+    setLoading(false);
+    setLoadingMore(false);
+  }, [legacyHealth, live.snapshot, props.project]);
+  useEffect(() => {
+    if (legacyHealth) return;
+    if (live.snapshot.status === 'error') {
+      setError(errorMessage(live.snapshot.error));
+      setLoading(false);
+    } else if (live.snapshot.status === 'loading' && !report) {
+      setLoading(true);
+    }
+  }, [legacyHealth, live.snapshot, report]);
+  useEffect(() => {
+    const previous = liveRefresh.current;
+    liveRefresh.current = {project: props.project, external: props.refreshGeneration, local: generation};
+    if (
+      previous.project === props.project &&
+      previous.external === props.refreshGeneration &&
+      previous.local === generation
+    )
+      return;
+    if (previous.project === props.project && !legacyHealth) live.invalidate();
+  }, [props.project, props.refreshGeneration, generation, legacyHealth]);
 
   useEffect(() => {
     if (citationRepairJobProject.current !== props.project) {
@@ -527,6 +592,9 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
         onLoadMore={loadMore}
         reportError={error}
         onRefresh={() => setGeneration(value => value + 1)}
+        healthLiveStale={live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project}
+        healthLegacy={legacyHealth}
+        healthFallback={live.active && legacyHealth && fallbackFreshProject === props.project}
       />
     );
   }
@@ -673,19 +741,23 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
           ) : null}
         </>
       ) : null}
-      {selected ? (
+      {selected && report ? (
         <HealthDetail
           key={`${props.project}:${selected.id}`}
           finding={selected}
           memoryPreview={report?.recordPreviews.find(preview => preview.uri === selected.repair.subjectUri)}
           project={props.project}
           repairsAvailable={report?.repositoryEvidence.state === 'available'}
+          stale={
+            (live.active && live.snapshot.status !== 'ready' && fallbackFreshProject !== props.project) ||
+            JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
+          }
           onClose={() => setSelected(undefined)}
           onChanged={() => setGeneration(value => value + 1)}
           onOpenLibrary={props.onOpenLibrary}
         />
       ) : null}
-      {citationRepairOpen ? (
+      {citationRepairOpen && report ? (
         <CitationRepairDialog
           project={props.project}
           onChanged={() => setGeneration(value => value + 1)}
