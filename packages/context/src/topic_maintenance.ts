@@ -460,15 +460,17 @@ export const buildTopicMaintenanceEvidencePacket = Effect.fn('topicMaintenance.b
       Effect.gen(function* () {
         const observed = observation.sources.find(item => item.citationId === original.id);
         if (!observed?.current) return undefined;
-        const old = yield* readContextHealthCitationEvidence(config, scope, original, excerptOptions).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
-        const next =
-          observed.current.id === original.id
-            ? old
-            : yield* readContextHealthCitationEvidence(config, scope, observed.current, excerptOptions).pipe(
-                Effect.orElseSucceed(() => undefined),
-              );
+        const sameCitation = observed.current.id === original.id;
+        const old = yield* readContextHealthCitationEvidence(config, scope, original, {
+          ...excerptOptions,
+          purpose: sameCitation ? 'both' : 'historical',
+        }).pipe(Effect.orElseSucceed(() => undefined));
+        const next = sameCitation
+          ? old
+          : yield* readContextHealthCitationEvidence(config, scope, observed.current, {
+              ...excerptOptions,
+              purpose: 'current',
+            }).pipe(Effect.orElseSucceed(() => undefined));
         const oldExcerpt = old?.excerpts.find(
           item => item.provenance === 'historical-verified' && item.supportsCitation,
         );

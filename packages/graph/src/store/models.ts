@@ -1,3 +1,4 @@
+import type {CodeGraphLeaseTimingObserver} from './lease_timing.js';
 import type {Effect, Option} from 'effect';
 import type {CodeGraphBuildOwnerIdentity} from '../build/owner.js';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
@@ -683,6 +684,8 @@ export type CodeGraphVisualizationScope =
   | {readonly type: 'unscoped'};
 
 export interface CodeGraphSnapshotLeaseWriterOptions {
+  /** @internal Optional diagnostic observer; does not alter lease policy. */
+  readonly onTiming?: CodeGraphLeaseTimingObserver;
   /** Maximum time to wait for another checkout writer. Omit to preserve the unbounded background-worker contract. */
   readonly waitTimeoutMilliseconds?: number;
 }

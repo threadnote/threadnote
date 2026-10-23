@@ -6,7 +6,7 @@ import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
-import {Crypto, DateTime, Deferred, Effect, Fiber, FileSystem, Path} from 'effect';
+import {Cause, Crypto, DateTime, Deferred, Effect, Exit, Fiber, FileSystem, Path} from 'effect';
 import {Base64Url} from 'effect/encoding';
 import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
@@ -728,6 +728,7 @@ describe('standalone updater', () => {
       const captured = yield* captureConsole(
         runUpdate(runtimeConfig('/tmp/threadnote-update-stale-listing'), {beta: true}).pipe(
           Effect.provideService(HttpService, http),
+          isolateReleaseSelection,
         ),
       );
 
@@ -735,6 +736,45 @@ describe('standalone updater', () => {
       expect(captured.output).toContain('run `threadnote repair`, then restart that host once');
       expect(downloadAttempted).toBe(false);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'rejects swallowed external command attempts in release-selection fixtures',
+    {
+      categories: fc.array(fc.constantFrom('execute', 'executeBytes', 'executeStreaming', 'spawnDetached'), {
+        minLength: 1,
+        maxLength: 4,
+      }),
+    },
+    ({categories}) =>
+      Effect.gen(function* () {
+        const exit = yield* isolateReleaseSelection(
+          Effect.gen(function* () {
+            const commands = yield* CommandExecutor;
+            for (const category of categories) {
+              const command: Effect.Effect<unknown, unknown> | undefined =
+                category === 'executeBytes'
+                  ? commands.executeBytes?.('fixture', [])
+                  : category === 'spawnDetached'
+                    ? commands.spawnDetached?.('fixture', [])
+                    : category === 'executeStreaming'
+                      ? commands.executeStreaming('fixture', [])
+                      : commands.execute('fixture', []);
+              yield* (command ?? Effect.die('Missing fixture command boundary')).pipe(
+                Effect.catchCause(() => Effect.void),
+              );
+            }
+          }),
+        ).pipe(Effect.exit);
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isFailure(exit)) {
+          const defects = exit.cause.reasons.filter(Cause.isDieReason).map(reason => reason.defect);
+          expect(defects).toHaveLength(1);
+          expect(defects[0]).toMatchObject({actual: categories, expected: []});
+        }
+      }).pipe(provideTestLayer(ApplicationLayer)),
+    {fastCheck: {numRuns: 16}},
   );
 
   effectIt.effect('refuses a forced same-channel downgrade before downloading or activating it', () =>
@@ -756,7 +796,12 @@ describe('standalone updater', () => {
       const failure = yield* runUpdate(runtimeConfig('/tmp/threadnote-update-same-channel-downgrade'), {
         beta: true,
         force: true,
-      }).pipe(Effect.provideService(HttpService, http), provideTestLayer(ApplicationLayer), Effect.flip);
+      }).pipe(
+        Effect.provideService(HttpService, http),
+        isolateReleaseSelection,
+        provideTestLayer(ApplicationLayer),
+        Effect.flip,
+      );
 
       expect(String(failure)).toContain(`Refusing to downgrade Threadnote ${currentVersion} to ${olderVersion}`);
       expect(downloadAttempted).toBe(false);
@@ -862,7 +907,12 @@ describe('standalone updater', () => {
       const failure = yield* runUpdate(runtimeConfig('/tmp/threadnote-update-stable-to-beta-downgrade'), {
         beta: true,
         force: true,
-      }).pipe(Effect.provideService(HttpService, http), provideTestLayer(ApplicationLayer), Effect.flip);
+      }).pipe(
+        Effect.provideService(HttpService, http),
+        isolateReleaseSelection,
+        provideTestLayer(ApplicationLayer),
+        Effect.flip,
+      );
 
       expect(String(failure)).toContain(`Refusing to downgrade Threadnote ${currentVersion} to ${olderVersion}`);
       expect(downloadAttempted).toBe(false);
@@ -2350,6 +2400,37 @@ function runtimeConfig(home: string): RuntimeConfig {
     manifestPath: `${home}/seed-manifest.yaml`,
     user: 'update-test',
   };
+}
+
+function isolateReleaseSelection<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    // These HTTP-only examples must not enter a credential subprocess under TestClock.
+    const baseSystem = yield* SystemInfo;
+    const system = SystemInfo.of({
+      ...baseSystem,
+      environment: () => ({
+        ...baseSystem.environment(),
+        GH_TOKEN: 'fixture-release-selection-token',
+        GITHUB_TOKEN: undefined,
+      }),
+    });
+    const commandAttempts: string[] = [];
+    const unexpectedCommand = (category: string) =>
+      Effect.sync(() => commandAttempts.push(category)).pipe(
+        Effect.andThen(Effect.die('Release-selection fixture must not run external commands.')),
+      );
+    const commands = CommandExecutor.of({
+      execute: () => unexpectedCommand('execute'),
+      executeBytes: () => unexpectedCommand('executeBytes'),
+      executeStreaming: () => unexpectedCommand('executeStreaming'),
+      spawnDetached: () => unexpectedCommand('spawnDetached'),
+    });
+    return yield* effect.pipe(
+      Effect.provideService(SystemInfo, system),
+      Effect.provideService(CommandExecutor, commands),
+      Effect.ensuring(Effect.sync(() => expect(commandAttempts).toEqual([]))),
+    );
+  });
 }
 
 function captureDryRunUpdateSelection(

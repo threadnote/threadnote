@@ -11,10 +11,10 @@ import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/regist
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
-import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {parseRepositoryIdentityMetadata, resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphStoreError, type CodeGraphSnapshot, type RepositoryIdentity} from '@threadnote/graph/types';
-import {CommandExecutor} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {makeCodeGraphBuildReporter} from '@threadnote/graph/build_status';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -374,6 +374,14 @@ describe('shared ready view attachment locking', () => {
       const graph = yield* CodeGraphQueryService;
       const store = yield* CodeGraphStore;
       const identity = yield* resolveRepositoryIdentity(repositoryRoot);
+      const branch = (yield* runCommandEffect('git', [
+        '-C',
+        repositoryRoot,
+        'symbolic-ref',
+        '--quiet',
+        '--short',
+        'HEAD',
+      ])).stdout.trim();
       const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
       const snapshot = readySnapshot(identity);
       yield* store.activate(layout.databasePath, identity, snapshot, [], [], [], fixturePackProvenance);
@@ -420,7 +428,6 @@ describe('shared ready view attachment locking', () => {
       const observeInvocation = (executable: string, args: readonly string[]) => {
         if (executable !== 'git') return;
         counts.git += 1;
-        if (args.includes('symbolic-ref')) counts.branchObservation += 1;
         if (args[2] === 'rev-parse' && args.includes('--show-toplevel')) counts.fullIdentity += 1;
         if (args[2] === 'status') {
           counts.status += 1;
@@ -436,7 +443,31 @@ describe('shared ready view attachment locking', () => {
           if (executeBytes) {
             mutableCommand.executeBytes = (executable, args, options) => {
               observeInvocation(executable, args);
-              return executeBytes(executable, args, options);
+              return executeBytes(executable, args, options).pipe(
+                Effect.tap(result =>
+                  Effect.sync(() => {
+                    if (executable !== 'git' || !args.includes('--abbrev-ref=loose')) return;
+                    expect(args).toEqual([
+                      '-C',
+                      args[1],
+                      'rev-parse',
+                      '--path-format=absolute',
+                      '--show-toplevel',
+                      '--git-common-dir',
+                      '--git-dir',
+                      '--show-object-format',
+                      'HEAD',
+                      '--abbrev-ref=loose',
+                      'HEAD',
+                    ]);
+                    expect(result.exitCode).toBe(0);
+                    const metadata = parseRepositoryIdentityMetadata(result.stdout);
+                    expect(metadata?.repoRoot).toBe(identity.repoRoot);
+                    expect(metadata?.branch).toEqual({state: 'current', branch});
+                    counts.branchObservation += 1;
+                  }),
+                ),
+              );
             };
           }
         }),
@@ -455,7 +486,8 @@ describe('shared ready view attachment locking', () => {
       expect(observed.elapsedMilliseconds).toBeLessThan(500);
       expect(observed.attached.readySnapshot?.id).toBe(observed.snapshot.id);
       expect(observed.attached.stale).toBe(false);
-      expect(observed.counts).toEqual({branchObservation: 1, fullIdentity: 1, git: 12, publicationProof: 1, status: 2});
+      expect(observed.attached.identity.branch).toBe(branch);
+      expect(observed.counts).toEqual({branchObservation: 1, fullIdentity: 1, git: 11, publicationProof: 1, status: 2});
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 

@@ -490,6 +490,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
     readonly maximumLines?: number;
     readonly startLine?: number;
     readonly symbolSpanOnly?: boolean;
+    readonly purpose?: 'both' | 'historical' | 'current'; // Defaults to both.
   } = {},
 ) {
   const attemptedSteps: string[] = ['verified-repository-routes'];
@@ -503,7 +504,7 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
   const query = yield* CodeGraphQueryService;
   const statusOptions = citationStatusOptions(config, scope);
   const store = yield* CodeGraphStore;
-  if (!resolution.ambiguous)
+  if (options.purpose !== 'historical' && !resolution.ambiguous)
     for (const route of resolution.routes) {
       attemptedSteps.push('current-source');
       const current = yield* Effect.gen(function* () {
@@ -592,85 +593,87 @@ export const readContextHealthCitationEvidence = Effect.fn('contextHealth.readCi
         break;
       }
     }
-  attemptedSteps.push('retained-capsule');
-  let historical: Uint8Array | undefined;
-  for (const checkoutId of resolution.checkoutIds) {
-    const retained = yield* readRetainedCodeGraphCitationEvidence(
-      config.agentContextHome,
-      checkoutId,
-      citationEvidenceSource(citation),
-    );
-    if (
-      retained !== undefined &&
-      (yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))
-    ) {
-      historical = retained.bytes;
-      break;
-    }
-  }
-  if (historical === undefined && !resolution.ambiguous)
-    for (const route of resolution.routes) {
-      attemptedSteps.push('exact-snapshot');
-      historical = yield* Effect.gen(function* () {
-        const snapshot = yield* store.readySnapshotById(route.databasePath, citation.sourceSnapshotId);
-        if (
-          snapshot === undefined ||
-          snapshot.repositoryId !== citation.repositoryId ||
-          snapshot.commit !== citation.sourceCommit ||
-          snapshot.dirty !== citation.sourceDirty ||
-          snapshot.extractorSet !== citation.extractorSet
-        )
-          return undefined;
-        return yield* Effect.scoped(
-          Effect.gen(function* () {
-            yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>
-              store.releaseSnapshotLease(route.databasePath, token).pipe(Effect.ignore),
-            );
-            const evidence = yield* store.effectiveSnapshotCitationEvidence(route.databasePath, snapshot.id, {
-              paths: [citation.path],
-              symbolIds: citation.target.kind === 'symbol' ? [citation.target.nodeId] : [],
-            });
-            if (!historicalSnapshotCitationMatches(citation, evidence)) return undefined;
-            const request = {
-              expectedContentHash: citation.fileContentHash.value,
-              repositoryPath: citation.path,
-              requireBytes: true,
-            };
-            const sources = yield* readCodeGraphCitationSources({
-              allowCommitFallback: !snapshot.dirty,
-              commitOnly: !snapshot.dirty,
-              objectFormat: route.identity.objectFormat,
-              repositoryRoot: route.identity.repoRoot,
-              sourceCommit: snapshot.commit,
-              sources: [request],
-              retainedBytesLimit: 4 * 1_048_576,
-            });
-            const bytes = sources.get(codeGraphCitationSourceKey(request));
-            return bytes !== undefined &&
-              (yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)) &&
-              (yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
-              ? bytes
-              : undefined;
-          }),
-        );
-      }).pipe(Effect.orElseSucceed(() => undefined));
-      if (historical === undefined) {
-        attemptedSteps.push('exact-clean-git');
-        historical = yield* readHistoricalGitCitationBytes(config, route, citation).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
+  if (options.purpose !== 'current') {
+    attemptedSteps.push('retained-capsule');
+    let historical: Uint8Array | undefined;
+    for (const checkoutId of resolution.checkoutIds) {
+      const retained = yield* readRetainedCodeGraphCitationEvidence(
+        config.agentContextHome,
+        checkoutId,
+        citationEvidenceSource(citation),
+      );
+      if (
+        retained !== undefined &&
+        (yield* historicalCitationBytesMatch(citation, retained.capsule.objectFormat, retained.bytes))
+      ) {
+        historical = retained.bytes;
+        break;
       }
-      if (historical !== undefined) break;
     }
-  if (historical !== undefined) {
-    const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
-      ...options,
-      startLine: options.startLine ?? (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
-      ...(options.symbolSpanOnly && citation.target.kind === 'symbol'
-        ? {endLine: lastCoveredSymbolLine(citation.target.span)}
-        : {}),
-    });
-    if (excerpt !== undefined) excerpts.push(excerpt);
+    if (historical === undefined && !resolution.ambiguous)
+      for (const route of resolution.routes) {
+        attemptedSteps.push('exact-snapshot');
+        historical = yield* Effect.gen(function* () {
+          const snapshot = yield* store.readySnapshotById(route.databasePath, citation.sourceSnapshotId);
+          if (
+            snapshot === undefined ||
+            snapshot.repositoryId !== citation.repositoryId ||
+            snapshot.commit !== citation.sourceCommit ||
+            snapshot.dirty !== citation.sourceDirty ||
+            snapshot.extractorSet !== citation.extractorSet
+          )
+            return undefined;
+          return yield* Effect.scoped(
+            Effect.gen(function* () {
+              yield* Effect.acquireRelease(store.acquireSnapshotLease(route.databasePath, snapshot.id, 60_000), token =>
+                store.releaseSnapshotLease(route.databasePath, token).pipe(Effect.ignore),
+              );
+              const evidence = yield* store.effectiveSnapshotCitationEvidence(route.databasePath, snapshot.id, {
+                paths: [citation.path],
+                symbolIds: citation.target.kind === 'symbol' ? [citation.target.nodeId] : [],
+              });
+              if (!historicalSnapshotCitationMatches(citation, evidence)) return undefined;
+              const request = {
+                expectedContentHash: citation.fileContentHash.value,
+                repositoryPath: citation.path,
+                requireBytes: true,
+              };
+              const sources = yield* readCodeGraphCitationSources({
+                allowCommitFallback: !snapshot.dirty,
+                commitOnly: !snapshot.dirty,
+                objectFormat: route.identity.objectFormat,
+                repositoryRoot: route.identity.repoRoot,
+                sourceCommit: snapshot.commit,
+                sources: [request],
+                retainedBytesLimit: 4 * 1_048_576,
+              });
+              const bytes = sources.get(codeGraphCitationSourceKey(request));
+              return bytes !== undefined &&
+                (yield* historicalCitationBytesMatch(citation, route.identity.objectFormat, bytes)) &&
+                (yield* revalidateCodeGraphCitationRecoveryRoute(config.agentContextHome, route))
+                ? bytes
+                : undefined;
+            }),
+          );
+        }).pipe(Effect.orElseSucceed(() => undefined));
+        if (historical === undefined) {
+          attemptedSteps.push('exact-clean-git');
+          historical = yield* readHistoricalGitCitationBytes(config, route, citation).pipe(
+            Effect.orElseSucceed(() => undefined),
+          );
+        }
+        if (historical !== undefined) break;
+      }
+    if (historical !== undefined) {
+      const excerpt = citationSourceExcerpt(historical, citationEvidenceSource(citation), 'historical-verified', true, {
+        ...options,
+        startLine: options.startLine ?? (citation.target.kind === 'symbol' ? citation.target.span.line : 1),
+        ...(options.symbolSpanOnly && citation.target.kind === 'symbol'
+          ? {endLine: lastCoveredSymbolLine(citation.target.span)}
+          : {}),
+      });
+      if (excerpt !== undefined) excerpts.push(excerpt);
+    }
   }
   return {
     attemptedSteps: [...new Set(attemptedSteps)],

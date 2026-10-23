@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -172,10 +172,11 @@ describe('private workflow artifact protocol', () => {
       }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
     );
   }
-  effectIt.effect.prop(
-    'replaying completed operations never resurrects retired state',
-    [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4}))],
-    ([retries], context) => {
+  // Exhaust the finite retry domain without repeating whole native fixtures
+  // under a single property-test deadline.
+  effectIt.effect.each([1, 2, 3, 4])(
+    'replaying completed operations never resurrects retired state (replay count: %i)',
+    (retries, context) => {
       const diagnostics = workflowPropertyDiagnostics(context, 'workflow-retirement');
       return diagnostics.observe(
         retries,
@@ -226,7 +227,6 @@ describe('private workflow artifact protocol', () => {
         ),
       );
     },
-    {arbitrary: {runs: 8}},
   );
 
   effectIt.effect('previews without creating an artifact and replays an exact native write', () =>

@@ -880,7 +880,9 @@ export class CodeGraphQueryService extends Context.Service<
                 options?.telemetry,
                 'graph.query.status',
                 'query-repository-identity',
-                resolvePublishedRepositoryIdentityObservation(cwd, expected, options?.observeWorktree !== false),
+                resolvePublishedRepositoryIdentityObservation(cwd, expected, options?.observeWorktree !== false, {
+                  threadnoteHome,
+                }),
               );
               const identity = observation.identity;
               const changed = options?.afterIdentityObserved === undefined ? observation.worktreeChanged : undefined;
@@ -893,14 +895,15 @@ export class CodeGraphQueryService extends Context.Service<
           withRepositoryServices(
             Effect.scoped(
               Effect.gen(function* () {
-                const {identity, worktreeChanged: changed} = yield* observeCodeGraphStatusSessionIdentity(
-                  threadnoteHome,
-                  cwd,
-                  expected,
-                  options,
-                );
+                const {
+                  identity,
+                  worktreeChanged: changed,
+                  observeTogether,
+                } = yield* observeCodeGraphStatusSessionIdentity(threadnoteHome, cwd, expected, options);
                 const layout = codeGraphLayout(path, threadnoteHome, identity.checkoutId, identity.worktreeId);
-                const observe = statusForIdentity(threadnoteHome, identity, options, true, changed, cwd);
+                const observe = observeTogether(
+                  statusForIdentity(threadnoteHome, identity, options, true, changed, cwd),
+                );
                 const read = observe.pipe(Effect.flatMap(use));
                 const readSession: typeof read = store.withSession(layout.databasePath, read, {existingOnly: true});
                 const result = yield* (yield* fs.exists(layout.databasePath))

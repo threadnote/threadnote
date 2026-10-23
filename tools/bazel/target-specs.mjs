@@ -256,6 +256,7 @@ export const virtualModules = [
 const toolingTests = [
   ...testFilesBelow('tools/bazel/test'),
   ...testFilesBelow('tools/ci/test'),
+  ...testFilesBelow('tools/diagnostics/test'),
   ...testFilesBelow('tools/workspace/test'),
 ];
 
@@ -426,6 +427,7 @@ export const targetSpecs = [
     kind: 'test',
     entries: toolingTests,
     data: [
+      'apps/threadnote/test/evaluation/baselines/context-brief-citations-v1/scale-budgets.json',
       'tools/bazel/runner.mjs',
       'tools/bazel/targets.json',
       'tools/ci/bazel-run-selected.mjs',

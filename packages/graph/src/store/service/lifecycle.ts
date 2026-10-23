@@ -1,3 +1,4 @@
+import {withCodeGraphLeaseTiming} from '../lease_timing.js';
 import {DateTime, Effect, Option, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
@@ -304,32 +305,59 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
       ),
     acquireSnapshotLease: (databasePath, snapshotId, durationMilliseconds, options) =>
       Effect.gen(function* () {
-        const token = `${options?.retainedBase === true ? 'retained-base:' : ''}${system.processId}:${yield* crypto.randomUUIDv4()}`;
-        const acquired = yield* prepare(databasePath).pipe(
+        const observe = options?.onTiming;
+        const token = `${options?.retainedBase === true ? 'retained-base:' : ''}${system.processId}:${yield* withCodeGraphLeaseTiming(observe, 'token', crypto.randomUUIDv4())}`;
+        const acquired = yield* withCodeGraphLeaseTiming(observe, 'prepare', prepare(databasePath)).pipe(
           Effect.andThen(
-            withWriterGate(
-              databasePath,
-              useDatabase(
+            withCodeGraphLeaseTiming(
+              observe,
+              'writer-gate',
+              withWriterGate(
                 databasePath,
-                Effect.gen(function* () {
-                  const sql = yield* SqlClient.SqlClient;
-                  yield* ensureLeaseSchemaInitialized(databasePath, sql, false);
-                  const acquiredToken = yield* acquireSnapshotLease(
-                    snapshotId,
-                    durationMilliseconds,
-                    token,
-                    options?.retireWhenInactive === true,
-                  );
-                  const cleanup = yield* pruneRetiredSnapshotRowsPage();
-                  return {cleanup, token: acquiredToken};
-                }),
+                withCodeGraphLeaseTiming(
+                  observe,
+                  'session',
+                  useDatabase(
+                    databasePath,
+                    withCodeGraphLeaseTiming(
+                      observe,
+                      'session-body',
+                      Effect.gen(function* () {
+                        const sql = yield* SqlClient.SqlClient;
+                        yield* withCodeGraphLeaseTiming(
+                          observe,
+                          'schema',
+                          ensureLeaseSchemaInitialized(databasePath, sql, false),
+                        );
+                        const acquiredToken = yield* withCodeGraphLeaseTiming(
+                          observe,
+                          'lease-sql',
+                          acquireSnapshotLease(
+                            snapshotId,
+                            durationMilliseconds,
+                            token,
+                            options?.retireWhenInactive === true,
+                            observe,
+                          ),
+                        );
+                        const cleanup = yield* withCodeGraphLeaseTiming(
+                          observe,
+                          'prune',
+                          pruneRetiredSnapshotRowsPage(),
+                        );
+                        return {cleanup, token: acquiredToken};
+                      }),
+                    ),
+                  ),
+                ),
+                options?.waitTimeoutMilliseconds,
               ),
-              options?.waitTimeoutMilliseconds,
             ),
           ),
           Effect.mapError(cause => storeError('acquire code graph snapshot lease', cause)),
         );
-        if (acquired.cleanup.remaining) yield* scheduleRoutinePhysicalCleanup(databasePath);
+        if (acquired.cleanup.remaining)
+          yield* withCodeGraphLeaseTiming(observe, 'schedule', scheduleRoutinePhysicalCleanup(databasePath));
         return acquired.token;
       }).pipe(Effect.mapError(cause => storeError('acquire code graph snapshot lease', cause))),
     retainViewSnapshotLease: (databasePath, worktreeId, snapshotId, durationMilliseconds, options) =>

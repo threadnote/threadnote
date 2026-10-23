@@ -1,3 +1,4 @@
+import {withCodeGraphLeaseTiming, type CodeGraphLeaseTimingObserver} from './lease_timing.js';
 import {Clock, DateTime, Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {
@@ -293,29 +294,36 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
   durationMilliseconds: number,
   token: string,
   retireWhenInactive: boolean,
+  observer?: CodeGraphLeaseTimingObserver,
 ) {
   const sql = yield* SqlClient.SqlClient;
-  yield* configureConnection(sql);
+  yield* withCodeGraphLeaseTiming(observer, 'connection-configure', configureConnection(sql));
   const now = yield* Clock.currentTimeMillis;
   const duration = Math.max(1_000, Math.min(60 * 60_000, Math.floor(durationMilliseconds)));
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, false, false, false))) {
-        return yield* CodeGraphStoreError.of('Code graph snapshot lease authority schema is invalid.');
-      }
-      const ready = yield* sql<{readonly id: string}>`
+  yield* withCodeGraphLeaseTiming(
+    observer,
+    'transaction',
+    sql.withTransaction(
+      withCodeGraphLeaseTiming(
+        observer,
+        'transaction-body',
+        Effect.gen(function* () {
+          if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, false, false, false))) {
+            return yield* CodeGraphStoreError.of('Code graph snapshot lease authority schema is invalid.');
+          }
+          const ready = yield* sql<{readonly id: string}>`
         SELECT id FROM snapshots WHERE id = ${snapshotId} AND state = 'ready' LIMIT 1
       `;
-      if (!ready[0]) {
-        return yield* CodeGraphStoreError.of(`Ready snapshot ${snapshotId} is no longer available.`);
-      }
-      if (token.startsWith('retained-base:')) {
-        const targets = yield* sql<{
-          readonly estimated_bytes: number;
-          readonly physical_id: string;
-          readonly repository_id: string;
-          readonly worktree_id: string;
-        }>`
+          if (!ready[0]) {
+            return yield* CodeGraphStoreError.of(`Ready snapshot ${snapshotId} is no longer available.`);
+          }
+          if (token.startsWith('retained-base:')) {
+            const targets = yield* sql<{
+              readonly estimated_bytes: number;
+              readonly physical_id: string;
+              readonly repository_id: string;
+              readonly worktree_id: string;
+            }>`
           SELECT repository_id, worktree_id, COALESCE(base_snapshot_id, id) AS physical_id,
                  MAX(
                    ${CODE_GRAPH_RETENTION_ESTIMATED_BYTES_MINIMUM},
@@ -326,16 +334,16 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           WHERE id = ${snapshotId} AND state = 'ready'
           LIMIT 1
         `;
-        const target = targets[0];
-        if (!target) {
-          return yield* CodeGraphStoreError.of('Retained code graph base is no longer available.');
-        }
-        const retainedReservations = yield* sql<{
-          readonly estimated_bytes: number;
-          readonly physical_id: string;
-          readonly repository_id: string;
-          readonly worktree_id: string;
-        }>`
+            const target = targets[0];
+            if (!target) {
+              return yield* CodeGraphStoreError.of('Retained code graph base is no longer available.');
+            }
+            const retainedReservations = yield* sql<{
+              readonly estimated_bytes: number;
+              readonly physical_id: string;
+              readonly repository_id: string;
+              readonly worktree_id: string;
+            }>`
           SELECT snapshot.repository_id, snapshot.worktree_id,
                  COALESCE(snapshot.base_snapshot_id, snapshot.id) AS physical_id,
                  MAX(
@@ -348,22 +356,22 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           WHERE lease.token GLOB 'retained-base:*' AND lease.expires_at > ${now}
           GROUP BY snapshot.repository_id, snapshot.worktree_id, physical_id
         `;
-        if (
-          retainedReservations.some(
-            row =>
-              row.worktree_id === target.worktree_id &&
-              row.repository_id === target.repository_id &&
-              row.physical_id !== target.physical_id,
-          )
-        ) {
-          return yield* CodeGraphStoreError.of('The worktree already has a retained committed code graph base.');
-        }
-        const detachedReady = yield* sql<{
-          readonly estimated_bytes: number;
-          readonly physical_id: string;
-          readonly repository_id: string;
-          readonly worktree_id: string;
-        }>`
+            if (
+              retainedReservations.some(
+                row =>
+                  row.worktree_id === target.worktree_id &&
+                  row.repository_id === target.repository_id &&
+                  row.physical_id !== target.physical_id,
+              )
+            ) {
+              return yield* CodeGraphStoreError.of('The worktree already has a retained committed code graph base.');
+            }
+            const detachedReady = yield* sql<{
+              readonly estimated_bytes: number;
+              readonly physical_id: string;
+              readonly repository_id: string;
+              readonly worktree_id: string;
+            }>`
           SELECT snapshot.repository_id, snapshot.worktree_id,
                  COALESCE(snapshot.base_snapshot_id, snapshot.id) AS physical_id,
                  MAX(
@@ -393,21 +401,21 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
             )
           GROUP BY snapshot.repository_id, physical_id
         `;
-        const physical = new Map(
-          [...detachedReady, ...retainedReservations]
-            .filter(row => row.repository_id === target.repository_id)
-            .map(row => [row.physical_id, row] as const),
-        );
-        if (!physical.has(target.physical_id)) physical.set(target.physical_id, target);
-        const retainedBytes = [...physical.values()].reduce((total, row) => total + row.estimated_bytes, 0);
-        if (
-          physical.size > CODE_GRAPH_DETACHED_READY_COUNT_MAXIMUM ||
-          retainedBytes > CODE_GRAPH_DETACHED_READY_ESTIMATED_BYTES_MAXIMUM
-        ) {
-          return yield* CodeGraphStoreError.of('Retained code graph bases would exceed detached-ready capacity.');
-        }
-      }
-      yield* sql`
+            const physical = new Map(
+              [...detachedReady, ...retainedReservations]
+                .filter(row => row.repository_id === target.repository_id)
+                .map(row => [row.physical_id, row] as const),
+            );
+            if (!physical.has(target.physical_id)) physical.set(target.physical_id, target);
+            const retainedBytes = [...physical.values()].reduce((total, row) => total + row.estimated_bytes, 0);
+            if (
+              physical.size > CODE_GRAPH_DETACHED_READY_COUNT_MAXIMUM ||
+              retainedBytes > CODE_GRAPH_DETACHED_READY_ESTIMATED_BYTES_MAXIMUM
+            ) {
+              return yield* CodeGraphStoreError.of('Retained code graph bases would exceed detached-ready capacity.');
+            }
+          }
+          yield* sql`
         INSERT INTO snapshot_leases (token, snapshot_id, expires_at, retire_when_inactive)
         VALUES (
           ${token}, ${snapshotId}, ${now + duration},
@@ -429,11 +437,13 @@ const acquireSnapshotLease = Effect.fn('codeGraph.acquireSnapshotLease')(functio
           ) THEN 1 ELSE 0 END
         )
       `;
-      // The new lease protects its target before expired readers are reaped.
-      // This makes the next ordinary graph read self-heal snapshots left by a
-      // crashed process without racing a caller that is reacquiring that view.
-      yield* reapAndRetireExpiredSnapshotLeasesPage(sql, now);
-    }),
+          // The new lease protects its target before expired readers are reaped.
+          // This makes the next ordinary graph read self-heal snapshots left by a
+          // crashed process without racing a caller that is reacquiring that view.
+          yield* reapAndRetireExpiredSnapshotLeasesPage(sql, now);
+        }),
+      ),
+    ),
   );
   return token;
 });
@@ -566,65 +576,77 @@ const validateViewSnapshotLease = Effect.fn('codeGraph.validateViewSnapshotLease
   );
 });
 
-const releaseSnapshotLease = Effect.fn('codeGraph.releaseSnapshotLease')(function* (token: string) {
+const releaseSnapshotLease = Effect.fn('codeGraph.releaseSnapshotLease')(function* (
+  token: string,
+  observer?: CodeGraphLeaseTimingObserver,
+) {
   const sql = yield* SqlClient.SqlClient;
-  yield* configureConnection(sql);
-  return yield* sql.withTransaction(
-    Effect.gen(function* () {
-      if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, false, false, false))) {
-        return yield* CodeGraphStoreError.of('Code graph snapshot lease authority schema is invalid.');
-      }
-      const now = yield* Clock.currentTimeMillis;
-      const releasedRows = yield* sql.unsafe<BoundedSnapshotLeaseRow>(
-        `SELECT ${boundedSnapshotLeaseProjection('lease')}
+  yield* withCodeGraphLeaseTiming(observer, 'connection-configure', configureConnection(sql));
+  return yield* withCodeGraphLeaseTiming(
+    observer,
+    'transaction',
+    sql.withTransaction(
+      withCodeGraphLeaseTiming(
+        observer,
+        'transaction-body',
+        Effect.gen(function* () {
+          if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, false, false, false))) {
+            return yield* CodeGraphStoreError.of('Code graph snapshot lease authority schema is invalid.');
+          }
+          const now = yield* Clock.currentTimeMillis;
+          const releasedRows = yield* sql.unsafe<BoundedSnapshotLeaseRow>(
+            `SELECT ${boundedSnapshotLeaseProjection('lease')}
          FROM snapshot_leases AS lease
          WHERE lease.token = ?
          LIMIT 1`,
-        [token],
-      );
-      const releasedCandidates: string[] = [];
-      const row = releasedRows[0] === undefined ? undefined : decodeSnapshotLeaseManifest(releasedRows[0]);
-      if (releasedRows[0] !== undefined && row === undefined) {
-        return yield* CodeGraphStoreError.of('Code graph snapshot lease manifest is invalid.');
-      }
-      if (row?.retireWhenInactive === 1) {
-        const successorRows = yield* sql.unsafe<BoundedSnapshotLeaseRow>(
-          `SELECT ${boundedSnapshotLeaseProjection('lease')}
+            [token],
+          );
+          const releasedCandidates: string[] = [];
+          const row = releasedRows[0] === undefined ? undefined : decodeSnapshotLeaseManifest(releasedRows[0]);
+          if (releasedRows[0] !== undefined && row === undefined) {
+            return yield* CodeGraphStoreError.of('Code graph snapshot lease manifest is invalid.');
+          }
+          if (row?.retireWhenInactive === 1) {
+            const successorRows = yield* sql.unsafe<BoundedSnapshotLeaseRow>(
+              `SELECT ${boundedSnapshotLeaseProjection('lease')}
            FROM snapshot_leases AS lease
            WHERE lease.snapshot_id = ?
              AND lease.token <> ?
              AND lease.expires_at > ?
            ORDER BY lease.expires_at
            LIMIT 1`,
-          [row.snapshotId, token, now],
-        );
-        const successor = successorRows[0] === undefined ? undefined : decodeSnapshotLeaseManifest(successorRows[0]);
-        if (successorRows[0] !== undefined && successor === undefined) {
-          return yield* CodeGraphStoreError.of('Code graph snapshot lease manifest is invalid.');
-        }
-        if (successor === undefined) {
-          // Ordinary readers and baton transfers do not retire this snapshot.
-          // Observe full retirement authority only when its result is needed,
-          // inside the same transaction and before admitting any retirement.
-          if (yield* codeGraphWorktreeReconciliationSchemaCompatible(sql)) releasedCandidates.push(row.snapshotId);
-        } else {
-          yield* sql`
+              [row.snapshotId, token, now],
+            );
+            const successor =
+              successorRows[0] === undefined ? undefined : decodeSnapshotLeaseManifest(successorRows[0]);
+            if (successorRows[0] !== undefined && successor === undefined) {
+              return yield* CodeGraphStoreError.of('Code graph snapshot lease manifest is invalid.');
+            }
+            if (successor === undefined) {
+              // Ordinary readers and baton transfers do not retire this snapshot.
+              // Observe full retirement authority only when its result is needed,
+              // inside the same transaction and before admitting any retirement.
+              if (yield* codeGraphWorktreeReconciliationSchemaCompatible(sql)) releasedCandidates.push(row.snapshotId);
+            } else {
+              yield* sql`
             UPDATE snapshot_leases
             SET retire_when_inactive = 1
             WHERE token = ${successor.token}
           `;
-        }
-      }
-      if (row !== undefined) {
-        yield* sql`
+            }
+          }
+          if (row !== undefined) {
+            yield* sql`
           DELETE FROM snapshot_leases
           WHERE token = ${token}
         `;
-      }
-      const releasedRetirements = yield* retireRoutineLeaseCandidates(sql, releasedCandidates, now);
-      const expiredRetirements = yield* reapAndRetireExpiredSnapshotLeasesPage(sql, now);
-      return releasedRetirements + expiredRetirements > 0;
-    }),
+          }
+          const releasedRetirements = yield* retireRoutineLeaseCandidates(sql, releasedCandidates, now);
+          const expiredRetirements = yield* reapAndRetireExpiredSnapshotLeasesPage(sql, now);
+          return releasedRetirements + expiredRetirements > 0;
+        }),
+      ),
+    ),
   );
 });
 

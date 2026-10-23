@@ -69,7 +69,10 @@ const scenario = (
     const overlapIdentityReads = (args: readonly string[]) =>
       Effect.gen(function* () {
         if (!overlapIdentity) return;
-        if (args.includes('--git-dir')) {
+        // Status shares the initial metadata batch, then overlaps the remaining
+        // identity reads. Blocking that prerequisite batch would deadlock the
+        // fixture before either observation can reach its intended overlap.
+        if (args.includes('config') && args.includes('core.ignorecase')) {
           yield* Deferred.succeed(identityStarted, undefined);
           yield* Deferred.await(worktreeStarted);
         }
@@ -296,6 +299,10 @@ const scenario = (
     expect(ordinaryFinalCalls).toBe(mutation === 'legacy-service' ? 1 : 0);
     expect(sessions).toBe(1);
     expect(leases).toBe(0);
+    if (overlapIdentity) {
+      expect(yield* Deferred.isDone(identityStarted)).toBe(true);
+      expect(yield* Deferred.isDone(worktreeStarted)).toBe(true);
+    }
     if (failInitialProbe) {
       expect(probeFailed).toBe(true);
       expect(fallbackReads).toBeGreaterThan(0);
@@ -310,7 +317,7 @@ describe('Context Brief local citation closing observation', () => {
     scenario('none', 0, false, false, true),
   );
   effectIt.effect(
-    'overlaps complete initial identity and worktree observations while retaining the closing fence',
+    'overlaps initial identity completion and worktree observations while retaining the closing fence',
     () => scenario('none', 0, false, true),
   );
   effectIt.effect('overlaps initial admission and worktree reads without skipping the closing fence', () =>

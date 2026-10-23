@@ -1,6 +1,7 @@
 import {describe, expect, it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Path} from 'effect';
 import {TestClock} from 'effect/testing';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphLayout} from '@threadnote/graph/layout';
@@ -192,7 +193,7 @@ describe('graph share TCG1 delta publication and apply', () => {
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
-          const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-graph-share-compact-'});
+          const root = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-graph-share-compact-');
           const repository = path.join(root, 'repository');
           const cas = path.join(root, 'cas');
           const publisherHome = path.join(root, 'publisher-home');

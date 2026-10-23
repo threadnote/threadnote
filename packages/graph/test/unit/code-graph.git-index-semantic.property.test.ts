@@ -57,6 +57,39 @@ describe('Git index semantic fingerprint', () => {
     expect(codeGraphGitIndexSemanticSha256(v4, 'sha1')).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('rejects every case spelling of tracked ignore basenames without changing ordinary digest semantics', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(2 as const, 3 as const, 4 as const),
+        fc.array(fc.constantFrom('scope', 'scope with spaces', 'line\nbreak', 'é'), {maxLength: 4}),
+        fc.array(fc.boolean(), {minLength: 10, maxLength: 10}),
+        (version, directories, uppercase) => {
+          const name = [...'.gitignore']
+            .map((letter, index) => (uppercase[index] ? letter.toUpperCase() : letter))
+            .join('');
+          const prefix = directories.length ? directories.join('/') + '/' : '';
+          const stat = Array.from({length: 9}, () => 0);
+          const objectId = new Uint8Array(SHA1_BYTES).fill(7);
+          const bytes = (path: string) =>
+            buildGitIndex(version, [
+              entry(stat, objectId, new TextEncoder().encode(prefix + 'marker.txt'), 0),
+              entry(stat, objectId, new TextEncoder().encode(path), 0),
+            ]);
+          const ignored = bytes(prefix + name);
+          expect(codeGraphGitIndexSemanticSha256(ignored, 'sha1')).toMatch(/^[0-9a-f]{64}$/);
+          expect(codeGraphGitIndexSemanticSha256(ignored, 'sha1', {rejectTrackedIgnoreFiles: true})).toBeUndefined();
+          for (const path of [prefix + name + '.backup', prefix + 'prefix-' + name, prefix + name + '/source.ts']) {
+            const ordinary = bytes(path);
+            expect(codeGraphGitIndexSemanticSha256(ordinary, 'sha1', {rejectTrackedIgnoreFiles: true})).toBe(
+              codeGraphGitIndexSemanticSha256(ordinary, 'sha1'),
+            );
+          }
+        },
+      ),
+      {numRuns: 50},
+    );
+  });
+
   it('ignores optional cache extensions and rejects required or corrupt input', () => {
     const stat = Array.from({length: 9}, () => 0);
     const objectId = new Uint8Array(SHA1_BYTES).fill(7);

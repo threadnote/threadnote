@@ -25,6 +25,11 @@ on:
         required: false
         type: boolean
         default: false
+      include_context_brief_citation_diagnostics:
+        description: Collect instrumented citation phase diagnostics with the full frozen scale workload; never release evidence
+        required: false
+        type: boolean
+        default: false
       include_code_memory_link_scale:
         description: Run the governed 100,000-memory code-to-memory inverse-selector gate
         required: false
@@ -384,6 +389,42 @@ jobs:
           path: artifacts/context-brief-citations-scale-*.json
           if-no-files-found: error
           retention-days: 90
+
+  context-brief-citation-phase-diagnostic:
+    name: Context Brief citation phase diagnostic · macOS ARM64
+    if: github.event_name == 'workflow_dispatch' && inputs.include_context_brief_citation_diagnostics
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - run: bun install --frozen-lockfile
+
+      - name: Verify the hosted ARM64 runner
+        run: test "$RUNNER_ARCH" = "ARM64"
+
+      - name: Collect full-history diagnostic evidence separately from the scale gate
+        env:
+          THREADNOTE_BENCHMARK_RUNNER_CLASS: github-hosted-macos-15-ARM64
+        run: >-
+          bun tools/diagnostics/build-citation-phase-diagnostic.ts
+          --candidate "${{ github.sha }}"
+          --output artifacts/context-brief-citation-phase-diagnostic.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: context-brief-citation-phase-diagnostic-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          path: artifacts/context-brief-citation-phase-diagnostic.json
+          if-no-files-found: error
 
   code-memory-link-inverse-scale:
     name: Code-to-memory inverse selector · 100,000 memories · release macOS class

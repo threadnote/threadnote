@@ -40,6 +40,8 @@ export type CodeGraphPreparedSpoolBudgetGate = <A, E, R>(
 ) => Effect.Effect<A, E | unknown, R>;
 
 export interface CodeGraphIndexOptions extends CodeGraphInventoryOptions {
+  /** @internal Optional path-free benchmark observation; never owns the observed operation. */
+  readonly onTiming?: CodeGraphIndexTimingObserver;
   /** @internal Home-global builder admission priority. CLI defaults to current-required. */
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
   readonly cwd: string;
@@ -68,6 +70,55 @@ export interface CodeGraphIndexOptions extends CodeGraphInventoryOptions {
     boundary: CodeGraphDirectPersistentCapacityBoundary,
   ) => Effect.Effect<number | undefined, unknown>;
   readonly threadnoteHome: string;
+}
+
+export type CodeGraphIndexTimingStage =
+  | 'admission'
+  | 'database-session'
+  | 'database-session-body'
+  | 'index-scope'
+  | 'index-scope-body'
+  | 'lifecycle-opportunity'
+  | 'reporter-completion'
+  | 'share-drain'
+  | 'snapshot-lease-release';
+
+/** Starts an observation and returns its completion effect; no paths or lease tokens enter the observer. */
+export type CodeGraphIndexTimingObserver = (
+  stage: CodeGraphIndexTimingStage,
+) => Effect.Effect<Effect.Effect<void, unknown>, unknown>;
+
+export function withCodeGraphIndexTiming<A, E, R>(
+  observer: CodeGraphIndexTimingObserver | undefined,
+  stage: CodeGraphIndexTimingStage,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  if (observer === undefined) return effect;
+  return Effect.gen(function* () {
+    const complete: Effect.Effect<void, unknown> = yield* Effect.suspend(() => observer(stage)).pipe(
+      Effect.catchCause(() => Effect.succeed(Effect.void)),
+    );
+    return yield* effect.pipe(Effect.ensuring(complete.pipe(Effect.ignoreCause)));
+  });
+}
+
+/** Preserve the original store and session context; observe even repeated scoped releases without changing ownership. */
+export function codeGraphIndexTimingStore(
+  store: CodeGraphStoreShape,
+  observer: CodeGraphIndexTimingObserver | undefined,
+): CodeGraphStoreShape {
+  if (observer === undefined) return store;
+  return {
+    ...store,
+    releaseSnapshotLease: (...args) =>
+      withCodeGraphIndexTiming(observer, 'snapshot-lease-release', store.releaseSnapshotLease(...args)),
+    withSession: (databasePath, effect, options) =>
+      withCodeGraphIndexTiming(
+        observer,
+        'database-session',
+        store.withSession(databasePath, withCodeGraphIndexTiming(observer, 'database-session-body', effect), options),
+      ),
+  };
 }
 
 export interface CodeGraphSourceVerification {

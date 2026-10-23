@@ -52,6 +52,28 @@ export interface ContextBriefCitationScaleRunOptions {
   >;
   readonly samples: number;
   readonly warmups: number;
+  /** @internal Diagnostic-only wrapper outside the existing observation clocks. */
+  readonly observeObservation?: ContextBriefCitationScaleObservationWrapper;
+}
+
+export interface ContextBriefCitationScaleObservationDescriptor {
+  readonly pass: 'rss-memory' | 'warmup' | 'timed';
+  readonly profileId: ContextBriefCitationScaleProfileId;
+  readonly ordinal: number;
+}
+
+export type ContextBriefCitationScaleObservationWrapper = <A, E, R>(
+  descriptor: ContextBriefCitationScaleObservationDescriptor,
+  observation: Effect.Effect<A, E, R>,
+) => Effect.Effect<A, E, R>;
+
+/** The ordinary gate retains the exact existing Effect when no diagnostic observer is supplied. */
+export function observeContextBriefCitationScaleObservation<A, E, R>(
+  observer: ContextBriefCitationScaleObservationWrapper | undefined,
+  descriptor: ContextBriefCitationScaleObservationDescriptor,
+  observation: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  return observer === undefined ? observation : observer(descriptor, observation);
 }
 
 export interface ContextBriefCitationScaleRssObservation {
@@ -187,10 +209,14 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
             prepareContextBriefCitationScaleObservation(graph);
             const memoryRun = yield* observer.observe(
               observationId,
-              runObservation(fixture, graph, profileId, index, {
-                captureBoundaryRss: true,
-                prepare: false,
-              }),
+              observeContextBriefCitationScaleObservation(
+                options.observeObservation,
+                {pass: 'rss-memory', profileId, ordinal: index},
+                runObservation(fixture, graph, profileId, index, {
+                  captureBoundaryRss: true,
+                  prepare: false,
+                }),
+              ),
             );
             memoryWorkloads.set(observationId, memoryRun);
           }
@@ -210,18 +236,26 @@ export const evaluateContextBriefCitationScale = Effect.fn('evaluation.contextBr
   for (const profileId of options.profileIds) {
     const cold = memoryWorkloads.get(rssObservationId(profileId, 0))!;
     for (let index = 0; index < options.warmups; index += 1) {
-      yield* runObservation(fixture, graph, profileId, options.samples + index, {
-        captureBoundaryRss: false,
-        prepare: true,
-      });
+      yield* observeContextBriefCitationScaleObservation(
+        options.observeObservation,
+        {pass: 'warmup', profileId, ordinal: index},
+        runObservation(fixture, graph, profileId, options.samples + index, {
+          captureBoundaryRss: false,
+          prepare: true,
+        }),
+      );
     }
     const observations: ContextBriefCitationScaleObservationV2[] = [];
     for (let index = 0; index < options.samples; index += 1) {
       observations.push(
-        yield* runObservation(fixture, graph, profileId, options.samples + options.warmups + index, {
-          captureBoundaryRss: false,
-          prepare: true,
-        }),
+        yield* observeContextBriefCitationScaleObservation(
+          options.observeObservation,
+          {pass: 'timed', profileId, ordinal: index},
+          runObservation(fixture, graph, profileId, options.samples + options.warmups + index, {
+            captureBoundaryRss: false,
+            prepare: true,
+          }),
+        ),
       );
       yield* Effect.yieldNow;
     }

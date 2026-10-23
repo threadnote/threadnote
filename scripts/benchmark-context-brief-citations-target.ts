@@ -387,7 +387,7 @@ export const waitForContextBriefCitationRssBarrierAcknowledgement = Effect.fn(
   );
 });
 
-const startContextBriefCitationRssObserver = Effect.fn('contextBriefCitationScale.startRssObserver')(function* (
+export const startContextBriefCitationRssObserver = Effect.fn('contextBriefCitationScale.startRssObserver')(function* (
   expectedBuiltArtifactSha256: string,
 ) {
   const fs = yield* FileSystem.FileSystem;

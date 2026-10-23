@@ -1,3 +1,5 @@
+import type {CodeGraphLeaseTimingObserver} from '../store/lease_timing.js';
+import {Effect} from 'effect';
 import type {CodeGraphProvenance, CodeGraphSnapshot} from '../types.js';
 
 export interface CodeGraphAnalysisBudget {
@@ -25,6 +27,15 @@ export interface CodeGraphAnalysisLimits {
 }
 
 export interface CodeGraphAnalysisOptions {
+  /** @internal Paired lease substage boundaries for diagnostics only. */
+  readonly onLeaseTiming?: (
+    operation: 'acquire' | 'release',
+    ...event: Parameters<CodeGraphLeaseTimingObserver>
+  ) => void;
+  /** @internal Optional path-free benchmark observer; returns completion work without owning the analysis. */
+  readonly onTiming?: (
+    stage: 'lease-acquire' | 'read-session' | 'lease-release',
+  ) => Effect.Effect<Effect.Effect<void, unknown>, unknown>;
   readonly allowedProvenances?: readonly CodeGraphProvenance[];
   readonly budget?: CodeGraphAnalysisBudget;
   /** Stable `cgc_…` identifier returned by an earlier analysis. */
@@ -35,6 +46,20 @@ export interface CodeGraphAnalysisOptions {
   readonly minimumGodNodeDegree?: number;
   readonly minimumHubDegree?: number;
   readonly snapshot: CodeGraphSnapshot;
+}
+
+export function withCodeGraphAnalysisTiming<A, E, R>(
+  observer: CodeGraphAnalysisOptions['onTiming'],
+  stage: Parameters<NonNullable<CodeGraphAnalysisOptions['onTiming']>>[0],
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  if (observer === undefined) return effect;
+  return Effect.gen(function* () {
+    const complete: Effect.Effect<void, unknown> = yield* Effect.suspend(() => observer(stage)).pipe(
+      Effect.catchCause(() => Effect.succeed(Effect.void)),
+    );
+    return yield* effect.pipe(Effect.ensuring(complete.pipe(Effect.ignoreCause)));
+  });
 }
 
 export interface ResolvedCodeGraphAnalysisBudget {

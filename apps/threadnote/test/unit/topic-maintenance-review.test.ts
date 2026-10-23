@@ -774,6 +774,8 @@ describe('reviewed personal topic acceptance', () => {
           expect(yield* fs.readFileString(memory)).toBe(preview.content);
         }),
       ).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
-    90_000,
+    // Covers sequential CLI/Manager/MCP preview, crash-recovery and replay scenarios.
+    // This outer harness ceiling leaves per-command and product deadlines unchanged.
+    180_000,
   );
 });

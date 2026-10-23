@@ -61,6 +61,7 @@ export const createVitestConfig = (ciLongRunningGroupName = process.env.THREADNO
             'packages/*/test/**/*.test.{ts,tsx}',
             'tools/bazel/test/*.test.ts',
             'tools/ci/test/*.test.ts',
+            'tools/diagnostics/test/*.test.ts',
             'tools/workspace/test/*.test.ts',
           ],
       testNamePattern: ciLongRunningGroupName ? ciLongRunningTestPatterns[ciLongRunningGroupName] : undefined,

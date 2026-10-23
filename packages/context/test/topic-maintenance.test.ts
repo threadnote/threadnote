@@ -1,6 +1,6 @@
 import fc from 'fast-check';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Path, Tracer} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
@@ -698,8 +698,20 @@ describe('topic maintenance current evidence', () => {
                 worktreeId: identity.worktreeId,
               },
             };
+            let statusReads = 0;
+            let evidenceReads = 0;
+            const tracer = Tracer.make({
+              span(options) {
+                if (options.name === 'contextHealth.readCitationEvidence') evidenceReads++;
+                return new Tracer.NativeSpan(options);
+              },
+            });
             const query = CodeGraphQueryService.of({
-              status: () => Effect.succeed(status),
+              status: () =>
+                Effect.sync(() => {
+                  statusReads++;
+                  return status;
+                }),
               statusForPublishedIdentity: () => Effect.succeed(status),
             } as unknown as CodeGraphQueryService['Service']);
             const store = CodeGraphStore.of({
@@ -768,6 +780,7 @@ describe('topic maintenance current evidence', () => {
               effect.pipe(
                 Effect.provideService(CodeGraphQueryService, query),
                 Effect.provideService(CodeGraphStore, store),
+                Effect.withTracer(tracer),
               );
             const config = {
               agentContextHome: home,
@@ -802,6 +815,15 @@ describe('topic maintenance current evidence', () => {
             const initial = yield* observe();
             expect(initial.outcome).toBe('unchanged');
             expect(initial.sources[0]?.historicalAvailable).toBe(true);
+            statusReads = evidenceReads = 0;
+            const unchangedPacket = yield* provide(
+              buildTopicMaintenanceEvidencePacket(config, enrolledRecord, repo, initial),
+            );
+            expect(unchangedPacket.outcome).toBe('ready');
+            expect(unchangedPacket.sources?.[0]?.oldExcerpt.provenance).toBe('historical-verified');
+            expect(unchangedPacket.sources?.[0]?.newExcerpt.provenance).toBe('current-verified');
+            expect(evidenceReads).toBe(1);
+            expect(statusReads).toBe(2);
             const readOnlyInitial = yield* observe(initial, {allowCapture: false});
             expect(readOnlyInitial.revision).toBe(initial.revision);
             expect((yield* observe(undefined, {allowCapture: false})).outcome).toBe('unavailable');
@@ -856,6 +878,34 @@ describe('topic maintenance current evidence', () => {
             expect(changed.outcome).toBe('review-required');
             expect(changed.revision).not.toBe(initial.revision);
             expect(changed.sources[0]?.historicalAvailable).toBe(true);
+            statusReads = evidenceReads = 0;
+            const changedPacket = yield* provide(
+              buildTopicMaintenanceEvidencePacket(config, enrolledRecord, repo, changed),
+            );
+            expect(changedPacket.outcome).toBe('ready');
+            expect(changedPacket.sources?.[0]?.oldExcerpt).toMatchObject({
+              provenance: 'historical-verified',
+              supportsCitation: true,
+              fileBytesHash: sha256HexSync('export const value = 1;\n'),
+            });
+            expect(changedPacket.sources?.[0]?.newExcerpt).toMatchObject({
+              provenance: 'current-verified',
+              supportsCitation: true,
+              fileBytesHash: sha256HexSync('export const value = 2;\n'),
+            });
+            expect(evidenceReads).toBe(2);
+            expect(statusReads).toBe(2);
+            const mismatchedHash = projectTopicMaintenanceObservation(
+              enrolledRecord,
+              changed.sources.map(item => ({
+                ...item,
+                currentFileBytesHash: 'f'.repeat(64),
+              })),
+            );
+            expect(
+              (yield* provide(buildTopicMaintenanceEvidencePacket(config, enrolledRecord, repo, mismatchedHash)))
+                .outcome,
+            ).toBe('unavailable');
             const acceptedRecord = acceptComparison(enrolledRecord, changed.sources[0].current!);
             expect(acceptedRecord.metadata.topicMaintenanceError).toBeUndefined();
             const acceptedInitial = yield* provide(observeTopicMaintenanceEvidence(config, acceptedRecord, repo));

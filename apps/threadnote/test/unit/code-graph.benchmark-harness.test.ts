@@ -1,4 +1,5 @@
 import {TestError} from '@threadnote/testing/test-error';
+import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {readFileSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
@@ -9,6 +10,9 @@ import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
 import {
   applyBenchmarkOverlay,
+  BenchmarkStageTimings,
+  IndexPhaseTimeline,
+  indexPhaseMeasurements,
   benchmarkDarwinStorageClassification,
   benchmarkLinuxStorageClassification,
   benchmarkVectorModelDirectoryName,
@@ -182,6 +186,99 @@ describe('code graph external benchmark harness', () => {
       surprisingLinks: 0,
     });
   });
+
+  fcEffectProp(
+    effectIt,
+    'keeps repeated timing observations bounded and independent of returned snapshots',
+    {durations: fc.array(fc.integer({min: 0, max: 1000}), {minLength: 1, maxLength: 12})},
+    ({durations}) =>
+      Effect.gen(function* () {
+        const timings = new BenchmarkStageTimings();
+        for (const duration of durations) {
+          const complete = yield* timings.observe('snapshot-lease-release');
+          yield* TestClock.adjust(duration);
+          yield* complete;
+        }
+        const before = timings.observations();
+        expect(before).toHaveLength(1);
+        expect(before[0]?.[1]).toMatchObject({
+          count: durations.length,
+          maximumWallMilliseconds: Math.max(...durations),
+          wallMilliseconds: durations.reduce((total, duration) => total + duration, 0),
+        });
+        Object.assign(before[0][1], {wallMilliseconds: -1});
+        expect(timings.observations()[0]?.[1].wallMilliseconds).toBeGreaterThanOrEqual(0);
+        expect(timings.measurements('one-file-reindex')).toHaveLength(4);
+      }),
+    {fastCheck: {numRuns: 32}},
+  );
+
+  it('retains activation timing while exposing the post-completion tail', () => {
+    fc.assert(
+      fc.property(
+        fc.tuple(
+          fc.integer({min: 0, max: 1000}),
+          fc.integer({min: 0, max: 1000}),
+          fc.integer({min: 0, max: 1000}),
+          fc.integer({min: 0, max: 1000}),
+        ),
+        durations => {
+          const telemetry = {cpuSystemMicroseconds: 0, cpuUserMicroseconds: 0, peakRssBytes: 0, rssBytes: 0};
+          const timeline = new IndexPhaseTimeline(0n, telemetry);
+          let at = 0;
+          timeline.observe({phase: 'activating', subphase: 'validating-input', snapshotId: 'snapshot'}, 0n, telemetry);
+          for (const [index, subphase] of (['writing-and-checkpointing', 'promoting', 'complete'] as const).entries()) {
+            at += durations[index];
+            timeline.observe(
+              {phase: 'activating', subphase, snapshotId: 'snapshot'},
+              BigInt(at) * 1_000_000n,
+              telemetry,
+            );
+          }
+          at += durations[3];
+          timeline.finish(BigInt(at) * 1_000_000n, telemetry);
+          const measurements = new Map(
+            indexPhaseMeasurements('one-file-reindex', timeline, false).map(value => [value.name, value.maximum]),
+          );
+          expect(measurements.get('one-file-reindex-activation-lexical-only')).toBe(at);
+          expect(measurements.get('one-file-reindex-post-activation-completion')).toBe(durations[3]);
+          expect(
+            (measurements.get('one-file-reindex-pre-activation-validation') ?? 0) +
+              (measurements.get('one-file-reindex-snapshot-write-and-checkpoint') ?? 0) +
+              (measurements.get('one-file-reindex-snapshot-promotion') ?? 0) +
+              (measurements.get('one-file-reindex-post-activation-completion') ?? 0),
+          ).toBe(at);
+        },
+      ),
+      {numRuns: 64},
+    );
+  });
+
+  effectIt.effect('separates lease releases after activation completion while retaining repeated calls', () =>
+    Effect.gen(function* () {
+      const telemetry = {cpuSystemMicroseconds: 0, cpuUserMicroseconds: 0, peakRssBytes: 0, rssBytes: 0};
+      const timeline = new IndexPhaseTimeline(0n, telemetry);
+      const early = yield* timeline.observeTiming('snapshot-lease-release');
+      yield* TestClock.adjust(5);
+      yield* early;
+      timeline.observe({phase: 'activating', subphase: 'complete', snapshotId: 'snapshot'}, 5_000_000n, telemetry);
+      for (let index = 0; index < 2; index += 1) {
+        const scoped = yield* timeline.observeTiming('snapshot-lease-release');
+        yield* TestClock.adjust(7);
+        yield* scoped;
+      }
+      timeline.finish(19_000_000n, telemetry);
+      const measurements = new Map(
+        indexPhaseMeasurements('one-file-reindex', timeline, false).map(value => [value.name, value.maximum]),
+      );
+      expect(measurements.get('one-file-reindex-completion-snapshot-lease-release-count-n1')).toBe(1);
+      expect(measurements.get('one-file-reindex-completion-snapshot-lease-release-after-complete-count-n1')).toBe(2);
+      expect(measurements.get('one-file-reindex-completion-snapshot-lease-release-after-complete-wall-total-n1')).toBe(
+        14,
+      );
+      expect(measurements.get('one-file-reindex-post-activation-completion')).toBe(14);
+    }),
+  );
 
   effectIt.effect('measures only index execution after setup and before cleanup', () =>
     Effect.gen(function* () {

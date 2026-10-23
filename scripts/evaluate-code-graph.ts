@@ -1,6 +1,6 @@
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
-import {Effect, FileSystem, Path} from 'effect';
+import {Cause, Effect, FileSystem, Path} from 'effect';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -74,6 +74,12 @@ const evaluateNativeCodeGraph = Effect.scoped(
     let worktreeLeakageCount = 0;
     let worktreeObservationCount = 0;
     const worktreeFailures: string[] = [];
+    const failedWorktrees: {
+      readonly allowed: CodeGraphQueryResult;
+      readonly forbidden: CodeGraphQueryResult;
+      readonly expected: string;
+      readonly path: string;
+    }[] = [];
     for (const contract of fixture.worktreeContracts) {
       for (const variant of [
         {allowed: contract.branchAReplacement, forbidden: contract.branchBReplacement, root: worktreeA},
@@ -97,12 +103,17 @@ const evaluateNativeCodeGraph = Effect.scoped(
           ],
           {concurrency: 1},
         );
+        const failuresBefore = worktreeFailures.length;
+        const leakageBefore = worktreeLeakageCount;
         if (!allowed.nodes.some(node => node.name === variant.allowed)) {
           worktreeFailures.push(`worktree overlay did not expose ${variant.allowed}`);
         }
         if (contract.forbiddenCrossBranch) {
           worktreeObservationCount += 1;
           if (forbidden.nodes.some(node => node.name === variant.forbidden)) worktreeLeakageCount += 1;
+        }
+        if (worktreeFailures.length !== failuresBefore || worktreeLeakageCount !== leakageBefore) {
+          failedWorktrees.push({allowed, forbidden, expected: variant.allowed, path: contract.basePath});
         }
       }
     }
@@ -135,11 +146,44 @@ const evaluateNativeCodeGraph = Effect.scoped(
     });
     const gateFailures = [...nativeGateFailures(metrics), ...worktreeFailures];
     if (gateFailures.length > 0) {
+      // Observe failed fixtures only after every original query has completed.
+      // These later reads explain the selected snapshot; they cannot establish
+      // query-time freshness or replace the original quality failure.
+      const worktreeObservations = yield* Effect.forEach(failedWorktrees.slice(0, 8), failed =>
+        observeCodeGraphEvaluationDiagnostic(() =>
+          Effect.gen(function* () {
+            const selectedSnapshot = yield* Effect.all({
+              exact: store.findSymbolsByPathAndName(
+                layout.databasePath,
+                failed.allowed.snapshot.id,
+                failed.path,
+                failed.expected,
+              ),
+              file: store.searchSymbolsByPaths(layout.databasePath, failed.allowed.snapshot.id, [failed.path], 20),
+            }).pipe(
+              Effect.map(({exact, file}) => ({
+                state: 'observed-after-queries' as const,
+                exactSymbolNames: exact.slice(0, 20).map(node => node.name.slice(0, 256)),
+                fileSymbolNames: (file[0] ?? []).slice(0, 20).map(node => node.name.slice(0, 256)),
+              })),
+            );
+            return {
+              expected: failed.expected.slice(0, 256),
+              path: failed.path.slice(0, 1_024),
+              allowed: worktreeQueryObservation(failed.allowed),
+              forbidden: worktreeQueryObservation(failed.forbidden),
+              selectedSnapshot,
+            };
+          }),
+        ),
+      );
       yield* printJson({
         actualAuthoritativeEdges,
         expectedEdges: fixture.expectedEdges.map(codeGraphEdgeKey),
         metrics,
         observations,
+        worktreeObservations,
+        worktreeObservationsTruncated: failedWorktrees.length > worktreeObservations.length,
       });
       return yield* ScriptError.make({message: gateFailures.join('\n')});
     }
@@ -162,6 +206,26 @@ const evaluateNativeCodeGraph = Effect.scoped(
     yield* printJson(baseline);
   }),
 );
+
+/** Supplemental evidence must never replace an established quality failure. */
+export function observeCodeGraphEvaluationDiagnostic<A, E, R>(read: () => Effect.Effect<A, E, R>) {
+  return Effect.suspend(read).pipe(
+    Effect.timeout('5 seconds'),
+    Effect.catchCauseIf(
+      cause => !Cause.hasInterrupts(cause),
+      () => Effect.succeed({state: 'unavailable' as const}),
+    ),
+  );
+}
+
+function worktreeQueryObservation(result: CodeGraphQueryResult) {
+  return {
+    freshness: result.freshness,
+    snapshot: result.snapshot,
+    nodes: result.nodes.slice(0, 20).map(node => ({name: node.name.slice(0, 256), path: node.path.slice(0, 1_024)})),
+    warnings: result.warnings.slice(0, 8).map(warning => warning.slice(0, 512)),
+  };
+}
 
 function observation(queryId: string, answerable: boolean, result: CodeGraphQueryResult) {
   return {
@@ -231,4 +295,4 @@ const replaceContractSymbol = Effect.fn('codeGraphEvaluation.replaceContractSymb
   yield* fs.writeFileString(target, content.replaceAll(from, to));
 });
 
-BunRuntime.runMain(provideScriptLayer(evaluateNativeCodeGraph, ApplicationLayer));
+if (import.meta.main) BunRuntime.runMain(provideScriptLayer(evaluateNativeCodeGraph, ApplicationLayer));
