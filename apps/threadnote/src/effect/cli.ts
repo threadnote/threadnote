@@ -1,5 +1,6 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
 import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
+import {makeMemoryArchiveCommand} from './memory_archive_cli.js';
 import {devSkillsCommandMetadata, makeDevSkillsCommand} from './dev_skills_cli.js';
 import {sourceAddFlags} from '../integrations/cli.js';
 import {makeContextRuntimeCommand} from './context_cli.js';
@@ -1957,6 +1958,9 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('list', list, {aliases: ['ls']}),
   registerTopLevelCommand('handoff', handoff),
   registerTopLevelCommand('archive', archive),
+  registerTopLevelCommand('memory-archive', makeMemoryArchiveCommand(withRuntimeEffect), {
+    productionLog: {mode: 'never'},
+  }),
   registerTopLevelCommand('forget', forget),
   registerTopLevelCommand('cloud', cloud),
   registerTopLevelCommand('workflow-memory', makeWorkflowMemoryCommand(withRuntimeEffect)),

@@ -51,12 +51,30 @@ def inventory(root):
 
 
 def run(arguments, environment, cwd, timeout=120, evidence=None):
-    result = subprocess.run(arguments, env=environment, cwd=cwd, capture_output=True,
-                            encoding="utf-8", timeout=timeout)
+    # Own Python children use UTF-8 pipes; raw capture also preserves unexpected native diagnostics.
+    result = subprocess.run(arguments, env={**environment, "PYTHONIOENCODING": "utf-8"}, cwd=cwd,
+                            capture_output=True, timeout=timeout)
+
+    def decode(value, errors="strict"):
+        return value.decode("utf-8", errors=errors).replace("\r\n", "\n").replace("\r", "\n")
+
+    stdout = decode(result.stdout, errors="backslashreplace")
+    stderr = decode(result.stderr, errors="backslashreplace")
     if evidence is not None:
-        evidence.write_text(result.stdout + result.stderr, encoding="utf-8")
-    require(result.returncode == 0, repr(arguments) + "\n" + result.stdout[-5000:] + result.stderr[-5000:])
-    return result.stdout
+        evidence.with_name(evidence.name + ".stdout.bin").write_bytes(result.stdout)
+        evidence.with_name(evidence.name + ".stderr.bin").write_bytes(result.stderr)
+        evidence.write_text(stdout + stderr, encoding="utf-8")
+    require(result.returncode == 0, repr(arguments) + " exited with code " + str(result.returncode)
+            + "\n" + stdout[-5000:] + stderr[-5000:])
+    # Success output remains strict UTF-8, including stderr; diagnostic rendering never grants success.
+    decode(result.stderr)
+    return decode(result.stdout)
+
+
+def copy_native_logs(root, destination):
+    for log in root.glob("*-native.log"):
+        for source in (log, log.with_name(log.name + ".stdout.bin"), log.with_name(log.name + ".stderr.bin")):
+            shutil.copyfile(source, destination / source.name)
 
 
 def fixture_environment(root, runtime):
@@ -381,8 +399,7 @@ def stage(arguments):
         report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
         evidence = report.with_suffix(".provenance")
         shutil.copytree(root / "provenance", evidence, dirs_exist_ok=True)
-        for log in root.glob("*-native.log"):
-            shutil.copyfile(log, evidence / log.name)
+        copy_native_logs(root, evidence)
         shutil.rmtree(root)
         print(json.dumps({"status": result["status"], "report": str(report)}))
     except BaseException as error:

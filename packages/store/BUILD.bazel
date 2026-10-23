@@ -43,6 +43,7 @@ bun_test(
         "//packages/store:test/resource-id.property.test.ts",
         "//packages/store:test/resource-segment.property.test.ts",
         "//packages/store:test/resource-store-checked-batch.test.ts",
+        "//packages/store:test/resource-store-existing-read.test.ts",
         "//packages/store:test/source-evidence.test.ts",
         "//packages/testing:package.json",
         "//packages/testing:src/fast-check-property.ts",
@@ -69,6 +70,7 @@ bun_test(
         "packages/store/test/resource-id.property.test.ts",
         "packages/store/test/resource-segment.property.test.ts",
         "packages/store/test/resource-store-checked-batch.test.ts",
+        "packages/store/test/resource-store-existing-read.test.ts",
         "packages/store/test/source-evidence.test.ts",
     ],
 )

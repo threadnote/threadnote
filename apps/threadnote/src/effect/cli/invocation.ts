@@ -90,6 +90,7 @@ export function makeCliInvocationInspector(registrations: readonly CliCommandReg
       !offlinePilot &&
       operation !== undefined &&
       operation !== 'telemetry' &&
+      operation !== 'memory-archive' &&
       !scanned.flags.has('--help') &&
       !scanned.flags.has('-h');
     return {

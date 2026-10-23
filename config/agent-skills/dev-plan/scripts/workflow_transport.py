@@ -133,6 +133,7 @@ class WorkflowTransport:
         require(generation_pin is None or generation_pin == self.generation,
                 "Explicit workflow generation does not match these actual helper resources")
         self.invoke = invoke
+        self._binding_identity = None
         self.state = read_json(self.path) if self.path.exists() else None
         if self.state is not None and "binding" in self.state:
             self._validate()
@@ -146,6 +147,10 @@ class WorkflowTransport:
         require(self.home is None or str(Path(binding["home"]).resolve()) == self.home, "Workflow data home changed")
         require(self.profile is None or binding["profile"] == self.profile, "Workflow profile changed")
         require(self.team is None or binding.get("team") == self.team, "Workflow publication team changed")
+        identity = digest(binding)
+        require(self._binding_identity is None or identity == self._binding_identity,
+                "Workflow binding identity changed during this operation")
+        self._binding_identity = identity
         self.repo, self.home = str(Path(binding["repo"]).resolve()), str(Path(binding["home"]).resolve())
 
     @property
@@ -228,8 +233,7 @@ class WorkflowTransport:
         require(result.get("operationId", pending["request"]["operationId"]) == pending["request"]["operationId"], "Workflow operation identity mismatch")
         uri = result.get("canonicalUri")
         require(isinstance(uri, str), "Workflow mutation has no exact destination")
-        if pending["request"]["action"] != "archive":
-            require(uri == pending["preview"]["canonicalUri"], "Workflow mutation changed its preflight destination")
+        require(uri == pending["preview"]["canonicalUri"], "Workflow mutation changed its preflight destination")
         observed = self.read(uri)
         require(result.get("verifiedReadback") is True and result.get("revision") == observed["revision"], "Workflow mutation readback revision mismatch")
         expected = pending["request"].get("bodySha256", pending.get("sourceBodySha256"))
@@ -245,10 +249,24 @@ class WorkflowTransport:
         save_json(self.path, self.state)
         return uri
 
-    def recover(self):
+    def recover(self, archive_plan=None):
         with locked(self.path):
             self.state = read_json(self.path)
+            self._validate()
             pending = self.state.get("pending")
+            if archive_plan is not None:
+                # Recheck under the replay lock: another helper may have changed pending intent
+                # after the caller's admission check released its own lock.
+                require(archive_plan.get("bindingId") == self.binding["bindingId"]
+                        and archive_plan.get("generation") == self.generation
+                        and archive_plan.get("bindingHash") == digest(self.binding),
+                        "Archive recovery belongs to another full workflow identity")
+                require(not pending or (pending["key"] == "archive:" + archive_plan["request"]["uri"]
+                        and pending["request"] == archive_plan["request"]
+                        and pending.get("sourceBodySha256") == archive_plan["sourceBodySha256"]
+                        and (pending.get("preview") == archive_plan["preview"]
+                             or (pending.get("stage") == "preflight" and pending.get("preview") is None))),
+                        "Pending workflow mutation differs from the admitted archive recovery")
             if not pending or pending.get("stage") != "mutation":
                 return
             try:
@@ -276,6 +294,7 @@ class WorkflowTransport:
         key = digest(request)
         with locked(self.path):
             self.state = read_json(self.path)
+            self._validate()
             old = self.state["operations"].get(key)
             if old:
                 return old["preview"]
@@ -300,6 +319,7 @@ class WorkflowTransport:
             return prepared["canonicalUri"]
         with locked(self.path):
             self.state = read_json(self.path)
+            self._validate()
             pending = self.state.get("pending")
             if pending is None:
                 # A verified completed operation is replayed only for the same intent.
@@ -318,10 +338,72 @@ class WorkflowTransport:
             result = self.request(request.pop("action"), **request)
             return self._accept(pending, result)
 
-    def archive(self, uri, expected_revision=None):
-        self.recover()
+    def validate_archive_plans(self, plans):
         with locked(self.path):
             self.state = read_json(self.path)
+            self._validate()
+            identity = {"bindingId": self.binding["bindingId"], "generation": self.generation,
+                        "bindingHash": digest(self.binding)}
+            require(all(all(plan.get(key) == value for key, value in identity.items()) for plan in plans),
+                    "Archive admission belongs to another full workflow identity")
+            return identity
+
+    def plan_archive(self, uri):
+        """Read-only native preflight; persist the returned intent in the closeout receipt."""
+        with locked(self.path):
+            self.state = read_json(self.path)
+            self._validate()
+            require(not self.state.get("pending"), "Recover the existing workflow operation before planning closeout")
+            source = self.read(uri)
+            require(source["state"] == "active", "Archive plan requires an active owned artifact")
+            match = re.search(r"<!-- dev-(?:spec|plan):v1 (.*?) -->", source["body"], re.S)
+            require(match, "Archive requires a native owned workflow artifact")
+            record = json.loads(match.group(1))
+            source_run = source.get("sourceRunId") or record.get("runId") or record.get("data", {}).get("runId")
+            require(source_run, "Workflow archive lacks source writer runId")
+            request = {"action": "archive", "operationId": uuid.uuid4().hex,
+                       "artifactKey": source.get("artifactKey") or uri.rsplit("/", 1)[-1].removesuffix(".md"),
+                       "sourceRunId": source_run, "role": record["kind"], "uri": uri,
+                       "expectedRevision": source["revision"]}
+            preview = self.request("preflight", mutation="archive", **{k: v for k, v in request.items() if k != "action"})
+            require(preview.get("beforeRevision") == source["revision"]
+                    and preview.get("bodySha256") == source["bodySha256"]
+                    and isinstance(preview.get("canonicalUri"), str), "Archive preflight changed source or destination")
+            return {"bindingId": self.binding["bindingId"], "generation": self.generation,
+                    "bindingHash": digest(self.binding),
+                    "request": request, "preview": preview, "sourceBodySha256": source["bodySha256"]}
+
+    def archive(self, uri, expected_revision=None, plan=None):
+        if plan is not None:
+            # Validate the admitted intent before recover() can replay a native mutation.
+            with locked(self.path):
+                self.state = read_json(self.path)
+                self._validate()
+                pending = self.state.get("pending")
+                require(plan.get("bindingId") == self.binding["bindingId"] and plan.get("generation") == self.generation
+                        and plan.get("bindingHash") == digest(self.binding)
+                        and plan["request"].get("action") == "archive" and plan["request"].get("uri") == uri,
+                        "Archive plan belongs to another workflow, generation or source")
+                require(expected_revision is None or expected_revision == plan["request"]["expectedRevision"],
+                        "Archive plan targets another revision")
+                require(not pending or (pending["key"] == "archive:" + uri
+                        and pending["request"] == plan["request"]
+                        and pending.get("sourceBodySha256") == plan["sourceBodySha256"]
+                        and (pending.get("preview") == plan["preview"]
+                             or (pending.get("stage") == "preflight" and pending.get("preview") is None))),
+                        "Pending workflow mutation differs from the admitted archive plan")
+        self.recover(archive_plan=plan)
+        with locked(self.path):
+            self.state = read_json(self.path)
+            self._validate()
+            if plan is not None:
+                require(plan.get("bindingId") == self.binding["bindingId"] and plan.get("generation") == self.generation
+                        and plan.get("bindingHash") == digest(self.binding),
+                        "Archive plan belongs to another workflow or helper generation")
+                require(plan["request"].get("action") == "archive" and plan["request"].get("uri") == uri,
+                        "Archive plan targets another source")
+                require(expected_revision is None or expected_revision == plan["request"]["expectedRevision"],
+                        "Archive plan targets another revision")
             request_key = "archive:" + uri
             completed = self.state["operations"].get(request_key)
             if completed:
@@ -330,9 +412,14 @@ class WorkflowTransport:
                 archived = self.read(completed["result"]["canonicalUri"])
                 require(archived["revision"] == completed["result"]["revision"] and archived["state"] == "archived",
                         "Completed workflow archive changed")
+                require(plan is None or (completed["request"] == plan["request"]
+                        and archived["canonicalUri"] == plan["preview"]["canonicalUri"]),
+                        "Completed archive differs from the admitted archive plan")
                 return archived["canonicalUri"]
             pending = self.state.get("pending")
             require(not pending or pending["key"] == request_key, "Recover the pending workflow operation before archiving")
+            require(plan is None or not pending or pending["request"] == plan["request"],
+                    "Pending archive differs from the admitted archive plan")
             if pending is None:
                 source = self.read(uri)
                 require(expected_revision is None or source["revision"] == expected_revision, "Owned artifact revision changed before retirement")
@@ -341,14 +428,21 @@ class WorkflowTransport:
                 record = json.loads(match.group(1))
                 source_run = source.get("sourceRunId") or record.get("runId") or record.get("data", {}).get("runId")
                 require(source_run, "Workflow archive lacks source writer runId")
-                request = {"action": "archive", "operationId": uuid.uuid4().hex, "artifactKey": source.get("artifactKey") or uri.rsplit("/", 1)[-1].removesuffix(".md"),
-                           "sourceRunId": source_run, "role": record["kind"], "uri": uri, "expectedRevision": source["revision"]}
+                request = plan["request"] if plan is not None else {
+                    "action": "archive", "operationId": uuid.uuid4().hex,
+                    "artifactKey": source.get("artifactKey") or uri.rsplit("/", 1)[-1].removesuffix(".md"),
+                    "sourceRunId": source_run, "role": record["kind"], "uri": uri, "expectedRevision": source["revision"]}
+                require(plan is None or (source["revision"] == request["expectedRevision"]
+                        and source["bodySha256"] == plan["sourceBodySha256"]),
+                        "Owned artifact changed after final-size admission")
                 pending = {"key": request_key, "request": request, "sourceBodySha256": source["bodySha256"], "stage": "preflight"}
                 self.state["pending"] = pending
                 save_json(self.path, self.state)
             request = pending["request"]
             pending["preview"] = self.request("preflight", mutation="archive", **{k: v for k, v in request.items() if k != "action"})
             require(pending["preview"].get("beforeRevision") == request["expectedRevision"], "Archive preflight changed expected source revision")
+            require(plan is None or pending["preview"] == plan["preview"],
+                    "Archive destination changed after final-size admission")
             pending["stage"] = "mutation"
             save_json(self.path, self.state)
             return self._accept(pending, self.request("archive", **{k: v for k, v in request.items() if k != "action"}))

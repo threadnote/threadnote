@@ -57,6 +57,67 @@ def evidence_check(plan, root, implemented, evidence):
     require(len(implemented["contextRefs"]) <= 13, "Leave relation room for superseded architecture and plan history")
 
 
+def architecture_record(plan, root, root_uri, implemented, evidence, archive_map, final=False):
+    baseline = root["data"]["children"]["current"]
+    target = root["data"]["children"]["target"]
+    data = {**implemented, "archiveMap": archive_map, "archiveMapPresentation": "summary-v1",
+            "closeoutStatus": "complete" if final else "archiving",
+            "planningRoot": archive_map.get(root_uri, root_uri),
+            "supersededArchitecture": {key: archive_map.get(uri, uri)
+                                        for key, uri in (("current", baseline), ("target", target))},
+            "implementationEvidence": evidence}
+    record = record_for(plan, "implemented", data, plan["title"] + " — implemented architecture")
+    record["runId"] = root["runId"]
+    relations = [("references", uri) for uri in implemented["contextRefs"]]
+    # Native relations target active knowledge; the full archiveMap remains private structured history.
+    if not final:
+        relations += [("supersedes", uri) for uri in (baseline, target)]
+        relations += [("references", root_uri)]
+    record["relations"] = [{"type": kind, "uri": uri} for kind, uri in relations]
+    record["citationPolicy"] = "require-current"
+    return record, relations
+
+
+def admit_final_size(state, implemented, evidence, client):
+    """Plan every remaining archive without native mutations, then size the exact final body."""
+    require(not state.get("pending") or state.get("finalSizeAdmission"),
+            "This pending closeout predates final-size admission; reconcile its original journal explicitly "
+            "before any further mutation. No recovery mutation attempted.")
+    plans = state.setdefault("archivePlans", {})
+    require(set(state["archiveMap"]) <= set(state["records"]), "Archive map contains unowned history")
+    for uri, record in state["records"].items():
+        if uri in state["archiveMap"]:
+            require(uri not in plans or state["archiveMap"][uri] == plans[uri]["preview"]["canonicalUri"],
+                    "Returned archive differs from its admitted destination")
+            continue
+        if uri not in plans or not state.get("implementedUri"):
+            require(hasattr(client, "plan_archive") and hasattr(client, "archive"),
+                    "Archive transport has no exact destination preflight; no save or retirement attempted")
+            require(digest(load_record(client.read(uri))) == digest(record),
+                    "Planning artifact changed before final-size admission")
+        if uri not in plans:
+            plans[uri] = client.plan_archive(uri)
+    if plans:
+        client.validate_archive_plans(list(plans.values()))
+    projected = {uri: state["archiveMap"][uri] if uri in state["archiveMap"]
+                 else plans[uri]["preview"]["canonicalUri"] for uri in state["records"]}
+    require(all(isinstance(uri, str) and uri.startswith("threadnote://") for uri in projected.values()),
+            "Archive preflight did not return every exact destination")
+    record, _ = architecture_record(state["plan"], state["root"], state["rootUri"],
+                                    implemented, evidence, projected, final=True)
+    final_bytes = len(memory_text(record).encode("utf-8"))
+    require(final_bytes <= 60000,
+            f"Final implemented architecture needs {final_bytes} UTF-8 bytes with all {len(projected)} archives; "
+            "limit is 60000. Compact architecture/evidence without pruning history; no native mutation attempted.")
+    if not state.get("implementedUri"):
+        initial, _ = architecture_record(state["plan"], state["root"], state["rootUri"],
+                                          implemented, evidence, state["archiveMap"])
+        require(len(memory_text(initial).encode("utf-8")) <= 60000,
+                "Initial implemented architecture exceeds 60000 UTF-8 bytes; no native mutation attempted")
+    state["finalSizeAdmission"] = {"finalBodyBytes": final_bytes, "finalRecordHash": digest(record),
+                                    "archiveCount": len(projected), "archivePlansHash": digest(plans)}
+
+
 def complete(root_uri, implemented, evidence, state_path, client, recover_uri=None):
     wt.block_cloud_finish(client)
     state_path = Path(state_path)
@@ -101,18 +162,23 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
             require(uri in sources, "Implemented architecture references unread context")
             require(pin(client, uri)["sha256"] == sources[uri]["sha256"],
                     "Relevant memory changed; refresh the implemented architecture's context")
+        if state["status"] != "complete":
+            admit_final_size(state, implemented, evidence, client)
+            write_json(state_path, state)
         if state.get("pending"):
             pending = state["pending"]
             if pending["operation"] == "archive":
                 uri = recover_uri or pending.get("uri")
-                if uri is None and getattr(client, "workflow", None) is not None:
-                    uri = client.archive(pending["source"])
+                if uri is None:
+                    uri = client.archive(pending["source"], plan=state["archivePlans"][pending["source"]])
                 if not uri:
                     original = client.peek(pending["source"])
                     require(original is not None and digest(load_record(original)) == pending["hash"]
                             and client.is_active(pending["source"]),
                             "Archive outcome unknown; recall its archived topic and provide --recover-uri")
                 else:
+                    require(uri == state["archivePlans"][pending["source"]]["preview"]["canonicalUri"],
+                            "Recovered archive differs from its admitted destination")
                     require(digest(load_record(client.read(uri))) == pending["hash"],
                             "Recovered archive differs from the intended artifact")
                     if getattr(client, "workflow", None) is not None:
@@ -132,23 +198,11 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
                     "archiveMap": state["archiveMap"]}
 
         def publish(final=False):
-            baseline = root["data"]["children"]["current"]
-            target = root["data"]["children"]["target"]
-            data = {**implemented, "archiveMap": state["archiveMap"],
-                    "closeoutStatus": "complete" if final else "archiving",
-                    "planningRoot": state["archiveMap"].get(root_uri, root_uri),
-                    "supersededArchitecture": {key: state["archiveMap"].get(uri, uri)
-                                                for key, uri in (("current", baseline), ("target", target))},
-                    "implementationEvidence": evidence}
-            record = record_for(plan, "implemented", data, plan["title"] + " — implemented architecture")
-            record["runId"] = root["runId"]
-            relations = [("references", uri) for uri in implemented["contextRefs"]]
-            # Native relation targets must be active. Archived history stays in canonical body links.
-            if not final:
-                relations += [("supersedes", uri) for uri in (baseline, target)]
-                relations += [("references", root_uri)]
-            record["relations"] = [{"type": kind, "uri": uri} for kind, uri in relations]
-            record["citationPolicy"] = "require-current"
+            if state["archivePlans"]:
+                client.validate_archive_plans(list(state["archivePlans"].values()))
+            record, relations = architecture_record(plan, root, root_uri, implemented, evidence, state["archiveMap"], final)
+            require(not final or digest(record) == state["finalSizeAdmission"]["finalRecordHash"],
+                    "Final architecture differs from its before-write size admission")
             require(len(memory_text(record).encode()) <= 60000,
                     "Implemented architecture is too large; narrow the source snapshot")
             topic = plan["id"] + "-" + root["runId"] + "-implemented-architecture"
@@ -174,15 +228,11 @@ def complete(root_uri, implemented, evidence, state_path, client, recover_uri=No
                     "Planning artifact changed during closeout; reconcile before retirement")
             state["pending"] = {"operation": "archive", "source": uri, "hash": digest(record)}
             write_json(state_path, state)
-            if hasattr(client, "archive"):
-                archived = client.archive(uri)
-            else:
-                output = client.call("archive", [uri])
-                match = re.search(r"Stored memory: (threadnote://[^\s]+)", output)
-                require(match, "Unknown archive outcome; recover the returned archived URI before retrying")
-                archived = match.group(1)
+            archived = client.archive(uri, plan=state["archivePlans"][uri])
             state["pending"]["uri"] = archived
             write_json(state_path, state)
+            require(archived == state["archivePlans"][uri]["preview"]["canonicalUri"],
+                    "Archive changed its admitted destination; preserve the pending recovery journal")
             require(digest(load_record(client.read(archived))) == digest(record), "Archive readback mismatch")
             state["archiveMap"][uri] = archived
             state.pop("pending")
@@ -198,12 +248,13 @@ def main():
     for name in ("root", "implemented", "evidence", "state"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--threadnote-home")
+    parser.add_argument("--archive-runtime-policy", help="Explicit owner-approved immutable archive-only runtime policy; never installs or changes global runtime")
     wt.add_arguments(parser)
     parser.add_argument("--recover-uri")
     args = parser.parse_args()
     implemented = read_json(args.implemented)
     result = complete(args.root, implemented, read_json(args.evidence), args.state,
-                      Threadnote(implemented["scope"]["repo"], args.threadnote_home, **wt.options(args)), args.recover_uri)
+                      Threadnote(implemented["scope"]["repo"], args.threadnote_home, archive_runtime_policy=args.archive_runtime_policy, **wt.options(args)), args.recover_uri)
     print(json.dumps(result, ensure_ascii=True, indent=2))
 
 

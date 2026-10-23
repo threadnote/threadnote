@@ -88,6 +88,20 @@ class SpecClient:
 
 class PlanClient(SpecClient):
     def is_active(self, uri): return self.active(uri)
+    def plan_archive(self, uri):
+        return {"source": uri, "sourceRecordHash": dp.digest(dp.load_record(self.read(uri))),
+                "preview": {"canonicalUri": uri.replace("/active/", "/archived/")}}
+    def validate_archive_plans(self, plans):
+        for plan in plans:
+            observed = self.peek(plan["source"]) or self.peek(plan["preview"]["canonicalUri"])
+            dp.require(observed is not None and dp.digest(dp.load_record(observed)) == plan["sourceRecordHash"],
+                       "Synthetic exact archive source changed")
+    def archive(self, uri, plan=None):
+        dp.require(plan is not None and plan["source"] == uri, "Archive requires its exact admitted plan")
+        self.validate_archive_plans([plan])
+        destination = self.call("archive", [uri]).split("Stored memory: ", 1)[1]
+        dp.require(destination == plan["preview"]["canonicalUri"], "Synthetic archive destination changed")
+        return destination
     def remember(self, record, topic, relations, replace=None, deferred=False):
         return self.backend.write(record, topic, replace, False, dp.memory_text(record))
     def preflight(self, record, topic, relations, replace=None, deferred=False):
@@ -454,6 +468,38 @@ class Specs(unittest.TestCase):
         self.assertTrue(self.sc.active(uri))
         verified = support.load_record(self.sc.read(result["verifiedSpecUri"]))
         self.assertIn({"type": "references", "uri": uri}, verified["relations"])
+
+    def test_desktop_workflow_transport_reaches_planned_archive_closeout(self):
+        # Keep both real skill clients and their shared import; only the native wire is synthetic.
+        from test_workflow_transport import NativeFixture
+        native_home = str(self.directory / "native-home")
+        native = NativeFixture(self.repo, native_home, profile="desktop")
+
+        def request(transport, action, **fields):
+            payload = {"protocolVersion": 1, "action": action, **fields}
+            if action != "bind":
+                payload["bindingId"] = transport.binding["bindingId"]
+            result = native.response(payload)
+            if result["status"] == "error":
+                raise ds.wt.WorkflowError(result["code"], result["message"])
+            return result
+
+        self.assertIs(ds.wt, dp.wt)
+        with patch.object(ds.wt.WorkflowTransport, "request", request):
+            self.sc, self.pc = ds.Threadnote(str(self.repo), native_home), dp.Threadnote(str(self.repo), native_home)
+            _, _, cycle, directory = self.prepare()
+            complete = self.finish(cycle, directory)
+            self.assertEqual(complete["status"], "complete")
+            self.assertTrue(self.sc.active(complete["verifiedSpecUri"]))
+            self.assertTrue(self.pc.is_active(complete["implementedArchitectureUri"]))
+            archive_calls = [call for call in native.calls if call["action"] == "archive"]
+            self.assertTrue(archive_calls)
+            for call in archive_calls:
+                preview = next(item for item in native.calls if item["action"] == "preflight"
+                               and item["operationId"] == call["operationId"])
+                self.assertEqual(call["expectedRevision"], preview["expectedRevision"])
+                self.assertNotIn(call["uri"], native.documents)
+                self.assertEqual(native.operations[call["operationId"]]["state"], "archived")
 
     @unittest.skipUnless(os.environ.get("DEV_SPEC_NATIVE") == "1", "Opt-in isolated native lifecycle")
     def test_native_full_workflow_with_current_new_code_bindings(self):
