@@ -77,6 +77,15 @@ def copy_native_logs(root, destination):
             shutil.copyfile(source, destination / source.name)
 
 
+def preserve_failed_native_logs(root, report):
+    try:
+        destination = report.with_suffix(".provenance")
+        destination.mkdir(parents=True, exist_ok=True)
+        copy_native_logs(root, destination)
+    except BaseException:
+        pass  # Evidence retention must never replace the original staging failure.
+
+
 def fixture_environment(root, runtime):
     environment = {key: os.environ[key] for key in
                    ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC") if key in os.environ}
@@ -405,6 +414,7 @@ def stage(arguments):
     except BaseException as error:
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({"status": "failed", "error": str(error), "fixture": str(root)}, indent=2) + "\n")
+        preserve_failed_native_logs(root, report)
         raise
 
 

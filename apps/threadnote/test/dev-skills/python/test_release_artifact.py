@@ -6,7 +6,9 @@ from pathlib import Path
 import random
 import subprocess
 import sys
+import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -126,6 +128,70 @@ class ReleaseOutput(unittest.TestCase):
         (self.root / "suite-native.log.stderr.bin").unlink()
         with self.assertRaises(FileNotFoundError):
             release.copy_native_logs(self.root, destination)
+
+    def failed_stage(self, copy_failure=False):
+        checkout = self.root / "checkout"
+        dist = checkout / "dist"
+        dist.mkdir(parents=True)
+        (dist / "fixture").write_bytes(b"synthetic archive payload; never executable")
+        fixtures = checkout / "apps/threadnote/test/dev-skills/python"
+        fixtures.mkdir(parents=True)
+        (fixtures / "fixture.py").write_text("# synthetic staging input\n")
+        archive = self.root / "fixture.tar.gz"
+        with tarfile.open(archive, "w:gz") as stream:
+            stream.add(dist / "fixture", arcname="fixture")
+        Path(str(archive) + ".sha256").write_text(release.digest(archive) + "\n")
+        staging = self.root / "staging"
+        staging.mkdir()
+        report = self.root / "report/result.json"
+        original = RuntimeError("original native suite refusal")
+        packet = b'NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS {"version":1}\n'
+        expected = {"test_dev_spec-native.log": packet + b"traceback\n" * 1000,
+                    "test_dev_spec-native.log.stdout.bin": b"",
+                    "test_dev_spec-native.log.stderr.bin": packet + b"traceback\n" * 1000}
+
+        def fail_child(arguments, environment, cwd, timeout):
+            self.assertEqual(timeout, 1800)
+            self.assertEqual(arguments[-1], "--functional-only")
+            for name, raw in expected.items():
+                (staging / name).write_bytes(raw)
+            (staging / "private-data").write_text("must not copy unrelated files")
+            raise original
+
+        with patch.object(release.tempfile, "mkdtemp", return_value=str(staging)), \
+                patch.object(release.sys, "platform", "win32"), patch.object(release, "run", side_effect=fail_child) as launch:
+            if copy_failure:
+                with patch.object(release, "copy_native_logs", side_effect=OSError("synthetic copy refusal")):
+                    with self.assertRaises(RuntimeError) as caught:
+                        release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True))
+            else:
+                with self.assertRaises(RuntimeError) as caught:
+                    release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True))
+        self.assertIs(caught.exception, original)
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(json.loads(report.read_text())["error"], str(original))
+        self.assertTrue(staging.exists(), "Original failure retains its fixture")
+        return report, expected
+
+    def test_failed_stage_retains_native_sidecars_beyond_the_exception_tail(self):
+        report, expected = self.failed_stage()
+        destination = report.with_suffix(".provenance")
+        self.assertEqual({p.name: p.read_bytes() for p in destination.iterdir()}, expected)
+        self.assertNotIn(b"NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS", expected["test_dev_spec-native.log"][-5000:])
+        self.assertIn(b"NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS", (destination / "test_dev_spec-native.log.stderr.bin").read_bytes())
+
+    def test_failed_stage_copy_refusal_cannot_mask_original_failure(self):
+        self.failed_stage(copy_failure=True)
+
+    def test_best_effort_failed_evidence_handles_absent_and_incomplete_logs(self):
+        report = self.root / "report/result.json"
+        release.preserve_failed_native_logs(self.root, report)
+        self.assertEqual(list(report.with_suffix(".provenance").iterdir()), [])
+        (self.root / "suite-native.log").write_bytes(b"original failure")
+        (self.root / "suite-native.log.stdout.bin").write_bytes(b"partial")
+        release.preserve_failed_native_logs(self.root, report)
+        self.assertEqual((report.with_suffix(".provenance") / "suite-native.log").read_bytes(), b"original failure")
+        self.assertFalse((report.with_suffix(".provenance") / "suite-native.log.stderr.bin").exists())
 
 
 if __name__ == "__main__":
