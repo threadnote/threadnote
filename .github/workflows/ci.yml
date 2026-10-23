@@ -161,7 +161,14 @@ jobs:
           path: .context/bazel-selection
 
       - name: Install workflow inspection prerequisite
-        run: sudo apt-get update && sudo apt-get install --yes ripgrep
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          if ! command -v rg > /dev/null 2>&1 || ! rg --version; then
+            sudo apt-get update
+            sudo apt-get install --yes ripgrep
+          fi
+          rg --version
 
       - name: Execute Bazel shard
         run: bun tools/ci/bazel-run-selected.mjs ".context/bazel-selection/shards/${{ matrix.id }}.json"
