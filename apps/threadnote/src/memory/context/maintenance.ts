@@ -1,4 +1,5 @@
 import {currentMemoryCodeCitations} from '@threadnote/memory/reviewed-support';
+import {ManagerLiveChangeHints} from '../../manager/live_sources.js';
 import {prepareAutomaticMaintenance} from './maintenance_preparation.js';
 import {publicStatus} from './maintenance_projection.js';
 import {reviewedSemanticMaintenanceCases, saveReviewedSemanticMaintenanceCases} from './semantic_review_state.js';
@@ -1624,9 +1625,10 @@ function receiptProjection(journal: UndoJournal): ContextMaintenanceReceiptV2 {
   } = journal;
   return receipt;
 }
-const statePath = Effect.fn('contextMaintenance.statePath')(function* (config: RuntimeConfig) {
+export const contextMaintenanceStatePath = Effect.fn('contextMaintenance.statePath')(function* (config: RuntimeConfig) {
   return (yield* Path.Path).join(config.agentContextHome, 'context-maintenance', 'state-v2.json');
 });
+const statePath = contextMaintenanceStatePath;
 const receiptPath = Effect.fn('contextMaintenance.receiptPath')(function* (config: RuntimeConfig, id: string) {
   return (yield* Path.Path).join(config.agentContextHome, 'context-maintenance', 'receipts', `${id}.json`);
 });
@@ -1692,7 +1694,9 @@ const atomicJson = Effect.fn('contextMaintenance.atomicJson')(function* (file: s
 function writeState(config: RuntimeConfig, state: MaintenanceState) {
   if (!validTopicMaintenanceCheckpoints(state.topicCheckpoints))
     return Effect.fail(fail('Maintenance topic checkpoints exceed their write boundary.'));
-  return Effect.flatMap(statePath(config), file => atomicJson(file, state));
+  return Effect.flatMap(statePath(config), file => atomicJson(file, state)).pipe(
+    Effect.andThen(Effect.flatMap(ManagerLiveChangeHints, hints => hints.maintenance.pipe(Effect.ignoreCause))),
+  );
 }
 const pruneReceiptJournals = Effect.fn('contextMaintenance.pruneReceipts')(function* (
   config: RuntimeConfig,
