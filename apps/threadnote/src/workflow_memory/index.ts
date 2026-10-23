@@ -1,17 +1,24 @@
 import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
-import {WorkflowRequestSchema, requiredText, validateWorkflowInput, type WorkflowRequest} from './protocol.js';
+import {
+  WorkflowRequestSchema,
+  WorkflowOperationInspectionRequestSchema,
+  requiredText,
+  validateWorkflowInput,
+  type WorkflowRequest,
+} from './protocol.js';
 import {resolveWorkflowBinding} from './profile.js';
 import {bindWorkflow, loadWorkflowJournal, withWorkflowLock} from './journal.js';
 import {executeWorkflowOperation, prepareWorkflowOperation, readWorkflowArtifact} from './artifacts.js';
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
 import {assertWorkflowPublicationVerified, runWorkflowPublication} from './publication.js';
+import {inspectWorkflowOperation} from './inspection.js';
 
 export {readWorkflowReadiness} from './profile.js';
 
 export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (config: RuntimeConfig, input: unknown) {
   const request = yield* Schema.decodeUnknownEffect(
-    Schema.Union([WorkflowRequestSchema, WorkflowPublicationRequestSchema]),
+    Schema.Union([WorkflowRequestSchema, WorkflowPublicationRequestSchema, WorkflowOperationInspectionRequestSchema]),
   )(input, {onExcessProperty: 'error'});
   if (request.action === 'capabilities')
     return {
@@ -21,6 +28,7 @@ export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (conf
       operations: [
         'bind',
         'read',
+        'inspect-operation',
         'preflight',
         'create',
         'replace',
@@ -41,6 +49,14 @@ export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (conf
       ),
     );
   }
+  if (request.action === 'inspect-operation')
+    return yield* withWorkflowLock(
+      config,
+      request.bindingId,
+      loadWorkflowJournal(config, request.bindingId, false).pipe(
+        Effect.flatMap(state => inspectWorkflowOperation(state, request)),
+      ),
+    );
   if (
     request.action === 'publication-preview' ||
     request.action === 'publication-approve' ||
