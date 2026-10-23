@@ -202,29 +202,7 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                   );
                 return yield* withHomeLease(ownConfig, coordinator, lease =>
                   Effect.gen(function* () {
-                    // The home lease first recovers a validated enablement journal.
-                    // Only its recovered indexes may authorize a skip or a write.
-                    const recovered = yield* enrollmentContext(ownConfig);
-                    const currentEnrollment = recovered.runtimeIndex.enrollments[member.consumerId];
-                    if (
-                      !currentEnrollment ||
-                      recovered.homeContent === null ||
-                      recovered.root !== context.root ||
-                      stableJson(currentEnrollment.target) !== stableJson(enrollment.target) ||
-                      currentEnrollment.home !== enrollment.home ||
-                      stableJson(recovered.homeIndex.targets[member.consumerId]) !== stableJson(currentEnrollment)
-                    )
-                      return yield* fail(
-                        'enrollment-conflict',
-                        'Recovered home and runtime enrollment differ; refresh does not reconstruct consent.',
-                      );
-                    if (currentEnrollment.state === 'removed' || !currentEnrollment.enabled) return 'skipped' as const;
-                    if (member.enrollment.state !== 'enrolled' || !member.enrollment.enabled)
-                      return yield* fail(
-                        'enrollment-conflict',
-                        'Consumer was enabled after this intent; prepare a new refresh.',
-                      );
-                    yield* withPhysicalLock(
+                    const disposition = yield* withPhysicalLock(
                       root,
                       Effect.gen(function* () {
                         const consumer = {
@@ -233,6 +211,30 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                           target: enrollment.target,
                         };
                         yield* recoverTransaction(consumer);
+                        // Both enablement and physical journals can change consent. Recover
+                        // before reading the indexes that authorize a skip or a write.
+                        const recovered = yield* enrollmentContext(ownConfig);
+                        const currentEnrollment = recovered.runtimeIndex.enrollments[member.consumerId];
+                        if (
+                          !currentEnrollment ||
+                          recovered.homeContent === null ||
+                          recovered.root !== context.root ||
+                          stableJson(currentEnrollment.target) !== stableJson(enrollment.target) ||
+                          currentEnrollment.home !== enrollment.home ||
+                          stableJson(recovered.homeIndex.targets[member.consumerId]) !== stableJson(currentEnrollment)
+                        )
+                          return yield* fail(
+                            'enrollment-conflict',
+                            'Recovered home and runtime enrollment differ; refresh does not reconstruct consent.',
+                          );
+                        if (currentEnrollment.state === 'removed' || !currentEnrollment.enabled)
+                          return 'skipped' as const;
+                        if (member.enrollment.state !== 'enrolled' || !member.enrollment.enabled)
+                          return yield* fail(
+                            'enrollment-conflict',
+                            'Consumer was enabled after this intent; prepare a new refresh.',
+                          );
+
                         const receipt = (yield* readReceipt(enrollment.target)).receipt;
                         if (!receipt || stableJson(receipt.consumers[member.consumerId]) !== stableJson(consumer))
                           return yield* fail(
@@ -254,8 +256,10 @@ export const runDevSkillsRefresh = Effect.fn('devSkills.runRefresh')(function* (
                           if (incompatible.length) return yield* fail('incompatible', incompatible[0].message);
                         }
                         yield* restoreOwnedProjection(ownConfig, consumer);
+                        return 'ready' as const;
                       }),
                     );
+                    if (disposition === 'skipped') return disposition;
                     yield* applyCapturedDevSkills(ownConfig, captured.success, 'update', selector, {lease});
                     return yield* withPhysicalLock(
                       root,
