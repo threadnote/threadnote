@@ -225,3 +225,67 @@ it('graph timeout diagnostics stay bounded, private and unchanged by arbitrary c
     },
   );
 }, 30_000);
+
+it('write admission isolates stale attempts while preserving exact matching replay', () => {
+  fc.assert(
+    fc.property(
+      fc.record({
+        first: fc.constantFrom('dev-spec', 'dev-plan'),
+        mode: fc.constantFrom('foreign', 'completed', 'pending', 'drift', 'advance', 'regress', 'completed-drift'),
+        change: fc.constantFrom(
+          'body',
+          'artifactKey',
+          'sourceRunId',
+          'operationId',
+          'citationPolicy',
+          'relations',
+          'codeRefs',
+          'role',
+          'storageKind',
+          'preview',
+          'key',
+          'stage',
+          'stage-list',
+          'binding',
+          'malformed',
+          'context',
+        ),
+        salt: fc.string({maxLength: 24}),
+      }),
+      sequence => {
+        const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+        const result = spawnSync(
+          python,
+          [
+            '-B',
+            resolve('apps/threadnote/test/dev-skills/python/test_workflow_transport.py'),
+            '--stale-attempt-fixture',
+          ],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(sequence),
+            timeout: 10_000,
+            env: {
+              ...process.env,
+              DEV_SPEC_NATIVE: '0',
+              DEV_PLAN_NATIVE: '0',
+              PYTHONDONTWRITEBYTECODE: '1',
+              PYTHONPATH: '',
+            },
+          },
+        );
+        expect(result.error, result.error?.message).toBeUndefined();
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({isolated: true, matchingReplay: true, refusedWithoutMutation: true});
+      },
+    ),
+    {
+      numRuns: 20,
+      examples: [
+        [{first: 'dev-plan', mode: 'foreign', change: 'body', salt: ''}],
+        [{first: 'dev-spec', mode: 'drift', change: 'operationId', salt: 'same body'}],
+        [{first: 'dev-plan', mode: 'completed', change: 'preview', salt: 'idempotent'}],
+      ],
+    },
+  );
+}, 30_000);

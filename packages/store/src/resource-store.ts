@@ -14,7 +14,7 @@ import {
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {globToRegExp} from '@threadnote/platform/glob';
 import {readExclusiveFileLockOwner, withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {resourceAccountMutationLockPath} from './resource/lock.js';
+import {resourceAccountMutationLockPath, resourceAccountMutationLockPolicy} from './resource/lock.js';
 import {
   advanceCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
@@ -320,7 +320,7 @@ function createResourceStoreOperations(
       fs,
       lockPath,
       {
-        heartbeatIntervalMilliseconds: 10_000,
+        ...resourceAccountMutationLockPolicy,
         ...(layerOptions.onMutationLockAcquired ? {onAcquired: () => layerOptions.onMutationLockAcquired!(event)} : {}),
         ...(layerOptions.onMutationLockCompleted
           ? {onCompleted: () => layerOptions.onMutationLockCompleted!(event)}
@@ -328,9 +328,6 @@ function createResourceStoreOperations(
         ...(layerOptions.onMutationLockContention
           ? {onContention: () => layerOptions.onMutationLockContention!(event)}
           : {}),
-        retryIntervalMilliseconds: 25,
-        staleAfterMilliseconds: 30_000,
-        waitTimeoutMilliseconds: 30_000,
       },
       Effect.result(effect),
     );

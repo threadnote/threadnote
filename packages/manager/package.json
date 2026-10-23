@@ -34,6 +34,7 @@
     "./integration-registration": "./src/integration_registration.tsx",
     "./integrations-contracts": "./src/integrations_contracts.ts",
     "./integrations-view": "./src/integrations_view.tsx",
+    "./live/contracts": "./src/live/contracts.ts",
     "./manifest-projects-view": "./src/manifest_projects_view.tsx",
     "./manifest_projects_view": "./src/manifest_projects_view.tsx",
     "./memory/contracts": "./src/memory/contracts.ts",

@@ -2,6 +2,7 @@
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 import {
@@ -1285,6 +1286,143 @@ describe('context maintenance view', () => {
     expect(onChanged).toHaveBeenCalledTimes(1);
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the selected review across arbitrary report and maintenance refresh outcomes', async () => {
+    vi.useFakeTimers();
+    const memory = (name: string, body: string): MemoryRecord => ({
+      uri: `threadnote://memory/${name}`,
+      body,
+      content: body,
+      headerTitle: 'MEMORY',
+      metadata: {
+        kind: 'durable',
+        project: 'threadnote',
+        status: 'active',
+        sourceAgentClient: 'test',
+        timestamp: '2026-01-01',
+      },
+    });
+    const evidence = buildContextHealthReport({
+      project: 'threadnote',
+      records: [memory('a', 'Timeout is 60 seconds.'), memory('b', 'Timeout must be 30 seconds.')],
+      now: new Date('2026-06-01'),
+    }).findings[0].semanticEvidence!;
+    await fc.assert(
+      fc.asyncProperty(
+        fc.constantFrom('left', 'right', 'both'),
+        fc.array(fc.record({hideCase: fc.boolean(), maintenanceFailure: fc.boolean(), reportFailure: fc.boolean()}), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        async (choice, updates) => {
+          if (root) await act(async () => root?.unmount());
+          root = undefined;
+          document.body.replaceChildren();
+          vi.clearAllMocks();
+          let revision = 0;
+          let outcome = {hideCase: false, maintenanceFailure: false, reportFailure: false};
+          const item = {
+            caseId: 'stable-review',
+            project: 'threadnote',
+            memoryId: 'a',
+            family: 'semantic-contradiction',
+            slot: 'conflict',
+            evidenceRevision: 'reviewed-revision',
+            disposition: 'needs-decision',
+            reason: 'incompatible-values',
+            subjectContentHashes: [{uri: evidence.left.recordUri, hash: 'reviewed-hash'}],
+            firstSeen: 'now',
+            lastSeen: 'now',
+            lastChecked: 'now',
+            attemptCount: 1,
+            events: [],
+          };
+          const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
+            const url = new URL(input, 'http://manager.test');
+            const response = (value: unknown, code = 200) => new Response(JSON.stringify(value), {status: code});
+            if (url.pathname === '/api/context-health')
+              return outcome.reportFailure
+                ? response({error: 'Synthetic report failure'}, 503)
+                : response(report(url.searchParams.get('project') ?? 'threadnote'));
+            if (url.searchParams.has('caseId'))
+              return url.searchParams.get('view') === 'status'
+                ? response({...status(), cases: [item]})
+                : response({
+                    version: 2,
+                    project: 'threadnote',
+                    caseId: item.caseId,
+                    memoryUri: evidence.left.recordUri,
+                    evidenceRevision: item.evidenceRevision,
+                    family: item.family,
+                    semanticEvidence: evidence,
+                  });
+            return outcome.maintenanceFailure
+              ? response({error: 'Synthetic maintenance failure'}, 503)
+              : response({
+                  ...status(),
+                  cases: outcome.hideCase ? [] : [{...item, evidenceRevision: `background-${revision}`}],
+                  page: {generation: `background-${revision}`},
+                });
+          });
+          vi.stubGlobal('fetch', fetch);
+          await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={revision} />);
+          const open = [...document.querySelectorAll('button')].find(
+            button => button.textContent === 'Review memory and evidence',
+          );
+          expect(open).toBeDefined();
+          await act(async () => open!.click());
+          const dialog = document.querySelector('dialog')!;
+          const input = dialog.querySelector<HTMLInputElement>(`input[value="${choice}"]`)!;
+          const body = dialog.querySelector<HTMLElement>('.detail-modal-body')!;
+          await act(async () => input.click());
+          input.focus();
+          body.scrollTop = 120;
+          for (const update of updates) {
+            outcome = update;
+            revision += 1;
+            await act(async () => vi.advanceTimersByTimeAsync(30_000));
+            await act(async () =>
+              root?.render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={revision} />),
+            );
+            expect(document.querySelector('dialog')).toBe(dialog);
+            expect(dialog.open).toBe(true);
+            expect(input.checked).toBe(true);
+            expect(document.activeElement).toBe(input);
+            expect(body.scrollTop).toBe(120);
+            expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledTimes(1);
+            expect(HTMLDialogElement.prototype.close).not.toHaveBeenCalled();
+          }
+          expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+          await act(async () =>
+            root?.render(<ContextHealthPanel {...props} project="other" refreshGeneration={revision} />),
+          );
+          expect(document.querySelector('dialog')).toBeNull();
+          expect(HTMLDialogElement.prototype.close).toHaveBeenCalledTimes(1);
+        },
+      ),
+      {numRuns: 24},
+    );
+  });
+
+  it('does not render the previous project report while the new project read is pending', async () => {
+    const pending = Promise.withResolvers<Response>();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const url = new URL(input, 'http://manager.test');
+        if (url.pathname === '/api/context-health')
+          return url.searchParams.get('project') === 'other' ? pending.promise : new Response(JSON.stringify(report()));
+        return new Response(JSON.stringify(status()));
+      }),
+    );
+    await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+    await act(async () => root?.render(<ContextHealthPanel {...props} project="other" refreshGeneration={0} />));
+    expect(document.body.textContent).toContain('Checking project context');
+    expect(document.body.textContent).not.toContain('1,712');
+    expect(document.body.textContent).not.toContain('Records scanned');
+    await act(async () => pending.resolve(new Response(JSON.stringify({...report('other'), recordsScanned: 0}))));
+    expect(document.body.textContent).not.toContain('1,712');
   });
 
   it('shows full aggregate recovery and history when decision details are truncated', async () => {
