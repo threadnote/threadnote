@@ -40,7 +40,7 @@ import {
   type CodeGraphLocalProvenanceRecord,
 } from '@threadnote/graph/local_provenance';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
-import {resolveRepositoryIdentity} from '@threadnote/graph/repository';
+import {parseRepositoryIdentityMetadata, resolveRepositoryIdentity} from '@threadnote/graph/repository';
 import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {runEffect} from '../helpers/effect-runtime.js';
 
@@ -338,9 +338,18 @@ describe('code graph private local provenance', () => {
     Effect.gen(function* () {
       const fixture = yield* effectProvenanceFixture();
       yield* recordVerifiedCodeGraphLocalAssociation(fixture.home, fixture.identity);
+      const branch = (yield* runCommandEffect('git', [
+        '-C',
+        fixture.root,
+        'symbolic-ref',
+        '--quiet',
+        '--short',
+        'HEAD',
+      ])).stdout.trim();
       let gitInvocationCount = 0;
       let branchObservationCount = 0;
       let interlockCount = 0;
+      const invocationCommands: string[] = [];
 
       const command = yield* CommandExecutor;
       const query = yield* CodeGraphQueryService;
@@ -356,16 +365,40 @@ describe('code graph private local provenance', () => {
           mutableCommand.execute = (executable, args, options) => {
             if (executable === 'git') {
               gitInvocationCount += 1;
-              if (args.includes('symbolic-ref')) branchObservationCount += 1;
+              invocationCommands.push(args[2]);
             }
             return execute(executable, args, options);
           };
           mutableCommand.executeBytes = (executable, args, options) => {
             if (executable === 'git') {
               gitInvocationCount += 1;
-              if (args.includes('symbolic-ref')) branchObservationCount += 1;
+              invocationCommands.push(args[2]);
             }
-            return executeBytes(executable, args, options);
+            return executeBytes(executable, args, options).pipe(
+              Effect.tap(result =>
+                Effect.sync(() => {
+                  if (executable !== 'git' || !args.includes('--abbrev-ref=loose')) return;
+                  expect(args).toEqual([
+                    '-C',
+                    args[1],
+                    'rev-parse',
+                    '--path-format=absolute',
+                    '--show-toplevel',
+                    '--git-common-dir',
+                    '--git-dir',
+                    '--show-object-format',
+                    'HEAD',
+                    '--abbrev-ref=loose',
+                    'HEAD',
+                  ]);
+                  expect(result.exitCode).toBe(0);
+                  const metadata = parseRepositoryIdentityMetadata(result.stdout);
+                  expect(metadata?.repoRoot).toBe(fixture.identity.repoRoot);
+                  expect(metadata?.branch).toEqual({state: 'current', branch});
+                  branchObservationCount += 1;
+                }),
+              ),
+            );
           };
         }),
         () =>
@@ -390,9 +423,18 @@ describe('code graph private local provenance', () => {
 
       expect(statuses).toHaveLength(16);
       expect(statuses.every(status => status.identity.repositoryId === fixture.identity.repositoryId)).toBe(true);
+      expect(statuses.every(status => status.identity.branch === branch)).toBe(true);
       expect(interlockCount).toBe(16);
       expect(branchObservationCount).toBe(16);
-      expect(gitInvocationCount).toBe(16 * 4);
+      expect(gitInvocationCount).toBe(16 * 3);
+      expect(
+        Object.fromEntries(
+          ['rev-parse', 'config', 'remote'].map(name => [
+            name,
+            invocationCommands.filter(command => command === name).length,
+          ]),
+        ),
+      ).toEqual({'rev-parse': 16, config: 16, remote: 16});
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
 
