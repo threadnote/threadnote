@@ -12,18 +12,28 @@ import {
 import {homeIndexPath, journalPath, receiptPath, runtimeIndexPath} from '../../src/dev_skills/registry.js';
 import {devSkillsReleaseFixture, devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {refreshPropertyDiagnostics} from './service-refresh-diagnostics.js';
 
 const selector = {agent: 'codex'};
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer));
 
-const removalRecovery = (boundary: 'journal' | 'receipt' | 'home' | 'runtime', shared: boolean) =>
+const removalRecovery = (
+  boundary: 'journal' | 'receipt' | 'home' | 'runtime',
+  shared: boolean,
+  diagnostics?: ReturnType<typeof refreshPropertyDiagnostics>,
+) =>
   Effect.gen(function* () {
+    diagnostics?.phase('fixture');
     const f = yield* fixture();
+    diagnostics?.phase('release');
     const old = yield* devSkillsReleaseFixture(f, '5.3.0-beta.6');
+    diagnostics?.phase('activate');
     yield* old.activate;
+    diagnostics?.phase('install');
     const installed = yield* old.run(applyDevSkills(f.config, 'install', selector));
     const other = {...f.config, agentContextHome: f.path.join(f.root, 'other-home')};
+    diagnostics?.phase('install');
     if (shared) yield* old.run(applyDevSkills(other, 'install', selector));
     const files = {
       journal: journalPath(f.path, installed.target.skillRoot),
@@ -31,6 +41,7 @@ const removalRecovery = (boundary: 'journal' | 'receipt' | 'home' | 'runtime', s
       home: homeIndexPath(f.path, f.home),
       runtime: runtimeIndexPath(f.path, f.runtime),
     };
+    diagnostics?.phase('index-read');
     const originalReceipt = yield* f.fs.readFileString(files.receipt);
     let interrupted = false;
     const failing = FileSystem.FileSystem.of({
@@ -43,6 +54,7 @@ const removalRecovery = (boundary: 'journal' | 'receipt' | 'home' | 'runtime', s
         return f.fs.rename(from, to);
       },
     });
+    diagnostics?.phase('remove-or-disable');
     expect(
       yield* old
         .run(applyDevSkills(f.config, 'remove', selector))
@@ -50,11 +62,17 @@ const removalRecovery = (boundary: 'journal' | 'receipt' | 'home' | 'runtime', s
     ).toMatchObject({_tag: 'Failure'});
     expect(interrupted).toBe(true);
     expect(yield* f.fs.exists(files.journal)).toBe(true);
+    diagnostics?.phase('release');
     const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.7');
+    diagnostics?.phase('preview');
     const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
+    diagnostics?.phase('prepare');
     const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
+    diagnostics?.phase('activate');
     yield* release.activate;
+    diagnostics?.phase('refresh');
     const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
+    diagnostics?.phase('assertions-status');
     expect(result.repairRequired).toBe(false);
     expect(result.targets.find(target => target.consumerId === installed.consumerId)?.outcome.state).toBe('skipped');
     expect(yield* f.fs.exists(files.journal)).toBe(false);
@@ -74,8 +92,9 @@ const removalRecovery = (boundary: 'journal' | 'receipt' | 'home' | 'runtime', s
       expect(receipt.entrypoints).toEqual({});
       expect(receipt.generations[release.bundle.manifest.digest]).toBeUndefined();
     }
+    diagnostics?.phase('replay');
     expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(false);
-  }).pipe(provide);
+  }).pipe(Effect.ensuring(Effect.sync(() => diagnostics?.phase('teardown'))), provide);
 
 for (const boundary of ['journal', 'receipt', 'home', 'runtime'] as const)
   effectIt.effect(`skips a consumer removed by recovery after the ${boundary} checkpoint`, () =>
@@ -85,7 +104,10 @@ for (const boundary of ['journal', 'receipt', 'home', 'runtime'] as const)
 effectIt.effect.prop(
   'refresh completes an interrupted removal before deciding ownership or enablement',
   {boundary: Schema.Literals(['journal', 'receipt', 'home', 'runtime']), shared: Schema.Boolean},
-  ({boundary, shared}) => removalRecovery(boundary, shared),
+  ({boundary, shared}, context) => {
+    const diagnostics = refreshPropertyDiagnostics(context, {scope: 'dev-skills-refresh-removal-recovery'});
+    return diagnostics.observeRecovery(boundary, shared, removalRecovery(boundary, shared, diagnostics));
+  },
   {arbitrary: {runs: 8}, timeout: 120_000},
 );
 

@@ -654,6 +654,7 @@ describe('bounded repository untracked cache', () => {
     it.effect('discards a private result from an ABA-retargeted caller before the final identity check', () =>
       Effect.gen(function* () {
         const f = yield* fixture;
+        const trackedFinished = yield* Deferred.make<void>();
         const linked = f.path.join(f.path.dirname(f.root), 'linked');
         const caller = f.path.join(f.path.dirname(f.root), 'caller');
         yield* f.git(['worktree', 'add', '-q', '--detach', linked]);
@@ -669,8 +670,12 @@ describe('bounded repository untracked cache', () => {
               if (!args.includes('status')) return yield* command.execute(executable, args, options);
               if (options?.trustedGitIndexFile === undefined) {
                 rawReads += 1;
-                return yield* command.execute(executable, args, options);
+                return yield* command
+                  .execute(executable, args, options)
+                  .pipe(Effect.ensuring(Deferred.succeed(trackedFinished, undefined)));
               }
+              // Retarget only the private read, not the concurrent canonical read's cwd lookup.
+              yield* Deferred.await(trackedFinished);
               switched = true;
               yield* f.fs.remove(caller);
               yield* Effect.sync(() => symlinkSync(linked, caller, 'junction'));
@@ -701,6 +706,7 @@ describe('bounded repository untracked cache', () => {
       () =>
         Effect.gen(function* () {
           const f = yield* fixture;
+          const trackedFinished = yield* Deferred.make<void>();
           const linked = f.path.join(f.path.dirname(f.root), 'linked');
           const caller = f.path.join(f.path.dirname(f.root), 'caller');
           yield* f.git(['worktree', 'add', '-q', '--detach', linked]);
@@ -716,8 +722,12 @@ describe('bounded repository untracked cache', () => {
                 if (!args.includes('status')) return yield* command.execute(executable, args, options);
                 if (options?.trustedGitIndexFile === undefined) {
                   rawReads += 1;
-                  return yield* command.execute(executable, args, options);
+                  return yield* command
+                    .execute(executable, args, options)
+                    .pipe(Effect.ensuring(Deferred.succeed(trackedFinished, undefined)));
                 }
+                // Retarget only the private read, not the concurrent canonical read's cwd lookup.
+                yield* Deferred.await(trackedFinished);
                 switched = true;
                 yield* f.fs.remove(caller);
                 yield* Effect.sync(() => symlinkSync(linked, caller, 'junction'));

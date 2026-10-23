@@ -4,6 +4,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {syncDirectoryBestEffort} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {runtimeTextDirectoryNamePage, SystemInfo, type SystemInfoShape} from '@threadnote/platform/system';
+import {withCodeGraphIndexTiming, type CodeGraphIndexTimingObserver} from '../indexer/types.js';
 import {
   CODE_GRAPH_DISK_RESERVATION_OPERATIONS,
   codeGraphDiskCapacityFailure,
@@ -120,6 +121,8 @@ export interface CodeGraphDiskReservationObservation {
 }
 
 export interface CodeGraphDiskReservationOptions<R = never> {
+  /** @internal Optional closed-stage timing for persistent reference resolution only. */
+  readonly onTiming?: CodeGraphIndexTimingObserver;
   /** @internal Deterministic release fault boundary for lifecycle tests. */
   readonly beforeReleaseAttempt?: Effect.Effect<void, unknown, R>;
   readonly boundary: CodeGraphDirectPersistentCapacityBoundary;
@@ -366,8 +369,14 @@ export function withCodeGraphDiskReservation<A, E, R, R2>(
   transaction: Effect.Effect<A, E, R2>,
 ) {
   return Effect.gen(function* () {
+    const onTiming =
+      options.boundary.operation === 'resolve persistent code graph references' ? options.onTiming : undefined;
     const system = yield* SystemInfo;
-    const processStartIdentity = yield* canonicalProcessStartIdentity(system, system.processId);
+    const processStartIdentity = yield* withCodeGraphIndexTiming(
+      onTiming,
+      'reference-reservation-owner-identity',
+      canonicalProcessStartIdentity(system, system.processId),
+    );
     if (!validProcessStartIdentity(processStartIdentity)) {
       return yield* unknownReservationFailure(options, 'disk-reservation-owner-identity-unavailable');
     }
@@ -381,16 +390,21 @@ export function withCodeGraphDiskReservation<A, E, R, R2>(
       // uninterruptible acquire mask. If cancellation arrives after receipt
       // publication, acquireUseRelease has already installed the finalizer.
       const attempted = yield* Effect.acquireUseRelease(
-        claimAttempt(options, processStartIdentity).pipe(
-          Effect.orElseSucceed(() => ({decision: undefined, state: 'unknown' as const})),
-          Effect.flatMap(attempt =>
-            attempt.state === 'claimed'
-              ? Effect.succeed(attempt.lease)
-              : Effect.fail(CodeGraphDiskReservationClaimControl.of(attempt.state, attempt.decision)),
+        withCodeGraphIndexTiming(
+          onTiming,
+          'reference-reservation-claim',
+          claimAttempt(options, processStartIdentity).pipe(
+            Effect.orElseSucceed(() => ({decision: undefined, state: 'unknown' as const})),
+            Effect.flatMap(attempt =>
+              attempt.state === 'claimed'
+                ? Effect.succeed(attempt.lease)
+                : Effect.fail(CodeGraphDiskReservationClaimControl.of(attempt.state, attempt.decision)),
+            ),
           ),
         ),
-        () => transaction,
-        lease => reservationFinalizer(options, lease),
+        () => withCodeGraphIndexTiming(onTiming, 'reference-reservation-use', transaction),
+        lease =>
+          withCodeGraphIndexTiming(onTiming, 'reference-reservation-release', reservationFinalizer(options, lease)),
       ).pipe(
         Effect.map(value => ({state: 'completed' as const, value})),
         Effect.catchIf(Schema.is(CodeGraphDiskReservationClaimControl), error =>

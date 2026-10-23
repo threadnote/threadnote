@@ -1,5 +1,6 @@
 """Offline wire-v1 transport, run propagation and interrupted-operation checks."""
 import copy
+import contextlib
 import hashlib
 import json
 import os
@@ -17,6 +18,10 @@ FIXTURES = Path(__file__).resolve().parent
 sys.path.insert(0, str(FIXTURES))
 from product_skills_fixture import configure_product_skills, assert_product_provenance
 SKILLS = configure_product_skills(__file__, 5)
+STALE_INPUT = json.load(sys.stdin) if __name__ == "__main__" and sys.argv[1:] == ["--stale-attempt-fixture"] else None
+if STALE_INPUT is not None:
+    assert STALE_INPUT["first"] in ("dev-spec", "dev-plan")
+    sys.path.insert(0, str(SKILLS / STALE_INPUT["first"] / "scripts"))
 import workflow_transport as wt
 import dev_spec
 import dev_plan
@@ -143,6 +148,127 @@ class TransportTests(unittest.TestCase):
 
     def make_transport(self):
         return wt.WorkflowTransport(self.context, self.repo, self.home, generation_pin="fixture-generation", invoke=self.native.response)
+
+    def stale_schedule(self, mode="foreign", change="body", salt="example"):
+        original_lock = wt.locked
+        injected, boundary = False, {}
+        body = self.body + salt + "\n"
+        original_input = copy.deepcopy((self.record, body))
+        if mode == "regress":
+            self.native.fail = "before-mutation"
+            with self.assertRaises(wt.WorkflowError):
+                self.transport.write(self.record, "original", body, [])
+        elif mode == "completed-drift":
+            self.transport.write(self.record, "original", body, [])
+
+        @contextlib.contextmanager
+        def interleave(path):
+            nonlocal injected
+            with original_lock(path):
+                yield
+            if not injected:
+                injected = True
+                if mode in ("foreign", "completed"):
+                    self.make_transport().write(self.record, "original", body, [])
+                if mode == "foreign":
+                    c = self.make_transport()
+                    c.prepare({**self.record, "runId": "different-writer"}, "different", body, [])
+                elif mode == "pending":
+                    self.make_transport().prepare(self.record, "original", body, [])
+                elif mode in ("drift", "advance", "regress", "completed-drift"):
+                    state = wt.read_json(self.context)
+                    if mode == "completed-drift":
+                        next(iter(state["operations"].values()))["request"]["operationId"] = "different-operation"
+                    elif mode in ("advance", "regress"):
+                        state["pending"]["stage"] = "mutation" if mode == "advance" else "preflight"
+                    else:
+                        self.drift_pending(state, change, body, boundary)
+                    wt.save_json(self.context, state)
+                boundary.update(context=self.context.read_bytes(), calls=copy.deepcopy(self.native.calls),
+                                documents=copy.deepcopy(self.native.documents), operations=copy.deepcopy(self.native.operations))
+
+        with patch.object(wt, "locked", interleave):
+            if mode in ("foreign", "drift", "regress", "completed-drift"):
+                with self.assertRaises(wt.WorkflowError):
+                    self.transport.write(self.record, "original", body, [])
+                self.assertEqual(self.context.read_bytes(), boundary["context"])
+                self.assertEqual(self.native.calls, boundary["calls"])
+                self.assertEqual(self.native.documents, boundary["documents"])
+                self.assertEqual(self.native.operations, boundary["operations"])
+                if "other" in boundary:
+                    self.assertEqual(boundary["other"][0].read_bytes(), boundary["other"][1])
+            else:
+                result = self.transport.write(self.record, "original", body, [])
+                self.assertEqual(self.transport.read(result)["body"], body)
+                self.assertEqual(len(self.native.operations), 1)
+                if mode == "completed":
+                    self.assertEqual(self.context.read_bytes(), boundary["context"])
+        self.assertTrue(injected)
+        self.assertEqual((self.record, body), original_input)
+
+    def drift_pending(self, state, change, body, boundary):
+        pending = state["pending"]
+        if change == "preview":
+            pending["preview"]["canonicalUri"] += "-changed"
+        elif change == "key":
+            pending["key"] = "changed-key"
+        elif change == "stage":
+            pending["stage"] = "unknown"
+        elif change == "stage-list":
+            pending["stage"] = []
+        elif change == "binding":
+            state["binding"]["agentId"] = "changed-agent"
+        elif change == "malformed":
+            pending["request"] = None
+        elif change == "context":
+            other = self.directory / "different-context.json"
+            wt.save_json(other, state)
+            self.transport.path = other
+            boundary["other"] = (other, other.read_bytes())
+        else:
+            value = {"body": body + "changed", "artifactKey": "other-topic", "sourceRunId": "other-writer",
+                     "operationId": "different-operation", "citationPolicy": "defer",
+                     "relations": [{"type": "references", "uri": "threadnote://other"}],
+                     "codeRefs": ["src/other.py"], "role": "other-role", "storageKind": "durable"}[change]
+            pending["request"][change] = value
+
+    def test_stale_writer_refuses_new_pending_after_same_intent_completion(self):
+        self.stale_schedule()
+
+    def test_matching_prepared_and_completed_attempts_keep_public_return_contracts(self):
+        preview = self.transport.prepare(self.record, "preview-only", self.body, [])
+        self.assertIsInstance(preview, dict)
+        self.assertEqual(self.transport.write(self.record, "preview-only", self.body, [], preview=True), preview["canonicalUri"])
+        self.assertEqual(self.native.operations, {})
+        for mode in ("pending", "completed"):
+            with self.subTest(mode=mode):
+                fresh = TransportTests()
+                fresh.setUp()
+                try:
+                    fresh.stale_schedule(mode)
+                finally:
+                    fresh.doCleanups()
+
+    def test_exact_admission_refuses_metadata_operation_preview_binding_and_stage_drift(self):
+        for change in ("body", "artifactKey", "sourceRunId", "operationId", "citationPolicy", "relations",
+                       "codeRefs", "role", "storageKind", "preview", "key", "stage", "stage-list", "binding", "malformed", "context"):
+            with self.subTest(change=change):
+                fresh = TransportTests()
+                fresh.setUp()
+                try:
+                    fresh.stale_schedule("drift", change)
+                finally:
+                    fresh.doCleanups()
+
+    def test_exact_attempt_allows_stage_advance_but_refuses_regression_and_changed_completion(self):
+        for mode in ("advance", "regress", "completed-drift"):
+            with self.subTest(mode=mode):
+                fresh = TransportTests()
+                fresh.setUp()
+                try:
+                    fresh.stale_schedule(mode)
+                finally:
+                    fresh.doCleanups()
 
     def test_private_baseline_semantic_role_uses_handoff_and_json_readback(self):
         uri = self.transport.write(self.record, "feature-current", self.body, [])
@@ -659,6 +785,10 @@ assert dev_spec.wt is dev_plan.wt is workflow_transport
 assert pathlib.Path(workflow_transport.__file__).resolve() == (skills / first / "scripts/workflow_transport.py").resolve()
 assert_product_provenance(skills, "transport-order-" + first + "-imports")
 suite = unittest.TestSuite([
+    test_workflow_transport.TransportTests("test_stale_writer_refuses_new_pending_after_same_intent_completion"),
+    test_workflow_transport.TransportTests("test_matching_prepared_and_completed_attempts_keep_public_return_contracts"),
+    test_workflow_transport.TransportTests("test_exact_admission_refuses_metadata_operation_preview_binding_and_stage_drift"),
+    test_workflow_transport.TransportTests("test_exact_attempt_allows_stage_advance_but_refuses_regression_and_changed_completion"),
     test_workflow_transport.TransportTests("test_planned_archive_recovery_reuses_exact_admitted_request"),
     test_workflow_transport.TransportTests("test_planned_archive_source_header_context_and_generation_fences_property"),
     test_dev_spec.Specs("test_desktop_workflow_transport_reaches_planned_archive_closeout")])
@@ -678,4 +808,17 @@ raise SystemExit(not result.wasSuccessful())
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if STALE_INPUT is not None:
+        before = copy.deepcopy(STALE_INPUT)
+        fixture = TransportTests()
+        fixture.setUp()
+        try:
+            fixture.stale_schedule(STALE_INPUT["mode"], STALE_INPUT["change"], STALE_INPUT["salt"])
+        finally:
+            fixture.doCleanups()
+        assert STALE_INPUT == before
+        assert Path(wt.__file__).resolve() == (SKILLS / STALE_INPUT["first"] / "scripts/workflow_transport.py").resolve()
+        assert_product_provenance(SKILLS, "stale-attempt-fixture")
+        print(json.dumps({"isolated": True, "matchingReplay": True, "refusedWithoutMutation": True}))
+    else:
+        unittest.main()

@@ -77,6 +77,15 @@ def copy_native_logs(root, destination):
             shutil.copyfile(source, destination / source.name)
 
 
+def preserve_failed_native_logs(root, report):
+    try:
+        destination = report.with_suffix(".provenance")
+        destination.mkdir(parents=True, exist_ok=True)
+        copy_native_logs(root, destination)
+    except BaseException:
+        pass  # Evidence retention must never replace the original staging failure.
+
+
 def fixture_environment(root, runtime):
     environment = {key: os.environ[key] for key in
                    ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC") if key in os.environ}
@@ -121,9 +130,9 @@ def verify_isolation(checkout, enforced):
 
 
 @contextlib.contextmanager
-def hold_maintenance_state_lock(root):
-    """Serialize the preview observation with unrelated maintenance in this disposable home."""
-    lock = root / "data/context-maintenance/state-v2.json.lock"
+def hold_observation_lock(root, relative_path, label):
+    """Serialize disposable preview snapshots without hiding changes to any observed file."""
+    lock = root / relative_path
     token = json.dumps({"version": 1, "processId": os.getpid(), "token": uuid.uuid4().hex}) + "\n"
     deadline = time.monotonic() + 10
     while True:
@@ -131,7 +140,7 @@ def hold_maintenance_state_lock(root):
             descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             break
         except FileExistsError:
-            require(time.monotonic() < deadline, "Maintenance state lock did not become available")
+            require(time.monotonic() < deadline, label + " lock did not become available")
             time.sleep(0.01)
 
     body_failed = False
@@ -145,7 +154,7 @@ def hold_maintenance_state_lock(root):
             still_owned = lock.read_text(encoding="utf-8") == token
         except FileNotFoundError:
             still_owned = False
-        require(still_owned, "Fixture lost ownership of the maintenance state lock")
+        require(still_owned, "Fixture lost ownership of the " + label + " lock")
     except BaseException:
         body_failed = True
         raise
@@ -242,7 +251,8 @@ def manager_checks_while_paused(root, binary, environment, checks):
             selector = {"agent": "antigravity-cli", "scope": "user"}
             for action in ("install", "update", "remove"):
                 # Capture only user/data/runtime state; Manager's diagnostic log is expected to change.
-                with hold_maintenance_state_lock(root):
+                with hold_observation_lock(root, "data/context-maintenance/state-v2.json.lock", "maintenance"), \
+                        hold_observation_lock(root, "data/locks/resources/local/mutations.lock", "account mutation"):
                     before = {name: inventory(root / name) for name in ("user", "data", "runtime")}
                     preview = request("/api/dev-skills/preview", {"action": action, "selector": selector})
                     require(preview["canApply"], "Manager preview blocked: " + json.dumps(preview["issues"]))
@@ -405,6 +415,7 @@ def stage(arguments):
     except BaseException as error:
         report.parent.mkdir(parents=True, exist_ok=True)
         report.write_text(json.dumps({"status": "failed", "error": str(error), "fixture": str(root)}, indent=2) + "\n")
+        preserve_failed_native_logs(root, report)
         raise
 
 

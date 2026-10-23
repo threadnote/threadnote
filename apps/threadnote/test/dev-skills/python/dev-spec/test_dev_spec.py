@@ -2,20 +2,146 @@
 """Behavioral invariants and isolated native checks for the three-skill handoff."""
 import sys
 from pathlib import Path
+
+_GRAPH_TIMEOUT_PREFIX = "NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS "
+_GRAPH_TIMEOUT_PHASES = ("registering", "sharing", "waiting", "reclaiming", "scanning", "materializing",
+                         "resolving", "activating", "embedding")
+_GRAPH_TIMEOUT_SUBPHASES = {
+    "sharing": ("applying-deltas", "building-local-overlay", "discovering-shared-base", "downloading-checkpoint"),
+    "resolving": ("references", "complete"),
+    "activating": ("complete", "promoting", "structural-ready", "summarizing-analysis", "validating-input",
+                   "writing-and-checkpointing"),
+}
+_GRAPH_TIMEOUT_REASONS = ("database-writer", "disk-capacity", "home-builder-cap", "prepared-spool-budget",
+                          "repository-lock", "request-lock", "snapshot-build")
+_GRAPH_TIMEOUT_COUNTERS = ("completed", "total", "accepted", "excluded", "skipped", "reused", "edges", "resolved",
+                           "symbols", "embedded", "pagesCompleted", "rowsDeleted")
+
+
+def native_graph_timeout_stream(value):
+    import hashlib
+    if isinstance(value, bytes):
+        sample, units, encoding = value[-16384:], "bytes", "captured-bytes"
+        truncated = len(value) > len(sample)
+    elif isinstance(value, str):
+        encoded = value[-4096:].encode("utf-8", errors="backslashreplace")
+        sample, units, encoding = encoded[-16384:], "characters", "utf8-backslashreplace"
+        truncated = len(value) > 4096 or len(encoded) > len(sample)
+    else:
+        return {"capture": "unavailable" if value is None else "unsupported"}, b""
+    return {"capture": "bytes" if isinstance(value, bytes) else "text", "units": units,
+            "capturedUnits": len(value), "sampleBytes": len(sample), "sampleEncoding": encoding,
+            "sampleSha256": hashlib.sha256(sample).hexdigest(), "truncated": truncated}, sample
+
+
+def native_graph_timeout_diagnostic(error, ordinal):
+    """Project already-captured output only; unknown strings and native identity never leave this observer."""
+    import json
+    stdout, _ = native_graph_timeout_stream(error.output)
+    stderr, sample = native_graph_timeout_stream(error.stderr)
+    lines = sample.split(b"\n")
+    if stderr.get("truncated"):
+        lines = lines[1:]  # The first sampled line may begin inside a JSON record.
+    reported = []
+    for line in lines[-64:]:
+        try:
+            value = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            continue
+        if not isinstance(value, dict) or value.get("type") != "code-graph-progress" or type(value.get("version")) is not int or value["version"] != 2:
+            continue
+        phase = value.get("phase")
+        if not isinstance(phase, str) or phase not in _GRAPH_TIMEOUT_PHASES:
+            continue
+        progress = {"phase": phase}
+        subphase, reason = value.get("subphase"), value.get("reason")
+        if isinstance(subphase, str) and subphase in _GRAPH_TIMEOUT_SUBPHASES.get(phase, ()):
+            progress["subphase"] = subphase
+        if phase == "waiting" and isinstance(reason, str) and reason in _GRAPH_TIMEOUT_REASONS:
+            progress["reason"] = reason
+        for key in _GRAPH_TIMEOUT_COUNTERS:
+            number = value.get(key)
+            if type(number) is int and 0 <= number <= 2**53 - 1:
+                progress[key] = number
+        reported.append(progress)
+    timeout = error.timeout
+    packet = {"version": 1, "scope": "native-spec-graph-index",
+              "operationOrdinal": ordinal if type(ordinal) is int and ordinal in (1, 2) else None,
+              "timeoutSeconds": timeout if type(timeout) in (int, float) and 0 <= timeout <= 86400 else None,
+              "stdout": stdout, "stderr": stderr, "reportedProgress": reported[-8:]}
+    while True:
+        text = _GRAPH_TIMEOUT_PREFIX + json.dumps(packet, ensure_ascii=True, separators=(",", ":")) + "\n"
+        if len(text.encode("utf-8")) <= 4096:
+            return text
+        packet["reportedProgress"].pop(0)
+
+
+def graph_timeout_fixture():
+    """Fast-check's pure stdlib boundary; dispatch before product imports or fixture setup."""
+    import base64
+    import copy
+    import json
+    import subprocess
+    payload = json.loads(sys.stdin.read())
+    assert set(payload) == {"stdoutBase64", "stderrBase64", "ordinal"}
+    assert type(payload["ordinal"]) is int
+    streams = {key: base64.b64decode(payload[key + "Base64"], validate=True) for key in ("stdout", "stderr")}
+    before_input = copy.deepcopy(payload)
+    error = subprocess.TimeoutExpired(["synthetic-graph-index"], 55, output=streams["stdout"], stderr=streams["stderr"])
+    before_error = copy.deepcopy(vars(error))
+    first = native_graph_timeout_diagnostic(error, payload["ordinal"])
+    assert first == native_graph_timeout_diagnostic(error, payload["ordinal"])
+    assert len(first.encode("utf-8")) <= 4096 and first.count("\n") == 1
+    assert first.startswith("NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS ")
+    packet = json.loads(first.split(" ", 1)[1])
+    assert set(packet) == {"version", "scope", "operationOrdinal", "timeoutSeconds", "stdout", "stderr", "reportedProgress"}
+    assert packet["version"] == 1 and packet["scope"] == "native-spec-graph-index" and packet["timeoutSeconds"] == 55
+    assert packet["operationOrdinal"] == (payload["ordinal"] if payload["ordinal"] in (1, 2) else None)
+    for key in ("stdout", "stderr"):
+        stream = packet[key]
+        assert set(stream) == {"capture", "units", "capturedUnits", "sampleBytes", "sampleEncoding", "sampleSha256", "truncated"}
+        assert stream["capture"] == "bytes" and stream["units"] == "bytes" and stream["sampleEncoding"] == "captured-bytes"
+        assert stream["capturedUnits"] == len(streams[key]) and 0 <= stream["sampleBytes"] <= 16384
+        assert type(stream["truncated"]) is bool
+        assert len(stream["sampleSha256"]) == 64 and all(character in "0123456789abcdef" for character in stream["sampleSha256"])
+    assert type(packet["reportedProgress"]) is list and len(packet["reportedProgress"]) <= 8
+    phases = ("registering", "sharing", "waiting", "reclaiming", "scanning", "materializing", "resolving", "activating", "embedding")
+    counters = {"completed", "total", "accepted", "excluded", "skipped", "reused", "edges", "resolved", "symbols", "embedded", "pagesCompleted", "rowsDeleted"}
+    subphases = {"references", "complete", "promoting", "structural-ready", "summarizing-analysis", "validating-input", "writing-and-checkpointing",
+                 "applying-deltas", "building-local-overlay", "discovering-shared-base", "downloading-checkpoint"}
+    reasons = {"database-writer", "disk-capacity", "home-builder-cap", "prepared-spool-budget", "repository-lock", "request-lock", "snapshot-build"}
+    for progress in packet["reportedProgress"]:
+        assert set(progress) <= {"phase", "subphase", "reason"} | counters and progress["phase"] in phases
+        assert "subphase" not in progress or progress["subphase"] in subphases
+        assert "reason" not in progress or progress["reason"] in reasons
+        for key in counters & set(progress):
+            assert type(progress[key]) is int and 0 <= progress[key] <= 2**53 - 1
+    assert payload == before_input and vars(error) == before_error
+    print(json.dumps({"bounded": True, "deterministic": True, "nonmutating": True, "private": True}))
+
+
+if __name__ == "__main__" and sys.argv[1:] == ["--graph-timeout-fixture"]:
+    graph_timeout_fixture()
+    raise SystemExit(0)
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from product_skills_fixture import configure_product_skills, assert_product_provenance
 PRODUCT_SKILLS = configure_product_skills(__file__, 6)
 import copy
+import contextlib
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import random
 import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 import dev_spec as ds
 import support
@@ -506,8 +632,18 @@ class Specs(unittest.TestCase):
         native_home = str(self.directory / "native-home")
         self.sc, self.pc = ds.Threadnote(str(self.repo), native_home), dp.Threadnote(str(self.repo), native_home)
 
+        index_ordinal = 0
         def index():
-            dp.run(["threadnote", "graph", "index", "--home", native_home, "--cwd", str(self.repo), "--no-vectors", "--json"])
+            nonlocal index_ordinal
+            index_ordinal += 1
+            try:
+                dp.run(["threadnote", "graph", "index", "--home", native_home, "--cwd", str(self.repo), "--no-vectors", "--json"])
+            except subprocess.TimeoutExpired as error:
+                try:
+                    sys.stderr.write(native_graph_timeout_diagnostic(error, index_ordinal))
+                except BaseException:
+                    pass  # Diagnostic construction/output must never replace this timeout.
+                raise
 
         index()
         saved, plan, result, cycle, memories = self.plan_cycle()
@@ -541,6 +677,138 @@ class Specs(unittest.TestCase):
         self.assertTrue(all(not self.sc.active(u) for u in final["data"]["archiveMap"].values()))
         arch = dp.load_record(self.pc.read(complete["implementedArchitectureUri"]))
         self.assertTrue(all(self.sc.active(r["uri"]) for r in arch["relations"]))
+
+
+class NativeGraphTimeoutDiagnostics(unittest.TestCase):
+    def packet(self, error, ordinal=1):
+        text = native_graph_timeout_diagnostic(error, ordinal)
+        self.assertTrue(text.startswith("NATIVE_GRAPH_TIMEOUT_DIAGNOSTICS "))
+        self.assertLessEqual(len(text.encode("utf-8")), 4096)
+        self.assertEqual(text.count("\n"), 1)
+        return json.loads(text.split(" ", 1)[1])
+
+    def progress(self, phase, **fields):
+        return json.dumps({"type": "code-graph-progress", "version": 2, "phase": phase, **fields}) + "\n"
+
+    def test_timeout_packet_is_path_free_and_does_not_mutate_exception(self):
+        private = "PRIVATE_BODY_TOKEN /private/fixture C:\\private\\fixture"
+        stderr = self.progress("scanning", completed=1, total=2, repository=private,
+                               activity={"path": private}, body=private).encode()
+        error = subprocess.TimeoutExpired([private], 55, output=private.encode(), stderr=stderr)
+        before = copy.deepcopy(vars(error))
+        record = self.packet(error)
+        self.assertEqual(record["reportedProgress"], [{"phase": "scanning", "completed": 1, "total": 2}])
+        self.assertEqual(record["operationOrdinal"], 1)
+        self.assertEqual(record["timeoutSeconds"], 55)
+        self.assertNotIn("PRIVATE_BODY_TOKEN", json.dumps(record))
+        self.assertNotIn("private", json.dumps(record))
+        self.assertEqual(record["stdout"]["capturedUnits"], len(private.encode()))
+        self.assertEqual(record["stdout"]["sampleSha256"], hashlib.sha256(private.encode()).hexdigest())
+        self.assertEqual(record, self.packet(error))
+        self.assertEqual(vars(error), before)
+
+    def test_missing_empty_text_bytes_and_invalid_progress_remain_distinct(self):
+        for value, capture, units in [(None, "unavailable", None), (b"", "bytes", "bytes"),
+                                      ("", "text", "characters"), (bytes(range(256)), "bytes", "bytes"),
+                                      ("漢🙂\ud800", "text", "characters")]:
+            with self.subTest(capture=capture, units=units):
+                record = self.packet(subprocess.TimeoutExpired([], 55, output=value, stderr=value))
+                self.assertEqual(record["stdout"]["capture"], capture)
+                self.assertEqual(record["stdout"].get("units"), units)
+                self.assertEqual(record["reportedProgress"], [])
+        invalid = b"\xff\n{\"type\":\"code-graph-progress\"\n" + self.progress("unknown", body="PRIVATE").encode()
+        invalid += self.progress("scanning", version=1).encode()
+        self.assertEqual(self.packet(subprocess.TimeoutExpired([], 55, stderr=invalid))["reportedProgress"], [])
+
+    def test_sample_recent_records_numbers_and_whole_packet_are_bounded(self):
+        counters = dict.fromkeys(("completed", "total", "accepted", "excluded", "skipped", "reused", "edges",
+                                 "resolved", "symbols", "embedded", "pagesCompleted", "rowsDeleted"), 2**53 - 1)
+        stderr = "PRIVATE" * 4000 + "\n" + self.progress("waiting", reason="repository-lock", body="PRIVATE")
+        stderr += "".join(self.progress("scanning", **counters) for _ in range(20))
+        record = self.packet(subprocess.TimeoutExpired([], float("nan"), output="🙂" * 20000, stderr=stderr.encode()), 999)
+        self.assertIsNone(record["operationOrdinal"])
+        self.assertIsNone(record["timeoutSeconds"])
+        for stream in ("stdout", "stderr"):
+            self.assertLessEqual(record[stream]["sampleBytes"], 16384)
+            self.assertTrue(record[stream]["truncated"])
+        self.assertLessEqual(len(record["reportedProgress"]), 8)
+        self.assertNotIn("PRIVATE", json.dumps(record))
+        bad = self.progress("waiting", reason="PRIVATE", completed=True, total=-1, reused=1.5, symbols=2**53,
+                            subphase="PRIVATE", activity={"stage": "PRIVATE"})
+        self.assertEqual(self.packet(subprocess.TimeoutExpired([], 55, stderr=bad))["reportedProgress"], [{"phase": "waiting"}])
+
+    def test_bounded_generated_progress_matches_independent_closed_projection(self):
+        randomizer = random.Random(39977299851)
+        for index in range(20):
+            lines, model = [], []
+            for _ in range(randomizer.randrange(25)):
+                valid = randomizer.choice((True, False))
+                phase = randomizer.choice(("scanning", "materializing", "waiting"))
+                completed = randomizer.randrange(500)
+                lines.append(self.progress(phase if valid else "PRIVATE", completed=completed,
+                                           repository="PRIVATE", activity={"path": "PRIVATE"}))
+                if valid:
+                    model.append({"phase": phase, "completed": completed})
+            error = subprocess.TimeoutExpired(["PRIVATE"], 55, stderr="".join(lines).encode())
+            before = copy.deepcopy(vars(error))
+            with self.subTest(index=index):
+                self.assertEqual(self.packet(error)["reportedProgress"], model[-8:])
+                self.assertEqual(vars(error), before)
+
+    def invoke_native_method(self, outcomes):
+        temporary = tempfile.TemporaryDirectory(prefix="graph-timeout-callback-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        repo = root / "repo"
+        (repo / "src").mkdir(parents=True)
+        self.after_index = RuntimeError("after both successful index calls")
+        subject = SimpleNamespace(directory=root, repo=repo, state=root / "receipts.json", git=Mock(),
+                                  plan_cycle=Mock(return_value=(None, None, None, {}, None)),
+                                  validate_cycle=Mock(side_effect=self.after_index))
+        self.expected_command = ["threadnote", "graph", "index", "--home", str(root / "native-home"),
+                                 "--cwd", str(repo), "--no-vectors", "--json"]
+        self.launch = Mock(side_effect=outcomes)
+        method = Specs.test_native_full_workflow_with_current_new_code_bindings
+        method = getattr(method, "__wrapped__", method)
+        with patch.object(ds, "Threadnote"), patch.object(dp, "Threadnote"), \
+                patch.object(ds, "read_json", return_value={"receipts": {}}), patch.object(dp, "run", self.launch):
+            method(subject)
+
+    def test_exact_native_call_and_timeout_identity_survive_first_and_second_failure(self):
+        for ordinal in (1, 2):
+            error = subprocess.TimeoutExpired(["PRIVATE"], 55, stderr=self.progress("waiting", reason="request-lock").encode())
+            before = copy.deepcopy(vars(error))
+            output = io.StringIO()
+            with self.subTest(ordinal=ordinal), contextlib.redirect_stderr(output):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    self.invoke_native_method(["success"] * (ordinal - 1) + [error])
+                self.assertIs(caught.exception, error)
+                self.assertEqual(self.launch.call_args_list, [call(self.expected_command)] * ordinal)
+                self.assertEqual(json.loads(output.getvalue().split(" ", 1)[1])["operationOrdinal"], ordinal)
+                self.assertEqual(vars(error), before)
+
+    def test_success_non_timeout_and_diagnostic_failures_preserve_original_behavior(self):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            with self.assertRaises(RuntimeError) as caught:
+                self.invoke_native_method(["first", "second"])
+            self.assertIs(caught.exception, self.after_index)
+            self.assertEqual(self.launch.call_args_list, [call(self.expected_command)] * 2)
+            original = ValueError("original non-timeout")
+            with self.assertRaises(ValueError) as caught:
+                self.invoke_native_method([original])
+            self.assertIs(caught.exception, original)
+        self.assertEqual(output.getvalue(), "")
+        for mode in ("renderer", "sink"):
+            error = subprocess.TimeoutExpired(["PRIVATE"], 55, stderr=b"PRIVATE")
+            before = copy.deepcopy(vars(error))
+            target, name = (sys, "stderr") if mode == "sink" else (sys.modules[__name__], "native_graph_timeout_diagnostic")
+            replacement = Mock(write=Mock(side_effect=OSError("synthetic sink refusal"))) if mode == "sink" else Mock(side_effect=ValueError("synthetic renderer refusal"))
+            with self.subTest(mode=mode), patch.object(target, name, replacement):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    self.invoke_native_method([error])
+                self.assertIs(caught.exception, error)
+                self.assertEqual(vars(error), before)
 
 
 if __name__ == "__main__":

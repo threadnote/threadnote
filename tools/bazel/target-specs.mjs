@@ -432,6 +432,8 @@ export const targetSpecs = [
       'tools/bazel/targets.json',
       'tools/ci/bazel-run-selected.mjs',
       'tools/ci/bazel-select.mjs',
+      'tools/ci/windows-workflow-prerequisites.py',
+      'tools/ci/test/python/test_windows_workflow_prerequisites.py',
     ],
     dataRoots: ['.github/workflows'],
   },

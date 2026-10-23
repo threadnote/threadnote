@@ -279,6 +279,34 @@ class WorkflowTransport:
             self._accept(pending, result)
 
     def prepare(self, record, topic, body, relations, replace=None, deferred=False):
+        return json.loads(self._prepare_write(record, topic, body, relations, replace, deferred))["preview"]
+
+    def _write_admission(self, key, operation):
+        require(isinstance(operation, dict) and isinstance(operation.get("request"), dict), "Invalid workflow write attempt")
+        request = operation["request"]
+        require(isinstance(request.get("operationId"), str) and bool(request["operationId"])
+                and "expectedRevision" in request
+                and (request["expectedRevision"] is None or isinstance(request["expectedRevision"], str))
+                and digest({k: v for k, v in request.items() if k not in {"operationId", "expectedRevision"}}) == key,
+                "Workflow write request differs from its intent")
+        stage, preview = operation.get("stage"), operation.get("preview")
+        require((isinstance(stage, str) and stage in {"preflight", "mutation"})
+                or ("stage" not in operation and isinstance(operation.get("result"), dict)),
+                "Invalid workflow write attempt stage")
+        require((stage == "preflight" and preview is None)
+                or (isinstance(preview, dict) and isinstance(preview.get("canonicalUri"), str)
+                    and preview.get("beforeRevision") == request["expectedRevision"]), "Invalid workflow write preview")
+        if stage is None:
+            result = operation["result"]
+            require(result.get("canonicalUri") == preview["canonicalUri"]
+                    and isinstance(result.get("revision"), str) and re.fullmatch(r"[a-f0-9]{64}", result["revision"])
+                    and result.get("operationId", request["operationId"]) == request["operationId"],
+                    "Invalid completed workflow write receipt")
+        return json.dumps({"contextPath": str(self.path), "bindingHash": digest(self.binding), "key": key,
+                           "request": request, "preview": preview, "stage": stage},
+                          sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+    def _prepare_write(self, record, topic, body, relations, replace=None, deferred=False):
         role = record["kind"]
         if self.cloud and role in {"verified", "implemented"}:
             raise WorkflowError("pending-publication", "Personal cloud closeout needs an approved sanitized publication graph; both draft sets remain active")
@@ -296,25 +324,32 @@ class WorkflowTransport:
             self.state = read_json(self.path)
             self._validate()
             old = self.state["operations"].get(key)
-            if old:
-                return old["preview"]
+            if key in self.state["operations"]:
+                return self._write_admission(key, old)
             pending = self.state.get("pending")
-            require(not pending or pending["key"] == key, "Recover the pending workflow operation before changing its intent")
+            require(pending is None or (isinstance(pending, dict) and pending.get("key") == key),
+                    "Recover the pending workflow operation before changing its intent")
             if not pending:
                 request["operationId"] = uuid.uuid4().hex
                 request["expectedRevision"] = self.read(replace)["revision"] if replace else None
                 pending = {"key": key, "request": request, "stage": "preflight"}
+                self._write_admission(key, pending)
                 self.state["pending"] = pending
                 save_json(self.path, self.state)
+            else:
+                self._write_admission(key, pending)
             request = pending["request"]
             preview = self.request("preflight", mutation=request["action"], **{k: v for k, v in request.items() if k != "action"})
             require(preview.get("beforeRevision") == request["expectedRevision"] and isinstance(preview.get("canonicalUri"), str), "Workflow preflight changed expected revision/destination")
             pending["preview"] = preview
+            admitted = self._write_admission(key, pending)
             save_json(self.path, self.state)
-            return preview
+            return admitted
 
     def write(self, record, topic, body, relations, replace=None, deferred=False, preview=False):
-        prepared = self.prepare(record, topic, body, relations, replace, deferred)
+        admission = json.loads(self._prepare_write(record, topic, body, relations, replace, deferred))
+        prepared = admission["preview"]
+        identity = digest({k: v for k, v in admission.items() if k != "stage"})
         if preview:
             return prepared["canonicalUri"]
         with locked(self.path):
@@ -323,15 +358,22 @@ class WorkflowTransport:
             pending = self.state.get("pending")
             if pending is None:
                 # A verified completed operation is replayed only for the same intent.
-                candidates = [item for item in self.state["operations"].values()
-                              if item["preview"] == prepared and item["request"].get("bodySha256") == body_hash(body)]
-                require(len(candidates) == 1, "Cannot identify the completed workflow operation")
-                uri = candidates[0]["result"]["canonicalUri"]
+                completed = self.state["operations"].get(admission["key"])
+                current = json.loads(self._write_admission(admission["key"], completed))
+                require(current["stage"] is None and digest({k: v for k, v in current.items() if k != "stage"}) == identity,
+                        "Cannot identify the completed workflow operation")
+                uri = completed["result"]["canonicalUri"]
                 observed = self.read(uri)
                 require(observed["bodySha256"] == body_hash(body)
-                        and observed["revision"] == candidates[0]["result"]["revision"]
+                        and observed["revision"] == completed["result"]["revision"]
                         and observed["state"] == "active", "Completed workflow artifact changed")
                 return uri
+            current = json.loads(self._write_admission(pending.get("key") if isinstance(pending, dict) else None, pending))
+            # Another caller may advance this exact attempt, but cannot replace it or regress its stage.
+            require(admission["stage"] in {"preflight", "mutation"}
+                    and current["stage"] in ({"preflight", "mutation"} if admission["stage"] == "preflight" else {"mutation"})
+                    and digest({k: v for k, v in current.items() if k != "stage"}) == identity,
+                    "Pending workflow write differs from the prepared attempt")
             pending["stage"] = "mutation"
             save_json(self.path, self.state)
             request = dict(pending["request"])
