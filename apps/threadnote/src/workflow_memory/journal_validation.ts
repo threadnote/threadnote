@@ -152,14 +152,19 @@ function assertSourceOwned(operation: WorkflowOperation, artifacts: WorkflowJour
     check(source[field] === operation.artifact[field]);
 }
 
-function assertPreparedRelations(state: WorkflowJournal, operation: WorkflowOperation): void {
+function assertPreparedRelations(
+  state: WorkflowJournal,
+  operation: WorkflowOperation,
+  desktopSharedRoots: readonly string[],
+): void {
   if (operation.request.action === 'archive') {
     check(operation.relations.length === 0);
     return;
   }
   const owned = workflowOwnedArtifacts(state);
+  const sharedRoots = state.binding.profile === 'desktop' ? desktopSharedRoots : state.binding.sharedRoots;
   const scopes = [
-    ...state.binding.sharedRoots,
+    ...sharedRoots,
     ...owned.map(artifact => artifact.canonicalUri),
     ...(state.binding.profile === 'desktop'
       ? [`${root(state.binding)}/durable`, `${root(state.binding)}/preferences`]
@@ -178,7 +183,7 @@ function assertPreparedRelations(state: WorkflowJournal, operation: WorkflowOper
     )
       check(
         owned.some(artifact => artifact.canonicalUri === target.uri) ||
-          state.binding.sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
+          sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
       );
     check(
       target.allowedUriScopes === undefined ||
@@ -228,6 +233,7 @@ function citationOnlyTransition(previous: WorkflowArtifact, operation: WorkflowO
 export function assertWorkflowJournalIntegrity(
   state: WorkflowJournal,
   currentManifestContent: string | undefined,
+  desktopSharedRoots: readonly string[] = [],
 ): void {
   check(state.protocolVersion === 1 && object(state.binding) && object(state.artifacts) && object(state.operations));
   const {bindingId, ...identity} = state.binding;
@@ -241,7 +247,7 @@ export function assertWorkflowJournalIntegrity(
   for (const [key, operation] of Object.entries(state.operations)) assertOperation(state, key, operation);
   for (const operation of Object.values(state.operations).filter(item => item.status === 'prepared')) {
     assertSourceOwned(operation, state.artifacts);
-    assertPreparedRelations(state, operation);
+    assertPreparedRelations(state, operation, desktopSharedRoots);
   }
   if (currentManifestContent === state.manifestContent) return;
   // The caller reports missing/changed committed state. It must never repair it.
@@ -266,7 +272,7 @@ export function assertWorkflowJournalIntegrity(
       if (changed.length === 1 && old && citationOnlyTransition(old, operation)) return true;
       try {
         assertSourceOwned(operation, previous);
-        assertPreparedRelations({...state, artifacts: previous}, operation);
+        assertPreparedRelations({...state, artifacts: previous}, operation, desktopSharedRoots);
       } catch {
         return false;
       }

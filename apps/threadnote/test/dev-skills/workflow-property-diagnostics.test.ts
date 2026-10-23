@@ -316,3 +316,194 @@ effectIt.effect.prop(
     }),
   {arbitrary: {runs: 24}},
 );
+
+effectIt.effect('reports shared namespace access mode before abort cleanup and after the original scoped exit', () =>
+  Effect.gen(function* () {
+    const test = lifecycle();
+    const writes: string[] = [];
+    const diagnostics = workflowPropertyDiagnostics(test.context, 'shared-context-namespace', {
+      write: line => {
+        writes.push(line);
+      },
+    });
+    let cleaned = false;
+    const original = {privateBody: 'never-record-body', privateUri: 'threadnote://private/example'};
+    const exit = yield* diagnostics
+      .observe(
+        2,
+        Effect.gen(function* () {
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              cleaned = true;
+            }),
+          );
+          diagnostics.phase('denied-preflight');
+          test.controller.abort(original);
+          expect(cleaned).toBe(false);
+          expect(writes).toHaveLength(1);
+          expect(parse(writes[0])).toMatchObject({
+            property: 'shared-context-namespace',
+            inputName: 'accessMode',
+            event: 'aborted',
+            phase: 'denied-preflight',
+            startedEvaluations: 1,
+            completedEvaluations: 0,
+            activeEvaluation: {ordinal: 1, input: 2},
+          });
+          return yield* Effect.interrupt;
+        }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), Effect.scoped),
+      )
+      .pipe(Effect.exit);
+    expect(Exit.hasInterrupts(exit)).toBe(true);
+    expect(cleaned).toBe(true);
+    test.finish();
+    expect(writes).toHaveLength(2);
+    expect(parse(writes[1])).toMatchObject({
+      event: 'finished',
+      completedEvaluations: 1,
+      successfulEvaluations: 0,
+      activeEvaluation: null,
+    });
+    for (const value of Object.values(original)) expect(writes.join('')).not.toContain(value);
+    const closed = lifecycle();
+    const silent = workflowPropertyDiagnostics(closed.context, 'shared-context-namespace', {
+      write: () => {
+        throw new Error('private sink failure');
+      },
+    });
+    expect(yield* silent.observe(1, Effect.succeed(original))).toBe(original);
+    closed.controller.abort(original);
+    closed.finish();
+  }),
+);
+
+effectIt.effect('limits shared namespace numeric access codes and serialized finite diagnostic fields', () =>
+  Effect.gen(function* () {
+    let time = 0;
+    const diagnostics = workflowDiagnostics('shared-context-namespace', () => time);
+    for (const input of [-1, 0, 3, Infinity, NaN]) {
+      yield* diagnostics.observe(
+        input,
+        Effect.sync(() => {
+          expect(diagnostics.snapshot().activeEvaluation?.input).toBeNull();
+          diagnostics.phase('authorized-preflight');
+          time = Number.MAX_VALUE;
+        }),
+      );
+    }
+    expect(diagnostics.snapshot()).toMatchObject({
+      inputName: 'accessMode',
+      startedEvaluations: 5,
+      completedEvaluations: 5,
+      successfulEvaluations: 5,
+    });
+    expect(diagnostics.snapshot().recent).toHaveLength(16);
+    expect(Buffer.byteLength(JSON.stringify(diagnostics.snapshot()), 'utf8')).toBeLessThan(8192);
+  }),
+);
+
+effectIt.effect.prop(
+  'bounds shared namespace outcome history and snapshots independently of private values and input mutations',
+  {
+    evaluations: Schema.Array(
+      Schema.Struct({
+        readOnly: Schema.Boolean,
+        phase: Schema.Literals(['authorized-read', 'authorized-preflight', 'denied-read', 'denied-preflight']),
+        outcome: Schema.Literals(['success', 'failure', 'defect', 'interruption']),
+        duration: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 9})),
+      }),
+    ).check(Schema.isBetweenLength(1, 22)),
+  },
+  ({evaluations}) =>
+    Effect.gen(function* () {
+      let time = 0;
+      let cleaned = 0;
+      let successes = 0;
+      const diagnostics = workflowDiagnostics('shared-context-namespace', () => time);
+      const originalInput = JSON.stringify(evaluations);
+      const frozen = Object.freeze(evaluations.map(value => Object.freeze({...value})));
+      const expectedEvents: string[] = [];
+      const privateValue = {body: 'private-shared-body', uri: 'threadnote://private/shared-context'};
+      for (const [index, evaluation] of frozen.entries()) {
+        const before = diagnostics.snapshot();
+        const beforeText = JSON.stringify(before);
+        // Closed diagnostic codes describe the original Boolean; no generated suffix or URI is retained.
+        const mode = evaluation.readOnly ? 2 : 1;
+        const exit = yield* diagnostics
+          .observe(
+            mode,
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() =>
+                Effect.sync(() => {
+                  cleaned++;
+                }),
+              );
+              expect(diagnostics.snapshot()).toMatchObject({
+                phase: 'provisioning',
+                startedEvaluations: index + 1,
+                completedEvaluations: index,
+                activeEvaluation: {ordinal: index + 1, input: mode},
+              });
+              diagnostics.phase(evaluation.phase);
+              time += evaluation.duration;
+              switch (evaluation.outcome) {
+                case 'success':
+                  return privateValue;
+                case 'failure':
+                  return yield* Effect.fail(privateValue);
+                case 'defect':
+                  return yield* Effect.die(privateValue);
+                case 'interruption':
+                  return yield* Effect.interrupt;
+              }
+            }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), Effect.scoped),
+          )
+          .pipe(Effect.exit);
+        if (evaluation.outcome === 'success') {
+          successes++;
+          expect(exit).toEqual(Exit.succeed(privateValue));
+        } else if (evaluation.outcome === 'failure') {
+          expect(exit).toEqual(Exit.fail(privateValue));
+        } else if (evaluation.outcome === 'defect') {
+          expect(exit).toEqual(Exit.failCause(Cause.die(privateValue)));
+        }
+        expect(Exit.hasInterrupts(exit)).toBe(evaluation.outcome === 'interruption');
+        expect(cleaned).toBe(index + 1);
+        expectedEvents.push(
+          'phase:between-evaluations',
+          'phase:provisioning',
+          'phase:' + evaluation.phase,
+          'phase:teardown',
+          'evaluation-exit',
+        );
+        const after = diagnostics.snapshot();
+        expect(after).toMatchObject({
+          startedEvaluations: index + 1,
+          completedEvaluations: index + 1,
+          successfulEvaluations: successes,
+          activeEvaluation: null,
+          phase: 'between-evaluations',
+          inputName: 'accessMode',
+        });
+        expect(after.recent.map(record => (record.event === 'phase' ? 'phase:' + record.phase : record.event))).toEqual(
+          expectedEvents.slice(-16),
+        );
+        expect(after.recent.at(-1)).toMatchObject({
+          event: 'evaluation-exit',
+          ordinal: index + 1,
+          input: mode,
+          outcome: evaluation.outcome === 'success' ? 'Success' : 'Failure',
+          interrupted: evaluation.outcome === 'interruption',
+          elapsedMs: evaluation.duration,
+        });
+        expect(JSON.stringify(before)).toBe(beforeText);
+        const afterText = JSON.stringify(after);
+        after.recent[0].startedMs = -1;
+        expect(JSON.stringify(diagnostics.snapshot())).toBe(afterText);
+        expect(Buffer.byteLength(afterText, 'utf8')).toBeLessThan(8192);
+        for (const value of Object.values(privateValue)) expect(afterText).not.toContain(value);
+      }
+      expect(JSON.stringify(evaluations)).toBe(originalInput);
+    }),
+  {arbitrary: {runs: 20}},
+);
