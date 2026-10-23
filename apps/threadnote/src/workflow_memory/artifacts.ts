@@ -19,6 +19,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
+import {readWorkflowSharedRoots} from './scopes.js';
 import {
   discardDeferredCodeAnchorIntent,
   discardOtherDeferredCodeAnchorIntents,
@@ -58,19 +59,24 @@ const nativeRoot = (config: RuntimeConfig) => `threadnote://user/${uriSegment(co
 const ownedArtifacts = workflowOwnedArtifacts;
 const ownedArtifact = (state: WorkflowJournal, uri: string) =>
   ownedArtifacts(state).find(artifact => artifact.canonicalUri === uri);
-function admitPrivateCandidate(state: WorkflowJournal, uri: string): void {
+function admitPrivateCandidate(state: WorkflowJournal, uri: string, sharedRoots: readonly string[]): void {
   if (
     parseResourceId(uri).segments.at(-1)?.startsWith('workflow-') &&
     !ownedArtifact(state, uri) &&
-    !state.binding.sharedRoots.some(root => resourceIdIsWithin(uri, root))
+    !sharedRoots.some(root => resourceIdIsWithin(uri, root))
   ) {
     throw workflowError('out-of-scope', 'Private artifacts must belong to this workflow.');
   }
 }
-function allowedScopes(config: RuntimeConfig, state: WorkflowJournal, readOnly = false): readonly string[] {
-  return [
+const allowedScopes = Effect.fn('workflowMemory.allowedScopes')(function* (
+  config: RuntimeConfig,
+  state: WorkflowJournal,
+  readOnly = false,
+) {
+  const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
+  const scopes = [
     ...new Set([
-      ...state.binding.sharedRoots,
+      ...sharedRoots,
       ...ownedArtifacts(state).map(artifact => artifact.canonicalUri),
       ...(readOnly && state.binding.profile === 'desktop'
         ? [`${nativeRoot(config)}/durable`, `${nativeRoot(config)}/preferences`, `${nativeRoot(config)}/incidents`]
@@ -80,7 +86,8 @@ function allowedScopes(config: RuntimeConfig, state: WorkflowJournal, readOnly =
         : []),
     ]),
   ];
-}
+  return {scopes, sharedRoots};
+});
 function isExpectedUnwrittenUri(config: RuntimeConfig, state: WorkflowJournal, uri: string): boolean {
   const roots = [
     `${nativeRoot(config)}/handoffs/active/${uriSegment(state.binding.project)}`,
@@ -113,15 +120,15 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
       'This artifact was retired; historical receipts do not restore ownership.',
     );
   }
-  const scopes = allowedScopes(config, state, true);
+  const {scopes, sharedRoots} = yield* allowedScopes(config, state, true);
   const expected = isExpectedUnwrittenUri(config, state, uri);
   if (!memoryIdFromIdentityAlias(uri) && !scopes.some(scope => resourceIdIsWithin(uri, scope)) && !expected)
     return yield* workflowError('out-of-scope', 'Memory is outside this workflow and its configured shares.');
   const [resolved] = yield* resolveMemoryIdentityAliases(config, [uri], expected ? [...scopes, uri] : scopes);
-  if (!expected) yield* validateWorkflowInput(() => admitPrivateCandidate(state, resolved.canonicalUri));
+  if (!expected) yield* validateWorkflowInput(() => admitPrivateCandidate(state, resolved.canonicalUri, sharedRoots));
   const live = yield* readMemoryWithRelocations(config, resolved.canonicalUri, {
     allowedUriScopes: [
-      ...state.binding.sharedRoots,
+      ...sharedRoots,
       ...ownedArtifacts(state).map(artifact => artifact.canonicalUri),
       resolved.canonicalUri,
     ],
@@ -132,10 +139,10 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
   if (!record) return yield* workflowError('invalid-memory', 'The workflow resource is not a native memory.');
   const workflowTopic = record.metadata.topic?.startsWith('workflow-');
   if (
-    (workflowTopic && !owned && !state.binding.sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root))) ||
+    (workflowTopic && !owned && !sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root))) ||
     (state.binding.profile !== 'desktop' &&
       !owned &&
-      !state.binding.sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root)))
+      !sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root)))
   )
     return yield* workflowError('out-of-scope', 'Private artifacts must belong to this workflow.');
   if (owned && owned.memoryId !== record.metadata.memoryId)
@@ -258,7 +265,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     const memoryId =
       previous?.metadata.memoryId ??
       `tn_${(yield* sha256Hex(`${state.binding.bindingId}\n${sourceRunId}\n${artifactKey}`)).slice(0, 20)}`;
-    const relationScopes = allowedScopes(config, state);
+    const {scopes: relationScopes, sharedRoots} = yield* allowedScopes(config, state);
     const relationUris = yield* validateWorkflowInput(() =>
       (request.relations ?? []).map(relation => parseResourceId(relation.uri).canonicalUri),
     );
@@ -272,11 +279,11 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     for (const candidate of candidates) {
       if (!relationScopes.some(scope => resourceIdIsWithin(candidate.canonicalUri, scope)))
         return yield* workflowError('out-of-scope', 'The resolved relation target is outside this workflow scope.');
-      yield* validateWorkflowInput(() => admitPrivateCandidate(state, candidate.canonicalUri));
+      yield* validateWorkflowInput(() => admitPrivateCandidate(state, candidate.canonicalUri, sharedRoots));
     }
     const resolvedRelations = yield* resolveAuthoredMemoryRelations(config, request.relations ?? [], {
       allowedUriScopes: [
-        ...state.binding.sharedRoots,
+        ...sharedRoots,
         ...ownedArtifacts(state).map(artifact => artifact.canonicalUri),
         ...candidates.map(candidate => candidate.canonicalUri),
       ],
@@ -289,7 +296,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
         (record?.metadata.topic?.startsWith('workflow-') ||
           resourceIdIsWithin(target.uri, `${nativeRoot(config)}/handoffs`)) &&
         !ownedArtifact(state, target.uri) &&
-        !state.binding.sharedRoots.some(root => resourceIdIsWithin(target.uri, root))
+        !sharedRoots.some(root => resourceIdIsWithin(target.uri, root))
       )
         return yield* workflowError('out-of-scope', 'Private relation targets must belong to the same workflow.');
     }
@@ -386,7 +393,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   let prepared = {...initial, operations: {...initial.operations, [operationId]: operation}};
   const finalArtifacts = {...prepared.artifacts, [operation.artifact.canonicalUri]: operation.artifact};
   if (operation.request.action === 'archive' && operation.sourceUri) delete finalArtifacts[operation.sourceUri];
-  yield* assertWorkflowTransition(prepared, {
+  yield* assertWorkflowTransition(config, prepared, {
     ...prepared,
     artifacts: finalArtifacts,
     operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},

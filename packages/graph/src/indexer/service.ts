@@ -516,6 +516,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
               });
             }
             const capacityProtection: DirectPersistentCapacityProtection = {
+              ...(options.onTiming === undefined ? {} : {onTiming: options.onTiming}),
               availableDiskBytes:
                 options.diskCapacityAvailableBytes ?? ((target: string) => system.availableDiskBytes(target)),
               crypto,
@@ -1576,6 +1577,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
             });
             const commitIdentity = {...initialIdentity, headCommit: request.commit};
             const capacityProtection: DirectPersistentCapacityProtection = {
+              ...(options.onTiming === undefined ? {} : {onTiming: options.onTiming}),
               availableDiskBytes:
                 options.diskCapacityAvailableBytes ?? ((target: string) => system.availableDiskBytes(target)),
               crypto,

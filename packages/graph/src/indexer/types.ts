@@ -79,6 +79,10 @@ export type CodeGraphIndexTimingStage =
   | 'index-scope'
   | 'index-scope-body'
   | 'lifecycle-opportunity'
+  | 'reference-reservation-owner-identity'
+  | 'reference-reservation-claim'
+  | 'reference-reservation-use'
+  | 'reference-reservation-release'
   | 'reporter-completion'
   | 'share-drain'
   | 'snapshot-lease-release';
@@ -135,6 +139,7 @@ export interface CodeGraphSourceVerification {
 }
 
 export interface DirectPersistentCapacityProtection {
+  readonly onTiming?: CodeGraphIndexTimingObserver;
   readonly availableDiskBytes: (
     path: string,
     boundary: CodeGraphDirectPersistentCapacityBoundary,

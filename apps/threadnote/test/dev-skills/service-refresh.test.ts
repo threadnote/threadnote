@@ -294,26 +294,45 @@ describe('exact-release enrolled workflow refresh', () => {
   );
   effectIt.effect(
     'unavailable registered homes remain pending and do not block a separate root or reconstruct consent',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        yield* f.run(applyDevSkills(f.config, 'install', selector));
-        const other = {...f.config, agentContextHome: f.path.join(f.root, 'offline-home')};
-        yield* f.run(applyDevSkills(other, 'install', {agent: 'claude-code'}));
-        const homeFile = homeIndexPath(f.path, other.agentContextHome);
-        const originalHome = yield* f.fs.readFileString(homeFile);
-        yield* f.fs.remove(homeFile);
-        const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.5');
-        const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
-        expect(plan.compatibility).toBe('unknown');
-        const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
-        yield* release.activate;
-        const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
-        expect(result.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'pending']);
-        expect(yield* f.fs.exists(homeFile)).toBe(false);
-        yield* f.fs.writeFileString(homeFile, originalHome);
-        expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(false);
-      }).pipe(provide),
+    context => {
+      const diagnostics = refreshPropertyDiagnostics(context, {scope: 'dev-skills-refresh-unavailable-home'});
+      return diagnostics.observe(
+        undefined,
+        Effect.gen(function* () {
+          diagnostics.phase('fixture');
+          const f = yield* fixture();
+          diagnostics.phase('install');
+          yield* f.run(applyDevSkills(f.config, 'install', selector));
+          const other = {...f.config, agentContextHome: f.path.join(f.root, 'offline-home')};
+          diagnostics.phase('install');
+          yield* f.run(applyDevSkills(other, 'install', {agent: 'claude-code'}));
+          diagnostics.phase('index-read');
+          const homeFile = homeIndexPath(f.path, other.agentContextHome);
+          const originalHome = yield* f.fs.readFileString(homeFile);
+          diagnostics.phase('remove-or-disable');
+          yield* f.fs.remove(homeFile);
+          diagnostics.phase('release');
+          const release = yield* devSkillsReleaseFixture(f, '5.3.0-beta.5');
+          diagnostics.phase('preview');
+          const plan = yield* f.run(previewDevSkillsRefresh(f.config, release));
+          diagnostics.phase('assertions-status');
+          expect(plan.compatibility).toBe('unknown');
+          diagnostics.phase('prepare');
+          const prepared = yield* f.run(prepareDevSkillsRefresh(f.config, plan, {expectedDigest: plan.previewDigest}));
+          diagnostics.phase('activate');
+          yield* release.activate;
+          diagnostics.phase('refresh');
+          const result = yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId));
+          diagnostics.phase('assertions-status');
+          expect(result.targets.map(target => target.outcome.state).sort()).toEqual(['current', 'pending']);
+          expect(yield* f.fs.exists(homeFile)).toBe(false);
+          diagnostics.phase('restore-home-index');
+          yield* f.fs.writeFileString(homeFile, originalHome);
+          diagnostics.phase('refresh');
+          expect((yield* release.run(runDevSkillsRefresh(f.config, prepared.intentId))).repairRequired).toBe(false);
+        }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), provide),
+      );
+    },
   );
   effectIt.effect(
     'preflight rejects concrete future retained requirements even when the old decoder cannot admit ownership',
