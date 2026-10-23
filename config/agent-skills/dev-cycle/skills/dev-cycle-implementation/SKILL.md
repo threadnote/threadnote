@@ -17,7 +17,7 @@ State verifiable acceptance before implementation, then work quietly, including 
 
 Use Threadnote graph query/explain before unfamiliar relationship/impact investigation, then verify source using stable nodes/adjacency. Every graph call uses the absolute phase checkout root, including monorepos. Exact paths/literals need no graph. During indexing do independent work and retry after the suggested delay; unavailable graph -> disclose and search narrowly. Memory project tags in `front-end-web-monorepo` use the working area (`docs`, `director`), while graph cwd remains the checkout root.
 
-Implement small straightforward work directly. Otherwise delegate the fewest independently owned slices with the cheapest sufficient advertised model. Preserve existing work/staging. Integrate and validate interactions; the main agent may finish straightforward follow-ups. Workers record observed failures, actual corrections and checks for the orchestrator's learning step; they do not independently publish memory or policy.
+Implement small straightforward work directly. Otherwise use [delegation](../../references/delegation.md) to choose model and reasoning effort separately for the fewest independently owned slices. A detailed plan with verified anchors, settled decisions and focused checks should normally start at low effort on the cheapest sufficient advertised model; justify higher capacity by the remaining uncertainty, not the phase size or parent settings. Preserve existing work/staging. Integrate and validate interactions; the main agent may finish straightforward follow-ups. Workers record observed failures, actual corrections and checks for the orchestrator's learning step; they do not independently publish memory or policy.
 
 ## Snapshot and review
 
