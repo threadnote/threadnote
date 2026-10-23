@@ -15,13 +15,17 @@ interface Step {
 }
 
 interface Job {
+  readonly name?: string;
   readonly if?: string;
   readonly needs?: string | readonly string[];
   readonly outputs?: Readonly<Record<string, string>>;
   readonly services?: Readonly<Record<string, unknown>>;
   readonly steps?: readonly Step[];
   readonly 'timeout-minutes'?: number;
-  readonly strategy?: {readonly 'fail-fast'?: boolean};
+  readonly strategy?: {
+    readonly 'fail-fast'?: boolean;
+    readonly matrix?: {readonly shard?: readonly string[]};
+  };
 }
 
 interface Workflow {
@@ -109,6 +113,73 @@ it('keeps the stable aggregate check and requires the planner plus every selecte
   );
   expect(step(jobs.test, 'Require every selected lane')?.run).toContain('test "$BAZEL_SHARDS_RESULT" = success');
 });
+
+it('partitions the complete serialized Windows inventory with two native shards and unchanged job limits', () => {
+  const windows = jobs['windows-smoke'];
+  expect(windows?.name).toBe('Bun unit smoke · Windows · ${{ matrix.shard }}');
+  expect(windows?.['timeout-minutes']).toBe(30);
+  expect(windows?.strategy).toEqual({'fail-fast': false, matrix: {shard: ['1/2', '2/2']}});
+  const runs = windows?.steps?.filter(candidate => candidate.run?.includes('vitest run --no-file-parallelism'));
+  expect(runs).toHaveLength(1);
+  expect(runs?.[0].run?.trim().split(/\s+/u)).toEqual([
+    'bun',
+    '--bun',
+    'vitest',
+    'run',
+    '--no-file-parallelism',
+    '--shard=${{',
+    'matrix.shard',
+    '}}',
+    'apps/threadnote/test/unit/windows-support.test.ts',
+    'apps/threadnote/test/unit/command-shim.test.ts',
+    'apps/threadnote/test/unit/effect-command.test.ts',
+    'apps/threadnote/test/unit/effect-system.test.ts',
+    'apps/threadnote/test/unit/standalone-process-lease.test.ts',
+    'apps/threadnote/test/unit/process-diagnostics.test.ts',
+    'apps/threadnote/test/unit/local-ai.test.ts',
+    'apps/threadnote/test/unit/update.test.ts',
+    'apps/threadnote/test/unit/mcp.test.ts',
+    'apps/threadnote/test/dev-skills/',
+    'apps/threadnote/test/integration/cli.dev-skills.test.ts',
+    'packages/integrations/test/dev-skills-catalog.test.ts',
+  ]);
+});
+
+it('runs the original graph repair smoke exactly once without sharding or changing its command', () => {
+  const quarantine = step(jobs['windows-smoke'], 'Graph repair quarantine smoke');
+  expect(quarantine).toEqual({
+    name: 'Graph repair quarantine smoke',
+    if: "matrix.shard == '1/2'",
+    run: 'bun --bun vitest run apps/threadnote/test/unit/code-graph.maintenance-bounded.test.ts -t "removes a database-less orphan spool"',
+  });
+  expect(jobs['windows-smoke']?.strategy?.matrix?.shard?.filter(shard => shard === '1/2')).toHaveLength(1);
+});
+
+it.each(['success', 'failure', 'cancelled', 'skipped'])(
+  'requires the overall Windows matrix result to be success when it is %s',
+  windowsResult => {
+    const aggregate = step(jobs.test, 'Require every selected lane')?.run;
+    expect(aggregate).toContain('test "$WINDOWS_RESULT" = success');
+    const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-c', aggregate ?? 'exit 98'], {
+      encoding: 'utf8',
+      env: {
+        BASH_ENV: '',
+        PATH: '',
+        BAZEL_PLAN_RESULT: 'success',
+        BAZEL_PLAN_VALIDATION_RESULT: 'success',
+        BAZEL_EXECUTE: 'false',
+        BAZEL_SHARDS_RESULT: 'skipped',
+        RECALL_SELECTED: 'false',
+        RELEASE_SELECTED: 'false',
+        WINDOWS_SELECTED: 'true',
+        WINDOWS_RESULT: windowsResult,
+      },
+      timeout: 2_000,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(windowsResult === 'success' ? 0 : 1);
+  },
+);
 
 const prerequisite = step(jobs['bazel-shards'], 'Install workflow inspection prerequisite');
 
