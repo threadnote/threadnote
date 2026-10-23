@@ -1,4 +1,4 @@
-import type {Vitest} from '@effect/vitest';
+import type {TestContext, Vitest} from '@effect/vitest';
 import {Schema, type Effect, type Scope} from 'effect';
 import * as Arbitrary from 'effect/Arbitrary';
 import * as FC from 'fast-check';
@@ -50,7 +50,7 @@ export function fcEffectProp<const A extends Inputs, R, E, Result>(
   it: Vitest.MethodsNonLive<R>,
   name: string,
   inputs: A,
-  property: (values: Values<A>) => Effect.Effect<Result, E, R | Scope.Scope>,
+  property: (values: Values<A>, context: TestContext) => Effect.Effect<Result, E, R | Scope.Scope>,
   options?: EffectPropertyOptions,
 ): void {
   const check = options?.fastCheck;
@@ -73,7 +73,7 @@ export function fcEffectProp<const A extends Inputs, R, E, Result>(
   );
   const timeLimit = check?.interruptAfterTimeLimit;
   const timeout = timeLimit === undefined ? options?.timeout : Math.min(options?.timeout ?? timeLimit, timeLimit);
-  it.effect.prop(name, [generated], ([values]) => property(values), {
+  it.effect.prop(name, [generated], ([values], context) => property(values, context), {
     arbitrary: {
       runs: check?.numRuns,
       seed: check?.seed,

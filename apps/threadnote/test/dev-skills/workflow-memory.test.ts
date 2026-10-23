@@ -15,6 +15,7 @@ import type {
   WorkflowProfile,
 } from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
 
 const fixture = Effect.fn('test.workflowMemory.fixture')(function* (profile: WorkflowProfile = 'desktop') {
   const fs = yield* FileSystem.FileSystem;
@@ -174,39 +175,57 @@ describe('private workflow artifact protocol', () => {
   effectIt.effect.prop(
     'replaying completed operations never resurrects retired state',
     [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4}))],
-    ([retries]) =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        const written = (yield* f.call(f.write)) as WorkflowReadResult;
-        for (let index = 0; index < retries; index++) expect(yield* f.call(f.write)).toEqual(written);
-        const archive: WorkflowRequest = {
-          protocolVersion: 1,
-          action: 'archive',
-          bindingId: f.binding.bindingId,
-          operationId: 'retire',
-          artifactKey: f.write.artifactKey,
-          sourceRunId: f.write.sourceRunId,
-          role: f.write.role,
-          uri: written.canonicalUri,
-          expectedRevision: written.revision,
-        };
-        const retired = yield* f.call(archive);
-        for (let index = 0; index < retries; index++) {
-          expect(yield* f.call(f.write).pipe(Effect.result)).toMatchObject({
-            _tag: 'Failure',
-            failure: {code: 'operation-superseded'},
-          });
-          expect(yield* f.call(archive)).toEqual(retired);
-        }
-        expect(
-          yield* f.call({
+    ([retries], context) => {
+      const diagnostics = workflowPropertyDiagnostics(context, 'workflow-retirement');
+      return diagnostics.observe(
+        retries,
+        Effect.gen(function* () {
+          diagnostics.phase('fixture');
+          const f = yield* fixture();
+          diagnostics.phase('create');
+          const written = (yield* f.call(f.write)) as WorkflowReadResult;
+          for (let index = 0; index < retries; index++) {
+            diagnostics.phase('write-replay', index);
+            expect(yield* f.call(f.write)).toEqual(written);
+          }
+          const archive: WorkflowRequest = {
             protocolVersion: 1,
-            action: 'read',
+            action: 'archive',
             bindingId: f.binding.bindingId,
+            operationId: 'retire',
+            artifactKey: f.write.artifactKey,
+            sourceRunId: f.write.sourceRunId,
+            role: f.write.role,
             uri: written.canonicalUri,
-          }),
-        ).toMatchObject({status: 'not-found'});
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+            expectedRevision: written.revision,
+          };
+          diagnostics.phase('archive');
+          const retired = yield* f.call(archive);
+          for (let index = 0; index < retries; index++) {
+            diagnostics.phase('retired-write-replay', index);
+            expect(yield* f.call(f.write).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'operation-superseded'},
+            });
+            diagnostics.phase('archive-replay', index);
+            expect(yield* f.call(archive)).toEqual(retired);
+          }
+          diagnostics.phase('read-assertion');
+          expect(
+            yield* f.call({
+              protocolVersion: 1,
+              action: 'read',
+              bindingId: f.binding.bindingId,
+              uri: written.canonicalUri,
+            }),
+          ).toMatchObject({status: 'not-found'});
+        }).pipe(
+          Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        ),
+      );
+    },
     {arbitrary: {runs: 8}},
   );
 
