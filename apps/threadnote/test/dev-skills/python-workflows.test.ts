@@ -95,3 +95,49 @@ it('replay and acknowledgement preserve arbitrary event order across delivery bo
     {numRuns: 20, examples: [[[1]], [Array.from({length: 201}, (_, index) => index)]]},
   );
 }, 30_000);
+
+it('phase advancement requires every completed delivery without changing the plan', () => {
+  fc.assert(
+    fc.property(
+      fc.record({
+        delivery: fc.constantFrom('local', 'commit', 'pr'),
+        receipts: fc.array(fc.boolean(), {minLength: 1, maxLength: 8}),
+        changeHead: fc.boolean(),
+      }),
+      sequence => {
+        const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+        const result = spawnSync(
+          python,
+          ['-B', resolve('apps/threadnote/test/dev-skills/python/dev-cycle/test_phase_state.py'), '--delivery-fixture'],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(sequence),
+            timeout: 10_000,
+            env: {...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: ''},
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        const firstUndelivered =
+          sequence.delivery === 'local'
+            ? -1
+            : sequence.receipts.findIndex((recorded, index) => !recorded || (index === 0 && sequence.changeHead));
+        const allowed = firstUndelivered === -1;
+        expect(JSON.parse(result.stdout)).toEqual({
+          action: allowed ? 'implement' : 'deliver',
+          phase: `p${allowed ? sequence.receipts.length : firstUndelivered}`,
+          packetAllowed: allowed,
+          cachedPacketAllowed: allowed,
+        });
+      },
+    ),
+    {
+      numRuns: 24,
+      examples: [
+        [{delivery: 'pr', receipts: [false], changeHead: false}],
+        [{delivery: 'pr', receipts: [true], changeHead: true}],
+        [{delivery: 'commit', receipts: [true, false, true], changeHead: false}],
+        [{delivery: 'local', receipts: [false, false], changeHead: true}],
+      ],
+    },
+  );
+}, 30_000);
