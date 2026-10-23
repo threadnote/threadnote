@@ -1,9 +1,9 @@
 import {it as effectIt} from '@effect/vitest';
-import {Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
+import {Cause, Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import fc from 'fast-check';
-import {spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
+import {ChildProcess, spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
 import {TestError} from '@threadnote/testing/test-error';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
@@ -27,28 +27,57 @@ with module.hold_account_mutation_lock(Path(sys.argv[2])):
     if sys.stdin.readline() != 'release\\n': raise RuntimeError('Invalid fixture release token')
 `;
 
+const readinessFrame = () => {
+  const prefix = [114, 101, 97, 100, 121];
+  let matchedBytes = 0;
+  let status: 'pending' | 'ready' | 'invalid' = 'pending';
+  return {
+    push: (chunk: Uint8Array) => {
+      for (const byte of chunk) {
+        if (status !== 'pending') break;
+        if (matchedBytes < prefix.length && byte === prefix[matchedBytes]) matchedBytes++;
+        else if (matchedBytes === prefix.length && byte === 13) matchedBytes++;
+        else if (matchedBytes >= prefix.length && byte === 10) status = 'ready';
+        else status = 'invalid';
+      }
+      return status;
+    },
+    snapshot: () => ({matchedBytes, status}),
+  };
+};
 const waitReady = (child: ChildProcessWithoutNullStreams) =>
   Effect.callback<void, Error>(resume => {
-    let output = '';
-    let errors = '';
+    const frame = readinessFrame();
+    let settled = false;
+    const cleanup = () => {
+      child.stdout.off('data', ready);
+      child.stderr.off('data', stderr);
+      child.off('close', failed);
+      child.off('error', error);
+    };
+    const complete = (result: Effect.Effect<void, Error>) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resume(result);
+    };
     const ready = (chunk: Buffer) => {
-      output = (output + chunk.toString()).slice(-1024);
-      if (output.includes('ready\n')) resume(Effect.void);
+      const status = frame.push(chunk);
+      if (status === 'ready') complete(Effect.void);
+      else if (status === 'invalid')
+        complete(Effect.fail(TestError.make({message: 'Invalid fixture readiness record'})));
     };
-    const failed = () => resume(Effect.fail(TestError.make({message: `Fence child exited before ready: ${errors}`})));
-    const error = (cause: Error) => resume(Effect.fail(cause));
-    const stderr = (chunk: Buffer) => {
-      errors = (errors + chunk.toString()).slice(-1024);
-    };
+    const failed = () => complete(Effect.fail(TestError.make({message: 'Fence child exited before ready'})));
+    const error = (cause: Error) => complete(Effect.fail(cause));
+    // Drain without retaining or echoing subprocess bytes in failure messages.
+    const stderr = () => {};
     child.stdout.on('data', ready);
     child.stderr.on('data', stderr);
     child.once('close', failed);
     child.once('error', error);
     return Effect.sync(() => {
-      child.stdout.off('data', ready);
-      child.stderr.off('data', stderr);
-      child.off('close', failed);
-      child.off('error', error);
+      settled = true;
+      cleanup();
     });
   }).pipe(Effect.timeout('5 seconds'));
 const waitExit = (child: ChildProcessWithoutNullStreams) =>
@@ -101,6 +130,9 @@ const withPythonFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>)
         ),
       ),
   );
+
+const awaitFenceAdmission = <A, E>(entered: Deferred.Deferred<void>, observer: Fiber.Fiber<A, E>) =>
+  Effect.raceFirst(Deferred.await(entered), Fiber.join(observer));
 
 const makeFixture = Effect.gen(function* () {
   const f = yield* fixture();
@@ -216,7 +248,7 @@ effectIt.effect('interrupting the observation releases the Python fixture token 
       f.root,
       Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
     ).pipe(Effect.forkChild);
-    yield* Deferred.await(entered);
+    yield* awaitFenceAdmission(entered, observer);
     yield* Fiber.interrupt(observer);
     expect(yield* f.fs.exists(f.lock)).toBe(false);
     expect(yield* readSettledCanonicalMutationGeneration(f.fs, f.path, f.home, 'local')).toBe('');
@@ -266,4 +298,191 @@ fcEffectProp(
       expect(yield* f.inventory).toEqual(outside);
     }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
   {fastCheck: {numRuns: 16}},
+);
+
+// Event-only child double: the constructor does not spawn an operating-system process.
+const protocolChild = () => {
+  const child = new ChildProcess() as ChildProcessWithoutNullStreams;
+  Object.defineProperties(child, {stdout: {value: new ChildProcess()}, stderr: {value: new ChildProcess()}});
+  return child;
+};
+const expectNoProtocolListeners = (child: ChildProcessWithoutNullStreams) => {
+  expect(child.stdout.listenerCount('data')).toBe(0);
+  expect(child.stderr.listenerCount('data')).toBe(0);
+  expect(child.listenerCount('close')).toBe(0);
+  expect(child.listenerCount('error')).toBe(0);
+};
+
+effectIt.effect('readiness protocol accepts exact LF and CRLF across every split without waiting for its cap', () =>
+  Effect.gen(function* () {
+    for (const frame of ['ready\n', 'ready\r\n']) {
+      for (let split = 0; split <= frame.length; split++) {
+        const child = protocolChild();
+        const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        child.stdout.emit('data', Buffer.from(frame.slice(0, split)));
+        child.stdout.emit('data', Buffer.from(frame.slice(split)));
+        yield* TestClock.adjust('5 seconds');
+        expect(yield* Fiber.await(waiting)).toEqual(Exit.void);
+        expectNoProtocolListeners(child);
+      }
+    }
+  }),
+);
+
+effectIt.effect('incomplete readiness retains the original five-second cap and cleans its listeners', () =>
+  Effect.gen(function* () {
+    const child = protocolChild();
+    const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    child.stdout.emit('data', Buffer.from('ready\r'));
+    yield* TestClock.adjust('5 seconds');
+    const result = yield* Fiber.await(waiting);
+    expect(Exit.isFailure(result)).toBe(true);
+    if (Exit.isFailure(result)) expect(Cause.squash(result.cause)).toMatchObject({_tag: 'TimeoutError'});
+    expectNoProtocolListeners(child);
+  }),
+);
+
+effectIt.effect('observer failure reaches pending admission with its original cause', () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const original = TestError.make({message: 'controlled observer failure before admission'});
+    const observer = yield* Effect.fail(original).pipe(Effect.forkChild);
+    yield* Fiber.await(observer);
+    const admission = yield* awaitFenceAdmission(entered, observer).pipe(Effect.timeout('1 millis'), Effect.forkChild);
+    yield* TestClock.adjust('1 millis');
+    expect(yield* Fiber.await(admission)).toEqual(Exit.fail(original));
+  }),
+);
+
+effectIt.effect('readiness protocol refuses false, malformed and oversized records without exposing bytes', () =>
+  Effect.gen(function* () {
+    for (const frame of ['notready\n', 'readyX\n', 'ready\rX\n', 'ready\r\r\n', '/private/body/token'.repeat(1024)]) {
+      const child = protocolChild();
+      const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      child.stderr.emit('data', Buffer.from('/private/error/credential'));
+      child.stdout.emit('data', Buffer.from(frame));
+      const result = yield* Fiber.await(waiting);
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('/private');
+      expect(JSON.stringify(result)).not.toContain('credential');
+      expectNoProtocolListeners(child);
+    }
+  }),
+);
+
+effectIt.effect('readiness protocol preserves early spawn failure and refuses early close with listener cleanup', () =>
+  Effect.gen(function* () {
+    const original = new Error('controlled spawn error');
+    for (const event of ['error', 'close'] as const) {
+      const child = protocolChild();
+      const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      if (event === 'error') child.emit('error', original);
+      else child.emit('close', 0, null);
+      const result = yield* Fiber.await(waiting);
+      if (event === 'error') expect(result).toEqual(Exit.fail(original));
+      else expect(Exit.isFailure(result)).toBe(true);
+      expectNoProtocolListeners(child);
+    }
+  }),
+);
+
+effectIt.effect(
+  'readiness interruption removes listeners and pending admission cancellation leaves its holder owned',
+  () =>
+    Effect.gen(function* () {
+      const child = protocolChild();
+      const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(waiting);
+      const result = yield* Fiber.await(waiting);
+      expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true);
+      expectNoProtocolListeners(child);
+      const entered = yield* Deferred.make<void>();
+      let released = false;
+      const observer = yield* Effect.never.pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            released = true;
+          }),
+        ),
+        Effect.forkChild,
+      );
+      const admission = yield* awaitFenceAdmission(entered, observer).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(admission);
+      expect(released).toBe(false);
+      yield* Fiber.interrupt(observer);
+      expect(released).toBe(true);
+    }),
+);
+
+fcEffectProp(
+  effectIt,
+  'readiness framing is chunk independent, bounded, private and nonmutating',
+  {
+    bytes: fc.oneof(
+      fc.uint8Array({maxLength: 128}),
+      fc
+        .constantFrom('ready\n', 'ready\r\n', 'ready', 'ready\r', 'notready\n', '/private/body/token')
+        .map(value => Buffer.from(value)),
+    ),
+    cuts: fc.array(fc.integer({min: 0, max: 128}), {maxLength: 16}),
+    ending: fc.constantFrom('close', 'error', 'interrupt'),
+  },
+  input =>
+    Effect.gen(function* () {
+      const before = Buffer.from(input.bytes);
+      const cutsBefore = [...input.cuts];
+      const text = Buffer.from(input.bytes).toString('latin1');
+      const newline = text.indexOf('\n');
+      const line = newline < 0 ? text : text.slice(0, newline);
+      const expected =
+        newline >= 0
+          ? line === 'ready' || line === 'ready\r'
+            ? 'ready'
+            : 'invalid'
+          : 'ready\r'.startsWith(line)
+            ? 'pending'
+            : 'invalid';
+      const frame = readinessFrame();
+      const initial = frame.snapshot();
+      const child = protocolChild();
+      const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      const cuts = [...input.cuts.map(value => Math.min(value, input.bytes.length)), input.bytes.length].sort(
+        (a, b) => a - b,
+      );
+      let start = 0;
+      for (const end of cuts) {
+        const chunk = input.bytes.subarray(start, end);
+        frame.push(chunk);
+        child.stdout.emit('data', chunk);
+        start = end;
+      }
+      const snapshot = frame.snapshot();
+      expect(snapshot.status).toBe(expected);
+      expect(snapshot.matchedBytes).toBeLessThanOrEqual(6);
+      expect(Object.keys(snapshot).sort()).toEqual(['matchedBytes', 'status']);
+      expect(initial).toEqual({matchedBytes: 0, status: 'pending'});
+      const original = new Error('controlled protocol error');
+      if (expected === 'pending') {
+        if (input.ending === 'interrupt') yield* Fiber.interrupt(waiting);
+        else if (input.ending === 'error') child.emit('error', original);
+        else child.emit('close', 0, null);
+      }
+      const result = yield* Fiber.await(waiting);
+      expect(Exit.isSuccess(result)).toBe(expected === 'ready');
+      if (expected === 'pending' && input.ending === 'error') expect(result).toEqual(Exit.fail(original));
+      if (expected === 'pending' && input.ending === 'interrupt')
+        expect(Exit.isFailure(result) && Cause.hasInterrupts(result.cause)).toBe(true);
+      expectNoProtocolListeners(child);
+      expect(Buffer.from(input.bytes)).toEqual(before);
+      expect(input.cuts).toEqual(cutsBefore);
+      expect(JSON.stringify(snapshot)).not.toContain('/private');
+    }),
+  {fastCheck: {numRuns: 20}},
 );
