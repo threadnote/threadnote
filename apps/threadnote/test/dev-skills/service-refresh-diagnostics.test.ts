@@ -242,6 +242,101 @@ effectIt.effect('cleans up listeners and isolates reused contexts and already ab
   }),
 );
 
+effectIt.effect(
+  'reports a recovery boundary and shared consumer through abort and cleanup without inventing removed input',
+  () =>
+    Effect.gen(function* () {
+      const test = lifecycle();
+      const writes: string[] = [];
+      const diagnostics = refreshPropertyDiagnostics(test.context, {
+        scope: 'dev-skills-refresh-removal-recovery',
+        write: line => {
+          writes.push(line);
+        },
+      });
+      let cleaned = false;
+      const result = yield* diagnostics
+        .observeRecovery(
+          'home',
+          true,
+          Effect.gen(function* () {
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                cleaned = true;
+              }),
+            );
+            diagnostics.phase('replay');
+            test.controller.abort('private-recovery-payload');
+            expect(cleaned).toBe(false);
+            return yield* Effect.interrupt;
+          }).pipe(Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))), Effect.scoped),
+        )
+        .pipe(Effect.exit);
+      expect(Exit.hasInterrupts(result)).toBe(true);
+      expect(cleaned).toBe(true);
+      test.finish();
+      const [aborted, finished] = writes.map(line => JSON.parse(line.slice('SERVICE_REFRESH_DIAGNOSTICS '.length)));
+      expect(aborted).toMatchObject({
+        event: 'aborted',
+        scope: 'dev-skills-refresh-removal-recovery',
+        startedEvaluations: 1,
+        completedEvaluations: 0,
+        phase: 'replay',
+        activeEvaluation: {ordinal: 1, boundary: 'home', shared: true},
+      });
+      expect(aborted.activeEvaluation).not.toHaveProperty('removed');
+      expect(finished).toMatchObject({
+        event: 'finished',
+        completedEvaluations: 1,
+        successfulEvaluations: 0,
+        recent: [{ordinal: 1, boundary: 'home', shared: true, interrupted: true}],
+      });
+      expect(writes.join('')).not.toContain('private-recovery-payload');
+    }),
+);
+
+effectIt.effect.prop(
+  'keeps recovery case inputs and snapshots independent while forwarding the original outcome',
+  {
+    boundary: Schema.Literals(['journal', 'receipt', 'home', 'runtime']),
+    shared: Schema.Boolean,
+    succeeds: Schema.Boolean,
+  },
+  ({boundary, shared, succeeds}) =>
+    Effect.gen(function* () {
+      const diagnostics = refreshDiagnostics(() => 0, 'dev-skills-refresh-removal-recovery');
+      const payload = {privatePayload: 'not-for-recovery-diagnostics'};
+      const outcome = yield* diagnostics
+        .observeRecovery(
+          boundary,
+          shared,
+          Effect.gen(function* () {
+            const active = diagnostics.snapshot();
+            expect(active.activeEvaluation).toMatchObject({boundary, shared});
+            if (active.activeEvaluation) active.activeEvaluation.shared = !shared;
+            expect(diagnostics.snapshot().activeEvaluation?.shared).toBe(shared);
+            return yield* succeeds ? Effect.succeed(payload) : Effect.fail(payload);
+          }),
+        )
+        .pipe(Effect.result);
+      if (outcome._tag === 'Success') expect(outcome.success).toBe(payload);
+      else expect(outcome.failure).toBe(payload);
+      const report = diagnostics.snapshot();
+      expect(report).toMatchObject({
+        startedEvaluations: 1,
+        completedEvaluations: 1,
+        successfulEvaluations: succeeds ? 1 : 0,
+        activeEvaluation: null,
+        recent: [{ordinal: 1, boundary, shared, outcome: succeeds ? 'Success' : 'Failure'}],
+      });
+      expect(report.recent[0]).not.toHaveProperty('removed');
+      report.recent[0].shared = !shared;
+      expect(diagnostics.snapshot().recent[0].shared).toBe(shared);
+      expect(JSON.stringify(report)).not.toContain('not-for-recovery-diagnostics');
+    }),
+  {arbitrary: {runs: 20}},
+);
+
 effectIt.effect('keeps an unavailable diagnostic sink from replacing Effect exits', () =>
   Effect.gen(function* () {
     const test = lifecycle();
