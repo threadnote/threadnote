@@ -35,6 +35,7 @@ bun_test(
         "//packages/store:src/resource/lock.ts",
         "//packages/store:src/resource/mutation_generation.ts",
         "//packages/store:src/resource/recall-invalidation.ts",
+        "//packages/store:src/resource/settled_revision.ts",
         "//packages/store:src/source-evidence-citation.ts",
         "//packages/store:src/source-evidence.ts",
         "//packages/store:test/external-resource-access.test.ts",
@@ -45,6 +46,7 @@ bun_test(
         "//packages/store:test/resource-store-checked-batch.test.ts",
         "//packages/store:test/resource-store-existing-read.test.ts",
         "//packages/store:test/source-evidence.test.ts",
+        "//packages/store:test/unit/settled-revision.test.ts",
         "//packages/testing:package.json",
         "//packages/testing:src/fast-check-property.ts",
         "//tools/bazel:project-vitest.config.ts",
@@ -72,5 +74,6 @@ bun_test(
         "packages/store/test/resource-store-checked-batch.test.ts",
         "packages/store/test/resource-store-existing-read.test.ts",
         "packages/store/test/source-evidence.test.ts",
+        "packages/store/test/unit/settled-revision.test.ts",
     ],
 )

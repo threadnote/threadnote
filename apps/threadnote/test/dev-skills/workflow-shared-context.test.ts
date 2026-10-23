@@ -11,6 +11,7 @@ import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import type {WorkflowReadResult, WorkflowRequest} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
 
 const rootUri = 'threadnote://user/tester/memories';
 const fixture = Effect.fn('test.workflowSharedContext.fixture')(function* (cloud = false) {
@@ -281,40 +282,58 @@ describe('workflow configured shared context', () => {
   effectIt.effect.prop(
     'admits only exact configured desktop team namespaces without mutating reads or preflights',
     [Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 1000})), Schema.Boolean],
-    ([suffix, readOnly]) =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        const team = `team-${suffix}`;
-        yield* f.configure([team], readOnly ? 'read-only' : 'read-write');
-        const source = yield* f.seed(`${rootUri}/shared/${team}/durable/projects/fixture/context.md`);
-        const original = yield* f.journal();
-        expect(yield* f.read(source.uri)).toMatchObject({body: source.body});
-        expect(
-          yield* f.call({
-            ...f.write,
-            action: 'preflight',
-            mutation: 'create',
-            relations: [{type: 'references', uri: source.uri}],
-          }),
-        ).toMatchObject({status: 'ok'});
-        for (const uri of [
-          `${rootUri}/shared/${team}-extra/durable/projects/fixture/context.md`,
-          `${rootUri}/shared/unconfigured/durable/projects/fixture/context.md`,
-          `threadnote://user/other/memories/shared/${team}/durable/projects/fixture/context.md`,
-        ]) {
-          expect(yield* f.read(uri).pipe(Effect.result)).toMatchObject({
-            _tag: 'Failure',
-            failure: {code: 'out-of-scope'},
-          });
+    ([suffix, readOnly], context) => {
+      const diagnostics = workflowPropertyDiagnostics(context, 'shared-context-namespace');
+      return diagnostics.observe(
+        readOnly ? 2 : 1,
+        Effect.gen(function* () {
+          diagnostics.phase('fixture');
+          const f = yield* fixture();
+          const team = `team-${suffix}`;
+          diagnostics.phase('configure-shared');
+          yield* f.configure([team], readOnly ? 'read-only' : 'read-write');
+          diagnostics.phase('seed-source');
+          const source = yield* f.seed(`${rootUri}/shared/${team}/durable/projects/fixture/context.md`);
+          diagnostics.phase('journal-read');
+          const original = yield* f.journal();
+          diagnostics.phase('authorized-read');
+          expect(yield* f.read(source.uri)).toMatchObject({body: source.body});
+          diagnostics.phase('authorized-preflight');
           expect(
-            yield* f
-              .call({...f.write, action: 'preflight', mutation: 'create', relations: [{type: 'references', uri}]})
-              .pipe(Effect.result),
-          ).toMatchObject({_tag: 'Failure', failure: {code: 'out-of-scope'}});
-        }
-        expect(yield* f.journal()).toBe(original);
-        expect(yield* f.store.read(f.location, source.uri)).toBe(source.content);
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+            yield* f.call({
+              ...f.write,
+              action: 'preflight',
+              mutation: 'create',
+              relations: [{type: 'references', uri: source.uri}],
+            }),
+          ).toMatchObject({status: 'ok'});
+          for (const uri of [
+            `${rootUri}/shared/${team}-extra/durable/projects/fixture/context.md`,
+            `${rootUri}/shared/unconfigured/durable/projects/fixture/context.md`,
+            `threadnote://user/other/memories/shared/${team}/durable/projects/fixture/context.md`,
+          ]) {
+            diagnostics.phase('denied-read');
+            expect(yield* f.read(uri).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'out-of-scope'},
+            });
+            diagnostics.phase('denied-preflight');
+            expect(
+              yield* f
+                .call({...f.write, action: 'preflight', mutation: 'create', relations: [{type: 'references', uri}]})
+                .pipe(Effect.result),
+            ).toMatchObject({_tag: 'Failure', failure: {code: 'out-of-scope'}});
+          }
+          diagnostics.phase('assertion');
+          expect(yield* f.journal()).toBe(original);
+          expect(yield* f.store.read(f.location, source.uri)).toBe(source.content);
+        }).pipe(
+          Effect.ensuring(Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        ),
+      );
+    },
     {arbitrary: {runs: 20}},
   );
 });

@@ -1,6 +1,6 @@
 import {Effect, Exit} from 'effect';
 
-type Property = 'setup-opt-out' | 'workflow-retirement';
+type Property = 'setup-opt-out' | 'workflow-retirement' | 'shared-context-namespace';
 type Phase =
   | 'between-evaluations'
   | 'provisioning'
@@ -15,6 +15,13 @@ type Phase =
   | 'retired-write-replay'
   | 'archive-replay'
   | 'read-assertion'
+  | 'configure-shared'
+  | 'seed-source'
+  | 'journal-read'
+  | 'authorized-read'
+  | 'authorized-preflight'
+  | 'denied-read'
+  | 'denied-preflight'
   | 'teardown';
 type Evaluation = {ordinal: number; input: number | null; startedMs: number};
 type Record =
@@ -73,7 +80,11 @@ export const workflowDiagnostics = (property: Property, now = () => performance.
         const evaluation = {
           ordinal: ++startedEvaluations,
           input:
-            Number.isInteger(input) && input >= 1 && input <= (property === 'setup-opt-out' ? 5 : 4) ? input : null,
+            Number.isInteger(input) &&
+            input >= 1 &&
+            input <= (property === 'shared-context-namespace' ? 2 : property === 'setup-opt-out' ? 5 : 4)
+              ? input
+              : null,
           startedMs: at,
         };
         active = evaluation;
@@ -105,7 +116,12 @@ export const workflowDiagnostics = (property: Property, now = () => performance.
       return {
         version: 1,
         property,
-        inputName: property === 'setup-opt-out' ? 'repetitions' : 'retries',
+        inputName:
+          property === 'shared-context-namespace'
+            ? 'accessMode'
+            : property === 'setup-opt-out'
+              ? 'repetitions'
+              : 'retries',
         elapsedOrigin: 'observer-created',
         elapsedMs: at,
         startedEvaluations,

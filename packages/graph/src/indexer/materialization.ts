@@ -92,6 +92,9 @@ export function codeGraphDirectPersistentCapacityProtector(
       ? withCodeGraphDiskReservation(
           {
             boundary,
+            ...(boundary.operation === 'resolve persistent code graph references' && input.capacityProtection.onTiming
+              ? {onTiming: input.capacityProtection.onTiming}
+              : {}),
             claimMode: input.claimMode,
             ledgerLockPath: codeGraphDiskReservationLockPath(input.capacityProtection.path, input.threadnoteHome),
             ledgerRoot: codeGraphDiskReservationRoot(input.capacityProtection.path, input.threadnoteHome),
@@ -648,7 +651,6 @@ export function cacheContentBatch(options: {
     sparseExtractedFiles: Effect.sync(() => sparseExtractedPaths.size),
   };
 }
-
 function blobReuseKeyForFile(
   file: CodeGraphInventoryFile,
   languagePacks: CodeGraphLanguagePackRegistryShape,
@@ -656,7 +658,6 @@ function blobReuseKeyForFile(
   const cacheIdentity = Option.getOrUndefined(languagePacks.cacheIdentityForPath(file.path));
   return cacheIdentity === undefined ? undefined : codeGraphBlobReuseCacheKey(file, cacheIdentity);
 }
-
 function extractionReuseGroups(
   files: readonly CodeGraphInventoryFile[],
   languagePacks: CodeGraphLanguagePackRegistryShape,
@@ -673,7 +674,6 @@ function extractionReuseGroups(
 }
 
 type ExtractionReuseGroup = ReturnType<typeof extractionReuseGroups>[number];
-
 function relocateSerializedParserResult(
   file: CodeGraphInventoryFile,
   donor: CodeGraphParserResult & {readonly cacheFact: BoundedCodeGraphFact},
