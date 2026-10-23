@@ -15,6 +15,7 @@ export function LibraryArticle({
   onChanged,
   onVerifiedUpdate,
   onPrepareGraph,
+  onOpenMemory,
 }: {
   readonly node: TreeNode;
   readonly metadata?: MemoryMetadata;
@@ -23,6 +24,7 @@ export function LibraryArticle({
   readonly onChanged?: () => void;
   readonly onVerifiedUpdate?: () => void;
   readonly onPrepareGraph?: () => void;
+  readonly onOpenMemory?: (uri: string) => void;
 }): React.ReactElement {
   const author = metadata?.sourceAgentClient;
   const timestamp = metadata?.timestamp;
@@ -44,7 +46,7 @@ export function LibraryArticle({
           onChanged={onVerifiedUpdate ?? onChanged}
         />
       ) : null}
-      <MarkdownViewer markdown={markdown} />
+      <MarkdownViewer markdown={markdown} onOpenMemory={onOpenMemory} />
       {!resource &&
       !node.isShared &&
       !node.isSystem &&

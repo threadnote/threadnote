@@ -443,8 +443,13 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     }
   }, [state]);
   const selectedNode = useMemo(
-    () => (selectedUri ? findNodeInTrees([tree, resourceTree], selectedUri) : undefined),
-    [resourceTree, selectedUri, tree],
+    () =>
+      selectedUri && selectedUri === loadedUri && memory?.node.uri === selectedUri
+        ? memory.node
+        : selectedUri
+          ? findNodeInTrees([tree, resourceTree], selectedUri)
+          : undefined,
+    [loadedUri, memory, resourceTree, selectedUri, tree],
   );
   const visibleSelectedUris = useMemo(
     () => (navTreeTab === 'memories' ? reconcileMemorySelection(selectedUris, scopedTree) : EMPTY_SELECTED_URIS),
@@ -624,16 +629,15 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     setGraphCatalog(nextCatalog);
     setGraphDiagnostics(current => withoutRemovedGraphDiagnosticsView(current, target));
   }
-
   async function loadMemory(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
     const next = await api<MemoryResponse>(`/api/memory?uri=${encodeURIComponent(uri)}`);
     if (!accept()) return undefined;
     showMemory(next);
     return next.node.uri;
   }
-
   function showMemory(next: MemoryResponse): void {
     setCreatingMemory(false);
+    setLibraryScope(next.node.sharedTeam ? `team:${next.node.sharedTeam}` : 'local');
     setMemory(next);
     setEditorRevision(value => value + 1);
     setLoadedUri(next.node.uri);
@@ -649,7 +653,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       topic: next.record?.metadata.topic ?? '',
     });
   }
-
   async function loadResource(uri: string, accept: () => boolean = () => true): Promise<string | undefined> {
     const result = await api<ReadResponse>('/api/read', {uri});
     if (!accept()) return undefined;
@@ -661,12 +664,10 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     setTarget({kind: 'durable', project: '', status: 'active', team: '', topic: ''});
     return uri;
   }
-
   function toastMessage(message: string): void {
     setToast(message);
     window.setTimeout(() => setToast(current => (current === message ? '' : current)), 3000);
   }
-
   async function runAction(label: string, action: () => Promise<{readonly output?: string}>): Promise<void> {
     if (libraryActionBusy) return;
     setLibraryActionBusy(true);
@@ -692,7 +693,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       setLibraryActionBusy(false);
     }
   }
-
   async function runDoctorAction(
     label: string,
     busyLabel: string,
@@ -715,7 +715,6 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       setDoctorAction(undefined);
     }
   }
-
   async function refreshTreeOnly(): Promise<TreeResponse> {
     const next = await api<TreeResponse>('/api/tree');
     setLibraryError('');
@@ -1219,7 +1218,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     setSelectedUri(uri);
     setPanel('memory');
     setNavTreeTab(isResourceUri(uri) ? 'resources' : 'memories');
-    const node = findNodeInTrees([tree], uri);
+    const node = uri === selectedUri ? selectedNode : findNodeInTrees([tree], uri);
     if (!isResourceUri(uri)) setLibraryScope(node?.sharedTeam ? `team:${node.sharedTeam}` : 'local');
   }
 
@@ -1863,6 +1862,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
                         metadata={memory?.record?.metadata}
                         markdown={markdownPreview}
                         resource={selectedIsResource}
+                        onOpenMemory={uri => void selectTreeUri(uri)}
                         onChanged={() => void refreshAll()}
                         onVerifiedUpdate={() =>
                           memoryUpdateVerified(selectedNode!.uri, 'Memory update saved and verified')
