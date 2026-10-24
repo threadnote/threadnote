@@ -3,7 +3,7 @@
 import {spawnSync} from '@threadnote/testing/node-child-process';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {chmod, readFile, writeFile} from '@threadnote/testing/node-fs-promises';
-import {isAbsolute, join, resolve, relative} from '@threadnote/testing/node-path';
+import {isAbsolute, join, resolve} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
 import {workflowInventoryVersion} from '../../src/inventory.js';
 import {workflowScenarios, workflowScenarioCatalogVersion} from '../../src/scenarios.js';
@@ -95,13 +95,13 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
     .flatMap(skill =>
       skill.files
         .filter(file => file === 'SKILL.md' || (file.startsWith('references/') && file.endsWith('.md')))
-        .map(file => join(repo, 'config/agent-skills', skill.id, file)),
+        .map(file => `config/agent-skills/${skill.id}/${file}`),
     )
     .sort();
   const skillDocuments = await Promise.all(
     skillFiles.map(async path => {
-      const content = await readFile(path, 'utf8');
-      return {path: relative(repo, path), bytes: utf8Bytes(content), method: 'UTF-8 encoded file content byte length'};
+      const content = await readFile(join(repo, path), 'utf8');
+      return {path, bytes: utf8Bytes(content), method: 'UTF-8 encoded file content byte length'};
     }),
   );
   const pythonSources = manifest.skills.flatMap(skill =>
