@@ -1,5 +1,6 @@
 import {Effect, FileSystem, Path} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
@@ -16,7 +17,7 @@ export const makeTopicExpansionFixture = Effect.fn('test.topicExpansionFixture')
   const project = options.project ?? 'fixture';
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.makeTempDirectoryScoped({prefix: 'topic-expansion-'});
+  const home = yield* makeIdempotentFixtureTempDirectoryScoped(fs, 'topic-expansion-');
   const repository = path.join(home, 'repository');
   yield* fs.makeDirectory(path.join(repository, 'src'), {recursive: true});
   yield* fs.writeFileString(
