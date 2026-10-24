@@ -1,6 +1,10 @@
 import {codeGraphUtf8ByteLength} from '../disk/capacity.js';
 import {CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM, type MeasuredCodeGraphFact} from '../fact/budget.js';
 import {symbolTerms} from '../store/utilities.js';
+import {
+  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
+  PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES,
+} from '../store/resolution/candidate_closure.js';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile} from '../types.js';
 
 export const CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FILES = 128;
@@ -107,7 +111,23 @@ export function planCodeGraphIncrementalFoldForwardPaths(
   };
 }
 
+export interface CodeGraphMembershipCandidateWork {
+  readonly metadataFiles: number;
+  readonly metadataFactBytes: number;
+  readonly omittedFiles: number;
+  readonly omittedFactBytes: number;
+  readonly rawBaseFiles: number;
+  readonly rawCurrentFiles: number;
+  readonly rawBaseBytes: number;
+  readonly rawCurrentBytes: number;
+  readonly selectedReloadFiles: number;
+  readonly selectedReloadBytes: number;
+  readonly projectionObservations: number;
+  readonly projectionObservedKeyBytes: number;
+}
+
 export interface CodeGraphIncrementalWork {
+  readonly membershipCandidate?: CodeGraphMembershipCandidateWork;
   /** Persisted attribution context decoded for this delta. */
   readonly attributionContextFiles: number;
   /** Base final facts decoded for compatibility checks. */
@@ -128,7 +148,11 @@ export interface CodeGraphIncrementalWork {
 
 export type CodeGraphIncrementalWorkObservation = Pick<
   CodeGraphIncrementalWork,
-  'attributionContextFiles' | 'baseFactsLoaded' | 'inventoryFilesInspected' | 'probedDependencyPaths'
+  | 'attributionContextFiles'
+  | 'baseFactsLoaded'
+  | 'inventoryFilesInspected'
+  | 'probedDependencyPaths'
+  | 'membershipCandidate'
 >;
 
 export function measureCodeGraphIncrementalWork(input: {
@@ -154,6 +178,7 @@ export function measureCodeGraphIncrementalWork(input: {
     );
   }
   return {
+    ...(input.observation?.membershipCandidate ? {membershipCandidate: input.observation.membershipCandidate} : {}),
     attributionContextFiles: input.observation?.attributionContextFiles ?? 0,
     baseFactsLoaded: input.observation?.baseFactsLoaded ?? input.files.length,
     changedFiles: input.files.length,
@@ -168,6 +193,17 @@ export function measureCodeGraphIncrementalWork(input: {
 }
 
 export function codeGraphIncrementalWorkFitsBudget(work: CodeGraphIncrementalWork): boolean {
+  const candidate = work.membershipCandidate;
+  if (
+    candidate &&
+    (Object.values(candidate).some(value => !Number.isSafeInteger(value) || value < 0) ||
+      candidate.metadataFiles > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES ||
+      candidate.metadataFactBytes > PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FACT_BYTES ||
+      candidate.omittedFiles + candidate.rawBaseFiles + candidate.rawCurrentFiles < candidate.metadataFiles ||
+      candidate.omittedFactBytes + candidate.rawBaseBytes + candidate.rawCurrentBytes !== candidate.metadataFactBytes ||
+      candidate.selectedReloadFiles !== work.changedFiles)
+  )
+    return false;
   return (
     Number.isSafeInteger(work.changedFiles) &&
     (work.changedFiles > 0 || work.deletedFiles > 0) &&

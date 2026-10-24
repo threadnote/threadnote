@@ -88,6 +88,8 @@ export type ProjectResolutionCandidateClosure =
       readonly paths: readonly string[];
       readonly reexports: readonly ProjectResolutionReexportKeys[];
       readonly scannedFiles: number;
+      readonly projectionObservations?: number;
+      readonly projectionObservedKeyBytes?: number;
     }
   | {
       readonly mode: 'fallback';
@@ -104,6 +106,8 @@ export type ProjectResolutionCandidateClosure =
 export interface ProjectResolutionCandidateFactPage {
   readonly bytesByPath: ReadonlyMap<string, number>;
   readonly facts: ReadonlyMap<string, CodeGraphFileFacts>;
+  /** A second attribution version shares the same path ordinal and every projection cap. */
+  readonly previousFacts?: ReadonlyMap<string, CodeGraphFileFacts>;
 }
 
 export function planProjectResolutionCandidateScan(input: {
@@ -192,6 +196,8 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
     readonly plan: Extract<ProjectResolutionCandidateScanPlan, {readonly mode: 'eligible'}>;
     readonly initialLookupKeys: readonly ProjectResolutionLookupKey[];
     readonly additionalReexports?: readonly ProjectResolutionReexportKeys[];
+    /** Membership evidence is complete only after all raw pages have been observed. */
+    readonly finalizeLookupKeys?: () => readonly ProjectResolutionLookupKey[];
     readonly loadPage: (
       files: readonly CodeGraphInventoryFile[],
     ) => Effect.Effect<ProjectResolutionCandidateFactPage, E>;
@@ -234,6 +240,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
       maximumObservedKeyBytes: maximumProjectionObservedKeyBytes,
     });
     const scannedPaths: string[] = [];
+    let versioned = false;
     let reexportKeyBytes = 0;
     let reexportLookupKeys = 0;
     for (const reexport of input.additionalReexports ?? []) {
@@ -249,45 +256,50 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
       for (const file of page.files) {
         const fileOrdinal = scannedPaths.length;
         scannedPaths.push(file.path);
-        const facts = loaded.facts.get(file.path)!;
-        if (!validFactLookupKeys(facts)) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-        for (const symbol of facts.symbols) {
-          for (const key of symbol.lookupKeys ?? []) {
-            const retained = projection.retainSymbol(
-              resolutionLookupKeyIdentity(lookupKeyDomain(key, symbol.resolutionDomain), key),
-            );
-            if (retained !== undefined) return retained;
-          }
-        }
-        for (const reference of facts.references ?? []) {
-          for (const tier of reference.lookupTiers) {
-            for (const key of tier) {
-              const retained = projection.retainReference(
-                resolutionLookupKeyIdentity(reference.resolutionDomain, key),
-                fileOrdinal,
+        const currentFacts = loaded.facts.get(file.path)!;
+        const previousFacts = loaded.previousFacts?.get(file.path);
+        if (previousFacts !== undefined) versioned = true;
+        for (const facts of previousFacts === undefined ? [currentFacts] : [previousFacts, currentFacts]) {
+          if (!validFactLookupKeys(facts)) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+          for (const symbol of facts.symbols) {
+            for (const key of symbol.lookupKeys ?? []) {
+              const retained = projection.retainSymbol(
+                resolutionLookupKeyIdentity(lookupKeyDomain(key, symbol.resolutionDomain), key),
               );
               if (retained !== undefined) return retained;
             }
           }
-          if (!isReexport(reference)) continue;
-          const aliases = symbolResolutionLookupKeys(reference.resolutionDomain, reference.aliasLookupKeys ?? []);
-          const candidates = resolutionLookupKeys(reference.resolutionDomain, reference.lookupTiers.flat());
-          const retained = retainReexport(
-            {aliases, candidates, sourcePath: reference.evidencePath},
-            reexports.length,
-            reexportLookupKeys,
-            reexportKeyBytes,
-          );
-          if (retained.mode === 'fallback') return retained;
-          reexports.push(retained.reexport);
-          baseReexports.push(retained.reexport);
-          reexportKeyBytes = retained.totalKeyBytes;
-          reexportLookupKeys = retained.totalLookupKeys;
+          for (const reference of facts.references ?? []) {
+            for (const tier of reference.lookupTiers) {
+              for (const key of tier) {
+                const retained = projection.retainReference(
+                  resolutionLookupKeyIdentity(reference.resolutionDomain, key),
+                  fileOrdinal,
+                );
+                if (retained !== undefined) return retained;
+              }
+            }
+            if (!isReexport(reference)) continue;
+            const aliases = symbolResolutionLookupKeys(reference.resolutionDomain, reference.aliasLookupKeys ?? []);
+            const candidates = resolutionLookupKeys(reference.resolutionDomain, reference.lookupTiers.flat());
+            const retained = retainReexport(
+              {aliases, candidates, sourcePath: reference.evidencePath},
+              reexports.length,
+              reexportLookupKeys,
+              reexportKeyBytes,
+            );
+            if (retained.mode === 'fallback') return retained;
+            reexports.push(retained.reexport);
+            if (facts === currentFacts) baseReexports.push(retained.reexport);
+            reexportKeyBytes = retained.totalKeyBytes;
+            reexportLookupKeys = retained.totalLookupKeys;
+          }
         }
       }
     }
     if (scannedPaths.length !== input.plan.files) return {mode: 'fallback', reason: 'cache-incomplete'} as const;
-    const lookupKeys = resolutionCandidateLookupKeyClosure(initialLookupKeys, reexports);
+    const finalizedKeys = input.finalizeLookupKeys?.() ?? [];
+    const lookupKeys = resolutionCandidateLookupKeyClosure([...initialLookupKeys, ...finalizedKeys], reexports);
     if (lookupKeys.mode === 'fallback') return lookupKeys;
 
     const resolvedProjection = projection.resolve(lookupKeys.identities, reexports);
@@ -321,6 +333,7 @@ export const scanProjectResolutionCandidateClosure = Effect.fn('codeGraph.scanPr
       paths: [...selectedPaths].sort(compareCodeUnits),
       reexports: baseReexports,
       scannedFiles: input.plan.files,
+      ...(versioned ? projection.observation() : {}),
     } as const;
   },
 );
@@ -520,6 +533,7 @@ function createResolutionCandidateProjection(input: {
   };
 
   return {
+    observation: () => ({projectionObservations: observations, projectionObservedKeyBytes: observedKeyBytes}),
     fingerprint: (identity: string): bigint | undefined => validProjectionFingerprint(input.fingerprint(identity)),
     retainReference: (
       identity: string,
@@ -616,6 +630,13 @@ function validProjectionFingerprint(value: unknown): bigint | undefined {
 
 function completePage(page: ProjectResolutionCandidateScanPage, loaded: ProjectResolutionCandidateFactPage): boolean {
   if (loaded.facts.size !== page.files.length || loaded.bytesByPath.size !== page.files.length) return false;
+  if (
+    loaded.previousFacts &&
+    [...loaded.previousFacts].some(
+      ([path, facts]) => facts.path !== path || !page.files.some(file => file.path === path),
+    )
+  )
+    return false;
   let bytes = 0;
   for (const file of page.files) {
     const facts = loaded.facts.get(file.path);

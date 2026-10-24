@@ -23,6 +23,8 @@ import {CODE_GRAPH_RESOLUTION_PASS_MAXIMUM} from '../store/resolution.js';
 import {
   planProjectResolutionCandidateScan,
   PROJECT_RESOLUTION_CANDIDATE_SCAN_MAX_FILES,
+  PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS,
+  PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES,
   scanProjectResolutionCandidateClosure,
   type ProjectResolutionCandidateClosure,
   type ProjectResolutionCandidateScanPlan,
@@ -36,6 +38,17 @@ import type {
   CodeGraphReference,
 } from '../types.js';
 import {createWorkspaceAttributor} from '../workspace.js';
+import {
+  classifyWorkspaceTransition,
+  type WorkspaceTransition,
+  type WorkspaceTransitionFile,
+} from '../workspace/transition.js';
+import {
+  sameWorkspaceInventoryFile,
+  workspaceMembershipEvidence,
+  workspaceTransitionFileEvidence,
+} from '../workspace/compatibility.js';
+import type {CodeGraphMembershipCandidateWork} from '../incremental/work.js';
 
 export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   'codeGraph.assessResolutionCandidateIncrementalClosure',
@@ -130,10 +143,251 @@ export const assessResolutionCandidateIncrementalClosure = Effect.fn(
   return yield* assessSelectedResolutionCandidateClosure({...input, scan, selectedFiles});
 });
 
+/** Complete two-version evidence with a narrow, metadata-certified inert tail. */
+export const assessWorkspaceTransitionIncrementalClosure = Effect.fn(
+  'codeGraph.assessWorkspaceTransitionIncrementalClosure',
+)(function* (input: {
+  readonly baseFileSetFingerprint: string;
+  readonly baseFiles: readonly CodeGraphInventoryFile[];
+  readonly committedWorkspace: CodeGraphWorkspace;
+  readonly currentChangedFiles: readonly CodeGraphInventoryFile[];
+  readonly currentFiles: readonly CodeGraphInventoryFile[];
+  readonly currentWorkspace: CodeGraphWorkspace;
+  readonly languagePacks: CodeGraphLanguagePackRegistryShape;
+  readonly layout: CodeGraphLayout;
+  readonly store: CodeGraphStoreShape;
+}) {
+  const evidence = workspaceMembershipEvidence({...input, baseWorkspace: input.committedWorkspace});
+  if (!evidence) return {mode: 'fallback', reason: 'workspace-changed'} as const;
+  const baseByPath = new Map(input.baseFiles.map(file => [file.path, file]));
+  const currentByPath = new Map(input.currentFiles.map(file => [file.path, file]));
+  const deletedPaths = input.baseFiles.filter(file => !currentByPath.has(file.path)).map(file => file.path);
+  if (
+    new Set([...input.currentChangedFiles.map(file => file.path), ...deletedPaths]).size >
+    PROJECT_INCREMENTAL_CLOSURE_MAX_FILES
+  )
+    return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
+  const [baseMetadata, currentMetadata] = yield* Effect.all(
+    [
+      cachedFactsMetadata(input.store, input.layout.databasePath, input.baseFiles, input.languagePacks),
+      cachedFactsMetadata(input.store, input.layout.databasePath, input.currentFiles, input.languagePacks),
+    ],
+    {concurrency: 1},
+  );
+  for (const [files, metadata] of [
+    [input.baseFiles, baseMetadata],
+    [input.currentFiles, currentMetadata],
+  ] as const) {
+    if (metadata.files !== files.length || metadata.bytesByPath.size !== files.length)
+      return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+    const completePlan = planProjectResolutionCandidateScan({files, bytesByPath: metadata.bytesByPath});
+    if (completePlan.mode === 'fallback')
+      return resolutionCandidateScanFallback(completePlan, input.currentChangedFiles.length);
+    for (const bytes of metadata.bytesByPath.values()) {
+      if (assessCodeGraphIncrementalFactBytes({aggregateBytes: bytes, factBytes: [bytes]}).mode !== 'eligible')
+        return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
+    }
+  }
+  const unionFiles = [...new Set([...baseByPath.keys(), ...currentByPath.keys()])]
+    .sort(compareCodeUnits)
+    .map(path => baseByPath.get(path) ?? currentByPath.get(path)!);
+  const distinctCurrent = (path: string) => {
+    const before = baseByPath.get(path);
+    const after = currentByPath.get(path);
+    return after !== undefined && (before === undefined || !sameWorkspaceInventoryFile(before, after));
+  };
+  const bytesByPath = new Map(
+    unionFiles.map(file => [
+      file.path,
+      (baseMetadata.bytesByPath.get(file.path) ?? 0) +
+        (distinctCurrent(file.path) ? currentMetadata.bytesByPath.get(file.path)! : 0),
+    ]),
+  );
+  // Admit the full union before omitting any certified reference-free facts.
+  const completePlan = planProjectResolutionCandidateScan({files: unionFiles, bytesByPath});
+  if (completePlan.mode === 'fallback')
+    return resolutionCandidateScanFallback(completePlan, input.currentChangedFiles.length);
+  const scannedFiles = unionFiles.filter(file => !evidence.omittedPaths.has(file.path));
+  if (scannedFiles.some(file => bytesByPath.get(file.path)! > PROJECT_RESOLUTION_CANDIDATE_SCAN_PAGE_MAX_FACT_BYTES))
+    return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
+  const plan = planProjectResolutionCandidateScan({files: scannedFiles, bytesByPath});
+  if (plan.mode === 'fallback') return resolutionCandidateScanFallback(plan, input.currentChangedFiles.length);
+  const oldEvidence = new Map<string, WorkspaceTransitionFile>();
+  const newEvidence = new Map<string, WorkspaceTransitionFile>();
+  for (const path of evidence.omittedPaths) {
+    oldEvidence.set(
+      path,
+      workspaceTransitionFileEvidence(baseByPath.get(path)!, undefined, evidence.basePackageNames.get(path)!)!,
+    );
+    newEvidence.set(
+      path,
+      workspaceTransitionFileEvidence(currentByPath.get(path)!, undefined, evidence.currentPackageNames.get(path)!)!,
+    );
+  }
+  const attributeBase = createFactsAttributor(input.baseFiles, input.committedWorkspace);
+  const attributeCurrent = createFactsAttributor(input.currentFiles, input.currentWorkspace);
+  const requiredPaths = new Set([...input.currentChangedFiles.map(file => file.path), ...deletedPaths]);
+  const lookupKeys = new Map<string, ProjectResolutionLookupKey>();
+  let evidenceComplete = true;
+  let rawBaseFiles = 0;
+  let rawCurrentFiles = 0;
+  let rawBaseBytes = 0;
+  let rawCurrentBytes = 0;
+  let transition: WorkspaceTransition | undefined;
+  const empty = (path: string): CodeGraphFileFacts => ({path, diagnostics: [], edges: [], symbols: [], references: []});
+  const scan = yield* scanProjectResolutionCandidateClosure({
+    initialLookupKeys: [],
+    maximumSelectedFiles: PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
+    plan,
+    finalizeLookupKeys: () => {
+      if (!evidenceComplete) return [];
+      transition = classifyWorkspaceTransition({
+        base: {
+          workspace: input.committedWorkspace,
+          files: [...oldEvidence.values()],
+          inventoryComplete: oldEvidence.size === input.baseFiles.length,
+        },
+        current: {
+          workspace: input.currentWorkspace,
+          files: [...newEvidence.values()],
+          inventoryComplete: newEvidence.size === input.currentFiles.length,
+        },
+        resolverExtractorContextUnchanged: true,
+      });
+      if (transition.mode === 'eligible') {
+        for (const path of [...transition.baseAffectedPaths, ...transition.currentAffectedPaths])
+          requiredPaths.add(path);
+      }
+      return [...lookupKeys.values()];
+    },
+    loadPage: files =>
+      Effect.gen(function* () {
+        const beforeFiles = files.flatMap(file => (baseByPath.has(file.path) ? [baseByPath.get(file.path)!] : []));
+        const afterFiles = files.flatMap(file => (distinctCurrent(file.path) ? [currentByPath.get(file.path)!] : []));
+        const [before, after] = yield* Effect.all(
+          [
+            loadCachedFacts(input.store, input.layout.databasePath, beforeFiles, input.languagePacks),
+            loadCachedFacts(input.store, input.layout.databasePath, afterFiles, input.languagePacks),
+          ],
+          {concurrency: 1},
+        );
+        rawBaseFiles += before.facts.size;
+        rawCurrentFiles += after.facts.size;
+        rawBaseBytes += before.bytes;
+        rawCurrentBytes += after.bytes;
+        const previousFacts = new Map<string, CodeGraphFileFacts>();
+        const facts = new Map<string, CodeGraphFileFacts>();
+        const actualBytes = new Map<string, number>();
+        for (const file of files) {
+          const oldFile = baseByPath.get(file.path);
+          const newFile = currentByPath.get(file.path);
+          const oldRaw = before.facts.get(file.path);
+          const newRaw = distinctCurrent(file.path) ? after.facts.get(file.path) : oldRaw;
+          if ((oldFile && !oldRaw) || (newFile && !newRaw)) continue;
+          const oldFacts = oldFile
+            ? attributeBase([input.languagePacks.postprocessFile(oldFile, oldRaw!)])[0]
+            : empty(file.path);
+          const newFacts = newFile
+            ? attributeCurrent([input.languagePacks.postprocessFile(newFile, newRaw!)])[0]
+            : empty(file.path);
+          const oldProof = oldFile
+            ? workspaceTransitionFileEvidence(oldFile, oldFacts, evidence.basePackageNames.get(file.path)!)
+            : undefined;
+          const newProof = newFile
+            ? workspaceTransitionFileEvidence(newFile, newFacts, evidence.currentPackageNames.get(file.path)!)
+            : undefined;
+          if (oldFile && oldProof) oldEvidence.set(file.path, oldProof);
+          if (newFile && newProof) newEvidence.set(file.path, newProof);
+          if ((oldFile && !oldProof) || (newFile && !newProof)) evidenceComplete = false;
+          if (
+            [...(oldFacts.references ?? []), ...(newFacts.references ?? [])].some(
+              reference =>
+                isStaticReexportReference(reference) &&
+                (reference.resolutionDomain !== 'typescript' ||
+                  [...reference.lookupTiers.flat(), ...(reference.aliasLookupKeys ?? [])].some(
+                    key => parseTypeScriptPathNameLookupKey(key).length !== 1,
+                  )),
+            )
+          )
+            evidenceComplete = false;
+          const changedSymbols = JSON.stringify(oldFacts.symbols) !== JSON.stringify(newFacts.symbols);
+          const changedReferences =
+            JSON.stringify(oldFacts.references ?? []) !== JSON.stringify(newFacts.references ?? []);
+          if (changedSymbols || changedReferences) {
+            requiredPaths.add(file.path);
+            for (const side of [oldFacts, newFacts]) {
+              for (const symbol of side.symbols)
+                for (const key of symbol.lookupKeys ?? []) {
+                  const value = {key, resolutionDomain: lookupKeyDomain(key, symbol.resolutionDomain)};
+                  if (lookupKeys.size <= PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS)
+                    lookupKeys.set(`${value.resolutionDomain}\0${key}`, value);
+                }
+              for (const reference of side.references ?? [])
+                for (const key of reference.aliasLookupKeys ?? []) {
+                  if (lookupKeys.size <= PROJECT_RESOLUTION_CANDIDATE_MAX_LOOKUP_KEYS)
+                    lookupKeys.set(`${reference.resolutionDomain}\0${key}`, {
+                      key,
+                      resolutionDomain: reference.resolutionDomain,
+                    });
+                }
+            }
+          }
+          if (oldFile) previousFacts.set(file.path, oldFacts);
+          facts.set(file.path, newFacts);
+          actualBytes.set(
+            file.path,
+            (before.bytesByPath.get(file.path) ?? 0) + (after.bytesByPath.get(file.path) ?? 0),
+          );
+        }
+        return {facts, previousFacts, bytesByPath: actualBytes};
+      }),
+  });
+  if (scan.mode === 'fallback') return resolutionCandidateScanFallback(scan, input.currentChangedFiles.length);
+  if (!evidenceComplete || transition?.mode !== 'eligible')
+    return {mode: 'fallback', reason: 'workspace-changed'} as const;
+  for (const path of scan.paths) requiredPaths.add(path);
+  if (requiredPaths.size > PROJECT_INCREMENTAL_CLOSURE_MAX_FILES)
+    return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
+  let sourceBytes = 0;
+  for (const path of requiredPaths) {
+    if (!currentByPath.has(path) && !deletedPaths.includes(path))
+      return {mode: 'fallback', reason: 'cache-incomplete'} as const;
+    sourceBytes += Math.max(baseByPath.get(path)?.size ?? 0, currentByPath.get(path)?.size ?? 0);
+  }
+  if (sourceBytes > PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES)
+    return {mode: 'fallback', reason: 'project-closure-unbounded'} as const;
+  const selectedFiles = [...requiredPaths]
+    .sort(compareCodeUnits)
+    .flatMap(path => (currentByPath.has(path) ? [currentByPath.get(path)!] : []));
+  const candidateWork: CodeGraphMembershipCandidateWork = {
+    metadataFiles: unionFiles.length,
+    metadataFactBytes: completePlan.factBytes,
+    omittedFiles: evidence.omittedPaths.size,
+    omittedFactBytes: completePlan.factBytes - plan.factBytes,
+    rawBaseFiles,
+    rawCurrentFiles,
+    rawBaseBytes,
+    rawCurrentBytes,
+    selectedReloadFiles: selectedFiles.length,
+    selectedReloadBytes: selectedFiles.reduce((sum, file) => sum + currentMetadata.bytesByPath.get(file.path)!, 0),
+    projectionObservations: scan.projectionObservations ?? 0,
+    projectionObservedKeyBytes: scan.projectionObservedKeyBytes ?? 0,
+  };
+  return yield* assessSelectedResolutionCandidateClosure({
+    ...input,
+    deletedPaths,
+    selectedFiles,
+    scan,
+    candidateWork,
+    projectCount: new Set([...transition.baseProjectClosureIds, ...transition.currentProjectClosureIds]).size,
+  });
+});
+
 const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSelectedResolutionCandidateClosure')(
   function* (input: {
     readonly baseFileSetFingerprint: string;
     readonly changedFiles?: number;
+    readonly candidateWork?: CodeGraphMembershipCandidateWork;
     readonly committedWorkspace: CodeGraphWorkspace;
     readonly currentChangedFiles: readonly CodeGraphInventoryFile[];
     readonly currentFiles: readonly CodeGraphInventoryFile[];
@@ -224,6 +478,7 @@ const assessSelectedResolutionCandidateClosure = Effect.fn('codeGraph.assessSele
       files: input.selectedFiles,
       mode: 'compatible',
       proportionalWork: {
+        ...(input.candidateWork ? {membershipCandidate: input.candidateWork} : {}),
         attributionContextFiles: input.scan.scannedFiles,
         baseFactsLoaded: input.selectedFiles.length,
         inventoryFilesInspected: input.currentFiles.length,

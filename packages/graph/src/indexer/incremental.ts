@@ -52,6 +52,7 @@ import {
 } from '../store.js';
 import {
   assessResolutionCandidateIncrementalClosure,
+  assessWorkspaceTransitionIncrementalClosure,
   enrichPersistedTypeScriptReexports,
   reusableReexportSeeds,
 } from './resolution_candidate_closure.js';
@@ -62,7 +63,9 @@ import {
   type CodeGraphSnapshot,
 } from '../types.js';
 import {createWorkspaceAttributor} from '../workspace.js';
-import {assessCodeGraphWorkspaceCompatibility} from '../workspace/compatibility.js';
+import {assessCodeGraphWorkspaceCompatibility, sameWorkspaceInventoryFile} from '../workspace/compatibility.js';
+import {isRepositoryFactAttributionContextPath} from '../extractor_context.js';
+import {codeGraphCommittedContentHash} from '../content_identity.js';
 
 export {resolvePersistedReexportTerminals} from './resolution_candidate_closure.js';
 
@@ -250,7 +253,17 @@ export const assessIncrementalOverlayCompatibility = Effect.fn('codeGraph.assess
     }
     const workspaceCompatibility = assessCodeGraphWorkspaceCompatibility(committedWorkspace, workspace);
     if (workspaceCompatibility.mode === 'fallback') {
-      return workspaceCompatibility satisfies IncrementalOverlayPreassessment;
+      return yield* assessWorkspaceTransitionIncrementalClosure({
+        baseFiles: input.inventory.committedFiles,
+        baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.inventory.committedFiles),
+        committedWorkspace,
+        currentChangedFiles: modifiedFiles,
+        currentFiles: input.inventory.files,
+        currentWorkspace: workspace,
+        languagePacks: input.languagePacks,
+        layout: input.layout,
+        store: input.store,
+      });
     }
     if (deletedPaths.length > 0 || modifiedFiles.some(file => !committedByPath.has(file.path))) {
       return yield* assessProjectFileSetIncrementalClosureCompatibility({
@@ -381,7 +394,58 @@ export const assessReusableCleanBaseCompatibility = Effect.fn('codeGraph.assessR
     }
     const committedWorkspace = baseWorkspace ?? workspace;
     const workspaceCompatibility = assessCodeGraphWorkspaceCompatibility(committedWorkspace, workspace);
-    if (workspaceCompatibility.mode === 'fallback') return workspaceCompatibility;
+    if (workspaceCompatibility.mode === 'fallback') {
+      if (
+        extractorTransition ||
+        baseWorkspace === undefined ||
+        input.candidate.receipt.workspaceFingerprint !== baseWorkspace.fingerprint
+      )
+        return workspaceCompatibility;
+      const contexts = input.candidate.receipt.inventory?.attributionFiles;
+      if (contexts === undefined) return workspaceCompatibility;
+      const contextByPath = new Map(contexts.map(file => [file.path, file]));
+      const baseByPath = new Map(input.candidate.files.map(file => [file.path, file]));
+      if (
+        contextByPath.size !== contexts.length ||
+        contexts.some(file => {
+          const base = baseByPath.get(file.path);
+          return (
+            !base ||
+            !isRepositoryFactAttributionContextPath(file.path) ||
+            !input.languagePacks.isResolutionContext(file.path) ||
+            file.source !== 'commit' ||
+            !sameWorkspaceInventoryFile(base, {...file, size: base.size}) ||
+            (base.blobId !== undefined &&
+              base.blobId !== `snapshot:${base.contentHash}` &&
+              base.blobId !== file.blobId) ||
+            file.blobId === undefined ||
+            !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(file.blobId) ||
+            codeGraphCommittedContentHash(file.blobId.length === 64 ? 'sha256' : 'sha1', file.blobId) !==
+              file.contentHash ||
+            file.size !== Buffer.byteLength(file.content, 'utf8')
+          );
+        })
+      )
+        return workspaceCompatibility;
+      // Receipt bodies are compact resolver inputs; retain original source sizes
+      // and source hashes instead of mistaking compact bytes for the Git blob.
+      const baseFiles = input.candidate.files.map(file =>
+        contextByPath.has(file.path) ? {...file, content: contextByPath.get(file.path)!.content} : file,
+      );
+      if (baseFiles.some(file => isRepositoryFactAttributionContextPath(file.path) && file.content === undefined))
+        return workspaceCompatibility;
+      return yield* assessWorkspaceTransitionIncrementalClosure({
+        baseFiles,
+        baseFileSetFingerprint: reusableBaseFileSetFingerprint(input.candidate.files),
+        committedWorkspace,
+        currentChangedFiles: modifiedFiles,
+        currentFiles: input.inventory.files,
+        currentWorkspace: workspace,
+        languagePacks: input.languagePacks,
+        layout: input.layout,
+        store: input.store,
+      });
+    }
     const workspaceSeedProjectIds =
       workspaceCompatibility.mode === 'project-closure' ? workspaceCompatibility.seedProjectIds : [];
     const currentPaths = new Set(input.inventory.files.map(file => file.path));

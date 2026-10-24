@@ -1,7 +1,13 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import type {CodeGraphWorkspace, CodeGraphWorkspaceProject} from '@threadnote/graph/languages/types';
-import {assessCodeGraphWorkspaceCompatibility} from '@threadnote/graph/workspace/compatibility';
+import {
+  assessCodeGraphWorkspaceCompatibility,
+  workspaceMembershipEvidence,
+} from '@threadnote/graph/workspace/compatibility';
+import {BUILTIN_LANGUAGE_PACK_REGISTRY} from '@threadnote/graph/languages/registry';
+import type {CodeGraphInventoryFile} from '@threadnote/graph/types';
+import {codeGraphPackageMoniker} from '@threadnote/graph/cross_repository/monikers';
 import {classifyWorkspaceTransition} from '@threadnote/graph/workspace/transition';
 
 describe('code graph workspace compatibility properties', () => {
@@ -59,6 +65,171 @@ describe('code graph workspace compatibility properties', () => {
       }),
       {numRuns: 50},
     );
+  });
+
+  it('certifies only unchanged builtin configs outside repository attribution changes', () => {
+    const parent = nodeProject('parent', '');
+    const child = nodeProject('child', 'packages/child');
+    const manifest = inventoryFile('package.json', 'npm-manifest', '{"name":"parent"}');
+    const nestedManifest = inventoryFile('packages/child/package.json', 'npm-manifest', '{"name":"child"}');
+    const stable = inventoryFile('stable.json', 'json');
+    const rewritten = inventoryFile('packages/child/config.json', 'json');
+    const baseFiles = [manifest, stable, rewritten];
+    const currentFiles = [...baseFiles, nestedManifest];
+    const input = {
+      baseFiles,
+      currentFiles,
+      baseWorkspace: side([parent], []).workspace,
+      currentWorkspace: side([parent, child], []).workspace,
+      languagePacks: BUILTIN_LANGUAGE_PACK_REGISTRY,
+    };
+    expect([...workspaceMembershipEvidence(input)!.omittedPaths]).toEqual(['stable.json']);
+    expect(workspaceMembershipEvidence(input)!.basePackageNames.get(rewritten.path)).toBe('parent');
+    expect(workspaceMembershipEvidence(input)!.currentPackageNames.get(rewritten.path)).toBe('child');
+    for (const invalid of [
+      {...input, baseFiles: [{...manifest, content: undefined}, stable, rewritten]},
+      {...input, baseFiles: [{...manifest, content: '{}'}, stable, rewritten]},
+      {...input, currentFiles: [...currentFiles, inventoryFile('Assets.xcassets/Icon.imageset/Contents.json', 'json')]},
+      {...input, currentFiles: [...currentFiles, inventoryFile('unknown.rb', 'ruby')]},
+      {...input, baseFiles: [...baseFiles, stable]},
+      {
+        ...input,
+        currentFiles: [
+          {...manifest, content: '{"name":"parent","main":"stale.ts"}'},
+          stable,
+          rewritten,
+          nestedManifest,
+        ],
+      },
+      {
+        ...input,
+        baseFiles: [...baseFiles, inventoryFile('tsconfig.json', 'typescript-config', '{"compilerOptions":{}}')],
+        currentFiles: [
+          ...currentFiles,
+          {
+            ...inventoryFile('tsconfig.json', 'typescript-config', '{"compilerOptions":{"baseUrl":"src"}}'),
+            contentHash: 'changed',
+          },
+        ],
+      },
+    ])
+      expect(workspaceMembershipEvidence(invalid)).toBeUndefined();
+  });
+
+  it('explains only roster-related external dependencies when an unchanged manifest gains a local provider', () => {
+    const provider = nodeProject('new', 'packages/new');
+    const consumer = {...nodeProject('consumer', 'packages/consumer'), id: `cgp_${'1'.repeat(32)}`};
+    const dependency = {
+      ecosystem: 'npm' as const,
+      evidence: {path: 'packages/consumer/package.json'},
+      importAlias: provider.name,
+      kind: 'runtime' as const,
+      name: provider.name,
+      versionConstraint: '*',
+    };
+    const monikerInput = {
+      componentId: consumer.id,
+      evidence: {path: 'packages/consumer/package.json', span: {line: 1, column: 1, endLine: 1, endColumn: 1}},
+    };
+    const exported = codeGraphPackageMoniker({
+      ...monikerInput,
+      role: 'export',
+      packageName: 'consumer',
+      packageVersion: '1.0.0',
+    });
+    const imported = codeGraphPackageMoniker({
+      ...monikerInput,
+      role: 'import',
+      dependencyKind: 'runtime',
+      packageName: provider.name,
+      packageVersion: '*',
+    });
+    const oldConsumer = {...consumer, externalDependencies: [dependency], monikers: [exported, imported]};
+    const newConsumer = {
+      ...nodeProject('consumer', 'packages/consumer', ['new']),
+      id: consumer.id,
+      externalDependencies: [],
+      monikers: [exported],
+    };
+    const files = [transitionFile('packages/consumer/index.ts')];
+    expect(
+      classifyWorkspaceTransition({
+        base: side([oldConsumer], files),
+        current: side([newConsumer, provider], files),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toMatchObject({mode: 'eligible', semanticChangedProjectIds: [consumer.id]});
+    expect(
+      classifyWorkspaceTransition({
+        base: side([oldConsumer], files),
+        current: side(
+          [
+            {
+              ...newConsumer,
+              monikers: [
+                codeGraphPackageMoniker({
+                  ...monikerInput,
+                  role: 'export',
+                  packageName: 'consumer',
+                  packageVersion: '2.0.0',
+                }),
+              ],
+            },
+            provider,
+          ],
+          files,
+        ),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toEqual({mode: 'fallback', reason: 'unrelated-workspace-change'});
+
+    expect(
+      classifyWorkspaceTransition({
+        base: side([{...oldConsumer, externalDependencies: []}], files),
+        current: side([newConsumer, provider], files),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toEqual({mode: 'fallback', reason: 'unrelated-workspace-change'});
+    expect(
+      classifyWorkspaceTransition({
+        base: side([{...oldConsumer, externalDependencies: [dependency, {...dependency, name: 'unrelated'}]}], files),
+        current: side([newConsumer, provider], files),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toEqual({mode: 'fallback', reason: 'unrelated-workspace-change'});
+  });
+
+  it('requires explicit unowned-domain proof and rewrites package attribution independently of domain ownership', () => {
+    const parent = nodeProject('parent', 'packages');
+    const child = nodeProject('child', 'packages/child');
+    const file = {
+      ...transitionFile('packages/child/config.json', 4, ['generic', 'documentation']),
+      repositoryPackageName: 'parent',
+      provenUnownedResolutionDomains: ['generic', 'documentation'],
+    };
+    const current = {...file, repositoryPackageName: 'child'};
+    const withoutProof = {...file, provenUnownedResolutionDomains: undefined};
+    const invalidProof = {...file, resolutionDomains: ['typescript'], provenUnownedResolutionDomains: ['typescript']};
+    const result = classifyWorkspaceTransition({
+      base: side([parent], [file]),
+      current: side([parent, child], [current]),
+      resolverExtractorContextUnchanged: true,
+    });
+    expect(result).toMatchObject({mode: 'eligible', baseAffectedPaths: [file.path], currentAffectedPaths: [file.path]});
+    expect(
+      classifyWorkspaceTransition({
+        base: side([parent], [withoutProof]),
+        current: side([parent, child], [current]),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toEqual({mode: 'fallback', reason: 'unowned-path'});
+    expect(
+      classifyWorkspaceTransition({
+        base: side([parent], [invalidProof]),
+        current: side([parent, child], [current]),
+        resolverExtractorContextUnchanged: true,
+      }),
+    ).toEqual({mode: 'fallback', reason: 'incomplete-inventory'});
   });
 
   it('models a nested declared package addition over unchanged files in both versions', () => {
@@ -382,4 +553,17 @@ function project(index: number): CodeGraphWorkspaceProject {
 
 function workspace(fingerprint: string, projects: readonly CodeGraphWorkspaceProject[]): CodeGraphWorkspace {
   return {diagnostics: [], fingerprint, projects, workspaces: []};
+}
+
+function inventoryFile(path: string, language: string, content?: string): CodeGraphInventoryFile {
+  return {
+    path,
+    language,
+    content,
+    blobId: 'a'.repeat(40),
+    contentHash: `hash-${path}`,
+    mode: '100644',
+    size: 1,
+    source: 'commit',
+  };
 }

@@ -1,5 +1,6 @@
 import type {CodeGraphBuildWorkspace, CodeGraphWorkspace, CodeGraphWorkspaceProject} from '../languages/types.js';
 import {compareCodeUnits} from '../ordering.js';
+import {codeGraphPackageMoniker} from '../cross_repository/monikers.js';
 import {
   PROJECT_INCREMENTAL_CLOSURE_MAX_FILES,
   PROJECT_INCREMENTAL_CLOSURE_MAX_SOURCE_BYTES,
@@ -25,6 +26,10 @@ export interface WorkspaceTransitionFile {
   readonly resolutionDomains: readonly string[];
   /** This file contains a package symbol in the workspace domain. */
   readonly hasWorkspacePackageSymbol: boolean;
+  /** Explicit absence of an ordinary owner, certified by the evidence adapter. */
+  readonly provenUnownedResolutionDomains?: readonly string[];
+  /** Repository attribution applies even to symbols without a project resolver owner. */
+  readonly repositoryPackageName?: string | null;
 }
 
 export interface WorkspaceTransitionSide {
@@ -112,13 +117,14 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
       return fallback('unsupported-roster-change');
     }
   }
+  const deltaPackageNames = new Set([...added, ...removed].map(id => (newMap.get(id) ?? oldMap.get(id)!).name));
   const semanticChanged: string[] = [];
   for (const id of oldMap.keys()) {
     const before = oldMap.get(id)!;
     const after = newMap.get(id);
     if (!after) continue;
     if (sameProject(before, after)) continue;
-    if (!sameNonDependencySurface(before, after)) return fallback('unrelated-workspace-change');
+    if (!sameNonDependencySurface(before, after, deltaPackageNames)) return fallback('unrelated-workspace-change');
     semanticChanged.push(id);
   }
   semanticChanged.sort(compareCodeUnits);
@@ -131,6 +137,7 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
   if (!oldOwners || !newOwners) return fallback('ambiguous-owner');
   const allPaths = [...new Set([...allBase.keys(), ...allCurrent.keys()])].sort(compareCodeUnits);
   const changedPaths: string[] = [];
+  const packageChangedPaths = new Set<string>();
   const baseSeeds = new Set([...removed, ...semanticChanged]);
   const currentSeeds = new Set([...added, ...semanticChanged]);
   for (const path of allPaths) {
@@ -139,12 +146,23 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
     const oldFile = allBase.get(path);
     const newFile = allCurrent.get(path);
     if (
-      (oldFile && oldByDomain.size !== observedDomains(oldFile).length) ||
-      (newFile && newByDomain.size !== observedDomains(newFile).length)
+      (oldFile &&
+        oldByDomain.size + (oldFile.provenUnownedResolutionDomains?.length ?? 0) !== observedDomains(oldFile).length) ||
+      (newFile &&
+        newByDomain.size + (newFile.provenUnownedResolutionDomains?.length ?? 0) !== observedDomains(newFile).length)
     )
       return fallback('unowned-path');
     if (oldFile && newFile && stableJson(oldFile.resolutionDomains) !== stableJson(newFile.resolutionDomains))
       return fallback('incomplete-domain-evidence');
+    if (
+      oldFile &&
+      newFile &&
+      (oldFile.repositoryPackageName !== undefined || newFile.repositoryPackageName !== undefined)
+    ) {
+      if (oldFile.repositoryPackageName === undefined || newFile.repositoryPackageName === undefined)
+        return fallback('incomplete-domain-evidence');
+      if (oldFile.repositoryPackageName !== newFile.repositoryPackageName) packageChangedPaths.add(path);
+    }
     const domains = new Set([...oldByDomain.keys(), ...newByDomain.keys()]);
     const ownerDiffers = [...domains].some(domain => oldByDomain.get(domain)?.id !== newByDomain.get(domain)?.id);
     if (ownerDiffers) {
@@ -168,14 +186,19 @@ export function classifyWorkspaceTransition(input: WorkspaceTransitionInput): Wo
     !workspaceDelta.added.length &&
     !workspaceDelta.removed.length &&
     !semanticChanged.length &&
-    !changedPaths.length
+    !changedPaths.length &&
+    !packageChangedPaths.size
   )
     return {mode: 'unchanged'};
-  const baseAffected = allPaths.filter(path =>
-    [...(oldOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, baseClosure)),
+  const baseAffected = allPaths.filter(
+    path =>
+      packageChangedPaths.has(path) ||
+      [...(oldOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, baseClosure)),
   );
-  const currentAffected = allPaths.filter(path =>
-    [...(newOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, currentClosure)),
+  const currentAffected = allPaths.filter(
+    path =>
+      packageChangedPaths.has(path) ||
+      [...(newOwners.get(path)?.values() ?? [])].some(owner => baseSeedsForPath(owner, currentClosure)),
   );
   const affected = [...new Set([...baseAffected, ...currentAffected, ...changedPaths])].sort(compareCodeUnits);
   const maxFiles = input.maxFiles ?? PROJECT_INCREMENTAL_CLOSURE_MAX_FILES;
@@ -235,6 +258,15 @@ function validInventory(files: readonly WorkspaceTransitionFile[]): Map<string, 
       file.resolutionDomains.some(domain => !domain || domain === 'workspace') ||
       new Set(file.resolutionDomains).size !== file.resolutionDomains.length ||
       typeof file.hasWorkspacePackageSymbol !== 'boolean' ||
+      (file.provenUnownedResolutionDomains !== undefined &&
+        (new Set(file.provenUnownedResolutionDomains).size !== file.provenUnownedResolutionDomains.length ||
+          file.provenUnownedResolutionDomains.some(
+            domain =>
+              !['generic', 'documentation', 'global'].includes(domain) || !file.resolutionDomains.includes(domain),
+          ))) ||
+      (file.repositoryPackageName !== undefined &&
+        file.repositoryPackageName !== null &&
+        typeof file.repositoryPackageName !== 'string') ||
       !Number.isSafeInteger(file.size) ||
       file.size < 0 ||
       map.has(file.path)
@@ -312,6 +344,7 @@ function ownersFor(
       const sourceOwner = nearestOwner(eligible, path, 'sourceRoots');
       const owner = sourceOwner === 'ambiguous' ? sourceOwner : (sourceOwner ?? nearestOwner(eligible, path, 'root'));
       if (owner === 'ambiguous') return undefined;
+      if (owner && file.provenUnownedResolutionDomains?.includes(domain)) return undefined;
       if (owner) owners.set(domain, owner);
     }
     result.set(path, owners);
@@ -337,8 +370,48 @@ function nearestOwner(
 function sameProject(a: CodeGraphWorkspaceProject, b: CodeGraphWorkspaceProject): boolean {
   return stableJson(a) === stableJson(b);
 }
-function sameNonDependencySurface(a: CodeGraphWorkspaceProject, b: CodeGraphWorkspaceProject): boolean {
-  const strip = (p: CodeGraphWorkspaceProject) => ({...p, dependencies: [], dependencyDetails: [], monikers: []});
+function sameNonDependencySurface(
+  a: CodeGraphWorkspaceProject,
+  b: CodeGraphWorkspaceProject,
+  deltaPackageNames: ReadonlySet<string>,
+): boolean {
+  const strip = (p: CodeGraphWorkspaceProject) => {
+    const explainedDependencies = (p.externalDependencies ?? []).filter(
+      dependency => deltaPackageNames.has(dependency.name) && dependency.importAlias === dependency.name,
+    );
+    const explainedMonikers = new Set(
+      explainedDependencies.flatMap(dependency => {
+        try {
+          return [
+            stableJson(
+              codeGraphPackageMoniker({
+                componentId: p.id,
+                dependencyKind: dependency.kind,
+                evidence: {
+                  path: dependency.evidence.path,
+                  span: dependency.evidence.span ?? {column: 1, endColumn: 1, endLine: 1, line: 1},
+                },
+                packageName: dependency.name,
+                packageVersion: dependency.versionConstraint,
+                role: 'import',
+              }),
+            ),
+          ];
+        } catch {
+          return [];
+        }
+      }),
+    );
+    return {
+      ...p,
+      dependencies: [],
+      dependencyDetails: [],
+      monikers: (p.monikers ?? []).filter(moniker => !explainedMonikers.has(stableJson(moniker))),
+      externalDependencies: (p.externalDependencies ?? []).filter(
+        dependency => !deltaPackageNames.has(dependency.name) || dependency.importAlias !== dependency.name,
+      ),
+    };
+  };
   return stableJson(strip(a)) === stableJson(strip(b));
 }
 function stableJson(value: unknown): string {
