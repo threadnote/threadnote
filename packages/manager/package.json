@@ -68,6 +68,8 @@
     "./workspace": "./src/workspace.tsx"
   },
   "dependencies": {
+    "@lezer/highlight": "1.2.5",
+    "@lezer/javascript": "1.5.6",
     "@mdxeditor/editor": "^4.3.2",
     "@threadnote/context": "workspace:*",
     "@threadnote/graph": "workspace:*",
