@@ -767,3 +767,68 @@ it('navigates bounded pages to a late ready review and resets the cursor when th
   expect(calls.at(-1)?.searchParams.has('afterUri')).toBe(false);
   expect(summary).toHaveBeenLastCalledWith('other-project', {ready: 0, pending: true});
 });
+
+it('shows a visible selected-review read state and stops loading after failure with a working retry', async () => {
+  const read = Promise.withResolvers<Response>();
+  vi.stubGlobal('fetch', () => read.promise);
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+  expect(document.querySelector('.review-progress')?.textContent).toContain('Loading the selected review');
+  expect(document.querySelector('.review-progress svg')?.getAttribute('width')).toBe('24');
+  await act(async () => read.reject(new TypeError('Failed to fetch')));
+  expect(document.body.textContent).toContain('Failed to fetch');
+  expect(document.querySelector('.review-progress')).toBeNull();
+  expect(document.body.textContent).not.toContain('Loading the selected review');
+  expect(button('Reload exact review').disabled).toBe(false);
+  vi.stubGlobal('fetch', async () => json(review()));
+  await click('Reload exact review');
+  expect(document.body.textContent).toContain('Accepted prose.');
+  expect(button('Preview exact update').disabled).toBe(false);
+});
+
+it('shows preview progress at the action and focuses a ready preview with explicit apply controls', async () => {
+  const preview = Promise.withResolvers<Response>();
+  const posts: Record<string, unknown>[] = [];
+  vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) {
+      posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return preview.promise;
+    }
+    return Promise.resolve(json(review()));
+  });
+  await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+  await click('Preview exact update');
+  expect(document.querySelector('.automatic-review-actions .review-progress')?.textContent).toContain(
+    'Preparing the exact full preview',
+  );
+  expect(posts).toHaveLength(1);
+  await act(async () => preview.resolve(json(review({revision: 2, approval: approval(), canApply: true}))));
+  const exact = document.querySelector('.automatic-review-exact');
+  expect(document.activeElement).toBe(exact);
+  expect(exact?.textContent).toContain('Preview ready');
+  expect(exact?.querySelector('button')?.textContent).toBe('Confirm and apply');
+  expect(button('Confirm and apply').disabled).toBe(true);
+  expect(document.querySelector('.review-progress')).toBeNull();
+  expect(posts).toHaveLength(1);
+  await act(async () => exact?.querySelector<HTMLInputElement>('input[type=checkbox]')?.click());
+  expect(button('Confirm and apply').disabled).toBe(false);
+});
+
+it('bounds an unresponsive selected-review read and enables retry without an endless loading label', async () => {
+  vi.useFakeTimers();
+  try {
+    vi.stubGlobal('fetch', (_input: RequestInfo | URL, init?: RequestInit) => {
+      const pending = Promise.withResolvers<Response>();
+      init?.signal?.addEventListener('abort', () => pending.reject(new DOMException('Aborted', 'AbortError')), {
+        once: true,
+      });
+      return pending.promise;
+    });
+    await render(<AutomaticMemoryReviewDialog project="project" reviewId={reviewId} onClose={() => undefined} />);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(document.body.textContent).toContain('timed out after 30000 ms');
+    expect(document.querySelector('.review-progress')).toBeNull();
+    expect(button('Reload exact review').disabled).toBe(false);
+  } finally {
+    vi.useRealTimers();
+  }
+});

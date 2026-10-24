@@ -462,6 +462,36 @@ describe('Manager topic review adapter', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('checks current source access only for imported reviews in the requested inbox view', () =>
+    Effect.gen(function* () {
+      const pending = importedReview();
+      const deferred = {
+        ...pending,
+        reviewId: `review-${'b'.repeat(24)}`,
+        candidates: [{...pending.candidates[0], state: 'deferred' as const}],
+      } as CandidateReview;
+      const history = {
+        ...pending,
+        reviewId: `review-${'c'.repeat(24)}`,
+        candidates: [{...pending.candidates[0], state: 'rejected' as const}],
+      } as CandidateReview;
+      mocks.list.mockReturnValue(Effect.succeed([pending, deferred, history]));
+      mocks.read.mockImplementation((_config: RuntimeConfig, id: string) =>
+        id === pending.reviewId
+          ? Effect.succeed(pending)
+          : Effect.fail(TopicReviewError.make({message: 'unrelated source must not be read'})),
+      );
+      const result = yield* handleManagerAttentionRequest({
+        config,
+        method: 'GET',
+        url: new URL('http://manager.test/api/reviews?project=alpha&view=pending'),
+      });
+      expect(result?.body).toMatchObject({pendingCount: 2, items: [{reviewId: pending.reviewId}]});
+      expect(mocks.read).toHaveBeenCalledTimes(1);
+      expect(mocks.read).toHaveBeenCalledWith(config, pending.reviewId);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('keeps capture-only journals out of inboxes and every generic review response', () =>
     Effect.gen(function* () {
       const {maintenance: _maintenance, maintenanceApproval: _approval, ...base} = review;
