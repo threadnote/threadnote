@@ -25,7 +25,7 @@ effectIt.effect('the public source CLI refuses unpinned application code with on
     for (const directory of [home, userHome, temporary]) yield* fs.makeDirectory(directory);
     const manifest = path.join(home, 'manifest.yaml');
     yield* fs.writeFileString(manifest, 'version: 1\nprojects: []\n');
-    const names = yield* fs.readDirectory(root, {recursive: true});
+    const names = (yield* fs.readDirectory(root, {recursive: true})).sort();
     const invocation = inspectCliInvocation(['--home', home, 'memory-archive']);
     expect(invocation).toMatchObject({
       operation: 'memory-archive',
@@ -69,7 +69,7 @@ effectIt.effect('the public source CLI refuses unpinned application code with on
     );
     expect(result.exitCode, result.stderr + result.stdout).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({version: 1, status: 'error', code: 'unsupported-runtime'});
-    expect(yield* fs.readDirectory(root, {recursive: true})).toEqual(names);
+    expect((yield* fs.readDirectory(root, {recursive: true})).sort()).toEqual(names);
     expect(yield* fs.readFileString(manifest)).toBe('version: 1\nprojects: []\n');
   }).pipe(provideTestLayer(layer), TestClock.withLive),
 );
