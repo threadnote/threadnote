@@ -5,6 +5,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
+import {assertWorkflowEvidenceSnapshot, workflowEvidenceScopes} from './evidence.js';
 import {
   portableKey,
   stableJson,
@@ -77,6 +78,7 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   // intent omits them. Validate the same canonical JSON image in both states.
   check(object(operation) && Schema.is(WorkflowRequestSchema)(JSON.parse(stableJson(operation.request))));
   const request = operation.request;
+  workflowEvidenceScopes(binding, request.evidenceRefs);
   portableKey(key, 'operationId');
   check(request.operationId === key && request.bindingId === binding.bindingId && request.mutation === undefined);
   check(['create', 'replace', 'archive'].includes(request.action));
@@ -165,6 +167,7 @@ function assertPreparedRelations(
   const sharedRoots = state.binding.profile === 'desktop' ? desktopSharedRoots : state.binding.sharedRoots;
   const scopes = [
     ...sharedRoots,
+    ...workflowEvidenceScopes(state.binding, operation.request.evidenceRefs),
     ...owned.map(artifact => artifact.canonicalUri),
     ...(state.binding.profile === 'desktop'
       ? [`${root(state.binding)}/durable`, `${root(state.binding)}/preferences`]
@@ -176,6 +179,8 @@ function assertPreparedRelations(
     check(typeof target.content === 'string');
     const record = parseMemoryDocument(target.uri, target.content);
     check(record && record.metadata.status === 'active' && record.metadata.memoryId === target.memoryId);
+    const evidence = operation.request.evidenceRefs?.find(ref => ref.uri === target.uri);
+    if (evidence) assertWorkflowEvidenceSnapshot(state.binding, evidence, target.uri, target.content);
     check(target.memoryId === undefined || target.memoryId !== operation.artifact.memoryId);
     if (
       record.metadata.topic?.startsWith('workflow-') ||
@@ -183,6 +188,7 @@ function assertPreparedRelations(
     )
       check(
         owned.some(artifact => artifact.canonicalUri === target.uri) ||
+          evidence !== undefined ||
           sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
       );
     check(

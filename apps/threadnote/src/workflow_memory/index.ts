@@ -6,6 +6,7 @@ import {
   requiredText,
   validateWorkflowInput,
   type WorkflowRequest,
+  workflowError,
 } from './protocol.js';
 import {resolveWorkflowBinding} from './profile.js';
 import {bindWorkflow, loadWorkflowJournal, withWorkflowLock} from './journal.js';
@@ -20,6 +21,15 @@ export const runWorkflowMemory = Effect.fn('workflowMemory.run')(function* (conf
   const request = yield* Schema.decodeUnknownEffect(
     Schema.Union([WorkflowRequestSchema, WorkflowPublicationRequestSchema, WorkflowOperationInspectionRequestSchema]),
   )(input, {onExcessProperty: 'error'});
+  if (
+    'evidenceRefs' in request &&
+    request.evidenceRefs?.length &&
+    ['bind', 'capabilities', 'recover'].includes(request.action)
+  )
+    return yield* workflowError(
+      'invalid-request',
+      'Evidence is admitted per read or write intent; recovery uses the original saved evidence references.',
+    );
   if (request.action === 'capabilities')
     return {
       protocolVersion: 1 as const,
@@ -81,12 +91,18 @@ const runBoundRequest = Effect.fn('workflowMemory.boundRequest')(function* (
   config: RuntimeConfig,
   request: WorkflowRequest,
 ) {
-  const state = yield* loadWorkflowJournal(config, request.bindingId!, !['read', 'preflight'].includes(request.action));
+  const state = yield* loadWorkflowJournal(
+    config,
+    request.bindingId!,
+    !['read', 'preflight'].includes(request.action),
+    request,
+  );
   if (request.action === 'read')
     return yield* readWorkflowArtifact(
       config,
       state,
       yield* validateWorkflowInput(() => requiredText(request.uri, 'uri')),
+      request.evidenceRefs,
     );
   if (request.action === 'preflight') {
     const prepared = yield* prepareWorkflowOperation(config, state, request);

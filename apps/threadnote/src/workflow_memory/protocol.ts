@@ -20,6 +20,12 @@ export const validateWorkflowInput = <A>(validate: () => A) =>
   });
 
 const optionalText = Schema.optionalKey(Schema.String);
+export const WorkflowEvidenceReferenceSchema = Schema.Struct({
+  uri: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096)),
+  memoryId: Schema.String.check(Schema.isPattern(/^tn_[A-Za-z0-9_-]{1,128}$/u)),
+  revision: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u)),
+});
+export type WorkflowEvidenceReference = typeof WorkflowEvidenceReferenceSchema.Type;
 export const WorkflowRequestSchema = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   action: Schema.Literals(['capabilities', 'bind', 'read', 'preflight', 'create', 'replace', 'archive', 'recover']),
@@ -42,6 +48,8 @@ export const WorkflowRequestSchema = Schema.Struct({
   expectedRevision: Schema.optionalKey(Schema.NullOr(Schema.String)),
   relations: Schema.optionalKey(Schema.Array(Schema.Struct({type: Schema.String, uri: Schema.String}))),
   codeRefs: Schema.optionalKey(Schema.Array(Schema.String)),
+  // Explicit read/reference authority for this intent, never part of binding identity.
+  evidenceRefs: Schema.optionalKey(Schema.Array(WorkflowEvidenceReferenceSchema).check(Schema.isMaxLength(16))),
   citationPolicy: Schema.optionalKey(Schema.Literals(['require-current', 'defer'])),
 });
 export type WorkflowRequest = typeof WorkflowRequestSchema.Type;

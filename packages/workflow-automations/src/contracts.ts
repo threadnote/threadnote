@@ -6,6 +6,7 @@ export const workflowAutomationProtocol = 1 as const;
 export class WorkflowAutomationError extends Schema.TaggedError<WorkflowAutomationError>()('WorkflowAutomationError', {
   code: Schema.String,
   message: Schema.String,
+  retryable: Schema.optionalKey(Schema.Boolean),
 }) {}
 
 export interface WorkflowArtifact {
@@ -25,17 +26,34 @@ export interface WorkflowWriteIntent {
   readonly role: string;
   readonly body: string;
   readonly expectedRevision: string | null;
+  readonly uri?: string;
+  readonly storageKind?: 'durable' | 'handoff';
+  readonly codeRefs?: readonly string[];
+  readonly relations?: readonly {readonly type: string; readonly uri: string}[];
+  readonly evidenceRefs?: readonly WorkflowEvidenceReference[];
+}
+
+export interface WorkflowEvidenceReference {
+  readonly uri: string;
+  readonly memoryId: string;
+  readonly revision: string;
 }
 
 /** App adapters retain native scope, identity, citation, CAS and publication authority. */
 export class WorkflowMemory extends Context.Service<
   WorkflowMemory,
   {
-    readonly read: (bindingId: string, uri: string) => Effect.Effect<WorkflowArtifact, WorkflowAutomationError>;
+    readonly read: (
+      bindingId: string,
+      uri: string,
+      evidenceRefs?: readonly WorkflowEvidenceReference[],
+    ) => Effect.Effect<WorkflowArtifact, WorkflowAutomationError>;
+    readonly preflight: (
+      intent: WorkflowWriteIntent,
+    ) => Effect.Effect<{readonly uri: string; readonly bodySha256: string}, WorkflowAutomationError>;
     readonly write: (intent: WorkflowWriteIntent) => Effect.Effect<WorkflowArtifact, WorkflowAutomationError>;
     readonly inspectOperation: (
-      bindingId: string,
-      operationId: string,
+      intent: WorkflowWriteIntent,
     ) => Effect.Effect<
       {readonly state: 'absent' | 'prepared' | 'verified'; readonly intentDigest?: string},
       WorkflowAutomationError

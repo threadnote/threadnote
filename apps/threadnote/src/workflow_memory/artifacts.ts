@@ -11,7 +11,7 @@ import {
   parseMemoryDocument,
   type MemoryMetadata,
 } from '@threadnote/memory/document';
-import {memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
+import {memoryIdFromIdentityAlias, memoryIdentityLockKey} from '@threadnote/memory/identity-alias';
 import {MemoryPointerNotFound, readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
@@ -20,6 +20,7 @@ import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {readWorkflowSharedRoots} from './scopes.js';
+import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence, verifyWorkflowEvidenceBytes} from './evidence.js';
 import {
   discardDeferredCodeAnchorIntent,
   discardOtherDeferredCodeAnchorIntents,
@@ -52,6 +53,7 @@ import {
   type WorkflowOperation,
   type WorkflowRequest,
   type WorkflowReadResult,
+  type WorkflowEvidenceReference,
 } from './protocol.js';
 
 const prefix = (state: WorkflowJournal) => `workflow-${state.binding.bindingId}-`;
@@ -59,10 +61,16 @@ const nativeRoot = (config: RuntimeConfig) => `threadnote://user/${uriSegment(co
 const ownedArtifacts = workflowOwnedArtifacts;
 const ownedArtifact = (state: WorkflowJournal, uri: string) =>
   ownedArtifacts(state).find(artifact => artifact.canonicalUri === uri);
-function admitPrivateCandidate(state: WorkflowJournal, uri: string, sharedRoots: readonly string[]): void {
+function admitPrivateCandidate(
+  state: WorkflowJournal,
+  uri: string,
+  sharedRoots: readonly string[],
+  evidenceRefs: readonly WorkflowEvidenceReference[] = [],
+): void {
   if (
     parseResourceId(uri).segments.at(-1)?.startsWith('workflow-') &&
     !ownedArtifact(state, uri) &&
+    !evidenceRefs.some(ref => ref.uri === uri) &&
     !sharedRoots.some(root => resourceIdIsWithin(uri, root))
   ) {
     throw workflowError('out-of-scope', 'Private artifacts must belong to this workflow.');
@@ -72,11 +80,14 @@ const allowedScopes = Effect.fn('workflowMemory.allowedScopes')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
   readOnly = false,
+  evidenceRefs: readonly WorkflowEvidenceReference[] = [],
 ) {
   const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
+  const evidenceScopes = yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
   const scopes = [
     ...new Set([
       ...sharedRoots,
+      ...evidenceScopes,
       ...ownedArtifacts(state).map(artifact => artifact.canonicalUri),
       ...(readOnly && state.binding.profile === 'desktop'
         ? [`${nativeRoot(config)}/durable`, `${nativeRoot(config)}/preferences`, `${nativeRoot(config)}/incidents`]
@@ -104,6 +115,7 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
   input: string,
+  evidenceRefs: readonly WorkflowEvidenceReference[] = [],
 ) {
   const uri = yield* validateWorkflowInput(() => parseResourceId(input).canonicalUri);
   if (
@@ -120,12 +132,13 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
       'This artifact was retired; historical receipts do not restore ownership.',
     );
   }
-  const {scopes, sharedRoots} = yield* allowedScopes(config, state, true);
+  const {scopes, sharedRoots} = yield* allowedScopes(config, state, true, evidenceRefs);
   const expected = isExpectedUnwrittenUri(config, state, uri);
   if (!memoryIdFromIdentityAlias(uri) && !scopes.some(scope => resourceIdIsWithin(uri, scope)) && !expected)
     return yield* workflowError('out-of-scope', 'Memory is outside this workflow and its configured shares.');
   const [resolved] = yield* resolveMemoryIdentityAliases(config, [uri], expected ? [...scopes, uri] : scopes);
-  if (!expected) yield* validateWorkflowInput(() => admitPrivateCandidate(state, resolved.canonicalUri, sharedRoots));
+  if (!expected)
+    yield* validateWorkflowInput(() => admitPrivateCandidate(state, resolved.canonicalUri, sharedRoots, evidenceRefs));
   const live = yield* readMemoryWithRelocations(config, resolved.canonicalUri, {
     allowedUriScopes: [
       ...sharedRoots,
@@ -137,9 +150,14 @@ const strictRead = Effect.fn('workflowMemory.strictRead')(function* (
   const owned = ownedArtifact(state, live.canonicalUri);
   const record = parseMemoryDocument(live.canonicalUri, live.content);
   if (!record) return yield* workflowError('invalid-memory', 'The workflow resource is not a native memory.');
+  const evidence = evidenceRefs.find(ref => ref.uri === live.canonicalUri);
+  if (evidence)
+    yield* validateWorkflowInput(() =>
+      assertWorkflowEvidenceSnapshot(state.binding, evidence, live.canonicalUri, live.content),
+    );
   const workflowTopic = record.metadata.topic?.startsWith('workflow-');
   if (
-    (workflowTopic && !owned && !sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root))) ||
+    (workflowTopic && !owned && !evidence && !sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root))) ||
     (state.binding.profile !== 'desktop' &&
       !owned &&
       !sharedRoots.some(root => resourceIdIsWithin(live.canonicalUri, root)))
@@ -154,8 +172,9 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
   config: RuntimeConfig,
   state: WorkflowJournal,
   uri: string,
+  evidenceRefs: readonly WorkflowEvidenceReference[] = [],
 ) {
-  const result = yield* strictRead(config, state, uri).pipe(
+  const result = yield* strictRead(config, state, uri, evidenceRefs).pipe(
     Effect.catchIf(
       error => error instanceof MemoryPointerNotFound || Schema.is(ResourceNotFound)(error),
       () => Effect.void,
@@ -265,7 +284,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     const memoryId =
       previous?.metadata.memoryId ??
       `tn_${(yield* sha256Hex(`${state.binding.bindingId}\n${sourceRunId}\n${artifactKey}`)).slice(0, 20)}`;
-    const {scopes: relationScopes, sharedRoots} = yield* allowedScopes(config, state);
+    const {scopes: relationScopes, sharedRoots} = yield* allowedScopes(config, state, false, request.evidenceRefs);
     const relationUris = yield* validateWorkflowInput(() =>
       (request.relations ?? []).map(relation => parseResourceId(relation.uri).canonicalUri),
     );
@@ -279,7 +298,9 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     for (const candidate of candidates) {
       if (!relationScopes.some(scope => resourceIdIsWithin(candidate.canonicalUri, scope)))
         return yield* workflowError('out-of-scope', 'The resolved relation target is outside this workflow scope.');
-      yield* validateWorkflowInput(() => admitPrivateCandidate(state, candidate.canonicalUri, sharedRoots));
+      yield* validateWorkflowInput(() =>
+        admitPrivateCandidate(state, candidate.canonicalUri, sharedRoots, request.evidenceRefs),
+      );
     }
     const resolvedRelations = yield* resolveAuthoredMemoryRelations(config, request.relations ?? [], {
       allowedUriScopes: [
@@ -292,10 +313,16 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     });
     for (const target of resolvedRelations.targets) {
       const record = parseMemoryDocument(target.uri, target.content);
+      const evidence = request.evidenceRefs?.find(ref => ref.uri === target.uri);
+      if (evidence)
+        yield* validateWorkflowInput(() =>
+          assertWorkflowEvidenceSnapshot(state.binding, evidence, target.uri, target.content),
+        );
       if (
         (record?.metadata.topic?.startsWith('workflow-') ||
           resourceIdIsWithin(target.uri, `${nativeRoot(config)}/handoffs`)) &&
         !ownedArtifact(state, target.uri) &&
+        !evidence &&
         !sharedRoots.some(root => resourceIdIsWithin(target.uri, root))
       )
         return yield* workflowError('out-of-scope', 'Private relation targets must belong to the same workflow.');
@@ -307,6 +334,11 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       'workflow-memory',
     );
     if (!captured.ok) {
+      if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
+        return yield* workflowError(
+          'evidence-busy',
+          'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.',
+        );
       if (
         request.citationPolicy !== 'defer' ||
         !Schema.is(MemoryCodeCitationCaptureError)(captured.failure) ||
@@ -415,9 +447,11 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
       artifact.canonicalUri,
       operation.sourceUri,
       ...operation.relations.map(target => target.uri),
+      ...(operation.request.evidenceRefs ?? []).flatMap(ref => [ref.uri, memoryIdentityLockKey(ref.memoryId)]),
       ...memoryIdentityWriteLockKeys(artifact.memoryId, operation.relations),
     ],
     Effect.gen(function* () {
+      yield* verifyWorkflowEvidence(config, initial.binding, operation.request.evidenceRefs);
       const current = yield* readOptionalResource(config, artifact.canonicalUri);
       const enriched = yield* reconcileWorkflowCitationEnrichment(config, initial.binding, operation, current);
       if (enriched) {
@@ -475,7 +509,9 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               ? {}
               : {expectedFingerprint: yield* store.fingerprint(operation.before)}),
           },
-          verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations),
+          verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations).pipe(
+            Effect.andThen(verifyWorkflowEvidenceBytes(config, initial.binding, operation.request.evidenceRefs)),
+          ),
         );
         if (staged) yield* discardOtherDeferredCodeAnchorIntents(config, artifact.canonicalUri, staged.intentId);
         else yield* discardDeferredCodeAnchorIntent(config, artifact.canonicalUri);
@@ -488,6 +524,8 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
         );
     }),
   );
+  if (existing?.status === 'verified')
+    return {...(yield* readWorkflowArtifact(config, prepared, artifact.canonicalUri)), operationId};
   const artifacts = {...prepared.artifacts, [artifact.canonicalUri]: artifact};
   if (isArchive && operation.sourceUri) delete artifacts[operation.sourceUri];
   const updated = yield* persistWorkflowState(config, prepared, {

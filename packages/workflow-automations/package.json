@@ -4,7 +4,9 @@
   "type": "module",
   "exports": {
     "./contracts": "./src/contracts.ts",
+    "./documents": "./src/documents.ts",
     "./inventory": "./src/inventory.ts",
+    "./native": "./src/native.ts",
     "./scenarios": "./src/scenarios.ts"
   },
   "dependencies": {
@@ -14,6 +16,7 @@
   "devDependencies": {
     "@effect/vitest": "4.0.3",
     "@threadnote/testing": "workspace:*",
+    "fast-check": "4.10.2",
     "vitest": "5.0.3"
   }
 }
