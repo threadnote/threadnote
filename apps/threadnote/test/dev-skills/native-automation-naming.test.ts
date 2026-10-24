@@ -234,88 +234,119 @@ describe('native workflow naming integration', () => {
       }).pipe(run),
   );
 
-  effectIt.effect(
-    'allocates distinct families for same-title, normalized, and truncated collisions under concurrent init',
-    () =>
-      Effect.gen(function* () {
-        const f = yield* nativeFixture();
-        const sharedTitle = 'Shared Roadmap';
-        const longPrefix = 'x'.repeat(100);
-        const requests = [
-          ['name-exact-a', sharedTitle],
-          ['name-exact-b', sharedTitle],
-          ['name-case', 'SHARED roadmap'],
-          ['name-long-a', `${longPrefix} left`],
-          ['name-long-b', `${longPrefix} right`],
-          ['name-suffix', 'Shared Roadmap-2'],
-          ['name-unicode-a', '世界'],
-          ['name-unicode-b', '計画'],
-        ] as const;
-        const simultaneousResults = yield* Effect.forEach(
-          requests.slice(0, 2),
-          ([runId, title]) => f.call(initInput(f, runId, title)),
-          {concurrency: 2},
-        );
-        const initialized = simultaneousResults.map(requireInitResult);
-        const remainingResults = yield* Effect.forEach(
-          requests.slice(2),
-          ([runId, title]) => f.call(initInput(f, runId, title)),
-          {concurrency: 2},
-        );
-        initialized.push(...remainingResults.map(requireInitResult));
-        expect(new Set(initialized.map(item => item.bindingId)).size).toBe(requests.length);
-        expect(initialized.slice(0, 3).map(item => item.naming.slug)).toEqual([
-          'shared-roadmap',
-          'shared-roadmap',
-          'shared-roadmap',
-        ]);
-        expect(new Set(initialized.slice(0, 3).map(item => item.naming.ordinal)).size).toBe(3);
-        expect(initialized[3].naming.slug).toBe('x'.repeat(80));
-        expect(initialized[4].naming.slug).toBe('x'.repeat(80));
-        expect(initialized[3].naming.ordinal).not.toBe(initialized[4].naming.ordinal);
-        expect(initialized[5].naming).toEqual({policyVersion: 1, slug: 'shared-roadmap-2', ordinal: 2});
-        expect(initialized[6].naming.slug).toBe('untitled');
-        expect(initialized[7].naming.slug).toBe('untitled');
-        expect(initialized[6].naming.ordinal).not.toBe(initialized[7].naming.ordinal);
+  effectIt.effect('allocates distinct same-title, normalized, and numeric-suffix families under concurrent init', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const sharedTitle = 'Shared Roadmap';
+      const requests = [
+        ['name-exact-a', sharedTitle],
+        ['name-exact-b', sharedTitle],
+        ['name-case', 'SHARED roadmap'],
+        ['name-suffix', 'Shared Roadmap-2'],
+      ] as const;
+      const simultaneousResults = yield* Effect.forEach(
+        requests.slice(0, 2),
+        ([runId, title]) => f.call(initInput(f, runId, title)),
+        {concurrency: 2},
+      );
+      const initialized = simultaneousResults.map(requireInitResult);
+      const remainingResults = yield* Effect.forEach(
+        requests.slice(2),
+        ([runId, title]) => f.call(initInput(f, runId, title)),
+        {concurrency: 2},
+      );
+      initialized.push(...remainingResults.map(requireInitResult));
+      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(requests.length);
+      expect(initialized.slice(0, 3).map(item => item.naming.slug)).toEqual([
+        'shared-roadmap',
+        'shared-roadmap',
+        'shared-roadmap',
+      ]);
+      expect(new Set(initialized.slice(0, 3).map(item => item.naming.ordinal)).size).toBe(3);
+      expect(initialized[3].naming).toEqual({policyVersion: 1, slug: 'shared-roadmap-2', ordinal: 2});
+    }).pipe(run),
+  );
 
-        const retryTitle = 'Interrupted Reservation';
-        const statePath = f.path.join(
-          yield* f.fs.realPath(f.home),
-          'workflow-automations',
-          'native-v1',
-          'retry-run.json',
-        );
-        const originalFs = yield* FileSystem.FileSystem;
-        let interrupted = false;
-        const failingFs = FileSystem.FileSystem.of({
-          ...originalFs,
-          rename: (from, to) =>
-            !interrupted && to === statePath
-              ? Effect.sync(() => {
-                  interrupted = true;
-                  throw new Error('Synthetic native state commit interruption');
-                })
-              : originalFs.rename(from, to),
-        });
-        const failedInit = yield* failure(
-          f.call(initInput(f, 'retry-run', retryTitle)).pipe(Effect.provideService(FileSystem.FileSystem, failingFs)),
-        );
-        expect(failedInit._tag).toBe('Failure');
-        expect(interrupted).toBe(true);
-        expect(yield* f.fs.exists(statePath)).toBe(false);
-        const registryBeforeRetry = yield* f.fs.readFileString(nameRegistryPath(f));
-        const reservationsBeforeRetry = JSON.parse(registryBeforeRetry).reservations as {
-          title: string;
-          family: {slug: string; ordinal: number};
-        }[];
-        const previous = reservationsBeforeRetry.find(item => item.title === retryTitle)!.family;
-        const recovered = requireInitResult(yield* f.call(initInput(f, 'retry-run', retryTitle)));
-        expect(recovered.naming).toEqual({...previous, policyVersion: 1});
-        expect(JSON.parse(yield* f.fs.readFileString(nameRegistryPath(f))).reservations).toHaveLength(
-          reservationsBeforeRetry.length,
-        );
-        expect(yield* f.fs.readFileString(statePath)).toContain(retryTitle);
-      }).pipe(run),
+  effectIt.effect('allocates distinct families for titles that collide after truncation', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const longPrefix = 'x'.repeat(100);
+      const requests = [
+        ['name-long-a', `${longPrefix} left`],
+        ['name-long-b', `${longPrefix} right`],
+      ] as const;
+      const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
+        concurrency: 2,
+      });
+      const initialized = results.map(requireInitResult);
+      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
+      expect(initialized[0].naming.slug).toBe('x'.repeat(80));
+      expect(initialized[1].naming.slug).toBe('x'.repeat(80));
+      expect(initialized[0].naming.ordinal).not.toBe(initialized[1].naming.ordinal);
+    }).pipe(run),
+  );
+
+  effectIt.effect('allocates distinct untitled families for Unicode-only titles', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const requests = [
+        ['name-unicode-a', '世界'],
+        ['name-unicode-b', '計画'],
+      ] as const;
+      const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
+        concurrency: 2,
+      });
+      const initialized = results.map(requireInitResult);
+      expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
+      expect(initialized[0].naming.slug).toBe('untitled');
+      expect(initialized[1].naming.slug).toBe('untitled');
+      expect(initialized[0].naming.ordinal).not.toBe(initialized[1].naming.ordinal);
+    }).pipe(run),
+  );
+
+  effectIt.effect('retries an interrupted reservation with the exact reserved family', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      requireInitResult(yield* f.call(initInput(f, 'unrelated-run', 'Unrelated Reservation')));
+      const retryTitle = 'Interrupted Reservation';
+      const statePath = f.path.join(
+        yield* f.fs.realPath(f.home),
+        'workflow-automations',
+        'native-v1',
+        'retry-run.json',
+      );
+      const originalFs = yield* FileSystem.FileSystem;
+      let interrupted = false;
+      const failingFs = FileSystem.FileSystem.of({
+        ...originalFs,
+        rename: (from, to) =>
+          !interrupted && to === statePath
+            ? Effect.sync(() => {
+                interrupted = true;
+                throw new Error('Synthetic native state commit interruption');
+              })
+            : originalFs.rename(from, to),
+      });
+      const failedInit = yield* failure(
+        f.call(initInput(f, 'retry-run', retryTitle)).pipe(Effect.provideService(FileSystem.FileSystem, failingFs)),
+      );
+      expect(failedInit._tag).toBe('Failure');
+      expect(interrupted).toBe(true);
+      expect(yield* f.fs.exists(statePath)).toBe(false);
+      const registryBeforeRetry = yield* f.fs.readFileString(nameRegistryPath(f));
+      const reservationsBeforeRetry = JSON.parse(registryBeforeRetry).reservations as {
+        title: string;
+        family: {slug: string; ordinal: number};
+      }[];
+      const previous = reservationsBeforeRetry.find(item => item.title === retryTitle)!.family;
+      const recovered = requireInitResult(yield* f.call(initInput(f, 'retry-run', retryTitle)));
+      expect(recovered.naming).toEqual({...previous, policyVersion: 1});
+      expect(JSON.parse(yield* f.fs.readFileString(nameRegistryPath(f))).reservations).toHaveLength(
+        reservationsBeforeRetry.length,
+      );
+      expect(yield* f.fs.readFileString(nameRegistryPath(f))).toBe(registryBeforeRetry);
+      expect(yield* f.fs.readFileString(statePath)).toContain(retryTitle);
+    }).pipe(run),
   );
 
   effectIt.effect(
