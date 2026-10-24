@@ -67,7 +67,7 @@ python3 "$SKILL_DIR/scripts/phase_state.py" check-phase --plan "$RUN_DIR/plan.js
   --packet "$PHASE_DIR/phase-packet.json" --snapshot "$ITER_DIR"
 ```
 
-Out-of-phase files, definition drift, stale phases and blocked dependencies fail. Do not edit the map just to pass: distinguish user steering from scope creep, reconcile, regenerate packets and revalidate affected work. After tests/review, record the [implementation satellite's](../skills/dev-cycle-implementation/SKILL.md) validation schema, then:
+Out-of-phase files, definition drift, stale phases and blocked dependencies fail. Do not edit the map just to pass: distinguish user steering from scope creep, reconcile, regenerate packets and revalidate affected work. After tests/review, record the [implementation reference's](implementation.md) validation schema, then:
 
 ```sh
 python3 "$SKILL_DIR/scripts/phase_state.py" ready --plan "$RUN_DIR/plan.json" \

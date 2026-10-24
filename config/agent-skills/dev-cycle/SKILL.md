@@ -29,9 +29,9 @@ Keep the current change correct and make the next session less likely to repeat 
 
 | Situation                                                                               | Load                                                                       |
 | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| Start/resume; relevant experience; meaningful feedback; phase closeout                  | [Learning](skills/dev-cycle-learning/SKILL.md)                             |
-| Implement or review/fix local source                                                    | [Implementation and review](skills/dev-cycle-implementation/SKILL.md)      |
-| Multiple phases, a Threadnote-backed plan, commit/PR publication, or CI/review feedback | [Phases and delivery](skills/dev-cycle-delivery/SKILL.md)                  |
+| Start/resume; relevant experience; meaningful feedback; phase closeout                  | [Learning](references/learning.md)                                         |
+| Implement or review/fix local source                                                    | [Implementation and review](references/implementation.md)                  |
+| Multiple phases, a Threadnote-backed plan, commit/PR publication, or CI/review feedback | [Phases and delivery](references/delivery.md)                              |
 | A PR has been created/updated                                                           | Installed [watch-pr](../watch-pr/SKILL.md), in a cheaper background worker |
 
 1. Resolve task/scope, repo standards and acceptance checks. Retrieve bounded Threadnote context and per-project `preference` memories; read useful pointers, apply current explicit preferences and turn applicable gotchas into prevention checks. Graph calls use the absolute checkout root only for unfamiliar relationships/evidence gaps, with disclosed narrow-source fallback when unavailable.

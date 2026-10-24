@@ -47,16 +47,16 @@
         "agents/openai.yaml",
         "references/closeout.md",
         "references/delegation.md",
+        "references/delivery.md",
         "references/feature-memory.md",
+        "references/implementation.md",
         "references/learning-records.md",
+        "references/learning.md",
         "references/phases.md",
         "references/review.md",
         "references/state-and-snapshots.md",
         "scripts/dev_cycle.py",
-        "scripts/phase_state.py",
-        "skills/dev-cycle-delivery/SKILL.md",
-        "skills/dev-cycle-implementation/SKILL.md",
-        "skills/dev-cycle-learning/SKILL.md"
+        "scripts/phase_state.py"
       ]
     },
     {
