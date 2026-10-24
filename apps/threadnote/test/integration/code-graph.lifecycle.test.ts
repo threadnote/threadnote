@@ -41,6 +41,7 @@ import {
   storedCodeGraphFactRawBytesSql,
 } from '@threadnote/graph/fact/storage';
 import {codeGraphLayout} from '@threadnote/graph/layout';
+import {assessReusableCleanBaseCompatibility} from '@threadnote/graph/indexer/incremental';
 import {
   CODE_GRAPH_INCREMENTAL_REWRITE_MAX_FACT_BYTES,
   CODE_GRAPH_INCREMENTAL_REWRITE_MAX_SOURCE_BYTES,
@@ -71,11 +72,13 @@ import {
   isCodeGraphStoreNoSpaceError,
   type CodeGraphMaterializationMetrics,
   type CodeGraphProgress,
+  type CodeGraphReference,
 } from '@threadnote/graph/types';
 import {captureConsole} from '@threadnote/threadnote/effect/console';
 import {CommandExecutor} from '@threadnote/platform/command';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import {runDoctor, runRepair} from '@threadnote/threadnote/lifecycle';
 import type {DoctorCheck} from '@threadnote/threadnote/types';
@@ -1165,6 +1168,644 @@ describe('native code graph lifecycle', () => {
       expect(normalizeStoredGraph(nextGraph)).toEqual(normalizeStoredGraph(forcedGraph));
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
   );
+
+  for (const [committed, unrelatedFiles] of [
+    [false, 16],
+    [false, 40],
+    [true, 16],
+    [true, 40],
+  ] as const) {
+    effectIt.effect(
+      `admits membership addition with complete attribution and sparse decode (${committed ? 'clean' : 'dirty'}, ${unrelatedFiles} unrelated)`,
+      () =>
+        Effect.gen(function* () {
+          const root = temporaryDirectory('threadnote-membership-');
+          const home = join(root, '.threadnote-test-home');
+          git(root, ['init', '-q']);
+          if (!committed) writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+          mkdirSync(join(root, 'packages/consumer'), {recursive: true});
+          writeFileSync(
+            join(root, 'package.json'),
+            JSON.stringify({name: 'membership-root', private: true, workspaces: ['packages/*']}),
+          );
+          writeFileSync(
+            join(root, 'packages/consumer/package.json'),
+            JSON.stringify({name: 'membership-consumer', dependencies: {'membership-new': '*'}}),
+          );
+          writeFileSync(join(root, 'README.md'), '# Workspace\n');
+          writeFileSync(
+            join(root, 'packages/consumer/index.ts'),
+            "import {answer} from 'membership-new'; export function use() { return answer(); }\n",
+          );
+          writeFileSync(join(root, 'packages/consumer/bridge.ts'), "export {answer} from 'membership-new';\n");
+          writeFileSync(join(root, 'packages/consumer/barrel.ts'), "export {answer} from './bridge';\n");
+          writeFileSync(
+            join(root, 'packages/consumer/transitive.ts'),
+            "import {answer} from './barrel'; export function viaBarrel() { return answer(); }\n",
+          );
+          if (committed && unrelatedFiles === 16) {
+            mkdirSync(join(root, 'packages/new'), {recursive: true});
+            writeFileSync(join(root, 'packages/new/index.ts'), 'export function answer() { return 42; }\n');
+            writeFileSync(join(root, 'packages/new/config.json'), '{"boundary": true}');
+            writeFileSync(join(root, 'packages/new/README.md'), '# Package\n');
+          }
+          for (let index = 0; index < unrelatedFiles; index++)
+            writeFileSync(join(root, `config-${index}.json`), JSON.stringify({value: index, nested: {stable: true}}));
+          git(root, ['add', '.']);
+          git(root, [
+            '-c',
+            'user.name=Threadnote Test',
+            '-c',
+            'user.email=test@threadnote.local',
+            'commit',
+            '-qm',
+            'base',
+          ]);
+          const store = yield* CodeGraphStore;
+          const captured: CodeGraphReference[] = [];
+          let decodedFiles = 0;
+          let decodedBytes = 0;
+          const observedStore = CodeGraphStore.of({
+            ...store,
+            preparePersistedIncrementalActivation: (...args) =>
+              Effect.sync(() => captured.push(...args[3].flatMap(facts => facts.references ?? []))).pipe(
+                Effect.andThen(store.preparePersistedIncrementalActivation(...args)),
+              ),
+            replaceStagedModifiedFiles: (...args) =>
+              Effect.sync(() => captured.push(...args[3].flatMap(facts => facts.references ?? []))).pipe(
+                Effect.andThen(store.replaceStagedModifiedFiles(...args)),
+              ),
+            loadCachedFacts: (...args) =>
+              store.loadCachedFacts(...args).pipe(
+                Effect.tap(result =>
+                  Effect.sync(() => {
+                    if (args[3]?.decode !== false) {
+                      decodedFiles += result.facts.size;
+                      decodedBytes += result.bytes;
+                    }
+                  }),
+                ),
+              ),
+            stageActivationFacts: (...args) =>
+              Effect.sync(() => captured.push(...(args[3] ?? []))).pipe(
+                Effect.andThen(store.stageActivationFacts(...args)),
+              ),
+            stageActivationFactBatches: (...args) =>
+              Effect.sync(() => captured.push(...args[1].flatMap(batch => batch.references))).pipe(
+                Effect.andThen(store.stageActivationFactBatches(...args)),
+              ),
+          });
+          const canonicalMembership = (
+            observations: readonly {readonly path: string; readonly file?: {readonly rawContentHash?: string}}[],
+          ) =>
+            observations.map(observation => {
+              if (!observation.file) return observation;
+              const {rawContentHash, ...file} = observation.file;
+              if (rawContentHash !== undefined)
+                expect(rawContentHash).toBe(sha256HexSync(readFileSync(join(root, observation.path))));
+              return {...observation, file};
+            });
+          const observedContext = yield* Layer.build(
+            Layer.fresh(CodeGraphIndexer.layer).pipe(Layer.provide(Layer.succeed(CodeGraphStore, observedStore))),
+          );
+          const indexer = Context.get(observedContext, CodeGraphIndexer);
+          const baseline = yield* indexer.index({cwd: root, threadnoteHome: home});
+          mkdirSync(join(root, 'packages/new'), {recursive: true});
+          writeFileSync(
+            join(root, 'packages/new/package.json'),
+            JSON.stringify({name: 'membership-new', main: 'index.ts'}),
+          );
+          writeFileSync(join(root, 'packages/new/index.ts'), 'export function answer() { return 42; }\n');
+          writeFileSync(join(root, 'packages/new/config.json'), '{"boundary": true}');
+          writeFileSync(join(root, 'packages/new/README.md'), '# Package\n');
+          if (committed) {
+            git(root, ['add', 'packages/new']);
+            git(root, [
+              '-c',
+              'user.name=Threadnote Test',
+              '-c',
+              'user.email=test@threadnote.local',
+              'commit',
+              '-qm',
+              'add package',
+            ]);
+          }
+          captured.length = 0;
+          decodedFiles = 0;
+          decodedBytes = 0;
+          const incremental = yield* indexer.index({cwd: root, threadnoteHome: home});
+          expect(incremental.materialization, JSON.stringify(incremental.materialization)).toMatchObject({
+            mode: committed ? 'incremental-clean' : 'incremental-overlay',
+            resolutionClosure: 'project',
+          });
+          const actual = yield* store.loadGraph(codeGraphDatabasePath(home, incremental), incremental.snapshot.id);
+          const incrementalReferences = [...captured];
+          const incrementalDecodedFiles = decodedFiles;
+          const incrementalDecodedBytes = decodedBytes;
+          captured.length = 0;
+          decodedFiles = 0;
+          decodedBytes = 0;
+          const full = yield* indexer.index({
+            cwd: root,
+            threadnoteHome: join(root, '.threadnote-oracle-home'),
+            force: true,
+          });
+          const expected = yield* store.loadGraph(
+            codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full),
+            full.snapshot.id,
+          );
+          expect(normalizeStoredGraph(actual)).toEqual(normalizeStoredGraph(expected));
+          const referencePaths = new Set(incrementalReferences.map(reference => reference.evidencePath));
+          const canonicalReferences = (values: readonly CodeGraphReference[]) =>
+            [...values].sort((a, b) => a.edgeId.localeCompare(b.edgeId));
+          expect(canonicalReferences(incrementalReferences)).toEqual(
+            canonicalReferences(captured.filter(reference => referencePaths.has(reference.evidencePath))),
+          );
+          expect(incrementalReferences.some(reference => reference.evidencePath === 'packages/consumer/index.ts')).toBe(
+            true,
+          );
+          const membershipPaths = [
+            'packages/consumer/bridge.ts',
+            'packages/consumer/barrel.ts',
+            'packages/consumer/transitive.ts',
+            'README.md',
+            'package.json',
+            'packages/consumer/package.json',
+            'packages/consumer/index.ts',
+            'packages/new/package.json',
+            'packages/new/index.ts',
+            'packages/new/config.json',
+            'packages/new/README.md',
+            ...Array.from({length: unrelatedFiles}, (_, index) => `config-${index}.json`),
+          ];
+          expect(
+            canonicalMembership(
+              yield* store.effectiveSnapshotFilesByPaths(
+                codeGraphDatabasePath(home, incremental),
+                incremental.snapshot.id,
+                membershipPaths,
+              ),
+            ),
+          ).toEqual(
+            canonicalMembership(
+              yield* store.effectiveSnapshotFilesByPaths(
+                codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full),
+                full.snapshot.id,
+                membershipPaths,
+              ),
+            ),
+          );
+          for (const query of ['answer', 'membership-new', 'nonexistent-membership-name']) {
+            const actualLookup = yield* store.searchSymbols(
+              codeGraphDatabasePath(home, incremental),
+              incremental.snapshot.id,
+              query,
+              20,
+            );
+            const expectedLookup = yield* store.searchSymbols(
+              codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full),
+              full.snapshot.id,
+              query,
+              20,
+            );
+            expect(actualLookup).toEqual(expectedLookup);
+          }
+          expect(
+            actual.symbols.some(
+              symbol => symbol.path === 'packages/new/index.ts' && symbol.packageName === 'membership-new',
+            ),
+          ).toBe(true);
+          const work = incremental.incrementalWork?.membershipCandidate;
+          expect(work).toBeDefined();
+          expect(work!.omittedFiles).toBe(unrelatedFiles);
+          expect(work!.rawBaseFiles + work!.rawCurrentFiles + work!.selectedReloadFiles).toBeLessThan(
+            full.materialization!.stagedFiles,
+          );
+          expect(incrementalDecodedFiles).toBeLessThan(decodedFiles);
+          expect(incrementalDecodedBytes).toBeLessThan(decodedBytes);
+          expect(incrementalDecodedFiles).toBe(work!.rawBaseFiles + work!.rawCurrentFiles + work!.selectedReloadFiles);
+          expect(incrementalDecodedBytes).toBe(work!.rawBaseBytes + work!.rawCurrentBytes + work!.selectedReloadBytes);
+          expect(incremental.materialization!.stagedFiles).toBeLessThan(full.materialization!.stagedFiles);
+          if (committed && unrelatedFiles === 40) {
+            const candidate = yield* store.reusableCleanBaseForCommit(
+              codeGraphDatabasePath(home, baseline),
+              baseline.identity.repositoryId,
+              baseline.snapshot.commit,
+            );
+            if (!candidate?.receipt.inventory)
+              return yield* TestError.make({message: 'Expected complete baseline receipt.'});
+            const identity = yield* resolveRepositoryIdentity(root);
+            const inventory = yield* inventoryRepository(identity);
+            const workspace = yield* BUILTIN_LANGUAGE_PACK_REGISTRY.discoverWorkspace(inventory.files);
+            const path = yield* Path.Path;
+            const input = {
+              candidate,
+              inventory,
+              languagePacks: BUILTIN_LANGUAGE_PACK_REGISTRY,
+              layout: codeGraphLayout(path, home, identity.checkoutId, identity.worktreeId),
+              store,
+            };
+            const changed = inventory.files.filter(file => !candidate.files.some(base => base.path === file.path));
+            expect((yield* assessReusableCleanBaseCompatibility(input, workspace, changed)).mode).toBe('compatible');
+            const receiptInventory = candidate.receipt.inventory;
+            const contexts = receiptInventory.attributionFiles;
+            const first = contexts[0];
+            for (const attributionFiles of [
+              contexts.slice(1),
+              [...contexts, first],
+              [{...first, blobId: 'f'.repeat(40)}, ...contexts.slice(1)],
+              [{...first, contentHash: 'f'.repeat(64)}, ...contexts.slice(1)],
+              [{...first, language: 'json'}, ...contexts.slice(1)],
+              [{...first, mode: '100755'}, ...contexts.slice(1)],
+              [{...first, size: first.size + 1}, ...contexts.slice(1)],
+              [{...first, content: '{}', size: 2}, ...contexts.slice(1)],
+              [...contexts, {...first, path: 'config-0.json'}],
+            ]) {
+              const invalid = {
+                ...candidate,
+                receipt: {...candidate.receipt, inventory: {...receiptInventory, attributionFiles}},
+              };
+              expect(
+                yield* assessReusableCleanBaseCompatibility({...input, candidate: invalid}, workspace, changed),
+              ).toMatchObject({mode: 'fallback', reason: 'workspace-changed'});
+            }
+            for (const fault of [
+              'missing',
+              'oversize-skipped-row',
+              'aggregate-skipped-bytes',
+              'metadata-files',
+            ] as const) {
+              let rawDecodes = 0;
+              const metadataStore = CodeGraphStore.of({
+                ...store,
+                loadCachedFacts: (_database, files, _extractor, options) =>
+                  Effect.sync(() => {
+                    if (options?.decode !== false) rawDecodes++;
+                    const entries = files
+                      .filter(file => fault !== 'missing' || file.path !== 'config-0.json')
+                      .map(
+                        file =>
+                          [
+                            file.path,
+                            file.path.startsWith('config-')
+                              ? fault === 'oversize-skipped-row'
+                                ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM + 1
+                                : fault === 'aggregate-skipped-bytes'
+                                  ? CODE_GRAPH_CACHED_FACT_BYTES_MAXIMUM
+                                  : 1
+                              : 1,
+                          ] as const,
+                      );
+                    return {
+                      facts: new Map(),
+                      keys: new Set(entries.map(([key]) => key)),
+                      bytesByPath: new Map(entries),
+                      bytes: entries.reduce((sum, [, bytes]) => sum + bytes, 0),
+                    };
+                  }),
+              });
+              const extra =
+                fault === 'metadata-files'
+                  ? Array.from({length: 5_001}, (_, index) => ({
+                      ...inventory.files.find(file => file.path === 'config-0.json')!,
+                      path: `extra-${index}.json`,
+                    }))
+                  : [];
+              const result = yield* assessReusableCleanBaseCompatibility(
+                {
+                  ...input,
+                  store: metadataStore,
+                  candidate: {...candidate, files: [...candidate.files, ...extra]},
+                  inventory: {...inventory, files: [...inventory.files, ...extra]},
+                },
+                workspace,
+                changed,
+              );
+              expect(result).toMatchObject({
+                mode: 'fallback',
+                reason: fault === 'missing' ? 'cache-incomplete' : 'project-closure-unbounded',
+              });
+              expect(rawDecodes).toBe(0);
+            }
+          }
+          if (!committed) {
+            git(root, ['add', 'packages/new']);
+            git(root, [
+              '-c',
+              'user.name=Threadnote Test',
+              '-c',
+              'user.email=test@threadnote.local',
+              'commit',
+              '-qm',
+              'retain indexed package',
+            ]);
+          }
+          yield* indexer.index({cwd: root, threadnoteHome: home, force: true});
+          rmSync(join(root, 'packages/new/package.json'));
+          if (committed) {
+            git(root, ['add', '-u']);
+            git(root, [
+              '-c',
+              'user.name=Threadnote Test',
+              '-c',
+              'user.email=test@threadnote.local',
+              'commit',
+              '-qm',
+              'remove boundary',
+            ]);
+          }
+          const removed = yield* indexer.index({cwd: root, threadnoteHome: home});
+          if (committed && unrelatedFiles === 16) {
+            expect(removed.materialization).toEqual({
+              mode: 'reused-snapshot',
+              stagedFiles: 0,
+              totalFiles: baseline.snapshot.fileCount,
+            });
+            expect(removed.snapshot.graphContentId).toBe(baseline.snapshot.graphContentId);
+          } else {
+            expect(removed.materialization, JSON.stringify(removed.materialization)).toMatchObject({
+              mode: committed ? 'incremental-clean' : 'incremental-overlay',
+              resolutionClosure: 'project',
+            });
+          }
+          const removedGraph = yield* store.loadGraph(codeGraphDatabasePath(home, removed), removed.snapshot.id);
+          const removedFull = yield* indexer.index({
+            cwd: root,
+            threadnoteHome: join(root, '.threadnote-remove-oracle-home'),
+            force: true,
+          });
+          const removedFullGraph = yield* store.loadGraph(
+            codeGraphDatabasePath(join(root, '.threadnote-remove-oracle-home'), removedFull),
+            removedFull.snapshot.id,
+          );
+          expect(normalizeStoredGraph(removedGraph)).toEqual(normalizeStoredGraph(removedFullGraph));
+          expect(
+            removedGraph.symbols
+              .filter(symbol => symbol.path.startsWith('packages/new/'))
+              .every(symbol => symbol.packageName === 'membership-root'),
+          ).toBe(true);
+          expect(
+            canonicalMembership(
+              yield* store.effectiveSnapshotFilesByPaths(
+                codeGraphDatabasePath(home, removed),
+                removed.snapshot.id,
+                membershipPaths,
+              ),
+            ),
+          ).toEqual(
+            canonicalMembership(
+              yield* store.effectiveSnapshotFilesByPaths(
+                codeGraphDatabasePath(join(root, '.threadnote-remove-oracle-home'), removedFull),
+                removedFull.snapshot.id,
+                membershipPaths,
+              ),
+            ),
+          );
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    );
+  }
+
+  for (const ambiguous of [false, true]) {
+    effectIt.effect(
+      `compares membership replacement and deletion against full (${ambiguous ? 'ambiguous' : 'unique'} provider)`,
+      () =>
+        Effect.gen(function* () {
+          const root = temporaryDirectory('threadnote-membership-replacement-');
+          const home = join(root, '.threadnote-test-home');
+          git(root, ['init', '-q']);
+          mkdirSync(join(root, 'packages/old'), {recursive: true});
+          mkdirSync(join(root, 'packages/consumer'), {recursive: true});
+          writeFileSync(join(root, 'package.json'), '{"name":"replacement-root","workspaces":["packages/*"]}');
+          writeFileSync(join(root, 'packages/old/package.json'), '{"name":"provider","main":"index.ts"}');
+          writeFileSync(join(root, 'packages/old/index.ts'), 'export function answer() { return 1; }\n');
+          writeFileSync(
+            join(root, 'packages/consumer/package.json'),
+            '{"name":"consumer","dependencies":{"provider":"*"}}',
+          );
+          writeFileSync(
+            join(root, 'packages/consumer/index.ts'),
+            "import {answer} from 'provider'; export function use() { return answer(); }\n",
+          );
+          if (ambiguous) {
+            mkdirSync(join(root, 'packages/duplicate'), {recursive: true});
+            writeFileSync(join(root, 'packages/duplicate/package.json'), '{"name":"provider","main":"index.ts"}');
+            writeFileSync(join(root, 'packages/duplicate/index.ts'), 'export function answer() { return 2; }\n');
+          }
+          git(root, ['add', '.']);
+          git(root, [
+            '-c',
+            'user.name=Threadnote Test',
+            '-c',
+            'user.email=test@threadnote.local',
+            'commit',
+            '-qm',
+            'base',
+          ]);
+          const indexer = yield* CodeGraphIndexer;
+          const store = yield* CodeGraphStore;
+          yield* indexer.index({cwd: root, threadnoteHome: home});
+          rmSync(join(root, 'packages/old'), {recursive: true});
+          if (!ambiguous) {
+            mkdirSync(join(root, 'packages/replacement'), {recursive: true});
+            writeFileSync(join(root, 'packages/replacement/package.json'), '{"name":"provider","main":"index.ts"}');
+            writeFileSync(join(root, 'packages/replacement/index.ts'), 'export function answer() { return 3; }\n');
+          }
+          const result = yield* indexer.index({cwd: root, threadnoteHome: home});
+          expect(result.materialization, JSON.stringify(result.materialization)).toMatchObject(
+            ambiguous
+              ? {mode: 'full', fallbackReason: 'workspace-changed'}
+              : {mode: 'incremental-overlay', resolutionClosure: 'project'},
+          );
+          const full = yield* indexer.index({
+            cwd: root,
+            threadnoteHome: join(root, '.threadnote-oracle-home'),
+            force: true,
+          });
+          const actual = yield* store.loadGraph(codeGraphDatabasePath(home, result), result.snapshot.id);
+          const expected = yield* store.loadGraph(
+            codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full),
+            full.snapshot.id,
+          );
+          expect(normalizeStoredGraph(actual)).toEqual(normalizeStoredGraph(expected));
+          expect(actual.symbols.some(symbol => symbol.path.startsWith('packages/old/'))).toBe(false);
+          const paths = [
+            'packages/old/package.json',
+            'packages/old/index.ts',
+            ambiguous ? 'packages/duplicate/index.ts' : 'packages/replacement/index.ts',
+          ];
+          expect(
+            yield* store.effectiveSnapshotFilesByPaths(codeGraphDatabasePath(home, result), result.snapshot.id, paths),
+          ).toEqual(
+            yield* store.effectiveSnapshotFilesByPaths(
+              codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full),
+              full.snapshot.id,
+              paths,
+            ),
+          );
+        }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    );
+  }
+
+  effectIt.effect('keeps membership changes behind the layered fold-forward surface fence', () =>
+    Effect.gen(function* () {
+      const root = temporaryDirectory('threadnote-membership-fold-forward-');
+      const home = join(root, '.threadnote-test-home');
+      git(root, ['init', '-q']);
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), 'packages:\n  - packages/*\n');
+      writeFileSync(join(root, 'package.json'), '{"name":"fold-root","workspaces":["packages/*"]}');
+      writeFileSync(join(root, 'index.ts'), 'export const baseline = 1;\n');
+      git(root, ['add', '.']);
+      git(root, ['-c', 'user.name=Threadnote Test', '-c', 'user.email=test@threadnote.local', 'commit', '-qm', 'base']);
+      const indexer = yield* CodeGraphIndexer;
+      const store = yield* CodeGraphStore;
+      const base = yield* indexer.index({cwd: root, threadnoteHome: home});
+      mkdirSync(join(root, 'packages/new'), {recursive: true});
+      writeFileSync(join(root, 'packages/new/package.json'), '{"name":"fold-new"}');
+      writeFileSync(join(root, 'packages/new/index.ts'), 'export const added = 2;\n');
+      git(root, ['add', 'packages']);
+      git(root, [
+        '-c',
+        'user.name=Threadnote Test',
+        '-c',
+        'user.email=test@threadnote.local',
+        'commit',
+        '-qm',
+        'add package',
+      ]);
+      const layered = yield* indexer.index({cwd: root, threadnoteHome: home});
+      expect(layered.materialization).toMatchObject({mode: 'incremental-clean', resolutionClosure: 'project'});
+      expect(layered.snapshot.baseSnapshotId).toBe(base.snapshot.id);
+      const before = yield* store.loadGraph(codeGraphDatabasePath(home, layered), layered.snapshot.id);
+      rmSync(join(root, 'packages/new/package.json'));
+      git(root, ['add', '-u']);
+      git(root, [
+        '-c',
+        'user.name=Threadnote Test',
+        '-c',
+        'user.email=test@threadnote.local',
+        'commit',
+        '-qm',
+        'remove boundary',
+      ]);
+      const fenced = yield* indexer.index({cwd: root, threadnoteHome: home});
+      expect(fenced.materialization).toMatchObject({mode: 'incremental-clean'});
+      expect(fenced.materialization).not.toHaveProperty('carriedFiles');
+      expect(fenced.snapshot.baseSnapshotId).toBe(base.snapshot.id);
+      expect(fenced.snapshot.baseSnapshotId).not.toBe(layered.snapshot.id);
+      const full = yield* indexer.index({
+        cwd: root,
+        threadnoteHome: join(root, '.threadnote-oracle-home'),
+        force: true,
+      });
+      expect(
+        normalizeStoredGraph(yield* store.loadGraph(codeGraphDatabasePath(home, fenced), fenced.snapshot.id)),
+      ).toEqual(
+        normalizeStoredGraph(
+          yield* store.loadGraph(codeGraphDatabasePath(join(root, '.threadnote-oracle-home'), full), full.snapshot.id),
+        ),
+      );
+      expect(
+        normalizeStoredGraph(yield* store.loadGraph(codeGraphDatabasePath(home, layered), layered.snapshot.id)),
+      ).toEqual(normalizeStoredGraph(before));
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  for (const fault of ['failure', 'cancellation', 'publication-race'] as const) {
+    effectIt.effect(`preserves READY through membership ${fault}`, () =>
+      Effect.gen(function* () {
+        const root = temporaryDirectory('threadnote-membership-ready-');
+        const home = join(root, '.threadnote-test-home');
+        git(root, ['init', '-q']);
+        writeFileSync(join(root, 'package.json'), '{"name":"ready-root","workspaces":["packages/*"]}');
+        writeFileSync(join(root, 'index.ts'), 'export const baseline = 1;\n');
+        git(root, ['add', '.']);
+        git(root, [
+          '-c',
+          'user.name=Threadnote Test',
+          '-c',
+          'user.email=test@threadnote.local',
+          'commit',
+          '-qm',
+          'base',
+        ]);
+        const originalIndexer = yield* CodeGraphIndexer;
+        const store = yield* CodeGraphStore;
+        const baseline = yield* originalIndexer.index({cwd: root, threadnoteHome: home});
+        const database = codeGraphDatabasePath(home, baseline);
+        const baselineGraph = yield* store.loadGraph(database, baseline.snapshot.id);
+        mkdirSync(join(root, 'packages/new'), {recursive: true});
+        writeFileSync(join(root, 'packages/new/package.json'), '{"name":"ready-new"}');
+        writeFileSync(join(root, 'packages/new/index.ts'), 'export const added = 2;\n');
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let prepared = false;
+        let raced = false;
+        const guardedStore = CodeGraphStore.of({
+          ...store,
+          preparePersistedIncrementalActivation: (...args) =>
+            Effect.gen(function* () {
+              expect(args[4]?.resolutionClosure).toBe('project');
+              const ready = yield* store.readySnapshot(database, baseline.identity.worktreeId);
+              if (!prepared) expect(ready?.id).toBe(baseline.snapshot.id);
+              else {
+                expect(fault).toBe('publication-race');
+                expect(ready?.state).toBe('ready');
+                const complete = yield* store.loadGraph(database, ready!.id);
+                expect(complete.symbols.some(symbol => symbol.name === 'added')).toBe(true);
+                expect(complete.symbols.some(symbol => symbol.name === 'raced')).toBe(false);
+              }
+              prepared = true;
+              if (fault === 'publication-race' && !raced) {
+                raced = true;
+                writeFileSync(join(root, 'packages/new/index.ts'), 'export const raced = 3;\n');
+              }
+              if (fault === 'failure') return yield* CodeGraphStoreNoSpaceError.of('Membership staging failure.');
+              if (fault === 'cancellation') {
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }
+              return yield* store.preparePersistedIncrementalActivation(...args);
+            }),
+        });
+        const context = yield* Layer.build(
+          Layer.fresh(CodeGraphIndexer.layer).pipe(Layer.provide(Layer.succeed(CodeGraphStore, guardedStore))),
+        );
+        const indexer = Context.get(context, CodeGraphIndexer);
+        const build = indexer.index({cwd: root, threadnoteHome: home});
+        if (fault === 'cancellation') {
+          const fiber = yield* build.pipe(Effect.forkChild);
+          yield* Deferred.await(entered);
+          yield* Fiber.interrupt(fiber);
+        } else if (fault === 'failure') {
+          const failed = yield* build.pipe(Effect.exit);
+          expect(Exit.isFailure(failed)).toBe(true);
+        } else {
+          const result = yield* build;
+          expect(raced).toBe(true);
+          expect(result.snapshot.id).not.toBe(baseline.snapshot.id);
+          const full = yield* originalIndexer.index({
+            cwd: root,
+            threadnoteHome: join(root, '.threadnote-race-oracle'),
+            force: true,
+          });
+          expect(normalizeStoredGraph(yield* store.loadGraph(database, result.snapshot.id))).toEqual(
+            normalizeStoredGraph(
+              yield* store.loadGraph(
+                codeGraphDatabasePath(join(root, '.threadnote-race-oracle'), full),
+                full.snapshot.id,
+              ),
+            ),
+          );
+        }
+        expect(prepared).toBe(true);
+        if (fault !== 'publication-race')
+          expect((yield* store.readySnapshot(database, baseline.identity.worktreeId))?.id).toBe(baseline.snapshot.id);
+        expect(normalizeStoredGraph(yield* store.loadGraph(database, baseline.snapshot.id))).toEqual(
+          normalizeStoredGraph(baselineGraph),
+        );
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    );
+  }
 
   effectIt.effect('materializes only body-changed files for a compatible clean commit', () =>
     Effect.gen(function* () {
