@@ -25,12 +25,17 @@ function encodeBase64(bytes: Uint8Array): string {
 }
 
 export function encodeWorkflowJournal(content: string): string {
+  return encodeBoundedWorkflowJson(content, FORMAT);
+}
+
+/** Shared bounded storage codec; callers choose their own isolated envelope marker. */
+export function encodeBoundedWorkflowJson(content: string, format: string): string {
   const plainBytes = encoder.encode(content);
   if (plainBytes.byteLength > LOGICAL_LIMIT) throw new RangeError('Workflow journal logical size limit exceeded');
   if (plainBytes.byteLength <= COMPRESSION_THRESHOLD) return content;
   const compressed = gzipSync(plainBytes, {level: 6, mtime: 0});
   const envelope = JSON.stringify({
-    format: FORMAT,
+    format,
     expandedBytes: plainBytes.byteLength,
     sha256: digest(plainBytes),
     payload: encodeBase64(compressed),
@@ -80,6 +85,10 @@ async function inflateBounded(
 }
 
 export async function decodeWorkflowJournal(text: string, signal?: AbortSignal): Promise<string> {
+  return decodeBoundedWorkflowJson(text, FORMAT, signal);
+}
+
+export async function decodeBoundedWorkflowJson(text: string, format: string, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
   if (new TextEncoder().encode(text).byteLength > DISK_LIMIT) throw new Error('Workflow journal exceeds disk limit');
   const trimmed = text.trimStart();
@@ -96,7 +105,7 @@ export async function decodeWorkflowJournal(text: string, signal?: AbortSignal):
   }
   if (typeof parsed !== 'object' || parsed === null || !('format' in parsed)) return text;
   const envelope = parsed as Record<string, unknown>;
-  if (envelope.format !== FORMAT) throw new Error('Unsupported workflow journal format');
+  if (envelope.format !== format) throw new Error('Unsupported workflow journal format');
   if (
     Object.keys(envelope).sort().join(',') !== 'expandedBytes,format,payload,sha256' ||
     !Number.isSafeInteger(envelope.expandedBytes) ||

@@ -12,10 +12,12 @@ import {
   WorkflowMemoryError,
   type WorkflowBinding,
   type WorkflowJournal,
+  type WorkflowRequest,
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
+import {verifyWorkflowEvidence} from './evidence.js';
 import {decodeWorkflowJournal, encodeWorkflowJournal} from './journal_codec.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
@@ -159,6 +161,7 @@ export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(funct
   config: RuntimeConfig,
   bindingId: string,
   recoverManifest = false,
+  admissionRequest?: WorkflowRequest,
 ) {
   const state = yield* readJournalFile(config, bindingId);
   if (!state)
@@ -167,8 +170,39 @@ export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(funct
       'The workflow binding is unavailable. Its local cloud workspace may have expired; do not create a new binding to reinterpret old receipts.',
     );
   yield* verifyWorkflowBinding(config, state.binding);
+  // Admission precedes even manifest recovery. Rejected evidence cannot advance
+  // a partially committed native transition or reinterpret its pending intent.
+  if (admissionRequest) {
+    const evidenceRefs =
+      admissionRequest.action === 'recover'
+        ? state.operations[admissionRequest.operationId ?? '']?.request.evidenceRefs
+        : admissionRequest.evidenceRefs;
+    yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+  }
   yield* reconcileManifest(config, state, recoverManifest);
   return state;
+});
+
+/** Native executor inspection may observe an exact pending transition, but never replay it. */
+export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')(function* (
+  config: RuntimeConfig,
+  bindingId: string,
+) {
+  const state = yield* readJournalFile(config, bindingId);
+  if (!state)
+    return yield* workflowError(
+      'task-state-lost',
+      'The native memory binding is unavailable. Restore its original state.',
+    );
+  yield* verifyWorkflowBinding(config, state.binding);
+  const needsRecovery = yield* reconcileManifest(config, state, false).pipe(
+    Effect.as(false),
+    Effect.catchIf(
+      error => Schema.is(WorkflowMemoryError)(error) && error.code === 'binding-recovery-needed',
+      () => Effect.succeed(true),
+    ),
+  );
+  return {state, needsRecovery};
 });
 
 const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['artifacts'], timestamp: string) =>
@@ -243,10 +277,16 @@ export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(fun
 export const bindWorkflow = Effect.fn('workflowMemory.bind')(function* (
   config: RuntimeConfig,
   binding: WorkflowBinding,
+  options: {readonly requireEmpty?: boolean} = {},
 ) {
   const existing = yield* readJournalFile(config, binding.bindingId);
   if (existing) {
     yield* verifyWorkflowBinding(config, existing.binding);
+    if (options.requireEmpty && (Object.keys(existing.artifacts).length || Object.keys(existing.operations).length))
+      return yield* workflowError(
+        'unsupported-state',
+        'A populated memory binding cannot initialize a fresh native run. Restore its original native state or start a new native run.',
+      );
     yield* reconcileManifest(config, existing, true);
     if (stableJson(binding) !== stableJson(existing.binding))
       return yield* workflowError('binding-drift', 'Existing workflow binding differs from the requested context.');

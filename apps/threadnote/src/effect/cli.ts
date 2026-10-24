@@ -1,5 +1,6 @@
 import {makeCodexCloudCommand} from './codex_cloud_cli.js';
 import {makeWorkflowMemoryCommand} from './workflow_memory_cli.js';
+import {makeWorkflowAutomationCommand} from './workflow_automation_cli.js';
 import {makeMemoryArchiveCommand} from './memory_archive_cli.js';
 import {devSkillsCommandMetadata, makeDevSkillsCommand} from './dev_skills_cli.js';
 import {sourceAddFlags} from '../integrations/cli.js';
@@ -1964,6 +1965,7 @@ const topLevelCommandRegistrations = [
   registerTopLevelCommand('forget', forget),
   registerTopLevelCommand('cloud', cloud),
   registerTopLevelCommand('workflow-memory', makeWorkflowMemoryCommand(withRuntimeEffect)),
+  registerTopLevelCommand('workflow-automation', makeWorkflowAutomationCommand(withRuntimeEffect)),
   registerTopLevelCommand('dev-skills', makeDevSkillsCommand(withRuntimeEffect), devSkillsCommandMetadata),
   registerTopLevelCommand('share', share, {
     productionLog: {
