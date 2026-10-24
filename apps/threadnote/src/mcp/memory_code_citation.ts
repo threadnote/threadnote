@@ -28,6 +28,32 @@ function memoryCodeCitationCaptureErrorResult(error: unknown, operation: string)
   const result = mcpErrorResult(error);
   if (!Schema.is(MemoryCodeCitationCaptureError)(error) || error.recovery === undefined) return result;
   const recovery = error.recovery;
+  if (recovery.recovery === 'retry-capture') {
+    result.content = [
+      {
+        type: 'text',
+        text: [
+          error.message,
+          'No memory was written.',
+          `Retry the same ${operation} request unchanged after the graph writer is available.`,
+        ].join(' '),
+      },
+    ];
+    result.structuredContent = {
+      code: recovery.code,
+      graph: recovery.observedGraph,
+      indexingStarted: false,
+      operation,
+      recovery: {action: 'retry-capture', retry: 'same-request'},
+      retryCondition: 'after-writer-available',
+      retryable: true,
+      state: 'blocked',
+      type: 'memory-code-citation-write-recovery',
+      version: 1,
+      writeApplied: false,
+    };
+    return result;
+  }
   const preparation = recovery.preparation;
   result.content = [
     {

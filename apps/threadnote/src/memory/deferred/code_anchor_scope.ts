@@ -80,10 +80,14 @@ export function deferredCodeAnchorIntentId(input: {
     input.recovery.observedGraph.freshness,
     input.recovery.observedGraph.readySnapshot,
     String(input.recovery.observedGraph.stale),
-    input.recovery.preparation.action,
-    input.recovery.preparation.target,
-    input.recovery.preparation.command,
-    ...input.recovery.preparation.arguments,
+    ...(input.recovery.recovery === 'prepare-current-graph'
+      ? [
+          input.recovery.preparation.action,
+          input.recovery.preparation.target,
+          input.recovery.preparation.command,
+          ...input.recovery.preparation.arguments,
+        ]
+      : [input.recovery.recovery, input.recovery.retryCondition]),
     ...input.codeRefs,
   ];
   if (input.project !== undefined) fields.push('project', input.project);
@@ -129,6 +133,83 @@ export function parseMemoryCodeCitationProjectScopeReceipt(
         scopeKey: value.scopeKey,
       }
     : undefined;
+}
+
+export function isMemoryCodeCitationRecovery(value: unknown): value is MemoryCodeCitationCaptureRecoveryV1 {
+  if (!Predicate.isObject(value) || value.type !== 'memory-code-citation-capture-recovery' || value.version !== 1)
+    return false;
+  if (value.recovery === 'retry-capture') {
+    return (
+      hasExactKeys(value, [
+        'code',
+        'indexingStarted',
+        'observedGraph',
+        'recovery',
+        'retryCondition',
+        'retryable',
+        'type',
+        'version',
+      ]) &&
+      value.code === 'graph-writer-busy' &&
+      value.indexingStarted === false &&
+      value.retryCondition === 'after-writer-available' &&
+      value.retryable === true &&
+      Predicate.isObject(value.observedGraph) &&
+      hasExactKeys(value.observedGraph, ['freshness', 'readySnapshot', 'stale']) &&
+      value.observedGraph.freshness === 'current' &&
+      value.observedGraph.readySnapshot === 'available' &&
+      value.observedGraph.stale === false
+    );
+  }
+  if (
+    !hasExactKeys(value, [
+      'code',
+      'indexingStarted',
+      'observedGraph',
+      'preparation',
+      'recovery',
+      'retryCondition',
+      'retryable',
+      'type',
+      'version',
+    ]) ||
+    (value.code !== 'exact-current-evidence-unavailable' && value.code !== 'ready-graph-unavailable') ||
+    value.indexingStarted !== false ||
+    value.recovery !== 'prepare-current-graph' ||
+    value.retryCondition !== 'after-current-graph-ready' ||
+    value.retryable !== true ||
+    !Predicate.isObject(value.observedGraph) ||
+    !Predicate.isObject(value.preparation)
+  ) {
+    return false;
+  }
+  if (
+    !hasExactKeys(value.observedGraph, ['freshness', 'readySnapshot', 'stale']) ||
+    !['current', 'deferred', 'stale'].includes(String(value.observedGraph.freshness)) ||
+    !['absent', 'available'].includes(String(value.observedGraph.readySnapshot)) ||
+    typeof value.observedGraph.stale !== 'boolean'
+  ) {
+    return false;
+  }
+  if (value.preparation.target === 'callerCwd') {
+    return (
+      hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
+      value.preparation.action === 'index-current-graph' &&
+      value.preparation.command === 'threadnote graph index --no-vectors' &&
+      Array.isArray(value.preparation.arguments) &&
+      value.preparation.arguments.length === 0
+    );
+  }
+  return (
+    value.preparation.target === 'workset' &&
+    hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
+    value.preparation.action === 'prepare-workset' &&
+    value.preparation.command === 'threadnote workset prepare' &&
+    Array.isArray(value.preparation.arguments) &&
+    value.preparation.arguments.length === 1 &&
+    typeof value.preparation.arguments[0] === 'string' &&
+    value.preparation.arguments[0].length > 0
+  );
 }
 
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {

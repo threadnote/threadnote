@@ -10,7 +10,7 @@ import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {attachCodeGraphStatusObservation} from '@threadnote/graph/query/contract';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import type {CodeGraphStoreShape} from '@threadnote/graph/store/shape';
-import type {CodeGraphInventoryFile, CodeGraphStatus} from '@threadnote/graph/types';
+import {CodeGraphStoreBusyError, type CodeGraphInventoryFile, type CodeGraphStatus} from '@threadnote/graph/types';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
@@ -41,11 +41,159 @@ import {finalizedDeferredCodeAnchorUris} from '@threadnote/threadnote/memory/def
 import {formatMemoryDocument, parseMemoryDocument, type MemoryMetadata} from '@threadnote/memory/document';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
 
 const MEMORY_URI = 'threadnote://user/tester/memories/durable/projects/threadnote/deferred.md';
 const TEST_ROUTE_PASS_TIMEOUT_MILLISECONDS = 5_000;
 
 describe('deferred code-anchor outbox', () => {
+  effectIt.effect('round trips busy intents and rejects mixed or impossible readiness descriptors', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const graph = yield* exactCurrentCitationGraph(fixture, []);
+      const scoped = selectedProjectStatus(graph.status, 'app-a', 'code-graph-scope:app-a');
+      const stage = () =>
+        stageDeferredCodeAnchorIntent(fixture.config, {
+          memoryContent: memoryContent(fixture.metadata, 'Busy capture intent.'),
+          memoryMetadata: fixture.metadata,
+          memoryUri: MEMORY_URI,
+          request: {...busyRequest(fixture.repository, ['apps/a/value.ts']), project: 'app-a'},
+        }).pipe(
+          Effect.provideService(
+            CodeGraphQueryService,
+            CodeGraphQueryService.of({
+              ...graph.query,
+              status: () => Effect.succeed(scoped),
+            }),
+          ),
+        );
+      const intent = yield* stage();
+      expect(intent.projectScope).toMatchObject({project: 'app-a', scopeKey: 'code-graph-scope:app-a'});
+      expect(yield* listDeferredCodeAnchorIntents(fixture.config)).toEqual([
+        expect.objectContaining({kind: 'valid', intent}),
+      ]);
+      const [file] = yield* fixtureIntentPaths(fixture);
+      for (const mutation of ['preparation', 'stale'] as const) {
+        yield* stage();
+        const stored = JSON.parse(yield* fixture.fs.readFileString(file)) as {
+          recovery: {preparation?: unknown; observedGraph: {stale: boolean}};
+        };
+        if (mutation === 'preparation') stored.recovery.preparation = deferredRequest(fixture.repository, []).recovery;
+        else stored.recovery.observedGraph.stale = true;
+        yield* fixture.fs.writeFileString(file, JSON.stringify(stored), {mode: 0o600});
+        expect(yield* listDeferredCodeAnchorIntents(fixture.config)).toEqual([
+          expect.objectContaining({kind: 'invalid'}),
+        ]);
+      }
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('chooses refresh from the current capture failure regardless of the original intent', () =>
+    Effect.gen(function* () {
+      for (const original of ['prepare', 'busy'] as const) {
+        for (const failure of ['busy', 'stale'] as const) {
+          const fixture = yield* makeFixture();
+          const content = memoryContent(fixture.metadata, 'Recover the current capture failure.');
+          yield* stageDeferredCodeAnchorIntent(fixture.config, {
+            memoryContent: content,
+            memoryMetadata: fixture.metadata,
+            memoryUri: MEMORY_URI,
+            request: (original === 'busy' ? busyRequest : deferredRequest)(fixture.repository, ['src/value.ts']),
+          });
+          const store = yield* ResourceStore;
+          yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
+          const graph = yield* exactCurrentCitationGraph(fixture, []);
+          const query =
+            failure === 'busy'
+              ? graph.query
+              : CodeGraphQueryService.of({
+                  ...graph.query,
+                  status: () =>
+                    Effect.succeed({
+                      ...graph.status,
+                      freshness: 'stale' as const,
+                      stale: true,
+                      readySnapshot: undefined,
+                    }),
+                });
+          const busyStore = CodeGraphStore.of({
+            ...graph.store,
+            acquireSnapshotLease: () => Effect.fail(CodeGraphStoreBusyError.of('fixture busy')),
+          });
+          let refreshes = 0;
+          const receipt = yield* finalizeDeferredCodeAnchors(fixture.config).pipe(
+            Effect.provideService(CodeGraphQueryService, query),
+            Effect.provideService(CodeGraphStore, busyStore),
+            Effect.provideService(
+              DeferredCodeAnchorRefreshScheduler,
+              DeferredCodeAnchorRefreshScheduler.of({
+                schedule: () => Effect.sync(() => void refreshes++),
+              }),
+            ),
+          );
+          expect(receipt).toMatchObject({
+            failedCount: 0,
+            pendingCount: 1,
+            items: [
+              {
+                recoveryAction: failure === 'busy' ? 'retry-capture' : 'prepare-current-graph',
+                state: 'pending',
+              },
+            ],
+          });
+          expect(refreshes).toBe(failure === 'busy' ? 0 : 1);
+          expect(yield* hasDeferredCodeAnchorIntent(fixture.config, MEMORY_URI)).toBe(true);
+        }
+      }
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('finalizes a persisted busy intent when its exact-current lease becomes available', () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeFixture();
+      const source = 'export const value = true;\n';
+      const file = 'src/value.ts';
+      yield* fixture.fs.makeDirectory(fixture.path.join(fixture.repository, 'src'));
+      yield* fixture.fs.writeFileString(fixture.path.join(fixture.repository, file), source);
+      const content = memoryContent(fixture.metadata, 'Preserve the busy intent.');
+      const graph = yield* exactCurrentCitationGraph(fixture, [
+        inventoryFile(file, source, fixture.path.join(fixture.repository, file)),
+      ]);
+      let refreshes = 0;
+      yield* stageDeferredCodeAnchorIntent(fixture.config, {
+        memoryContent: content,
+        memoryMetadata: fixture.metadata,
+        memoryUri: MEMORY_URI,
+        request: busyRequest(fixture.repository, [file]),
+      }).pipe(
+        Effect.provideService(CodeGraphQueryService, graph.query),
+        Effect.provideService(
+          DeferredCodeAnchorRefreshScheduler,
+          DeferredCodeAnchorRefreshScheduler.of({
+            schedule: () => Effect.sync(() => void refreshes++),
+          }),
+        ),
+      );
+      expect(refreshes).toBe(0);
+      const store = yield* ResourceStore;
+      yield* store.write(resourceStoreLocation(fixture.config), MEMORY_URI, content, {mode: 'create'});
+      const receipt = yield* finalizeDeferredCodeAnchors(fixture.config).pipe(
+        Effect.provideService(CodeGraphQueryService, graph.query),
+        Effect.provideService(CodeGraphStore, graph.store),
+      );
+      expect(receipt).toMatchObject({finalizedCount: 1, pendingCount: 0, failedCount: 0});
+      expect(yield* hasDeferredCodeAnchorIntent(fixture.config, MEMORY_URI)).toBe(false);
+      const saved = parseMemoryDocument(
+        MEMORY_URI,
+        yield* store.read(resourceStoreLocation(fixture.config), MEMORY_URI),
+      );
+      expect(saved?.body).toBe('Preserve the busy intent.');
+      expect(saved?.metadata.codeCitations).toEqual([
+        expect.objectContaining({path: file, sourceSnapshotId: graph.status.readySnapshot!.id}),
+      ]);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect('persists a verified selected project scope while legacy requests remain unselected', () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -2150,6 +2298,23 @@ function deferredRequest(callerCwd: string, codeRefs: readonly string[]): Deferr
       retryable: true as const,
       type: 'memory-code-citation-capture-recovery' as const,
       version: 1 as const,
+    },
+  };
+}
+
+function busyRequest(callerCwd: string, codeRefs: readonly string[]): DeferredCodeAnchorWriteRequest {
+  return {
+    callerCwd,
+    codeRefs,
+    recovery: {
+      code: 'graph-writer-busy',
+      indexingStarted: false,
+      observedGraph: {freshness: 'current', readySnapshot: 'available', stale: false},
+      recovery: 'retry-capture',
+      retryCondition: 'after-writer-available',
+      retryable: true,
+      type: 'memory-code-citation-capture-recovery',
+      version: 1,
     },
   };
 }

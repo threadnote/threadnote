@@ -16,11 +16,75 @@ import {
   selectDeferredCodeAnchorMissingCheckoutIntents,
   selectDeferredCodeAnchorWorkspaceRefreshTargets,
 } from '@threadnote/threadnote/memory/deferred/code_anchor_refresh';
-import {isDeferredCodeAnchorFullProjectScope} from '@threadnote/threadnote/memory/deferred/code_anchor_scope';
+import {
+  deferredCodeAnchorIntentId,
+  isDeferredCodeAnchorFullProjectScope,
+} from '@threadnote/threadnote/memory/deferred/code_anchor_scope';
 
 const URI = 'threadnote://user/test/memories/durable/projects/threadnote/deferred.md';
 
 describe('deferred code-anchor state model', () => {
+  effectIt.effect('preserves published legacy caller and Workset intent address digests', () =>
+    Effect.gen(function* () {
+      expect(yield* deferredCodeAnchorIntentId(deferredIntent())).toBe('tnca_3331513bfebf6551394b2060f07553b0');
+      expect(yield* deferredCodeAnchorIntentId(deferredIntent({preparation: 'workset'}))).toBe(
+        'tnca_3edaa750b604fefcb161c508bce51b47',
+      );
+    }),
+  );
+
+  fcEffectProp(
+    effectIt,
+    'busy intents retain repository and qualified routes without scheduling graph refresh',
+    {
+      qualified: fc.boolean(),
+      matchingRepository: fc.boolean(),
+      matchingWorktree: fc.boolean(),
+      duplicates: fc.integer({min: 1, max: 5}),
+    },
+    input =>
+      Effect.sync(() => {
+        const base = deferredIntent({codeRefs: input.qualified ? [`cgr_${'a'.repeat(40)}`] : ['src/index.ts']});
+        const intent: DeferredCodeAnchorIntentV1 = {
+          ...base,
+          recovery: {
+            code: 'graph-writer-busy',
+            indexingStarted: false,
+            observedGraph: {freshness: 'current', readySnapshot: 'available', stale: false},
+            recovery: 'retry-capture',
+            retryCondition: 'after-writer-available',
+            retryable: true,
+            type: 'memory-code-citation-capture-recovery',
+            version: 1,
+          },
+        };
+        expect(
+          deferredCodeAnchorIntentMatchesFinalizationRoute(intent, {
+            kind: 'repository',
+            callerCwd: intent.callerCwd,
+            repositoryId: input.matchingRepository ? intent.repositoryId : '3'.repeat(64),
+            worktreeId: input.matchingWorktree ? intent.worktreeId : '4'.repeat(64),
+          }),
+        ).toBe(input.matchingRepository && input.matchingWorktree);
+        expect(deferredCodeAnchorIntentMatchesFinalizationRoute(intent, {kind: 'workset', name: 'any-workset'})).toBe(
+          input.qualified,
+        );
+        const observations = new Map([
+          [
+            intent.callerCwd,
+            {state: 'present' as const, repositoryId: intent.repositoryId, worktreeId: intent.worktreeId},
+          ],
+        ]);
+        expect(
+          selectDeferredCodeAnchorWorkspaceRefreshTargets(
+            Array.from({length: input.duplicates}, () => intent),
+            observations,
+          ),
+        ).toEqual([]);
+      }),
+    {fastCheck: {numRuns: 24}},
+  );
+
   fcEffectProp(
     effectIt,
     'finalization is eligible only for the unchanged active personal uncited memory revision',
@@ -252,7 +316,10 @@ describe('deferred code-anchor state model', () => {
         for (const target of targets) {
           const intent = intents.find(candidate => candidate.callerCwd === target.cwd);
           expect(intent).toBeDefined();
-          expect(intent?.recovery.preparation.target).toBe('callerCwd');
+          expect(intent?.recovery.recovery).toBe('prepare-current-graph');
+          if (intent?.recovery.recovery === 'prepare-current-graph') {
+            expect(intent.recovery.preparation.target).toBe('callerCwd');
+          }
           expect(target.repositoryId).toBe(intent?.repositoryId);
           expect(target.worktreeId).toBe(intent?.worktreeId);
         }

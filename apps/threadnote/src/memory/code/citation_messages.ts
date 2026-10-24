@@ -1,6 +1,14 @@
 import type {DeferredCodeAnchorWriteRequest} from '../deferred/code_anchor.js';
 
 export function deferredCodeAnchorStoredMessage(memoryUri: string, request: DeferredCodeAnchorWriteRequest): string {
+  if (request.recovery.recovery === 'retry-capture') {
+    return [
+      `Stored memory without finalized code citations: ${memoryUri}`,
+      `${request.codeRefs.length} code reference(s) are pending in the private local outbox.`,
+      'Retry citation finalization after the graph writer is available; Threadnote does not schedule indexing for writer contention.',
+      'If the intent remains pending, run `threadnote finalize-code-refs` as a repair fallback.',
+    ].join(' ');
+  }
   const preparation = request.recovery.preparation;
   const prepare =
     preparation.target === 'callerCwd'
