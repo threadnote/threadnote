@@ -1,23 +1,18 @@
----
-name: dev-cycle-implementation
-description: Quiet implementation and bounded local review for a dev-cycle phase. Load only when implementing or reviewing source.
----
-
 # Implementation and review
 
-Resolve `SKILL_DIR` to the parent dev-cycle bundle, not this satellite. Read [state/snapshots](../../references/state-and-snapshots.md) when starting/resuming. Load [review contract](../../references/review.md) only when review is needed; [delegation](../../references/delegation.md) only when assigning agents.
+Resolve `SKILL_DIR` to the parent dev-cycle bundle, not this reference. Read [state/snapshots](state-and-snapshots.md) when starting/resuming. Load [review contract](review.md) only when review is needed; [delegation](delegation.md) only when assigning agents.
 
 ## Establish the phase
 
 Resolve Git root/HEAD and applicable ancestor/package instructions before writes. Inspect the active run before creating a new one. Choose intent-based mode before state changes: implementation task -> initial source snapshot as base; review current edits -> initial HEAD tree; review a clean branch -> fixed merge base (honor explicit/stack base, otherwise verified origin default then main/master fallbacks). Missing base requires a focused clarification. Review-only still fixes valid findings; publication follows the delivery contract.
 
-For a mapped plan, run `phase_state.py next` before dispatching or starting phase implementation. If it returns `action: deliver`, finish that completed phase's PR/watcher handoff through the delivery satellite first; only `action: implement` starts the returned phase. Do not bypass a pending handoff with a cached packet or a different independent phase. Scope this entire cycle to exactly one phase. Use a fresh run and baseline for a new phase, and resume its existing run for fixes or feedback. Never implement the next phase inside the current phase's source/review snapshot. After successful validation, hand this phase to delivery for its commit/PR and watcher; the orchestrator then starts the next eligible phase's own cycle.
+For a mapped plan, run `phase_state.py next` before dispatching or starting phase implementation. If it returns `action: deliver`, finish that completed phase's PR/watcher handoff through the delivery reference first; only `action: implement` starts the returned phase. Do not bypass a pending handoff with a cached packet or a different independent phase. Scope this entire cycle to exactly one phase. Use a fresh run and baseline for a new phase, and resume its existing run for fixes or feedback. Never implement the next phase inside the current phase's source/review snapshot. After successful validation, hand this phase to delivery for its commit/PR and watcher; the orchestrator then starts the next eligible phase's own cycle.
 
 State verifiable acceptance before implementation, then work quietly, including in the foreground. Write diagnostics, check results and reflection facts to artifacts; do not narrate implementation. A required decision/blocker and higher-priority host updates remain exceptions. Reuse actual recalled preferences and relevant prior gotchas; workers receive the task, acceptance, owned files, bounded phase packet and applicable prevention checks.
 
 Use Threadnote graph query/explain before unfamiliar relationship/impact investigation, then verify source using stable nodes/adjacency. Every graph call uses the absolute phase checkout root, including monorepos. Exact paths/literals need no graph. During indexing do independent work and retry after the suggested delay; unavailable graph -> disclose and search narrowly. Memory project tags in `front-end-web-monorepo` use the working area (`docs`, `director`), while graph cwd remains the checkout root.
 
-Implement small straightforward work directly. Otherwise use [delegation](../../references/delegation.md) to choose model and reasoning effort separately for the fewest independently owned slices. A detailed plan with verified anchors, settled decisions and focused checks should normally start at low effort on the cheapest sufficient advertised model; justify higher capacity by the remaining uncertainty, not the phase size or parent settings. Preserve existing work/staging. Integrate and validate interactions; the main agent may finish straightforward follow-ups. Workers record observed failures, actual corrections and checks for the orchestrator's learning step; they do not independently publish memory or policy.
+Implement small straightforward work directly. Otherwise use [delegation](delegation.md) to choose model and reasoning effort separately for the fewest independently owned slices. A detailed plan with verified anchors, settled decisions and focused checks should normally start at low effort on the cheapest sufficient advertised model; justify higher capacity by the remaining uncertainty, not the phase size or parent settings. Preserve existing work/staging. Integrate and validate interactions; the main agent may finish straightforward follow-ups. Workers record observed failures, actual corrections and checks for the orchestrator's learning step; they do not independently publish memory or policy.
 
 ## Snapshot and review
 
@@ -45,7 +40,7 @@ The helper derives counts and verifies coverage/prior blockers. Source drift req
 
 ## Fix, reflect and validate
 
-Verify evidence and intent before fixing. Keep finding IDs through line movement; record invalid findings in `ignored.json` with evidence, never silently drop them. Disagreement requires evidence, not a vote. Fix critical then important findings directly when straightforward, otherwise in non-overlapping worker slices. A scope conflict requires a user decision after useful independent work. Capture minimal failure/correction/prevention facts for the learning satellite after meaningful feedback; do not ask for hidden reasoning transcripts.
+Verify evidence and intent before fixing. Keep finding IDs through line movement; record invalid findings in `ignored.json` with evidence, never silently drop them. Disagreement requires evidence, not a vote. Fix critical then important findings directly when straightforward, otherwise in non-overlapping worker slices. A scope conflict requires a user decision after useful independent work. Capture minimal failure/correction/prevention facts for the learning reference after meaningful feedback; do not ask for hidden reasoning transcripts.
 
 Blocking fixes -> focused checks -> next incremental review. No blockers -> valid minor polish once -> final checks, without another review just for minors. Same blocking IDs with neither a relevant source change nor new supporting evidence means stalled. Do not treat line movement or an assertion weakened to green as progress.
 
