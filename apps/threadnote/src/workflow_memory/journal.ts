@@ -1,5 +1,6 @@
 import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {uriSegment} from '@threadnote/store/resource-segment';
@@ -63,8 +64,8 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   if (stat.type !== 'File' || Number(stat.size) > 16 * 1024 * 1024)
     return yield* workflowError('invalid-journal', 'Workflow journal is not a bounded regular file.');
   const text = yield* fs.readFileString(file);
-  return yield* Effect.tryPromise({
-    try: async signal => {
+  return yield* fromPromiseInterruptible(
+    async signal => {
       const parsed = JSON.parse(await decodeWorkflowJournal(text, signal)) as WorkflowJournal;
       if (
         parsed.protocolVersion !== 1 ||
@@ -78,12 +79,12 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
         throw new Error('Invalid journal');
       return parsed;
     },
-    catch: () =>
+    () =>
       workflowError(
         'invalid-journal',
         'Workflow task state is invalid; restore the original context instead of rebinding.',
       ),
-  });
+  );
 });
 
 export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(function* (
