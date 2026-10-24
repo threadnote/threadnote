@@ -4,6 +4,7 @@ import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {ModelSetupIndicator, ModelSetupPanel, useModelSetup} from '../../src/model_setup.js';
+import {ModelSetupProvider} from '../../src/model_setup_live.js';
 import type {ModelSetupStatus} from '../../src/model_setup_contracts.js';
 
 let root: Root | undefined;
@@ -59,7 +60,7 @@ async function render(children: React.ReactNode): Promise<void> {
     document.body.append(host);
     root = createRoot(host);
   }
-  await act(async () => root?.render(children));
+  await act(async () => root?.render(<ModelSetupProvider>{children}</ModelSetupProvider>));
 }
 function button(text: string): HTMLButtonElement {
   const result = [...document.querySelectorAll('button')].find(item => item.textContent?.includes(text));
@@ -237,4 +238,94 @@ it('increments readiness only on false-to-true transitions for arbitrary respons
     }),
     {numRuns: 20},
   );
+});
+
+it('refreshes a terminal fallback status when the last consumer leaves and a new consumer mounts', async () => {
+  state = {...state, phase: 'off', policy: 'off'};
+  await render(<ModelSetupPanel />);
+  expect(calls).toHaveLength(1);
+  await render(null);
+  state = {...state, phase: 'ready', policy: 'automatic', artifactReady: true};
+  await render(<ModelSetupPanel />);
+  expect(calls).toHaveLength(2);
+  expect(document.body.textContent).toContain('Model files are verified');
+});
+
+it('fences a late manual fallback refresh behind a successful policy command', async () => {
+  await render(
+    <>
+      <ModelSetupPanel />
+      <Probe />
+    </>,
+  );
+  const old = {...state};
+  const delayed = Promise.withResolvers<Response>();
+  vi.mocked(fetch).mockImplementationOnce((_url, init) => {
+    calls.push({signal: init?.signal});
+    return delayed.promise;
+  });
+  await act(async () => button('Read setup').click());
+  expect(calls.at(-1)?.body).toBeUndefined();
+  const readSignal = calls.at(-1)?.signal;
+  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  expect(readSignal?.aborted).toBe(true);
+  expect(document.body.textContent).toContain('Automatic setup is off');
+  await act(async () => delayed.resolve(new Response(JSON.stringify(old))));
+  expect(document.body.textContent).toContain('Automatic setup is off');
+  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  expect(calls.at(-1)?.body).toEqual({action: 'policy', policy: 'automatic', confirm: true, expectedEpoch: 8});
+});
+
+it('resumes fallback progress polling after a rejected command recovers as pending', async () => {
+  state = {...state, phase: 'pending'};
+  await render(<ModelSetupPanel />);
+  vi.mocked(fetch).mockImplementationOnce((_url, init) => {
+    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    return Promise.resolve(new Response(JSON.stringify({error: 'Changed elsewhere'}), {status: 409}));
+  });
+  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Refreshing its current status');
+  const beforeRecovery = calls.length;
+  await act(async () => vi.advanceTimersByTimeAsync(1_500));
+  expect(calls).toHaveLength(beforeRecovery + 1);
+  expect(document.body.textContent).toContain('Preparing local model');
+  state = {...state, phase: 'ready', artifactReady: true};
+  await act(async () => vi.advanceTimersByTimeAsync(1_500));
+  expect(calls).toHaveLength(beforeRecovery + 2);
+  expect(document.body.textContent).toContain('Model files are verified');
+});
+
+it('cancels old recovery before a newer held command and preserves its accepted epoch', async () => {
+  await render(<ModelSetupPanel />);
+  vi.mocked(fetch).mockImplementationOnce((_url, init) => {
+    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    return Promise.resolve(new Response(JSON.stringify({error: 'Changed elsewhere'}), {status: 409}));
+  });
+  await act(async () => button('Set up local model').click());
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Refreshing its current status');
+  const newer = Promise.withResolvers<Response>();
+  const staleRead = Promise.withResolvers<Response>();
+  const original = vi.mocked(fetch).getMockImplementation();
+  vi.mocked(fetch).mockImplementationOnce((_url, init) => {
+    calls.push({body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal});
+    return newer.promise;
+  });
+  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  const beforeDeadline = calls.length;
+  vi.mocked(fetch).mockImplementation((_url, init) => {
+    calls.push({signal: init?.signal});
+    return staleRead.promise;
+  });
+  await act(async () => vi.advanceTimersByTimeAsync(1_500));
+  expect(calls).toHaveLength(beforeDeadline);
+  const previous = {...state};
+  state = {...state, intentEpoch: 8, policy: 'off', phase: 'off'};
+  await act(async () => {
+    newer.resolve(new Response(JSON.stringify(state)));
+    staleRead.resolve(new Response(JSON.stringify(previous)));
+  });
+  expect(document.body.textContent).toContain('Automatic setup is off');
+  vi.mocked(fetch).mockImplementation(original!);
+  await act(async () => (document.querySelector('[role=switch]') as HTMLButtonElement).click());
+  expect(calls.at(-1)?.body).toEqual({action: 'policy', policy: 'automatic', confirm: true, expectedEpoch: 8});
 });

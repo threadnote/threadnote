@@ -19,6 +19,9 @@ it('keeps navigation available while the library is pending or failed and recove
   let sharesReady = true;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const path = new URL(String(input), 'http://localhost').pathname;
+    // Exercise the explicit REST compatibility path in this library fixture.
+    if (path === '/api/live-session')
+      return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     if (path === '/api/state') {
       if (!runtimeReady) throw new Error('runtime unavailable');
       return json({

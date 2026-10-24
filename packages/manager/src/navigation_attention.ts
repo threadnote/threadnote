@@ -2,7 +2,7 @@ import {useCallback, useEffect, useState} from 'react';
 import type {ManagerContextMaintenanceStatusV2} from './attention/contracts.js';
 import type {SharingConflict} from './sharing_contracts.js';
 import {api} from './ui/support.js';
-import {useManagerLiveResource} from './live/provider.js';
+import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
 
 const readMaintenance = (project: string) => (signal: AbortSignal) =>
   api<ManagerContextMaintenanceStatusV2>(
@@ -52,6 +52,12 @@ export function useNavigationAttention(
   const [snapshot, setSnapshot] = useState<{project: string; counts: NavigationAttention}>();
   const reader = useCallback(readMaintenance(project), [project]);
   const live = useManagerLiveResource('context-maintenance', enabled ? project : '', reader);
+  const sharesLive = useManagerLiveQuery<{readonly conflicts: readonly SharingConflict[]}>(
+    enabled ? {topic: 'share-conflicts', scope: 'account'} : undefined,
+    'conflicts',
+    signal => api('/api/shares/conflicts', undefined, {signal, timeoutMilliseconds: 10_000}),
+  );
+  const legacyShares = !sharesLive.active || sharesLive.snapshot.status === 'unsupported';
   const legacyHealth = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
     if (!enabled) return;
@@ -62,7 +68,9 @@ export function useNavigationAttention(
       running = true;
       const options = {signal: controller.signal, timeoutMilliseconds: 10_000};
       const [shares, health] = await Promise.allSettled([
-        api<{readonly conflicts: readonly SharingConflict[]}>('/api/shares/conflicts', undefined, options),
+        legacyShares
+          ? api<{readonly conflicts: readonly SharingConflict[]}>('/api/shares/conflicts', undefined, options)
+          : Promise.resolve(undefined),
         project && legacyHealth
           ? api<ManagerContextMaintenanceStatusV2>(
               `/api/attention/context-maintenance?project=${encodeURIComponent(project)}`,
@@ -76,7 +84,7 @@ export function useNavigationAttention(
           project,
           counts: {
             shares:
-              shares.status === 'fulfilled' && Array.isArray(shares.value.conflicts)
+              shares.status === 'fulfilled' && shares.value && Array.isArray(shares.value.conflicts)
                 ? new Set(shares.value.conflicts.map(item => item.id)).size
                 : undefined,
             'context-health': health.status === 'fulfilled' ? health.value?.counts?.decisionMemories : undefined,
@@ -85,21 +93,29 @@ export function useNavigationAttention(
       running = false;
     };
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 15_000);
+    const timer = legacyShares || legacyHealth ? window.setInterval(() => void refresh(), 15_000) : undefined;
     const onVisible = () => void refresh();
     window.addEventListener('focus', onVisible);
     document.addEventListener('visibilitychange', onVisible);
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearInterval(timer);
       window.removeEventListener('focus', onVisible);
       document.removeEventListener('visibilitychange', onVisible);
     };
-  }, [project, refreshGeneration, panel, enabled, legacyHealth]);
+  }, [project, refreshGeneration, panel, enabled, legacyHealth, legacyShares]);
   if (!enabled) return {};
   const counts = snapshot?.project === project ? snapshot.counts : {};
   const liveCount = !legacyHealth && 'data' in live.snapshot ? live.snapshot.data?.counts?.decisionMemories : undefined;
-  const projected = {...counts, 'context-health': legacyHealth ? counts['context-health'] : liveCount};
+  const liveShares =
+    !legacyShares && 'data' in sharesLive.snapshot && Array.isArray(sharesLive.snapshot.data?.conflicts)
+      ? new Set(sharesLive.snapshot.data.conflicts.map(item => item.id)).size
+      : undefined;
+  const projected = {
+    ...counts,
+    shares: legacyShares ? counts.shares : liveShares,
+    'context-health': legacyHealth ? counts['context-health'] : liveCount,
+  };
   // The mounted Health panel reconciles confirmed writes against complete queue totals.
   // Its scoped projection must also win over late, stale navigation polls.
   return panel === 'context-health' && contextHealthDecisionCount?.project === project

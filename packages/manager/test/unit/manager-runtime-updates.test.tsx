@@ -3,6 +3,9 @@ import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
 import {RuntimeUpdatesPanel} from '../../src/runtime_updates_view.js';
+import {ModelSetupProvider} from '../../src/model_setup_live.js';
+import {ManagerLiveProvider} from '../../src/live/provider.js';
+import {FakeManagerSocket} from './live-consumer-fixture.js';
 import type {RuntimeUpdates} from '../../src/update_contracts.js';
 
 let root: Root;
@@ -33,6 +36,7 @@ beforeEach(() => {
     'fetch',
     vi.fn(async (url: string, init: RequestInit) => {
       const body = init.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      if (url === '/api/live-session') return new Response(JSON.stringify({ticket: 'fixture'}));
       if (url === '/api/models/setup') {
         setupCalls.push({url, body});
         return new Response(
@@ -69,7 +73,13 @@ async function render() {
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
-  await act(async () => root.render(<RuntimeUpdatesPanel onChanged={onChanged} />));
+  await act(async () =>
+    root.render(
+      <ModelSetupProvider>
+        <RuntimeUpdatesPanel onChanged={onChanged} />
+      </ModelSetupProvider>,
+    ),
+  );
 }
 function button(label: string): HTMLButtonElement {
   const value = [...document.querySelectorAll('button')].find(node => node.textContent?.includes(label));
@@ -140,4 +150,71 @@ it('renders release-note Markdown without executing embedded HTML', async () => 
   await render();
   expect(document.querySelector('.runtime-release-notes script')).toBeNull();
   expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
+});
+
+it('replaces cleared live errors/job and refreshes full notes once when automatic work completes', async () => {
+  FakeManagerSocket.instances = [];
+  vi.stubGlobal('WebSocket', FakeManagerSocket);
+  state = {
+    ...state,
+    automaticRunning: true,
+    automaticFailure: 'Old automatic failure',
+    checkError: 'Old check failure',
+    notesError: 'Old notes failure',
+    job: {status: 'running', message: 'Old job running'},
+  };
+  const host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () =>
+    root.render(
+      <ManagerLiveProvider account="one">
+        <ModelSetupProvider>
+          <RuntimeUpdatesPanel onChanged={onChanged} />
+        </ModelSetupProvider>
+      </ManagerLiveProvider>,
+    ),
+  );
+  await act(async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+  const socket = FakeManagerSocket.instances[0];
+  await act(async () => {
+    socket.open(['runtime-updates', 'model-setup']);
+    socket.ack();
+  });
+  await act(async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+  expect(document.body.textContent).toContain('Old check failure');
+  expect(document.body.textContent).toContain('Old job running');
+  state = {...state, checkError: undefined, notesError: undefined, automaticFailure: undefined, job: undefined};
+  await act(async () => socket.invalidate(1, {topic: 'runtime-updates', scope: 'account'}));
+  await act(async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+  expect(document.body.textContent).not.toContain('Old check failure');
+  expect(document.body.textContent).not.toContain('Old notes failure');
+  expect(document.body.textContent).not.toContain('Old automatic failure');
+  expect(document.body.textContent).not.toContain('Old job running');
+  const fullBefore = calls.filter(call => call.url === '/api/runtime/updates').length;
+  state = {
+    ...state,
+    automaticRunning: false,
+    installedVersion: '5.1.2',
+    installedNotes: [{version: '5.1.2', title: 'Installed changes', body: '- Automatic completion notes'}],
+  };
+  await act(async () => socket.invalidate(2, {topic: 'runtime-updates', scope: 'account'}));
+  await act(async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+  expect(calls.filter(call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
+  expect(document.body.textContent).toContain('Automatic completion notes');
+  expect(onChanged).toHaveBeenCalledOnce();
+  await act(async () => socket.invalidate(3, {topic: 'runtime-updates', scope: 'account'}));
+  await act(async () => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  });
+  expect(calls.filter(call => call.url === '/api/runtime/updates')).toHaveLength(fullBefore + 1);
+  expect(onChanged).toHaveBeenCalledOnce();
 });

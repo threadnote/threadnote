@@ -11,6 +11,7 @@ import {
 import type {ConsolidationModelOption} from '../../src/ui/contracts.js';
 import {consolidationAgent} from '../../src/request_inputs.js';
 import {isAgentClient} from '../../src/ui/support.js';
+import {ModelSetupProvider} from '../../src/model_setup_live.js';
 
 it('accepts local AI at the consolidation request boundary', () => {
   expect(consolidationAgent('local-ai')).toBe('local-ai');
@@ -66,7 +67,13 @@ function setup() {
   document.body.append(container);
   root = createRoot(container);
   const render = (agent: string, storageKey?: string) =>
-    act(async () => root?.render(<Harness agent={agent} storageKey={storageKey} />));
+    act(async () =>
+      root?.render(
+        <ModelSetupProvider>
+          <Harness agent={agent} storageKey={storageKey} />
+        </ModelSetupProvider>,
+      ),
+    );
   const respond = (index: number, models: readonly ConsolidationModelOption[]) =>
     act(async () => {
       requests[index].resolve(new Response(JSON.stringify({models}), {headers: {'content-type': 'application/json'}}));

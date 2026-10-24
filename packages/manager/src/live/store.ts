@@ -1,4 +1,4 @@
-import {managerLiveResourceKey, type ManagerLiveResource} from './contracts.js';
+import {MANAGER_LIVE_LIMITS, managerLiveResourceKey, type ManagerLiveResource} from './contracts.js';
 
 export type ManagerLiveSnapshot<T = unknown> =
   | {readonly status: 'loading' | 'unsupported'; readonly data?: T}
@@ -8,6 +8,7 @@ export type ManagerLiveSnapshot<T = unknown> =
 export interface ManagerLiveEntry<T = unknown> {
   readonly resource: ManagerLiveResource;
   readonly key: string;
+  readonly queryKey: string;
   readonly listeners: Set<() => void>;
   read: (signal: AbortSignal) => Promise<T>;
   snapshot: ManagerLiveSnapshot<T>;
@@ -18,51 +19,86 @@ export interface ManagerLiveEntry<T = unknown> {
   version: number;
 }
 
-/** A tab-scoped, bounded registry. Entries disappear with their last subscriber. */
-export class ManagerLiveStore {
-  private readonly entries = new Map<string, ManagerLiveEntry>();
+interface ResourceGroup {
+  readonly resource: ManagerLiveResource;
+  readonly queries: Map<string, ManagerLiveEntry>;
+}
 
-  get(resource: ManagerLiveResource): ManagerLiveEntry | undefined {
-    return this.entries.get(managerLiveResourceKey(resource));
+/** One wire group may own several independently fenced local REST queries. */
+export class ManagerLiveStore {
+  private readonly groups = new Map<string, ResourceGroup>();
+  private queryCount = 0;
+
+  get(resource: ManagerLiveResource, queryKey = ''): ManagerLiveEntry | undefined {
+    return this.groups.get(managerLiveResourceKey(resource))?.queries.get(queryKey);
   }
 
   values(): readonly ManagerLiveEntry[] {
-    return [...this.entries.values()];
+    return [...this.groups.values()].flatMap(group => [...group.queries.values()]);
+  }
+
+  resources(): readonly ManagerLiveResource[] {
+    return [...this.groups.values()].map(group => group.resource);
+  }
+
+  queries(resource: ManagerLiveResource): readonly ManagerLiveEntry[] {
+    return [...(this.groups.get(managerLiveResourceKey(resource))?.queries.values() ?? [])];
+  }
+
+  has(resource: ManagerLiveResource): boolean {
+    return this.groups.has(managerLiveResourceKey(resource));
   }
 
   add<T>(
     resource: ManagerLiveResource,
+    queryKey: string,
     read: (signal: AbortSignal) => Promise<T>,
     listener: () => void,
   ): ManagerLiveEntry<T> {
     const key = managerLiveResourceKey(resource);
-    let entry = this.entries.get(key) as ManagerLiveEntry<T> | undefined;
+    let group = this.groups.get(key);
+    if (!group) {
+      if (this.groups.size >= MANAGER_LIVE_LIMITS.subscriptions) throw new Error('Too many live resources');
+      group = {resource, queries: new Map()};
+      this.groups.set(key, group);
+    }
+    let entry = group.queries.get(queryKey) as ManagerLiveEntry<T> | undefined;
     if (!entry) {
-      if (this.entries.size >= 32) throw new Error('Too many live resources');
+      if (this.queryCount >= MANAGER_LIVE_LIMITS.queries) {
+        if (group.queries.size === 0) this.groups.delete(key);
+        throw new Error('Too many live queries');
+      }
       entry = {
         resource,
         key,
+        queryKey,
         read,
         listeners: new Set(),
         snapshot: {status: 'loading'},
         reading: false,
         dirty: false,
-        available: true,
+        available: group.queries.values().next().value?.available ?? true,
         version: 0,
       };
-      this.entries.set(key, entry);
+      group.queries.set(queryKey, entry);
+      this.queryCount++;
     }
+    entry.read = read;
     entry.listeners.add(listener);
     return entry;
   }
 
   remove(entry: ManagerLiveEntry, listener: () => void): boolean {
-    if (this.entries.get(entry.key) !== entry) return false;
+    const group = this.groups.get(entry.key);
+    if (group?.queries.get(entry.queryKey) !== entry) return false;
     entry.listeners.delete(listener);
     if (entry.listeners.size) return false;
     entry.version++;
     entry.controller?.abort();
-    this.entries.delete(entry.key);
+    group.queries.delete(entry.queryKey);
+    this.queryCount--;
+    if (group.queries.size) return false;
+    this.groups.delete(entry.key);
     return true;
   }
 
@@ -72,11 +108,12 @@ export class ManagerLiveStore {
   }
 
   clear(): void {
-    for (const entry of this.entries.values()) {
+    for (const entry of this.values()) {
       entry.version++;
       entry.controller?.abort();
       entry.listeners.clear();
     }
-    this.entries.clear();
+    this.groups.clear();
+    this.queryCount = 0;
   }
 }

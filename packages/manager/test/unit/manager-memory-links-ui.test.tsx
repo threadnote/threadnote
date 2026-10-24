@@ -94,6 +94,9 @@ beforeEach(() => {
   finishSlow = undefined;
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost');
+    // Exercise the explicit REST compatibility path in this navigation fixture.
+    if (url.pathname === '/api/live-session')
+      return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     if (url.pathname === '/api/state')
       return json({
         agents: [],

@@ -39,6 +39,7 @@ import {ResourceConflict, ResourceNotFound} from '@threadnote/store/resource-sto
 import {handleManagerTopicReview, managerTopicPacketReviewId} from './topic_review.js';
 import {handleManagerTopicEnrollment} from './topic_enrollment.js';
 import {handleManagerTopicExpansion} from './topic_expansion.js';
+import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
 
 const CITATION_FINDING_CATEGORIES = ['citation-changed', 'citation-missing', 'citation-unknown'] as const;
 const MAXIMUM_MANAGER_BULK_CITATION_REPAIRS = 100;
@@ -49,6 +50,7 @@ const STALE_CONTEXT_HEALTH_CURSOR_MESSAGE = 'Context-health continuation cursor 
 interface InternalManagerCitationRepairJob {
   fiber?: Fiber.Fiber<void>;
   job: ManagerCitationRepairJobV1;
+  onChange: Effect.Effect<void, never>;
 }
 
 interface ManagerCitationRepairJobRegistry {
@@ -496,7 +498,9 @@ function startBackgroundCitationRepair(
       const crypto = yield* Crypto.Crypto;
       const createdAt = managerTimestamp(yield* Clock.currentTimeMillis);
       const id = `mcrj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+      const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerCitationRepairJob = {
+        onChange: hints.publish({topic: 'citation-repair-jobs', project}),
         job: {
           createdAt,
           id,
@@ -515,6 +519,7 @@ function startBackgroundCitationRepair(
         },
       };
       registry.jobs.set(id, entry);
+      yield* entry.onChange;
       const worker = runBackgroundCitationRepair(entry, request.config, project, cwd).pipe(
         Effect.matchCauseEffect({
           onFailure: cause => finishBackgroundCitationRepairFailure(entry, cause),
@@ -544,7 +549,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
   let initialCitationCount: number | undefined;
   let pagesScanned = 0;
   let repairedCount = 0;
-  updateCitationRepairJob(entry, {
+  yield* updateCitationRepairJob(entry, {
     batch: 0,
     failedCount,
     message: 'Preparing current project graph evidence before scanning memories.',
@@ -581,7 +586,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
       };
     }
     const recordCount = new Set(repairable.map(proposal => proposal.mutation.subjectUri)).size;
-    updateCitationRepairJob(entry, {
+    yield* updateCitationRepairJob(entry, {
       batch,
       failedCount,
       initialCitationCount,
@@ -606,7 +611,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
       capturedSnapshotIds.size > 0 &&
       (capturedSnapshotIds.size !== 1 || !capturedSnapshotIds.has(currentGraph.snapshot.id))
     ) {
-      updateCitationRepairJob(entry, {
+      yield* updateCitationRepairJob(entry, {
         batch,
         failedCount,
         initialCitationCount,
@@ -619,7 +624,7 @@ const runBackgroundCitationRepair = Effect.fn('managerAttention.runBackgroundCit
       });
       continue;
     }
-    updateCitationRepairJob(entry, {
+    yield* updateCitationRepairJob(entry, {
       batch,
       failedCount,
       initialCitationCount,
@@ -669,7 +674,7 @@ const scanBackgroundCitationRepairs = Effect.fn('managerAttention.scanBackground
     let restart = false;
     let unresolvedCount = 0;
     do {
-      updateCitationRepairJob(entry, {
+      yield* updateCitationRepairJob(entry, {
         batch: current.batch,
         failedCount: current.failedCount,
         ...(current.initialCitationCount === undefined ? {} : {initialCitationCount: current.initialCitationCount}),
@@ -694,7 +699,7 @@ const scanBackgroundCitationRepairs = Effect.fn('managerAttention.scanBackground
           errorMessage(Cause.squash(planExit.cause)).includes(STALE_CONTEXT_HEALTH_CURSOR_MESSAGE) &&
           restartCount < MAXIMUM_BACKGROUND_CITATION_SCAN_RESTARTS
         ) {
-          updateCitationRepairJob(entry, {
+          yield* updateCitationRepairJob(entry, {
             batch: current.batch,
             failedCount: current.failedCount,
             ...(current.initialCitationCount === undefined ? {} : {initialCitationCount: current.initialCitationCount}),
@@ -717,7 +722,7 @@ const scanBackgroundCitationRepairs = Effect.fn('managerAttention.scanBackground
       unresolvedCount = proposals.filter(
         proposal => proposal.mutation.kind === 'review-only' && proposal.mutation.repairKind === 'repair-citation',
       ).length;
-      updateCitationRepairJob(entry, {
+      yield* updateCitationRepairJob(entry, {
         batch: current.batch,
         failedCount: current.failedCount,
         ...(current.initialCitationCount === undefined ? {} : {initialCitationCount: current.initialCitationCount}),
@@ -781,6 +786,7 @@ function finishBackgroundCitationRepair(
       }),
     ),
     Effect.asVoid,
+    Effect.andThen(entry.onChange),
   );
 }
 
@@ -803,14 +809,17 @@ function finishBackgroundCitationRepairFailure(entry: InternalManagerCitationRep
       }),
     ),
     Effect.asVoid,
+    Effect.andThen(entry.onChange),
   );
 }
 
 function updateCitationRepairJob(
   entry: InternalManagerCitationRepairJob,
   progress: ManagerCitationRepairJobV1['progress'],
-): void {
-  entry.job = {...entry.job, progress};
+): Effect.Effect<void, never> {
+  return Effect.sync(() => {
+    entry.job = {...entry.job, progress};
+  }).pipe(Effect.andThen(entry.onChange));
 }
 
 function citationRepairRegistry(request: {

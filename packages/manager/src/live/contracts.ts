@@ -6,6 +6,7 @@ export const MANAGER_LIVE_LIMITS = {
   tickets: 64,
   ticketLifetimeMilliseconds: 30_000,
   subscriptions: 32,
+  queries: 64,
   pendingResources: 16,
   messageBytes: 8_192,
   incomingFrames: 8,
@@ -19,12 +20,56 @@ export const MANAGER_LIVE_LIMITS = {
  * context-maintenance invalidates its status GET, not evidence packets/actions.
  * context-health stays unadvertised until repository source coverage is ready.
  */
-export const ManagerLiveTopic = Schema.Literals(['context-health', 'context-maintenance']);
+export const ManagerLiveProjectTopic = Schema.Literals([
+  'context-health',
+  'context-maintenance',
+  'home',
+  'citation-repair-jobs',
+  'automatic-memory',
+]);
+export const ManagerLiveAccountTopic = Schema.Literals([
+  'home',
+  'share-conflicts',
+  'graph-status',
+  'processes',
+  'model-setup',
+  'runtime-updates',
+  'worksets',
+]);
+export const ManagerLiveTopic = Schema.Literals([
+  'context-health',
+  'context-maintenance',
+  'home',
+  'citation-repair-jobs',
+  'automatic-memory',
+  'share-conflicts',
+  'graph-status',
+  'processes',
+  'model-setup',
+  'runtime-updates',
+  'worksets',
+]);
 export type ManagerLiveTopic = typeof ManagerLiveTopic.Type;
-export const ManagerLiveResource = Schema.Struct({
-  topic: ManagerLiveTopic,
-  project: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
-});
+export const MANAGER_LIVE_SUPPORTED_TOPICS: readonly ManagerLiveTopic[] = [
+  'context-health',
+  'context-maintenance',
+  'home',
+  'citation-repair-jobs',
+  'automatic-memory',
+  'share-conflicts',
+  'graph-status',
+  'processes',
+  'model-setup',
+  'runtime-updates',
+  'worksets',
+];
+export const ManagerLiveResource = Schema.Union([
+  Schema.Struct({
+    topic: ManagerLiveProjectTopic,
+    project: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
+  }),
+  Schema.Struct({topic: ManagerLiveAccountTopic, scope: Schema.Literal('account')}),
+]);
 export type ManagerLiveResource = typeof ManagerLiveResource.Type;
 const sequence = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: Number.MAX_SAFE_INTEGER}));
 const generation = Schema.Int.check(Schema.isBetween({minimum: 1, maximum: Number.MAX_SAFE_INTEGER}));
@@ -82,5 +127,7 @@ export const ManagerLiveServerFrame = Schema.Union([
 export type ManagerLiveServerFrame = typeof ManagerLiveServerFrame.Type;
 
 export function managerLiveResourceKey(resource: ManagerLiveResource): string {
-  return JSON.stringify([resource.topic, resource.project]);
+  return 'project' in resource
+    ? JSON.stringify(['project', resource.topic, resource.project])
+    : JSON.stringify(['account', resource.topic]);
 }

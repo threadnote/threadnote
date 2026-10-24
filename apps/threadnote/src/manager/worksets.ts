@@ -33,6 +33,7 @@ import {
   type ManagerProjectRootValidation,
 } from './project/roots.js';
 import {updateManagerWorksetPrepareProgress} from '@threadnote/manager/workset/progress';
+import {ManagerLiveConsumerChangeHints} from './live_consumer_observation.js';
 import {managerWorksetCatalogHttp} from '@threadnote/manager/workset/catalog_http';
 import {validateManagerConfiguredProjectPath, validateManagerConfiguredProjectUri} from './project/manifest_values.js';
 import {validateProjectSeedPatterns} from '../seed_pattern.js';
@@ -119,6 +120,7 @@ export interface ManagerWorksetApiRequest {
 interface InternalManagerWorksetPrepareJob {
   fiber?: Fiber.Fiber<void>;
   job: ManagerWorksetPrepareJob;
+  onChange: Effect.Effect<void, never>;
 }
 
 interface ManagerWorksetJobRegistry {
@@ -765,7 +767,9 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
       const crypto = yield* Crypto.Crypto;
       const createdAt = isoTimestamp(yield* Clock.currentTimeMillis);
       const id = `cgwj_${(yield* crypto.randomUUIDv4()).replaceAll('-', '')}`;
+      const hints = yield* ManagerLiveConsumerChangeHints;
       const entry: InternalManagerWorksetPrepareJob = {
+        onChange: hints.publish({topic: 'worksets', scope: 'account'}),
         job: {
           createdAt,
           id,
@@ -780,9 +784,11 @@ function startManagerWorksetPrepare(request: ManagerWorksetApiRequest, body: Rec
         },
       };
       registry.jobs.set(id, entry);
+      yield* entry.onChange;
       const fiber = yield* (request.prepareWorkset ?? prepareManagerCodeGraphWorksetIsolated)(request.config, workset, {
         ...(concurrency === undefined ? {} : {concurrency}),
-        onProgress: progress => updateManagerWorksetPrepareProgress(entry, progress),
+        onProgress: progress =>
+          updateManagerWorksetPrepareProgress(entry, progress).pipe(Effect.andThen(entry.onChange)),
       }).pipe(
         Effect.matchCauseEffect({
           onFailure: cause => finishFailedPrepareJob(entry, cause),
@@ -811,6 +817,7 @@ function cancelManagerWorksetPrepare(contextKey: object, jobScope: Scope.Scope, 
       },
       status: 'cancelling',
     };
+    yield* entry.onChange;
     yield* Fiber.interrupt(entry.fiber).pipe(
       Effect.andThen(finishInterruptedPrepareJob(entry)),
       Effect.forkIn(jobScope),
@@ -849,6 +856,7 @@ function finishSuccessfulPrepareJob(entry: InternalManagerWorksetPrepareJob, res
       }),
     ),
     Effect.asVoid,
+    Effect.andThen(entry.onChange),
   );
 }
 
@@ -875,6 +883,7 @@ function finishFailedPrepareJob(entry: InternalManagerWorksetPrepareJob, cause: 
       }),
     ),
     Effect.asVoid,
+    Effect.andThen(entry.onChange),
   );
 }
 
@@ -898,6 +907,7 @@ function finishInterruptedPrepareJob(entry: InternalManagerWorksetPrepareJob) {
       }),
     ),
     Effect.asVoid,
+    Effect.andThen(entry.onChange),
   );
 }
 
@@ -1489,6 +1499,9 @@ function mutateManagerWorksetDefinitionFromRequest(
   assertNoActiveManagerPrepare(registry);
   registry.mutating = true;
   return mutateManagerWorksetDefinition(request.config, mutation).pipe(
+    Effect.tap(() =>
+      Effect.flatMap(ManagerLiveConsumerChangeHints, hints => hints.publish({topic: 'worksets', scope: 'account'})),
+    ),
     Effect.ensuring(Effect.sync(() => (registry.mutating = false))),
   );
 }
@@ -1501,6 +1514,9 @@ function mutateManagerManifestProjectFromRequest(
   assertNoActiveManagerPrepare(registry);
   registry.mutating = true;
   return mutateManagerManifestProject(request.config, mutation).pipe(
+    Effect.tap(() =>
+      Effect.flatMap(ManagerLiveConsumerChangeHints, hints => hints.publish({topic: 'worksets', scope: 'account'})),
+    ),
     Effect.ensuring(Effect.sync(() => (registry.mutating = false))),
   );
 }

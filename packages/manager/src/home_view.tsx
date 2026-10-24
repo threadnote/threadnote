@@ -3,6 +3,7 @@ import React, {useEffect, useState} from 'react';
 import type {ManagerHomeLane} from './home.js';
 import {MemoryDetailModal} from './detail_modal.js';
 import {api} from './ui/support.js';
+import {useManagerLiveQuery} from './live/provider.js';
 
 interface HomeResponse {
   readonly stats?: {
@@ -46,17 +47,31 @@ export function ManagerHomePanel({
   useEffect(() => setHandoff(undefined), [project]);
   const [home, setHome] = useState<HomeResponse | undefined>();
   const [generation, setGeneration] = useState(0);
+  const previousGeneration = React.useRef(0);
+  const live = useManagerLiveQuery<HomeResponse>(
+    project ? {topic: 'home', project} : {topic: 'home', scope: 'account'},
+    'home',
+    signal =>
+      api<HomeResponse>(`/api/home?project=${encodeURIComponent(project)}`, undefined, {
+        signal,
+        timeoutMilliseconds: 8_000,
+      }),
+  );
+  const fallback = !live.active || live.snapshot.status === 'unsupported';
   useEffect(() => {
+    if (!fallback) return;
     const timer = setInterval(() => {
       if (!document.hidden) setGeneration(value => value + 1);
     }, 30_000);
     return () => clearInterval(timer);
-  }, []);
+  }, [fallback]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const healthFindingCount = home?.lanes.find(lane => lane.id === 'health')?.count;
+  const visibleHome = home?.project === project ? home : undefined;
+  const healthFindingCount = visibleHome?.lanes.find(lane => lane.id === 'health')?.count;
 
   useEffect(() => {
+    if (!fallback) return;
     let cancelled = false;
     const controller = new AbortController();
     setHome(undefined);
@@ -79,7 +94,23 @@ export function ManagerHomePanel({
       cancelled = true;
       controller.abort();
     };
-  }, [project, generation]);
+  }, [project, generation, fallback]);
+  useEffect(() => {
+    if (fallback) return;
+    if (live.snapshot.status === 'ready' && live.snapshot.data.project === project) {
+      setHome(live.snapshot.data);
+      setError('');
+      setLoading(false);
+    } else if (live.snapshot.status === 'error') {
+      setError(String(live.snapshot.error));
+      setLoading(false);
+    }
+  }, [fallback, live.snapshot, project]);
+  useEffect(() => {
+    if (previousGeneration.current === generation) return;
+    previousGeneration.current = generation;
+    if (!fallback) live.invalidate();
+  }, [generation]);
 
   return (
     <section aria-busy={loading} className="panel home-panel is-active">
@@ -107,7 +138,11 @@ export function ManagerHomePanel({
           </label>
         </div>
       ) : null}
-      {projects.length === 0 && home?.stats?.memories === 0 && home?.stats?.pending === 0 && !loading && !error ? (
+      {projects.length === 0 &&
+      visibleHome?.stats?.memories === 0 &&
+      visibleHome?.stats?.pending === 0 &&
+      !loading &&
+      !error ? (
         <div className="home-empty">
           <h3>No project records yet</h3>
           <p>Open Context to create a scoped brief, or Library to save the first project memory.</p>
@@ -121,17 +156,17 @@ export function ManagerHomePanel({
           <h3>Project home is unavailable</h3>
           <p>{error}</p>
         </div>
-      ) : home ? (
+      ) : visibleHome ? (
         <>
           <div className="home-overview" aria-label={project ? 'Project overview' : 'All projects overview'}>
             <button onClick={() => onOpen('memory')}>
               <span>Memories</span>
-              <strong>{home.stats?.memories ?? '—'}</strong>
+              <strong>{visibleHome.stats?.memories ?? '—'}</strong>
               <small>{project ? 'Your project’s saved context' : 'Saved context across all projects'}</small>
             </button>
             <button onClick={() => onOpen('reviews')}>
               <span>Awaiting review</span>
-              <strong>{home.stats?.pending ?? '—'}</strong>
+              <strong>{visibleHome.stats?.pending ?? '—'}</strong>
               <small>Proposed knowledge to consider</small>
             </button>
             <button onClick={() => onOpen('context-health')}>
@@ -144,7 +179,7 @@ export function ManagerHomePanel({
             <header>
               <h3>Next up</h3>
             </header>
-            {home.lanes
+            {visibleHome.lanes
               .filter(lane => lane.id === 'reviews' || lane.id === 'health')
               .map(lane => (
                 <div className="workspace-row" key={lane.id}>
@@ -181,15 +216,15 @@ export function ManagerHomePanel({
               <h3>Resume work</h3>
               <button onClick={() => onOpen('memory')}>Open Library</button>
             </header>
-            {home.stats?.memories === undefined && home.handoffs.length === 0 ? (
+            {visibleHome.stats?.memories === undefined && visibleHome.handoffs.length === 0 ? (
               <p className="workspace-empty">Handoffs are unavailable. Refresh to retry.</p>
-            ) : home.handoffs.length === 0 ? (
+            ) : visibleHome.handoffs.length === 0 ? (
               <p className="workspace-empty">
                 No active handoffs {project ? `for ${project}` : 'across all projects'}.
               </p>
             ) : (
               <ul>
-                {home.handoffs.map(handoff => (
+                {visibleHome.handoffs.map(handoff => (
                   <li className="workspace-row" key={handoff.uri}>
                     <FileText aria-hidden="true" />
                     <button className="home-handoff-button" onClick={() => setHandoff(handoff)} type="button">
