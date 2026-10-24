@@ -6,6 +6,7 @@ import type {MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
 import type {ManagerContextMaintenancePacketV2} from '../../src/attention/contracts.js';
 import type {ManagerTopicReviewV1} from '../../src/attention/topic_contracts.js';
 import {TopicReviewContent} from '../../src/attention/topic_review.js';
+import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 import {TopicEnrollmentPanel} from '../../src/attention/topic_enrollment.js';
 
 const hash = 'a'.repeat(64);
@@ -129,6 +130,8 @@ let readGate: Promise<void> | undefined;
 let packetUnavailable: boolean;
 let recoveryOnly: boolean;
 let rejectedRecovery: boolean;
+let maintenanceReadDenied: boolean;
+let maintenanceReadUnavailable: boolean;
 let rejectGate: Promise<void> | undefined;
 const posted: Record<string, unknown>[] = [];
 const response = (value: unknown, status = 200) =>
@@ -145,16 +148,52 @@ beforeEach(() => {
   packetUnavailable = false;
   recoveryOnly = false;
   rejectedRecovery = false;
+  maintenanceReadDenied = false;
+  maintenanceReadUnavailable = false;
   rejectGate = undefined;
   posted.length = 0;
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = true;
+  });
+  vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+    this.open = false;
+  });
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), 'http://manager.test');
       if (url.pathname === '/api/consolidation-models')
         return response({models: [{id: 'model', label: 'Model', isDefault: true}]});
-      if (url.pathname === '/api/attention/context-maintenance')
+      if (url.pathname === '/api/attention/context-maintenance') {
+        if (url.searchParams.get('view') === 'status')
+          return response({
+            version: 2,
+            cases: [
+              {
+                caseId: 'case-note',
+                project: 'notes',
+                memoryId: 'memory-note',
+                family: 'topic-maintenance',
+                slot: 'declared-support',
+                evidenceRevision: hash,
+                disposition: 'needs-decision',
+                reason: 'note changed',
+                firstSeen: 'now',
+                lastSeen: 'now',
+                lastChecked: 'now',
+                attemptCount: 1,
+                events: [],
+              },
+            ],
+          });
+        if (maintenanceReadDenied) return response({error: 'Private source access denied.'}, 403);
+        if (maintenanceReadUnavailable && evidence.topicEvidence?.version === 2)
+          return response({
+            ...evidence,
+            topicEvidence: {...evidence.topicEvidence, outcome: 'unavailable', body: undefined, obsidian: {}},
+          });
         return packetUnavailable ? response({error: 'Source evidence changed.'}, 409) : response(evidence);
+      }
       if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         posted.push(body);
@@ -258,6 +297,35 @@ const renderReview = () =>
       />,
     ),
   );
+const renderMaintenanceReview = (stale: boolean) =>
+  act(async () =>
+    root.render(
+      <MaintenanceCaseDialog
+        project="notes"
+        caseId="case-note"
+        initialCase={{
+          caseId: 'case-note',
+          project: 'notes',
+          memoryId: 'memory-note',
+          family: 'topic-maintenance',
+          slot: 'declared-support',
+          evidenceRevision: hash,
+          disposition: 'needs-decision',
+          reason: 'note changed',
+          firstSeen: 'now',
+          lastSeen: 'now',
+          lastChecked: 'now',
+          attemptCount: 1,
+          events: [],
+        }}
+        stale={stale}
+        onChanged={() => undefined}
+        onClose={() => undefined}
+        onOpenLibrary={() => undefined}
+        onTask={() => undefined}
+      />,
+    ),
+  );
 async function selectExcerpt(start: number, end: number) {
   const editor = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Select current note excerpt"]')!;
   await act(async () => {
@@ -326,6 +394,26 @@ it('clears imported proposals, approvals and source excerpts immediately during 
   expect(document.body.textContent).toContain('Private review unavailable');
   expect(document.body.textContent).not.toMatch(/Accepted private|Proposed private|Approved private|Original private/u);
 });
+
+it.each(['denied', 'unavailable'] as const)(
+  'redacts a private topic packet without a review ID after %s revalidation',
+  async outcome => {
+    await renderMaintenanceReview(false);
+    const dialog = document.querySelector('dialog');
+    expect(dialog?.textContent).toContain('Original private note.');
+    expect(dialog?.textContent).toContain('Accepted private note.');
+    expect(dialog?.textContent).toContain('🙂 Exact supporting note.');
+    await renderMaintenanceReview(true);
+    await renderMaintenanceReview(false);
+    if (outcome === 'denied') maintenanceReadDenied = true;
+    else maintenanceReadUnavailable = true;
+    await act(async () => button('Revalidate review evidence').click());
+    expect(document.querySelector('dialog')).toBe(dialog);
+    expect(dialog?.textContent).not.toMatch(/Original private|Accepted private|Exact supporting note/u);
+    expect(dialog?.textContent).not.toContain('Keep selected excerpt');
+    expect(posted).toHaveLength(0);
+  },
+);
 
 it('discards newly loaded private review text if the following evidence read fails', async () => {
   packetUnavailable = true;

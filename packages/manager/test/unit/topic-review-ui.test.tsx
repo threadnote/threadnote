@@ -6,6 +6,7 @@ import {ReviewsPanel} from '@threadnote/manager/attention-view';
 import type {ManagerContextMaintenancePacketV2} from '@threadnote/manager/attention/contracts';
 import type {ManagerTopicReviewV1} from '@threadnote/manager/attention/topic-contracts';
 import {TopicReviewDialog} from '../../src/attention/topic_review.js';
+import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 
 const hash = 'a'.repeat(64);
 const citationId = `tncc_${'1'.repeat(40)}`;
@@ -153,6 +154,30 @@ beforeEach(() => {
       if (url.pathname === '/api/consolidation-models')
         result = {models: [{id: 'local-model', label: 'Local model', isDefault: true}]};
       else if (url.pathname === '/api/attention/context-maintenance') {
+        if (url.searchParams.get('view') === 'status')
+          return new Response(
+            JSON.stringify({
+              version: 2,
+              cases: [
+                {
+                  caseId: packet.caseId,
+                  project: packet.project,
+                  memoryId: 'memory-1',
+                  family: packet.family,
+                  slot: packet.slot,
+                  evidenceRevision: evidencePacket.evidenceRevision,
+                  disposition: 'needs-decision',
+                  reason: packet.reason,
+                  firstSeen: 'now',
+                  lastSeen: 'now',
+                  lastChecked: 'now',
+                  attemptCount: 1,
+                  events: [],
+                },
+              ],
+            }),
+            {status: 200, headers: {'content-type': 'application/json'}},
+          );
         if (packetFailure)
           return new Response(
             JSON.stringify({
@@ -349,6 +374,47 @@ async function edit(ordinal: number, value: string) {
     editor.dispatchEvent(new Event('input', {bubbles: true}));
   });
 }
+
+it('retains a dirty topic draft through unchanged evidence revalidation and freezes changed evidence', async () => {
+  const dialog = (stale: boolean) => (
+    <MaintenanceCaseDialog
+      project="threadnote"
+      caseId="case-1"
+      stale={stale}
+      onChanged={() => undefined}
+      onClose={() => undefined}
+      onOpenLibrary={() => undefined}
+      onTask={() => undefined}
+    />
+  );
+  await render(dialog(false));
+  await edit(0, 'Dirty current behavior.');
+  const editor = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]');
+  expect(editor?.value).toBe('Dirty current behavior.');
+  await act(async () => root?.render(dialog(true)));
+  await act(async () => root?.render(dialog(false)));
+  expect(button('Preview exact final document').disabled).toBe(true);
+  await click('Revalidate review evidence');
+  expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')).toBe(
+    editor,
+  );
+  expect(editor?.value).toBe('Dirty current behavior.');
+  expect(button('Preview exact final document').disabled).toBe(false);
+  evidencePacket = {...packet, evidenceRevision: 'changed-revision'};
+  await act(async () => root?.render(dialog(true)));
+  await act(async () => root?.render(dialog(false)));
+  await click('Revalidate review evidence');
+  expect(editor?.value).toBe('Dirty current behavior.');
+  expect(button('Preview exact final document').disabled).toBe(true);
+  expect(
+    [...document.querySelectorAll('dialog [role="alert"]')].some(alert => alert.textContent?.includes('case changed')),
+  ).toBe(true);
+  expect(posted).toHaveLength(0);
+  packetFailure = true;
+  await click('Revalidate review evidence');
+  expect(document.body.textContent).not.toContain('Dirty current behavior.');
+  expect(button('Preview exact final document')?.disabled ?? true).toBe(true);
+});
 
 it('previews a closed edited draft and applies only its exact revision and digest', async () => {
   const onClose = vi.fn();

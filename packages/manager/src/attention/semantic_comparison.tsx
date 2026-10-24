@@ -197,6 +197,8 @@ export function SemanticResolutionReview(props: {
   readonly onRefresh: () => void;
   readonly secondaryAction?: React.ReactNode;
   readonly ownerInstructions?: string;
+  readonly writesDisabled?: boolean;
+  readonly reviewNotice?: React.ReactNode;
 }): React.ReactElement {
   const [choice, setChoice] = useState<SemanticResolutionChoice>();
   const [preview, setPreview] = useState<ManagerSemanticReviewPreviewV1>();
@@ -234,6 +236,7 @@ export function SemanticResolutionReview(props: {
     preview?.choice === choice &&
     !busy &&
     !stale &&
+    !props.writesDisabled &&
     (preview?.mode === 'keep-both' || (archiveReady && reviewedWholeMemory));
   function choose(value: SemanticResolutionChoice) {
     setChoice(value);
@@ -253,7 +256,7 @@ export function SemanticResolutionReview(props: {
     setStale(isStale);
   }
   async function prepare() {
-    if (!choice || busy || stale) return;
+    if (!choice || busy || stale || props.writesDisabled) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy(true);
@@ -288,7 +291,7 @@ export function SemanticResolutionReview(props: {
     }
   }
   async function confirm() {
-    if (!preview || !canConfirm) return;
+    if (!preview || !canConfirm || props.writesDisabled) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy(true);
@@ -392,6 +395,7 @@ export function SemanticResolutionReview(props: {
         ) : null}
       </section>
       <footer className="semantic-resolution-footer" aria-label="Conflict resolution actions">
+        {props.reviewNotice}
         <span className="semantic-selection-status" role="status">
           {stale
             ? 'Refresh this comparison to continue.'
@@ -420,7 +424,7 @@ export function SemanticResolutionReview(props: {
               <button
                 type="button"
                 className={preview ? undefined : 'primary'}
-                disabled={!choice || busy}
+                disabled={!choice || busy || props.writesDisabled}
                 onClick={() => void prepare()}
               >
                 {busy ? 'Checking current memories…' : preview ? 'Refresh my preview' : 'Preview my choice'}

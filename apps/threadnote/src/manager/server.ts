@@ -22,8 +22,9 @@ import * as HttpServerResponse from 'effect/http/HttpServerResponse';
 import * as HttpServerRequest from 'effect/http/HttpServerRequest';
 import {createManagerHttpServer, type ManagerHttpRequest} from '@threadnote/manager/server';
 import {managerLoopbackUrl, managerRequestIsAuthorized} from '@threadnote/manager/authorization';
-import {makeManagerLive, managerLiveHttpLayer, readManagerLiveProjects, type ManagerLive} from './live.js';
+import {managerLiveHttpLayer, readManagerLiveProjects, type ManagerLive} from './live.js';
 import {makeManagerLiveSources, ManagerLiveChangeHints} from './live_sources.js';
+import {makeHealthEnabledManagerLive, ManagerHealthObservationHints} from './live_health_sources.js';
 import {contextMaintenanceStatePath} from '../memory/context/maintenance.js';
 import {applyReviewedConsolidation, type ReviewedConsolidationJob} from './consolidation.js';
 import {
@@ -370,7 +371,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
             server.address._tag === 'InetAddressV4' || server.address._tag === 'InetAddressV6'
               ? server.address.port
               : (options.uiPort ?? 0);
-          const live = yield* makeManagerLive({
+          const {live, healthHints} = yield* makeHealthEnabledManagerLive(config, {
             origin: `http://127.0.0.1:${actualPort}`,
             token,
             projects: readManagerLiveProjects(yield* FileSystem.FileSystem, config.manifestPath),
@@ -387,6 +388,7 @@ export function runManage(config: RuntimeConfig, options: ManageOptions) {
           yield* server.serve(
             createManagerServer({automaticCompactionStatus, config, jobs: new Map(), token, worksetScope, live}).pipe(
               Effect.provideService(ManagerLiveChangeHints, sources.hints),
+              Effect.provideService(ManagerHealthObservationHints, healthHints),
             ),
           );
           yield* startManagerContextSchedulers(config, automaticCompactionStatus).pipe(

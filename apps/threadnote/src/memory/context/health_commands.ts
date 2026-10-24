@@ -35,6 +35,8 @@ import {
   type ContextHealthSelectorV1,
 } from './health_selector.js';
 import {reviewedSemanticContradictionIds} from './semantic_review_state.js';
+import {nextContextHealthChangeAt} from '@threadnote/context/health';
+import {ManagerHealthObservationHints} from '../../manager/live_health_sources.js';
 
 export interface RunContextHealthOptionsV1 {
   readonly after?: string;
@@ -93,6 +95,8 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
     readonly includeFindingCombination?: Parameters<typeof buildContextHealthReport>[0]['includeFindingCombination'];
     readonly includeFindingUris?: readonly string[];
     readonly limit?: number;
+    /** Only the complete Manager health resource registers live source coverage. */
+    readonly liveObservation?: boolean;
     readonly relationCorpus?: Parameters<typeof buildContextHealthReport>[0]['records'];
   } = {},
 ) {
@@ -157,6 +161,23 @@ export const collectContextHealthEvidence = Effect.fn('memory.contextHealth.coll
     records,
     relationEvidence,
   });
+  // Register the report's actual source selection, including cited repositories.
+  // Non-Manager callers receive the no-op reference and do no observation work.
+  if (options.liveObservation === true) {
+    const deadlines = [
+      nextContextHealthChangeAt({records, duplicateCorpus: options.duplicateCorpus, project, now}),
+      ...citationValidations.flatMap(validation =>
+        validation.receipts
+          .filter(receipt => receipt.status === 'unknown' && receipt.provenance !== 'historical-verified')
+          .map(receipt => Date.parse(receipt.observedAt) + 60_000),
+      ),
+    ].filter((value): value is number => value !== undefined && Number.isFinite(value) && value > now.getTime());
+    yield* (yield* ManagerHealthObservationHints).register(project, {
+      cwd,
+      citations: citationRecords.flatMap(record => record.metadata.codeCitations ?? []),
+      ...(deadlines.length === 0 ? {} : {nextChangeAt: Math.min(...deadlines)}),
+    });
+  }
   return {report, citationValidations};
 });
 
