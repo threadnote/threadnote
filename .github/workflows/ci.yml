@@ -356,6 +356,8 @@ jobs:
         env:
           THREADNOTE_RELEASE_ARCHIVE: artifacts/threadnote-${{ matrix.target }}.tar.gz
           THREADNOTE_TEST_PYTHON: python
+      - name: Workflow journal persistence smoke
+        run: bun --bun vitest run apps/threadnote/test/dev-skills/workflow-journal-validation.test.ts
       - name: Preserve bounded release evidence
         if: always()
         uses: actions/upload-artifact@v7
