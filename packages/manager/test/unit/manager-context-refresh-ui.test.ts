@@ -100,6 +100,9 @@ it('refreshes Context choices through the Manager button while preserving a vali
   vi.spyOn(window, 'setInterval').mockImplementation(() => setTimeout(() => undefined, 0));
   setFetch(async input => {
     const path = new URL(String(input), 'http://localhost').pathname;
+    // Exercise the explicit REST compatibility path in this refresh fixture.
+    if (path === '/api/live-session')
+      return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     if (path === '/api/state')
       return json({
         agents: [],
