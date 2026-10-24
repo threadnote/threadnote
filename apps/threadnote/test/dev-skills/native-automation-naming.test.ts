@@ -1,7 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Layer, Option} from 'effect';
-import {ResourceStore} from '@threadnote/store/resource-store';
-import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
@@ -121,51 +119,6 @@ const writeInput = (
 
 const nameRegistryPath = (f: Effect.Success<ReturnType<typeof nativeFixture>>) =>
   f.path.join(f.home, 'workflow-automations', 'names-v1', 'fixture', 'workflow-names.json');
-
-/** Keep the real mutation lock and invalidation path; report bounded stages before the unchanged test deadline. */
-function observeConcurrentInit<A, E, R>(
-  f: Effect.Success<ReturnType<typeof nativeFixture>>,
-  program: Effect.Effect<A, E, R>,
-) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      const events: string[] = [];
-      const record = (stage: string) =>
-        Effect.sync(() => {
-          if (events.length < 24) events.push(stage);
-        });
-      const observedStore = ResourceStore.layerWith({
-        onMutationLockAcquired: () => record('acquired'),
-        onMutationLockCompleted: () => record('completed'),
-        onMutationLockContention: () => record('contention'),
-      }).pipe(Layer.provide(recallResourceInvalidationLayer));
-      const startedAt = yield* Clock.currentTimeMillis;
-      yield* Effect.sleep(10_000).pipe(
-        Effect.andThen(
-          Effect.gen(function* () {
-            const elapsed = (yield* Clock.currentTimeMillis) - startedAt;
-            const accountLock = f.path.join(f.home, 'locks', 'resources', 'local', 'mutations.lock');
-            const registryLock = nameRegistryPath(f) + '.lock';
-            const account = yield* f.fs.stat(accountLock).pipe(Effect.option);
-            const registry = yield* f.fs.stat(registryLock).pipe(Effect.option);
-            yield* Effect.logWarning(
-              JSON.stringify({
-                diagnostic: 'native-concurrent-init',
-                elapsed,
-                events,
-                accountLockPresent: Option.isSome(account),
-                registryLockPresent: Option.isSome(registry),
-              }),
-            );
-          }),
-        ),
-        Effect.forkScoped,
-      );
-      const services = yield* Layer.build(observedStore);
-      return yield* program.pipe(Effect.provide(services));
-    }),
-  );
-}
 
 describe('native workflow naming integration', () => {
   effectIt.effect(
@@ -295,13 +248,13 @@ describe('native workflow naming integration', () => {
         requests.slice(0, 2),
         ([runId, title]) => f.call(initInput(f, runId, title)),
         {concurrency: 2},
-      ).pipe(program => observeConcurrentInit(f, program));
+      );
       const initialized = simultaneousResults.map(requireInitResult);
       const remainingResults = yield* Effect.forEach(
         requests.slice(2),
         ([runId, title]) => f.call(initInput(f, runId, title)),
         {concurrency: 2},
-      ).pipe(program => observeConcurrentInit(f, program));
+      );
       initialized.push(...remainingResults.map(requireInitResult));
       expect(new Set(initialized.map(item => item.bindingId)).size).toBe(requests.length);
       expect(initialized.slice(0, 3).map(item => item.naming.slug)).toEqual([
@@ -324,7 +277,7 @@ describe('native workflow naming integration', () => {
       ] as const;
       const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
         concurrency: 2,
-      }).pipe(program => observeConcurrentInit(f, program));
+      });
       const initialized = results.map(requireInitResult);
       expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
       expect(initialized[0].naming.slug).toBe('x'.repeat(80));
@@ -342,7 +295,7 @@ describe('native workflow naming integration', () => {
       ] as const;
       const results = yield* Effect.forEach(requests, ([runId, title]) => f.call(initInput(f, runId, title)), {
         concurrency: 2,
-      }).pipe(program => observeConcurrentInit(f, program));
+      });
       const initialized = results.map(requireInitResult);
       expect(new Set(initialized.map(item => item.bindingId)).size).toBe(2);
       expect(initialized[0].naming.slug).toBe('untitled');
