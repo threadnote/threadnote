@@ -984,6 +984,7 @@ bun_test(
         "//apps/threadnote:src/workflow_memory/index.ts",
         "//apps/threadnote:src/workflow_memory/inspection.ts",
         "//apps/threadnote:src/workflow_memory/journal.ts",
+        "//apps/threadnote:src/workflow_memory/journal_codec.ts",
         "//apps/threadnote:src/workflow_memory/journal_validation.ts",
         "//apps/threadnote:src/workflow_memory/profile.ts",
         "//apps/threadnote:src/workflow_memory/protocol.ts",
