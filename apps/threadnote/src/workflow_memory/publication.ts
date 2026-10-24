@@ -1,4 +1,5 @@
 import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {
   canonicalMemoryDocumentContent,
@@ -251,6 +252,13 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
       input.relations.flatMap(relation => (relation.uri ? [{type: relation.type, uri: relation.uri}] : [])),
       {allowedUriScopes: [scope.root]},
     );
+    const topic = yield* Effect.try({
+      try: () =>
+        binding.naming
+          ? workflowMemoryStem(binding.naming, input.topic)
+          : `${input.topic}-${binding.bindingId.slice(0, 16)}`,
+      catch: invalidProjection,
+    });
     const prepared = yield* prepareCursorCloudSharedMemory(config, scope, {
       operation: 'create',
       bodyText: input.body,
@@ -258,7 +266,7 @@ const preparePublication = Effect.fn('workflowPublication.prepare')(function* (
         kind: 'durable',
         status: 'active',
         project: binding.project,
-        topic: `${input.topic}-${binding.bindingId.slice(0, 16)}`,
+        topic,
         timestamp,
         memoryId: `tn_${sha256HexSync(`${binding.bindingId}\n${input.key}`).slice(0, 20)}`,
         sourceAgentClient: 'threadnote',

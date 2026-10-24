@@ -3,6 +3,7 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {WorkflowAutomationError, type WorkflowWriteIntent} from '@threadnote/workflow-automations/contracts';
 import {
   decodeNativeWorkflowRequest,
+  decodeNativeWorkflowState,
   nativeWorkflowIntentDigest,
   type NativeWorkflowRequest,
   type NativeWorkflowState,
@@ -14,6 +15,7 @@ import {stableJson, type WorkflowBinding} from '../workflow_memory/protocol.js';
 import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} from './memory.js';
 import {makeWorkflowGraphAdapter} from './graph.js';
 import {readNativeWorkflowState, writeNativeWorkflowState, withNativeWorkflowLock} from './store.js';
+import {reserveWorkflowNameFamily} from './naming.js';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -31,6 +33,7 @@ const summary = (state: NativeWorkflowState) => ({
   bindingId: state.bindingId,
   project: state.project,
   featureId: state.featureId,
+  ...(state.naming ? {naming: state.naming, title: state.title} : {}),
   profile: state.profile,
   ...(state.team ? {team: state.team} : {}),
   operations: state.operations.map(operation => ({
@@ -47,7 +50,11 @@ const summary = (state: NativeWorkflowState) => ({
   })),
 });
 
-const bindingRequest = (state: Pick<NativeWorkflowState, 'runId' | 'project' | 'featureId' | 'generation'>) => ({
+const bindingRequest = (
+  state: Pick<NativeWorkflowState, 'runId' | 'project' | 'featureId' | 'generation'> & {
+    readonly naming?: NativeWorkflowState['naming'];
+  },
+) => ({
   protocolVersion: 1 as const,
   action: 'bind' as const,
   // Native fresh runs cannot reinterpret an ordinary helper's run ID.
@@ -55,6 +62,7 @@ const bindingRequest = (state: Pick<NativeWorkflowState, 'runId' | 'project' | '
   project: state.project,
   featureId: state.featureId,
   generation: state.generation,
+  ...(state.naming ? {naming: state.naming} : {}),
 });
 
 const currentBinding = Effect.fn('workflowAutomation.currentBinding')(function* (
@@ -133,6 +141,7 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
       state.project !== request.project ||
       state.featureId !== request.featureId ||
       state.generation !== request.generation ||
+      (request.title !== undefined && state.title !== request.title) ||
       (request.profile !== undefined && state.profile !== request.profile) ||
       (request.team !== undefined && state.team !== request.team)
     )
@@ -140,12 +149,19 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     const binding = yield* currentBinding(config, state);
     return yield* inspectNative(config, state, binding);
   }
-  const binding = yield* resolveWorkflowBinding(config, {
+  const baseBinding = yield* resolveWorkflowBinding(config, {
     ...bindingRequest(request),
     ...(request.profile ? {profile: request.profile} : {}),
     ...(request.team ? {team: request.team} : {}),
   });
-  yield* withWorkflowLock(config, binding.bindingId, bindWorkflow(config, binding, {requireEmpty: true}));
+  const title = request.title ?? request.featureId;
+  const naming = yield* reserveWorkflowNameFamily(config, baseBinding, title);
+  const binding = yield* resolveWorkflowBinding(config, {
+    ...bindingRequest(request),
+    naming,
+    ...(request.profile ? {profile: request.profile} : {}),
+    ...(request.team ? {team: request.team} : {}),
+  });
   const state: NativeWorkflowState = {
     format: 'threadnote-native-workflow',
     stateVersion: 1,
@@ -153,12 +169,17 @@ const initialize = Effect.fn('workflowAutomation.initialize')(function* (
     runId: request.runId,
     project: binding.project,
     featureId: binding.featureId,
+    title,
+    naming,
     generation: binding.generation,
     profile: binding.profile,
     ...(binding.team ? {team: binding.team} : {}),
     bindingId: binding.bindingId,
     operations: [],
   };
+  // Admission must finish before a canonical binding journal or manifest is created.
+  yield* Effect.try({try: () => decodeNativeWorkflowState(state), catch: nativeWorkflowError});
+  yield* withWorkflowLock(config, binding.bindingId, bindWorkflow(config, binding, {requireEmpty: true}));
   yield* writeNativeWorkflowState(config, state, null);
   return summary(state);
 });
@@ -328,6 +349,7 @@ const runNative = Effect.fn('workflowAutomation.run')(function* (config: Runtime
     return {
       ...version,
       stateVersion: 1,
+      namingPolicyVersion: 1,
       status: 'ok' as const,
       operations: ['init', 'inspect', 'read', 'preflight', 'write', 'recover', 'graph-ready'],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],

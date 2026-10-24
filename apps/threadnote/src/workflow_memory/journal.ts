@@ -19,6 +19,7 @@ import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
 import {decodeWorkflowJournal, encodeWorkflowJournal} from './journal_codec.js';
+import {workflowStateTopic} from './naming.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -212,7 +213,7 @@ const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['
       kind: 'handoff',
       status: 'active',
       project: binding.project,
-      topic: `workflow-${binding.bindingId}-manifest`,
+      topic: workflowStateTopic(binding),
       memoryId: `tn_${binding.bindingId.slice(0, 20)}`,
       timestamp,
       sourceAgentClient: 'threadnote',
@@ -298,7 +299,7 @@ export const bindWorkflow = Effect.fn('workflowMemory.bind')(function* (
     artifacts: {},
     operations: {},
     manifestCommitted: false,
-    manifestUri: `threadnote://user/${uriSegment(config.user)}/memories/handoffs/active/${uriSegment(binding.project)}/workflow-${binding.bindingId}-manifest.md`,
+    manifestUri: `threadnote://user/${uriSegment(config.user)}/memories/handoffs/active/${uriSegment(binding.project)}/${uriSegment(workflowStateTopic(binding))}.md`,
     manifestContent: manifestDocument(binding, {}, DateTime.formatIso(yield* DateTime.now)),
   };
   yield* writeJournalFile(config, state);

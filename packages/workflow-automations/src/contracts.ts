@@ -24,6 +24,7 @@ export interface WorkflowWriteIntent {
   readonly artifactKey: string;
   readonly sourceRunId: string;
   readonly role: string;
+  readonly nameHint?: string;
   readonly body: string;
   readonly expectedRevision: string | null;
   readonly uri?: string;
