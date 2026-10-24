@@ -16,8 +16,18 @@ import {loadWorkflowJournal, workflowLocation} from '../../src/workflow_memory/j
 import {reconcileWorkflowCitationEnrichment} from '../../src/workflow_memory/citation_recovery.js';
 import type {WorkflowRequest, WorkflowReadResult} from '../../src/workflow_memory/protocol.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {
+  executionDiagnosticPhase,
+  workflowExecutionDiagnostics,
+  withWorkflowExecutionDiagnostics,
+  type WorkflowExecutionDiagnostics,
+} from './workflow-execution-diagnostics.js';
 
-const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (codeRefs = ['src/value.ts']) {
+const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (
+  codeRefs = ['src/value.ts'],
+  diagnostics?: WorkflowExecutionDiagnostics,
+) {
+  executionDiagnosticPhase(diagnostics, 'fixture-filesystem');
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -27,6 +37,7 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (co
   yield* fs.makeDirectory(home);
   yield* fs.makeDirectory(path.join(repo, 'src'), {recursive: true});
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', repo, ...args]);
+  executionDiagnosticPhase(diagnostics, 'fixture-git');
   yield* git(['init', '--initial-branch=main']);
   yield* git(['config', 'user.email', 'test@example.invalid']);
   yield* git(['config', 'user.name', 'Citation Recovery Test']);
@@ -50,6 +61,7 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (co
   };
   const call = (request: WorkflowRequest) =>
     runWorkflowMemory(config, request).pipe(Effect.provideService(SystemInfo, context));
+  executionDiagnosticPhase(diagnostics, 'bind');
   const bound = yield* call({
     protocolVersion: 1,
     action: 'bind',
@@ -75,15 +87,20 @@ const fixture = Effect.fn('test.workflowCitationRecovery.fixture')(function* (co
     citationPolicy: 'defer',
     expectedRevision: null,
   };
+  executionDiagnosticPhase(diagnostics, 'create');
   const written = (yield* call(create)) as WorkflowReadResult;
   expect(written.codeCitations).toEqual([]);
+  executionDiagnosticPhase(diagnostics, 'journal-before-index');
   const original = yield* loadWorkflowJournal(config, binding.bindingId).pipe(
     Effect.provideService(SystemInfo, context),
   );
+  executionDiagnosticPhase(diagnostics, 'graph-index');
   yield* (yield* CodeGraphIndexer).index({threadnoteHome: home, cwd: repo, ensureVectors: false});
   // Exercise the real native finalizer after real graph preparation. The
   // indexer's automatic hook may already have completed this same transition.
+  executionDiagnosticPhase(diagnostics, 'deferred-finalization');
   yield* finalizeDeferredCodeAnchors(config, {uris: [written.canonicalUri]});
+  executionDiagnosticPhase(diagnostics, 'fixture-readback');
   const content = yield* (yield* ResourceStore).read(workflowLocation(config), written.canonicalUri);
   expect(parseMemoryDocument(written.canonicalUri, content)?.metadata.codeCitations).toHaveLength(1);
   return {fs, path, config, binding, repo, context, call, create, written, original, content};
@@ -142,58 +159,72 @@ describe('workflow deferred citation recovery', () => {
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('recovers the same operation after actual native graph-index citation enrichment', () =>
-    Effect.gen(function* () {
-      const f = yield* fixture();
-      const adopted = yield* reconcileWorkflowCitationEnrichment(
-        f.config,
-        f.binding,
-        f.original.operations.create,
-        f.content,
-      );
-      expect(adopted).toMatchObject({
-        intentDigest: f.original.operations.create.intentDigest,
-        desired: f.content,
-        artifact: {memoryId: f.written.memoryId, revision: sha256HexSync(f.content)},
-      });
-      const recovered = (yield* f.call({
-        protocolVersion: 1,
-        action: 'recover',
-        bindingId: f.binding.bindingId,
-        operationId: 'create',
-      })) as WorkflowReadResult;
-      expect(recovered).toMatchObject({
-        canonicalUri: f.written.canonicalUri,
-        memoryId: f.written.memoryId,
-        body: f.written.body,
-        bodySha256: f.written.bodySha256,
-        revision: sha256HexSync(f.content),
-      });
-      expect(recovered.codeCitations).toHaveLength(1);
-      expect(yield* f.call(f.create)).toEqual(recovered);
-      const after = yield* loadWorkflowJournal(f.config, f.binding.bindingId).pipe(
-        Effect.provideService(SystemInfo, f.context),
-      );
-      expect(after.operations.create.intentDigest).toBe(f.original.operations.create.intentDigest);
-      expect(after.operations.create.desired).toBe(f.content);
-      expect(after.artifacts[f.written.canonicalUri].revision).toBe(sha256HexSync(f.content));
-      yield* f.call({
-        protocolVersion: 1,
-        action: 'archive',
-        bindingId: f.binding.bindingId,
-        operationId: 'archive',
-        artifactKey: 'draft',
-        sourceRunId: 'writer',
-        role: 'current',
-        uri: f.written.canonicalUri,
-        expectedRevision: recovered.revision,
-      });
-      expect(yield* f.call(f.create).pipe(Effect.result)).toMatchObject({
-        _tag: 'Failure',
-        failure: {code: 'operation-superseded'},
-      });
-    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
-  );
+  effectIt.effect('recovers the same operation after actual native graph-index citation enrichment', context => {
+    const diagnostics = workflowExecutionDiagnostics(context);
+    return withWorkflowExecutionDiagnostics(
+      Effect.gen(function* () {
+        const f = yield* fixture(undefined, diagnostics);
+        executionDiagnosticPhase(diagnostics, 'citation-reconcile');
+        const adopted = yield* reconcileWorkflowCitationEnrichment(
+          f.config,
+          f.binding,
+          f.original.operations.create,
+          f.content,
+        );
+        expect(adopted).toMatchObject({
+          intentDigest: f.original.operations.create.intentDigest,
+          desired: f.content,
+          artifact: {memoryId: f.written.memoryId, revision: sha256HexSync(f.content)},
+        });
+        executionDiagnosticPhase(diagnostics, 'recover');
+        const recovered = (yield* f.call({
+          protocolVersion: 1,
+          action: 'recover',
+          bindingId: f.binding.bindingId,
+          operationId: 'create',
+        })) as WorkflowReadResult;
+        expect(recovered).toMatchObject({
+          canonicalUri: f.written.canonicalUri,
+          memoryId: f.written.memoryId,
+          body: f.written.body,
+          bodySha256: f.written.bodySha256,
+          revision: sha256HexSync(f.content),
+        });
+        expect(recovered.codeCitations).toHaveLength(1);
+        executionDiagnosticPhase(diagnostics, 'create-replay');
+        expect(yield* f.call(f.create)).toEqual(recovered);
+        executionDiagnosticPhase(diagnostics, 'journal-after-recovery');
+        const after = yield* loadWorkflowJournal(f.config, f.binding.bindingId).pipe(
+          Effect.provideService(SystemInfo, f.context),
+        );
+        expect(after.operations.create.intentDigest).toBe(f.original.operations.create.intentDigest);
+        expect(after.operations.create.desired).toBe(f.content);
+        expect(after.artifacts[f.written.canonicalUri].revision).toBe(sha256HexSync(f.content));
+        executionDiagnosticPhase(diagnostics, 'archive');
+        yield* f.call({
+          protocolVersion: 1,
+          action: 'archive',
+          bindingId: f.binding.bindingId,
+          operationId: 'archive',
+          artifactKey: 'draft',
+          sourceRunId: 'writer',
+          role: 'current',
+          uri: f.written.canonicalUri,
+          expectedRevision: recovered.revision,
+        });
+        executionDiagnosticPhase(diagnostics, 'retired-replay');
+        expect(yield* f.call(f.create).pipe(Effect.result)).toMatchObject({
+          _tag: 'Failure',
+          failure: {code: 'operation-superseded'},
+        });
+      }).pipe(
+        Effect.onExit(() => Effect.sync(() => executionDiagnosticPhase(diagnostics, 'teardown'))),
+        TestClock.withLive,
+        provideTestLayer(ApplicationLayer),
+      ),
+      diagnostics,
+    );
+  });
 
   effectIt.effect(
     'rejects noncitation edits and changed source evidence instead of adopting arbitrary postimages',
