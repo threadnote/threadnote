@@ -6,6 +6,7 @@ import React, {useEffect, useRef, useState} from 'react';
 import {Schema} from 'effect';
 import {DetailModal, MemoryBody} from '../detail_modal.js';
 import {MemoryExcerpt} from '../review_presentation.js';
+import {SourceExcerpt} from '../source_code.js';
 import {memoryDocumentParts} from '../library_model.js';
 import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import type {
@@ -272,6 +273,21 @@ export function MaintenanceCaseDialog(props: {
         <section className="health-decision-explanation">
           <strong>{maintenanceDecisionLabel(reason)}</strong>
           <p>{maintenanceDecisionExplanation(reason)}</p>
+          {reason === 'source-changed' || reason === 'citation-changed' ? (
+            <div className="health-source-next-step">
+              <strong>
+                {item && ['queued', 'repairing', 'waiting-evidence', 'deferred-policy'].includes(item.disposition)
+                  ? 'Evidence refresh is pending'
+                  : 'Your review is needed'}
+              </strong>
+              <p>
+                {item && ['queued', 'repairing', 'waiting-evidence', 'deferred-policy'].includes(item.disposition)
+                  ? 'Check Automatic recovery for the next evidence refresh. If this remains in Needs a decision, compare the advice with the updated source before making a change.'
+                  : 'Start with Review with agent to compare the memory and current code. Then review the proposed update, or edit or archive the memory in Library. Refresh evidence only rechecks the source; it does not approve or rewrite the memory.'}
+              </p>
+              {reviewWithAgent}
+            </div>
+          ) : null}
         </section>
       ) : null}
       {uri && !semanticReview ? <CaseMemory uri={uri} refresh={refresh} /> : null}
@@ -344,7 +360,7 @@ export function MaintenanceCaseDialog(props: {
                       {excerpt.source.path}:{excerpt.startLine}
                     </code>
                   </p>
-                  <pre>{excerpt.content}</pre>
+                  <SourceExcerpt content={excerpt.content} path={excerpt.source.path} />
                 </section>
               ))}
             </div>

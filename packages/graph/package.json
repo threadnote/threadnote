@@ -440,6 +440,7 @@
     "./workspace": "./src/workspace.ts",
     "./workspace/bazel": "./src/workspace/bazel.ts",
     "./workspace/compatibility": "./src/workspace/compatibility.ts",
+    "./workspace/transition": "./src/workspace/transition.ts",
     "./workspace/diagnostics": "./src/workspace/diagnostics.ts",
     "./workspace/node": "./src/workspace/node.ts",
     "./workspace/primitives": "./src/workspace/primitives.ts",

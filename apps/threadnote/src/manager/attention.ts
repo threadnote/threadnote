@@ -56,14 +56,37 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
       (count, review) => count + review.candidates.filter(candidate => isPending(candidate.state)).length,
       0,
     );
-    const privateAccess = new Set<string>();
-    for (const review of reviews) {
-      if (review.maintenance?.version !== 2 && review.maintenance?.version !== 3) continue;
-      const checked = yield* readTopicMaintenanceDraft(request.config, review.reviewId).pipe(Effect.result);
-      if (Result.isSuccess(checked) && JSON.stringify(checked.success) === JSON.stringify(review))
-        privateAccess.add(review.reviewId);
-    }
-    const items = reviews
+    const visibleReviews = reviews.filter(review =>
+      review.candidates.some(candidate =>
+        view === 'history'
+          ? !isPending(candidate.state)
+          : view === 'deferred'
+            ? candidate.state === 'deferred'
+            : view === 'pending'
+              ? candidate.state === 'pending' || candidate.state === 'applying'
+              : isPending(candidate.state),
+      ),
+    );
+    // A view never needs source validation for reviews it will not display.
+    // Keep each displayed imported review private unless its exact stored journal
+    // passes a fresh source check, including when a check fails or races a write.
+    const accessible = yield* Effect.forEach(
+      visibleReviews,
+      review =>
+        review.maintenance?.version !== 2 && review.maintenance?.version !== 3
+          ? Effect.succeed(false)
+          : readTopicMaintenanceDraft(request.config, review.reviewId).pipe(
+              Effect.result,
+              Effect.map(
+                checked => Result.isSuccess(checked) && JSON.stringify(checked.success) === JSON.stringify(review),
+              ),
+            ),
+      {concurrency: 4},
+    );
+    const privateAccess = new Set(
+      visibleReviews.flatMap((review, index) => (accessible[index] ? [review.reviewId] : [])),
+    );
+    const items = visibleReviews
       .map(review => {
         const withheld =
           (review.maintenance?.version === 2 || review.maintenance?.version === 3) &&
