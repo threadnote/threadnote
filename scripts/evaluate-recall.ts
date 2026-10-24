@@ -178,7 +178,7 @@ const runProductionBenchmark = Effect.scoped(
         const observations: RecallEvaluationSample[] = [];
         for (let sample = 0; sample < samples; sample += 1) {
           yield* beforeSample(sample);
-          const measured = yield* measureRecallEvaluationSample(() => runSample(sample));
+          const measured = yield* measureRecallEvaluationSample(() => runSample(sample), {trace: true});
           const result = measured.result;
           if (!result.ranked.some(hit => hit.uri === targetUri)) {
             return yield* ScriptError.make({message: 'Production benchmark failed to retrieve its target.'});

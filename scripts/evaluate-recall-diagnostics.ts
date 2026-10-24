@@ -5,6 +5,12 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ScriptError} from './effect/errors.js';
 import {atomicWrite} from './effect/script.js';
+import {
+  createRecallEvaluationTracing,
+  snapshotRecallEvaluationTracing,
+  withRecallEvaluationTracing,
+  type RecallEvaluationSpans,
+} from './evaluate-recall-tracing.js';
 
 const COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
 
@@ -15,6 +21,7 @@ export interface RecallEvaluationSample {
   readonly rssBeforeBytes: number;
   readonly rssAfterBytes: number;
   readonly resultCount?: number;
+  readonly spans?: RecallEvaluationSpans;
 }
 
 type ScenarioName =
@@ -69,24 +76,27 @@ export const captureRecallEvaluationSource = Effect.fn('recallEvaluation.capture
   } satisfies SourceObservation;
 });
 
-export function measureRecallEvaluationSample<A, E, R>(run: () => Effect.Effect<A, E, R>) {
+export function measureRecallEvaluationSample<A, E, R>(
+  run: () => Effect.Effect<A, E, R>,
+  options?: {readonly trace?: boolean},
+): Effect.Effect<{readonly result: A; readonly observation: RecallEvaluationSample}, E, R> {
   return Effect.gen(function* () {
+    const tracing = options?.trace ? createRecallEvaluationTracing() : undefined;
     const rssBeforeBytes = process.memoryUsage().rss;
     const cpuStarted = process.cpuUsage();
     const startedAt = yield* Clock.currentTimeNanos;
-    const result = yield* run();
+    const result = yield* withRecallEvaluationTracing(run(), tracing);
     const finishedAt = yield* Clock.currentTimeNanos;
     const cpu = process.cpuUsage(cpuStarted);
-    return {
-      result,
-      observation: {
-        wallMilliseconds: Number(finishedAt - startedAt) / 1_000_000,
-        cpuUserMilliseconds: cpu.user / 1000,
-        cpuSystemMilliseconds: cpu.system / 1000,
-        rssBeforeBytes,
-        rssAfterBytes: process.memoryUsage().rss,
-      } satisfies RecallEvaluationSample,
-    };
+    const observation = {
+      wallMilliseconds: Number(finishedAt - startedAt) / 1_000_000,
+      cpuUserMilliseconds: cpu.user / 1000,
+      cpuSystemMilliseconds: cpu.system / 1000,
+      rssBeforeBytes,
+      rssAfterBytes: process.memoryUsage().rss,
+    } satisfies RecallEvaluationSample;
+    const spans = snapshotRecallEvaluationTracing(tracing);
+    return {result, observation: spans ? {...observation, spans} : observation};
   });
 }
 
@@ -123,7 +133,7 @@ export const writeRecallEvaluationDiagnosticsAndEnforce = Effect.fn('recallEvalu
     runtime: {architecture: system.architecture, platform: system.platform, version: system.runtimeVersion},
     expectedCiCommit: expectedCommit && COMMIT_PATTERN.test(expectedCommit) ? expectedCommit : undefined,
     observationPolicy:
-      'Ordered wall samples; process CPU counters and boundary RSS observed outside the wall interval. CPU includes concurrent work in this process, excludes children; boundary RSS is not a phase peak. Source observations bracket the evaluation. No queries, memory bodies, paths or exception bodies retained.',
+      'Ordered wall samples; process CPU counters and boundary RSS observed outside the wall interval. CPU includes concurrent work in this process, excludes children; boundary RSS is not a phase peak. Source observations bracket the evaluation. Optional completed-span aggregates are inclusive and overlap; span lifecycle overhead remains inside the original measurement interval, while collector construction and snapshotting occur outside its counters. Counts saturate at one million and times at 24 hours. No queries, memory bodies, paths or exception bodies retained.',
     version: 1,
   };
   yield* atomicWrite(file, `${JSON.stringify(artifact, undefined, 2)}\n`);

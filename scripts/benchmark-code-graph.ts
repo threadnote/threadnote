@@ -2,7 +2,20 @@ import {BenchmarkLeaseTrace} from './benchmark-lease-trace.js';
 import {provideScriptLayer, scriptError, ScriptError} from './effect/errors.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import {Database} from 'bun:sqlite';
-import {Clock, DateTime, Deferred, Effect, Exit, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
+import {
+  Clock,
+  Context,
+  DateTime,
+  Deferred,
+  Effect,
+  Exit,
+  FileSystem,
+  Option,
+  Path,
+  PlatformError,
+  Schema,
+  Tracer,
+} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {readCodeGraphBuildStatuses} from '@threadnote/graph/build_status';
 import {CodeGraphIndexer, type CodeGraphIndexOptions} from '@threadnote/graph/indexer';
@@ -750,6 +763,7 @@ const benchmarkCodeGraph = Effect.scoped(
     const bootstrapExternalTelemetry = bootstrapSampler ? yield* bootstrapSampler.stop() : undefined;
     const coldStoragePeak = new SqliteStoragePeakTelemetry();
     yield* runCheckpoint?.mark('cold-index') ?? Effect.void;
+    const coldRegistrationTracing = productionGovernance ? createBenchmarkRegistrationTracing() : undefined;
     const coldPhase = yield* measureSampledBenchmarkIndex(
       sampleProcessTree
         ? startExternalSampler(
@@ -777,7 +791,9 @@ const benchmarkCodeGraph = Effect.scoped(
           threadnoteHome: prepared.home,
         }),
       observeSqliteStoragePeak(fs, coldStoragePeak, benchmarkLayout.databasePath),
+      coldRegistrationTracing,
     );
+    const coldRegistrationDiagnostics = serializeBenchmarkRegistrationTracing(coldRegistrationTracing);
     const coldMeasurement = coldPhase.measurement;
     const coldExternalTelemetry = coldPhase.telemetry;
     const {
@@ -1718,6 +1734,9 @@ const benchmarkCodeGraph = Effect.scoped(
             'Paired nested diagnostic boundaries per original sample; not assessed metrics. Writer-gate minus session separates lock acquisition/release; session minus body separates SQLite open/close. Includes observer overhead.',
         }),
         analysisCoverage: 'complete',
+        ...(coldRegistrationDiagnostics === undefined
+          ? {}
+          : {coldRegistrationExistingSpans: coldRegistrationDiagnostics}),
         coldIndexSamples: 1,
         ...(coldVectorMappingDigest === undefined ? {} : {coldVectorMappingDigest}),
         cpuMeasurement: 'process.cpuUsage delta at operation boundary',
@@ -2203,6 +2222,206 @@ export class BenchmarkStageTimings {
   }
 }
 
+export const BENCHMARK_REGISTRATION_SPAN_NAMES = [
+  'codeGraph.resolveAndRecordLocalAssociation',
+  'codeGraph.resolveRepositoryIdentityDetail',
+  'codeGraph.withLocalProvenanceLock',
+  'codeGraph.initializeSchema',
+  'codeGraph.initializeSchemaFully',
+  'codeGraph.configureConnection',
+  'codeGraph.observeAdmissionEnvironment',
+  'codeGraph.worktreeBuildRequestObservation',
+  'codeGraph.attemptSparseReusableOverlay',
+  'CommandExecutor.executeBinary',
+] as const;
+type BenchmarkRegistrationSpanName = (typeof BENCHMARK_REGISTRATION_SPAN_NAMES)[number];
+interface BenchmarkRegistrationSpanSummary {
+  readonly count: number;
+  readonly successCount: number;
+  readonly failureCount: number;
+  readonly wallTotalMilliseconds: number;
+  readonly wallMaximumMilliseconds: number;
+}
+export interface BenchmarkRegistrationTracing {
+  readonly tracer: Tracer.Tracer;
+  readonly begin: (at: bigint) => void;
+  readonly close: (at: bigint) => void;
+  readonly snapshot: () => {
+    readonly version: 1;
+    readonly started: boolean;
+    readonly firstScanningObserved: boolean;
+    readonly partialSpans: number;
+    readonly invalidSpans: number;
+    readonly overflow: boolean;
+    readonly spans: Readonly<Partial<Record<BenchmarkRegistrationSpanName, BenchmarkRegistrationSpanSummary>>>;
+  };
+}
+const REGISTRATION_COUNT_MAXIMUM = 1_000_000;
+const REGISTRATION_MILLISECONDS_MAXIMUM = 86_400_000;
+
+class BenchmarkRegistrationSpan extends Tracer.NativeSpan {
+  constructor(
+    private readonly record: (
+      name: BenchmarkRegistrationSpanName,
+      start: bigint,
+      end: bigint,
+      success: boolean,
+    ) => void,
+    private readonly selected: BenchmarkRegistrationSpanName | undefined,
+    startTime: bigint,
+  ) {
+    super({
+      name: selected ?? 'ignored',
+      startTime,
+      parent: Option.none(),
+      annotations: Context.empty(),
+      links: [],
+      kind: 'internal',
+      sampled: true,
+    });
+  }
+  override end(at: bigint, exit: Exit.Exit<unknown, unknown>) {
+    if (this.status._tag === 'Ended') return;
+    let success = false;
+    try {
+      if (this.selected) {
+        success = exit._tag === 'Success';
+        this.record(this.selected, this.startTime, at, success);
+      }
+    } catch {
+      // Diagnostic completion cannot replace the original Effect's exit.
+    }
+    super.end(typeof at === 'bigint' ? at : this.startTime, success ? Exit.void : Exit.fail(undefined));
+  }
+  override attribute() {}
+  override event() {}
+  override addLinks() {}
+}
+
+/**
+ * Complete spans only: crossing the first-scanning boundary is counted as partial,
+ * never clipped or attributed. The full cold Effect retains tracer interposition
+ * after closure; that lifecycle overhead remains inside its original measurements.
+ */
+export function createBenchmarkRegistrationTracing(): BenchmarkRegistrationTracing {
+  let startedAt: bigint | undefined;
+  let closedAt: bigint | undefined;
+  let latestCompletion = 0n;
+  let partialSpans = 0;
+  let invalidSpans = 0;
+  let overflow = false;
+  const summaries = new Map<BenchmarkRegistrationSpanName, BenchmarkRegistrationSpanSummary>();
+  const increment = (value: number) => {
+    overflow ||= value >= REGISTRATION_COUNT_MAXIMUM;
+    return Math.min(value + 1, REGISTRATION_COUNT_MAXIMUM);
+  };
+  const record = (name: BenchmarkRegistrationSpanName, start: bigint, end: bigint, success: boolean) => {
+    if (typeof end !== 'bigint' || end < start) {
+      invalidSpans = increment(invalidSpans);
+      return;
+    }
+    if (closedAt !== undefined && end > closedAt) {
+      partialSpans = increment(partialSpans);
+      return;
+    }
+    latestCompletion = end > latestCompletion ? end : latestCompletion;
+    const previous = summaries.get(name);
+    if ((previous?.count ?? 0) >= REGISTRATION_COUNT_MAXIMUM) {
+      overflow = true;
+      return;
+    }
+    const delta = end - start;
+    const maximumNanos = BigInt(REGISTRATION_MILLISECONDS_MAXIMUM) * 1_000_000n;
+    const wall = delta > maximumNanos ? REGISTRATION_MILLISECONDS_MAXIMUM : Number(delta) / 1_000_000;
+    const total = (previous?.wallTotalMilliseconds ?? 0) + wall;
+    overflow ||= delta > maximumNanos || total > REGISTRATION_MILLISECONDS_MAXIMUM;
+    summaries.set(name, {
+      count: (previous?.count ?? 0) + 1,
+      successCount: (previous?.successCount ?? 0) + Number(success),
+      failureCount: (previous?.failureCount ?? 0) + Number(!success),
+      wallTotalMilliseconds: Math.min(total, REGISTRATION_MILLISECONDS_MAXIMUM),
+      wallMaximumMilliseconds: Math.max(previous?.wallMaximumMilliseconds ?? 0, wall),
+    });
+  };
+  const tracer = Tracer.make({
+    span(options) {
+      if (startedAt === undefined || closedAt !== undefined)
+        return new BenchmarkRegistrationSpan(record, undefined, 0n);
+      let selected: BenchmarkRegistrationSpanName | undefined;
+      let start = 0n;
+      try {
+        const name = options.name;
+        const at = options.startTime;
+        if (typeof at === 'bigint' && at >= startedAt) {
+          selected = BENCHMARK_REGISTRATION_SPAN_NAMES.find(value => value === name);
+          start = at;
+        }
+      } catch {
+        // Never inspect or retain arbitrary span metadata.
+      }
+      return new BenchmarkRegistrationSpan(record, selected, start);
+    },
+  });
+  return {
+    tracer,
+    begin: at => {
+      if (typeof at === 'bigint' && at >= 0n && startedAt === undefined) startedAt = at;
+    },
+    close: at => {
+      if (
+        typeof at === 'bigint' &&
+        startedAt !== undefined &&
+        closedAt === undefined &&
+        at >= startedAt &&
+        at >= latestCompletion
+      )
+        closedAt = at;
+    },
+    snapshot: () => ({
+      version: 1,
+      started: startedAt !== undefined,
+      firstScanningObserved: closedAt !== undefined,
+      partialSpans,
+      invalidSpans,
+      overflow,
+      spans: Object.fromEntries([...summaries].map(([name, summary]) => [name, {...summary}])),
+    }),
+  };
+}
+
+function registrationTracingBoundary(
+  tracing: BenchmarkRegistrationTracing | undefined,
+  boundary: 'begin' | 'close',
+  at: bigint,
+): void {
+  try {
+    tracing?.[boundary](at);
+  } catch {
+    /* Observation never owns the measured boundary. */
+  }
+}
+
+export function withBenchmarkRegistrationTracing<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+  tracing?: BenchmarkRegistrationTracing,
+): Effect.Effect<A, E, R> {
+  try {
+    return tracing ? Effect.withTracer(effect, tracing.tracer) : effect;
+  } catch {
+    return effect;
+  }
+}
+
+export function serializeBenchmarkRegistrationTracing(tracing?: BenchmarkRegistrationTracing): string | undefined {
+  try {
+    if (!tracing) return undefined;
+    const json = JSON.stringify(tracing.snapshot());
+    return json.length <= 8192 ? json : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 type IndexPhasePoint =
   | 'activating:complete'
   | 'activating:promoting'
@@ -2261,10 +2480,15 @@ export class IndexPhaseTimeline {
   #sqliteDurableDatabaseHighWaterBytes = 0;
   #sqliteTemporaryDatabaseHighWaterBytes = 0;
 
-  constructor(startedAt: bigint, telemetry: ProcessTelemetry) {
+  constructor(
+    startedAt: bigint,
+    telemetry: ProcessTelemetry,
+    private registrationTracing?: BenchmarkRegistrationTracing,
+  ) {
     this.#lastProgressAt = startedAt;
     this.#points.set('start', startedAt);
     this.#resources.set('start', telemetry);
+    registrationTracingBoundary(registrationTracing, 'begin', startedAt);
   }
 
   observe(progress: CodeGraphProgress, at: bigint, telemetry: ProcessTelemetry): void {
@@ -2278,6 +2502,10 @@ export class IndexPhaseTimeline {
         this.#first('waiting:start', at, telemetry);
         break;
       case 'scanning':
+        if (this.registrationTracing) {
+          registrationTracingBoundary(this.registrationTracing, 'close', at);
+          this.registrationTracing = undefined;
+        }
         this.#first('scanning:start', at, telemetry);
         this.#inventoryEligibleFiles = Math.max(this.#inventoryEligibleFiles, progress.total);
         this.#inventoryExcludedFiles = Math.max(this.#inventoryExcludedFiles, progress.excluded);
@@ -2650,12 +2878,13 @@ export interface SampledBenchmarkIndexMeasurement<A> {
 
 export function measureBenchmarkIndex<A, E, R>(
   run: (timeline: IndexPhaseTimeline) => Effect.Effect<A, E, R>,
+  registrationTracing?: BenchmarkRegistrationTracing,
 ): Effect.Effect<BenchmarkIndexMeasurement<A>, E, R> {
   return Effect.gen(function* () {
     const startedAt = yield* Clock.currentTimeNanos;
     const processStarted = processTelemetry();
-    const timeline = new IndexPhaseTimeline(startedAt, processStarted);
-    const result = yield* run(timeline);
+    const timeline = new IndexPhaseTimeline(startedAt, processStarted, registrationTracing);
+    const result = yield* withBenchmarkRegistrationTracing(run(timeline), registrationTracing);
     const finishedAt = yield* Clock.currentTimeNanos;
     const processFinished = processTelemetry();
     timeline.finish(finishedAt, processFinished);
@@ -2673,6 +2902,7 @@ export function measureSampledBenchmarkIndex<A>(
   startSampler: Effect.Effect<BenchmarkIndexSamplerHandle | undefined, unknown>,
   run: (timeline: IndexPhaseTimeline, sampler: BenchmarkIndexSamplerHandle | undefined) => Effect.Effect<A, unknown>,
   observeFinalStorage: Effect.Effect<void, unknown>,
+  registrationTracing?: BenchmarkRegistrationTracing,
 ): Effect.Effect<SampledBenchmarkIndexMeasurement<A>, unknown> {
   return Effect.scoped(
     Effect.gen(function* () {
@@ -2682,7 +2912,7 @@ export function measureSampledBenchmarkIndex<A>(
           ? handle.stop(Exit.isSuccess(exit) ? 'complete' : 'aborted').pipe(Effect.ignore)
           : succeedUndefined,
       );
-      const measurement = yield* measureBenchmarkIndex(timeline => run(timeline, sampler));
+      const measurement = yield* measureBenchmarkIndex(timeline => run(timeline, sampler), registrationTracing);
       yield* observeFinalStorage;
       const telemetry = sampler ? yield* sampler.stop('complete') : undefined;
       stopped = true;

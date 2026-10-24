@@ -1,7 +1,18 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Effect, Exit, Schema} from 'effect';
-import {expect, vi} from 'vitest';
+import {Cause, Context, Deferred, Effect, Exit, Fiber, Option, Schema, Tracer} from 'effect';
+import fc from 'fast-check';
+import {describe, expect, it, vi} from 'vitest';
+import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {workflowDiagnostics, workflowPropertyDiagnostics} from './workflow-property-diagnostics.js';
+import {
+  createWorkflowExecutionDiagnostics,
+  executionDiagnosticPhase,
+  withWorkflowExecutionDiagnostics,
+  workflowExecutionDiagnostics,
+  WORKFLOW_COMMAND_SPANS,
+  WORKFLOW_EXECUTION_PHASES,
+  type WorkflowExecutionDiagnostics,
+} from './workflow-execution-diagnostics.js';
 
 const lifecycle = () => {
   const controller = new AbortController();
@@ -507,3 +518,439 @@ effectIt.effect.prop(
     }),
   {arbitrary: {runs: 20}},
 );
+
+describe('workflow execution diagnostics', () => {
+  const span = (diagnostics: WorkflowExecutionDiagnostics, name: string = WORKFLOW_COMMAND_SPANS[0]) =>
+    diagnostics.tracer.span({
+      name,
+      startTime: 0n,
+      parent: Option.none(),
+      annotations: Context.empty(),
+      links: [],
+      kind: 'internal',
+      root: false,
+      sampled: true,
+    });
+  const lifecycle = (controller = new AbortController()) => {
+    const finished: (() => void)[] = [];
+    return {
+      signal: controller.signal,
+      onTestFinished: (callback: () => void) => {
+        finished.push(callback);
+      },
+      finish: () => finished.forEach(callback => callback()),
+      controller,
+    };
+  };
+  const packets = (lines: readonly string[]) =>
+    lines.map(line => JSON.parse(line.slice('WORKFLOW_EXECUTION_DIAGNOSTICS '.length)));
+
+  class Dependency extends Context.Service<Dependency, {readonly value: object}>()(
+    '@threadnote/threadnote/test/dev-skills/workflow-property-diagnostics.test/Dependency',
+  ) {}
+
+  effectIt.effect(
+    'execution observer retains absent identity, typed environment, result identity and one execution',
+    () =>
+      Effect.gen(function* () {
+        const value = {original: true};
+        let calls = 0;
+        const original = Effect.gen(function* () {
+          calls++;
+          return (yield* Dependency).value;
+        });
+        expect(withWorkflowExecutionDiagnostics(original)).toBe(original);
+        const diagnostics = createWorkflowExecutionDiagnostics({write: () => {}});
+        const observed: Effect.Effect<object, never, Dependency> = withWorkflowExecutionDiagnostics(
+          original,
+          diagnostics,
+        );
+        expect(yield* observed.pipe(Effect.provideService(Dependency, {value}))).toBe(value);
+        expect(calls).toBe(1);
+        expect(diagnostics.snapshot()).toMatchObject({
+          programStarted: true,
+          programCompleted: true,
+          programOutcome: 'Success',
+        });
+      }),
+  );
+
+  it('execution command records are closed, bounded, idempotent and independent snapshots', () => {
+    let time = 0;
+    const lines: string[] = [];
+    const diagnostics = createWorkflowExecutionDiagnostics({now: () => time, write: line => lines.push(line)});
+    const children = Array.from({length: 7}, (_, index) => span(diagnostics, WORKFLOW_COMMAND_SPANS[index % 3]));
+    expect(diagnostics.snapshot()).toMatchObject({
+      commandCount: 7,
+      activeCount: 7,
+      unlistedActiveCount: 3,
+      droppedActiveRecords: 3,
+      overflow: true,
+    });
+    expect(diagnostics.snapshot().active).toHaveLength(4);
+    time = 8;
+    for (const child of children) {
+      child.end(0n, Exit.void);
+      child.end(0n, Exit.fail('private'));
+    }
+    for (let index = 0; index < 30; index++) diagnostics.phase('archive');
+    const copied = diagnostics.snapshot();
+    expect(copied).toMatchObject({completedCommands: 7, successfulCommands: 7, activeCount: 0, droppedRecords: 21});
+    expect(copied.recent).toHaveLength(16);
+    copied.recent.splice(0);
+    expect(diagnostics.snapshot().recent).toHaveLength(16);
+    diagnostics.report('aborted');
+    expect(JSON.stringify(packets(lines)[0]).length).toBeLessThanOrEqual(8192);
+  });
+
+  it('execution spans discard metadata, payloads and unknown labels without retaining input', () => {
+    const diagnostics = createWorkflowExecutionDiagnostics({now: () => 0, write: () => {}});
+    const poison = new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error('/private/body/token');
+        },
+      },
+    );
+    const options = {
+      name: WORKFLOW_COMMAND_SPANS[0],
+      get startTime(): never {
+        throw new Error('clock metadata');
+      },
+      get parent(): never {
+        throw new Error('parent');
+      },
+      get annotations(): never {
+        throw new Error('annotations');
+      },
+      get links(): never {
+        throw new Error('links');
+      },
+      get kind(): never {
+        throw new Error('kind');
+      },
+      get root(): never {
+        throw new Error('root');
+      },
+      get sampled(): never {
+        throw new Error('sampled');
+      },
+    };
+    const measured = diagnostics.tracer.span(options);
+    measured.attribute('/private/path', poison);
+    measured.event('/private/body', 0n, {credential: poison});
+    measured.addLinks([{span: measured, attributes: {credential: poison}}]);
+    measured.end(0n, Exit.fail(poison));
+    span(diagnostics, '/private/unknown').end(0n, Exit.void);
+    expect(measured.attributes.size).toBe(0);
+    expect(measured.links).toEqual([]);
+    expect(measured instanceof Tracer.NativeSpan ? measured.events : []).toEqual([]);
+    expect(diagnostics.snapshot()).toMatchObject({commandCount: 1, completedCommands: 1, successfulCommands: 0});
+    expect(JSON.stringify(diagnostics.snapshot())).not.toContain('/private');
+  });
+
+  effectIt.effect('execution failures, defects and interruption retain their original identities and finalizers', () =>
+    Effect.gen(function* () {
+      const diagnostics = createWorkflowExecutionDiagnostics({write: () => {}});
+      const original = {private: 'typed failure'};
+      const failure = yield* withWorkflowExecutionDiagnostics(Effect.fail(original), diagnostics).pipe(Effect.result);
+      expect(failure._tag === 'Failure' ? failure.failure : undefined).toBe(original);
+      const defect = new Error('private defect');
+      const died = yield* withWorkflowExecutionDiagnostics(
+        Effect.die(defect),
+        createWorkflowExecutionDiagnostics({write: () => {}}),
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(died) ? Cause.squash(died.cause) : undefined).toBe(defect);
+      const entered = yield* Deferred.make<void>();
+      let cleaned = 0;
+      const child = yield* withWorkflowExecutionDiagnostics(
+        Effect.acquireUseRelease(
+          Effect.void,
+          () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
+          () =>
+            Effect.sync(() => {
+              cleaned++;
+            }),
+        ),
+        createWorkflowExecutionDiagnostics({write: () => {}}),
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(child);
+      expect(Exit.isFailure(yield* Fiber.await(child))).toBe(true);
+      expect(cleaned).toBe(1);
+    }),
+  );
+
+  effectIt.effect('actual abort packet precedes Deferred-blocked cleanup and effect-exit observes its completion', () =>
+    Effect.gen(function* () {
+      const context = lifecycle();
+      const lines: string[] = [];
+      const diagnostics = workflowExecutionDiagnostics(context, {write: line => lines.push(line)});
+      const entered = yield* Deferred.make<void>();
+      const cleanupEntered = yield* Deferred.make<void>();
+      const releaseCleanup = yield* Deferred.make<void>();
+      const program = Effect.acquireUseRelease(
+        Effect.void,
+        () =>
+          Effect.sync(() => diagnostics.phase('archive')).pipe(
+            Effect.andThen(Deferred.succeed(entered, undefined)),
+            Effect.andThen(Effect.never),
+          ),
+        () =>
+          Effect.sync(() => diagnostics.phase('teardown')).pipe(
+            Effect.andThen(Deferred.succeed(cleanupEntered, undefined)),
+            Effect.andThen(Deferred.await(releaseCleanup)),
+          ),
+      );
+      // The real AbortSignal interrupts the program through this callback; no second Effect runtime is started.
+      const aborted = Effect.callback<never>(resume => {
+        const interrupt = () => resume(Effect.interrupt);
+        context.signal.addEventListener('abort', interrupt, {once: true});
+        if (context.signal.aborted) interrupt();
+        return Effect.sync(() => context.signal.removeEventListener('abort', interrupt));
+      });
+      const child = yield* withWorkflowExecutionDiagnostics(Effect.raceFirst(program, aborted), diagnostics).pipe(
+        Effect.forkChild,
+      );
+      yield* Effect.gen(function* () {
+        yield* Deferred.await(entered);
+        context.controller.abort();
+        yield* Deferred.await(cleanupEntered);
+        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted']);
+        expect(packets(lines)[0]).toMatchObject({phase: 'archive', programCompleted: false});
+        yield* Deferred.succeed(releaseCleanup, undefined);
+        expect(Exit.isFailure(yield* Fiber.await(child))).toBe(true);
+        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted', 'effect-exit']);
+        expect(packets(lines)[1]).toMatchObject({programCompleted: true, programOutcome: 'Failure'});
+        context.finish();
+        context.finish();
+        expect(packets(lines).map(packet => packet.event)).toEqual(['aborted', 'effect-exit', 'finished']);
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(releaseCleanup, undefined).pipe(Effect.andThen(Fiber.interrupt(child)))),
+      );
+    }),
+  );
+
+  effectIt.effect('clock, observer and sink faults cannot replace or rerun original work', () =>
+    Effect.gen(function* () {
+      let index = 0;
+      const values = [0, NaN, Infinity, -2, 90_000_000];
+      const diagnostics = createWorkflowExecutionDiagnostics({
+        now: () => {
+          const value = values[index++];
+          if (value === undefined) throw new Error('clock');
+          return value;
+        },
+        write: () => {
+          throw new Error('sink');
+        },
+      });
+      diagnostics.phase('archive');
+      span(diagnostics).end(0n, Exit.void);
+      diagnostics.report('aborted');
+      expect(diagnostics.snapshot()).toMatchObject({invalid: true, overflow: true, elapsedMs: 86_400_000});
+      const faulty = {
+        ...diagnostics,
+        started() {
+          throw new Error('started');
+        },
+        exited() {
+          throw new Error('exited');
+        },
+        phase() {
+          throw new Error('phase');
+        },
+      };
+      executionDiagnosticPhase(faulty, 'archive');
+      const value = {original: true};
+      let calls = 0;
+      const original = Effect.sync(() => {
+        calls++;
+        return value;
+      });
+      expect(yield* withWorkflowExecutionDiagnostics(original, faulty)).toBe(value);
+      const attach = {
+        ...faulty,
+        get tracer(): never {
+          throw new Error('attach');
+        },
+      };
+      expect(yield* withWorkflowExecutionDiagnostics(original, attach)).toBe(value);
+      expect(calls).toBe(2);
+      const options = {
+        now: () => 0,
+        get write(): never {
+          throw new Error('write getter');
+        },
+      };
+      expect(() => createWorkflowExecutionDiagnostics(options)).not.toThrow();
+    }),
+  );
+
+  it('attempt lifecycle is idempotent, removes listeners and handles aborted or failed registration', () => {
+    const context = lifecycle();
+    const add = vi.spyOn(context.signal, 'addEventListener');
+    const remove = vi.spyOn(context.signal, 'removeEventListener');
+    const lines: string[] = [];
+    const diagnostics = workflowExecutionDiagnostics(context, {write: line => lines.push(line)});
+    expect(workflowExecutionDiagnostics(context)).toBe(diagnostics);
+    context.finish();
+    expect(add).toHaveBeenCalledTimes(1);
+    expect(remove).toHaveBeenCalledExactlyOnceWith('abort', add.mock.calls[0][1]);
+    context.controller.abort();
+    expect(packets(lines).map(packet => packet.event)).toEqual(['finished']);
+    const retry = workflowExecutionDiagnostics(context, {write: line => lines.push(line)});
+    expect(retry).not.toBe(diagnostics);
+    expect(packets(lines).map(packet => packet.event)).toEqual(['finished', 'aborted']);
+    context.finish();
+    const broken = {
+      signal: new AbortController().signal,
+      onTestFinished() {
+        throw new Error('registration');
+      },
+    };
+    expect(() => workflowExecutionDiagnostics(broken)).not.toThrow();
+    const badSignal = {
+      get signal(): never {
+        throw new Error('signal getter');
+      },
+      onTestFinished() {},
+    };
+    expect(() => workflowExecutionDiagnostics(badSignal)).not.toThrow();
+    add.mockRestore();
+    remove.mockRestore();
+  });
+
+  it('abort retains the last work phase when an earlier listener already entered teardown', () => {
+    const context = lifecycle();
+    const lines: string[] = [];
+    const earlier = () => executionDiagnosticPhase(diagnostics, 'teardown');
+    context.signal.addEventListener('abort', earlier, {once: true});
+    const diagnostics = workflowExecutionDiagnostics(context, {write: line => lines.push(line)});
+    diagnostics.phase('archive');
+    context.controller.abort();
+    expect(packets(lines)[0]).toMatchObject({
+      event: 'aborted',
+      phase: 'teardown',
+      lastWorkPhase: 'archive',
+      programCompleted: false,
+    });
+    context.finish();
+  });
+
+  it('execution command count saturation stays finite without additional retained records', () => {
+    const diagnostics = createWorkflowExecutionDiagnostics({now: () => 0, write: () => {}});
+    for (let index = 0; index < 1_000_001; index++) span(diagnostics).end(0n, Exit.void);
+    expect(diagnostics.snapshot()).toMatchObject({
+      commandCount: 1_000_000,
+      completedCommands: 1_000_000,
+      successfulCommands: 1_000_000,
+      activeCount: 0,
+      overflow: true,
+    });
+    expect(diagnostics.snapshot().active).toEqual([]);
+    expect(diagnostics.snapshot().recent).toHaveLength(16);
+  });
+
+  fcEffectProp(
+    effectIt,
+    'execution schedule totals and bounded private snapshots agree with an independent model',
+    {
+      abortFirst: fc.boolean(),
+      succeeds: fc.boolean(),
+      events: fc.array(
+        fc.record({
+          kind: fc.constantFrom('start', 'finish', 'phase'),
+          channel: fc.integer({min: 0, max: 3}),
+          target: fc.integer({min: 0, max: 29}),
+          success: fc.boolean(),
+          phase: fc.constantFrom(...WORKFLOW_EXECUTION_PHASES),
+          privatePayload: fc.string({maxLength: 30}),
+        }),
+        {maxLength: 40},
+      ),
+    },
+    input =>
+      Effect.sync(() => {
+        const before = structuredClone(input);
+        let time = 0;
+        const context = lifecycle();
+        const lines: string[] = [];
+        const diagnostics = workflowExecutionDiagnostics(context, {now: () => time, write: line => lines.push(line)});
+        const started: {measured: Tracer.Span; observed: boolean}[] = [];
+        const completed = new Map<number, boolean>();
+        const modelRecent: {event: string; sequence?: number; outcome?: string; phase?: string}[] = [];
+        let phase: string = 'provisioning';
+        let sequence = 0;
+        for (const event of input.events) {
+          time += 3;
+          if (event.kind === 'start') {
+            const observed = event.channel < 3;
+            const measured = span(diagnostics, WORKFLOW_COMMAND_SPANS[event.channel] ?? '/private/unknown');
+            measured.attribute('/private/body/token', event.privatePayload);
+            started.push({measured, observed});
+            if (observed) sequence++;
+          } else if (event.kind === 'finish') {
+            const child = started[event.target];
+            if (!child) continue;
+            child.measured.end(0n, event.success ? Exit.void : Exit.fail(event.privatePayload));
+            child.measured.end(0n, Exit.void);
+            if (child.observed && !completed.has(event.target)) {
+              completed.set(event.target, event.success);
+              const ordinal = started.slice(0, event.target + 1).filter(value => value.observed).length;
+              modelRecent.push({
+                event: 'command-exit',
+                sequence: ordinal,
+                outcome: event.success ? 'Success' : 'Failure',
+              });
+            }
+          } else {
+            diagnostics.phase(event.phase);
+            modelRecent.push({event: 'phase', phase});
+            phase = event.phase;
+          }
+        }
+        const snapshot = diagnostics.snapshot();
+        expect(snapshot).toMatchObject({
+          commandCount: sequence,
+          completedCommands: completed.size,
+          successfulCommands: [...completed.values()].filter(Boolean).length,
+          activeCount: sequence - completed.size,
+          phase,
+        });
+        const expected = modelRecent.slice(-16);
+        expect(
+          snapshot.recent.map(entry =>
+            entry.event === 'phase'
+              ? {event: entry.event, phase: entry.phase}
+              : {event: entry.event, sequence: entry.sequence, outcome: entry.outcome},
+          ),
+        ).toEqual(expected);
+        expect(snapshot.active.length).toBeLessThanOrEqual(4);
+        expect(snapshot.active.length + snapshot.unlistedActiveCount).toBe(snapshot.activeCount);
+        expect(snapshot.recent.length).toBeLessThanOrEqual(16);
+        expect(snapshot.droppedRecords).toBe(Math.max(0, modelRecent.length - 16));
+        const serialized = JSON.stringify(snapshot);
+        expect(serialized.length).toBeLessThanOrEqual(8192);
+        expect(serialized).not.toContain('/private');
+        snapshot.active.splice(0);
+        snapshot.recent.splice(0);
+        expect(JSON.stringify(diagnostics.snapshot())).toBe(serialized);
+        diagnostics.exited(input.succeeds ? 'Success' : 'Failure');
+        diagnostics.exited('Failure');
+        if (input.abortFirst) context.controller.abort();
+        context.finish();
+        context.finish();
+        context.controller.abort();
+        expect(packets(lines).map(packet => packet.event)).toEqual(
+          input.abortFirst ? ['effect-exit', 'aborted', 'finished'] : ['effect-exit', 'finished'],
+        );
+        expect(packets(lines).every(packet => packet.programCompleted)).toBe(true);
+        expect(workflowExecutionDiagnostics(context, {write: () => {}})).not.toBe(diagnostics);
+        context.finish();
+        expect(input).toEqual(before);
+      }),
+    {fastCheck: {numRuns: 20}},
+  );
+});

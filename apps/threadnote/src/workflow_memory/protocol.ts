@@ -45,6 +45,35 @@ export const WorkflowRequestSchema = Schema.Struct({
   citationPolicy: Schema.optionalKey(Schema.Literals(['require-current', 'defer'])),
 });
 export type WorkflowRequest = typeof WorkflowRequestSchema.Type;
+
+const inspectionDigest = Schema.String.check(Schema.isBetweenLength(64, 64), Schema.isPattern(/^[a-f0-9]{64}$/u));
+export const WorkflowOperationInspectionRequestSchema = Schema.Struct({
+  protocolVersion: Schema.Literal(1),
+  action: Schema.Literal('inspect-operation'),
+  bindingId: inspectionDigest,
+  generation: Schema.String.check(
+    Schema.makeFilter(value => {
+      try {
+        requiredText(value, 'generation');
+      } catch {
+        return 'Expected a valid workflow generation.';
+      }
+    }),
+  ),
+  bindingHash: inspectionDigest,
+  operationId: Schema.String.check(
+    Schema.makeFilter(value => {
+      try {
+        portableKey(value, 'operationId');
+      } catch {
+        return 'Expected a portable operation identifier.';
+      }
+    }),
+  ),
+  intentDigest: inspectionDigest,
+});
+export type WorkflowOperationInspectionRequest = typeof WorkflowOperationInspectionRequestSchema.Type;
+
 export interface WorkflowBinding {
   readonly bindingId: string;
   readonly workflowRunId: string;
