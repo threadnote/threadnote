@@ -1,4 +1,4 @@
-# Design sources
+# Dev-plan design sources
 
 Inspected 2026-10-18. These are design influences, not runtime dependencies or instructions imported wholesale.
 

@@ -1,12 +1,21 @@
-import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Context, Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {FileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {decodeNativeWorkflowState, type NativeWorkflowState} from '@threadnote/workflow-automations/native';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {decodeBoundedWorkflowJson, encodeBoundedWorkflowJson} from '../workflow_memory/journal_codec.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {CurrentWorkflowReadCache, immutableWorkflowImage} from '../workflow_memory/read_cache.js';
+
+export const CurrentNativeAuthoringSave = Context.Reference<string | undefined>('threadnote/NativeAuthoringSave', {
+  defaultValue: () => undefined,
+});
+/** Internal test/service budget can reduce the ceiling, never increase the protocol limit. */
+export const CurrentNativeOperationLimit = Context.Reference<number>('threadnote/NativeOperationLimit', {
+  defaultValue: () => 4096,
+});
 
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const STATE_CODEC = 'threadnote-native-workflow-state-gzip-v1';
@@ -77,6 +86,9 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
   if (file === undefined) return undefined;
   const bytes = yield* stateBytes(file);
   if (bytes === undefined) return undefined;
+  const cache = yield* CurrentWorkflowReadCache;
+  if (cache?.native?.file === file && cache.native.bytes === bytes)
+    return {state: cache.native.state, revision: cache.native.revision};
   const state = yield* fromPromiseInterruptible(
     async signal => {
       const parsed: unknown = JSON.parse(bytes);
@@ -95,7 +107,9 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
           ),
   );
   if (state.runId !== runId) return yield* issue('invalid-state', 'The native state file belongs to another run.');
-  return {state, revision: sha256HexSync(bytes)};
+  const result = {state, revision: sha256HexSync(bytes)};
+  if (cache) cache.native = {file, bytes, ...result, state: immutableWorkflowImage(state)};
+  return result;
 });
 
 /** Call only under the run lock. CAS and rename preserve the old file on every failed preparation. */
@@ -127,7 +141,10 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
         'Native run state changed after it was read. Retry from its current receipt.',
       );
     yield* fs.rename(temporary, file);
-    return {state: validated, revision: sha256HexSync(serialized)};
+    const result = {state: validated, revision: sha256HexSync(serialized)};
+    const cache = yield* CurrentWorkflowReadCache;
+    if (cache) cache.native = {file, bytes: serialized, ...result, state: immutableWorkflowImage(validated)};
+    return result;
   }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
 });
 
@@ -162,6 +179,30 @@ export function withNativeWorkflowLock<A, E, R>(
             retryable: true,
           }),
         ),
+      ),
+    );
+  });
+}
+
+/** Serialize a multi-artifact authoring commit without recursively taking the run lock. */
+export function withNativeAuthoringLock<A, E, R>(config: RuntimeConfig, runId: string, body: Effect.Effect<A, E, R>) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const file = yield* statePath(config, runId);
+    if (file === undefined) return yield* issue('run-not-found', 'Start the native run before authoring.');
+    return yield* withExclusiveFileLock(
+      fs,
+      file + '.authoring.lock',
+      {
+        createParentDirectory: false,
+        retryIntervalMilliseconds: 25,
+        staleAfterMilliseconds: 300_000,
+        waitTimeoutMilliseconds: 2_000,
+      },
+      body,
+    ).pipe(
+      Effect.catchIf(Schema.is(FileLockTimeout), () =>
+        Effect.fail(issue('state-busy', 'Another authoring transaction owns this run; retry the same intent.')),
       ),
     );
   });

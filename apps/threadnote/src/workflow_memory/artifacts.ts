@@ -432,11 +432,12 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   let prepared = {...initial, operations: {...initial.operations, [operationId]: operation}};
   const finalArtifacts = {...prepared.artifacts, [operation.artifact.canonicalUri]: operation.artifact};
   if (operation.request.action === 'archive' && operation.sourceUri) delete finalArtifacts[operation.sourceUri];
-  yield* assertWorkflowTransition(config, prepared, {
-    ...prepared,
-    artifacts: finalArtifacts,
-    operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
-  });
+  if (existing?.status !== 'verified' || operation.request.action === 'archive')
+    yield* assertWorkflowTransition(config, prepared, {
+      ...prepared,
+      artifacts: finalArtifacts,
+      operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
+    });
   if (!existing) yield* writeJournalFile(config, prepared);
   const store = yield* ResourceStore;
   const fs = yield* FileSystem.FileSystem;

@@ -1,6 +1,14 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
-import {nativeWorkflowIntentDigest, decodeNativeWorkflowRequest, decodeNativeWorkflowState} from '../src/native.js';
+import {
+  admitNativeAuthoringSave,
+  nativeAuthoringSaveByteBudget,
+  nativeAuthoringPrefixDigest,
+  nativeWorkflowOperationLimit,
+  nativeWorkflowIntentDigest,
+  decodeNativeWorkflowRequest,
+  decodeNativeWorkflowState,
+} from '../src/native.js';
 import type {NativeWorkflowState} from '../src/native.js';
 import type {WorkflowWriteIntent} from '../src/contracts.js';
 
@@ -291,5 +299,188 @@ describe('native workflow state', () => {
     expect(caught(() => decodeNativeWorkflowState({...stateBase, unexpected: 'extra'}))).toMatchObject({
       code: 'invalid-state',
     });
+  });
+
+  it('holds a single exact reservation across completed prefixes at the operation and byte ceilings', () => {
+    const byteLimit = 64 * 1024 * 1024;
+    const startingOperations = [{intentDigest: 'b'.repeat(64)}];
+    const prefixDigest = nativeAuthoringPrefixDigest(startingOperations);
+    const plannedOperations = nativeWorkflowOperationLimit - startingOperations.length;
+    const plannedBytes = 4096;
+    const admission = {
+      intentDigest: 'c'.repeat(64),
+      rootUri: null,
+      operationCount: startingOperations.length,
+      plannedOperations,
+      journalBytes: byteLimit - plannedBytes,
+      stateBytes: byteLimit - plannedBytes,
+      plannedBytes,
+      prefixDigest,
+      operationLimit: nativeWorkflowOperationLimit,
+    };
+    const reservation = admitNativeAuthoringSave(admission);
+    expect(reservation.operationStart).toBe(1);
+    expect(reservation.operationLimit).toBe(4096);
+    expect(reservation.journalBytesAtStart + reservation.reservedBytes).toBe(byteLimit);
+
+    fc.assert(
+      fc.property(fc.integer({min: 0, max: plannedOperations}), completed => {
+        const resumed = admitNativeAuthoringSave(
+          {
+            ...admission,
+            operationCount: reservation.operationStart + completed,
+            journalBytes: byteLimit,
+            stateBytes: byteLimit,
+          },
+          reservation,
+        );
+        expect(resumed).toEqual(reservation);
+      }),
+      {numRuns: 64},
+    );
+
+    for (const changed of [
+      {...admission, intentDigest: 'd'.repeat(64)},
+      {
+        ...admission,
+        prefixDigest: nativeAuthoringPrefixDigest([...startingOperations, {intentDigest: 'e'.repeat(64)}]),
+      },
+      {...admission, plannedBytes: plannedBytes + 1},
+      {...admission, plannedOperations: plannedOperations - 1},
+    ])
+      expect(caught(() => admitNativeAuthoringSave(changed, reservation))).toMatchObject({code: 'pending-operation'});
+
+    expect(
+      caught(() =>
+        admitNativeAuthoringSave({
+          ...admission,
+          operationCount: nativeWorkflowOperationLimit,
+          plannedOperations: 1,
+        }),
+      ),
+    ).toMatchObject({code: 'authoring-capacity'});
+    expect(
+      caught(() =>
+        admitNativeAuthoringSave({
+          ...admission,
+          journalBytes: byteLimit - plannedBytes + 1,
+        }),
+      ),
+    ).toMatchObject({code: 'authoring-capacity'});
+    expect(
+      caught(() =>
+        admitNativeAuthoringSave({
+          ...admission,
+          operationLimit: nativeWorkflowOperationLimit + 1,
+          plannedOperations: nativeWorkflowOperationLimit,
+        }),
+      ),
+    ).toMatchObject({code: 'authoring-capacity'});
+  });
+
+  it('budgets large scope inventories before admission and retains the original prefix budget on retry', () => {
+    const byteLimit = 64 * 1024 * 1024;
+    const inventory = Array.from({length: 2000}, (_, index) => {
+      const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
+      const unique = `owned-${String(index).padStart(4, '0')}-`;
+      return prefix + unique + 'x'.repeat(250 - prefix.length - unique.length);
+    });
+    expect(inventory.every(uri => new TextEncoder().encode(uri).byteLength === 250)).toBe(true);
+    const scopeBytes = new TextEncoder().encode(JSON.stringify(inventory)).byteLength;
+    const maximumScopeEntryBytes = Math.max(
+      ...inventory.map(uri => new TextEncoder().encode(JSON.stringify(uri)).byteLength + 1),
+    );
+    const budgetInput = {
+      contentBytes: 0,
+      evidenceBytes: 0,
+      plannedOperations: 48,
+      scopeBytes,
+      maximumScopeEntryBytes,
+      requestMetadataBytes: 64 * 1024,
+    };
+    const plannedBytes = nativeAuthoringSaveByteBudget(budgetInput);
+    expect(plannedBytes).toBeGreaterThan(59 * 1024 * 1024);
+    expect(plannedBytes).toBeLessThan(61 * 1024 * 1024);
+
+    const originalOperations = Array.from({length: 3}, (_, index) => ({intentDigest: `${index + 1}`.repeat(64)}));
+    const prefixDigest = nativeAuthoringPrefixDigest(originalOperations);
+    const admission = {
+      intentDigest: 'f'.repeat(64),
+      rootUri: null,
+      operationCount: originalOperations.length,
+      plannedOperations: budgetInput.plannedOperations,
+      journalBytes: 4 * 1024 * 1024,
+      stateBytes: 4 * 1024 * 1024,
+      plannedBytes,
+      prefixDigest,
+      operationLimit: nativeWorkflowOperationLimit,
+    };
+    const reservation = admitNativeAuthoringSave(admission);
+    expect(reservation.operationLimit).toBe(51);
+
+    const candidateUris = Array.from({length: 16}, (_, index) => {
+      const prefix = 'threadnote://user/tester/memories/durable/projects/fixture/';
+      const unique = `candidate-${String(index).padStart(2, '0')}-`;
+      return prefix + unique + 'y'.repeat(250 - prefix.length - unique.length);
+    });
+    const grownScopeBytes = new TextEncoder().encode(JSON.stringify([...inventory, ...candidateUris])).byteLength;
+    const changedScopeBudget = nativeAuthoringSaveByteBudget({...budgetInput, scopeBytes: grownScopeBytes});
+    expect(changedScopeBudget).toBeGreaterThan(plannedBytes);
+
+    const retry = admitNativeAuthoringSave(
+      {
+        ...admission,
+        operationCount: reservation.operationStart + 11,
+        journalBytes: 50 * 1024 * 1024,
+        stateBytes: 60 * 1024 * 1024,
+        prefixDigest: nativeAuthoringPrefixDigest(originalOperations),
+      },
+      reservation,
+    );
+    expect(retry).toEqual(reservation);
+
+    expect(
+      caught(() =>
+        admitNativeAuthoringSave({
+          ...admission,
+          journalBytes: 4_500_000,
+          stateBytes: 4_500_000,
+        }),
+      ),
+    ).toMatchObject({code: 'authoring-capacity'});
+    expect(
+      caught(() =>
+        admitNativeAuthoringSave(
+          {
+            ...admission,
+            prefixDigest: nativeAuthoringPrefixDigest([...originalOperations, {intentDigest: '9'.repeat(64)}]),
+          },
+          reservation,
+        ),
+      ),
+    ).toMatchObject({code: 'pending-operation'});
+    expect(byteLimit - (admission.journalBytes + plannedBytes)).toBeGreaterThan(0);
+  });
+
+  it('rejects invalid numeric byte-budget inputs', () => {
+    const base = {
+      contentBytes: 100,
+      evidenceBytes: 50,
+      plannedOperations: 2,
+      scopeBytes: 30,
+      maximumScopeEntryBytes: 250,
+      requestMetadataBytes: 20,
+    };
+    const invalid = [
+      {...base, contentBytes: Number.NaN},
+      {...base, evidenceBytes: Number.POSITIVE_INFINITY},
+      {...base, plannedOperations: 0},
+      {...base, plannedOperations: nativeWorkflowOperationLimit + 1},
+      {...base, scopeBytes: -1},
+      {...base, maximumScopeEntryBytes: 1.5},
+      {...base, requestMetadataBytes: Number.MAX_SAFE_INTEGER},
+    ];
+    for (const input of invalid)
+      expect(caught(() => nativeAuthoringSaveByteBudget(input))).toMatchObject({code: 'authoring-capacity'});
   });
 });

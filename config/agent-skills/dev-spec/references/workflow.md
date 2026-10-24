@@ -9,7 +9,7 @@ flowchart LR
   C -->|Implementation detail within goal| P
 ```
 
-Resolve `SPEC_DIR`, `PLAN_DIR` and `CYCLE_DIR` from the entrypoint's explicit immutable resource/bundle roots; a flat discovered entrypoint is not the resource directory. On resume use the generation pinned by the workflow context, including its related skill roots, rather than a newly installed generation. Do not assume all three discovered entrypoints are sibling directories. `RUN` is a task-local scratch directory, `REPO` the absolute checkout. Commands have `--help`; do not recreate their transformations manually. Use the explicit root URI from the task/handoff, or scoped recall and read to find the relevant current ready artifact. Ask only if multiple plausible active revisions remain ambiguous. Preserve existing answers and references instead of restarting interviews.
+Resolve `SPEC_DIR`, `PLAN_DIR` and `CYCLE_DIR` through the host's skill catalog, using the generation pinned by the workflow context. `RUN` is a private task directory; `REPO` is the absolute checkout. Use the root URI from the task/handoff, or scoped recall and read to find the current ready artifact. Ask only if active revisions remain ambiguous. Preserve existing answers and references instead of restarting interviews.
 
 ## Spec to plan
 

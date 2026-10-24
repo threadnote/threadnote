@@ -11,6 +11,7 @@ import {
 export const nativeWorkflowProtocolVersion = 1 as const;
 export const nativeWorkflowExecutorVersion = 1 as const;
 export const nativeWorkflowStateVersion = 1 as const;
+export const nativeWorkflowOperationLimit = 4096;
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const nonEmpty = (maximum: number) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum));
@@ -148,6 +149,24 @@ const nativeOperationSchema = Schema.Struct({
   intentDigest: digest,
   artifact: Schema.optionalKey(nativeArtifactSchema),
 });
+const byteLimit = 64 * 1024 * 1024;
+const boundedCount = Schema.Finite.check(
+  Schema.isInt(),
+  Schema.isBetween({minimum: 0, maximum: nativeWorkflowOperationLimit}),
+);
+const boundedBytes = Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: byteLimit}));
+export const NativeAuthoringSaveReservationSchema = Schema.Struct({
+  intentDigest: digest,
+  rootUri: Schema.NullOr(uri),
+  operationStart: boundedCount,
+  operationLimit: boundedCount,
+  prefixDigest: digest,
+  journalBytesAtStart: boundedBytes,
+  stateBytesAtStart: boundedBytes,
+  reservedBytes: boundedBytes,
+});
+export type NativeAuthoringSaveReservation = typeof NativeAuthoringSaveReservationSchema.Type;
+
 export const NativeWorkflowStateSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-workflow'),
   stateVersion: Schema.Literal(nativeWorkflowStateVersion),
@@ -161,7 +180,8 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   profile,
   team: Schema.optionalKey(portableId),
   bindingId: digest,
-  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(512)),
+  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
+  authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
 });
 export type NativeWorkflowState = typeof NativeWorkflowStateSchema.Type;
 
@@ -175,6 +195,98 @@ function sortedJson(value: unknown): unknown {
         .map(([key, item]) => [key, sortedJson(item)]),
     );
   return value;
+}
+
+export function nativeAuthoringPrefixDigest(operations: readonly {readonly intentDigest: string}[]): string {
+  return sha256HexSync(JSON.stringify(operations.map(operation => operation.intentDigest)));
+}
+
+/** Bound new packed journal/native content, including every growing permission table. */
+export function nativeAuthoringSaveByteBudget(input: {
+  readonly contentBytes: number;
+  readonly evidenceBytes: number;
+  readonly plannedOperations: number;
+  readonly scopeBytes: number;
+  readonly maximumScopeEntryBytes: number;
+  readonly requestMetadataBytes: number;
+}): number {
+  if (
+    Object.values(input).some(value => !Number.isSafeInteger(value) || value < 0) ||
+    input.plannedOperations < 1 ||
+    input.plannedOperations > nativeWorkflowOperationLimit
+  )
+    throw fail('authoring-capacity', 'Authoring capacity requires bounded nonnegative integer budgets.');
+  // A related operation stores one exact scope set, shared by its <=16 targets.
+  // Each set can add every planned child and all16 candidate URIs. The fixed
+  // allowance covers bounded citations (64KiB), relation/receipt metadata and
+  // manifest entries; variable request/binding metadata is charged separately.
+  const perOperation =
+    512 * 1024 +
+    4 * input.requestMetadataBytes +
+    input.scopeBytes +
+    (input.plannedOperations + 16) * input.maximumScopeEntryBytes;
+  const bytes = 4096 + 10 * input.contentBytes + 2 * input.evidenceBytes + input.plannedOperations * perOperation;
+  if (!Number.isSafeInteger(bytes)) throw fail('authoring-capacity', 'Authoring capacity exceeds its integer budget.');
+  return bytes;
+}
+
+/** A retry retains its original admission; completed children never consume headroom twice. */
+export function admitNativeAuthoringSave(
+  input: {
+    readonly intentDigest: string;
+    readonly rootUri: string | null;
+    readonly operationCount: number;
+    readonly plannedOperations: number;
+    readonly journalBytes: number;
+    readonly stateBytes: number;
+    readonly plannedBytes: number;
+    readonly prefixDigest: string;
+    readonly operationLimit?: number;
+  },
+  existing?: NativeAuthoringSaveReservation,
+): NativeAuthoringSaveReservation {
+  if (
+    [input.operationCount, input.plannedOperations, input.journalBytes, input.stateBytes, input.plannedBytes].some(
+      value => !Number.isSafeInteger(value) || value < 0,
+    ) ||
+    input.plannedOperations < 1
+  )
+    throw fail('authoring-capacity', 'Authoring capacity requires bounded nonnegative integer budgets.');
+  const limit = Math.min(input.operationLimit ?? nativeWorkflowOperationLimit, nativeWorkflowOperationLimit);
+  const reservation = existing ?? {
+    intentDigest: input.intentDigest,
+    rootUri: input.rootUri,
+    operationStart: input.operationCount,
+    operationLimit: input.operationCount + input.plannedOperations,
+    prefixDigest: input.prefixDigest,
+    journalBytesAtStart: input.journalBytes,
+    stateBytesAtStart: input.stateBytes,
+    reservedBytes: input.plannedBytes,
+  };
+  try {
+    Schema.decodeSync(NativeAuthoringSaveReservationSchema, {onExcessProperty: 'error'})(reservation);
+  } catch {
+    throw fail('authoring-capacity', 'The authoring save reservation exceeds its bounded schema.');
+  }
+  if (
+    reservation.intentDigest !== input.intentDigest ||
+    reservation.rootUri !== input.rootUri ||
+    reservation.prefixDigest !== input.prefixDigest ||
+    reservation.operationLimit - reservation.operationStart !== input.plannedOperations ||
+    reservation.reservedBytes !== input.plannedBytes
+  )
+    throw fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    reservation.operationStart > input.operationCount ||
+    input.operationCount > reservation.operationLimit ||
+    reservation.operationLimit > limit ||
+    reservation.journalBytesAtStart + reservation.reservedBytes > byteLimit ||
+    reservation.stateBytesAtStart + reservation.reservedBytes > byteLimit
+  )
+    throw fail('authoring-capacity', 'This save exceeds the original run’s bounded capacity before new child writes.');
+  return reservation;
 }
 
 export function nativeWorkflowIntentDigest(intent: WorkflowWriteIntent): string {
@@ -218,6 +330,18 @@ export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
     } catch {
       throw fail('invalid-state', 'The native name family is invalid.');
     }
+  }
+  if (state.authoringSave) {
+    const save = state.authoringSave;
+    if (
+      save.operationStart > state.operations.length ||
+      state.operations.length > save.operationLimit ||
+      save.operationLimit <= save.operationStart ||
+      save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
+      save.journalBytesAtStart + save.reservedBytes > byteLimit ||
+      save.stateBytesAtStart + save.reservedBytes > byteLimit
+    )
+      throw fail('invalid-state', 'The authoring save reservation differs from its original receipts or capacity.');
   }
   const operationIds = new Set<string>();
   for (const operation of state.operations) {

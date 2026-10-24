@@ -1,6 +1,6 @@
 # Quiet plan review
 
-For a substantial plan, send one independent reviewer the output of `review-packet`, the relevant repository, read access to the pinned memories, and an exact output path. Use the current available collaboration API; do not assume a model slug or spawn a fixed specialist panel.
+For a substantial plan, give one available independent reviewer the output of `review-packet`, the relevant repository, read access to the pinned memories, and an exact output path.
 
 Reviewer task:
 

@@ -1,4 +1,5 @@
 import {gzipSync} from 'fflate';
+import {gunzipSync} from 'node:zlib';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {
   decodeWorkflowJournal,
@@ -16,7 +17,7 @@ import {
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertWorkflowJournalIntegrity, workflowOwnedArtifacts} from '../../src/workflow_memory/journal_validation.js';
-import {serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
+import {assertWorkflowJournalCapacity, serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
 import {
   stableJson,
   type WorkflowArtifact,
@@ -375,6 +376,40 @@ describe('workflow journal ownership validation', () => {
 const digest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
 const format = 'threadnote-workflow-journal-gzip-v1';
 describe('workflow journal codec', async () => {
+  it('emits deterministic native gzip readable by independent zlib and journal readers', async () => {
+    const logical = `${JSON.stringify({payload: 'UTF-8 journal — 雪 and 🌊. '.repeat(90_000)})}\n`;
+    const encoded = encodeWorkflowJournal(logical);
+    expect(encodeWorkflowJournal(logical)).toBe(encoded);
+    const envelope = JSON.parse(encoded) as {format: string; payload: string};
+    expect(envelope.format).toBe(format);
+    const compressed = Uint8Array.from(atob(envelope.payload), character => character.charCodeAt(0));
+    expect(compressed.slice(4, 8)).toEqual(new Uint8Array(4));
+    expect(compressed[9]).toBe(255);
+    expect(new TextDecoder().decode(gunzipSync(compressed))).toBe(logical);
+    expect(await decodeWorkflowJournal(encoded)).toBe(logical);
+  });
+
+  it('keeps capacity admission equivalent at the disk edge and for compressible histories above it', async () => {
+    const atPlainBytes = (targetBytes: number) => {
+      const empty = state();
+      const fixedBytes = new TextEncoder().encode(`${stableJson({...empty, manifestContent: ''})}\n`).byteLength;
+      const value = {...empty, manifestContent: 'x'.repeat(targetBytes - fixedBytes)};
+      const logical = `${stableJson(value)}\n`;
+      expect(new TextEncoder().encode(logical).byteLength).toBe(targetBytes);
+      return {value, logical};
+    };
+
+    const atDiskLimit = atPlainBytes(workflowJournalLimits.diskBytes);
+    expect(() => assertWorkflowJournalCapacity(atDiskLimit.value)).not.toThrow();
+    expect(await decodeWorkflowJournal(serializeWorkflowJournal(atDiskLimit.value))).toBe(atDiskLimit.logical);
+
+    const justBeyondDisk = atPlainBytes(workflowJournalLimits.diskBytes + 1);
+    expect(() => assertWorkflowJournalCapacity(justBeyondDisk.value)).not.toThrow();
+    const encoded = serializeWorkflowJournal(justBeyondDisk.value);
+    expect(new TextEncoder().encode(encoded).byteLength).toBeLessThanOrEqual(workflowJournalLimits.diskBytes);
+    expect(await decodeWorkflowJournal(encoded)).toBe(justBeyondDisk.logical);
+  });
+
   it('keeps legacy plaintext capacity when compressed encoding would be larger', async () => {
     const data = new Uint8Array(2 * 1024 * 1024);
     let seed = 0x12345678;

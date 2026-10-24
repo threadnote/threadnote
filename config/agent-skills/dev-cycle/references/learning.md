@@ -12,7 +12,7 @@ Record retrieval outcomes in `reflection.json`: URI, disposition (`used`, `irrel
 
 ## Project preferences
 
-Recall project-scoped `preference` memories alongside task experience; inspect the returned kind/project rather than assuming every hit is a preference. Use the stable working-area project (`docs`, `director`, etc.), not a monorepo-wide catch-all. Apply relevant current user preferences to the plan and worker packet; current instructions and repo contracts win on conflict.
+Recall project-scoped `preference` memories alongside task experience; inspect the returned kind/project rather than assuming every hit is a preference. Use the project identity verified from repository configuration and recalled context. Apply relevant current user preferences to the plan and worker packet; current instructions and repo contracts win on conflict.
 
 An explicit user preference/correction for this project may be saved privately with `remember_context(kind="preference", project=...)`, its human source and narrow applicability. Reuse a read matching URI via `replaceUri` to avoid duplicates. Repeated technical failure is a gotcha, not evidence that the user prefers a policy; inferred preferences enter the closeout queue until confirmed. Do not silently make a project preference global or publish it to a team. Record whether applying it avoided the same user correction in a later session.
 
@@ -37,5 +37,3 @@ Collect proposals quietly in `proposals.json` during the run; do not interrupt d
 ## Improvement check
 
 At the next relevant phase/session, recall/read the saved experience, run its applicable prevention check, and record whether it helped, recurred or was invalidated. Promote confidence only after new evidence, not repeated model agreement. Keep source commit/tree, exact check pointers and applicability/expiry conditions so future agents can reject stale advice. If it recurs, investigate retrieval/query/packet omission versus a wrong lesson and fix the specific cause; do not just append another “remember this” note.
-
-The design uses outcome-driven learning and bounded task context from [Addy Osmani](https://addyosmani.com/blog/self-improving-agents/). The [CodeToDeploy article](https://medium.com/codetodeploy/how-to-build-a-self-improving-ai-agent-that-actually-gets-better-over-time-69ad063ae6f3) was available only as a preview when this workflow was authored; no unseen implementation claims are assumed.

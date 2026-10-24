@@ -1,5 +1,5 @@
 import {Effect, Schema} from 'effect';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {MemoryCodeCitationCaptureError} from '@threadnote/context/citation/capture';
 import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
 import {

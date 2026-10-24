@@ -1,4 +1,4 @@
-# Research and adaptations
+# Dev-spec design sources
 
 Reviewed 2026-10-19 using primary sources. Scripts are original; upstream ideas were adapted rather than copying instruction packs wholesale.
 

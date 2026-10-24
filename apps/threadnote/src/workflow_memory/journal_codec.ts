@@ -1,5 +1,5 @@
-import {gzipSync} from 'fflate';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {gzipSync as fflateGzipSync} from 'fflate';
+import {sha256HexSync} from './native_digest.js';
 
 const DISK_LIMIT = 16 * 1024 * 1024;
 const LOGICAL_LIMIT = 64 * 1024 * 1024;
@@ -33,18 +33,29 @@ export function encodeBoundedWorkflowJson(content: string, format: string): stri
   const plainBytes = encoder.encode(content);
   if (plainBytes.byteLength > LOGICAL_LIMIT) throw new RangeError('Workflow journal logical size limit exceeded');
   if (plainBytes.byteLength <= COMPRESSION_THRESHOLD) return content;
-  const compressed = gzipSync(plainBytes, {level: 6, mtime: 0});
-  const envelope = JSON.stringify({
-    format,
-    expandedBytes: plainBytes.byteLength,
-    sha256: digest(plainBytes),
-    payload: encodeBase64(compressed),
-  });
-  const storedBytes = encoder.encode(envelope).byteLength;
+  const makeEnvelope = (compressed: Uint8Array) =>
+    JSON.stringify({
+      format,
+      expandedBytes: plainBytes.byteLength,
+      sha256: digest(plainBytes),
+      payload: encodeBase64(compressed),
+    });
+  const nativeCompressed = Bun.gzipSync(plainBytes, {level: 6});
+  // The OS field is advisory; normalize it so the same deterministic payload is emitted on every host.
+  nativeCompressed[9] = 255;
+  const nativeEnvelope = makeEnvelope(nativeCompressed);
+  const nativeStoredBytes = encoder.encode(nativeEnvelope).byteLength;
   // Compression is optional: it must never shrink the capacity of valid plain journals.
-  if (plainBytes.byteLength <= DISK_LIMIT && storedBytes >= plainBytes.byteLength) return content;
-  if (storedBytes > DISK_LIMIT) throw new RangeError('Workflow journal disk size limit exceeded');
-  return envelope;
+  if (plainBytes.byteLength <= DISK_LIMIT && nativeStoredBytes >= plainBytes.byteLength) return content;
+  if (nativeStoredBytes <= DISK_LIMIT) return nativeEnvelope;
+
+  // Keep the prior codec as a bounded compatibility fallback for histories whose native gzip
+  // representation crosses the stored limit but whose established fflate representation fits.
+  const fallbackEnvelope = makeEnvelope(fflateGzipSync(plainBytes, {level: 6, mtime: 0}));
+  const fallbackStoredBytes = encoder.encode(fallbackEnvelope).byteLength;
+  if (plainBytes.byteLength <= DISK_LIMIT && fallbackStoredBytes >= plainBytes.byteLength) return content;
+  if (fallbackStoredBytes > DISK_LIMIT) throw new RangeError('Workflow journal disk size limit exceeded');
+  return fallbackEnvelope;
 }
 
 /** Native gzip parsing avoids repeated optional-header scans in JS streaming decoders. */

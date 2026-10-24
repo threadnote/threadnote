@@ -5,6 +5,8 @@ import {runWorkflowAutomation} from '../workflow_automation/index.js';
 import {nativeWorkflowError} from '../workflow_automation/memory.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 
+export const nativeWorkflowInputByteLimit = 2_000_000;
+
 /** Stop consuming before buffering an oversized or malformed UTF-8 request. */
 export const readNativeWorkflowInput = Effect.gen(function* () {
   const stdio = yield* Stdio.Stdio;
@@ -16,10 +18,10 @@ export const readNativeWorkflowInput = Effect.gen(function* () {
         Effect.try({
           try: () => {
             const bytes = previous.bytes + chunk.byteLength;
-            if (bytes > 256_000)
+            if (bytes > nativeWorkflowInputByteLimit)
               throw WorkflowAutomationError.make({
                 code: 'invalid-request',
-                message: 'Native workflow requests are limited to 256000 UTF-8 bytes.',
+                message: 'Native workflow requests are limited to 2000000 UTF-8 bytes.',
               });
             return {bytes, text: previous.text + decoder.decode(chunk, {stream: true})};
           },

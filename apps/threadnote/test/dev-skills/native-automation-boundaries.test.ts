@@ -33,7 +33,7 @@ describe('native workflow automation boundaries', () => {
     Effect.gen(function* () {
       let consumed = 0;
       const stream = Stream.fromIterable([
-        new Uint8Array(256_000),
+        new Uint8Array(2_000_000),
         new Uint8Array([0x20]),
         new TextEncoder().encode('trailing-sentinel'),
       ]).pipe(Stream.tap(() => Effect.sync(() => (consumed += 1))));

@@ -1,11 +1,12 @@
 import {Schema} from 'effect';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256HexSync} from './native_digest.js';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
 import {assertWorkflowEvidenceSnapshot, workflowEvidenceScopes} from './evidence.js';
+import {immutableWorkflowImage, type WorkflowReadCache} from './read_cache.js';
 import {workflowFamilyStem, workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {
   workflowArtifactTopic,
@@ -189,6 +190,7 @@ function assertPreparedRelations(
     return;
   }
   const owned = workflowOwnedArtifacts(state);
+  const ownedUris = new Set(owned.map(artifact => artifact.canonicalUri));
   const sharedRoots = state.binding.profile === 'desktop' ? desktopSharedRoots : state.binding.sharedRoots;
   const scopes = [
     ...sharedRoots,
@@ -198,7 +200,7 @@ function assertPreparedRelations(
       ? [`${root(state.binding)}/durable`, `${root(state.binding)}/preferences`]
       : []),
   ];
-  const allowed = (uri: string) => scopes.some(scope => resourceIdIsWithin(uri, scope));
+  const allowed = (uri: string) => ownedUris.has(uri) || scopes.some(scope => resourceIdIsWithin(uri, scope));
   for (const target of operation.relations) {
     check(object(target) && typeof target.uri === 'string' && allowed(target.uri));
     check(typeof target.content === 'string');
@@ -212,7 +214,7 @@ function assertPreparedRelations(
       resourceIdIsWithin(target.uri, `${root(state.binding)}/handoffs`)
     )
       check(
-        owned.some(artifact => artifact.canonicalUri === target.uri) ||
+        ownedUris.has(target.uri) ||
           evidence !== undefined ||
           sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
       );
@@ -265,6 +267,7 @@ export function assertWorkflowJournalIntegrity(
   state: WorkflowJournal,
   currentManifestContent: string | undefined,
   desktopSharedRoots: readonly string[] = [],
+  cache?: WorkflowReadCache,
 ): void {
   check(state.protocolVersion === 1 && object(state.binding) && object(state.artifacts) && object(state.operations));
   const {bindingId, ...identity} = state.binding;
@@ -276,7 +279,16 @@ export function assertWorkflowJournalIntegrity(
   );
   const desired = manifestArtifacts(state, state.manifestContent);
   check(same(desired, state.artifacts));
-  for (const [key, operation] of Object.entries(state.operations)) assertOperation(state, key, operation);
+  for (const [key, operation] of Object.entries(state.operations)) {
+    const checked = cache?.operations.get(operation);
+    if (checked?.binding === state.binding && checked.key === key) continue;
+    assertOperation(state, key, operation);
+    if (cache) {
+      immutableWorkflowImage(operation);
+      immutableWorkflowImage(state.binding);
+      cache.operations.set(operation, {binding: state.binding, key});
+    }
+  }
   for (const operation of Object.values(state.operations).filter(item => item.status === 'prepared')) {
     assertSourceOwned(operation, state.artifacts);
     assertPreparedRelations(state, operation, desktopSharedRoots);

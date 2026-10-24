@@ -11,9 +11,9 @@ python3 "$SKILL_DIR/scripts/dev_cycle.py" snapshot \
   --repo "$GIT_ROOT" --output "$RUN_DIR/baseline" --base "$INITIAL_HEAD"
 ```
 
-The helper validates the checkout/base before writes and adds `/.context/dev-cycle/` to the local Git exclude file. It copies the real index into a disposable temporary index, updates that copy from the current working tree, and writes immutable blob/tree objects. It creates no commits or refs and leaves the real index byte-for-byte unchanged. Keep snapshots local: they may contain the same sensitive source content as the working tree.
+The helper validates the checkout/base and captures an immutable source tree without staging files, creating commits or changing refs. It locally excludes `/.context/dev-cycle/` from Git. Keep snapshots private: they contain source from the working tree.
 
-For end-to-end staging preservation, compare staged paths/modes/blob IDs and conflict stages (`git --no-optional-locks ls-files --stage -z`), not just raw index checksums. `--no-optional-locks` reduces optional writes; some commands (including working-tree `diff --check`) may still refresh cached stat metadata. Record a cache-only difference but do not classify it as a staging mutation or failed source validation. A changed staged entry is a real discrepancy and must be reconciled before completion. Prefer tree-to-tree whitespace checks after snapshotting.
+Verify staging with paths, modes, blob IDs and conflict stages (`git --no-optional-locks ls-files --stage -z`). Reconcile any changed staged entry before completion. Prefer tree-to-tree whitespace checks after snapshotting.
 
 Choose and persist `baseTree`:
 
@@ -63,7 +63,7 @@ The shared plan maps each phase to its `cycleRunId` and absolute `cycleDir`. On 
 
 ## Resume
 
-1. Read the active run/session; verify schema, checkout identity, initial HEAD, fixed base/tree availability, and last completed phase. Preserve incompatible legacy state and explain that it cannot safely resume; start a separate run rather than deleting it.
+1. Read the active run/session; verify schema, checkout identity, initial HEAD, fixed base/tree availability, and last completed phase. Preserve incompatible state and explain the resume blocker; start a separate run only when appropriate for the task.
 2. If a recorded worker is still active, wait or reconnect instead of spawning a duplicate. Recover only the missing dependency. A completed snapshot is reused, never regenerated in place.
 3. Run `check` against the last source checkpoint. If interrupted during implementation/fixing, compare current source against that checkpoint and reconcile completed edits before continuing. Do not roll them back or blindly repeat the feature/fix. If interrupted during review, source drift invalidates acceptance of that verdict.
 4. If artifacts exist but the session update was interrupted, validate their identity/schema before marking the phase complete. Missing/malformed review artifacts permit one targeted recovery; otherwise mark `review_failed`. Never reuse a stale summary after a failed validation.
@@ -71,4 +71,8 @@ The shared plan maps each phase to its `cycleRunId` and absolute `cycleDir`. On 
 
 Final validation uses `RUN_DIR/final` (or a fresh `final-N` if a check required more edits), the same base, and `validation.json` keyed by the final tree. Validation snapshots do not consume review iterations. The latest accepted review verdict covers blocking fixes; the final snapshot may additionally contain once-only minor polish.
 
-For mapped plans, persist each phase's verified `deliveryReceipt` through `phase_state.py record-delivery`. `next` returns an action as well as a phase: `deliver` resumes an unfinished handoff, `implement` starts/resumes source work, `blocked` requires reconciliation, and `complete` confirms the requested local delivery boundaries. Preserve the agreed delivery mode; phase validation alone never substitutes for PR publication and watcher ownership.
+For mapped plans, preserve verified delivery receipts and select the next action through the [phase delivery procedure](phases.md#record-delivery-before-advancing).
+
+## Index checksum discrepancies
+
+Git may refresh cached filesystem metadata without changing staged content. If raw index checksums differ, compare staged paths, modes, blob IDs and conflict stages before classifying a staging mutation. Record cache-only differences without invalidating the source snapshot.
