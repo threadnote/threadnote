@@ -119,6 +119,134 @@ describe('resolution-candidate closure', () => {
     {fastCheck: {numRuns: 80}},
   );
 
+  fcEffectProp(
+    effectIt,
+    'conservatively selects the independent union of old and current membership references',
+    {
+      rows: FC.array(FC.record({oldKey: FC.integer({min: 0, max: 5}), newKey: FC.integer({min: 0, max: 5})}), {
+        minLength: 1,
+        maxLength: 20,
+      }),
+      seed: FC.integer({min: 0, max: 5}),
+      reverse: FC.boolean(),
+    },
+    ({rows, seed, reverse}) =>
+      Effect.gen(function* () {
+        const files = rows.map((_, index) => inventory(`file-${index}.ts`, 1));
+        const before = new Map(
+          rows.map((row, index) => [
+            files[index].path,
+            facts(files[index].path, [reference(files[index].path, [[String(row.oldKey)]])]),
+          ]),
+        );
+        const current = new Map(
+          rows.map((row, index) => [
+            files[index].path,
+            facts(files[index].path, [reference(files[index].path, [[String(row.newKey)]])]),
+          ]),
+        );
+        const expected = files
+          .filter((_, index) => rows[index].oldKey === seed || rows[index].newKey === seed)
+          .map(file => file.path)
+          .sort();
+        let loaded = 0;
+        const result = yield* scanProjectResolutionCandidateClosure({
+          initialLookupKeys: [lookup('typescript', String(seed))],
+          maximumSelectedFiles: files.length,
+          plan: eligiblePlan(reverse ? [...files].reverse() : files, 3),
+          loadPage: page => {
+            loaded += page.length;
+            return Effect.succeed({
+              ...loadedPage(page, current),
+              previousFacts: new Map(page.map(file => [file.path, before.get(file.path)!])),
+            });
+          },
+        });
+        expect(loaded).toBe(files.length);
+        expect(result.mode).toBe('eligible');
+        if (result.mode === 'eligible') {
+          expect(result.paths).toEqual(expected);
+          expect(result.projectionObservations).toBe(files.length * 2);
+        }
+      }),
+    {fastCheck: {numRuns: 80}},
+  );
+
+  effectIt.effect(
+    'projects both membership versions once with shared observation limits and current-only reexports',
+    () =>
+      Effect.gen(function* () {
+        const files = [inventory('consumer.ts', 1), inventory('barrel.ts', 1)];
+        const before = new Map([
+          ['consumer.ts', facts('consumer.ts', [reference('consumer.ts', [['old']])])],
+          ['barrel.ts', facts('barrel.ts', [reexportReference('barrel.ts', 'alias', 'old')])],
+        ]);
+        const current = new Map([
+          ['consumer.ts', facts('consumer.ts', [reference('consumer.ts', [['new']])])],
+          ['barrel.ts', facts('barrel.ts', [reexportReference('barrel.ts', 'alias', 'new')])],
+        ]);
+        let loads = 0;
+        const loadPage = (page: readonly CodeGraphInventoryFile[]) => {
+          loads += 1;
+          return Effect.succeed({
+            ...loadedPage(page, current),
+            previousFacts: new Map(page.map(file => [file.path, before.get(file.path)!])),
+          });
+        };
+        const closure = yield* scanProjectResolutionCandidateClosure({
+          initialLookupKeys: [],
+          finalizeLookupKeys: () => [lookup('typescript', 'old')],
+          loadPage,
+          maximumSelectedFiles: 2,
+          plan: eligiblePlan(files, 1),
+        });
+        expect(loads).toBe(2);
+        expect(closure.mode).toBe('eligible');
+        if (closure.mode === 'eligible') {
+          expect(closure.paths).toEqual(['barrel.ts', 'consumer.ts']);
+          expect(closure.reexports).toEqual([
+            {
+              aliases: [lookup('typescript', 'alias')],
+              candidates: [lookup('typescript', 'new')],
+              sourcePath: 'barrel.ts',
+            },
+          ]);
+          expect(closure.projectionObservations).toBe(4);
+          for (const [limits, detail] of [
+            [{maximumProjectionAssociations: 3}, 'candidate-projection-associations'],
+            [{maximumProjectionAssociationsPerFile: 1}, 'candidate-projection-file-associations'],
+            [
+              {maximumProjectionObservedKeyBytes: closure.projectionObservedKeyBytes! - 1},
+              'candidate-projection-observed-key-bytes',
+            ],
+          ] as const) {
+            expect(
+              yield* scanProjectResolutionCandidateClosure({
+                initialLookupKeys: [],
+                loadPage,
+                maximumSelectedFiles: 2,
+                plan: eligiblePlan(files, 1),
+                ...limits,
+              }),
+            ).toMatchObject({mode: 'fallback', detail});
+          }
+        }
+        const bounded = yield* scanProjectResolutionCandidateClosure({
+          initialLookupKeys: [lookup('typescript', 'old')],
+          loadPage,
+          maximumSelectedFiles: 2,
+          maximumProjectionObservations: 3,
+          plan: eligiblePlan(files, 1),
+        });
+        expect(bounded).toMatchObject({
+          mode: 'fallback',
+          detail: 'candidate-projection-observations',
+          observed: 4,
+          limit: 3,
+        });
+      }),
+  );
+
   effectIt.effect('loads each page once and joins earlier evidence to aliases discovered later', () =>
     Effect.gen(function* () {
       const alias = 'alias';

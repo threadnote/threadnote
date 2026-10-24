@@ -1054,6 +1054,7 @@ bun_test(
         "//packages/graph:src/workspace/diagnostics.ts",
         "//packages/graph:src/workspace/node.ts",
         "//packages/graph:src/workspace/primitives.ts",
+        "//packages/graph:src/workspace/transition.ts",
         "//packages/graph:src/workspace/xcode.ts",
         "//packages/graph:src/worktree_reconciliation.ts",
         "//packages/inference:package.json",
