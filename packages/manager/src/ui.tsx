@@ -40,6 +40,8 @@ import {WorksetsPanel} from '@threadnote/manager/worksets_view';
 import {ProcessesPanel} from './processes_view.js';
 import {ManagerProcessesProvider} from './process/live.js';
 import {ManagerLiveProvider} from './live/provider.js';
+import {ModelSetupProvider} from './model_setup_live.js';
+import {useGraphLiveStatus, useManagerRuntimeConnection} from './ui/live.js';
 import {ManagerOperationsFooter} from './operations_footer.js';
 import {ManagerHomePanel} from './home_view.js';
 import {ContextHealthPanel, ReviewsPanel} from './attention_view.js';
@@ -84,14 +86,7 @@ import {
 } from '@threadnote/manager/graph/removal';
 import {
   GraphWorkspace,
-  graphBuildIsActive,
-  graphCatalogRequiresAuthoritativeRefresh,
-  graphCompletedBuildResultIdentity,
-  graphDiagnosticsRequiresCatalogRefresh,
   graphAdministrationBusyLabel,
-  graphStatusPollDelay,
-  graphStatusRequiresCatalogRefresh,
-  mergeGraphCatalogStatus,
   type GraphAdministrationAction,
   type GraphCatalog,
 } from '@threadnote/manager/graph';
@@ -186,7 +181,13 @@ interface StateResponse {
   readonly version: string;
 }
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
-function App({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): React.ReactElement {
+function App({
+  integrations,
+  onAccount,
+}: {
+  readonly integrations: readonly IntegrationRegistration[];
+  readonly onAccount: (account: string) => void;
+}): React.ReactElement {
   const dialogs = useManagerDialogs();
   const [panel, setPanel] = useState<PanelName>('home');
   const [state, setState] = useState<StateResponse | undefined>();
@@ -269,21 +270,15 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
   const [attentionRefreshGeneration, setAttentionRefreshGeneration] = useState(0);
   const [contextHealthDecisionCount, onHealthDecisionCountChange] = useContextHealthDecisionCount();
   const [libraryError, setLibraryError] = useState('');
-  const account = state?.config.account;
   useEffect(() => {
     void refreshAll();
   }, []);
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      void api<{readonly status: 'ok'}>('/api/health').then(
-        () => {
-          if (availability.runtime === 'disconnected') void refreshAll();
-        },
-        () => dispatchAvailability('runtime-lost'),
-      );
-    }, 3_000);
-    return () => window.clearInterval(timer);
-  }, [availability.runtime]);
+  useManagerRuntimeConnection({
+    runtime: availability.runtime,
+    onLost: () => dispatchAvailability('runtime-lost'),
+    onReady: () => dispatchAvailability('runtime-ready'),
+    onRecovery: () => void refreshAll(),
+  });
   useEffect(() => {
     if (panel === 'doctor') {
       void loadDoctor(false);
@@ -292,86 +287,16 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       void refreshGraphDiagnostics({analyze: false, deep: false}, false);
     }
   }, [panel]);
-  useEffect(() => {
-    if (panel !== 'graph') return;
-    let cancelled = false;
-    let timer: number | undefined;
-    let observedActiveBuild = false;
-    let observedActiveMaintenance = false;
-    const acknowledgedCompletedResults = new Set<string>();
-    const poll = async (): Promise<void> => {
-      try {
-        const status = await api<
-          Pick<
-            GraphCatalog,
-            | 'automaticCompaction'
-            | 'builds'
-            | 'catalogRevision'
-            | 'lifecyclePending'
-            | 'maintenance'
-            | 'waiterCount'
-            | 'waiters'
-          >
-        >('/api/graphs/status', undefined, {timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS});
-        if (cancelled) return;
-        const active = status.builds.some(graphBuildIsActive);
-        const activeMaintenance = status.maintenance !== undefined;
-        const refreshCatalog =
-          graphCatalogRequiresAuthoritativeRefresh(graphCatalogAuthoritativeRef.current, status.maintenance) ||
-          (!activeMaintenance &&
-            ((observedActiveBuild && !active) ||
-              (observedActiveMaintenance && !activeMaintenance) ||
-              graphStatusRequiresCatalogRefresh(
-                graphCatalogRef.current,
-                status.builds,
-                acknowledgedCompletedResults,
-                status.catalogRevision,
-              )));
-        if (refreshCatalog) {
-          const refreshed = await api<GraphCatalog>('/api/graphs', undefined, {
-            timeoutMilliseconds: GRAPH_CATALOG_REQUEST_TIMEOUT_MILLISECONDS,
-          });
-          if (cancelled) return;
-          const refreshedWithStatus = mergeGraphCatalogStatus(refreshed, status);
-          graphCatalogAuthoritativeRef.current = true;
-          graphCatalogRef.current = refreshedWithStatus;
-          setGraphCatalog(refreshedWithStatus);
-          setGraphCatalogError('');
-          for (const build of status.builds) {
-            const identity = graphCompletedBuildResultIdentity(build);
-            if (identity) acknowledgedCompletedResults.add(identity);
-          }
-        } else {
-          const merged = mergeGraphCatalogStatus(graphCatalogRef.current, status);
-          graphCatalogRef.current = merged;
-          setGraphCatalog(merged);
-        }
-        if (
-          graphDiagnosticsRequiresCatalogRefresh(
-            graphDiagnosticsCatalogRevisionRef.current,
-            status.catalogRevision,
-            status.maintenance,
-          )
-        ) {
-          await refreshGraphDiagnostics({analyze: false, deep: false}, false, true, status.catalogRevision);
-          if (cancelled) return;
-        }
-        observedActiveBuild = active;
-        observedActiveMaintenance = activeMaintenance;
-        timer = window.setTimeout(
-          () => void poll(),
-          graphStatusPollDelay(status.builds, status.maintenance, status.lifecyclePending, status.automaticCompaction),
-        );
-      } catch {
-        if (!cancelled) timer = window.setTimeout(() => void poll(), 15_000);
-      }
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [panel]);
+  useGraphLiveStatus({
+    enabled: panel === 'graph',
+    catalog: graphCatalogRef,
+    authoritative: graphCatalogAuthoritativeRef,
+    diagnosticsRevision: graphDiagnosticsCatalogRevisionRef,
+    setCatalog: setGraphCatalog,
+    setError: setGraphCatalogError,
+    refreshDiagnostics: (revision, signal) =>
+      refreshGraphDiagnostics({analyze: false, deep: false}, false, true, revision, signal),
+  });
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       if (draftRef.current || (creatingMemory && content.trim())) event.preventDefault();
@@ -499,7 +424,9 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
         label: 'Runtime',
         run: async () => {
           try {
-            setState(await api<StateResponse>('/api/state'));
+            const next = await api<StateResponse>('/api/state');
+            setState(next);
+            onAccount(next.config.account);
             dispatchAvailability('runtime-ready');
           } catch (cause) {
             dispatchAvailability('runtime-lost');
@@ -554,6 +481,7 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     notify = true,
     background = false,
     catalogRevision = graphCatalogRef.current?.catalogRevision,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (!background) {
       setGraphAdministrationBusy(
@@ -563,7 +491,10 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
     try {
       const report = await api<CodeGraphLocalDiagnosticsReport>(
         `/api/graphs/diagnostics?analyze=${options.analyze}&deep=${options.deep}`,
+        undefined,
+        {signal},
       );
+      if (signal?.aborted) return false;
       setGraphDiagnostics(report);
       graphDiagnosticsCatalogRevisionRef.current = catalogRevision;
       if (!background) setGraphAdministrationOutput('');
@@ -1983,7 +1914,28 @@ function App({integrations}: {readonly integrations: readonly IntegrationRegistr
       {manualEdit.dialog}
     </div>
   );
-  return <ManagerLiveProvider account={account} key={account} children={app} />;
+  return app;
+}
+function AccountApp({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): React.ReactElement {
+  const [scope, setScope] = useState<{account?: string; generation: number}>({generation: 0});
+  const setAccount = (account: string) =>
+    setScope(current =>
+      current.account === account
+        ? current
+        : {
+            account,
+            generation: current.account === undefined ? current.generation : current.generation + 1,
+          },
+    );
+  return (
+    <ManagerLiveProvider account={scope.account} key={scope.generation}>
+      <ModelSetupProvider>
+        <ManagerProcessesProvider>
+          <App integrations={integrations} onAccount={setAccount} />
+        </ManagerProcessesProvider>
+      </ModelSetupProvider>
+    </ManagerLiveProvider>
+  );
 }
 export function mountManager({integrations}: {readonly integrations: readonly IntegrationRegistration[]}): void {
   const root = document.getElementById('root');
@@ -1992,9 +1944,7 @@ export function mountManager({integrations}: {readonly integrations: readonly In
   }
   createRoot(root).render(
     <ManagerDialogProvider>
-      <ManagerProcessesProvider>
-        <App integrations={integrations} />
-      </ManagerProcessesProvider>
+      <AccountApp integrations={integrations} />
     </ManagerDialogProvider>,
   );
 }

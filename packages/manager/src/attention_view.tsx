@@ -13,7 +13,7 @@ import {TopicReviewDialog} from './attention/topic_review.js';
 import {AutomaticMemoryReviewDialog} from './attention/automatic_review.js';
 import {ReviewDetail, HealthDetail} from './attention_details.js';
 import {api, errorMessage} from '@threadnote/manager/ui/support';
-import {useManagerLiveResource} from './live/provider.js';
+import {useManagerLiveQuery, useManagerLiveResource} from './live/provider.js';
 
 interface AttentionPanelProps {
   readonly onOpenLibrary: (uri?: string) => void;
@@ -315,11 +315,46 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
   const [citationRepairJobError, setCitationRepairJobError] = useState('');
   const [citationRepairJobGeneration, setCitationRepairJobGeneration] = useState(0);
   const [citationRepairJobStarting, setCitationRepairJobStarting] = useState(false);
+  const citationLive = useManagerLiveQuery<ManagerCitationRepairJobResponseV1>(
+    props.project && report !== undefined && report.maintenance === undefined
+      ? {topic: 'citation-repair-jobs', project: props.project}
+      : undefined,
+    'jobs',
+    signal =>
+      api<ManagerCitationRepairJobResponseV1>(
+        `/api/context-health/citations/jobs?project=${encodeURIComponent(props.project)}`,
+        undefined,
+        {signal},
+      ),
+  );
+  const citationFallback = !citationLive.active || citationLive.snapshot.status === 'unsupported';
   const activeCitationRepairJobId = useRef<string | undefined>(undefined);
   const citationRepairJobProjectEpoch = useRef(0);
   const citationRepairJobProject = useRef('');
   const refreshedCitationRepairJobId = useRef<string | undefined>(undefined);
   const liveRefresh = useRef({project: props.project, external: props.refreshGeneration, local: generation});
+  useEffect(() => {
+    if (!citationFallback && citationLive.snapshot.status === 'ready') {
+      const next = citationLive.snapshot.data.job;
+      setCitationRepairJob(next ?? undefined);
+      setCitationRepairJobError('');
+      if (next?.status === 'running') activeCitationRepairJobId.current = next.id;
+      else if (
+        next &&
+        activeCitationRepairJobId.current === next.id &&
+        refreshedCitationRepairJobId.current !== next.id
+      ) {
+        activeCitationRepairJobId.current = undefined;
+        refreshedCitationRepairJobId.current = next.id;
+        setGeneration(value => value + 1);
+      }
+    } else if (!citationFallback && citationLive.snapshot.status === 'error') {
+      setCitationRepairJobError(errorMessage(citationLive.snapshot.error));
+    }
+  }, [citationFallback, citationLive.snapshot]);
+  useEffect(() => {
+    if (!citationFallback) citationLive.invalidate();
+  }, [citationRepairJobGeneration]);
   useEffect(() => {
     requestEpoch.current += 1;
     requestController.current?.abort();
@@ -424,6 +459,7 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       setCitationRepairJobError('');
       return;
     }
+    if (!citationFallback) return;
     let cancelled = false;
     let failedPollCount = 0;
     let timer: number | undefined;
@@ -469,7 +505,13 @@ export function ContextHealthPanel(props: AttentionPanelProps): React.ReactEleme
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [props.project, citationRepairJobGeneration, report !== undefined, report?.maintenance !== undefined]);
+  }, [
+    props.project,
+    citationRepairJobGeneration,
+    report !== undefined,
+    report?.maintenance !== undefined,
+    citationFallback,
+  ]);
 
   function loadMore(): void {
     if (!nextCursor || loadingMore) return;

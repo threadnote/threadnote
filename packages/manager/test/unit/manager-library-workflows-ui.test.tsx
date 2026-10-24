@@ -57,6 +57,9 @@ it('wires hidden folder descendants to bulk results, keeps failures selected, an
   const json = (body: unknown) => new Response(JSON.stringify(body), {headers: {'content-type': 'application/json'}});
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
+    // Exercise the explicit REST compatibility path in this library fixture.
+    if (url.pathname === '/api/live-session')
+      return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
     if (init?.body) posts.push({path: url.pathname, body});
     if (url.pathname === '/api/state')
@@ -232,6 +235,9 @@ it('preserves an independent unsaved draft when an automatic update is applied a
   const json = (body: unknown) => new Response(JSON.stringify(body), {headers: {'content-type': 'application/json'}});
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
+    // Exercise the explicit REST compatibility path in this library fixture.
+    if (url.pathname === '/api/live-session')
+      return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
     if (url.pathname === '/api/state')
       return json({
         agents: [],

@@ -5,6 +5,7 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 import {beforeEach, describe, expect, vi} from 'vitest';
 import {handleManagerAttentionAction} from '../../src/manager/attention_actions.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {ManagerLiveConsumerChangeHints} from '../../src/manager/live_consumer_observation.js';
 
 class StaleCursorTestError extends Schema.TaggedError<StaleCursorTestError>()('StaleCursorTestError', {
   message: Schema.String,
@@ -136,6 +137,53 @@ beforeEach(() => {
 });
 
 describe('Manager reviewed action adapters', () => {
+  effectIt.effect('publishes citation job creation, progress, success, and failure after each state change', () =>
+    Effect.gen(function* () {
+      const observed: Array<{project: string; status: string; phase: string}> = [];
+      const hints = ManagerLiveConsumerChangeHints.of({
+        publish: resource =>
+          Effect.gen(function* () {
+            if (resource.topic !== 'citation-repair-jobs') return;
+            const response = yield* readCitationRepairJob(resource.project).pipe(Effect.orDie);
+            if (!response) return;
+            const job = (response.body as {job: {status: string; progress: {phase: string}}}).job;
+            observed.push({project: resource.project, status: job.status, phase: job.progress.phase});
+          }),
+      });
+      const start = (project: string) =>
+        request('/api/context-health/citations/jobs', {project}).pipe(
+          Effect.provideService(ManagerLiveConsumerChangeHints, hints),
+        );
+      const successProject = 'live-citation-success';
+      mocks.preview.mockReturnValue(Effect.succeed({proposals: [], omittedProposals: 0, sourceOmittedFindings: 0}));
+      expect((yield* start(successProject))?.status).toBe(202);
+      for (
+        let attempt = 0;
+        attempt < 50 && !observed.some(item => item.project === successProject && item.status === 'completed');
+        attempt++
+      )
+        yield* Effect.yieldNow;
+      const success = observed.filter(item => item.project === successProject);
+      expect(success[0]).toEqual({project: successProject, status: 'running', phase: 'starting'});
+      expect(success.some(item => item.status === 'running' && item.phase !== 'starting')).toBe(true);
+      expect(success.at(-1)?.status).toBe('completed');
+
+      const failureProject = 'live-citation-failure';
+      mocks.indexGraph.mockReturnValue(Effect.fail(StaleCursorTestError.make({message: 'simulated graph failure'})));
+      expect((yield* start(failureProject))?.status).toBe(202);
+      for (
+        let attempt = 0;
+        attempt < 50 && !observed.some(item => item.project === failureProject && item.status === 'failed');
+        attempt++
+      )
+        yield* Effect.yieldNow;
+      const failure = observed.filter(item => item.project === failureProject);
+      expect(failure[0]).toEqual({project: failureProject, status: 'running', phase: 'starting'});
+      expect(failure.some(item => item.status === 'running' && item.phase === 'rebuilding')).toBe(true);
+      expect(failure.at(-1)?.status).toBe('failed');
+      expect(observed.every(item => item.project === successProject || item.project === failureProject)).toBe(true);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
   effectIt.effect('forwards spaced project names to maintenance, citation jobs and repair preview', () =>
     Effect.gen(function* () {
       const project = 'Example Project';

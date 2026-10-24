@@ -10,6 +10,11 @@ const LEASE = 120_000;
 const RETRY = 300_000;
 const CAPACITY = 128;
 const IDENTITY_CAPACITY = 16;
+/** Private owner directory for bounded live metadata observation; this does not create or read queue state. */
+export const draftQueueObservationDirectory = Effect.fn('draftQueue.observationDirectory')(function* (config: Config) {
+  const home = yield* (yield* FileSystem.FileSystem).realPath(config.agentContextHome);
+  return (yield* Path.Path).join(home, 'threadnote', 'draft-queue', 'v1', sha256HexSync(config.account));
+});
 const hash = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 const text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
 const millis = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));

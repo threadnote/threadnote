@@ -167,6 +167,7 @@
     "./languages/vue/pack": "./src/languages/vue/pack.ts",
     "./languages/zig/pack": "./src/languages/zig/pack.ts",
     "./layout": "./src/layout.ts",
+    "./live_catalog_observation": "./src/live_catalog_observation.ts",
     "./live_observation": "./src/live_observation.ts",
     "./lifecycle/classification": "./src/lifecycle/classification.ts",
     "./lifecycle/opportunity": "./src/lifecycle/opportunity.ts",

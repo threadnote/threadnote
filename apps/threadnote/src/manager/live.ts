@@ -7,11 +7,11 @@ import {managerRequestIsAuthorized} from '@threadnote/manager/authorization';
 import {
   MANAGER_LIVE_LIMITS,
   MANAGER_LIVE_VERSION,
+  ManagerLiveTopic,
   ManagerLiveClientFrame,
   managerLiveResourceKey,
   type ManagerLiveResource,
   type ManagerLiveServerFrame,
-  type ManagerLiveTopic,
 } from '@threadnote/manager/live/contracts';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseSeedManifest} from '@threadnote/workspace/manifest';
@@ -112,20 +112,32 @@ export interface ManagerLiveOptions {
     readonly subscribe: (connectionKey: string, projects: readonly string[]) => Effect.Effect<readonly string[], never>;
     readonly release: (connectionKey: string) => Effect.Effect<void, never>;
   };
+  readonly observations?: {
+    readonly topics: readonly ManagerLiveTopic[];
+    readonly subscribe: (
+      connectionKey: string,
+      resources: readonly ManagerLiveResource[],
+    ) => Effect.Effect<readonly ManagerLiveResource[], never>;
+    readonly release: (connectionKey: string) => Effect.Effect<void, never>;
+  };
 }
 
 export const makeManagerLive = Effect.fn('manager.live.make')(function* (options: ManagerLiveOptions) {
   const crypto = yield* Crypto.Crypto;
   const epoch = yield* crypto.randomUUIDv4();
-  const topics: readonly ManagerLiveTopic[] = options.health
-    ? ['context-maintenance', 'context-health']
-    : ['context-maintenance'];
+  const topics: readonly ManagerLiveTopic[] = [
+    ...new Set<ManagerLiveTopic>([
+      'context-maintenance',
+      ...(options.health ? ['context-health' as const] : []),
+      ...(options.observations?.topics ?? []),
+    ]),
+  ];
   const origin = new URL(options.origin);
-  const tickets = new Map<string, number>();
+  const tickets = new Map<string, {expiresAt: number; topics: readonly ManagerLiveTopic[]}>();
   const connections = new Set<LiveConnection>();
   let reservedConnections = 0;
   const pruneTickets = (now: number) => {
-    for (const [ticket, expires] of tickets) if (expires <= now) tickets.delete(ticket);
+    for (const [ticket, value] of tickets) if (value.expiresAt <= now) tickets.delete(ticket);
   };
   const projects = options.projects.pipe(Effect.timeoutOption(1_000));
   const json = (status: number, body: unknown) =>
@@ -137,8 +149,56 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
     Effect.flatMap(result => Effect.fromOption(result, refused)),
     Effect.mapError(refused),
   );
+  const readTicketTopics = (request: HttpServerRequest.HttpServerRequest) =>
+    Effect.gen(function* () {
+      if (
+        (request.headers['content-length'] === undefined || request.headers['content-length'] === '0') &&
+        request.headers['transfer-encoding'] === undefined
+      )
+        return ['context-maintenance', 'context-health'] as readonly ManagerLiveTopic[];
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      yield* request.stream.pipe(
+        Stream.runForEach(chunk => {
+          size += chunk.byteLength;
+          if (size > 1_024) return Effect.fail(refused());
+          chunks.push(chunk);
+          return Effect.void;
+        }),
+      );
+      if (size === 0) return ['context-maintenance', 'context-health'] as readonly ManagerLiveTopic[];
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const value = yield* Effect.try({
+        try: () => JSON.parse(new TextDecoder().decode(bytes)) as unknown,
+        catch: refused,
+      });
+      if (
+        typeof value !== 'object' ||
+        value === null ||
+        Array.isArray(value) ||
+        Object.keys(value).some(key => key !== 'topics')
+      )
+        return yield* refused();
+      const requested = (value as {topics?: unknown}).topics;
+      if (requested === undefined) return ['context-maintenance', 'context-health'] as readonly ManagerLiveTopic[];
+      if (
+        !Array.isArray(requested) ||
+        requested.length > ManagerLiveTopic.literals.length ||
+        requested.some(
+          topic => typeof topic !== 'string' || !ManagerLiveTopic.literals.includes(topic as ManagerLiveTopic),
+        ) ||
+        new Set(requested).size !== requested.length
+      )
+        return yield* refused();
+      return requested as readonly ManagerLiveTopic[];
+    });
 
-  const serveSocket = (socket: Socket.Socket) =>
+  const serveSocket = (socket: Socket.Socket, negotiatedTopics: readonly ManagerLiveTopic[]) =>
     Effect.scoped(
       Effect.gen(function* () {
         const reader = yield* socket.reader;
@@ -163,6 +223,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           () =>
             Effect.sync(() => connections.delete(connection)).pipe(
               Effect.andThen(options.health?.release(connectionKey) ?? Effect.void),
+              Effect.andThen(options.observations?.release(connectionKey) ?? Effect.void),
               Effect.andThen(PubSub.shutdown(wake)),
               Effect.andThen(Queue.shutdown(incoming)),
               Effect.andThen(close),
@@ -173,7 +234,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           type: 'welcome',
           version: MANAGER_LIVE_VERSION,
           epoch,
-          topics,
+          topics: negotiatedTopics,
           heartbeatMilliseconds: limits.heartbeatMilliseconds,
         });
         let lastMessage = yield* Clock.currentTimeMillis;
@@ -198,7 +259,12 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           if (frame.type === 'heartbeat') return;
           if (frame.generation <= connection.generation) return yield* refused();
           const allowed = yield* readProjects;
-          if (frame.resources.some(resource => !topics.includes(resource.topic) || !allowed.has(resource.project)))
+          if (
+            frame.resources.some(
+              resource =>
+                !negotiatedTopics.includes(resource.topic) || ('project' in resource && !allowed.has(resource.project)),
+            )
+          )
             return yield* refused();
           yield* gate.withPermits(1)(
             Effect.gen(function* () {
@@ -209,12 +275,26 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
               const healthProjects = [
                 ...new Set(
                   frame.resources
-                    .filter(resource => resource.topic === 'context-health')
+                    .filter(
+                      (resource): resource is Extract<ManagerLiveResource, {project: string}> =>
+                        'project' in resource && resource.topic === 'context-health',
+                    )
                     .map(resource => resource.project),
                 ),
               ];
-              const unavailable =
+              const healthUnavailable =
                 options.health === undefined ? [] : yield* options.health.subscribe(connectionKey, healthProjects);
+              const observationResources = frame.resources.filter(
+                resource => resource.topic !== 'context-health' && resource.topic !== 'context-maintenance',
+              );
+              const observationUnavailable =
+                options.observations === undefined
+                  ? []
+                  : yield* options.observations.subscribe(connectionKey, observationResources);
+              const unavailable: ManagerLiveResource[] = [
+                ...healthUnavailable.map(project => ({topic: 'context-health' as const, project})),
+                ...observationUnavailable,
+              ];
               connection.generation = frame.generation;
               // Filters are live before this barrier; flush uses the same gate.
               yield* send({
@@ -223,9 +303,7 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
                 epoch,
                 generation: frame.generation,
                 startingSequence: connection.sequence,
-                ...(unavailable.length > 0
-                  ? {unavailable: unavailable.map(project => ({topic: 'context-health' as const, project}))}
-                  : {}),
+                ...(unavailable.length > 0 ? {unavailable} : {}),
               });
             }),
           );
@@ -267,7 +345,11 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
                 const now = yield* Clock.currentTimeMillis;
                 if (now - lastMessage >= limits.clientTimeoutMilliseconds) return yield* refused();
                 const allowed = yield* readProjects;
-                if (connection.mailbox.resources().some(resource => !allowed.has(resource.project)))
+                if (
+                  connection.mailbox
+                    .resources()
+                    .some(resource => 'project' in resource && !allowed.has(resource.project))
+                )
                   return yield* refused();
                 yield* gate.withPermits(1)(send({type: 'heartbeat', version: MANAGER_LIVE_VERSION, epoch}));
               }),
@@ -300,22 +382,25 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
       if (request.method !== 'POST') return json(405, {error: 'Method not allowed'});
       if (!managerRequestIsAuthorized(request, options.token)) return json(401, {error: 'Unauthorized'});
       if (tickets.size >= limits.tickets) return json(429, {error: 'Too many pending live sessions'});
+      const requested = yield* readTicketTopics(request).pipe(Effect.orElseSucceed(() => undefined));
+      if (requested === undefined) return json(400, {error: 'Invalid live session request'});
       const ticket = yield* crypto.randomUUIDv4();
       const expiresAt = now + limits.ticketLifetimeMilliseconds;
-      tickets.set(ticket, expiresAt);
+      tickets.set(ticket, {expiresAt, topics: topics.filter(topic => requested.includes(topic))});
       return json(200, {version: MANAGER_LIVE_VERSION, ticket, expiresAt});
     }
     if (request.method !== 'GET') return json(405, {error: 'Method not allowed'});
     const ticket = url.searchParams.get('ticket');
     if (ticket === null || !tickets.has(ticket) || [...url.searchParams.keys()].some(key => key !== 'ticket'))
       return json(401, {error: 'Unauthorized'});
+    const negotiatedTopics = tickets.get(ticket)?.topics ?? [];
     tickets.delete(ticket);
     if (reservedConnections >= limits.connections) return json(429, {error: 'Too many live sessions'});
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => reservedConnections++),
       () =>
         request.upgrade.pipe(
-          Effect.flatMap(serveSocket),
+          Effect.flatMap(socket => serveSocket(socket, negotiatedTopics)),
           Effect.as(HttpServerResponse.empty({status: 204})),
           Effect.catchCause(() => Effect.succeed(json(400, {error: 'Live upgrade refused'}))),
         ),
@@ -338,9 +423,8 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
           yield* PubSub.publish(connection.wake, undefined);
     }).pipe(Effect.ignoreCause);
 
-  const publishAvailability = (project: string, available: boolean) =>
+  const publishResourceAvailability = (resource: ManagerLiveResource, available: boolean) =>
     Effect.gen(function* () {
-      const resource: ManagerLiveResource = {topic: 'context-health', project};
       const key = managerLiveResourceKey(resource);
       for (const connection of connections) {
         if (!connection.mailbox.resources().some(subscribed => managerLiveResourceKey(subscribed) === key)) continue;
@@ -350,12 +434,15 @@ export const makeManagerLive = Effect.fn('manager.live.make')(function* (options
         yield* PubSub.publish(connection.wake, undefined);
       }
     }).pipe(Effect.ignoreCause);
+  const publishAvailability = (project: string, available: boolean) =>
+    publishResourceAvailability({topic: 'context-health', project}, available);
 
   return {
     handle,
     publish,
     publishResource,
     publishAvailability,
+    publishResourceAvailability,
     invalidateScope: Effect.sync(() => tickets.clear()).pipe(
       Effect.andThen(
         Effect.suspend(() => Effect.forEach([...connections], connection => connection.close, {discard: true})),

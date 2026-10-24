@@ -43,6 +43,9 @@ describe('Manager disconnect recovery', () => {
         if (!online) throw new TypeError('Manager is unavailable');
         const url = new URL(String(input), 'http://localhost');
         const path = url.pathname;
+        // Exercise REST loss/recovery with an explicitly unsupported live endpoint.
+        if (path === '/api/live-session')
+          return new Response(JSON.stringify({error: 'Live unavailable in this REST fixture'}), {status: 404});
         if (path === '/api/state')
           return json({
             agents: [],

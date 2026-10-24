@@ -167,8 +167,17 @@ export type CodeGraphLocalProvenanceInventory =
  * maintenance bounded; overflow and containment ambiguity fail closed.
  */
 export const inspectCodeGraphLocalProvenanceInventory = Effect.fn('codeGraph.inspectLocalProvenanceInventory')(
-  function* (threadnoteHome: string, checkoutId: string) {
-    if (!HASH_ID.test(checkoutId)) {
+  function* (
+    threadnoteHome: string,
+    checkoutId: string,
+    entryLimit = CODE_GRAPH_LOCAL_PROVENANCE_INVENTORY_ENTRY_LIMIT,
+  ) {
+    if (
+      !HASH_ID.test(checkoutId) ||
+      !Number.isInteger(entryLimit) ||
+      entryLimit < 0 ||
+      entryLimit > CODE_GRAPH_LOCAL_PROVENANCE_INVENTORY_ENTRY_LIMIT
+    ) {
       return {state: 'unavailable'} as const satisfies CodeGraphLocalProvenanceInventory;
     }
     return yield* Effect.gen(function* () {
@@ -194,10 +203,7 @@ export const inspectCodeGraphLocalProvenanceInventory = Effect.fn('codeGraph.ins
         return {state: 'ready', worktreeIds: []} as const satisfies CodeGraphLocalProvenanceInventory;
       }
       const canonicalWorktrees = yield* inspectPrivateContainedDirectory(fs, path, canonicalContext, worktrees);
-      const page = yield* runtimeTextDirectoryNamePage(
-        canonicalWorktrees,
-        CODE_GRAPH_LOCAL_PROVENANCE_INVENTORY_ENTRY_LIMIT,
-      );
+      const page = yield* runtimeTextDirectoryNamePage(canonicalWorktrees, entryLimit);
       if (page.overflow) {
         return {state: 'unavailable'} as const satisfies CodeGraphLocalProvenanceInventory;
       }
@@ -209,6 +215,84 @@ export const inspectCodeGraphLocalProvenanceInventory = Effect.fn('codeGraph.ins
     }).pipe(Effect.orElseSucceed(() => ({state: 'unavailable'}) as const satisfies CodeGraphLocalProvenanceInventory));
   },
 );
+
+/**
+ * Passive live coverage of private records and their remembered worktree roots.
+ * Never resolves Git, refreshes provenance, reads graph databases, or performs cleanup.
+ * Expired present associations require an authoritative read before coverage can resume.
+ */
+export const observeCodeGraphLocalProvenance = Effect.fn('codeGraph.observeLocalProvenance')(function* (
+  threadnoteHome: string,
+  checkoutId: string,
+  entryLimit: number,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const system = yield* SystemInfo;
+  const now = yield* Clock.currentTimeMillis;
+  const inventory = yield* inspectCodeGraphLocalProvenanceInventory(threadnoteHome, checkoutId, entryLimit);
+  if (inventory.state !== 'ready')
+    return yield* CodeGraphLocalProvenanceError.make({message: 'Local provenance live coverage is unavailable.'});
+  const root = path.join(threadnoteHome, 'indexes', 'code-graph', 'repositories', checkoutId, LOCAL_CONTEXT_DIRECTORY);
+  const directory = path.join(root, LOCAL_WORKTREES_DIRECTORY);
+  const files: string[] = [];
+  const directories = new Set([root, directory]);
+  const revisions: unknown[] = [];
+  let nextChangeAt = Infinity;
+  for (const worktreeId of inventory.worktreeIds) {
+    const file = path.join(directory, `${worktreeId}.json`);
+    if (Option.isSome(yield* fs.readLink(file).pipe(Effect.option)))
+      return yield* CodeGraphLocalProvenanceError.make({message: 'Linked local provenance live record.'});
+    const info = yield* fs.stat(file);
+    if (
+      info.type !== 'File' ||
+      Number(info.size) > LOCAL_PROVENANCE_BYTES_LIMIT ||
+      (system.platform !== 'win32' && (info.mode & 0o777) !== 0o600)
+    )
+      return yield* CodeGraphLocalProvenanceError.make({message: 'Invalid local provenance live record.'});
+    const content = yield* readBoundedObservedRegularFile(fs, file, info);
+    const record = parseCodeGraphLocalProvenanceRecordJson(content, {checkoutId, worktreeId});
+    if (!record || !isCanonicalAbsolutePath(path, record.canonicalWorktreePath))
+      return yield* CodeGraphLocalProvenanceError.make({message: 'Invalid local provenance live identity.'});
+    const worktree = record.canonicalWorktreePath;
+    const observed = yield* optionOnNotFound(fs.stat(worktree));
+    const canonical = yield* optionOnNotFound(fs.realPath(worktree));
+    const deadline = Date.parse(record.observedAt) + LOCAL_PROVENANCE_REFRESH_MILLISECONDS;
+    if (
+      Option.isSome(observed) &&
+      observed.value.type === 'Directory' &&
+      Option.isSome(canonical) &&
+      canonical.value === worktree
+    ) {
+      if (now < Date.parse(record.observedAt) || now >= deadline)
+        return yield* CodeGraphLocalProvenanceError.make({message: 'Local provenance live identity needs refresh.'});
+      nextChangeAt = Math.min(nextChangeAt, deadline);
+    }
+    files.push(file);
+    directories.add(worktree);
+    directories.add(path.dirname(worktree));
+    revisions.push([
+      file,
+      sha256HexSync(content),
+      Option.getOrUndefined(canonical),
+      Option.isNone(observed)
+        ? 'missing'
+        : [
+            observed.value.type,
+            String(observed.value.dev),
+            String(Option.getOrUndefined(observed.value.ino)),
+            observed.value.mode,
+          ],
+    ]);
+  }
+  return {
+    files,
+    directories: [...directories],
+    count: inventory.worktreeIds.length,
+    revision: sha256HexSync(JSON.stringify(revisions)),
+    ...(Number.isFinite(nextChangeAt) ? {nextChangeAt} : {}),
+  };
+});
 
 /**
  * Persist a path only after the caller resolved the complete Git identity. Failures are represented

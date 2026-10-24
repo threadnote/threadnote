@@ -9,6 +9,7 @@ import {aggregateValueReportV1, type ValueReportV1} from './index.js';
 import {readLocalValueEvents, summarizeCandidateReviewValue, summarizeLocalValueEvents} from './events.js';
 import {deleteValueReportData, pruneValueReportData, VALUE_REPORT_EXPORT_DIRECTORY} from './storage.js';
 import {ValueArtifactError, writeValueArtifact} from './artifact.js';
+import {ManagerConsumerClockHints, nextManagerWindowChange} from '../manager/live_consumer_sources.js';
 
 export const DEFAULT_VALUE_REPORT_PERIOD_DAYS = 30 as const;
 export const DEFAULT_VALUE_REPORT_RETENTION_DAYS = 365 as const;
@@ -163,6 +164,22 @@ export const buildLocalValueReport = Effect.fn('valueReport.buildLocal')(functio
     {concurrency: 3},
   );
   const project = options.project?.trim();
+  if (!absolute && periodDays === 30 && project) {
+    // Reuse the inputs already loaded by the authoritative projection. Observers never rebuild this report.
+    const timestamps = [
+      ...feedbackEvents.map(event => Date.parse(event.timestamp)),
+      ...valueEvents.map(event => Date.parse(event.timestamp)),
+      ...candidateReviews.flatMap(review => [
+        Date.parse(review.createdAt),
+        ...review.auditEvents.map(event => Date.parse(event.at)),
+      ]),
+    ];
+    yield* (yield* ManagerConsumerClockHints).register(
+      'home',
+      project,
+      nextManagerWindowChange(DateTime.toEpochMillis(now), periodDays * 86_400_000, timestamps),
+    );
+  }
   const from = window?.from ?? DateTime.toEpochMillis(now) - periodDays * 86_400_000;
   const to = window?.to ?? DateTime.toEpochMillis(now);
   const period = {from: DateTime.formatIso(DateTime.makeUnsafe(from)), to: DateTime.formatIso(DateTime.makeUnsafe(to))};

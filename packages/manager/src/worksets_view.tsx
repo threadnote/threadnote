@@ -11,6 +11,7 @@ import type {CodeGraphWorksetStatusResultV1} from '@threadnote/graph/workset_cat
 import type {ProjectedCodeGraphWorksetEvidenceV1} from '@threadnote/graph/workset/evidence';
 import {useManagerDialogs} from '@threadnote/manager/dialog';
 import {ManifestProjectsPanel} from './manifest_projects_view.js';
+import {useManagerLiveQuery} from './live/provider.js';
 import {ManagerApiError, api, errorMessage} from '@threadnote/manager/ui/support';
 import type {
   ManagerWorksetCatalog,
@@ -51,6 +52,38 @@ export function WorksetsPanel(): React.ReactElement {
   const [statusError, setStatusError] = useState('');
   const [statusLoading, setStatusLoading] = useState(false);
   const [job, setJob] = useState<ManagerWorksetPrepareJob>();
+  const catalogLive = useManagerLiveQuery<ManagerWorksetCatalog>(
+    {topic: 'worksets', scope: 'account'},
+    'catalog',
+    signal => api('/api/worksets', undefined, {signal}),
+  );
+  const jobsLive = useManagerLiveQuery<{readonly jobs: readonly ManagerWorksetPrepareJobSummary[]}>(
+    {topic: 'worksets', scope: 'account'},
+    'jobs',
+    signal => api('/api/worksets/jobs', undefined, {signal}),
+  );
+  const definitionLive = useManagerLiveQuery<ManagerWorksetDefinition>(
+    selectedName ? {topic: 'worksets', scope: 'account'} : undefined,
+    JSON.stringify(['definition', selectedName]),
+    signal => api(`/api/worksets/definition?workset=${encodeURIComponent(selectedName)}`, undefined, {signal}),
+  );
+  const statusLive = useManagerLiveQuery<CodeGraphWorksetStatusResultV1>(
+    selectedName ? {topic: 'worksets', scope: 'account'} : undefined,
+    JSON.stringify(['status', selectedName]),
+    signal => api(`/api/worksets/status?workset=${encodeURIComponent(selectedName)}`, undefined, {signal}),
+  );
+  const jobLive = useManagerLiveQuery<{readonly job: ManagerWorksetPrepareJob}>(
+    job?.id ? {topic: 'worksets', scope: 'account'} : undefined,
+    JSON.stringify(['job', job?.id]),
+    signal => api(`/api/worksets/jobs/${encodeURIComponent(job?.id ?? '')}`, undefined, {signal}),
+  );
+  const fallback = !catalogLive.active || catalogLive.snapshot.status === 'unsupported';
+  const liveReadErrors = fallback
+    ? []
+    : [jobsLive.snapshot, definitionLive.snapshot, jobLive.snapshot].flatMap(snapshot =>
+        snapshot.status === 'error' ? [errorMessage(snapshot.error)] : [],
+      );
+  const completedJob = useRef<string | undefined>(undefined);
   const [definitionDraft, setDefinitionDraft] = useState<DefinitionDraft>();
   const [definitionBusy, setDefinitionBusy] = useState(false);
   const [definitionFilter, setDefinitionFilter] = useState('');
@@ -124,15 +157,78 @@ export function WorksetsPanel(): React.ReactElement {
   }, [catalog, definitionDraft, definitionFilter, definitionProjectPage, definitionSelectedOnly]);
 
   useEffect(() => {
-    void loadCatalog();
-    void loadJobs();
+    if (fallback) {
+      void loadCatalog();
+      void loadJobs();
+    }
     return () => {
       catalogRequestRef.current?.abort();
       definitionRequestRef.current?.abort();
       statusRequestRef.current?.abort();
       operationRequestRef.current?.abort();
     };
-  }, []);
+  }, [fallback]);
+  useEffect(() => {
+    if (fallback) return;
+    if (catalogLive.snapshot.status === 'error') {
+      setCatalogError(errorMessage(catalogLive.snapshot.error));
+      return;
+    }
+    if (catalogLive.snapshot.status !== 'ready') return;
+    const next = catalogLive.snapshot.data;
+    setCatalog(next);
+    setCatalogError('');
+    setSelectedName(current =>
+      next.definitions.some(definition => definition.name === current) ? current : (next.definitions[0]?.name ?? ''),
+    );
+  }, [fallback, catalogLive.snapshot]);
+  useEffect(() => {
+    if (fallback) return;
+    if (jobsLive.snapshot.status !== 'ready') return;
+    const active = jobsLive.snapshot.data.jobs.find(item => item.status === 'running' || item.status === 'cancelling');
+    const selectedJob = active ?? jobsLive.snapshot.data.jobs[0];
+    if (selectedJob) setJob(current => (current?.id === selectedJob.id ? current : selectedJob));
+  }, [fallback, jobsLive.snapshot]);
+  useEffect(() => {
+    if (fallback) return;
+    if (definitionLive.snapshot.status === 'ready') setSelectedDefinition(definitionLive.snapshot.data);
+  }, [fallback, definitionLive.snapshot]);
+  useEffect(() => {
+    if (fallback) return;
+    if (statusLive.snapshot.status === 'error') {
+      const cause = statusLive.snapshot.error;
+      setStatusError(
+        Schema.is(ManagerApiError)(cause) && cause.code === 'maintenance-busy'
+          ? 'Readiness is temporarily unavailable while graph maintenance is active. Manifest definitions remain available.'
+          : errorMessage(cause),
+      );
+      setStatusLoading(false);
+    } else if (statusLive.snapshot.status === 'ready') {
+      setStatus(statusLive.snapshot.data);
+      setStatusError('');
+      setStatusLoading(false);
+    }
+  }, [fallback, statusLive.snapshot]);
+  useEffect(() => {
+    if (fallback) return;
+    if (jobLive.snapshot.status !== 'ready') return;
+    const next = jobLive.snapshot.data.job;
+    if (next.id !== job?.id) return;
+    setJob(next);
+    if (next.status !== 'running' && next.status !== 'cancelling') {
+      const identity = `${next.id}:${next.status}`;
+      if (completedJob.current !== identity) {
+        completedJob.current = identity;
+        if (next.workset === selectedName) {
+          if (next.status === 'completed') {
+            cancelOperation();
+            clearOperationResults();
+          }
+          statusLive.invalidate();
+        }
+      }
+    }
+  }, [fallback, jobLive.snapshot, job?.id, selectedName]);
 
   useEffect(() => {
     if (catalog?.projects.length === 0) setManagementView('projects');
@@ -147,14 +243,14 @@ export function WorksetsPanel(): React.ReactElement {
     setStatusError('');
     clearOperationResults();
     setSelectedDefinition(undefined);
-    if (selectedName) {
+    if (selectedName && fallback) {
       void loadDefinition(selectedName);
       void loadStatus(selectedName);
     }
-  }, [selectedName]);
+  }, [selectedName, fallback]);
 
   useEffect(() => {
-    if (!job || (job.status !== 'running' && job.status !== 'cancelling')) return;
+    if (!fallback || !job || (job.status !== 'running' && job.status !== 'cancelling')) return;
     let cancelled = false;
     let jobTimer: number | undefined;
     const pollJob = async (): Promise<void> => {
@@ -180,7 +276,7 @@ export function WorksetsPanel(): React.ReactElement {
       cancelled = true;
       if (jobTimer !== undefined) window.clearTimeout(jobTimer);
     };
-  }, [job?.id, job?.status, selectedName]);
+  }, [job?.id, job?.status, selectedName, fallback]);
 
   async function loadCatalog(): Promise<void> {
     catalogRequestRef.current?.abort();
@@ -576,6 +672,11 @@ export function WorksetsPanel(): React.ReactElement {
 
   return (
     <div className="worksets-management">
+      {liveReadErrors.length > 0 ? (
+        <p className="worksets-error" role="alert">
+          {liveReadErrors.join(' ')}
+        </p>
+      ) : null}
       {managementView === 'worksets' ? (
         <PageActions>
           <button
@@ -636,7 +737,14 @@ export function WorksetsPanel(): React.ReactElement {
                   {notice}
                 </p>
               ) : null}
-              {catalogError ? <p role="alert">{catalogError}</p> : null}
+              {catalogError ? (
+                <p role="alert">
+                  {catalogError}{' '}
+                  <button onClick={() => (fallback ? void loadCatalog() : catalogLive.invalidate())} type="button">
+                    Retry catalog
+                  </button>
+                </p>
+              ) : null}
               {catalog?.definitions.map(definition => (
                 <section className="workspace-card" key={definition.name}>
                   <div className="workspace-row">

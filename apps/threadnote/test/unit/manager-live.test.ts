@@ -4,7 +4,7 @@ import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunSocket from '@effect/platform-bun/BunSocket';
 import {it as effectIt} from '@effect/vitest';
 import {Context, Deferred, Effect, Fiber, FileSystem, Layer, Path, PlatformError, Ref, Schema, Stream} from 'effect';
-import {HttpClient, HttpServer, HttpServerRequest, HttpServerResponse} from 'effect/http';
+import {HttpClient, HttpClientRequest, HttpServer, HttpServerRequest, HttpServerResponse} from 'effect/http';
 import * as Socket from 'effect/socket/Socket';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -21,7 +21,11 @@ import {readSettledCanonicalMutationGeneration} from '@threadnote/store/resource
 import {makeCanonicalRevisionObservation, makeManagerLiveSources} from '../../src/manager/live_sources.js';
 import {makeManagerHealthLiveRegistry} from '../../src/manager/live_health_sources.js';
 import {makeManagerLive, makeManagerLiveMailbox, type ManagerLiveOptions} from '../../src/manager/live.js';
-import {MANAGER_LIVE_LIMITS, ManagerLiveServerFrame} from '@threadnote/manager/live/contracts';
+import {
+  MANAGER_LIVE_LIMITS,
+  ManagerLiveServerFrame,
+  type ManagerLiveResource,
+} from '@threadnote/manager/live/contracts';
 import {TestError} from '@threadnote/testing/test-error';
 
 const systemLayer = SystemInfo.layer.pipe(
@@ -608,6 +612,7 @@ describe('Manager health live registry', () => {
 const serveLive = Effect.fn('test.managerLive.serve')(function* (
   projects: Effect.Effect<ReadonlySet<string>> = Effect.succeed(new Set(['one', 'two'])),
   health?: ManagerLiveOptions['health'],
+  observations?: ManagerLiveOptions['observations'],
 ) {
   const context = yield* Layer.build(
     BunHttpServer.layer({
@@ -628,6 +633,7 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
     token: 'synthetic-live-token',
     projects,
     health,
+    observations,
   });
   yield* server.serve(
     Effect.gen(function* () {
@@ -675,10 +681,107 @@ const serveLive = Effect.fn('test.managerLive.serve')(function* (
         close: writer.write(new Socket.CloseEvent()),
       };
     });
-  return {origin, live, ticket, connect};
+  const ticketWithBody = (body: unknown) =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const request = yield* HttpClientRequest.bodyJson(
+        HttpClientRequest.post(`${origin}/api/live-session`, {
+          headers: {authorization: 'Bearer synthetic-live-token', origin},
+        }),
+        body,
+      );
+      return yield* client.execute(request);
+    });
+  return {origin, live, ticket, ticketWithBody, connect};
 });
 
 describe('Manager live protocol', () => {
+  effectIt.effect('negotiates legacy and requested topics without advertising absent producers', () =>
+    Effect.gen(function* () {
+      const server = yield* serveLive(undefined, undefined, {
+        topics: ['home', 'worksets'],
+        subscribe: () => Effect.succeed([]),
+        release: () => Effect.void,
+      });
+      const legacy = yield* server.connect((yield* server.ticket).ticket);
+      expect(yield* legacy.next).toMatchObject({type: 'welcome', topics: ['context-maintenance']});
+      yield* legacy.close;
+      const emptyBody = yield* server.ticketWithBody({});
+      expect(emptyBody.status).toBe(200);
+      const emptyBodyTicket = (yield* emptyBody.json) as {ticket: string};
+      const emptyBodyClient = yield* server.connect(emptyBodyTicket.ticket);
+      expect(yield* emptyBodyClient.next).toMatchObject({type: 'welcome', topics: ['context-maintenance']});
+      yield* emptyBodyClient.close;
+      const requested = yield* server.ticketWithBody({topics: ['worksets', 'context-maintenance', 'graph-status']});
+      expect(requested.status).toBe(200);
+      const body = (yield* requested.json) as {ticket: string};
+      const modern = yield* server.connect(body.ticket);
+      expect(yield* modern.next).toMatchObject({type: 'welcome', topics: ['context-maintenance', 'worksets']});
+      yield* modern.send({
+        type: 'subscribe',
+        version: 1,
+        generation: 1,
+        resources: [{topic: 'graph-status', scope: 'account'}],
+      });
+      expect((yield* Effect.result(modern.next))._tag).toBe('Failure');
+      for (const invalid of [
+        {topics: ['worksets', 'worksets']},
+        {topics: ['unknown']},
+        {topics: 'worksets'},
+        {topics: [], extra: true},
+      ])
+        expect((yield* server.ticketWithBody(invalid)).status).toBe(400);
+    }).pipe(Effect.timeout('10 seconds'), TestClock.withLive, provideLayer),
+  );
+
+  effectIt.effect('authorizes mixed account and project resources and rejects malformed or revoked scopes', () =>
+    Effect.gen(function* () {
+      let allowed = new Set(['one']);
+      const installed: ManagerLiveResource[][] = [];
+      const server = yield* serveLive(
+        Effect.sync(() => allowed),
+        undefined,
+        {
+          topics: ['home', 'worksets'],
+          subscribe: (_key, resources) =>
+            Effect.sync(() => {
+              installed.push([...resources]);
+              return [];
+            }),
+          release: () => Effect.void,
+        },
+      );
+      const issue = Effect.gen(function* () {
+        const response = yield* server.ticketWithBody({topics: ['home', 'worksets', 'context-maintenance']});
+        expect(response.status).toBe(200);
+        return (yield* response.json) as {ticket: string};
+      });
+      const good = yield* server.connect((yield* issue).ticket);
+      expect(yield* good.next).toMatchObject({type: 'welcome', topics: ['context-maintenance', 'home', 'worksets']});
+      const mixed = [
+        {topic: 'home', scope: 'account'},
+        {topic: 'home', project: 'one'},
+        {topic: 'worksets', scope: 'account'},
+      ];
+      yield* good.send({type: 'subscribe', version: 1, generation: 1, resources: mixed});
+      expect(yield* good.next).toMatchObject({type: 'subscribed', generation: 1});
+      expect(installed).toEqual([[mixed[0], mixed[1], mixed[2]]]);
+      allowed = new Set();
+      yield* good.send({type: 'subscribe', version: 1, generation: 2, resources: mixed});
+      expect((yield* Effect.result(good.next))._tag).toBe('Failure');
+      for (const resource of [
+        {topic: 'worksets', project: 'one'},
+        {topic: 'context-maintenance', scope: 'account'},
+        {topic: 'home', project: 'one', scope: 'account'},
+        {topic: 'home', project: 'two'},
+      ]) {
+        const client = yield* server.connect((yield* issue).ticket);
+        yield* client.next;
+        yield* client.send({type: 'subscribe', version: 1, generation: 1, resources: [resource]});
+        expect((yield* Effect.result(client.next))._tag).toBe('Failure');
+      }
+    }).pipe(Effect.timeout('15 seconds'), TestClock.withLive, provideLayer),
+  );
   effectIt.effect('bounds incoming frames while subscription authorization is pending', () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
