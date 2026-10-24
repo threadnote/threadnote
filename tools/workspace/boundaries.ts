@@ -43,6 +43,7 @@ export function validateSourceVisibility(
 
 const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
   platform: [],
+  'workflow-automations': ['platform'],
   store: ['platform'],
   memory: ['platform', 'store', 'workspace'],
   evidence: ['platform'],

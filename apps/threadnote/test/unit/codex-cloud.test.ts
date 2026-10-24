@@ -20,7 +20,10 @@ import {codexCloudRuntimeConfig} from '@threadnote/threadnote/codex/cloud';
 import {cursorCloudMemoryRoot, cursorCloudUriWithinScope} from '@threadnote/threadnote/cursor/cloud';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 
-const segment = fc.stringMatching(/^[a-z][a-z0-9-]{0,12}$/u);
+// Successful namespace properties require portable resource segments.
+const segment = fc
+  .stringMatching(/^[a-z][a-z0-9-]{0,12}$/u)
+  .filter(value => !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/u.test(value));
 
 describe('Codex Cloud contracts', () => {
   it('normalizes bounded shares independently of order and duplicates', () => {
@@ -66,6 +69,12 @@ describe('Codex Cloud contracts', () => {
       }),
       {numRuns: 100},
     );
+  });
+
+  it('rejects Windows reserved filenames before checking namespace containment', () => {
+    const root = cursorCloudMemoryRoot('a', 'a');
+    const scope = {mode: 'shared-read-write' as const, shares: [{root, team: 'a'}], localReadRoots: []};
+    expect(() => cursorCloudUriWithinScope(scope, `${root}/durable/con.md`)).toThrow('Windows reserved name');
   });
 
   it('uses stable cloud defaults and preserves persisted identities', () => {
