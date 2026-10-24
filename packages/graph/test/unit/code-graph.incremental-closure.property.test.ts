@@ -13,8 +13,181 @@ import type {CodeGraphWorkspace, CodeGraphWorkspaceProject} from '@threadnote/gr
 import type {CodeGraphReusableReexport} from '@threadnote/graph/store';
 import type {CodeGraphFileFacts, CodeGraphInventoryFile, CodeGraphSymbol} from '@threadnote/graph/types';
 import {mergeCodeGraphWorkspaces} from '@threadnote/graph/workspace';
+import {classifyWorkspaceTransition} from '@threadnote/graph/workspace/transition';
 
 describe('project incremental closure', () => {
+  it('includes unchanged nested ownership paths and reverse dependents from each project version', () => {
+    const oldLib = transitionProject('lib', 'packages/lib');
+    const oldConsumer = transitionProject('consumer', 'packages/consumer', ['lib']);
+    const newLib = transitionProject('new-lib', 'packages/lib');
+    const newConsumer = transitionProject('consumer', 'packages/consumer', ['new-lib']);
+    const paths = ['packages/consumer/index.ts', 'packages/lib/index.ts', 'packages/lib/nested/kept.ts'];
+    const files = paths.map(path => ({
+      path,
+      size: 10,
+      resolutionDomains: ['typescript'],
+      hasWorkspacePackageSymbol: path.startsWith('packages/lib/'),
+    }));
+    const transition = classifyWorkspaceTransition({
+      base: transitionSide([oldConsumer, oldLib], files),
+      current: transitionSide([newConsumer, newLib], files),
+      resolverExtractorContextUnchanged: true,
+    });
+    expect(transition).toMatchObject({
+      mode: 'eligible',
+      ownerChangedPaths: ['packages/lib/index.ts', 'packages/lib/nested/kept.ts'],
+    });
+    if (transition.mode === 'eligible') {
+      expect(transition.baseAffectedPaths).toEqual(paths);
+      expect(transition.currentAffectedPaths).toEqual(paths);
+      expect(transition.sourceBytes).toBe(30);
+    }
+  });
+
+  it('matches an independent reverse reachability model for generated dependency chains', () => {
+    FC.assert(
+      FC.property(FC.integer({min: 2, max: 18}), count => {
+        const projects = Array.from({length: count}, (_, index) =>
+          transitionProject(`p${index}`, `packages/p${index}`, index + 1 < count ? [`p${index + 1}`] : []),
+        );
+        const target = `p${Math.floor(count / 2)}`;
+        const currentProjects = projects.map((value, index) =>
+          index === Math.floor(count / 2)
+            ? transitionProject(value.id, value.root, [...value.dependencies, 'added'])
+            : value,
+        );
+        const files = [
+          ...projects.map(value => ({
+            path: `${value.root}/index.ts`,
+            size: 1,
+            resolutionDomains: ['typescript'],
+            hasWorkspacePackageSymbol: false,
+          })),
+          {
+            path: 'packages/added/index.ts',
+            size: 1,
+            resolutionDomains: ['typescript'],
+            hasWorkspacePackageSymbol: false,
+          },
+        ];
+        const transition = classifyWorkspaceTransition({
+          base: transitionSide(projects, files.slice(0, projects.length)),
+          current: transitionSide([...currentProjects, transitionProject('added', 'packages/added')], files),
+          resolverExtractorContextUnchanged: true,
+        });
+        expect(transition.mode).toBe('eligible');
+        if (transition.mode === 'eligible') {
+          const expected = independentReverseClosure(projects, [target]);
+          expect([...expected].sort()).toEqual(
+            projects
+              .filter(value => transition.baseAffectedPaths.includes(`${value.root}/index.ts`))
+              .map(value => value.id)
+              .sort(),
+          );
+        }
+      }),
+      {numRuns: 50},
+    );
+  });
+
+  it('matches independent nearest-root ownership and two-version graph oracles for generated nested transitions', () => {
+    FC.assert(
+      FC.property(
+        FC.record({depth: FC.integer({min: 1, max: 5}), dependentCount: FC.integer({min: 0, max: 8})}),
+        ({depth, dependentCount}) => {
+          const childRoot = `packages/${Array.from({length: depth}, () => 'nested').join('/')}`;
+          const parent = transitionProject('parent', 'packages');
+          const child = transitionProject('child', childRoot);
+          const oldConsumers = Array.from({length: dependentCount}, (_, index) =>
+            transitionProject(`consumer${index}`, `apps/consumer${index}`, ['parent']),
+          );
+          const currentConsumers = oldConsumers.map(value => transitionProject(value.id, value.root, ['child']));
+          const allFiles = [
+            {
+              path: `${childRoot}/src/kept.ts`,
+              size: 2,
+              resolutionDomains: ['typescript'],
+              hasWorkspacePackageSymbol: true,
+            },
+            ...oldConsumers.map(value => ({
+              path: `${value.root}/index.ts`,
+              size: 3,
+              resolutionDomains: ['typescript'],
+              hasWorkspacePackageSymbol: false,
+            })),
+          ];
+          const baseProjects = [parent, ...oldConsumers];
+          const currentProjects = [parent, child, ...currentConsumers];
+          const beforeSeeds = ['parent', ...oldConsumers.map(value => value.id)];
+          const afterSeeds = ['child', ...currentConsumers.map(value => value.id)];
+          for (const direction of [
+            {base: baseProjects, current: currentProjects, baseSeeds: beforeSeeds, currentSeeds: afterSeeds},
+            {base: currentProjects, current: baseProjects, baseSeeds: afterSeeds, currentSeeds: beforeSeeds},
+          ]) {
+            const transition = classifyWorkspaceTransition({
+              base: transitionSide(direction.base, allFiles),
+              current: transitionSide(direction.current, allFiles),
+              resolverExtractorContextUnchanged: true,
+            });
+            expect(transition.mode).toBe('eligible');
+            if (transition.mode !== 'eligible') continue;
+            const baseClosure = independentReverseClosure(direction.base, direction.baseSeeds);
+            const currentClosure = independentReverseClosure(direction.current, direction.currentSeeds);
+            expect(transition.baseProjectClosureIds).toEqual([...baseClosure].sort());
+            expect(transition.currentProjectClosureIds).toEqual([...currentClosure].sort());
+            expect(transition.ownerChangedPaths).toEqual([`${childRoot}/src/kept.ts`]);
+            expect(transition.baseAffectedPaths).toEqual(oracleAffectedPaths(direction.base, allFiles, baseClosure));
+            expect(transition.currentAffectedPaths).toEqual(
+              oracleAffectedPaths(direction.current, allFiles, currentClosure),
+            );
+          }
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
+
+  it('admits generated additions and removals monotonically under tighter valid work caps', () => {
+    FC.assert(
+      FC.property(
+        FC.record({
+          count: FC.integer({min: 1, max: 15}),
+          size: FC.integer({min: 1, max: 50}),
+          fileLimit: FC.integer({min: 0, max: 20}),
+          byteLimit: FC.integer({min: 0, max: 800}),
+        }),
+        ({count, size, fileLimit, byteLimit}) => {
+          const parent = transitionProject('parent', 'packages');
+          const child = transitionProject('child', 'packages/child');
+          const files = Array.from({length: count}, (_, index) => ({
+            path: `packages/child/file${index}.ts`,
+            size,
+            resolutionDomains: ['typescript'],
+            hasWorkspacePackageSymbol: false,
+          }));
+          const before = transitionSide([parent], files);
+          const after = transitionSide([parent, child], files);
+          for (const [base, current] of [
+            [before, after],
+            [after, before],
+          ]) {
+            const input = {base, current, resolverExtractorContextUnchanged: true};
+            const limited = classifyWorkspaceTransition({...input, maxFiles: fileLimit, maxSourceBytes: byteLimit});
+            const loosened = classifyWorkspaceTransition({
+              ...input,
+              maxFiles: fileLimit + 1,
+              maxSourceBytes: byteLimit + 1,
+            });
+            expect(limited.mode).toBe(count <= fileLimit && count * size <= byteLimit ? 'eligible' : 'fallback');
+            if (limited.mode === 'eligible') expect(loosened.mode).toBe('eligible');
+            if (loosened.mode === 'fallback') expect(limited.mode).toBe('fallback');
+          }
+        },
+      ),
+      {numRuns: 60},
+    );
+  });
+
   it('finds the exact reverse-transitive declared project closure and deterministically selects its files', () => {
     const projects = [project('app', ['barrel']), project('barrel', ['core']), project('core'), project('unrelated')];
     const files = projects.flatMap(value => [inventory(`${value.root}/index.ts`, 32)]);
@@ -1030,6 +1203,85 @@ describe('project incremental closure', () => {
     ).toEqual({mode: 'fallback', reason: 'reexport-closure-unbounded'});
   });
 });
+
+function transitionProject(id: string, root: string, dependencies: readonly string[] = []): CodeGraphWorkspaceProject {
+  return {
+    ...project(id, dependencies),
+    buildSystem: 'node',
+    root,
+    sourceRoots: [root],
+    workspaceId: 'workspace',
+    workspaceRoots: ['packages'],
+  };
+}
+function transitionSide(
+  projects: readonly CodeGraphWorkspaceProject[],
+  files: readonly {
+    path: string;
+    size: number;
+    resolutionDomains: readonly string[];
+    hasWorkspacePackageSymbol: boolean;
+  }[],
+) {
+  const workspaces = [
+    ...new Map(
+      projects.map(value => [
+        value.workspaceId,
+        {
+          buildSystem: value.buildSystem,
+          diagnostics: [],
+          id: value.workspaceId,
+          name: value.workspaceId,
+          provenance: 'declared' as const,
+          root: value.workspaceRoots[0] ?? value.root,
+        },
+      ]),
+    ).values(),
+  ];
+  return {workspace: {...workspace(projects), workspaces}, files, inventoryComplete: true};
+}
+
+function oracleAffectedPaths(
+  projects: readonly CodeGraphWorkspaceProject[],
+  files: readonly {path: string; resolutionDomains: readonly string[]; hasWorkspacePackageSymbol: boolean}[],
+  closure: ReadonlySet<string>,
+): string[] {
+  return files
+    .filter(file => {
+      const domains = [...file.resolutionDomains, ...(file.hasWorkspacePackageSymbol ? ['workspace'] : [])];
+      return domains.some(domain => {
+        const owner = oracleOwner(projects, file.path, domain);
+        return owner !== undefined && closure.has(owner.id);
+      });
+    })
+    .map(file => file.path)
+    .sort();
+}
+
+function oracleOwner(
+  projects: readonly CodeGraphWorkspaceProject[],
+  path: string,
+  domain: string,
+): CodeGraphWorkspaceProject | undefined {
+  const eligible = projects.filter(value =>
+    domain === 'workspace'
+      ? value.buildSystem === 'node' || value.buildSystem === 'pnpm'
+      : value.resolutionDomain === domain ||
+        (domain === 'bazel' && value.languages.some(language => language === 'bazel' || language === 'starlark')),
+  );
+  const find = (rootsFor: (project: CodeGraphWorkspaceProject) => readonly string[]) => {
+    const matches = eligible.flatMap(project =>
+      rootsFor(project)
+        .filter(root => root === '' || path === root || path.startsWith(`${root}/`))
+        .map(root => ({project, root})),
+    );
+    matches.sort(
+      (left, right) => right.root.length - left.root.length || left.project.id.localeCompare(right.project.id),
+    );
+    return matches[0]?.project;
+  };
+  return find(project => project.sourceRoots) ?? find(project => [project.root]);
+}
 
 function project(id: string, dependencies: readonly string[] = []): CodeGraphWorkspaceProject {
   return {
