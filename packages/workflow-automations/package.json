@@ -1,0 +1,19 @@
+{
+  "name": "@threadnote/workflow-automations",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./contracts": "./src/contracts.ts",
+    "./inventory": "./src/inventory.ts",
+    "./scenarios": "./src/scenarios.ts"
+  },
+  "dependencies": {
+    "@threadnote/platform": "workspace:*",
+    "effect": "4.0.3"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.3",
+    "@threadnote/testing": "workspace:*",
+    "vitest": "5.0.3"
+  }
+}

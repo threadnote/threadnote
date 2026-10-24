@@ -20,6 +20,7 @@
         "@threadnote/recall": "workspace:*",
         "@threadnote/remote-memory": "workspace:*",
         "@threadnote/store": "workspace:*",
+        "@threadnote/workflow-automations": "workspace:*",
         "@threadnote/workspace": "workspace:*",
         "effect": "4.0.3",
         "fflate": "0.8.3",
@@ -105,6 +106,7 @@
         "@threadnote/recall": "workspace:*",
         "@threadnote/remote-memory": "workspace:*",
         "@threadnote/store": "workspace:*",
+        "@threadnote/workflow-automations": "workspace:*",
         "@threadnote/workspace": "workspace:*",
         "effect": "4.0.3",
         "jose": "6.2.12",
@@ -523,6 +525,18 @@
         "@effect/vitest": "4.0.3",
         "effect": "4.0.3",
         "fast-check": "4.10.2",
+      },
+    },
+    "packages/workflow-automations": {
+      "name": "@threadnote/workflow-automations",
+      "dependencies": {
+        "@threadnote/platform": "workspace:*",
+        "effect": "4.0.3",
+      },
+      "devDependencies": {
+        "@effect/vitest": "4.0.3",
+        "@threadnote/testing": "workspace:*",
+        "vitest": "5.0.3",
       },
     },
     "packages/workspace": {
@@ -1098,6 +1112,8 @@
     "@threadnote/threadnote": ["@threadnote/threadnote@workspace:apps/threadnote"],
 
     "@threadnote/website": ["@threadnote/website@workspace:apps/website"],
+
+    "@threadnote/workflow-automations": ["@threadnote/workflow-automations@workspace:packages/workflow-automations"],
 
     "@threadnote/workspace": ["@threadnote/workspace@workspace:packages/workspace"],
 
