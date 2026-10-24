@@ -47,6 +47,39 @@ describe('bundled development workflow Python contracts', () => {
   }
 });
 
+it('source helper generation ignores Finder metadata while retaining real payload changes', () => {
+  fc.assert(
+    fc.property(
+      fc.record({
+        skill: fc.constantFrom('dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr'),
+        directory: fc.constantFrom('', 'scripts', 'resources'),
+        metadata: fc.array(fc.integer({min: 0, max: 255}), {maxLength: 256}),
+        payload: fc.array(fc.integer({min: 0, max: 255}), {maxLength: 64}),
+      }),
+      sample => {
+        const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+        const result = spawnSync(
+          python,
+          [
+            '-B',
+            resolve('apps/threadnote/test/dev-skills/python/test_workflow_transport.py'),
+            '--source-generation-fixture',
+          ],
+          {
+            encoding: 'utf8',
+            input: JSON.stringify(sample),
+            timeout: 10_000,
+            env: {...process.env, PYTHONDONTWRITEBYTECODE: '1', PYTHONPATH: ''},
+          },
+        );
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({metadataStable: true, payloadTracked: true, readOnly: true});
+      },
+    ),
+    {numRuns: 12},
+  );
+}, 30_000);
+
 it('plan revisions remain durable and idempotent across readiness changes and legacy migration', () => {
   fc.assert(
     fc.property(

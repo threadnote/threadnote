@@ -69,7 +69,7 @@ def generation():
     hashes = [(p.relative_to(root).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest())
               for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")
               for p in sorted((root / skill).rglob("*"))
-              if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"]
+              if p.is_file() and p.name != ".DS_Store" and "__pycache__" not in p.parts and p.suffix != ".pyc"]
     return "source-" + digest(hashes)
 
 
