@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Schema} from 'effect';
+import {Effect, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {
@@ -101,14 +101,17 @@ for (const boundary of ['journal', 'receipt', 'home', 'runtime'] as const)
     removalRecovery(boundary, false),
   );
 
-effectIt.effect.prop(
-  'refresh completes an interrupted removal before deciding ownership or enablement',
-  {boundary: Schema.Literals(['journal', 'receipt', 'home', 'runtime']), shared: Schema.Boolean},
-  ({boundary, shared}, context) => {
+effectIt.effect(
+  'refresh completes each interrupted removal boundary before deciding ownership or enablement',
+  context => {
     const diagnostics = refreshPropertyDiagnostics(context, {scope: 'dev-skills-refresh-removal-recovery'});
-    return diagnostics.observeRecovery(boundary, shared, removalRecovery(boundary, shared, diagnostics));
+    return Effect.gen(function* () {
+      for (const boundary of ['journal', 'receipt', 'home', 'runtime'] as const)
+        for (const shared of [false, true])
+          yield* diagnostics.observeRecovery(boundary, shared, removalRecovery(boundary, shared, diagnostics));
+    });
   },
-  {arbitrary: {runs: 8}, timeout: 120_000},
+  120_000,
 );
 
 for (const conflict of ['missing-receipt', 'different-owner', 'third-party-edit'] as const)

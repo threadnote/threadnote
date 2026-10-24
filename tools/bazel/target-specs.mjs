@@ -114,6 +114,7 @@ const packageDataRoots = {
   ],
 };
 const packageData = {
+  'packages/workflow-automations': ['config/dev-skills.json'],
   'packages/evidence': ['.github/workflows/benchmarks.yml'],
   'packages/graph': [
     '.github/actionlint.yml',
