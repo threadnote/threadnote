@@ -15,6 +15,7 @@ import {
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
+import {decodeWorkflowJournal, encodeWorkflowJournal} from './journal_codec.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -62,9 +63,9 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   if (stat.type !== 'File' || Number(stat.size) > 16 * 1024 * 1024)
     return yield* workflowError('invalid-journal', 'Workflow journal is not a bounded regular file.');
   const text = yield* fs.readFileString(file);
-  return yield* Effect.try({
-    try: () => {
-      const parsed = JSON.parse(text) as WorkflowJournal;
+  return yield* Effect.tryPromise({
+    try: async signal => {
+      const parsed = JSON.parse(await decodeWorkflowJournal(text, signal)) as WorkflowJournal;
       if (
         parsed.protocolVersion !== 1 ||
         parsed.binding?.bindingId !== bindingId ||
@@ -107,12 +108,14 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
 
 export function serializeWorkflowJournal(state: WorkflowJournal): string {
   const content = `${stableJson(state)}\n`;
-  if (new TextEncoder().encode(content).byteLength > 16 * 1024 * 1024)
+  try {
+    return encodeWorkflowJournal(content);
+  } catch {
     throw workflowError(
       'journal-capacity',
       'This workflow has reached its bounded task-state capacity. No new operation was applied; preserve its existing receipts.',
     );
-  return content;
+  }
 }
 
 /** Only replay an exact journaled manifest transition; never reconstruct missing committed state. */
