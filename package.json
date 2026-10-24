@@ -199,7 +199,8 @@
     "@threadnote/recall": "workspace:*",
     "@threadnote/graph": "workspace:*",
     "@threadnote/context": "workspace:*",
-    "@threadnote/remote-memory": "workspace:*"
+    "@threadnote/remote-memory": "workspace:*",
+    "@threadnote/workflow-automations": "workspace:*"
   },
   "overrides": {
     "@effect/platform-node-shared": "4.0.3",

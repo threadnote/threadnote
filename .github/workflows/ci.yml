@@ -320,6 +320,11 @@ jobs:
       - run: bun run check:self-contained
       - name: Platform process identity smoke
         run: bun --bun vitest run apps/threadnote/test/unit/effect-system.test.ts
+      - name: Native workflow foundation smoke
+        run: >-
+          bun --bun vitest run
+          packages/workflow-automations/test/inventory.test.ts
+          packages/workflow-automations/test/baseline.test.ts
       - run: bun run test:smoke:self-contained
       - name: Real predecessor upgrade and model setup admission
         if: matrix.os == 'macos-15'
