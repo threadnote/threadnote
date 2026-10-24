@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import random
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,81 @@ import workflow
 import phase_state
 
 assert_product_provenance(SKILLS, "workflow-transport-imports")
+
+
+class SourceGenerationTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "source"
+        for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr"):
+            directory = self.root / skill
+            (directory / "scripts").mkdir(parents=True)
+            (directory / "resources").mkdir()
+            (directory / "SKILL.md").write_text("# " + skill + "\n")
+            (directory / "resources" / "payload.bin").write_bytes(b"payload")
+        self.generators = self.load_generators(self.root)
+
+    def load_generators(self, root):
+        result = {}
+        for skill in ("dev-plan", "dev-spec"):
+            helper = root / skill / "scripts" / "workflow_transport.py"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_bytes((SKILLS / skill / "scripts" / "workflow_transport.py").read_bytes())
+            result[skill] = runpy.run_path(str(helper))["generation"]
+        return result
+
+    def generations(self):
+        return {skill: generate() for skill, generate in self.generators.items()}
+
+    def test_source_generation_ignores_finder_metadata_without_writing_payload(self):
+        baseline = self.generations()
+        random_bytes = random.Random(6719)
+        metadata = [self.root / skill / directory / ".DS_Store"
+                    for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")
+                    for directory in ("", "scripts", "resources")]
+        for index in range(12):
+            for file in metadata:
+                file.write_bytes(random_bytes.randbytes(index * 17 + 1))
+            before = {file.relative_to(self.root): file.read_bytes() for file in self.root.rglob("*") if file.is_file()}
+            with self.subTest(sample=index):
+                self.assertEqual(self.generations(), baseline)
+                self.assertEqual({file.relative_to(self.root): file.read_bytes()
+                                  for file in self.root.rglob("*") if file.is_file()}, before)
+        for file in metadata:
+            file.unlink()
+        self.assertEqual(self.generations(), baseline)
+
+    def test_source_generation_still_tracks_real_bytes_paths_and_hidden_inputs(self):
+        baseline = self.generations()
+        mutations = [self.root / skill / relative
+                     for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")
+                     for relative in ("scripts/new.py", "resources/new.bin", ".hidden", ".DS_Store.backup", ".ds_store")]
+        random_bytes = random.Random(2271)
+        for file in mutations:
+            with self.subTest(path=str(file.relative_to(self.root))):
+                file.write_bytes(random_bytes.randbytes(37))
+                self.assertTrue(all(value != baseline[skill] for skill, value in self.generations().items()))
+                first = self.generations()
+                file.write_bytes(random_bytes.randbytes(53))
+                self.assertTrue(all(value != first[skill] for skill, value in self.generations().items()))
+                before_rename = self.generations()
+                renamed = file.with_name(file.name + "-renamed")
+                file.rename(renamed)
+                self.assertTrue(all(value != before_rename[skill] for skill, value in self.generations().items()))
+                renamed.unlink()
+                self.assertEqual(self.generations(), baseline)
+        directory = self.root / "dev-plan" / ".DS_Store"
+        directory.mkdir()
+        (directory / "payload").write_bytes(b"meaningful child")
+        self.assertTrue(all(value != baseline[skill] for skill, value in self.generations().items()))
+
+    def test_immutable_generation_fast_path_preserves_the_existing_pin(self):
+        pin = "b" * 64
+        generators = self.load_generators(Path(self.temporary.name) / "generations" / pin)
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("immutable fast path read payload")):
+            self.assertEqual({skill: generate() for skill, generate in generators.items()},
+                             {"dev-plan": pin, "dev-spec": pin})
 
 
 class NativeFixture:
@@ -808,7 +884,30 @@ raise SystemExit(not result.wasSuccessful())
 
 
 if __name__ == "__main__":
-    if STALE_INPUT is not None:
+    if sys.argv[1:] == ["--source-generation-fixture"]:
+        sample = json.load(sys.stdin)
+        fixture = SourceGenerationTests()
+        fixture.setUp()
+        try:
+            baseline = fixture.generations()
+            directory = fixture.root / sample["skill"] / sample["directory"]
+            metadata = directory / ".DS_Store"
+            metadata.write_bytes(bytes(sample["metadata"]))
+            before = {file.relative_to(fixture.root): file.read_bytes()
+                      for file in fixture.root.rglob("*") if file.is_file()}
+            assert fixture.generations() == baseline
+            assert {file.relative_to(fixture.root): file.read_bytes()
+                    for file in fixture.root.rglob("*") if file.is_file()} == before
+            payload = directory / ".meaningful-input"
+            payload.write_bytes(bytes(sample["payload"]))
+            assert all(value != baseline[skill] for skill, value in fixture.generations().items())
+            payload.unlink()
+            metadata.unlink()
+            assert fixture.generations() == baseline
+        finally:
+            fixture.doCleanups()
+        print(json.dumps({"metadataStable": True, "payloadTracked": True, "readOnly": True}))
+    elif STALE_INPUT is not None:
         before = copy.deepcopy(STALE_INPUT)
         fixture = TransportTests()
         fixture.setUp()
