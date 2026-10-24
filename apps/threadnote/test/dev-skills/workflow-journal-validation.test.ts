@@ -1,3 +1,10 @@
+import {gzipSync} from 'fflate';
+import {createHash} from '@threadnote/testing/node-crypto';
+import {
+  decodeWorkflowJournal,
+  encodeWorkflowJournal,
+  workflowJournalLimits,
+} from '../../src/workflow_memory/journal_codec.js';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {
@@ -356,11 +363,139 @@ describe('workflow journal ownership validation', () => {
     expect(() => assertWorkflowJournalIntegrity(transition(forged), originalState.manifestContent)).toThrow();
   });
 
-  it('rejects an oversized journal before it can be persisted beyond the reader limit', () => {
+  it('keeps plain journals compatible and rejects logical journals beyond the expanded limit', () => {
     const original = state();
     expect(serializeWorkflowJournal(original)).toContain('"protocolVersion":1');
-    expect(() => serializeWorkflowJournal({...original, manifestContent: 'x'.repeat(16 * 1024 * 1024)})).toThrow(
+    expect(() => serializeWorkflowJournal({...original, manifestContent: 'x'.repeat(64 * 1024 * 1024)})).toThrow(
       expect.objectContaining({code: 'journal-capacity'}),
     );
+  });
+});
+
+const digest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
+const format = 'threadnote-workflow-journal-gzip-v1';
+describe('workflow journal codec', async () => {
+  it('keeps legacy plaintext capacity when compressed encoding would be larger', async () => {
+    const data = new Uint8Array(2 * 1024 * 1024);
+    let seed = 0x12345678;
+    for (let index = 0; index < data.length; index++) {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      data[index] = seed & 255;
+    }
+    const logical = `${JSON.stringify({payload: Buffer.from(data).toString('base64')})}\n`;
+    const encoded = encodeWorkflowJournal(logical);
+    expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(Buffer.byteLength(logical));
+    expect(await decodeWorkflowJournal(encoded)).toBe(logical);
+  });
+
+  it('round trips unicode JSON losslessly and emits deterministic bytes', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.array(fc.string(), {minLength: 64, maxLength: 128}), async values => {
+        const varied = `🧭雪é${values.join(' | ')}`;
+        const logical = `${JSON.stringify({values: Array.from({length: Math.ceil(1_100_000 / varied.length)}, () => varied), sentinel: '🧭'})}\n`;
+        const encoded = encodeWorkflowJournal(logical);
+        expect(encoded).not.toBe(logical);
+        expect(encodeWorkflowJournal(logical)).toBe(encoded);
+        expect(JSON.parse(await decodeWorkflowJournal(encoded))).toEqual(JSON.parse(logical));
+      }),
+      {numRuns: 8},
+    );
+  });
+
+  it('compresses a large legitimate shaped history while preserving every receipt byte', async () => {
+    const operations = Object.fromEntries(
+      Array.from({length: 91}, (_, index) => {
+        const content = `relation-document-${index}\n${'shared relation content '.repeat(3_000)}`;
+        return [
+          `operation-${index}`,
+          {
+            request: {operationId: `operation-${index}`, body: `body-${index}`},
+            before: content,
+            desired: content,
+            relations: [{uri: `threadnote://fixture/${index}`, content}],
+            status: 'verified',
+          },
+        ];
+      }),
+    );
+    const logical = `${JSON.stringify({protocolVersion: 1, binding: {}, artifacts: {}, operations, manifestCommitted: true, manifestUri: 'threadnote://fixture/manifest', manifestContent: 'manifest'})}\n`;
+    expect(new TextEncoder().encode(logical).byteLength).toBeGreaterThan(16 * 1024 * 1024);
+    const encoded = encodeWorkflowJournal(logical);
+    expect(new TextEncoder().encode(encoded).byteLength).toBeLessThan(16 * 1024 * 1024);
+    expect(JSON.parse(await decodeWorkflowJournal(encoded))).toEqual(JSON.parse(logical));
+  });
+
+  it('reads existing plain JSON and rejects malformed envelopes, gzip integrity failures and expansion limits', async () => {
+    expect(await decodeWorkflowJournal('{"protocolVersion":1}\n')).toBe('{"protocolVersion":1}\n');
+    const plain = new TextEncoder().encode('{"ok":true}\n');
+    const good = JSON.parse(
+      JSON.stringify({
+        format,
+        expandedBytes: plain.byteLength,
+        sha256: digest(plain),
+        payload: btoa(String.fromCharCode(...gzipSync(plain, {mtime: 0}))),
+      }),
+    ) as Record<string, unknown>;
+    expect(await decodeWorkflowJournal(JSON.stringify(good))).toBe('{"ok":true}\n');
+    // Readers must not depend on the writer's compressor version or options.
+    expect(
+      await decodeWorkflowJournal(
+        JSON.stringify({
+          ...good,
+          payload: btoa(String.fromCharCode(...gzipSync(plain, {level: 0, mtime: 42}))),
+        }),
+      ),
+    ).toBe('{"ok":true}\n');
+    for (const bad of [
+      {...good, payload: `${String(good.payload).slice(0, -4)}!!!!`},
+      {...good, expandedBytes: workflowJournalLimits.logicalBytes + 1},
+      {...good, extra: true},
+      {...good, sha256: '0'.repeat(64)},
+    ])
+      await expect(decodeWorkflowJournal(JSON.stringify(bad))).rejects.toThrow();
+    const truncated = {
+      ...good,
+      payload: btoa(String.fromCharCode(...gzipSync(plain).subarray(0, 10))),
+      expandedBytes: 1,
+    };
+    await expect(decodeWorkflowJournal(JSON.stringify(truncated))).rejects.toThrow();
+    const corrupt = gzipSync(plain, {mtime: 0});
+    corrupt[corrupt.length - 8] ^= 1;
+    await expect(
+      decodeWorkflowJournal(JSON.stringify({...good, payload: btoa(String.fromCharCode(...corrupt))})),
+    ).rejects.toThrow();
+    const concatenated = new Uint8Array([...gzipSync(plain), ...gzipSync(plain)]);
+    await expect(
+      decodeWorkflowJournal(JSON.stringify({...good, payload: btoa(String.fromCharCode(...concatenated))})),
+    ).rejects.toThrow();
+    const trailing = new Uint8Array([...gzipSync(plain), 0]);
+    await expect(
+      decodeWorkflowJournal(JSON.stringify({...good, payload: btoa(String.fromCharCode(...trailing))})),
+    ).rejects.toThrow();
+    const emptyMember = new Uint8Array([...gzipSync(plain), ...gzipSync(new Uint8Array())]);
+    expect(
+      await decodeWorkflowJournal(JSON.stringify({...good, payload: Buffer.from(emptyMember).toString('base64')})),
+    ).toBe('{"ok":true}\n');
+    const tooSmall = {...good, expandedBytes: plain.byteLength - 1};
+    await expect(decodeWorkflowJournal(JSON.stringify(tooSmall))).rejects.toThrow();
+    const unknownFormat = {...good, format: 'threadnote-workflow-journal-gzip-v99'};
+    await expect(decodeWorkflowJournal(JSON.stringify(unknownFormat))).rejects.toThrow();
+    expect(await decodeWorkflowJournal(` ${JSON.stringify(good)}`)).toBe('{"ok":true}\n');
+    const filenameHeader = new Uint8Array(1024 * 1024);
+    filenameHeader.set(gzipSync(plain).subarray(0, 10));
+    filenameHeader[3] = 8;
+    filenameHeader.fill(65, 10);
+    // A second malformed optional header used to bypass the first-header guard
+    // and make the JS decoder repeatedly scan/copy the entire pending header.
+    for (const payload of [filenameHeader, new Uint8Array([...gzipSync(plain), ...filenameHeader])]) {
+      await expect(
+        decodeWorkflowJournal(JSON.stringify({...good, payload: Buffer.from(payload).toString('base64')})),
+      ).rejects.toThrow();
+    }
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(decodeWorkflowJournal(JSON.stringify(good), aborted.signal)).rejects.toThrow();
   });
 });

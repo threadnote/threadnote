@@ -1,5 +1,6 @@
 import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {uriSegment} from '@threadnote/store/resource-segment';
@@ -15,6 +16,7 @@ import {
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
+import {decodeWorkflowJournal, encodeWorkflowJournal} from './journal_codec.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -62,9 +64,9 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   if (stat.type !== 'File' || Number(stat.size) > 16 * 1024 * 1024)
     return yield* workflowError('invalid-journal', 'Workflow journal is not a bounded regular file.');
   const text = yield* fs.readFileString(file);
-  return yield* Effect.try({
-    try: () => {
-      const parsed = JSON.parse(text) as WorkflowJournal;
+  return yield* fromPromiseInterruptible(
+    async signal => {
+      const parsed = JSON.parse(await decodeWorkflowJournal(text, signal)) as WorkflowJournal;
       if (
         parsed.protocolVersion !== 1 ||
         parsed.binding?.bindingId !== bindingId ||
@@ -77,12 +79,12 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
         throw new Error('Invalid journal');
       return parsed;
     },
-    catch: () =>
+    () =>
       workflowError(
         'invalid-journal',
         'Workflow task state is invalid; restore the original context instead of rebinding.',
       ),
-  });
+  );
 });
 
 export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(function* (
@@ -107,12 +109,14 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
 
 export function serializeWorkflowJournal(state: WorkflowJournal): string {
   const content = `${stableJson(state)}\n`;
-  if (new TextEncoder().encode(content).byteLength > 16 * 1024 * 1024)
+  try {
+    return encodeWorkflowJournal(content);
+  } catch {
     throw workflowError(
       'journal-capacity',
       'This workflow has reached its bounded task-state capacity. No new operation was applied; preserve its existing receipts.',
     );
-  return content;
+  }
 }
 
 /** Only replay an exact journaled manifest transition; never reconstruct missing committed state. */
