@@ -257,8 +257,12 @@ describe('native workflow naming integration', () => {
           {concurrency: 2},
         );
         const initialized = simultaneousResults.map(requireInitResult);
-        for (const [runId, title] of requests.slice(2))
-          initialized.push(requireInitResult(yield* f.call(initInput(f, runId, title))));
+        const remainingResults = yield* Effect.forEach(
+          requests.slice(2),
+          ([runId, title]) => f.call(initInput(f, runId, title)),
+          {concurrency: 2},
+        );
+        initialized.push(...remainingResults.map(requireInitResult));
         expect(new Set(initialized.map(item => item.bindingId)).size).toBe(requests.length);
         expect(initialized.slice(0, 3).map(item => item.naming.slug)).toEqual([
           'shared-roadmap',
