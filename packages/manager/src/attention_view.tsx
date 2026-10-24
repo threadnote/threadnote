@@ -1,6 +1,7 @@
 import {MarkdownViewer} from './ui/controls.js';
 import {Sparkles} from 'lucide-react';
 import {MemoryExcerpt, ReviewBadge} from './review_presentation.js';
+import {ReviewProgress} from './review_progress.js';
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import type {
   ManagerCitationRepairJobResponseV1,
@@ -140,9 +141,17 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
         ))}
       </div>
       {error ? (
-        <AttentionError error={error} />
+        <div role="alert">
+          <AttentionError error={error} />
+          <button type="button" onClick={() => setGeneration(value => value + 1)}>
+            Retry loading reviews
+          </button>
+        </div>
       ) : loading ? (
-        <AttentionEmpty text="Loading the review inbox…" />
+        <ReviewProgress
+          title="Loading the review inbox…"
+          description="Checking current review and source access. You can switch tabs while this loads."
+        />
       ) : !inbox || inbox.items.length === 0 ? (
         <AttentionEmpty
           text={

@@ -456,7 +456,7 @@ export const handleManagerAutomaticMemory = Effect.fn('managerAutomaticMemory.ha
   const checked = yield* selectedAutomaticReview(request.config, project, body.reviewId).pipe(Effect.result);
   if (Result.isFailure(checked) || !checked.success || checked.success.revision !== body.revision) return unavailable();
   let approvalRevision = body.revision;
-  if (action === 'preview' || action === 'apply') {
+  if (action === 'apply') {
     const authorized = yield* readManagerAutomaticReview(request.config, project, body.reviewId).pipe(Effect.result);
     if (Result.isFailure(authorized) || !authorized.success || authorized.success.revision !== body.revision)
       return unavailable();

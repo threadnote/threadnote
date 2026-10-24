@@ -339,7 +339,7 @@ export function maintenanceDecisionExplanation(reason: string): string {
   if (reason.includes('owner') || reason.includes('shared-canonical'))
     return 'This shared memory needs a change reviewed by its team owner. Review the affected links and prepare a proposal for the owner.';
   if (reason === 'source-changed' || reason === 'citation-changed')
-    return 'The source changed since this memory was written. Compare the stored claim with current and historical evidence, then update the advice if it no longer applies.';
+    return 'The code changed since this memory was written, so its advice may be out of date. Background checks can refresh source evidence, but they cannot decide whether the advice is still correct. Review the claim before updating or archiving it.';
   if (reason.includes('ambiguous'))
     return 'More than one source could support this memory. Review the candidates and choose the correct repository or claim.';
   if (reason.includes('relation'))

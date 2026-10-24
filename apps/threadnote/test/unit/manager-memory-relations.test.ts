@@ -1087,7 +1087,7 @@ describe('Manager retained reviewed provenance', () => {
           desiredContent: desired,
         });
         expect(preview.status, await preview.clone().text()).toBe(200);
-        const prepared = (await preview.json()) as ManagerAutomaticReview;
+        let prepared = (await preview.json()) as ManagerAutomaticReview;
         expect(prepared).toMatchObject({
           kind: 'automatic-memory-review',
           purpose: 'manual-edit',
@@ -1164,6 +1164,22 @@ describe('Manager retained reviewed provenance', () => {
           return;
         }
         await writeFile(join(directory, 'support.md'), sourceContent);
+        const refreshed = await post('/api/attention/automatic-review', {
+          action: 'preview',
+          project: 'threadnote',
+          reviewId: prepared.reviewId,
+          revision: prepared.revision,
+        });
+        expect(refreshed.status, await refreshed.clone().text()).toBe(200);
+        prepared = (await refreshed.json()) as ManagerAutomaticReview;
+        expect(prepared).toMatchObject({
+          kind: 'automatic-memory-review',
+          state: 'pending',
+          canApply: true,
+          approval: {stage: 'preview'},
+        });
+        expect(prepared.approval?.content).toContain('Edited info.');
+        expect(await readFile(join(directory, 'source.md'), 'utf8')).toBe(storedContent);
         const selection = {
           action: 'apply',
           project: 'threadnote',

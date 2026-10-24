@@ -1,5 +1,6 @@
 import React from 'react';
 import {AlertTriangle, Info, Quote} from 'lucide-react';
+import {MarkdownViewer} from './ui/controls.js';
 
 export type ReviewTone = 'neutral' | 'info' | 'proposal' | 'warning' | 'danger' | 'protected';
 
@@ -17,6 +18,7 @@ export function ReviewBadge(props: {
 export function MemoryExcerpt(props: {
   readonly children: React.ReactNode;
   readonly label?: string;
+  readonly markdown?: boolean;
   readonly tone?: 'info' | 'protected';
 }): React.ReactElement {
   return (
@@ -25,7 +27,13 @@ export function MemoryExcerpt(props: {
         <Quote size={14} aria-hidden="true" />
         {props.label ?? 'Accepted memory'}
       </figcaption>
-      <blockquote>{props.children}</blockquote>
+      <blockquote>
+        {props.markdown && typeof props.children === 'string' ? (
+          <MarkdownViewer markdown={props.children} />
+        ) : (
+          props.children
+        )}
+      </blockquote>
     </figure>
   );
 }

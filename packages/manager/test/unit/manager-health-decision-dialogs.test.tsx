@@ -345,3 +345,20 @@ it('switches checks inside the same review and ignores the previous check’s la
   expect(document.querySelector('dialog')?.textContent).toContain('Second check choice');
   expect(document.querySelector('dialog')?.textContent).not.toContain('current declaration');
 });
+
+it('explains source-changed ownership and offers a direct supported review step', async () => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL) =>
+    String(input).includes('/api/memory?')
+      ? response({content: '# Stored advice'})
+      : String(input).includes('view=status')
+        ? response({version: 2, project: 'threadnote', cases: [item]})
+        : response(packet),
+  );
+  await render(<MaintenanceCaseDialog {...base} />);
+  expect(document.body.textContent).toContain('Background checks can refresh source evidence');
+  expect(document.body.textContent).toContain('Your review is needed');
+  expect(document.body.textContent).toContain('Refresh evidence only rechecks the source');
+  const next = document.querySelector('.health-source-next-step');
+  expect(next?.querySelector('button')?.textContent).toContain('Review with agent');
+  expect(document.querySelector('.health-code-preview .source-excerpt code')?.textContent).toBe('current declaration');
+});

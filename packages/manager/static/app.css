@@ -8688,8 +8688,7 @@ h4 {
   line-height: 1.8;
   padding: 0;
   min-height: 0;
-  max-height: 220px;
-  overflow: auto;
+  max-height: none;
 }
 .review-proposal-preview .markdown-viewer > :first-child {
   margin-top: 0;
@@ -9815,6 +9814,36 @@ h4 {
   overflow-wrap: anywhere;
   white-space: normal;
 }
+.source-excerpt {
+  min-width: 0;
+  margin: 12px 0;
+}
+.source-excerpt figcaption {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.source-excerpt pre {
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.source-excerpt .tok-keyword,
+.source-excerpt .tok-operatorKeyword {
+  color: #c9a7f0;
+}
+.source-excerpt .tok-string,
+.source-excerpt .tok-string2 {
+  color: #80d8a8;
+}
+.source-excerpt .tok-number,
+.source-excerpt .tok-bool,
+.source-excerpt .tok-null {
+  color: #ffbe7a;
+}
+.source-excerpt .tok-comment {
+  color: var(--muted);
+}
 .review-proposal-text {
   font-size: 14px;
   line-height: 1.65;
@@ -10523,6 +10552,11 @@ h4 {
 .automatic-review-dialog code {
   overflow-wrap: anywhere;
 }
+.automatic-review-dialog .source-excerpt pre,
+.automatic-review-dialog .source-excerpt code {
+  white-space: pre;
+  overflow-wrap: normal;
+}
 .automatic-review-actions {
   display: flex;
   flex-wrap: wrap;
@@ -10568,4 +10602,35 @@ h4 {
   .automatic-review-actions > button {
     width: 100%;
   }
+}
+
+.review-progress {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+  padding: 18px;
+  margin-block: 12px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+.review-progress strong {
+  font-size: 15px;
+}
+.review-progress p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+.automatic-review-exact > .review-confirmation {
+  display: flex;
+  gap: 10px;
+  margin-block: 18px;
+}
+.automatic-review-exact:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 5px;
+}
+.health-source-next-step {
+  margin-top: 16px;
 }
