@@ -1,4 +1,4 @@
-import {DateTime, Effect, FileSystem, Option, Path, Predicate, Result} from 'effect';
+import {DateTime, Effect, FileSystem, Option, Path, Predicate, Result, Schema} from 'effect';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {succeedUndefined} from '@threadnote/platform/optional';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -18,6 +18,7 @@ import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   captureMemoryCodeCitations,
   memoryCodeCitationProjectScopeReceipt,
+  MemoryCodeCitationCaptureError,
   type MemoryCodeCitationCaptureRecoveryV1,
   normalizeMemoryCodeRefs,
 } from '@threadnote/context/citation/capture';
@@ -29,6 +30,7 @@ import {
   deferredCodeAnchorIntentId,
   hasDeferredCodeAnchorIntentKeys,
   isDeferredCodeAnchorFullProjectScope,
+  isMemoryCodeCitationRecovery,
   parseMemoryCodeCitationProjectScopeReceipt,
   verifyDeferredCodeAnchorProjectScope,
   type DeferredCodeAnchorIntentV1,
@@ -138,7 +140,7 @@ export interface DeferredCodeAnchorFinalizeItemV1 {
   readonly code?: string;
   readonly memoryUri?: string;
   readonly reason?: string;
-  readonly recoveryAction?: 'prepare-current-graph' | 'replace-memory-code-refs';
+  readonly recoveryAction?: 'prepare-current-graph' | 'retry-capture' | 'replace-memory-code-refs';
   readonly retryable?: boolean;
   readonly state: 'conflict' | 'failed' | 'finalized' | 'pending';
 }
@@ -307,7 +309,7 @@ export const stageDeferredCodeAnchorIntent = Effect.fn('memoryCodeAnchor.stage')
     worktreeId: status.identity.worktreeId,
   };
   yield* writeDeferredCodeAnchorIntent(config, intent);
-  if (intent.recovery.preparation.target !== 'workset') {
+  if (intent.recovery.recovery === 'prepare-current-graph' && intent.recovery.preparation.target !== 'workset') {
     yield* scheduleDeferredCodeAnchorIntentRefresh(config, intent).pipe(Effect.ignoreCause);
   }
   return intent;
@@ -653,7 +655,9 @@ export function deferredCodeAnchorIntentMatchesFinalizationRoute(
     return intent.repositoryId === route.repositoryId && intent.worktreeId === route.worktreeId;
   }
   return (
-    (intent.recovery.preparation.target === 'workset' && intent.recovery.preparation.arguments[0] === route.name) ||
+    (intent.recovery.recovery === 'prepare-current-graph' &&
+      intent.recovery.preparation.target === 'workset' &&
+      intent.recovery.preparation.arguments[0] === route.name) ||
     intent.codeRefs.some(ref => DEFERRED_CODE_ANCHOR_QUALIFIED_REF.test(ref))
   );
 }
@@ -718,10 +722,14 @@ const finalizeDeferredCodeAnchor = Effect.fn('memoryCodeAnchor.finalizeOne')(fun
   if (Result.isFailure(captured)) {
     const classified = deferredCodeAnchorCaptureFailureItem(captured.failure, entry.intent.memoryUri);
     if (classified !== undefined) {
+      const recovery = Schema.is(MemoryCodeCitationCaptureError)(captured.failure)
+        ? captured.failure.recovery
+        : undefined;
       if (
         classified.state === 'pending' &&
         classified.retryable === true &&
-        entry.intent.recovery.preparation.target !== 'workset'
+        recovery?.recovery === 'prepare-current-graph' &&
+        recovery.preparation.target !== 'workset'
       ) {
         yield* scheduleDeferredCodeAnchorIntentRefresh(config, entry.intent).pipe(Effect.ignoreCause);
       }
@@ -1145,7 +1153,7 @@ const deferredCodeAnchorRouteQueueKeysForIntent = Effect.fn('memoryCodeAnchor.ro
     worktreeId: intent.worktreeId,
   });
   const keys = [`r${repositoryDigest.slice(0, DEFERRED_CODE_ANCHOR_ROUTE_KEY_HEX_LENGTH)}`];
-  if (intent.recovery.preparation.target === 'workset') {
+  if (intent.recovery.recovery === 'prepare-current-graph' && intent.recovery.preparation.target === 'workset') {
     const worksetDigest = yield* deferredCodeAnchorRouteDigest(config, {
       kind: 'workset',
       name: intent.recovery.preparation.arguments[0],
@@ -1592,7 +1600,7 @@ const storedDeferredCodeAnchorIntentMatchesAddress = Effect.fn('memoryCodeAnchor
       worktreeId: intent.worktreeId,
     });
     const worksetRouteDigest =
-      intent.recovery.preparation.target === 'workset'
+      intent.recovery.recovery === 'prepare-current-graph' && intent.recovery.preparation.target === 'workset'
         ? yield* deferredCodeAnchorRouteDigest(config, {
             kind: 'workset',
             name: intent.recovery.preparation.arguments[0],
@@ -1631,66 +1639,6 @@ const storedDeferredCodeAnchorIntentMatchesAddress = Effect.fn('memoryCodeAnchor
     })) === intent.intentId
   );
 });
-
-function isMemoryCodeCitationRecovery(value: unknown): value is MemoryCodeCitationCaptureRecoveryV1 {
-  if (!Predicate.isObject(value) || value.type !== 'memory-code-citation-capture-recovery' || value.version !== 1)
-    return false;
-  if (
-    !hasExactKeys(value, [
-      'code',
-      'indexingStarted',
-      'observedGraph',
-      'preparation',
-      'recovery',
-      'retryCondition',
-      'retryable',
-      'type',
-      'version',
-    ]) ||
-    (value.code !== 'exact-current-evidence-unavailable' && value.code !== 'ready-graph-unavailable') ||
-    value.indexingStarted !== false ||
-    value.recovery !== 'prepare-current-graph' ||
-    value.retryCondition !== 'after-current-graph-ready' ||
-    value.retryable !== true ||
-    !Predicate.isObject(value.observedGraph) ||
-    !Predicate.isObject(value.preparation)
-  ) {
-    return false;
-  }
-  if (
-    !hasExactKeys(value.observedGraph, ['freshness', 'readySnapshot', 'stale']) ||
-    !['current', 'deferred', 'stale'].includes(String(value.observedGraph.freshness)) ||
-    !['absent', 'available'].includes(String(value.observedGraph.readySnapshot)) ||
-    typeof value.observedGraph.stale !== 'boolean'
-  ) {
-    return false;
-  }
-  if (value.preparation.target === 'callerCwd') {
-    return (
-      hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
-      value.preparation.action === 'index-current-graph' &&
-      value.preparation.command === 'threadnote graph index --no-vectors' &&
-      Array.isArray(value.preparation.arguments) &&
-      value.preparation.arguments.length === 0
-    );
-  }
-  return (
-    value.preparation.target === 'workset' &&
-    hasExactKeys(value.preparation, ['action', 'arguments', 'command', 'target']) &&
-    value.preparation.action === 'prepare-workset' &&
-    value.preparation.command === 'threadnote workset prepare' &&
-    Array.isArray(value.preparation.arguments) &&
-    value.preparation.arguments.length === 1 &&
-    typeof value.preparation.arguments[0] === 'string' &&
-    value.preparation.arguments[0].length > 0
-  );
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
-}
 
 function isCanonicalIsoDate(value: string): boolean {
   const parsed = new Date(value);

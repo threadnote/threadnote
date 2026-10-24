@@ -36,6 +36,7 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
     await run(['graph', 'index', '--no-vectors', '--json']);
     const status = JSON.parse((await run(['graph', 'status', '--json'])).stdout) as {
       identity: {checkoutId: string};
+      readySnapshot: {id: string};
     };
     const lock = join(home, 'locks', 'indexes', 'code-graph', 'database-writes', `${status.identity.checkoutId}.lock`);
     await mkdir(dirname(lock), {recursive: true});
@@ -76,12 +77,50 @@ it('refuses a strict save promptly while the graph writer is busy and retries af
       );
       expect(failure?.killed, failure?.stderr).not.toBe(true);
       expect(failure?.code, failure?.stderr).toBe(1);
-      expect(failure?.stderr).toContain('Could not capture code citation');
+      expect(failure?.stderr).toContain('citation storage is busy');
+      expect(failure?.stderr).toContain('no indexing was started');
       expect(await readFile(lock, 'utf8')).toBe(owner);
       await expect(readFile(memory, 'utf8')).rejects.toThrow();
     }
 
+    // A private deferred write must keep the original reference intent while
+    // the fixture-owned writer is present, without starting another index.
+    const pending: {path: string; uri: string}[] = [];
+    for (const [topic, deferArgs] of [
+      ['default', []],
+      ['explicit', ['--defer-code-refs']],
+    ] as const) {
+      const deferredArgs = args
+        .filter(argument => argument !== '--require-current-code-refs')
+        .map(argument => (argument === 'contention' ? `contention-${topic}` : argument));
+      const pendingPath = join(dirname(memory), `contention-${topic}.md`);
+      await run([...deferredArgs, ...deferArgs, '--dry-run']);
+      await expect(readFile(pendingPath, 'utf8')).rejects.toThrow();
+      const savedPending = await run([...deferredArgs, ...deferArgs]);
+      expect(savedPending.stdout).toContain('Stored memory:');
+      expect(savedPending.stdout).not.toContain('threadnote graph index');
+      const pendingContent = await readFile(pendingPath, 'utf8');
+      const pendingDocument = parseMemoryDocument(
+        savedPending.stdout.match(/Stored memory: (threadnote:\/\/\S+)/u)?.[1] ?? '',
+        pendingContent,
+      );
+      expect(pendingDocument).toBeDefined();
+      expect(pendingDocument?.metadata.codeCitations ?? []).toEqual([]);
+      expect(await readFile(lock, 'utf8')).toBe(owner);
+      pending.push({path: pendingPath, uri: pendingDocument!.uri});
+    }
+
     await rm(lock);
+    const finalized = JSON.parse(
+      (await run(['finalize-code-refs', ...pending.flatMap(item => ['--uri', item.uri])])).stdout,
+    );
+    expect(finalized).toMatchObject({finalizedCount: 2, failedCount: 0, pendingCount: 0});
+    for (const item of pending) {
+      const content = await readFile(item.path, 'utf8');
+      expect(parseMemoryDocument(item.uri, content)?.metadata.codeCitations).toEqual([
+        expect.objectContaining({path: 'source.ts', sourceSnapshotId: status.readySnapshot.id}),
+      ]);
+    }
     const saved = await run(args);
     expect(saved.stdout).toContain('Stored memory:');
     const content = await readFile(memory, 'utf8');
