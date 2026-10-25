@@ -37,7 +37,8 @@ export function selectDeferredCodeAnchorWorkspaceRefreshTargets(
   const seen = new Set<string>();
   const targets: DeferredCodeAnchorWorkspaceRefreshTarget[] = [];
   for (const intent of intents) {
-    if (intent.recovery.preparation.target === 'workset') continue;
+    if (intent.recovery.recovery !== 'prepare-current-graph' || intent.recovery.preparation.target === 'workset')
+      continue;
     const observation = observationByCwd.get(intent.callerCwd);
     if (
       observation === undefined ||

@@ -89,3 +89,61 @@ it('is deterministic and monotone as additional impacted targets are discovered'
     {numRuns: 50},
   );
 });
+
+it('models the module lockfile as a global input even when target hashes report no impact', () => {
+  for (const changedFiles of [['MODULE.bazel.lock'], ['apps/website/src/page.tsx', 'MODULE.bazel.lock']]) {
+    expect(select([], changedFiles)).toEqual({
+      mode: 'fallback',
+      reason: 'global-inputs',
+      unknown: [],
+      targets: [...inventory].sort(),
+    });
+  }
+});
+
+it('preserves analysis failure and genuinely unknown input diagnostics with a module lock change', () => {
+  expect(select([], ['MODULE.bazel.lock'], 'missing baseline')).toMatchObject({
+    reason: 'missing baseline',
+    unknown: [],
+    targets: [...inventory].sort(),
+  });
+  expect(select([], ['MODULE.bazel.lock', 'new/unmodeled.ts'])).toMatchObject({
+    reason: 'unmodeled-inputs',
+    unknown: ['new/unmodeled.ts'],
+    targets: [...inventory].sort(),
+  });
+  for (const path of ['nested/MODULE.bazel.lock', 'MODULE.bazel.lock.backup']) {
+    expect(select([], [path])).toMatchObject({reason: 'unmodeled-inputs', unknown: [path]});
+  }
+});
+
+it('keeps global lock coverage complete and deterministic across mixed changes and duplicate inventory', () => {
+  fc.assert(
+    fc.property(
+      fc.subarray(inventory, {minLength: 1}),
+      fc.subarray(inventory),
+      fc.array(fc.constantFrom('apps/website/src/page.tsx', 'new/unmodeled.ts', 'MODULE.bazel.lock'), {maxLength: 8}),
+      (labels, impacted, changedFiles) => {
+        const input = {
+          inventory: [...labels, ...labels].reverse(),
+          impacted,
+          changedFiles,
+          knownInputs: ['apps/website/src/page.tsx'],
+        };
+        const before = selectTargets(input);
+        const withLock = selectTargets({...input, changedFiles: [...changedFiles, 'MODULE.bazel.lock']});
+        expect(withLock.targets).toEqual([...labels].sort());
+        expect(before.targets.every(label => withLock.targets.includes(label))).toBe(true);
+        expect(withLock).toEqual(
+          selectTargets({
+            ...input,
+            inventory: labels,
+            impacted: [...impacted].reverse(),
+            changedFiles: ['MODULE.bazel.lock', ...changedFiles].reverse(),
+          }),
+        );
+      },
+    ),
+    {numRuns: 50},
+  );
+});

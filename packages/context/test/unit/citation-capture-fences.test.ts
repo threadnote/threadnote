@@ -1,6 +1,6 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {describe, expect, it} from '@effect/vitest';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path, Schema} from 'effect';
 import fc from 'fast-check';
 import {codeGraphCommittedFileContentHash} from '@threadnote/graph/content_identity';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -102,6 +102,13 @@ describe('local citation capture fences', () => {
             const failure = yield* fixture.capture(0).pipe(Effect.flip);
             expect(failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
             expect(failure).toMatchObject({retryable: true});
+            if (Schema.is(MemoryCodeCitationCaptureError)(failure)) {
+              expect(failure.recovery).toMatchObject({
+                code: 'graph-writer-busy',
+                recovery: 'retry-capture',
+                retryCondition: 'after-writer-available',
+              });
+            }
             expect(evidenceReads).toBe(0);
             expect(fixture.leases()).toEqual({acquired: 0, released: 0});
           }

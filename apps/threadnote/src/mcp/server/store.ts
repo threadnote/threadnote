@@ -524,6 +524,38 @@ function withDeferredCodeAnchorWriteReceipt(
 ): CallToolResult {
   if (result.isError === true) return result;
   const memoryUri = (result.structuredContent as {readonly memoryUri?: unknown} | undefined)?.memoryUri;
+  if (request.recovery.recovery === 'retry-capture') {
+    const recovery = {
+      action: 'retry-capture',
+      automaticRetry: ['next-code-linked-context-brief'] as const,
+      cliCommand: 'threadnote finalize-code-refs',
+      replaceUri: typeof memoryUri === 'string' ? memoryUri : undefined,
+      retry: 'replace-stored-memory',
+      retryCondition: 'after-writer-available',
+    };
+    return {
+      ...result,
+      content: [
+        ...result.content,
+        {
+          type: 'text',
+          text: `Memory stored with ${request.codeRefs.length} pending code reference(s). Retry finalization after the graph writer is available, or run threadnote finalize-code-refs.`,
+        },
+      ],
+      structuredContent: {
+        ...(result.structuredContent ?? {}),
+        citationsFinalized: false,
+        citationPolicy: 'defer',
+        graph: request.recovery.observedGraph,
+        memoryStored: true,
+        memoryUri,
+        pendingCodeRefs: request.codeRefs.length,
+        recovery,
+        type: 'memory-code-citation-write-receipt',
+        version: 1,
+      },
+    };
+  }
   const preparation = request.recovery.preparation;
   const recovery = {
     action: preparation.action,

@@ -9,6 +9,16 @@ export function deferredCodeAnchorCaptureFailureItem(
 ): DeferredCodeAnchorFinalizeItemV1 | undefined {
   if (!Schema.is(MemoryCodeCitationCaptureError)(error)) return undefined;
   if (error.recovery !== undefined) {
+    if (error.recovery.recovery === 'retry-capture') {
+      return {
+        code: error.recovery.code,
+        memoryUri,
+        reason: 'graph-writer-busy',
+        recoveryAction: 'retry-capture',
+        retryable: true,
+        state: 'pending',
+      };
+    }
     return {
       code: error.recovery.code,
       memoryUri,

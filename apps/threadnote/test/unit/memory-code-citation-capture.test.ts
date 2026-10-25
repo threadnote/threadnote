@@ -29,7 +29,9 @@ import {
   type CodeGraphSymbol,
 } from '@threadnote/graph/types';
 import {validateContextBriefMemoryCitations} from '@threadnote/context/citation_validation';
-import {StandaloneBrokerLayer} from '@threadnote/threadnote/effect/runtime';
+import {ApplicationLayer, StandaloneBrokerLayer} from '@threadnote/threadnote/effect/runtime';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {parseMemoryDocument} from '@threadnote/memory/document';
 import {
   captureMemoryCodeCitations,
   MEMORY_CODE_CITATION_GRAPH_PREPARATION_COMMAND,
@@ -39,6 +41,10 @@ import {
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {captureMemoryCodeCitationsForMcp} from '../../src/mcp/memory_code_citation.js';
+import {EffectMcpServerAdapter} from '../../src/effect/ai/mcp.js';
+import {registerStoreTool} from '../../src/mcp/server/store.js';
+import {listDeferredCodeAnchorIntents} from '../../src/memory/deferred/code_anchor.js';
+import {DeferredCodeAnchorRefreshScheduler} from '../../src/memory/deferred/code_anchor_scheduler.js';
 
 const SOURCE = 'export function value() {\n  return "😀";\n}\n';
 const SOURCE_HASH = codeGraphCommittedFileContentHash('sha1', new TextEncoder().encode(SOURCE));
@@ -49,6 +55,99 @@ const SYMBOL_ID = `cgs_${'4'.repeat(32)}`;
 const MODULE_ID = `cgs_${'6'.repeat(32)}`;
 
 describe('memory code citation capture and validation', () => {
+  effectIt.effect('registered remember_context retains private busy intents and refuses strict and shared writes', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-registered-citation-busy-'});
+      const root = path.join(home, 'repository');
+      yield* fs.makeDirectory(root);
+      const config = {...CONFIG, agentContextHome: home, manifestPath: path.join(home, 'manifest.yaml')};
+      yield* fs.writeFileString(config.manifestPath, 'version: 1\nprojects: []\n');
+      const fixture = citationFixture(root, {
+        acquireLease: () => Effect.fail(CodeGraphStoreBusyError.of('fixture writer busy')),
+        statusFor: () => status,
+      });
+      // Persisted routes require real identity-shaped digests, unlike capture-only fixtures.
+      const status: CodeGraphStatus = {
+        ...fixture.status,
+        identity: {...fixture.status.identity, worktreeId: 'e'.repeat(64)},
+        readySnapshot: {...fixture.status.readySnapshot!, worktreeId: 'e'.repeat(64)},
+      };
+      let refreshes = 0;
+      const scheduler = DeferredCodeAnchorRefreshScheduler.of({schedule: () => Effect.sync(() => void refreshes++)});
+      const server = new EffectMcpServerAdapter('citation-busy-test', '1.0.0', '');
+      registerStoreTool(server, config, 'remember_context', 'Store memory.');
+      const store = yield* ResourceStore;
+      const invoke = (citationPolicy: 'defer' | 'require-current' | undefined, topic: string) =>
+        server
+          .invokeTool('remember_context', {
+            callerCwd: root,
+            codeRefs: ['src/value.ts'],
+            kind: 'handoff',
+            text: 'Retain the intended source invariant.',
+            topic,
+            ...(citationPolicy === undefined ? {} : {citationPolicy}),
+          })
+          .pipe(provideTestLayer(fixture.layer), Effect.provideService(DeferredCodeAnchorRefreshScheduler, scheduler));
+      for (const [policy, topic] of [
+        [undefined, 'default'],
+        ['defer', 'explicit'],
+      ] as const) {
+        const result = yield* invoke(policy, topic);
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          citationsFinalized: false,
+          memoryStored: true,
+          pendingCodeRefs: 1,
+          recovery: {action: 'retry-capture', retryCondition: 'after-writer-available'},
+        });
+        expect(JSON.stringify(result.structuredContent)).not.toMatch(/graph index|workset prepare|preparation/u);
+        const uri = String((result.structuredContent as {readonly memoryUri?: unknown})?.memoryUri);
+        const content = yield* store.read({account: config.account, home, user: config.user}, uri);
+        expect(parseMemoryDocument(uri, content)?.metadata.codeCitations ?? []).toEqual([]);
+        expect(content).toContain('Retain the intended source invariant.');
+      }
+      const refused = yield* invoke('require-current', 'strict');
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toMatchObject({code: 'graph-writer-busy', writeApplied: false});
+      const sharedRoot = `threadnote://user/${config.user}/memories/shared/default`;
+      const sharedUri = `${sharedRoot}/durable/existing.md`;
+      const sharedBody = '# Existing shared invariant\n\nPreserve canonical shared bytes.\n';
+      const location = {account: config.account, home, user: config.user};
+      yield* store.write(location, sharedUri, sharedBody, {mode: 'create'});
+      const sharedServer = new EffectMcpServerAdapter('shared-citation-busy-test', '1.0.0', '');
+      registerStoreTool(sharedServer, config, 'remember_context', 'Store shared memory.', {
+        mode: 'shared-read-write',
+        shares: [{root: sharedRoot, team: 'default'}],
+      });
+      for (const policy of [undefined, 'require-current', 'defer'] as const) {
+        const shared = yield* sharedServer
+          .invokeTool('remember_context', {
+            callerCwd: root,
+            codeRefs: ['src/value.ts'],
+            kind: 'durable',
+            replaceUri: sharedUri,
+            text: 'Attempted shared replacement.',
+            ...(policy === undefined ? {} : {citationPolicy: policy}),
+          })
+          .pipe(provideTestLayer(fixture.layer), Effect.provideService(DeferredCodeAnchorRefreshScheduler, scheduler));
+        expect(shared.isError).toBe(true);
+        if (policy === 'defer') {
+          expect(JSON.stringify(shared.content)).toContain('cannot write shared memory');
+        } else {
+          expect(shared.structuredContent).toMatchObject({code: 'graph-writer-busy', writeApplied: false});
+        }
+        expect(yield* store.read(location, sharedUri)).toBe(sharedBody);
+      }
+      const intents = yield* listDeferredCodeAnchorIntents(config);
+      expect(intents).toHaveLength(2);
+      expect(intents.every(entry => entry.kind === 'valid' && entry.intent.codeRefs[0] === 'src/value.ts')).toBe(true);
+      expect(refreshes).toBe(0);
+      expect(fixture.evidenceCalls()).toBe(0);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
   effectIt.effect('MCP memory writes refuse a busy writer before reading citation evidence', () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -69,6 +168,14 @@ describe('memory code citation capture and validation', () => {
       expect(result.failure).toBeInstanceOf(MemoryCodeCitationCaptureError);
       expect(result.failure).toMatchObject({retryable: true});
       expect(result.error.isError).toBe(true);
+      expect(result.error.structuredContent).toMatchObject({
+        code: 'graph-writer-busy',
+        indexingStarted: false,
+        retryCondition: 'after-writer-available',
+        recovery: {retry: 'same-request'},
+        state: 'blocked',
+        writeApplied: false,
+      });
       expect(fixture.evidenceCalls()).toBe(0);
       expect(fixture.leases()).toEqual({acquired: 0, released: 0});
     }).pipe(provideTestLayer(StandaloneBrokerLayer)),

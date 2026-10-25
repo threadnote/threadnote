@@ -196,3 +196,9 @@ They do not depend on the Bazel preflight and must not be moved behind
 proves cold/warm measurement parity. Bazel staging, HOME/TMPDIR isolation,
 caching, and process-launch overhead are valid for correctness tests but are not
 part of the benchmark measurement environment.
+
+`MODULE.bazel.lock` is an explicit global selection input: any change to it selects
+all modeled targets, including inventory-only CI lanes, even when `bazel-diff`
+reports no impacted targets. Mixed changes retain this coverage. Unknown inputs
+and failed analysis still select the full inventory and preserve their diagnostic
+reasons.

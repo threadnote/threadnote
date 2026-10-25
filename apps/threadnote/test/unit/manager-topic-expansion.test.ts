@@ -50,6 +50,35 @@ const safe = (body: unknown, f: Fixture) => {
   expect(json).not.toMatch(/callerCwd|scopeReceiptJson|sourceFenceDigest/u);
 };
 
+effectIt.effect('removes the owned topic-expansion fixture root after normal scope completion', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeTopicExpansionFixture();
+        expect(yield* fs.exists(fixture.memoryPath)).toBe(true);
+        return fixture.home;
+      }),
+    );
+    expect(yield* fs.exists(home)).toBe(false);
+  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+);
+
+effectIt.effect('cleans up the topic-expansion fixture when its owned root is already absent', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const fixture = yield* makeTopicExpansionFixture();
+        expect(yield* fs.exists(fixture.memoryPath)).toBe(true);
+        yield* fs.remove(fixture.home, {recursive: true});
+        return fixture.home;
+      }),
+    );
+    expect(yield* fs.exists(home)).toBe(false);
+  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+);
+
 effectIt.effect('inspects and previews a configured spaced project without changing the accepted memory', () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

@@ -1,3 +1,6 @@
+// External module resolution can affect every target even when bazel-diff reports no local impact.
+const globalInputs = new Set(['MODULE.bazel.lock']);
+
 /**
  * @param {{
  *   inventory: readonly string[];
@@ -19,13 +22,15 @@ export function selectTargets({
   failure,
 }) {
   const all = [...new Set(inventory)].sort();
-  const known = new Set(knownInputs);
+  const known = new Set([...knownInputs, ...globalInputs]);
   const unknown = changedFiles.filter(path => !known.has(path)).sort();
   if (failure || unknown.length)
     return {mode: 'fallback', reason: failure ?? 'unmodeled-inputs', unknown, targets: all};
   if (!Array.isArray(impacted) || impacted.some(label => typeof label !== 'string' || !label.startsWith('//'))) {
     return {mode: 'fallback', reason: 'invalid-impacted-targets', unknown: [], targets: all};
   }
+  if (changedFiles.some(path => globalInputs.has(path)))
+    return {mode: 'fallback', reason: 'global-inputs', unknown: [], targets: all};
   const affected = new Set(impacted);
   const changed = new Set(changedFiles);
   for (const label of all) {

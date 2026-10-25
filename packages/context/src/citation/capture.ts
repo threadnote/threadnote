@@ -10,7 +10,12 @@ import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote
 import {codeGraphScopeAdmitsPath} from '@threadnote/graph/scope/applicability';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import {type CodeGraphStatus, type CodeGraphSymbol, isCodeGraphStoreError} from '@threadnote/graph/types';
+import {
+  CodeGraphStoreBusyError,
+  type CodeGraphStatus,
+  type CodeGraphSymbol,
+  isCodeGraphStoreError,
+} from '@threadnote/graph/types';
 import {
   resolveCodeGraphQualifiedRefTargets,
   type ResolvedCodeGraphQualifiedRefTargetV1,
@@ -50,21 +55,36 @@ export type MemoryCodeCitationGraphPreparationV1 =
       readonly target: 'workset';
     };
 
-export interface MemoryCodeCitationCaptureRecoveryV1 {
-  readonly code: MemoryCodeCitationCaptureRecoveryCode;
-  readonly indexingStarted: false;
-  readonly observedGraph: {
-    readonly freshness: CodeGraphStatus['freshness'];
-    readonly readySnapshot: 'absent' | 'available';
-    readonly stale: boolean;
-  };
-  readonly preparation: MemoryCodeCitationGraphPreparationV1;
-  readonly recovery: 'prepare-current-graph';
-  readonly retryCondition: 'after-current-graph-ready';
-  readonly retryable: true;
-  readonly type: 'memory-code-citation-capture-recovery';
-  readonly version: 1;
-}
+export type MemoryCodeCitationCaptureRecoveryV1 =
+  | {
+      readonly code: MemoryCodeCitationCaptureRecoveryCode;
+      readonly indexingStarted: false;
+      readonly observedGraph: {
+        readonly freshness: CodeGraphStatus['freshness'];
+        readonly readySnapshot: 'absent' | 'available';
+        readonly stale: boolean;
+      };
+      readonly preparation: MemoryCodeCitationGraphPreparationV1;
+      readonly recovery: 'prepare-current-graph';
+      readonly retryCondition: 'after-current-graph-ready';
+      readonly retryable: true;
+      readonly type: 'memory-code-citation-capture-recovery';
+      readonly version: 1;
+    }
+  | {
+      readonly code: 'graph-writer-busy';
+      readonly indexingStarted: false;
+      readonly observedGraph: {
+        readonly freshness: CodeGraphStatus['freshness'];
+        readonly readySnapshot: 'absent' | 'available';
+        readonly stale: boolean;
+      };
+      readonly recovery: 'retry-capture';
+      readonly retryCondition: 'after-writer-available';
+      readonly retryable: true;
+      readonly type: 'memory-code-citation-capture-recovery';
+      readonly version: 1;
+    };
 
 export interface ExpectedMemoryCodeCitationCallerIdentity {
   readonly repositoryId: string;
@@ -360,7 +380,18 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
       yield* Effect.acquireRelease(
         store
           .acquireSnapshotLease(before.databasePath, snapshot.id, 60_000, leaseWriterOptions)
-          .pipe(Effect.mapError(error => captureError(cwd, error))),
+          .pipe(
+            Effect.mapError(error =>
+              Schema.is(CodeGraphStoreBusyError)(error)
+                ? MemoryCodeCitationCaptureError.of(
+                    'The observed graph is ready, but citation storage is busy. Retry this same capture after the graph writer is available; no indexing was started.',
+                    writerBusyRecovery(before),
+                    undefined,
+                    true,
+                  )
+                : captureError(cwd, error),
+            ),
+          ),
         token => store.releaseSnapshotLease(before.databasePath, token, leaseWriterOptions).pipe(Effect.ignore),
       );
       const repositoryRoot = yield* fs
@@ -717,6 +748,23 @@ function captureRecovery(
     preparation,
     recovery: 'prepare-current-graph',
     retryCondition: 'after-current-graph-ready',
+    retryable: true,
+    type: 'memory-code-citation-capture-recovery',
+    version: 1,
+  };
+}
+
+function writerBusyRecovery(status: CodeGraphStatus): MemoryCodeCitationCaptureRecoveryV1 {
+  return {
+    code: 'graph-writer-busy',
+    indexingStarted: false,
+    observedGraph: {
+      freshness: status.freshness,
+      readySnapshot: status.readySnapshot === undefined ? 'absent' : 'available',
+      stale: status.stale,
+    },
+    recovery: 'retry-capture',
+    retryCondition: 'after-writer-available',
     retryable: true,
     type: 'memory-code-citation-capture-recovery',
     version: 1,
