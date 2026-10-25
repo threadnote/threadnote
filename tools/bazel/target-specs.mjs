@@ -88,7 +88,6 @@ const recallQualityEntries = [
 ];
 const windowsSmokeEntries = [
   'apps/threadnote/test/dev-skills/bundle.test.ts',
-  'apps/threadnote/test/dev-skills/python-workflows.test.ts',
   'apps/threadnote/test/dev-skills/workflow-memory.test.ts',
   'apps/threadnote/test/dev-skills/workflow-publication.test.ts',
   'apps/threadnote/test/dev-skills/workflow-publication-coordinator.test.ts',
@@ -111,7 +110,6 @@ const allNpm = Object.keys({...rootManifest.dependencies, ...rootManifest.devDep
   .sort();
 
 const packageDataRoots = {
-  'packages/workflow-automations': ['apps/threadnote/test/dev-skills/python/oracle-skills'],
   'packages/evidence': ['apps/threadnote/test/evaluation'],
   'packages/graph': [
     'assets/code-graph',

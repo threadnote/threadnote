@@ -30,6 +30,7 @@ import {
 import {inspectWorkflowJournal, withWorkflowLock, workflowJournalLogicalBytes} from '../workflow_memory/journal.js';
 import {stableJson} from '../workflow_memory/protocol.js';
 import {withWorkflowReadCache} from '../workflow_memory/read_cache.js';
+import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {readWorkflowSharedRoots} from '../workflow_memory/scopes.js';
 import {assertWorkflowEvidenceSnapshot, verifyWorkflowEvidence} from '../workflow_memory/evidence.js';
 import {workflowArtifactUri} from '../workflow_memory/naming.js';
@@ -836,6 +837,7 @@ export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, cal
     };
   }).pipe(
     program => withWorkflowReadCache(program, {compactJournal: true}),
+    program => withWorkflowRecallRefreshBatch(config, program),
     Effect.map(payload => ({
       protocolVersion: 1 as const,
       executorVersion: 1 as const,

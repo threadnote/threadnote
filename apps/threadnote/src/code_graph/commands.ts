@@ -412,12 +412,14 @@ export const runCodeGraphStatus = Effect.fn('codeGraph.command.status')(function
           ...(ready.projectCoverage === undefined ? {} : {projectCoverage: ready.projectCoverage}),
           readySnapshot: ready.readySnapshot ?? null,
           stale: ready.stale,
+          ...(ready.semantic === undefined ? {} : {semantic: ready.semantic}),
           storage,
         },
       ),
     );
     return;
   }
+  if (ready.semantic !== undefined) yield* Console.log(`Semantic vectors: ${ready.semantic.state}`);
   if (current !== undefined) {
     yield* Console.log(`Repository: ${identity.displayName}`);
     yield* Console.log(`Database: ${layout.databasePath}`);
@@ -813,6 +815,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
       readonly full?: boolean;
       readonly json?: boolean;
       readonly noVectors?: boolean;
+      readonly backgroundVectors?: boolean;
       readonly project?: string;
     },
 ) {
@@ -832,7 +835,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
       message: 'Repository identity does not match the requested graph target.',
     });
   }
-  const ensureVectors = options.noVectors === true ? false : undefined;
+  const vectorPolicy = options.noVectors === true ? 'off' : options.backgroundVectors === true ? 'background' : 'wait';
   if (options.json) {
     const reportProgress = yield* makeCodeGraphJsonProgressReporter({
       displayName: identity.displayName,
@@ -840,7 +843,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
     });
     const summary = yield* indexer.index({
       cwd,
-      ...(ensureVectors === false ? {ensureVectors: false} : {}),
+      vectorPolicy,
       ...(options.expectedIdentity ? {expectedIdentity: options.expectedIdentity} : {}),
       force: options.full,
       onProgress: reportProgress,
@@ -856,7 +859,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
     indexer
       .index({
         cwd,
-        ...(ensureVectors === false ? {ensureVectors: false} : {}),
+        vectorPolicy,
         ...(options.expectedIdentity ? {expectedIdentity: options.expectedIdentity} : {}),
         force: options.full,
         onProgress: state => formatProgress(state).pipe(Effect.flatMap(update)),
@@ -877,6 +880,7 @@ export const runCodeGraphIndex = Effect.fn('codeGraph.command.index')(function* 
       `${summary.snapshot.symbolCount} symbol(s), ${summary.snapshot.edgeCount} relationship(s); ` +
       `${summary.reusedFiles} file(s) reused.`,
   );
+  if (summary.semantic !== undefined) yield* Console.log(`Semantic vectors: ${summary.semantic.state}`);
 });
 
 export const runCodeGraphWorksetPrepare = Effect.fn('codeGraph.command.worksetPrepare')(function* (

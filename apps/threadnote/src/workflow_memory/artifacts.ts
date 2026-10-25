@@ -14,7 +14,7 @@ import {
 import {memoryIdFromIdentityAlias, memoryIdentityLockKey} from '@threadnote/memory/identity-alias';
 import {MemoryPointerNotFound, readMemoryWithRelocations} from '@threadnote/memory/relocation';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
-import {refreshRecallDerivedIndexesAfterCanonicalMutation} from '@threadnote/recall/mcp/refresh';
+import {refreshWorkflowRecall, trackPotentialWorkflowMutation} from './recall_refresh.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {preparePersonalMemoryWrite} from '../mcp/server/memory.js';
 import {captureMemoryCodeCitationsForMcp} from '../mcp/memory_code_citation.js';
@@ -466,6 +466,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
       const current = yield* readOptionalResource(config, artifact.canonicalUri);
       const enriched = yield* reconcileWorkflowCitationEnrichment(config, initial.binding, operation, current);
       if (enriched) {
+        yield* trackPotentialWorkflowMutation(config, [enriched.artifact.canonicalUri]);
         operation = {...enriched, status: 'verified'};
         artifact = enriched.artifact;
         prepared = yield* persistWorkflowState(config, prepared, {
@@ -488,6 +489,11 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
           'revision-conflict',
           'The destination differs from both the pinned preimage and postimage.',
         );
+      if (!isArchive && operation.status !== 'verified')
+        yield* trackPotentialWorkflowMutation(config, [
+          artifact.canonicalUri,
+          ...(operation.sourceUri ? [operation.sourceUri] : []),
+        ]);
       if (isArchive) {
         const source = yield* readOptionalResource(config, operation.sourceUri!);
         if (source !== operation.before && !(source === undefined && current === operation.desired))
@@ -495,6 +501,8 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
             'revision-conflict',
             'Archive source changed or disappeared without its verified archived copy.',
           );
+        if (operation.status !== 'verified' || source !== undefined)
+          yield* trackPotentialWorkflowMutation(config, [artifact.canonicalUri, operation.sourceUri!]);
         if (current === undefined)
           yield* store.write(workflowLocation(config), artifact.canonicalUri, operation.desired, {mode: 'create'});
         if (source !== undefined)
@@ -544,9 +552,6 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
     artifacts,
     operations: {...prepared.operations, [operationId]: {...operation, status: 'verified'}},
   });
-  yield* refreshRecallDerivedIndexesAfterCanonicalMutation(config, [
-    artifact.canonicalUri,
-    ...(operation.sourceUri ? [operation.sourceUri] : []),
-  ]);
+  yield* refreshWorkflowRecall(config, [artifact.canonicalUri, ...(operation.sourceUri ? [operation.sourceUri] : [])]);
   return {...(yield* readWorkflowArtifact(config, updated, artifact.canonicalUri)), operationId};
 });

@@ -47,7 +47,7 @@ const receipt = Schema.Struct({
 type Preview = typeof preview.Type;
 const git = (f: Fixture, args: readonly string[]) =>
   runCommandEffect('git', ['-C', f.path.join(f.root, 'remote.git'), ...args]);
-const prepare = (f: Fixture) =>
+const prepare = (f: Fixture, withSpec = true) =>
   Effect.gen(function* () {
     const input = yield* decode(validation)(yield* f.closeout('validation-input'));
     const proposal = decodeNativeCloseoutProposal({
@@ -70,7 +70,7 @@ const prepare = (f: Fixture) =>
         acceptance: p.acceptanceCriteria.map(criterion => ({criterion, evidence: 'Observed: ' + criterion})),
       })),
       scenarios: input.scenarios.map(s => ({id: s.id, evidence: 'Observed complete saved data for ' + s.id})),
-      behaviorVerification: 'All approved scenarios returned complete saved data.',
+      ...(withSpec ? {behaviorVerification: 'All approved scenarios returned complete saved data.'} : {}),
       decisions: input.decisions.map(d => ({
         id: d.id,
         implemented: d.selected + ' Independently verified against the durable graph.',
@@ -80,7 +80,9 @@ const prepare = (f: Fixture) =>
     });
     yield* f.closeout('prepare', {proposal});
     const projected = yield* decode(preview)(yield* f.closeout('publication-preview'));
-    expect(projected.publication.nodes.map(n => n.key).sort()).toEqual(['architecture', 'spec']);
+    expect(projected.publication.nodes.map(n => n.key).sort()).toEqual(
+      withSpec ? ['architecture', 'spec'] : ['architecture'],
+    );
     return {proposal, projected};
   });
 const active = (f: Fixture, owned: readonly {runId: string; uri: string}[]) =>
@@ -201,9 +203,9 @@ describe('verified personal cloud closeout', () => {
     'retains drafts after a committed readback mismatch and retries the approved graph without duplicate commits',
     () =>
       Effect.gen(function* () {
-        const f = yield* nativeCloseoutFixture(true, 'codex-cloud-personal');
+        const f = yield* nativeCloseoutFixture(false, 'codex-cloud-personal');
         const loaded = yield* f.load();
-        const {projected} = yield* prepare(f);
+        const {projected} = yield* prepare(f, false);
         yield* approve(f, projected.publication.approvalDigest);
         const commands = yield* CommandExecutor;
         const worktree = f.path.join(f.root, 'shared');
@@ -245,6 +247,7 @@ describe('verified personal cloud closeout', () => {
           '2',
         );
         expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        const committedHead = (yield* runCommandEffect('git', ['-C', worktree, 'rev-parse', 'HEAD'])).stdout;
         yield* active(f, loaded.owned);
         const state = yield* readNativeWorkflowState(f.config, f.controllerRunId);
         if (!state) throw new Error('Missing native closeout binding.');
@@ -260,11 +263,12 @@ describe('verified personal cloud closeout', () => {
         expect(publication.approvalDigest).toBe(projected.publication.approvalDigest);
         expect(publication.decision).toBe('approve');
         expect((yield* decode(summary)(yield* f.closeout('finish'))).closeout.state).toBe('complete');
+        expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(committedHead);
         yield* readRemote(f, projected);
         yield* verifyRetirement(f, loaded.owned);
-        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('2');
         expect((yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout.trim()).toBe(
-          '4',
+          '2',
         );
         const head = (yield* git(f, ['rev-parse', 'main'])).stdout;
         yield* f.closeout('finish');

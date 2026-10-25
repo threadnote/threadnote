@@ -855,6 +855,7 @@ bun_test(
         "//packages/graph:src/vector/retirement.ts",
         "//packages/graph:src/vector/retirement/inspection.ts",
         "//packages/graph:src/vector/retirement/schema.ts",
+        "//packages/graph:src/vector/status.ts",
         "//packages/graph:src/vector/worker.ts",
         "//packages/graph:src/view_removal.ts",
         "//packages/graph:src/visualization.ts",

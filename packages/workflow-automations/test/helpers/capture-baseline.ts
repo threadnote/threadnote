@@ -5,10 +5,10 @@ import {createHash} from '@threadnote/testing/node-crypto';
 import {chmod, readFile, writeFile} from '@threadnote/testing/node-fs-promises';
 import {isAbsolute, join, resolve} from '@threadnote/testing/node-path';
 import {fileURLToPath} from '@threadnote/testing/node-url';
-import {workflowInventoryVersion} from '../../src/inventory.js';
 import {workflowScenarios, workflowScenarioCatalogVersion} from '../../src/scenarios.js';
 
 type Json = Record<string, unknown>;
+const captureFormatVersion = 2;
 const utf8Bytes = (value: string) => Buffer.byteLength(value, 'utf8');
 
 function gitHead(repo: string): string {
@@ -81,15 +81,21 @@ export interface CaptureBaselineOptions {
 export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineOptions): Promise<Json> {
   const repo = resolve(repoArg);
   const head = gitHead(repo);
-  const sourceIdentity = {
-    repositoryHead: head,
-    inventoryVersion: workflowInventoryVersion,
-    scenarioCatalogVersion: workflowScenarioCatalogVersion,
-  };
   const manifest = JSON.parse(await readFile(join(repo, 'config/dev-skills.json'), 'utf8')) as {
+    schemaVersion: number;
+    nativeRequirements: Record<string, number>;
     workflowProtocol: number;
     stateSchema: number;
     skills: {id: string; files: string[]}[];
+  };
+  const sourceIdentity = {
+    captureFormatVersion,
+    repositoryHead: head,
+    manifestSchemaVersion: manifest.schemaVersion,
+    nativeRequirements: manifest.nativeRequirements,
+    workflowProtocol: manifest.workflowProtocol,
+    stateSchema: manifest.stateSchema,
+    scenarioCatalogVersion: workflowScenarioCatalogVersion,
   };
   const skillFiles = manifest.skills
     .flatMap(skill =>
@@ -104,22 +110,6 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
       return {path, bytes: utf8Bytes(content), method: 'UTF-8 encoded file content byte length'};
     }),
   );
-  const pythonSources = manifest.skills.flatMap(skill =>
-    skill.files
-      .filter(file => file.endsWith('.py'))
-      .map(file => ({path: `config/agent-skills/${skill.id}/${file}`, owner: skill.id})),
-  );
-  const pythonFiles = await Promise.all(
-    pythonSources.map(async item => {
-      const content = await readFile(join(repo, item.path), 'utf8');
-      return {
-        path: item.path,
-        owner: item.owner,
-        bytes: utf8Bytes(content),
-        method: 'UTF-8 encoded file content byte length',
-      };
-    }),
-  );
   const scenarioRecords = workflowScenarios.map(item => ({
     id: item.id,
     category: item.category,
@@ -127,14 +117,8 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
     measurementUnits: [...item.measurements],
   }));
   const result: Json = {
-    schemaVersion: 1,
-    source: {
-      repositoryHead: head,
-      workflowProtocol: manifest.workflowProtocol,
-      stateSchema: manifest.stateSchema,
-      inventoryVersion: workflowInventoryVersion,
-      scenarioCatalogVersion: workflowScenarioCatalogVersion,
-    },
+    schemaVersion: captureFormatVersion,
+    source: sourceIdentity,
     capturedAt: new Date().toISOString(),
     sourceMeasurements: {
       skillDocuments: {
@@ -142,12 +126,6 @@ export async function captureBaseline({repo: repoArg, runtime}: CaptureBaselineO
         method: 'manifest-declared SKILL.md and references/*.md files; UTF-8 bytes; sorted by relative path',
         files: skillDocuments,
         totalBytes: skillDocuments.reduce((sum, file) => sum + file.bytes, 0),
-      },
-      shippedPython: {
-        sourceIdentity,
-        method: 'all Python files listed by config/dev-skills.json in manifest order; UTF-8 bytes',
-        files: pythonFiles,
-        totalBytes: pythonFiles.reduce((sum, file) => sum + file.bytes, 0),
       },
       scenarios: {
         sourceIdentity,

@@ -45,6 +45,8 @@ export interface CodeGraphIndexOptions extends CodeGraphInventoryOptions {
   /** @internal Home-global builder admission priority. CLI defaults to current-required. */
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
   readonly cwd: string;
+  /** Explicit vector completion policy. Background authorizes demand only on a new indexing publication. */
+  readonly vectorPolicy?: CodeGraphVectorPolicy;
   /** When false, skip blocking vector materialization after a ready structural snapshot. */
   readonly ensureVectors?: boolean;
   /** Exact graph target supplied by a trusted local administration surface. */
@@ -188,8 +190,21 @@ export interface CodeGraphBuildAndActivateInput {
   readonly workspace?: CodeGraphWorkspace;
 }
 
-export function codeGraphIndexEnsuresVectors(options: {readonly ensureVectors?: boolean}): boolean {
-  return options.ensureVectors !== false;
+export type CodeGraphVectorPolicy = 'wait' | 'background' | 'off';
+
+export function codeGraphIndexVectorPolicy(options: {
+  readonly ensureVectors?: boolean;
+  readonly vectorPolicy?: CodeGraphVectorPolicy;
+}): CodeGraphVectorPolicy {
+  // Legacy explicit opt-out remains authoritative even when an automatic route supplies policy.
+  return options.ensureVectors === false ? 'off' : (options.vectorPolicy ?? 'wait');
+}
+
+export function codeGraphIndexEnsuresVectors(options: {
+  readonly ensureVectors?: boolean;
+  readonly vectorPolicy?: CodeGraphVectorPolicy;
+}): boolean {
+  return codeGraphIndexVectorPolicy(options) === 'wait';
 }
 
 export interface CommittedBaseResult {

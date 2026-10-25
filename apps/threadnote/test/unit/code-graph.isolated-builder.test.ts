@@ -1112,3 +1112,58 @@ describe('isolated builder cross-host spawn admission', () => {
     ),
   );
 });
+
+effectIt.effect('resolves a fast keyless forced child by its new owned receipt without respawning', () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-fast-forced-child-'});
+    const identity: RepositoryIdentity = {
+      caseMode: 'sensitive',
+      checkoutId: 'a'.repeat(64),
+      displayName: 'fixture/repository',
+      gitCommonDirectory: '/fixture/repository/.git',
+      headCommit: 'b'.repeat(40),
+      objectFormat: 'sha1',
+      repoRoot: '/fixture/repository',
+      repositoryId: 'c'.repeat(64),
+      worktreeId: 'd'.repeat(64),
+    };
+    const childProcessId = 77;
+    const completed = (buildId: string, snapshotId: string) =>
+      ({
+        buildId,
+        owner: {processId: childProcessId},
+        observation: {heartbeatAgeMilliseconds: 0, liveness: 'completed'},
+        state: 'completed',
+        result: {dirty: false, edges: 2, files: 1, symbols: 3, snapshotId},
+      }) as unknown as ObservedCodeGraphBuildStatus;
+    const prior = completed('prior-build', `cgsn_${'e'.repeat(40)}`);
+    const owned = completed('owned-build', `cgsn_${'f'.repeat(40)}`);
+    let reads = 0;
+    let spawns = 0;
+    const result = yield* runIsolatedCodeGraphIndex({
+      assertRuntimeSchemaCompatible: () => Effect.void,
+      cwd: identity.repoRoot,
+      full: true,
+      vectorPolicy: 'off',
+      readStatus: Effect.suspend(() => {
+        reads++;
+        // Hold the startup observation until child exit wins. Then expose an old
+        // same-PID receipt once before the actual owned completion becomes visible.
+        if (reads === 2) return Effect.never;
+        return Effect.succeed(reads <= 3 ? prior : owned);
+      }),
+      resolveIdentity: () => Effect.succeed(identity),
+      spawn: plan => {
+        expect(plan.arguments).toContain('--full');
+        spawns++;
+        return {exited: Promise.resolve(0), processId: childProcessId, kill: () => undefined};
+      },
+      threadnoteHome: home,
+    });
+    expect(result.snapshotId).toBe(owned.result!.snapshotId);
+    expect(result.requestKey).toBeUndefined();
+    expect(spawns).toBe(1);
+    expect(reads).toBeGreaterThanOrEqual(4);
+  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+);

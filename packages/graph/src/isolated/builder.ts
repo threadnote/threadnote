@@ -1,3 +1,4 @@
+import type {CodeGraphVectorPolicy} from '../indexer/types.js';
 import {
   CODE_GRAPH_EXPECTED_MANIFEST_REVISION_ENV,
   CODE_GRAPH_REFRESH_SCOPE_ROUTE_ENV,
@@ -87,6 +88,7 @@ export interface CodeGraphIsolatedBuilderOptions {
   readonly scopeRoute?: 'full' | 'selected';
   /** Preserve MCP/workset structural-only indexing unless the caller explicitly enables vectors. */
   readonly noVectors?: boolean;
+  readonly vectorPolicy?: CodeGraphVectorPolicy;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
   /** Carries the configured view through the pre-spawn status/lock routing. */
   readonly project?: Pick<ProjectManifest, 'graph' | 'uri'> & {readonly name?: string};
@@ -112,6 +114,7 @@ export interface CodeGraphIsolatedBuilderOptions {
       readonly expectedScopeId?: string;
       readonly scopeRoute?: 'full' | 'selected';
       readonly noVectors?: boolean;
+      readonly vectorPolicy?: CodeGraphVectorPolicy;
       readonly project?: string;
       readonly refreshDemandToken?: string;
       readonly threadnoteHome: string;
@@ -145,7 +148,7 @@ export function isCodeGraphIsolatedBuilderHost(
 
 /**
  * Re-invoke the current Threadnote entrypoint as a CLI `graph index` child.
- * Uses `--no-vectors` by default so MCP watcher refresh matches in-process `ensureVectors: false`.
+ * Carries wait/background/off explicitly; legacy callers retain the structural-only default.
  * Never targets the MCP launcher; MCP stdio stays free for recall and other tools.
  * Interrupted MCP hosts detach and leave the child running so a later refresh can re-attach.
  */
@@ -160,6 +163,7 @@ export function codeGraphIsolatedBuilderSpawnPlan(
     readonly expectedScopeId?: string;
     readonly scopeRoute?: 'full' | 'selected';
     readonly noVectors?: boolean;
+    readonly vectorPolicy?: CodeGraphVectorPolicy;
     readonly project?: string;
     readonly refreshDemandToken?: string;
     readonly threadnoteHome: string;
@@ -175,7 +179,13 @@ export function codeGraphIsolatedBuilderSpawnPlan(
       'graph',
       'index',
       ...(options.full === true ? ['--full'] : []),
-      ...(options.noVectors === false ? [] : ['--no-vectors']),
+      ...((options.noVectors === true
+        ? 'off'
+        : (options.vectorPolicy ?? (options.noVectors === false ? 'wait' : 'off'))) === 'off'
+        ? ['--no-vectors']
+        : options.vectorPolicy === 'background'
+          ? ['--background-vectors']
+          : []),
       ...(options.project === undefined ? [] : ['--project', options.project]),
       '--cwd',
       options.cwd,
@@ -333,7 +343,7 @@ export function codeGraphProgressFromBuildStatus(
 }
 
 /**
- * Run `graph index --no-vectors` in a child CLI process and mirror its build-status sidecar.
+ * Run `graph index` with the selected vector policy and mirror its build-status sidecar.
  * On interruption the child is detached (not killed) so a later MCP refresh can re-attach.
  */
 export const runIsolatedCodeGraphIndex: (
@@ -369,6 +379,7 @@ export const runIsolatedCodeGraphIndex: (
     scopeRoute: options.scopeRoute,
     expectedScopeId: options.scopeId ?? (options.scopeRoute === undefined ? undefined : 'full-repository'),
     noVectors: options.noVectors,
+    vectorPolicy: options.vectorPolicy,
     project: options.project?.name,
     refreshDemandToken: options.refreshDemandToken,
     threadnoteHome: options.threadnoteHome,
@@ -438,7 +449,12 @@ export const runIsolatedCodeGraphIndex: (
           return yield* IsolatedBuilderError.make({
             message: isolatedBuilderFailureMessage(startup.exitCode, undefined, child.stderrTail?.()),
           });
-        return {compatible: false, mode: 'attach' as const};
+        // A fast successful child may finish between startup polls. Resolve only its
+        // exact PID/new build receipt; an old incompatible completion is never enough.
+        return {
+          mode: 'completed-owned' as const,
+          result: yield* awaitOwnedIsolatedBuilderResult(readStatus, child.processId, priorBuildId),
+        };
       }
       const observed = startup.observed;
       return isolatedBuilderOwnedAdmission(observed, child, priorBuildId);
@@ -446,6 +462,7 @@ export const runIsolatedCodeGraphIndex: (
   ).pipe(Effect.catchIf(isFileLockTimeout, () => Effect.succeed({compatible: false, mode: 'attach' as const})));
 
   // The spawn lock is released before either branch waits for repository-sized work.
+  if (admission.mode === 'completed-owned') return admission.result;
   if (admission.mode === 'completed') {
     return {
       dirty: admission.result.dirty,

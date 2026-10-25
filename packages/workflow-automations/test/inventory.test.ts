@@ -1,51 +1,16 @@
 import {describe, expect, it} from 'vitest';
-import {readFile, readdir} from '@threadnote/testing/node-fs-promises';
-import {workflowInventory} from '../src/inventory.js';
+import {readFile} from '@threadnote/testing/node-fs-promises';
 import {workflowScenarios} from '../src/scenarios.js';
 
-describe('workflow contract inventory', () => {
-  it('ships no Python and preserves the exact independent historical oracle inventory', async () => {
+describe('native workflow manifest', () => {
+  it('ships no Python under the current native manifest schema', async () => {
     const manifest = JSON.parse(await readFile('config/dev-skills.json', 'utf8')) as {
       schemaVersion: number;
       skills: {id: string; files: string[]}[];
     };
-    const shipped = manifest.skills
-      .flatMap(skill =>
-        skill.files.filter(file => file.endsWith('.py')).map(file => `config/agent-skills/${skill.id}/${file}`),
-      )
-      .sort();
+    const shipped = manifest.skills.flatMap(skill => skill.files.filter(file => file.endsWith('.py')));
     expect(manifest.schemaVersion).toBe(2);
     expect(shipped).toEqual([]);
-    const oracleRoot = 'apps/threadnote/test/dev-skills/python/oracle-skills';
-    const historical = (await readdir(oracleRoot, {recursive: true}))
-      .filter(file => file.endsWith('.py'))
-      .map(file => `config/agent-skills/${file.replaceAll('\\', '/')}`)
-      .sort();
-    expect(historical).toHaveLength(16);
-    expect(new Set(historical).size).toBe(16);
-    expect(workflowInventory).toHaveLength(16);
-    expect(workflowInventory.map(item => item.path).sort()).toEqual(historical);
-  });
-
-  it('has unique paths and explicit owner, command, state, and native replacement route classifications', () => {
-    const paths = workflowInventory.map(item => item.path);
-    expect(new Set(paths).size).toBe(paths.length);
-    for (const item of workflowInventory) {
-      expect(['spec', 'plan', 'cycle', 'watch-pr']).toContain(item.owner);
-      expect(Array.isArray(item.commands)).toBe(true);
-      expect(Array.isArray(item.mutableLocalState)).toBe(true);
-      expect(item.nativeRoute.length).toBeGreaterThan(0);
-    }
-    const phaseState = workflowInventory.find(item => item.path.endsWith('/phase_state.py'))!;
-    expect(phaseState.mutableLocalState.some(state => state.includes('plan.json'))).toBe(true);
-    const cloudCloseout = workflowInventory.find(item => item.path.endsWith('/cloud_closeout.py'))!;
-    expect(cloudCloseout.mutableLocalState.some(state => state.includes('cloud-publication.json'))).toBe(true);
-    const devPlan = workflowInventory.find(item => item.path.endsWith('/dev_plan.py'))!;
-    expect(devPlan.mutableLocalState.join(' ')).toMatch(/recover rewrites receipt state/i);
-    expect(devPlan.mutableLocalState.join(' ')).toMatch(/load writes imported draft and receipts/i);
-    const workflow = workflowInventory.find(item => item.path.endsWith('/workflow.py'))!;
-    expect(workflow.mutableLocalState.join(' ')).toMatch(/preparation outputs/i);
-    expect(workflow.mutableLocalState.join(' ')).toMatch(/final cycle-plan rewrite/i);
   });
 });
 

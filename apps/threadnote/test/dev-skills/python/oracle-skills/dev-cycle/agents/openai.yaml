@@ -1,4 +1,0 @@
-interface:
-  display_name: 'Dev Cycle'
-  short_description: 'Develop, review, learn, and deliver safe PRs'
-  default_prompt: 'Use $dev-cycle to implement and validate this task, learn from feedback, and deliver working PRs when in scope.'

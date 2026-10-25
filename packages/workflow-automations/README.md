@@ -1,10 +1,8 @@
 # Workflow automations
 
-This private package owns native workflow automation contracts, replacement coverage, and scenario definitions. It depends on platform services; application composition may depend on this package, while workflow automations do not depend on the application. The Python helper inventory is a checklist for replacing those flows for fresh native runs. It does not define a Python compatibility, historical migration, or run-admission contract. Production code does not invoke Python.
+This private package owns native authoring, cycle, watch and closeout contracts, plus workflow scenarios. It uses the existing platform file and locking services; application composition lives in `apps/threadnote`.
 
-Native implementations use the existing platform file and locking services. The package does not port legacy JSON hashing profiles or cross-language lock behavior.
-
-Capture a reproducible source and scenario baseline with Bun:
+Capture source and scenario measurements with Bun:
 
 ```sh
 bun packages/workflow-automations/test/helpers/capture-baseline.ts \
@@ -12,6 +10,6 @@ bun packages/workflow-automations/test/helpers/capture-baseline.ts \
   --out /private/path/baseline.json
 ```
 
-The capture reports UTF-8 byte lengths for manifest-declared skill documents and Python files, plus frozen scenario IDs, invariants, and declared measurement names. Those names are planned measurements, not observed outcomes. Optional `--runtime /absolute/path/to/executable` records up to three bounded `--version` startup samples. Token counts, pricing, actual model usage, and quality outcomes remain unavailable unless separately measured by an appropriate evaluation system. The corpus recipe keeps routine and risk-bearing tasks, prompts, source revisions, acceptance criteria, and policy controls explicit for later comparison. Session observations remain empty unless supplied with real run evidence.
+The capture records the source revision, native manifest versions, UTF-8 byte lengths of manifest-declared skill documents, and scenario IDs with their expected invariants and measurement names. Optional `--runtime /absolute/path/to/executable` adds up to three bounded `--version` startup samples and the executable byte size/hash while withholding its path.
 
-This source baseline does not establish runtime parity, concurrency safety, or native Windows acceptance. Those require separate focused evidence.
+Scenario measurement names describe planned evaluations. Token usage, pricing and quality outcomes require actual run evidence; session observations remain empty until supplied. Source measurements alone do not establish runtime correctness or platform acceptance.

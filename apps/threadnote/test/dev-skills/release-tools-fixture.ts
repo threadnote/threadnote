@@ -12,7 +12,7 @@ if (name === 'memory-read') {
   if (!uri) throw new Error('Provide the canonical memory URI.');
   const record = parseMemoryDocument(uri, await Bun.stdin.text());
   if (!record) throw new Error('Published fixture is not a valid memory document.');
-  process.stdout.write(JSON.stringify({body: record.body}));
+  await Bun.write(Bun.stdout, JSON.stringify({body: record.body}));
   process.exit(0);
 }
 if (name === 'git' || name === 'rg') {
@@ -20,8 +20,8 @@ if (name === 'git' || name === 'rg') {
   const executable = paths[name];
   if (!executable) throw new Error('Missing native fixture tool.');
   const child = Bun.spawnSync([executable, ...args], {env: process.env, stdin: 'inherit'});
-  process.stdout.write(child.stdout);
-  process.stderr.write(child.stderr);
+  await Bun.write(Bun.stdout, child.stdout);
+  await Bun.write(Bun.stderr, child.stderr);
   process.exit(child.exitCode);
 }
 if (name !== 'gh') {
@@ -29,7 +29,7 @@ if (name !== 'gh') {
   const attempts: unknown[] = (await Bun.file(path).exists()) ? await Bun.file(path).json() : [];
   attempts.push({name, args});
   await Bun.write(path, JSON.stringify(attempts));
-  process.stderr.write('External interpreters are unavailable in the extracted-release fixture.\n');
+  await Bun.write(Bun.stderr, 'External interpreters are unavailable in the extracted-release fixture.\n');
   process.exit(97);
 }
 const state: {head: string; terminal: boolean; revision: number} = await Bun.file(root + '/provider.json').json();
@@ -90,6 +90,7 @@ const body =
           : endpoint?.includes('/status')
             ? {statuses: []}
             : {state: state.terminal ? 'closed' : 'open', merged: state.terminal, head: {sha: state.head}};
-process.stdout.write(
+await Bun.write(
+  Bun.stdout,
   'HTTP/2.0 200 OK\r\nETag: "fixture-' + state.revision + '"\r\nX-Poll-Interval: 1\r\n\r\n' + JSON.stringify(body),
 );

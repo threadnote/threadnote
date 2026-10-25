@@ -3,6 +3,8 @@ import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {parseMemoryDocument} from '@threadnote/memory/document';
+import {ResourceStore} from '@threadnote/store/resource-store';
+import {loadRecallIndexData, recallIndexStatus} from '@threadnote/recall/index';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {
   decodeNativeAuthoringDocument,
@@ -1325,6 +1327,37 @@ describe('native authoring lifecycle', () => {
     }).pipe(run),
   );
 
+  effectIt.effect('refreshes a durable authoring prefix when a post-commit child write fails before verification', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* f.init();
+      let written: {uri: string; content: string} | undefined;
+      const faulty = ResourceStore.of({
+        ...f.store,
+        writeChecked: (location, uri, content, options, check) =>
+          f.store.writeChecked(location, uri, content, options, check).pipe(
+            Effect.tap(() => {
+              if (written) return Effect.void;
+              written = {uri, content};
+              return Effect.die(new Error('Synthetic post-commit child write failure'));
+            }),
+          ),
+      });
+      const failed = yield* authoringRequest(f, 'save', {
+        document: specDocument(),
+        ready: false,
+        expectedRevision: null,
+      }).pipe(Effect.provideService(ResourceStore, faulty), Effect.exit);
+      expect(failed._tag).toBe('Failure');
+      const committed = written;
+      if (!committed) throw new Error('Expected an actual committed child artifact.');
+      expect(yield* f.store.read(f.location, committed.uri)).toBe(committed.content);
+      expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+      const recalled = yield* loadRecallIndexData(f.config, {includeInactive: false});
+      expect(recalled.candidates.some(candidate => candidate.uri === committed.uri)).toBe(true);
+    }).pipe(run),
+  );
+
   effectIt.effect('saves, validates, reloads, replays and exports a reviewed native specification', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -1335,6 +1368,10 @@ describe('native authoring lifecycle', () => {
       const initial = authoring(yield* authoringRequest(f, 'save', {document, ready: false, expectedRevision: null}));
       expect(initial.readiness).toBe('draft');
       const originalRoot = reference(initial.root);
+      // Check readiness before querying, so lazy recall repair cannot hide a missed batch flush.
+      expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+      const recalled = yield* loadRecallIndexData(f.config, {includeInactive: false, query: document.title});
+      expect(recalled.candidates.some(candidate => candidate.uri === originalRoot.uri)).toBe(true);
       const rootBytes = yield* f.store.read(f.location, originalRoot.uri);
       const statePath = f.statePath();
       const stateBytes = yield* f.fs.readFileString(statePath);
