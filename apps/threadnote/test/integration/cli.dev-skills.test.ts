@@ -95,7 +95,7 @@ describe('development workflows CLI', () => {
     }
   }, 90_000);
 
-  it('installs complete offline workflows, repeats without mutation and retains generation helpers after removal', async () => {
+  it('installs complete offline workflows, repeats without mutation and retains generation payloads after removal', async () => {
     const f = await fixture();
     const installed = JSON.parse((await f.call(['dev-skills', 'install', '--agent', 'codex', '--json'])).stdout);
     expect(installed.applied).toBe(true);
@@ -116,12 +116,12 @@ describe('development workflows CLI', () => {
     await f.call(['dev-skills', 'remove', '--agent', 'codex', '--json']);
     await expect(access(join(f.skillRoot, 'dev-plan/SKILL.md'))).rejects.toMatchObject({code: 'ENOENT'});
     const remaining = await snapshot(f.root);
-    expect(Object.keys(remaining).some(path => path.includes('generations') && path.endsWith('dev_plan.py'))).toBe(
-      true,
-    );
+    expect(
+      Object.keys(remaining).some(path => path.includes('generations') && path.endsWith(join('dev-plan', 'SKILL.md'))),
+    ).toBe(true);
   }, 90_000);
 
-  it('full uninstall preserves another home, edited files and old helper generations', async () => {
+  it('full uninstall preserves another home, edited files and old native generations', async () => {
     const f = await fixture();
     const otherHome = join(f.root, 'other-data');
     await f.call(['dev-skills', 'install', '--agent', 'codex']);
@@ -140,7 +140,9 @@ describe('development workflows CLI', () => {
     const status = JSON.parse((await f.call(['dev-skills', 'status', '--json'], otherHome)).stdout);
     expect(status.targets.every((target: {enrolled: boolean}) => !target.enrolled)).toBe(true);
     expect(
-      Object.keys(await snapshot(f.root)).some(path => path.includes('generations') && path.endsWith('dev_plan.py')),
+      Object.keys(await snapshot(f.root)).some(
+        path => path.includes('generations') && path.endsWith(join('dev-plan', 'SKILL.md')),
+      ),
     ).toBe(true);
   }, 90_000);
 });

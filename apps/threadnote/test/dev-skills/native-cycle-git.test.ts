@@ -1,5 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Option, Result} from 'effect';
+import {Effect, FileSystem, Option, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {runCommandEffect} from '@threadnote/platform/command';
@@ -17,6 +17,50 @@ const commit = (repo: string) =>
   git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Fixture');
 
 describe('native cycle Git snapshots', () => {
+  effectIt.effect('accepts an alternate canonical spelling only when native directory identity matches', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', 'source.ts');
+      yield* commit(f.repo);
+      const originalFs = f.fs;
+      let realPathCalls = 0;
+      const aliasFs = {
+        ...originalFs,
+        realPath: (path: string) =>
+          originalFs.realPath(path).pipe(
+            Effect.map(actual => {
+              realPathCalls++;
+              return realPathCalls === 1 ? `${actual}${f.path.sep}.` : actual;
+            }),
+          ),
+      } satisfies FileSystem.FileSystem;
+      const index = f.path.join(f.repo, '.git', 'index');
+      const beforeIndex = yield* f.fs.readFile(index);
+      const snapshot = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+        Effect.provideService(FileSystem.FileSystem, aliasFs),
+      );
+      const gitRoot = (yield* git(f.repo, 'rev-parse', '--show-toplevel')).trim();
+      expect(snapshot.repo).toBe(yield* f.fs.realPath(gitRoot));
+      expect(yield* f.fs.readFile(index)).toEqual(beforeIndex);
+    }).pipe(run),
+  );
+
+  effectIt.effect('rejects subdirectory and sibling Git roots', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const subdirectory = f.path.join(f.repo, 'nested');
+      yield* f.fs.makeDirectory(subdirectory);
+      const sibling = f.path.join(f.root, 'sibling');
+      yield* f.fs.makeDirectory(sibling);
+      const subdirectoryResult = yield* captureNativeCycleSource(subdirectory, 'HEAD').pipe(Effect.result);
+      const siblingResult = yield* captureNativeCycleSource(sibling, 'HEAD').pipe(Effect.result);
+      expect(subdirectoryResult._tag).toBe('Failure');
+      expect(siblingResult._tag).toBe('Failure');
+      if (subdirectoryResult._tag === 'Failure')
+        expect(subdirectoryResult.failure).toMatchObject({code: 'binding-drift'});
+    }).pipe(run),
+  );
+
   effectIt.effect('captures staged, unstaged, untracked and binary content without changing the real index', () =>
     Effect.gen(function* () {
       const f = yield* nativeFixture();
@@ -37,6 +81,17 @@ describe('native cycle Git snapshots', () => {
       expect(yield* git(f.repo, 'status', '--porcelain=v2', '-z')).toBe(beforeStatus);
       expect(Array.from(yield* f.fs.readFile(f.path.join(f.repo, 'new.bin')))).toEqual(Array.from(binary));
       const ref = yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.tree);
+      expect(ref.length).toBeLessThanOrEqual(100);
+      expect(ref.slice(ref.lastIndexOf('/') + 1)).toMatch(/^[a-f0-9]{64}$/u);
+      const otherBinding = yield* pinNativeCycleTree(f.repo, 'b'.repeat(64), 'phase-review-1', snapshot.tree);
+      const otherPurpose = yield* pinNativeCycleTree(
+        f.repo,
+        'a'.repeat(64),
+        'phase-review-1',
+        snapshot.tree,
+        'baseline',
+      );
+      expect(new Set([ref, otherBinding, otherPurpose]).size).toBe(3);
       expect(yield* git(f.repo, 'rev-parse', ref)).toBe(snapshot.tree + '\n');
       expect(yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.tree)).toBe(ref);
       const conflict = yield* pinNativeCycleTree(f.repo, 'a'.repeat(64), 'phase-review-1', snapshot.baseTree).pipe(

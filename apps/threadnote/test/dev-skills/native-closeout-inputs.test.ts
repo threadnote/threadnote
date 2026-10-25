@@ -1,9 +1,10 @@
 import {it as effectIt} from '@effect/vitest';
-import {Effect} from 'effect';
+import {Effect, Option} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {SystemInfo} from '@threadnote/platform/system';
 import {runCommandEffect} from '@threadnote/platform/command';
+import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
 import {
   decodeNativeAuthoringDocument,
   nativeAuthoringDigest,
@@ -263,7 +264,21 @@ effectIt.effect('admits clean current source and only active original authoring-
     const result = yield* f.load();
     expect(result.planRoot).toEqual(f.planRoot);
     expect(result.plan).toEqual(f.plan);
-    expect(result.source.repo).toBe(yield* f.fs.realPath(f.repo));
+    const gitRoot = (yield* runCommandEffect('git', [
+      '--no-optional-locks',
+      '-C',
+      f.repo,
+      'rev-parse',
+      '--show-toplevel',
+    ])).stdout.trim();
+    const canonicalGitRoot = yield* f.fs.realPath(gitRoot);
+    const fixtureRoot = yield* f.fs.realPath(f.repo);
+    const gitAuthority = yield* readPathFileSystemAuthority(canonicalGitRoot, 'Directory');
+    const fixtureAuthority = yield* readPathFileSystemAuthority(fixtureRoot, 'Directory');
+    expect(Option.isSome(gitAuthority) && Option.isSome(fixtureAuthority)).toBe(true);
+    if (Option.isSome(gitAuthority) && Option.isSome(fixtureAuthority))
+      expect(sameFileSystemIdentity(gitAuthority.value, fixtureAuthority.value)).toBe(true);
+    expect(result.source.repo).toBe(canonicalGitRoot);
     expect(result.source.head).toMatch(/^[a-f0-9]{40}$/u);
     expect(result.source.tree).toMatch(/^[a-f0-9]{40}$/u);
     expect(result.owned.length).toBeGreaterThan(0);

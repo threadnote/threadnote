@@ -9,6 +9,7 @@ import {
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {nativeWorkflowError} from './memory.js';
 import {nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
+import {readPathFileSystemAuthority, sameFileSystemIdentity} from '@threadnote/platform/system';
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u;
@@ -92,9 +93,18 @@ const canonicalRepo = Effect.fn('workflowAutomation.cycle.canonicalRepo')(functi
   const fs = yield* FileSystem.FileSystem;
   const root = yield* fs.realPath(repo);
   const reported = (yield* git(root, ['rev-parse', '--show-toplevel'])).trim();
-  if ((yield* fs.realPath(reported)) !== root)
-    return yield* fail('binding-drift', 'Cycle Git operations must use the bound repository root.');
-  return root;
+  const canonicalReported = yield* fs.realPath(reported);
+  if (canonicalReported !== root) {
+    const requestedAuthority = yield* readPathFileSystemAuthority(root, 'Directory');
+    const reportedAuthority = yield* readPathFileSystemAuthority(canonicalReported, 'Directory');
+    if (
+      Option.isNone(requestedAuthority) ||
+      Option.isNone(reportedAuthority) ||
+      !sameFileSystemIdentity(requestedAuthority.value, reportedAuthority.value)
+    )
+      return yield* fail('binding-drift', 'Cycle Git operations must use the bound repository root.');
+  }
+  return canonicalReported;
 });
 
 /** A private index captures worktree bytes; the contributor's index is never written. */
@@ -183,7 +193,7 @@ export const pinNativeCycleTree = Effect.fn('workflowAutomation.cycle.pinTree')(
 ) {
   if (!/^[a-f0-9]{64}$/u.test(bindingId) || !objectId.test(tree))
     return yield* fail('invalid-snapshot', 'Snapshot pin identity is invalid.');
-  const reference = `refs/threadnote/workflow-cycles/${bindingId}/${purpose}/${sha256HexSync(snapshotId)}`;
+  const reference = `refs/threadnote/cycles/${purpose}/${sha256HexSync(JSON.stringify([bindingId, purpose, snapshotId]))}`;
   const existing = yield* runCommandEffect(
     'git',
     ['--no-optional-locks', '-C', repo, 'show-ref', '--verify', '--hash', reference],
