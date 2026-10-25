@@ -57,6 +57,7 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_CAPABILITIES = [
   'direct-current-contract-adoption',
   'explicit-cleanup-preparation',
   'graph-scope-authority',
+  'embedding-demand',
 ] as const;
 
 export type CodeGraphPersistentSchemaCapability = (typeof CODE_GRAPH_PERSISTENT_SCHEMA_CAPABILITIES)[number];
@@ -78,7 +79,8 @@ export type CodeGraphPersistentSchemaRevisionKey =
   | 'sorted-spool-citation-predecessor'
   | 'citation-alias-checkpoint-predecessor'
   | 'checkpoint-import'
-  | 'graph-scope-authority';
+  | 'graph-scope-authority'
+  | 'embedding-demand';
 
 export type CodeGraphPersistentSchemaUpgradeRoute =
   | 'adopt-current-contract'
@@ -86,6 +88,7 @@ export type CodeGraphPersistentSchemaUpgradeRoute =
   | 'current'
   | 'extend-checkpoint-import'
   | 'extend-graph-scope-authority'
+  | 'extend-embedding-demand'
   | 'retire-legacy-references-and-rebuild'
   | 'rebuild-extensions';
 
@@ -198,6 +201,20 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS = [
   profile(
     18,
     'graph-scope-authority',
+    'background-readable',
+    'extend-embedding-demand',
+    [
+      ...citationColumn,
+      'checkpoint-import',
+      'direct-current-contract-adoption',
+      'explicit-cleanup-preparation',
+      'graph-scope-authority',
+    ],
+    'current',
+  ),
+  profile(
+    19,
+    'embedding-demand',
     'current',
     'current',
     [
@@ -206,6 +223,7 @@ export const CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS = [
       'direct-current-contract-adoption',
       'explicit-cleanup-preparation',
       'graph-scope-authority',
+      'embedding-demand',
     ],
     'current',
   ),
@@ -226,7 +244,7 @@ function requiredProfile<const Key extends CodeGraphPersistentSchemaRevisionKey>
   return value;
 }
 
-export const CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT = requiredProfile('graph-scope-authority');
+export const CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT = requiredProfile('embedding-demand');
 export const CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR = requiredProfile('sorted-spool-citation-predecessor');
 export const CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR = requiredProfile(
   'citation-alias-checkpoint-predecessor',

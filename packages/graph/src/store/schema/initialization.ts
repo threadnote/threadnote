@@ -1,3 +1,4 @@
+import {codeGraphEmbeddingDemandSchemaState} from '../../vector/demand.js';
 import {Effect} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {REMOVED_VIEWS_TABLE_SQL} from '../removed/view_schema_contracts.js';
@@ -57,7 +58,11 @@ const initializeSchema = Effect.fn('codeGraph.initializeSchema')(function* (sql:
   yield* sql.unsafe(
     `PRAGMA wal_autocheckpoint = ${Math.max(1, Math.floor(CODE_GRAPH_WAL_AUTOCHECKPOINT_BYTES / pageSize))}`,
   );
-  if (receiptCurrent) return;
+  if (receiptCurrent) {
+    if ((yield* codeGraphEmbeddingDemandSchemaState(sql)) !== 'ready')
+      return yield* CodeGraphStoreError.of('Code graph embedding demand authority is incompatible.');
+    return;
+  }
   yield* initializeSchemaFully(sql);
   yield* recordCodeGraphSchemaInitializationReceipt(sql);
 });

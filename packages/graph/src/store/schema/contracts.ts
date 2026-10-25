@@ -1,6 +1,46 @@
 import {CODE_GRAPH_CHECKPOINT_IMPORT_FORMAT_VERSION} from './revision.js';
 
-export type PersistentExtensionGroup = 'analysis' | 'build' | 'checkpoint' | 'cross-repository' | 'lexical' | 'shards';
+export const CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL = `CREATE TABLE IF NOT EXISTS embedding_demand (
+  worktree_id TEXT NOT NULL CHECK(length(worktree_id) = 64 AND worktree_id NOT GLOB '*[^0-9a-f]*'),
+  scope_id TEXT NOT NULL CHECK(length(CAST(scope_id AS BLOB)) BETWEEN 1 AND 256),
+  snapshot_id TEXT NOT NULL CHECK(length(CAST(snapshot_id AS BLOB)) BETWEEN 1 AND 128),
+  activated_at TEXT NOT NULL CHECK(length(activated_at) = 24),
+  state TEXT NOT NULL CHECK(state IN ('queued', 'building', 'deferred', 'blocked', 'ready', 'cancelled')),
+  attempt INTEGER NOT NULL CHECK(typeof(attempt) = 'integer' AND attempt BETWEEN 0 AND 3),
+  not_before INTEGER NOT NULL CHECK(typeof(not_before) = 'integer' AND not_before BETWEEN 0 AND 9007199254740991),
+  reason TEXT CHECK(reason IS NULL OR length(CAST(reason AS BLOB)) <= 2048),
+  model_json TEXT CHECK(model_json IS NULL OR (length(CAST(model_json AS BLOB)) <= 1024 AND json_valid(model_json))),
+  active_json TEXT CHECK(active_json IS NULL OR (length(CAST(active_json AS BLOB)) <= 4096 AND json_valid(active_json))),
+  PRIMARY KEY (worktree_id, scope_id)
+) WITHOUT ROWID`;
+const column = (name: string, type: string, primaryKeyPosition = 0, notNull = true) => ({
+  name,
+  type,
+  primaryKeyPosition,
+  notNull,
+});
+export const CODE_GRAPH_EMBEDDING_DEMAND_TABLE_CONTRACT = {
+  name: 'embedding_demand',
+  foreignKeys: [],
+  group: 'vector-demand',
+  createSql: CODE_GRAPH_EMBEDDING_DEMAND_TABLE_SQL,
+  withoutRowid: true,
+  columns: [
+    column('worktree_id', 'TEXT', 1),
+    column('scope_id', 'TEXT', 2),
+    column('snapshot_id', 'TEXT'),
+    column('activated_at', 'TEXT'),
+    column('state', 'TEXT'),
+    column('attempt', 'INTEGER'),
+    column('not_before', 'INTEGER'),
+    column('reason', 'TEXT', 0, false),
+    column('model_json', 'TEXT', 0, false),
+    column('active_json', 'TEXT', 0, false),
+  ],
+} as const satisfies PersistentExtensionTableContract;
+
+export type PersistentExtensionGroup =
+  'analysis' | 'build' | 'checkpoint' | 'cross-repository' | 'lexical' | 'shards' | 'vector-demand';
 
 export type CodeGraphPersistentSchemaMigrationPhase =
   | 'added-build-owner-instance'
@@ -97,6 +137,7 @@ const optionalColumn = (name: string, type: string): PersistentExtensionColumnCo
  * are restarted against the current resumable-build contract.
  */
 export const PERSISTENT_EXTENSION_TABLES = [
+  CODE_GRAPH_EMBEDDING_DEMAND_TABLE_CONTRACT,
   {
     columns: [
       requiredColumn('snapshot_id', 'TEXT', 1),

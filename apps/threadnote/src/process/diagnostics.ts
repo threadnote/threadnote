@@ -31,6 +31,7 @@ export const readBoundedProcessRegistrationNames = Effect.fn('processDiagnostics
 export type ThreadnoteProcessRole =
   | 'cli'
   | 'graph-builder'
+  | 'graph-embedding-worker'
   | 'graph-compaction-worker'
   | 'graph-diagnostics-worker'
   | 'graph-parser-worker'
@@ -833,6 +834,7 @@ function isRegisteredThreadnoteProcessRole(value: unknown): value is RegisteredT
   return (
     value === 'cli' ||
     value === 'graph-builder' ||
+    value === 'graph-embedding-worker' ||
     value === 'graph-compaction-worker' ||
     value === 'graph-diagnostics-worker' ||
     value === 'graph-parser-worker' ||

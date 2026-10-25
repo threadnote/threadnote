@@ -1,6 +1,7 @@
 export type ManagerProcessRole =
   | 'cli'
   | 'graph-builder'
+  | 'graph-embedding-worker'
   | 'graph-compaction-worker'
   | 'graph-diagnostics-worker'
   | 'graph-parser-worker'

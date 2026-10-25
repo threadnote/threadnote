@@ -113,10 +113,12 @@ export interface FileSystemPathAuthority extends FileSystemIdentity {
 }
 
 interface RuntimeDirectoryEntry {
+  readonly isDirectory: () => boolean;
   readonly name: string | Uint8Array;
 }
 
 interface RuntimeDirectoryHandle extends AsyncIterable<RuntimeDirectoryEntry | Uint8Array> {
+  readonly read: () => Promise<RuntimeDirectoryEntry | null>;
   readonly close: () => Promise<void> | void;
 }
 
@@ -501,6 +503,38 @@ export async function runtimeDirectoryNamePage(path: string, entryLimit: number)
     }
   }
   return {names, overflow: false};
+}
+
+/** Scoped callers retain this native iterator; every read advances at most 64 directory entries. */
+export async function runtimeOpenTextDirectoryNameReader(root: string) {
+  const directory = await nativeFileSystemPromises.opendir(root, {bufferSize: 32, encoding: 'utf8'});
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await directory.close();
+  };
+  return {
+    close,
+    readPage: async (limit: number) => {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 64)
+        throw SystemOperationError.make({message: 'Runtime directory page limit is invalid.'});
+      const names: string[] = [];
+      if (closed) return {names, done: true};
+      for (let count = 0; count < limit; count++) {
+        const entry = await directory.read();
+        if (!entry) {
+          await close();
+          return {names, done: true};
+        }
+        if (entry.isDirectory())
+          names.push(
+            typeof entry.name === 'string' ? entry.name : new TextDecoder('utf-8', {fatal: true}).decode(entry.name),
+          );
+      }
+      return {names, done: false};
+    },
+  };
 }
 
 /** Effect-native UTF-8 view for bounded application ledgers that reject non-text names. */

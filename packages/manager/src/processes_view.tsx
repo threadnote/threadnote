@@ -207,6 +207,8 @@ function processRoleLabel(role: ManageableManagerProcess['role']): string {
       return 'CLI';
     case 'graph-builder':
       return 'Graph builder';
+    case 'graph-embedding-worker':
+      return 'Graph embedding worker';
     case 'graph-compaction-worker':
       return 'Graph compaction worker';
     case 'graph-diagnostics-worker':

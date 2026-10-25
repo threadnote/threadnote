@@ -1,3 +1,4 @@
+import {codeGraphEmbeddingDemandSchemaState, initializeCodeGraphEmbeddingDemandSchema} from '../../vector/demand.js';
 import {DateTime, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import * as SqlError from 'effect/sql/SqlError';
@@ -265,6 +266,14 @@ const migratePersistentExtensionTables = Effect.fn('codeGraph.migratePersistentE
           `Code graph persistent extension schema ${revisionPlan.value} is newer than ${CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT_REVISION}.`,
         );
       }
+      const demandState = yield* codeGraphEmbeddingDemandSchemaState(sql);
+      if (
+        demandState === 'incompatible' ||
+        (demandState === 'absent' && recordedRevision !== undefined && recordedRevision >= 19)
+      ) {
+        return yield* CodeGraphStoreError.of('Code graph embedding demand authority is incompatible.');
+      }
+      yield* initializeCodeGraphEmbeddingDemandSchema(sql);
       if (!(yield* codeGraphWorktreeReconciliationSchemaCompatible(sql, true, false))) {
         return yield* CodeGraphStoreError.of('Code graph cleanup authority schema is incompatible.');
       }
