@@ -3,9 +3,10 @@ import {mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync}
 import {join, resolve} from 'node:path';
 import {bazelDiffPath, bazelPath} from './cli-tools.mjs';
 import {selectTargets} from '../ci/selection.mjs';
-import {targetSpecs} from './target-specs.mjs';
+import {createTargetSpecs} from './target-specs.mjs';
 
 const root = resolve(import.meta.dir, '../..');
+const {targetSpecs} = createTargetSpecs(root);
 const evidence = resolve(root, '.context/dev-cycle/bazel-spike/selection-regressions');
 mkdirSync(evidence, {recursive: true});
 const workspace = mkdtempSync(join(evidence, 'fixture-'));
