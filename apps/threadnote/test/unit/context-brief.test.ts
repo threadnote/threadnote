@@ -36,6 +36,7 @@ import {
   CONTEXT_BRIEF_PROCEDURE_VERSION,
 } from '@threadnote/threadnote/context_brief/index';
 import {compileContextBriefWith} from '@threadnote/context/compiler';
+import {projectContextBrief} from '@threadnote/context/projector';
 import {createCodeMemoryLinkAgentSuiteCorpusV1} from '@threadnote/threadnote/evaluation/code-memory-link-agent-suite';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {memoryIdentityAlias} from '@threadnote/memory/identity-alias';
@@ -841,18 +842,33 @@ describe('Context Brief compiler', () => {
   effectIt.effect('surfaces graph warnings as stable coverage codes without copying warning prose', () =>
     Effect.gen(function* () {
       const warning = 'Cross-repository bridges were withheld; semantic search reached its elapsed-time budget.';
+      let logicalGaps: readonly string[] = [];
       const result = yield* compileContextBriefWith(
         {
           graphEvidence: () => Effect.succeed({...graphEvidence(), warnings: [warning]}),
           memoryEvidence: () => Effect.succeed(memoryEvidence()),
+          projection: (logical, budget, format) =>
+            Effect.sync(() => {
+              logicalGaps = logical.coverage.gaps;
+              return projectContextBrief(logical, budget, format);
+            }),
         },
         request(1_250),
       );
 
+      expect([...logicalGaps].sort()).toEqual([
+        'graph-bridge-evidence-incomplete',
+        'graph-evidence-partial',
+        'graph-query-warning',
+        'graph-semantic-evidence-incomplete',
+        'memory-freshness-unknown',
+        'one-optional-contract-extractor-unavailable',
+        'task-anchor-locators-unavailable',
+      ]);
       expect(result.structuredContent.coverage.gaps).toEqual(['graph-bridge-evidence-incomplete']);
       expect(
         result.structuredContent.coverage.gaps.length + result.structuredContent.coverage.omissions.coverageGaps,
-      ).toBe(6);
+      ).toBe(7);
       expect(JSON.stringify(result.structuredContent)).not.toContain(warning);
       expectTextCarriesSelectedEvidence(result.text, result.structuredContent);
     }),

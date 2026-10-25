@@ -12,6 +12,7 @@ import {
 
 import type {
   ContextBriefFreshness,
+  ContextBriefGraphEvidenceV1,
   ContextBriefMemoryCandidateV1,
   ContextBriefMemoryActionCardV1,
   ContextBriefContinuationCardV1,
@@ -783,4 +784,59 @@ export function contextBriefPreciseEvidenceId(evidence: ContextBriefPreciseCodeE
   return `cbpe_${sha256HexSync(
     `${value.repositoryId}\u0000${value.sourceCommit}\u0000${value.path}\u0000${value.nodeId ?? ''}\u0000${value.contentHash}`,
   ).slice(0, 24)}`;
+}
+
+/** Select locators only from already admitted recall evidence, independently of citation freshness. */
+export function contextBriefTaskGraphAnchors(
+  task: string,
+  memory: ContextBriefMemoryRetrievalV1,
+  graph: ContextBriefGraphEvidenceV1,
+  maximumRefs: number,
+): readonly string[] {
+  const repositoryId =
+    graph.citationValidationFence?.kind === 'repository' ? graph.citationValidationFence.repositoryId : undefined;
+  if (repositoryId === undefined) return [];
+  // Generic verification language cannot by itself make a candidate task-aligned.
+  const specific = (text: string) =>
+    text.replace(
+      /\b(?:verify|verification|installed|contracts?|source|replacement|baseline|test|tests|check|checks|support)\b/giu,
+      ' ',
+    );
+  const eligible = memory.candidates
+    .map(candidate => ({
+      candidate,
+      score: contextBriefResumeTaskAlignmentScore(specific(task), {
+        topic: specific(candidate.topic ?? ''),
+        ...(candidate.continuationCard === undefined
+          ? {}
+          : {continuationCard: {...candidate.continuationCard, task: specific(candidate.continuationCard.task ?? '')}}),
+      }),
+      paths: [
+        ...new Set(
+          candidate.codeCitations
+            .filter(citation => citation.repositoryId === repositoryId && canonicalTaskAnchorPath(citation.path))
+            .map(citation => citation.path),
+        ),
+      ].sort(),
+    }))
+    .filter(item => item.score > 0 && item.paths.length > 0)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.candidate.rank - right.candidate.rank ||
+        compareText(left.candidate.uri, right.candidate.uri),
+    );
+  return eligible[0]?.paths.slice(0, Math.min(8, maximumRefs)) ?? [];
+}
+
+function canonicalTaskAnchorPath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    path.trim() === path &&
+    new TextEncoder().encode(path).byteLength <= 4096 &&
+    !/^(?:[a-z]:|\/|cgs_|cgr_)/iu.test(path) &&
+    !path.includes('\\') &&
+    ![...path].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) &&
+    path.split('/').every(segment => segment !== '' && segment !== '.' && segment !== '..')
+  );
 }
