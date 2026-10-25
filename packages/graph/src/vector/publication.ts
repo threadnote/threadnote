@@ -6,7 +6,11 @@ import {SystemInfo} from '@threadnote/platform/system';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import type {CodeGraphEmbeddingIndexShape, CodeGraphVectorPublication} from '../embedding.js';
 import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from '../layout.js';
-import {withCodeGraphVectorPublicationWorktreeLock, withCodeGraphDatabaseWriteLock} from '../maintenance/gate.js';
+import {
+  withCodeGraphVectorPublicationWorktreeLock,
+  withCodeGraphTargetWorktreeLock,
+  withCodeGraphDatabaseWriteLock,
+} from '../maintenance/gate.js';
 import {selectActiveViewFence} from '../store/active_views.js';
 import {withCodeGraphReadTransaction} from '../store/session.js';
 import type {CodeGraphStoreShape} from '../store.js';
@@ -24,6 +28,8 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
   readonly layout: CodeGraphLayout;
   readonly threadnoteHome: string;
   readonly snapshot: CodeGraphSnapshot;
+  readonly background?: boolean;
+  readonly validateClaimInSession?: Effect.Effect<void, unknown, SqlClient.SqlClient>;
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -42,6 +48,7 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
   }
   const selectedModelId = (yield* readModelSelection(threadnoteHome)).roles.embedding;
   const validateInSession = Effect.gen(function* () {
+    yield* input.validateClaimInSession ?? Effect.void;
     const current = yield* selectActiveViewFence(layout.worktreeId, layout.scopeId);
     const ready = yield* store.readySnapshot(layout.databasePath, layout.worktreeId, layout.scopeId);
     const modelId = (yield* readModelSelection(threadnoteHome)).roles.embedding;
@@ -70,7 +77,7 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
     validate: provide(store.withSession(layout.databasePath, validateInSession, {readOnly: true})),
     attach: commit =>
       provide(
-        withCodeGraphVectorPublicationWorktreeLock(
+        (input.background ? withCodeGraphTargetWorktreeLock : withCodeGraphVectorPublicationWorktreeLock)(
           threadnoteHome,
           layout.checkoutId,
           layout.worktreeId,
@@ -80,7 +87,7 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
             {
               retryIntervalMilliseconds: 100,
               staleAfterMilliseconds: 120_000,
-              waitTimeoutMilliseconds: Number.POSITIVE_INFINITY,
+              waitTimeoutMilliseconds: input.background ? 0 : Number.POSITIVE_INFINITY,
             },
             withCodeGraphDatabaseWriteLock(
               threadnoteHome,
@@ -95,6 +102,7 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
                 }),
                 {existingOnly: true, writerLockPath: layout.databaseWriteLockPath, writerGateHeld: true},
               ),
+              input.background ? 0 : Number.POSITIVE_INFINITY,
             ),
           ),
           layout.scopeId,

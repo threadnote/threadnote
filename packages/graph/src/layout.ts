@@ -283,3 +283,11 @@ function assertCheckoutId(checkoutId: string): void {
 function assertWorktreeId(worktreeId: string): void {
   if (!/^[0-9a-f]{64}$/.test(worktreeId)) throw new Error('Code graph worktree identity is invalid.');
 }
+
+/** One detached embedding worker per canonical home. */
+export function codeGraphEmbeddingWorkerLockPath(path: Path.Path, home: string): string {
+  return path.join(home, 'locks', 'indexes', 'code-graph', 'embedding-worker.lock');
+}
+export function codeGraphEmbeddingWorkerReceiptPath(path: Path.Path, home: string): string {
+  return path.join(home, 'locks', 'indexes', 'code-graph', 'embedding-worker-v1.json');
+}

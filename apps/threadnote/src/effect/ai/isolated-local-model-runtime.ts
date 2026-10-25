@@ -104,6 +104,8 @@ export interface IsolatedLocalModelRuntimeOptions {
   readonly maxStderrBytes?: number;
   readonly responseLimitBytes?: number;
   readonly requestDeadlineMs?: number;
+  /** Background workers persist retries in their durable demand instead. Defaults to 2. */
+  readonly maximumRequestAttempts?: 1 | 2;
   readonly spawnWorker?: LocalModelWorkerSpawner;
 }
 
@@ -316,6 +318,7 @@ class LocalModelWorkerPool {
   private closed = false;
   private connection = Option.none<LocalModelWorkerConnection>();
   private readonly deadlineMs: number;
+  private readonly maximumRequestAttempts: number;
   private evictingConnection: Promise<void> | undefined;
   private idleGeneration = 0;
   private idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -330,6 +333,7 @@ class LocalModelWorkerPool {
     private readonly system: SystemInfoShape,
     options: IsolatedLocalModelRuntimeOptions,
   ) {
+    this.maximumRequestAttempts = options.maximumRequestAttempts ?? 2;
     this.deadlineMs = positiveInteger(options.requestDeadlineMs, DEFAULT_REQUEST_DEADLINE_MS);
     this.idleTimeoutMs = nonNegativeInteger(
       options.idleTimeoutMs ?? parseInteger(system.environment()[LOCAL_MODEL_WORKER_IDLE_TIMEOUT_ENV]),
@@ -362,7 +366,7 @@ class LocalModelWorkerPool {
     this.activeRequests += 1;
     this.cancelIdleEviction();
     try {
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < this.maximumRequestAttempts; attempt += 1) {
         let connection = Option.none<LocalModelWorkerConnection>();
         try {
           const activeConnection = await this.activeConnection(operation);
@@ -380,7 +384,12 @@ class LocalModelWorkerPool {
           );
         } catch (cause: unknown) {
           if (Option.isSome(connection)) await this.discard(connection.value);
-          if (!Schema.is(LocalModelWorkerTransportError)(cause) || attempt === 1 || signal.aborted) throw cause;
+          if (
+            !Schema.is(LocalModelWorkerTransportError)(cause) ||
+            attempt + 1 === this.maximumRequestAttempts ||
+            signal.aborted
+          )
+            throw cause;
         }
       }
       throw transportError(operation, 'exit');

@@ -38,7 +38,8 @@ const historicalProfiles = [
   [15, 'sorted-spool-citation-predecessor', 'adopt-current-contract'],
   [16, 'citation-alias-checkpoint-predecessor', 'extend-checkpoint-import'],
   [17, 'checkpoint-import', 'extend-graph-scope-authority'],
-  [18, 'graph-scope-authority', 'current'],
+  [18, 'graph-scope-authority', 'extend-embedding-demand'],
+  [19, 'embedding-demand', 'current'],
 ] as const;
 
 describe('code graph schema revision entity', () => {
@@ -48,7 +49,7 @@ describe('code graph schema revision entity', () => {
     );
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CITATION_PREDECESSOR.value).toBe(15);
     expect(CODE_GRAPH_PERSISTENT_SCHEMA_CHECKPOINT_PREDECESSOR.value).toBe(16);
-    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(18);
+    expect(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value).toBe(19);
   });
 
   it('keeps storage, receipt, artifact, reuse, resolution, and Manager versions distinct', () => {
@@ -85,12 +86,12 @@ describe('code graph schema revision entity', () => {
       fc.property(fc.constantFrom(...CODE_GRAPH_PERSISTENT_SCHEMA_REVISIONS), profile => {
         expect(observeCodeGraphPersistentSchemaRevision(profile.value)).toEqual({profile, state: 'known'});
         expect(observeCodeGraphPersistentSchemaRevision(String(profile.value))).toEqual({profile, state: 'known'});
-        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'graph-scope-authority');
+        expect(codeGraphPersistentSchemaIsCurrent(profile.value)).toBe(profile.key === 'embedding-demand');
         expect(codeGraphPersistentSchemaMigrationPending(profile.value)).toBe(
           profile.lifecycle === 'background-readable',
         );
         const plan = planCodeGraphPersistentSchemaUpgrade(profile.value);
-        expect(plan.state).toBe(profile.key === 'graph-scope-authority' ? 'ready' : 'upgrade');
+        expect(plan.state).toBe(profile.key === 'embedding-demand' ? 'ready' : 'upgrade');
         if (plan.state !== 'ready' && plan.state !== 'upgrade')
           throw new Error('Historical revision plan unavailable.');
         expect(plan.route).toBe(profile.upgradeRoute);
@@ -129,7 +130,7 @@ describe('code graph schema revision entity', () => {
       'store/schema/receipt.ts',
     ];
     const subject = String.raw`(?:recordedRevision|persistentExtensionSchemaRevision|revision\.value|receipt\.contract_revision|receipt\.persistent_extension_revision)`;
-    const numericRevision = String.raw`(?:[2-9]|1[0-7])`;
+    const numericRevision = String.raw`(?:[2-9]|1[0-8])`;
     const leftComparison = new RegExp(String.raw`\b${subject}\s*(?:===|!==|<=|>=|<|>)\s*${numericRevision}\b`, 'u');
     const rightComparison = new RegExp(String.raw`\b${numericRevision}\s*(?:===|!==|<=|>=|<|>)\s*${subject}\b`, 'u');
     for (const file of governedFiles) {
