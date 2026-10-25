@@ -493,3 +493,75 @@ describe('native GitHub watch provider', () => {
     }),
   );
 });
+
+describe('native pull mergeability projection', () => {
+  effectIt.effect('propagates final PR truth and start/end base without extra requests', () =>
+    Effect.gen(function* () {
+      let reads = 0;
+      const fake = harness((args, input, call, now) =>
+        apiEndpoint(args).endsWith('/pulls/7')
+          ? {
+              headers: {etag: '"new-pull"'},
+              body: {
+                ...pull(),
+                base: {sha: (++reads === 1 ? 'c' : 'd').repeat(40)},
+                mergeable: reads === 1 ? true : false,
+              },
+            }
+          : defaultReply(args, input, call, now),
+      );
+      const result = yield* fake.sweep();
+      expect(result.sweep).toMatchObject({base: 'd'.repeat(40), startedBase: 'c'.repeat(40), mergeable: false});
+      expect(fake.calls).toHaveLength(7);
+      expect(result.metrics.requests).toBe(7);
+    }),
+  );
+  effectIt.effect('refreshes legacy pull once in the scheduled request and preserves explicit null across 304', () =>
+    Effect.gen(function* () {
+      const seeded = yield* harness().sweep();
+      const legacy: NativeWatchProviderCache = {
+        pages: seeded.cache.pages.map(page =>
+          page.key === 'pull' ? {...page, projection: {...page.projection, pull: {head, state: 'open'}}} : page,
+        ),
+      };
+      let reads = 0;
+      const fake = harness((args, input, call, now) => {
+        if (!apiEndpoint(args).endsWith('/pulls/7')) return defaultReply(args, input, call, now);
+        reads++;
+        if (reads === 1) {
+          expect(args.some(arg => arg.startsWith('If-None-Match:') || arg.startsWith('If-Modified-Since:'))).toBe(
+            false,
+          );
+          return {headers: {etag: '"fresh"'}, body: {...pull(), base: {sha: 'c'.repeat(40)}}};
+        }
+        expect(args).toContain('If-None-Match: "fresh"');
+        return {status: 304, body: ''};
+      });
+      const result = yield* fake.sweep(legacy);
+      expect(fake.calls).toHaveLength(7);
+      expect(result.sweep).toMatchObject({base: 'c'.repeat(40), startedBase: 'c'.repeat(40), mergeable: null});
+      expect(result.cache.pages.find(page => page.key === 'pull')?.projection.pull).toMatchObject({mergeable: null});
+      const cached = harness((args, input, call, now) =>
+        apiEndpoint(args).endsWith('/pulls/7') ? {status: 304, body: ''} : defaultReply(args, input, call, now),
+      );
+      const next = yield* cached.sweep(result.cache);
+      expect(next.sweep.mergeable).toBeNull();
+      expect(cached.calls).toHaveLength(7);
+    }),
+  );
+  for (const metadata of [{mergeable: 'dirty'}, {mergeable: 0}, {base: {sha: 'invalid'}}]) {
+    effectIt.effect('rejects malformed PR metadata ' + JSON.stringify(metadata), () =>
+      Effect.gen(function* () {
+        const fake = harness((args, input, call, now) =>
+          apiEndpoint(args).endsWith('/pulls/7')
+            ? {body: {...pull(), ...metadata}}
+            : defaultReply(args, input, call, now),
+        );
+        const result = yield* fake.sweep().pipe(Effect.result);
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure') expect(result.failure.code).toBe('provider-shape');
+        expect(fake.calls).toHaveLength(1);
+      }),
+    );
+  }
+});

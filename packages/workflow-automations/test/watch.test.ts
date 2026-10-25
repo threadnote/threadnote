@@ -748,3 +748,129 @@ describe('native watch domain', () => {
     ).toBe('invalid-watch');
   });
 });
+
+describe('native merge conflict metadata', () => {
+  const conflict = (overrides: Partial<NativeWatchSweep> = {}) =>
+    sweep({
+      base: sha('b'),
+      startedBase: sha('b'),
+      mergeable: false,
+      ...overrides,
+    });
+  it('bootstraps actionable durable conflict work with no CI and deduplicates through unknown, restart and ack', () => {
+    const initial = reconcileNativeWatch(state(), conflict());
+    expect(initial.events).toHaveLength(1);
+    expect(initial.events[0]).toMatchObject({
+      source: 'watch',
+      kind: 'merge_conflict',
+      key: sha('b'),
+      head: sha('a'),
+      url: pr,
+    });
+    expect(initial.work).toHaveLength(1);
+    expect(initial.work[0]).toMatchObject({status: 'open', eventId: initial.events[0].id});
+    expect(initial.ci).toBeNull();
+    const unknown = reconcileNativeWatch(initial, conflict({mergeable: null, at: 2_000}));
+    const restarted = decodeNativeWatchState(JSON.parse(JSON.stringify(unknown)));
+    const relayed = relayNativeWatch(withConsumer(restarted), 'consumer-1', 20);
+    const recorded = recordNativeWatchDispositions(
+      relayed.state,
+      'consumer-1',
+      required(relayed.delivery).id,
+      [
+        {
+          eventId: initial.events[0].id,
+          status: 'open',
+          reason: initial.work[0].reason,
+          evidence: initial.work[0].evidence,
+        },
+      ],
+      21,
+    );
+    const acked = acknowledgeNativeWatch(recorded, 'consumer-1', required(relayed.delivery).id, 22);
+    expect(acked.events).toHaveLength(0);
+    expect(acked.work).toEqual(initial.work);
+    const again = reconcileNativeWatch(acked, conflict({at: 3_000}));
+    expect(again.events).toHaveLength(0);
+    expect(again.work).toEqual(initial.work);
+  });
+  it('preserves work through missing and resolved metadata and emits a renewed explicit blockage', () => {
+    const initial = reconcileNativeWatch(state(), conflict());
+    const missing = reconcileNativeWatch(initial, sweep({at: 2_000}));
+    expect(missing.work).toEqual(initial.work);
+    expect(missing.mergeConflictVersion).toEqual(initial.mergeConflictVersion);
+    const clear = reconcileNativeWatch(missing, conflict({mergeable: true, at: 3_000}));
+    expect(clear.work).toEqual(initial.work);
+    const renewed = reconcileNativeWatch(clear, conflict({at: 4_000}));
+    expect(renewed.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(2);
+    expect(renewed.work.every(item => item.status === 'open')).toBe(true);
+  });
+  it('emits once per changed head/base and never infers a conflict from unknown or missing metadata', () => {
+    let value = reconcileNativeWatch(state(), conflict());
+    value = reconcileNativeWatch(value, conflict({base: sha('c'), startedBase: sha('c')}));
+    value = reconcileNativeWatch(
+      value,
+      conflict({base: sha('c'), startedBase: sha('c'), head: sha('d'), startedHead: sha('d')}),
+    );
+    expect(value.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(3);
+    for (const metadata of [
+      {mergeable: null},
+      {},
+      {mergeable: false},
+      {state: 'closed' as const, mergeable: false, base: sha('b')},
+    ]) {
+      expect(reconcileNativeWatch(state(), sweep(metadata)).events.some(event => event.kind === 'merge_conflict')).toBe(
+        false,
+      );
+    }
+  });
+  it('suppresses advisory completion during explicit conflict and base drift while preserving all five source fences', () => {
+    const green = conflict({
+      sources: allComplete(1_000),
+      ci: {
+        head: sha('a'),
+        complete: true,
+        count: 1,
+        pending: 0,
+        failed: 0,
+        version: digest('c'),
+      },
+    });
+    for (const metadata of [
+      {mergeable: false},
+      {mergeable: true, startedBase: sha('c')},
+      {mergeable: true, sources: allComplete(1_000).slice(0, 4)},
+      {mergeable: true, sources: allComplete(1_000, sha('d'))},
+    ]) {
+      const first = reconcileNativeWatch(state(), {...green, ...metadata});
+      const later = reconcileNativeWatch(first, {...green, ...metadata, at: 61_000});
+      expect(later.events.some(event => event.kind === 'ci_complete')).toBe(false);
+    }
+  });
+  it('deduplicates the same pair across bounded arbitrary observations and JSON restarts', () => {
+    fc.assert(
+      fc.property(fc.array(fc.constantFrom('missing', 'unknown', 'conflict'), {maxLength: 20}), observations => {
+        let current = reconcileNativeWatch(state(), conflict());
+        for (const observation of observations) {
+          const metadata = observation === 'missing' ? {} : {mergeable: observation === 'unknown' ? null : false};
+          current = reconcileNativeWatch(
+            decodeNativeWatchState(JSON.parse(JSON.stringify(current))),
+            sweep({base: sha('b'), startedBase: sha('b'), ...metadata}),
+          );
+          expect(current.events.filter(event => event.kind === 'merge_conflict')).toHaveLength(1);
+          expect(current.work).toHaveLength(1);
+          expect(current.work[0].status).toBe('open');
+        }
+      }),
+      {numRuns: 32},
+    );
+  });
+  it('retains legacy native v1 decoding and rejects malformed optional metadata', () => {
+    expect(decodeNativeWatchState(state()).base).toBeUndefined();
+    for (const metadata of [{base: 'invalid'}, {startedBase: 'invalid'}, {mergeable: 'dirty'}]) {
+      expect(errorCode(() => reconcileNativeWatch(state(), sweep(metadata as Partial<NativeWatchSweep>)))).toBe(
+        'invalid-watch',
+      );
+    }
+  });
+});

@@ -14,6 +14,8 @@ export const NativeWatchProviderNow = Context.Reference<() => number>('threadnot
   defaultValue: () => Date.now,
 });
 interface Pull {
+  readonly base?: string;
+  readonly mergeable?: boolean | null;
   readonly head: string;
   readonly state: 'open' | 'closed' | 'merged';
 }
@@ -184,6 +186,8 @@ const restProjection = (source: Source, input: unknown, head: string): Projectio
 const pullProjection = (input: unknown): Projection => {
   const value = object(input);
   if (!['open', 'closed'].includes(String(value.state))) throw fail('provider-shape');
+  if (value.mergeable !== undefined && value.mergeable !== null && typeof value.mergeable !== 'boolean')
+    throw fail('provider-shape');
   return {
     items: [],
     size: 0,
@@ -191,6 +195,8 @@ const pullProjection = (input: unknown): Projection => {
     failed: 0,
     pull: {
       head: sha(object(value.head).sha),
+      ...(value.base === undefined ? {} : {base: sha(object(value.base).sha)}),
+      mergeable: value.mergeable === undefined ? null : value.mergeable,
       state: value.merged === true ? 'merged' : (value.state as 'open' | 'closed'),
     },
   };
@@ -309,7 +315,10 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     project: (input: unknown) => Projection,
   ) {
     const old = pages.get(key);
-    const result = yield* request(endpoint, undefined, old);
+    // Old pull projections need one unconditional refresh within this scheduled request.
+    const refreshPull =
+      key === 'pull' && old?.projection.pull !== undefined && !Object.hasOwn(old.projection.pull, 'mergeable');
+    const result = yield* request(endpoint, undefined, refreshPull ? undefined : old);
     const projection =
       result.cached ??
       (yield* Effect.try({
@@ -517,6 +526,9 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
     sweep: {
       head: after.head,
       startedHead: before.head,
+      ...(after.base === undefined ? {} : {base: after.base}),
+      ...(before.base === undefined ? {} : {startedBase: before.base}),
+      ...(finalPull._tag === 'Success' && after.mergeable !== undefined ? {mergeable: after.mergeable} : {}),
       state: after.state,
       at,
       sources: verifiedSources,

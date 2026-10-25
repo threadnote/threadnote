@@ -108,6 +108,9 @@ const sweepSchema = Schema.Struct({
   state: Schema.Literals(['open', 'closed', 'merged']),
   at: timestamp,
   startedHead: sha,
+  base: Schema.optionalKey(sha),
+  startedBase: Schema.optionalKey(sha),
+  mergeable: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   sources: Schema.Array(sourceResultSchema).check(Schema.isMaxLength(sources.length)),
   ci: ciSchema,
 });
@@ -172,6 +175,8 @@ const stateSchema = Schema.Struct({
   watchId: portable,
   pr: prUrl,
   head: Schema.optionalKey(sha),
+  base: Schema.optionalKey(sha),
+  mergeConflictVersion: Schema.optionalKey(version),
   prState: Schema.Literals(['open', 'closed', 'merged']),
   nextSequence: integerRange(1, Number.MAX_SAFE_INTEGER),
   acknowledged: integerRange(0, Number.MAX_SAFE_INTEGER),
@@ -354,6 +359,8 @@ function eligibleCi(
   }[],
 ): boolean {
   return (
+    sweep.mergeable !== false &&
+    (sweep.startedBase === undefined || sweep.base === undefined || sweep.startedBase === sweep.base) &&
     sweep.startedHead === sweep.head &&
     sweep.ci.head === sweep.head &&
     sweep.ci.complete &&
@@ -375,6 +382,26 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
   const events: Omit<NativeWatchEvent, 'sequence' | 'id'>[] = [];
   let head = state.head;
   let prState = state.prState;
+  const base = sweep.base ?? state.base;
+  let mergeConflictVersion = state.mergeConflictVersion;
+  if (state.head !== sweep.head || (sweep.base !== undefined && state.base !== sweep.base) || sweep.mergeable === true)
+    mergeConflictVersion = undefined;
+  if (sweep.state === 'open' && sweep.mergeable === false && sweep.base !== undefined) {
+    const conflictVersion = sha256HexSync(`merge_conflict:${sweep.head}:${sweep.base}`);
+    if (mergeConflictVersion !== conflictVersion) {
+      events.push({
+        source: 'watch',
+        kind: 'merge_conflict',
+        key: sweep.base,
+        version: conflictVersion,
+        head: sweep.head,
+        url: state.pr,
+        at: sweep.at,
+        removed: false,
+      });
+      mergeConflictVersion = conflictVersion;
+    }
+  }
   if (head === undefined) head = sweep.head;
   else if (head !== sweep.head) {
     events.push({
@@ -481,7 +508,32 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
     }
   }
   const withDiff = appendEvents(state, events);
-  return decodeNativeWatchState({...withDiff, head, prState, sources: orderedCheckpoints, ci, ciEmittedVersions});
+  const work = [...withDiff.work];
+  for (const event of withDiff.events.slice(state.events.length)) {
+    if (event.kind === 'merge_conflict')
+      work.push({
+        eventId: event.id,
+        status: 'open',
+        reason: 'Pull request has an explicit merge conflict.',
+        evidence: state.pr,
+        event,
+        at: sweep.at,
+      });
+  }
+  if (work.filter(item => item.status === 'open' || item.status === 'blocked').length > nativeWatchWorkLimit)
+    fail('Unresolved watch work capacity reached.');
+  const {mergeConflictVersion: _previousConflict, ...withoutConflict} = withDiff;
+  return decodeNativeWatchState({
+    ...withoutConflict,
+    head,
+    ...(base === undefined ? {} : {base}),
+    ...(mergeConflictVersion === undefined ? {} : {mergeConflictVersion}),
+    prState,
+    sources: orderedCheckpoints,
+    ci,
+    ciEmittedVersions,
+    work,
+  });
 }
 
 export function attachNativeWatchConsumer(

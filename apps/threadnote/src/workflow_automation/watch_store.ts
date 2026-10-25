@@ -72,6 +72,8 @@ const envelopeSchema = Schema.Struct({
           pull: Schema.optionalKey(
             Schema.Struct({
               head: Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)),
+              base: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u))),
+              mergeable: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
               state: Schema.Literals(['open', 'closed', 'merged']),
             }),
           ),

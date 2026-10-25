@@ -33,6 +33,27 @@ describe('native watch envelope', () => {
   });
   it('round trips a strict envelope', () =>
     expect(decodeNativeWatchEnvelope(JSON.parse(JSON.stringify(fixture())))).toEqual(fixture()));
+  it.each([null, false, true])('retains nullable mergeability metadata through the cache envelope: %s', mergeable => {
+    const input = {
+      ...fixture(),
+      provider: {
+        pages: [
+          {
+            key: 'pull',
+            etag: '"pull"',
+            projection: {
+              items: [],
+              size: 0,
+              pending: 0,
+              failed: 0,
+              pull: {head: 'a'.repeat(40), base: 'b'.repeat(40), mergeable, state: 'open'},
+            },
+          },
+        ],
+      },
+    };
+    expect(decodeNativeWatchEnvelope(JSON.parse(JSON.stringify(input)))).toEqual(input);
+  });
   it('rejects unknown fields and legacy state', () => {
     expect(() => decodeNativeWatchEnvelope({...fixture(), token: 'secret'})).toThrow();
     expect(() => decodeNativeWatchEnvelope(fixture().state)).toThrow();
