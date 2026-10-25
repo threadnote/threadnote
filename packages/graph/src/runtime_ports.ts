@@ -73,3 +73,9 @@ export function withCodeGraphBuildAnonymousTelemetry<A extends CodeGraphIndexSum
 ): Effect.Effect<A, E, R> {
   return effect.pipe(Effect.onExit(exit => reporter.terminal(exit)));
 }
+
+/** Application-owned detached process adapter; waking never authorizes queue creation. */
+export class CodeGraphEmbeddingWorkerProcess extends Context.Service<
+  CodeGraphEmbeddingWorkerProcess,
+  {readonly wake: (home: string) => Effect.Effect<boolean, unknown>}
+>()('@threadnote/graph/runtime_ports/CodeGraphEmbeddingWorkerProcess') {}

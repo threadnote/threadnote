@@ -1,3 +1,4 @@
+import {enqueueCodeGraphEmbeddingDemandSql} from '../vector/demand.js';
 import {Clock, Effect, Option} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import type {CodeGraphDirectPersistentCapacityBoundary} from '../disk/capacity.js';
@@ -834,6 +835,7 @@ const promoteSnapshot = Effect.fn('codeGraph.promoteSnapshot')(function* (
   identity: RepositoryIdentity,
   snapshotId: string,
   capacity: SnapshotPromotionCapacityPlan,
+  backgroundEmbeddingDemand = false,
 ) {
   const sql = yield* SqlClient.SqlClient;
   yield* configureConnection(sql);
@@ -971,6 +973,13 @@ const promoteSnapshot = Effect.fn('codeGraph.promoteSnapshot')(function* (
       // owns an active pointer, carry retirement to its final release after
       // displacement. Clean snapshots remain bounded warm-cache candidates.
       yield* markSnapshotLeaseRetirementBaton(sql, snapshotId, now, true);
+      if (backgroundEmbeddingDemand)
+        yield* enqueueCodeGraphEmbeddingDemandSql(sql, {
+          worktreeId: identity.worktreeId,
+          scopeId,
+          snapshotId,
+          activatedAt,
+        });
       if (displacedSnapshotId === undefined || displacedSnapshotId === snapshotId) return 0;
       // Dirty overlays cannot be exact future aliases. Recent clean snapshots
       // remain ready and are bounded by routine per-repository LRU retention,

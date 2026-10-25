@@ -240,10 +240,12 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
 
 export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVectorGeneration')(function* (input: {
   readonly maximumSteps?: number;
+  readonly lockWaitTimeoutMilliseconds?: number;
   readonly maximumInferenceSymbolsPerStep?: number;
   readonly inferenceBatchSize?: number;
   readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
   readonly ownerToken?: string;
+  readonly abandonedOwnerToken?: string;
   readonly catalog: LocalModelCatalogShape;
   readonly force: boolean;
   readonly fs: FileSystem.FileSystem;
@@ -284,8 +286,12 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
     input.layout.checkoutId,
     sha256HexSync(selected.manifest.id),
   );
+  const lockOptions = {
+    ...CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS,
+    waitTimeoutMilliseconds: input.lockWaitTimeoutMilliseconds ?? Number.POSITIVE_INFINITY,
+  };
   const lock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    withExclusiveFileLock(input.fs, writeLockPath, CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS, effect).pipe(
+    withExclusiveFileLock(input.fs, writeLockPath, lockOptions, effect).pipe(
       Effect.provideService(Crypto.Crypto, crypto),
       Effect.provideService(Path.Path, input.path),
       Effect.provideService(SystemInfo, system),
@@ -296,6 +302,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   yield* input.fs.makeDirectory(root, {recursive: true, mode: 0o700});
   const capacity = yield* makeCodeGraphVectorRetirementCapacityProtector({
     databasePath,
+    claimMode: input.lockWaitTimeoutMilliseconds === 0 ? 'nonblocking-one-attempt' : 'wait',
     threadnoteHome: input.threadnoteHome,
   });
   if (yield* input.fs.exists(databasePath)) {
@@ -404,6 +411,11 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                     [id],
                   ))[0]!;
                 }
+                if (input.abandonedOwnerToken)
+                  yield* sql.unsafe(
+                    'UPDATE vector_generation_progress SET expires_at = 0 WHERE generation = ? AND owner_token = ?',
+                    [generation.generation, input.abandonedOwnerToken],
+                  );
                 const progress = yield* claimCodeGraphGeneration(sql, {
                   generation: generation.generation,
                   ownerToken,
@@ -502,7 +514,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               const vectors = yield* withExclusiveFileLock(
                 input.fs,
                 `${writeLockPath}.inference`,
-                CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS,
+                lockOptions,
                 Effect.gen(function* () {
                   yield* validate;
                   yield* protect(1, 4096, lock(renewCodeGraphGenerationClaim(sql, generation, ownerToken)));

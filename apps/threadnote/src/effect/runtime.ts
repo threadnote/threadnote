@@ -1,3 +1,4 @@
+import {codeGraphEmbeddingWorkerProcessLayer} from '../code_graph/embedding_worker.js';
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -105,6 +106,7 @@ const codeGraphWatcherLayer = CodeGraphWatcher.layer.pipe(Layer.provideMerge(cod
 
 const ApplicationServicesLayer = Layer.mergeAll(
   cliOutputLayer,
+  codeGraphEmbeddingWorkerProcessLayer.pipe(Layer.provide(Layer.mergeAll(systemLayer, commandLayer))),
   threadnoteCliFormatterLayer,
   codeGraphQueryLayer,
   codeGraphStoreLayer,
@@ -145,3 +147,13 @@ export {standaloneBrokerLayerForHome, StandaloneBrokerLayer};
 export {telemetryLayerForHomeForTest} from './runtime-bootstrap.js';
 
 export type ApplicationServices = Layer.Success<typeof ApplicationLayer>;
+
+/** Background retries are durable; one model child deadline per lane attempt. */
+export const GraphEmbeddingWorkerLayer = Layer.mergeAll(
+  codeGraphStoreLayer,
+  localModelCatalogLayer,
+  localModelStoreLayer,
+  commandLayer,
+  systemLayer,
+  isolatedLocalModelRuntimeLayer({maximumRequestAttempts: 1}).pipe(Layer.provideMerge(systemLayer)),
+).pipe(Layer.provideMerge(BunServices.layer), Layer.provideMerge(BunHttpClient.layer));

@@ -691,6 +691,8 @@ export interface CodeGraphSnapshotLeaseWriterOptions {
 }
 
 export interface CodeGraphSnapshotPromotionOptions extends CodeGraphSnapshotLeaseWriterOptions {
+  /** Internal opt-in only; publication and exact demand enqueue share one transaction. */
+  readonly backgroundEmbeddingDemand?: true;
   /** @internal Capacity reservation wrapped outside the checkout writer gate. */
   readonly persistentCapacityProtector?: CodeGraphDirectPersistentCapacityProtector;
 }

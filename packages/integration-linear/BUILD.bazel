@@ -361,6 +361,8 @@ bun_test(
         "//packages/graph:src/tree_sitter/runtime.ts",
         "//packages/graph:src/types.ts",
         "//packages/graph:src/typescript_runtime.ts",
+        "//packages/graph:src/vector/demand.ts",
+        "//packages/graph:src/vector/demand_scheduler.ts",
         "//packages/graph:src/vector/generation.ts",
         "//packages/graph:src/vector/generation_schema.ts",
         "//packages/graph:src/vector/identity.ts",
