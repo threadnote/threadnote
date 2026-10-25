@@ -122,6 +122,40 @@ const harness = (replyFor: ReplyFor = defaultReply) => {
 };
 
 describe('native GitHub watch provider', () => {
+  for (const exitCode of [127, 124]) {
+    effectIt.effect('classifies normalized command exit ' + exitCode + ' without exposing command diagnostics', () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const command = CommandExecutor.of({
+          execute: (executable, args, options) => {
+            calls++;
+            expect(executable).toBe('gh');
+            expect(args).toContain('--include');
+            expect(options?.allowFailure).toBe(true);
+            expect(options?.timeoutMs).toBe(15_000);
+            expect(options?.maxOutputBytes).toBe(8 * 1024 * 1024);
+            return Effect.succeed({exitCode, stdout: '', stderr: secretBody + ' /private/host/path ghp_SECRET_TOKEN'});
+          },
+          executeStreaming: () => Effect.die(new Error('Unexpected streaming request')),
+        });
+        const result = yield* collectNativeWatchGitHub(pr).pipe(
+          Effect.provideService(CommandExecutor, command),
+          Effect.result,
+        );
+        expect(result._tag).toBe('Failure');
+        if (result._tag !== 'Failure') throw new Error('Expected provider command failure.');
+        expect(result.failure.code).toBe(exitCode === 127 ? 'provider-executable' : 'provider-transport');
+        expect(result.failure.retryable).toBe(exitCode === 124);
+        expect(calls).toBe(1);
+        const serialized = JSON.stringify(result.failure);
+        expect(serialized).not.toContain(secretBody);
+        expect(serialized).not.toContain('/private/host/path');
+        expect(serialized).not.toContain('ghp_SECRET_TOKEN');
+        expect(serialized).not.toContain('provider-http');
+      }),
+    );
+  }
+
   effectIt.effect(
     'bounds and fully projects paginated threads, nested replies and REST pages without retaining bodies',
     () =>

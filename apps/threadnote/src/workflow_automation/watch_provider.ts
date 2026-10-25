@@ -255,6 +255,10 @@ export const collectNativeWatchGitHub = Effect.fn('workflowWatch.collectGitHub')
       maxOutputBytes: 8 * 1024 * 1024,
       ...(data === undefined ? {} : {input: new TextEncoder().encode(JSON.stringify(data))}),
     }).pipe(Effect.mapError(() => fail('provider-transport', true)));
+    // allowFailure normalizes spawn/timeout/output-limit failures into these
+    // exit codes with no HTTP response. Never expose command diagnostics.
+    if (result.exitCode === 127) return yield* fail('provider-executable');
+    if (result.exitCode === 124) return yield* fail('provider-transport', true);
     metrics.responseBytes += new TextEncoder().encode(result.stdout).byteLength;
     const response = yield* Effect.try({
       try: () => nativeWatchHttpResponse(result.stdout),
