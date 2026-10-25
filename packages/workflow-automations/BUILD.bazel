@@ -38,6 +38,7 @@ bun_test(
         "//packages/workflow-automations:src/native.ts",
         "//packages/workflow-automations:src/scenarios.ts",
         "//packages/workflow-automations:src/templates.ts",
+        "//packages/workflow-automations:src/watch.ts",
         "//packages/workflow-automations:test/authoring.test.ts",
         "//packages/workflow-automations:test/baseline.test.ts",
         "//packages/workflow-automations:test/cycle.test.ts",
@@ -49,6 +50,7 @@ bun_test(
         "//packages/workflow-automations:test/naming.test.ts",
         "//packages/workflow-automations:test/native.test.ts",
         "//packages/workflow-automations:test/templates.test.ts",
+        "//packages/workflow-automations:test/watch.test.ts",
         "//tools/bazel:project-vitest.config.ts",
         "//:tools/ci/vitest-plan.ts",
         "//:vitest.config.ts",
@@ -74,5 +76,6 @@ bun_test(
         "packages/workflow-automations/test/naming.test.ts",
         "packages/workflow-automations/test/native.test.ts",
         "packages/workflow-automations/test/templates.test.ts",
+        "packages/workflow-automations/test/watch.test.ts",
     ],
 )

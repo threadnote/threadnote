@@ -25,6 +25,7 @@ import {
 import {reserveWorkflowNameFamily} from './naming.js';
 import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
+import {runNativeWatch} from './watch.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
   CurrentWorkflowReadCache,
@@ -390,7 +391,19 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
       authoringVersion: 1,
       status: 'ok' as const,
       cycleVersion: 1,
-      operations: ['init', 'inspect', 'read', 'preflight', 'write', 'recover', 'graph-ready', 'authoring', 'cycle'],
+      watchVersion: 1,
+      operations: [
+        'init',
+        'inspect',
+        'read',
+        'preflight',
+        'write',
+        'recover',
+        'graph-ready',
+        'authoring',
+        'cycle',
+        'watch',
+      ],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],
     };
   if (request.action === 'init')
@@ -438,6 +451,8 @@ const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (confi
         }
       : {...version, status: 'ok' as const, cycle: payload};
   }
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'watch')
+    return yield* runNativeWatch(config, input);
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'authoring')
     return yield* runNativeAuthoring(config, input, request =>
       runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),

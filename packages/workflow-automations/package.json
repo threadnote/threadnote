@@ -11,6 +11,7 @@
     "./native": "./src/native.ts",
     "./scenarios": "./src/scenarios.ts",
     "./templates": "./src/templates.ts",
+    "./watch": "./src/watch.ts",
     "./cycle": "./src/cycle.ts",
     "./cycle-packet": "./src/cycle_packet.ts",
     "./cycle-review": "./src/cycle_review.ts",

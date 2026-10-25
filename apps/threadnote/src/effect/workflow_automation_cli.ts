@@ -1,10 +1,11 @@
 import {Console, Effect, Schema, Stdio, Stream} from 'effect';
-import {Command} from 'effect/cli';
+import {Command, Flag} from 'effect/cli';
 import type {CliRuntimeRunner} from './cli.js';
 import {runWorkflowAutomation} from '../workflow_automation/index.js';
 import {nativeWorkflowError} from '../workflow_automation/memory.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {SystemInfo} from '@threadnote/platform/system';
+import {runNativeWatchCollector} from '../workflow_automation/watch.js';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
 
@@ -82,5 +83,12 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         ),
       ),
     ),
-  ).pipe(Command.withDescription('Opt-in structured native workflow execution for fresh runs'));
+  ).pipe(
+    Command.withDescription('Opt-in structured native workflow execution for fresh runs'),
+    Command.withSubcommands([
+      Command.make('watch-collector', {watchId: Flag.String('watch-id'), token: Flag.String('token')}, options =>
+        withRuntime(config => runNativeWatchCollector(config, options.watchId, options.token)),
+      ).pipe(Command.withDescription('Internal same-executable native watcher process')),
+    ]),
+  );
 }
