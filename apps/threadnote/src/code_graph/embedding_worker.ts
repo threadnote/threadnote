@@ -3,6 +3,7 @@ import {runDetachedCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphEmbeddingWorkerProcess} from '@threadnote/graph/runtime_ports';
 import {runtimeOpenTextDirectoryNameReader, SystemInfo} from '@threadnote/platform/system';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {fromPromise} from '@threadnote/platform/errors';
 import {getThreadnoteVersion} from '@threadnote/workspace/runtime-version';
 import {
   codeGraphRepositoriesRoot,
@@ -50,35 +51,36 @@ export const codeGraphEmbeddingWorkerProgram = Effect.fn('codeGraph.embeddingWor
   const canonical = yield* fs.realPath(home);
   let directory: Awaited<ReturnType<typeof runtimeOpenTextDirectoryNameReader>> | undefined;
   let sequence = 0;
-  const close = Effect.promise(async () => {
+  const close = fromPromise('codeGraph.embeddingWorker.closeCatalog', async () => {
     await directory?.close().catch(() => {});
     directory = undefined;
-  });
+  }).pipe(Effect.ignore);
   return yield* runCodeGraphEmbeddingWorker(canonical, {
     version,
     catalogPage: after =>
-      Effect.tryPromise({
-        try: async () => {
-          if (after === undefined) {
-            await directory?.close().catch(() => {});
-            directory = await runtimeOpenTextDirectoryNameReader(codeGraphRepositoriesRoot(path, canonical)).catch(
-              (error: NodeJS.ErrnoException) => {
-                if (error.code === 'ENOENT') return undefined;
-                throw error;
-              },
-            );
-          }
-          if (!directory) return {checkoutIds: []};
-          const page = await directory.readPage(64);
-          const checkoutIds = page.names.filter(name => /^[a-f0-9]{64}$/.test(name));
-          if (page.done) {
-            directory = undefined;
-            return {checkoutIds};
-          }
-          return {checkoutIds, after: String(++sequence)};
-        },
-        catch: () => CodeGraphEmbeddingWorkerProcessError.make({message: 'Embedding worker process operation failed.'}),
-      }),
+      fromPromise('codeGraph.embeddingWorker.readCatalogPage', async () => {
+        if (after === undefined) {
+          await directory?.close().catch(() => {});
+          directory = await runtimeOpenTextDirectoryNameReader(codeGraphRepositoriesRoot(path, canonical)).catch(
+            (error: NodeJS.ErrnoException) => {
+              if (error.code === 'ENOENT') return undefined;
+              throw error;
+            },
+          );
+        }
+        if (!directory) return {checkoutIds: []};
+        const page = await directory.readPage(64);
+        const checkoutIds = page.names.filter(name => /^[a-f0-9]{64}$/.test(name));
+        if (page.done) {
+          directory = undefined;
+          return {checkoutIds};
+        }
+        return {checkoutIds, after: String(++sequence)};
+      }).pipe(
+        Effect.mapError(() =>
+          CodeGraphEmbeddingWorkerProcessError.make({message: 'Embedding worker process operation failed.'}),
+        ),
+      ),
   }).pipe(Effect.ensuring(close));
 });
 
