@@ -91,6 +91,37 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
         child.kill();
       }
     };
+    const diagnostic = (result: Awaited<ReturnType<typeof delayed>>) =>
+      JSON.stringify({
+        code: result.code,
+        signal: result.signal,
+        stdoutBytes: result.stdout.length,
+        stderr: result.stderr.toString('utf8').slice(-4000),
+      });
+    const repositoryArgs = ['-C', repo, 'rev-parse', '--is-bare-repository'];
+    const repository = await delayed(repositoryArgs);
+    const piped = spawnSync(proxy, repositoryArgs, {
+      env: {...process.env, THREADNOTE_RELEASE_FIXTURE_ROOT: temporary},
+      input: '',
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    const repositoryDiagnostic = JSON.stringify({
+      ignoredStdin: diagnostic(repository),
+      pipeStdin: {
+        code: piped.status,
+        error: piped.error?.message,
+        stdout: piped.stdout?.slice(-100),
+        stderr: piped.stderr?.slice(-4000),
+      },
+    });
+    expect(repository.code, repositoryDiagnostic).toBe(0);
+    expect(repository.stdout.toString('utf8').trim(), repositoryDiagnostic).toBe('true');
+    expect(repository.stderr.length, repositoryDiagnostic).toBe(0);
+    expect(piped.error, repositoryDiagnostic).toBeUndefined();
+    expect(piped.status, repositoryDiagnostic).toBe(0);
+    expect(piped.stdout.trim(), repositoryDiagnostic).toBe('true');
+    expect(piped.stderr.length, repositoryDiagnostic).toBe(0);
     // Bounded property: arbitrary large byte lengths retain every binary byte and UTF-8 tail.
     await fc.assert(
       fc.asyncProperty(fc.integer({min: 1_048_576, max: 4_194_304}), async size => {
@@ -104,7 +135,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
         });
         expect(stored.status).toBe(0);
         const result = await delayed(['-C', repo, 'cat-file', 'blob', stored.stdout.trim()]);
-        expect(result.code).toBe(0);
+        expect(result.code, diagnostic(result)).toBe(0);
         expect(result.stderr.length).toBe(0);
         expect(result.stdout.length).toBe(payload.length);
         expect(result.stdout.subarray(-64).equals(payload.subarray(-64))).toBe(true);
@@ -116,7 +147,7 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     const expected = spawnSync(nativeGit, args, {timeout: 15_000});
     expect(expected.status).not.toBe(0);
     const failure = await delayed(args);
-    expect(failure.code).toBe(expected.status);
+    expect(failure.code, diagnostic(failure)).toBe(expected.status);
     expect(failure.stdout.equals(expected.stdout)).toBe(true);
     expect(failure.stderr.equals(expected.stderr)).toBe(true);
   } finally {
