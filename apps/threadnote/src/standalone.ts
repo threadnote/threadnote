@@ -3,7 +3,7 @@ import {runtimeEntrypointLayer} from './effect/runtime-entrypoint.js';
 import * as BunRuntime from '@effect/platform-bun/BunRuntime';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {Cause, Console, Effect, Layer, Option, Runtime} from 'effect';
-import {withCliOutputConsole} from './effect/cli/output.js';
+import {withCliDiagnostics, withCliOutputConsole} from './effect/cli/output.js';
 import {inspectMcpServerInvocation, mcpServerHelp} from './mcp/launcher.js';
 import type {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
 import {fromPromise, fromPromiseInterruptibleAwaiting} from '@threadnote/platform/errors';
@@ -87,6 +87,7 @@ if (
             : await codeGraphDeepDiagnosticsWorkerProgram();
   const nativeWorkerProgram: Effect.Effect<void, unknown, never> = selectedNativeWorkerProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
+    withCliDiagnostics,
   );
   runSignalTransparentMain(nativeWorkerProgram, {disableErrorReporting: true});
 } else {
@@ -119,6 +120,7 @@ if (
                             : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
+    withCliDiagnostics,
   );
 
   BunRuntime.runMain(program, {
