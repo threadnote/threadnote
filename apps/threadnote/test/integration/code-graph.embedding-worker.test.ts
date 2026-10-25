@@ -1,6 +1,6 @@
 import {TestError} from '@threadnote/testing/test-error';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Path} from 'effect';
+import {Clock, Effect, FileSystem, Path, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {Database} from 'bun:sqlite';
@@ -18,12 +18,19 @@ import {
 } from '../fixtures/code-graph-embedding-worker-child.js';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {enqueueCodeGraphEmbeddingDemandSql} from '@threadnote/graph/vector/demand';
-import {codeGraphLayout} from '@threadnote/graph/layout';
+import {
+  codeGraphLayout,
+  codeGraphVectorWriteLockPath,
+  codeGraphDiskReservationLockPath,
+} from '@threadnote/graph/layout';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
-import {selectLocalModel} from '@threadnote/inference/models/selection';
+import {clearLocalModelSelection, selectLocalModel} from '@threadnote/inference/models/selection';
 import {runtimeOpenTextDirectoryNameReader, SystemInfo} from '@threadnote/platform/system';
 import {withCodeGraphDatabaseWriteLock} from '@threadnote/graph/maintenance/gate';
+import {runCodeGraphEmbeddingWorkerUnit} from '@threadnote/graph/vector/worker';
+import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 
 const iso = (milliseconds: number) => new Date(milliseconds).toISOString();
 const childPath = new URL('../fixtures/code-graph-embedding-worker-child.ts', import.meta.url).pathname;
@@ -108,6 +115,346 @@ const fixture = Effect.gen(function* () {
 });
 const run = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   program.pipe(provideTestLayer(fixtureLayer), TestClock.withLive);
+
+for (const fault of [
+  'capacity-observation',
+  'expired-owner',
+  'expired-demand-cleanup',
+  'expired-demand-unavailable-model',
+  'native-open-cleanup',
+  'expiry-during-model-read',
+  'expiry-during-owner-probe',
+  'terminal-cleanup',
+  'model-change-cleanup',
+  'superseded-cleanup',
+] as const) {
+  effectIt.effect(
+    `preserves durable ownership through ${fault} failure after completing vectors`,
+    () =>
+      run(
+        Effect.gen(function* () {
+          const home = yield* fixture;
+          const layout = yield* seed(home, 2);
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const system = yield* SystemInfo;
+          const store = yield* CodeGraphStore;
+          const vectorRoot = path.join(layout.vectorRoot, manifest.id);
+          const filename = path.join(vectorRoot, 'vectors-v2.sqlite');
+          const vectorLock = codeGraphVectorWriteLockPath(path, home, layout.checkoutId, sha256HexSync(manifest.id));
+          const reservationLock = codeGraphDiskReservationLockPath(path, home);
+          const observe = () => {
+            if (!existsSync(filename)) return undefined;
+            const db = new Database(filename, {readonly: true});
+            try {
+              if (!db.query("SELECT 1 FROM sqlite_master WHERE name = 'vector_generations'").get()) return undefined;
+              return {
+                generations: db
+                  .query<{generation: string; state: string; count: number}, []>(
+                    'SELECT generation, state, count FROM vector_generations',
+                  )
+                  .all(),
+                progress: db
+                  .query<{owner_token: string; expires_at: number}, []>(
+                    'SELECT owner_token, expires_at FROM vector_generation_progress',
+                  )
+                  .all(),
+                pointers: db.query<{generation: string}, []>('SELECT generation FROM vector_pointers').all(),
+              };
+            } finally {
+              db.close();
+            }
+          };
+          let denyRecovery = true;
+          const capacityFault = fault === 'capacity-observation' || fault === 'expired-owner';
+          const terminal = !capacityFault;
+          let denyPublication = terminal;
+          let publicationFailures = 0;
+          let cleanupFailures = 0;
+          let observationFailures = 0;
+          let capacityFaultArmed = false;
+          let crossExpiryOnModelRead = false;
+          let boundaryTime = 0;
+          let inferenceCalls = 0;
+          const ready = () => observe()?.generations.some(row => row.state === 'ready') === true;
+          const permissionDenied = (filename: string) =>
+            PlatformError.systemError({
+              _tag: 'PermissionDenied',
+              module: 'FileSystem',
+              method: 'writeFileString',
+              pathOrDescriptor: filename,
+              cause: {code: 'EPERM'},
+            });
+          const faultFs = FileSystem.FileSystem.of({
+            ...fs,
+            readFileString: (filename, options) =>
+              fs.readFileString(filename, options).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (crossExpiryOnModelRead && filename === path.join(home, 'models', 'selection.json')) {
+                      boundaryTime += 2;
+                      crossExpiryOnModelRead = false;
+                    }
+                  }),
+                ),
+              ),
+            remove: (filename, options) =>
+              fs.remove(filename, options).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    // Arm after the completed generation's reservation is released, before publication admission.
+                    if (/^v1-[a-f0-9]+\.json$/u.test(path.basename(filename)) && ready()) capacityFaultArmed = true;
+                  }),
+                ),
+              ),
+            writeFileString: (filename, content, options) =>
+              Effect.suspend(() => {
+                if (
+                  capacityFault &&
+                  denyRecovery &&
+                  capacityFaultArmed &&
+                  observationFailures < 2 &&
+                  filename === reservationLock
+                ) {
+                  observationFailures += 1;
+                  return Effect.fail(permissionDenied(filename));
+                }
+                if (denyPublication && filename === layout.lockPath && ready()) {
+                  publicationFailures += 1;
+                  return Effect.fail(permissionDenied(filename));
+                }
+                if (terminal && denyRecovery && publicationFailures > 0 && filename === vectorLock) {
+                  cleanupFailures += 1;
+                  return Effect.fail(permissionDenied(filename));
+                }
+                return fs.writeFileString(filename, content, options);
+              }),
+          });
+          const unexpected = () => Effect.die(TestError.make({message: 'Unexpected model operation'}));
+          const runtime = LocalModelRuntime.of({
+            diagnostics: Effect.succeed({backend: 'fixture', buildType: 'prebuilt', cpuMathCores: 1}),
+            embedMany: ({inputs}) =>
+              Effect.sync(() => {
+                inferenceCalls += 1;
+                return inputs.map(() => [1, 0]);
+              }),
+            generate: unexpected,
+            rerank: unexpected,
+          });
+          const owner = {
+            token: 'worker-process',
+            processId: system.processId,
+            processStartIdentity: (yield* system.processStartIdentity(system.processId))!,
+          };
+          const claims: string[] = [];
+          const turn = Effect.gen(function* () {
+            const lane = (yield* lanes(home))[0];
+            yield* Effect.sleep(Math.max(0, lane.notBefore - (yield* Clock.currentTimeMillis)));
+            return yield* runCodeGraphEmbeddingWorkerUnit({
+              home,
+              layout,
+              lane,
+              owner,
+              onClaim: lanes(home).pipe(
+                Effect.map(rows => {
+                  claims.push(rows[0].active!.owner.token);
+                }),
+                Effect.provideService(CodeGraphStore, store),
+                Effect.provideService(Path.Path, path),
+              ),
+            });
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, faultFs),
+            Effect.provideService(LocalModelRuntime, runtime),
+          );
+          expect(
+            yield* turn,
+            JSON.stringify({observationFailures, publicationFailures, cleanupFailures}),
+          ).toMatchObject({state: terminal ? 'blocked' : 'deferred'});
+          const pending = (yield* lanes(home))[0];
+          const completed = observe()!;
+          expect(completed.generations).toMatchObject([{state: 'ready', count: 2}]);
+          expect(completed.pointers).toEqual([]);
+          expect(completed.progress[0].owner_token).toBe(pending.active?.owner.token);
+          expect(completed.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
+          expect(pending.attempt).toBe(0);
+          expect(inferenceCalls).toBe(1);
+          if (capacityFault) expect(observationFailures).toBeGreaterThan(0);
+          else {
+            expect(publicationFailures).toBeGreaterThan(0);
+            expect(cleanupFailures).toBeGreaterThan(0);
+          }
+          if (fault === 'expiry-during-model-read' || fault === 'expiry-during-owner-probe') {
+            const clock = yield* Clock.Clock;
+            boundaryTime = yield* Clock.currentTimeMillis;
+            const uncertainOwner = fault === 'expiry-during-owner-probe';
+            yield* store.withSession(
+              layout.databasePath,
+              Effect.gen(function* () {
+                yield* (yield* SqlClient.SqlClient).unsafe('UPDATE embedding_demand SET active_json = ?', [
+                  JSON.stringify({
+                    ...pending.active!,
+                    expiresAt: boundaryTime + 1,
+                    owner: {
+                      ...pending.active!.owner,
+                      processId: uncertainOwner ? system.processId + 1 : system.processId,
+                    },
+                  }),
+                ]);
+              }),
+            );
+            if (!uncertainOwner) yield* clearLocalModelSelection(home, 'embedding');
+            crossExpiryOnModelRead = true;
+            const boundaryTurn = turn.pipe(
+              Effect.provideService(Clock.Clock, {
+                ...clock,
+                currentTimeMillis: Effect.sync(() => boundaryTime),
+                currentTimeMillisUnsafe: () => boundaryTime,
+                currentTimeNanos: clock.currentTimeNanos,
+                currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+                monotonicTimeNanos: clock.monotonicTimeNanos,
+                monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+                sleep: duration => clock.sleep(duration),
+              }),
+              Effect.provideService(SystemInfo, {
+                ...system,
+                isProcessRunning: () => true,
+                processStartIdentity: processId =>
+                  Effect.succeed(processId === owner.processId ? owner.processStartIdentity : undefined),
+              }),
+            );
+            expect(yield* boundaryTurn).toMatchObject({state: uncertainOwner ? 'deferred' : 'unavailable'});
+            expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
+            expect(claims).toHaveLength(1);
+            expect(observe()!.progress[0].expires_at).toBeGreaterThan(boundaryTime);
+            // The next turn sees the expired demand and must still retain it if vector cleanup is denied.
+            expect(yield* boundaryTurn).toMatchObject({state: 'blocked'});
+            expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
+            denyRecovery = false;
+            denyPublication = false;
+            expect(yield* boundaryTurn).toMatchObject({state: uncertainOwner ? 'ready' : 'unavailable'});
+            expect((yield* lanes(home))[0].active).toBeUndefined();
+            expect(inferenceCalls).toBe(1);
+            if (uncertainOwner)
+              expect(observe()!.pointers).toEqual([{generation: completed.generations[0].generation}]);
+            else expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
+            return;
+          }
+          if (fault === 'expired-demand-cleanup' || fault === 'expired-demand-unavailable-model') {
+            yield* store.withSession(
+              layout.databasePath,
+              Effect.gen(function* () {
+                yield* (yield* SqlClient.SqlClient).unsafe('UPDATE embedding_demand SET active_json = ?', [
+                  JSON.stringify({...pending.active!, expiresAt: 0}),
+                ]);
+              }),
+            );
+            if (fault === 'expired-demand-unavailable-model') yield* clearLocalModelSelection(home, 'embedding');
+            expect(yield* turn).toMatchObject({state: 'blocked'});
+            expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
+            expect(observe()!.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
+            expect(claims).toHaveLength(1);
+            expect(inferenceCalls).toBe(1);
+            denyRecovery = false;
+            denyPublication = false;
+            if (fault === 'expired-demand-unavailable-model') {
+              expect(yield* turn).toMatchObject({state: 'unavailable'});
+              expect((yield* lanes(home))[0].active).toBeUndefined();
+              expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
+              expect(observe()!.pointers).toEqual([]);
+              expect(inferenceCalls).toBe(1);
+              return;
+            }
+          }
+          if (fault === 'model-change-cleanup' || fault === 'native-open-cleanup') {
+            yield* selectLocalModel(home, yield* LocalModelCatalog, 'embedding', alternateManifest.id);
+            if (fault === 'native-open-cleanup') {
+              // Use the real SQLite constructor: an existing directory cannot be opened as a database.
+              yield* Effect.acquireUseRelease(
+                fs.rename(filename, `${filename}.retained`),
+                () =>
+                  fs.makeDirectory(filename).pipe(
+                    Effect.andThen(turn),
+                    Effect.tap(result => Effect.sync(() => expect(result).toMatchObject({state: 'blocked'}))),
+                  ),
+                () =>
+                  fs
+                    .remove(filename, {recursive: true})
+                    .pipe(Effect.andThen(fs.rename(`${filename}.retained`, filename)), Effect.orDie),
+              );
+            } else expect(yield* turn).toMatchObject({state: 'blocked'});
+            expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
+            expect(inferenceCalls).toBe(1);
+            denyRecovery = false;
+            denyPublication = false;
+            expect(yield* turn).toMatchObject({state: 'ready'});
+            expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
+            expect(observe()!.pointers).toEqual([]);
+            expect((yield* lanes(home))[0]).toMatchObject({state: 'ready', model: {id: alternateManifest.id}});
+            expect(claims.at(-1)).not.toBe(claims[0]);
+            expect(inferenceCalls).toBe(2);
+            return;
+          }
+          if (fault === 'superseded-cleanup') {
+            yield* store.withSession(
+              layout.databasePath,
+              Effect.gen(function* () {
+                const sql = yield* SqlClient.SqlClient;
+                const activatedAt = iso((yield* Clock.currentTimeMillis) + 1);
+                yield* sql.unsafe('UPDATE active_snapshots SET activated_at = ? WHERE worktree_id = ?', [
+                  activatedAt,
+                  worktreeId,
+                ]);
+                yield* enqueueCodeGraphEmbeddingDemandSql(sql, {worktreeId, snapshotId, activatedAt});
+              }),
+            );
+            expect(yield* turn).toMatchObject({state: 'blocked'});
+            expect((yield* lanes(home))[0].active?.owner.token).toBe(pending.active!.owner.token);
+            expect(observe()!.pointers).toEqual([]);
+            denyRecovery = false;
+            denyPublication = false;
+            expect(yield* turn).toMatchObject({state: 'deferred'});
+            expect((yield* lanes(home))[0].active).toBeUndefined();
+            expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
+          }
+          denyRecovery = false;
+          if (fault === 'expired-owner') {
+            yield* Effect.sync(() => {
+              const db = new Database(filename);
+              try {
+                db.exec('UPDATE vector_generation_progress SET expires_at = 0');
+              } finally {
+                db.close();
+              }
+            });
+            expect(yield* turn).toMatchObject({state: 'deferred'});
+            expect((yield* lanes(home))[0].active).toBeUndefined();
+            expect((yield* lanes(home))[0]).toMatchObject({attempt: 0, reason: 'owner-expired'});
+            expect(observe()!.pointers).toEqual([]);
+          }
+          if (fault === 'terminal-cleanup') {
+            expect(yield* turn).toMatchObject({state: 'deferred'});
+            expect((yield* lanes(home))[0].attempt).toBe(1);
+            expect((yield* lanes(home))[0].active).toBeUndefined();
+            expect(observe()!.progress).toMatchObject([{expires_at: 0}]);
+            expect(claims[1]).toBe(claims[0]);
+            denyPublication = false;
+          }
+          expect(yield* turn).toMatchObject({state: 'ready'});
+          const published = observe()!;
+          expect(published.generations).toEqual(completed.generations);
+          expect(published.progress).toEqual([]);
+          expect(published.pointers).toEqual([{generation: completed.generations[0].generation}]);
+          expect((yield* lanes(home))[0]).toMatchObject({state: 'ready', attempt: 0});
+          expect((yield* lanes(home))[0].active).toBeUndefined();
+          expect(inferenceCalls).toBe(1);
+          if (fault === 'capacity-observation') expect(claims[1]).toBe(claims[0]);
+          else expect(claims.at(-1)).not.toBe(claims[0]);
+        }),
+      ),
+    20_000,
+  );
+}
 
 effectIt.effect(
   'recovers committed demand without reindexing and duplicate hosts launch one actual worker with bounded isolated inference',

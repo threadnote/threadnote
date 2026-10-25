@@ -7,6 +7,7 @@ import {
   requireCodeGraphGenerationClaim,
   requireCodeGraphGenerationSchema,
   renewCodeGraphGenerationClaim,
+  readCodeGraphGenerationProgress,
   releaseCodeGraphGenerationClaim,
   type CodeGraphGenerationProgress,
 } from './vector/generation.js';
@@ -15,7 +16,7 @@ import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Cause, Clock, Context, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
+import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
 import {LocalModelCatalog, type LocalModelCatalogShape} from '@threadnote/inference/models/catalog';
@@ -44,6 +45,29 @@ class CodeGraphEmbeddingError extends Schema.TaggedError<CodeGraphEmbeddingError
   cause: Schema.optionalKey(Schema.Defect()),
   message: Schema.String,
 }) {}
+
+class CodeGraphVectorOwnerExpired extends Schema.TaggedError<CodeGraphVectorOwnerExpired>()(
+  'CodeGraphVectorOwnerExpired',
+  {message: Schema.String},
+) {}
+
+class CodeGraphVectorClaimCleanupPending extends Schema.TaggedError<CodeGraphVectorClaimCleanupPending>()(
+  'CodeGraphVectorClaimCleanupPending',
+  {cause: Schema.Defect(), message: Schema.String},
+) {
+  get retryable(): boolean {
+    return (
+      isFileLockTimeout(this.cause) ||
+      (typeof this.cause === 'object' &&
+        this.cause !== null &&
+        'retryable' in this.cause &&
+        this.cause.retryable === true)
+    );
+  }
+  get recovery(): 'defer' | 'fix-storage' {
+    return this.retryable ? 'defer' : 'fix-storage';
+  }
+}
 
 const CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION = 1;
 const CODE_GRAPH_EMBEDDING_CONTEXT_CAP = 8;
@@ -282,7 +306,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
   readonly ownerToken?: string;
   readonly abandonedOwnerToken?: string;
-  /** Retain completed ownership only when the caller will retry with the same token. */
+  /** Retain ownership, including unfinished checkpoints, only for same-token retries. */
   readonly retainPublicationClaimOnFailure?: (cause: unknown) => boolean;
   readonly catalog: LocalModelCatalogShape;
   readonly force: boolean;
@@ -348,7 +372,6 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
       capacityProtector: (boundary, transaction, storage) => capacity(boundary, lock(transaction), storage),
     });
   }
-  let terminalValidationFailure = false;
   const validate = Effect.gen(function* () {
     yield* input.publication?.validate ?? Effect.void;
     const selection = yield* readModelSelection(input.threadnoteHome);
@@ -361,15 +384,7 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
     ) {
       return yield* CodeGraphEmbeddingError.make({message: 'Code graph embedding model changed during generation.'});
     }
-  }).pipe(
-    Effect.provideService(FileSystem.FileSystem, input.fs),
-    Effect.provideService(Path.Path, input.path),
-    Effect.tapError(() =>
-      Effect.sync(() => {
-        terminalValidationFailure = true;
-      }),
-    ),
-  );
+  }).pipe(Effect.provideService(FileSystem.FileSystem, input.fs), Effect.provideService(Path.Path, input.path));
   return yield* useVectorDatabase(
     databasePath,
     Effect.gen(function* () {
@@ -454,6 +469,11 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
                     'UPDATE vector_generation_progress SET expires_at = 0 WHERE generation = ? AND owner_token = ?',
                     [generation.generation, input.abandonedOwnerToken],
                   );
+                const prior = yield* readCodeGraphGenerationProgress(sql, generation.generation);
+                if (prior?.owner_token === ownerToken && prior.expires_at <= (yield* Clock.currentTimeMillis))
+                  return yield* CodeGraphVectorOwnerExpired.make({
+                    message: 'Vector generation ownership expired; a fresh validated owner is required.',
+                  });
                 const progress = yield* claimCodeGraphGeneration(sql, {
                   generation: generation.generation,
                   ownerToken,
@@ -479,7 +499,6 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
       const generation = prepared.generation.generation;
       const initialGeneration = prepared.generation;
       const initialProgress = prepared.progress;
-      let preservePublicationClaim = initialGeneration.state === 'ready';
       return yield* Effect.gen(function* () {
         let progress = initialProgress;
         const total = yield* embeddingSymbolCount(input.symbols);
@@ -619,7 +638,6 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
               };
           }
           yield* protect(2, 4096, lock(completeCodeGraphGeneration(sql, generation, ownerToken, total)));
-          preservePublicationClaim = true;
         }
         // Completion retains ownership until the independent publication fence has committed.
         const commit = sql.withTransaction(
@@ -661,15 +679,84 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
       }).pipe(
         Effect.onExit(exit =>
           Exit.isFailure(exit) &&
-          (terminalValidationFailure ||
-            !preservePublicationClaim ||
-            Cause.hasInterrupts(exit.cause) ||
+          (Cause.hasInterrupts(exit.cause) ||
             input.retainPublicationClaimOnFailure?.(Cause.squash(exit.cause)) !== true)
             ? protect(1, 4096, lock(releaseCodeGraphGenerationClaim(sql, generation, ownerToken))).pipe(Effect.ignore)
             : Effect.void,
         ),
       );
     }),
+  );
+});
+
+/** A worker must prove release before discarding its durable demand owner. Never creates vector storage. */
+export const releaseCodeGraphVectorOwner = Effect.fn('codeGraph.releaseVectorOwner')(function* (input: {
+  readonly home: string;
+  readonly layout: CodeGraphLayout;
+  readonly modelId: string;
+  readonly ownerToken: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (!/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u.test(input.modelId))
+    return yield* CodeGraphEmbeddingError.make({message: 'Vector cleanup model identity is invalid.'});
+  const databasePath = vectorDatabasePath(path, input.layout.vectorRoot, input.modelId);
+  const release = Effect.gen(function* () {
+    if (!(yield* fs.exists(databasePath))) return;
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        // Expected native open failures stay typed; the scoped connection closes before returning.
+        const services = yield* Layer.build(
+          SqliteClient.layer({
+            create: false,
+            disableWAL: true,
+            filename: databasePath,
+            readwrite: true,
+            busyTimeout: 50,
+          }),
+        );
+        return yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* requireVectorDatabaseReady(sql);
+          const versions = yield* sql.unsafe<{user_version: number}>('PRAGMA user_version');
+          if (versions[0]?.user_version === 2) return;
+          yield* requireCodeGraphGenerationSchema(sql);
+          const owned = yield* sql.unsafe<{generation: string}>(
+            'SELECT generation FROM vector_generation_progress WHERE owner_token = ? AND expires_at > ? LIMIT 2',
+            [input.ownerToken, yield* Clock.currentTimeMillis],
+          );
+          if (owned.length === 0) return;
+          if (owned.length !== 1)
+            return yield* CodeGraphEmbeddingError.make({message: 'A vector owner has multiple generation claims.'});
+          const capacity = yield* makeCodeGraphVectorRetirementCapacityProtector({
+            databasePath,
+            threadnoteHome: input.home,
+            claimMode: 'nonblocking-one-attempt',
+          });
+          const storage = yield* inspectVectorPageStorageSql(sql);
+          yield* capacity(
+            {operation: 'write code graph vector generation', rowCount: 1, finalFactBytes: 4096},
+            withExclusiveFileLock(
+              fs,
+              codeGraphVectorWriteLockPath(path, input.home, input.layout.checkoutId, sha256HexSync(input.modelId)),
+              {...CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS, waitTimeoutMilliseconds: 0},
+              sql.withTransaction(
+                sql.unsafe(
+                  'UPDATE vector_generation_progress SET expires_at = 0 WHERE generation = ? AND owner_token = ?',
+                  [owned[0].generation, input.ownerToken],
+                ),
+              ),
+            ),
+            storage,
+          );
+        }).pipe(Effect.provide(services));
+      }),
+    );
+  });
+  return yield* release.pipe(
+    Effect.mapError(cause =>
+      CodeGraphVectorClaimCleanupPending.make({cause, message: 'Vector ownership cleanup must be retried.'}),
+    ),
   );
 });
 
