@@ -144,9 +144,18 @@ or `npm`; the generator is not a proof of arbitrary dynamic JavaScript behavior.
 Adding a target requires auditing those boundaries and executing it sandboxed.
 
 Generated package declarations use `export_package_files` with package-local
-top-level globs. This keeps source visibility automatic as files are added while
-each `bun_test` and `bun_action` retains its exact, generated `srcs` closure. The
-export globs grant visibility only; they are not broad target dependencies.
+top-level globs for visibility. Resolved import components become reusable
+`bun_library` targets; static import cycles share one component. Existing test
+and action labels depend on those libraries while retaining their exact expanded
+file and npm inputs. Configurations, dynamic resources, exclusions, and handwritten
+package boundaries retain explicit inputs where required. Internal libraries are
+absent from the selectable CI inventory, so test grouping and shard weights stay
+unchanged. The export globs grant visibility only.
+
+The generation model retains a `representation: 'flat'` oracle for validating
+the factored graph. Focused properties compare independent reachability, and
+real `bazel-diff` histories compare edits, additions, removals, redundant edges,
+and cycle merge/split behavior in both representations.
 
 ```sh
 bun run bazel:generate
@@ -170,7 +179,7 @@ jobs. Each job runs one Bazel test target at a time so target-internal Vitest
 workers do not compete with another test process. PostgreSQL tests share one service-enabled shard, which may also carry ordinary targets. Platform and evaluation jobs consume outputs from the
 same authoritative plan and run alongside the Bazel shards. Selector regression validation runs alongside them instead of delaying matrix fanout. The selector uses a disposable detached baseline
 worktree; the caller's checkout and HEAD are unchanged. Selection JSON and graph
-hashes, plus the exact shard plan, are retained as workflow artifacts. Validation
+hashes, prepared inventories and receipts, plus the exact shard plan, are retained as workflow artifacts. Validation
 checks generated declarations alongside the execution jobs. Selection and shard
 artifacts include head, source, and inventory generation fingerprints; each
 worker prepares its own checkout and rejects a mismatched generation.
@@ -192,9 +201,11 @@ selection. A new source file under a declared website source directory changes
 only its package's declarations; no shared generated `.bzl` couples graph targets
 to those additions.
 
-`verify-selection.mjs` uses the real Bazel/bazel-diff executables against a tiny
-isolated graph. It checks edits, additions, renames, deletions, new dependency
-edges, and a website tsconfig-only change using the production target declarations.
+`verify-selection.mjs` uses the real Bazel/bazel-diff executables against isolated
+graphs. Paired flat/factored histories cover edits, additions, renames, deletions,
+dependency edges, cycle merge/split, resources, provider boundaries, and a new
+target sharing existing source. The original fixture also checks a website
+tsconfig-only change using the production target declarations.
 It also runs the website target with empty action cache and verifies that no
 graph test is selected. Bounded property tests independently check import-closure
 reachability and selection determinism/monotonicity.

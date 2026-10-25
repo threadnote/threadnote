@@ -171,3 +171,90 @@ it('resolves imports from authored files even when ignored emitted JavaScript ex
     rmSync(root, {recursive: true, force: true});
   }
 });
+
+it('factors fixture closures with identical inventory, settings, resources, and excluded leaves', async () => {
+  const root = fixture();
+  try {
+    await Bun.write(join(root, 'apps/demo/main.ts'), 'export * as shared from "./shared.js";');
+    await Bun.write(join(root, 'apps/demo/shared.ts'), 'import "runtime-npm"; export const shared = 1;');
+    await Bun.write(join(root, 'apps/demo/isolated.ts'), 'export const isolated = 2;');
+    await Bun.write(join(root, 'apps/demo/data.json'), '{}');
+    await Bun.write(join(root, 'tools/bazel/project-vitest.config.ts'), 'export {};');
+    const specs = [
+      {
+        package: 'apps/demo',
+        name: 'sample',
+        kind: 'test',
+        entries: ['apps/demo/main.ts'],
+        sourceRoots: ['apps/demo'],
+        data: ['apps/demo/data.json'],
+        exclude: (path: string) => path === 'apps/demo/shared.ts',
+        npm: ['extra-npm'],
+        args: ['custom', '--flag'],
+        env: {FIXTURE: 'yes'},
+        timeout: 'long',
+        workspace: true,
+      },
+    ];
+    const options = {root, specs, suites: [], statics: [], modules: []};
+    const flat = await buildGenerationModel({...options, representation: 'flat'});
+    const factored = await buildGenerationModel({...options, representation: 'factored'});
+    expect(factored.inventory).toEqual(flat.inventory);
+    const declaration = factored.declarations.get('//apps/demo:sample')!;
+    const files = new Set(declaration.srcs);
+    const npm = new Set(declaration.npm);
+    const pending = [...declaration.deps];
+    const visited = new Set<string>();
+    while (pending.length) {
+      const label = pending.pop()!;
+      if (visited.has(label)) continue;
+      visited.add(label);
+      const library = factored.libraries.get(label)!;
+      for (const file of library.srcs) files.add(file);
+      for (const name of library.npm) npm.add(name);
+      pending.push(...library.deps);
+    }
+    expect([...files].sort()).toEqual(flat.inventory[0].inputs);
+    expect([...npm].sort()).toEqual(flat.inventory[0].npm);
+    expect(files.has('apps/demo/shared.ts')).toBe(false);
+    expect(declaration.srcs).toContain('apps/demo/main.ts');
+    expect(declaration.srcs).toContain('apps/demo/data.json');
+    expect(declaration.srcs).toContain('tools/bazel/project-vitest.config.ts');
+    expect(declaration.deps.length).toBeGreaterThan(0);
+    const build = factored.output.get('apps/demo/BUILD.bazel')!;
+    expect(build).toContain('runner_args = [\n        "custom",\n        "--flag",');
+    expect(build).toContain('env = {"FIXTURE":"yes"}');
+    expect(build).toContain('timeout = "long"');
+    expect(build).toContain('tags = ["local", "no-cache", "no-sandbox"]');
+    expect(flat.libraries.size).toBe(0);
+    expect([...flat.output]).toEqual([...(await buildGenerationModel({...options, representation: 'flat'})).output]);
+    expect([...factored.output]).toEqual([...(await buildGenerationModel(options)).output]);
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
+
+it.each(['BUILD', 'BUILD.bazel'])(
+  'keeps handwritten workspace %s owners as explicit library boundaries',
+  async buildName => {
+    const root = fixture();
+    try {
+      const authored = 'exports_files(["main.ts", "package.json"])\n';
+      await Bun.write(join(root, 'apps/demo', buildName), authored);
+      const options = {root, specs: [spec('consumer')], suites: [], statics: [], modules: []};
+      const flat = await buildGenerationModel({...options, representation: 'flat'});
+      const factored = await buildGenerationModel({...options, representation: 'factored'});
+      expect(factored.inventory).toEqual(flat.inventory);
+      expect([...factored.output]).toEqual([...flat.output]);
+      expect(factored.output.has('apps/demo/BUILD.bazel')).toBe(false);
+      expect([...factored.libraries.values()].some(value => value.package === 'apps/demo')).toBe(false);
+      expect(factored.declarations.get('//:consumer')?.srcs).toContain('apps/demo/main.ts');
+      expect(await Bun.file(join(root, 'apps/demo', buildName)).text()).toBe(authored);
+      await expect(
+        buildGenerationModel({...options, specs: [{...spec('conflict'), package: 'apps/demo'}]}),
+      ).rejects.toThrow('Refusing to replace handwritten Bazel package');
+    } finally {
+      rmSync(root, {recursive: true, force: true});
+    }
+  },
+);
