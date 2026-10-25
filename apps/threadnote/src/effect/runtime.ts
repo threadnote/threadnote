@@ -1,3 +1,4 @@
+import {resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
 import {codeGraphEmbeddingWorkerProcessLayer} from '../code_graph/embedding_worker.js';
 import {codeGraphRuntimeAdapters} from '../code_graph/runtime_adapters.js';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
@@ -75,7 +76,11 @@ const codeGraphLanguagePackLayer = CodeGraphLanguagePackRegistry.layer;
 const codeGraphEmbeddingLayer = CodeGraphEmbeddingIndex.layer.pipe(
   Layer.provideMerge(Layer.mergeAll(localModelCatalogLayer, localModelRuntimeLayer, localModelStoreLayer)),
 );
+const graphEmbeddingWorkerProcessLayer = codeGraphEmbeddingWorkerProcessLayer.pipe(
+  Layer.provide(Layer.mergeAll(systemLayer, commandLayer)),
+);
 const codeGraphIndexerDependencies = Layer.mergeAll(
+  graphEmbeddingWorkerProcessLayer,
   codeGraphStoreLayer,
   codeGraphMaintenanceCoordinatorLayer,
   codeGraphEmbeddingLayer,
@@ -106,7 +111,7 @@ const codeGraphWatcherLayer = CodeGraphWatcher.layer.pipe(Layer.provideMerge(cod
 
 const ApplicationServicesLayer = Layer.mergeAll(
   cliOutputLayer,
-  codeGraphEmbeddingWorkerProcessLayer.pipe(Layer.provide(Layer.mergeAll(systemLayer, commandLayer))),
+  graphEmbeddingWorkerProcessLayer,
   threadnoteCliFormatterLayer,
   codeGraphQueryLayer,
   codeGraphStoreLayer,
@@ -139,7 +144,15 @@ export const ApplicationLayer = ApplicationServicesLayer.pipe(
  */
 export function applicationLayerForHome(home: string, entrypoint: 'cli' | 'mcp') {
   return telemetryLayerForHome(home, entrypoint === 'cli' ? 'invocation' : 'broker').pipe(
-    Layer.provideMerge(deferredCodeAnchorRefreshSchedulerLayer.pipe(Layer.provideMerge(ApplicationLayer))),
+    Layer.provideMerge(
+      deferredCodeAnchorRefreshSchedulerLayer.pipe(
+        Layer.provideMerge(
+          Layer.effectDiscard(Effect.forkScoped(resumeExistingCodeGraphEmbeddingDemand(home))).pipe(
+            Layer.provideMerge(ApplicationLayer),
+          ),
+        ),
+      ),
+    ),
   );
 }
 

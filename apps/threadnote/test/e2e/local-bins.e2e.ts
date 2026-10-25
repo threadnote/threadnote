@@ -1369,9 +1369,62 @@ async function runCliOutput(
         ...(args[0] === 'source' && args[1] === 'sync'
           ? [await coordinatorFailureEvidence(targetHome, environment)]
           : []),
+        ...(args[0] === 'graph' && args[1] === 'index' ? [await graphIndexFailureEvidence(targetHome)] : []),
       ].join('\n'),
     });
   }
+}
+
+async function graphIndexFailureEvidence(targetHome: string): Promise<string> {
+  // Read only bounded fixture state after failure; never launch another index or copy source/model payloads.
+  const repositoriesRoot = join(targetHome, 'indexes', 'code-graph', 'repositories');
+  const repositories = (await readdir(repositoriesRoot).catch(() => []))
+    .filter(name => /^[a-f0-9]{64}$/.test(name))
+    .slice(0, 3);
+  const inspect = (filename: string, queries: Readonly<Record<string, string>>) => {
+    let database: Database | undefined;
+    try {
+      database = new Database(filename, {readonly: true});
+      database.exec('PRAGMA busy_timeout = 50');
+      return Object.fromEntries(
+        Object.entries(queries).map(([name, query]) => {
+          try {
+            return [name, database!.query(query).all()];
+          } catch {
+            return [name, 'unavailable'];
+          }
+        }),
+      );
+    } catch {
+      return {state: 'unavailable'};
+    } finally {
+      database?.close();
+    }
+  };
+  const catalogs = [];
+  for (const repository of repositories) {
+    const directory = join(repositoriesRoot, repository);
+    const models = (await readdir(join(directory, 'vectors')).catch(() => []))
+      .filter(name => /^[a-zA-Z0-9._-]+$/.test(name))
+      .slice(0, 3);
+    catalogs.push({
+      repository,
+      graph: inspect(join(directory, 'graph-v3.sqlite'), {
+        active: 'SELECT worktree_id, scope_id, snapshot_id, activated_at FROM active_snapshots LIMIT 8',
+        demand: 'SELECT state, attempt, not_before, reason, active_json FROM embedding_demand LIMIT 8',
+      }),
+      vectors: models.map(model => ({
+        model,
+        ...inspect(join(directory, 'vectors', model, 'vectors-v2.sqlite'), {
+          generations: 'SELECT generation, snapshot_id, state, count FROM vector_generations LIMIT 8',
+          progress:
+            'SELECT generation, owner_token, expires_at, array_offset, embedded, reused FROM vector_generation_progress LIMIT 8',
+          pointers: 'SELECT worktree_id, generation FROM vector_pointers LIMIT 8',
+        }),
+      })),
+    });
+  }
+  return `Graph fixture state: ${boundedFailureOutput(JSON.stringify({observedAt: Date.now(), catalogs}))}`;
 }
 
 async function coordinatorFailureEvidence(targetHome: string, environment: NodeJS.ProcessEnv): Promise<string> {

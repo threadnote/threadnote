@@ -681,10 +681,8 @@ const graphIndex = Command.make(
     cwd: graphBounds.cwd,
     full: boolean('full', 'Ignore reusable snapshot state and rebuild the graph'),
     json: graphBounds.json,
-    noVectors: boolean(
-      'no-vectors',
-      'Skip embedding materialization; matches watcher-driven refresh (ensureVectors: false)',
-    ),
+    noVectors: boolean('no-vectors', 'Skip embedding materialization and background demand'),
+    backgroundVectors: boolean('background-vectors', 'Publish structure and queue bounded background embeddings'),
     project: graphBounds.project,
   },
   options => withMutationRuntimeEffect(config => runCodeGraphIndex(config, options)),

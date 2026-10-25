@@ -203,6 +203,26 @@ const readLane = Effect.fn('codeGraph.readEmbeddingDemandLane')(function* (
       })
     : undefined;
 });
+/** Bounded observation of one logical view; never prepares or migrates its schema. */
+export const readCodeGraphEmbeddingDemandLane = Effect.fn('codeGraph.observeEmbeddingDemandLane')(function* (
+  sql: SqlClient.SqlClient,
+  lane: CodeGraphEmbeddingDemandLaneIdentity,
+) {
+  if (!(yield* requireDemandSchema(sql, false))) return undefined;
+  return yield* readLane(sql, lane);
+});
+
+/** Startup recovery checks recorded intent only, without preparing storage. */
+export const hasCodeGraphEmbeddingDemand = Effect.fn('codeGraph.hasEmbeddingDemand')(function* (
+  sql: SqlClient.SqlClient,
+) {
+  if (!(yield* requireDemandSchema(sql, false))) return false;
+  const rows = yield* sql.unsafe(
+    "SELECT 1 FROM embedding_demand WHERE state IN ('queued', 'building', 'deferred', 'blocked') LIMIT 1",
+  );
+  return rows.length === 1;
+});
+
 const writeLane = (sql: SqlClient.SqlClient, lane: CodeGraphEmbeddingDemandLane) =>
   sql.unsafe(
     `INSERT INTO embedding_demand

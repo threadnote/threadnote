@@ -544,7 +544,15 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               scope?.scopeKey,
             ),
             overlay,
-            requestKey: codeGraphBuildRequestKey(identity, overlay, languagePacks, undefined, false, admission, scope),
+            requestKey: codeGraphBuildRequestKey(
+              identity,
+              overlay,
+              languagePacks,
+              undefined,
+              'background',
+              admission,
+              scope,
+            ),
             ...(scopeEvidence === undefined ? {} : {scopeEvidence}),
             ...(scope === undefined ? {} : {scopeId: scope.scopeKey}),
           };
@@ -590,6 +598,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
               : isolateBuilder
                 ? runIsolatedCodeGraphIndex({
                     admissionClass: 'background',
+                    vectorPolicy: 'background',
                     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
                     cwd: options.cwd,
                     ...(target.refreshRoute === undefined
@@ -685,6 +694,7 @@ export class CodeGraphWatcher extends Context.Service<CodeGraphWatcher, CodeGrap
                 Effect.flatMap(target =>
                   runIsolatedCodeGraphIndex({
                     admissionClass: options.admissionClass,
+                    vectorPolicy: 'background',
                     assertRuntimeSchemaCompatible: databasePath => store.assertRuntimeSchemaCompatible(databasePath),
                     cwd: options.cwd,
                     ...(target.refreshRoute === undefined
@@ -1743,11 +1753,11 @@ const indexRepository = (indexer: CodeGraphIndexerShape, options: CodeGraphWatch
       ),
     );
 
-/** Watcher-driven refresh never owns embedding; explicit `graph index` still does. */
+/** Automatic indexing publishes structure first and records bounded background vector demand. */
 export function codeGraphWatcherRefreshIndexRequest(options: CodeGraphWatchOptions): {
   readonly admissionClass?: CodeGraphBuilderAdmissionClass;
   readonly cwd: string;
-  readonly ensureVectors: false;
+  readonly vectorPolicy: 'background';
   readonly onProgress: CodeGraphWatchOptions['onProgress'];
   readonly project?: CodeGraphWatchOptions['project'];
   readonly refreshDemandToken?: string;
@@ -1756,7 +1766,7 @@ export function codeGraphWatcherRefreshIndexRequest(options: CodeGraphWatchOptio
   return {
     ...(options.admissionClass === undefined ? {} : {admissionClass: options.admissionClass}),
     cwd: options.cwd,
-    ensureVectors: false,
+    vectorPolicy: 'background',
     onProgress: options.onProgress,
     ...(options.project === undefined ? {} : {project: options.project}),
     ...(options.refreshDemandToken === undefined ? {} : {refreshDemandToken: options.refreshDemandToken}),
