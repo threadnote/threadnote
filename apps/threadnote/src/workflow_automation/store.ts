@@ -125,7 +125,7 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
     catch: error => error as WorkflowAutomationError,
   });
   const serialized = yield* Effect.try({
-    try: () => encodeBoundedWorkflowJson(stableJson(validated) + '\n', STATE_CODEC),
+    try: () => encodeBoundedWorkflowJson((cache?.stringify ?? stableJson)(validated) + '\n', STATE_CODEC),
     catch: () =>
       issue('state-capacity', 'Native run state reached its byte limit. Existing receipts remain unchanged.'),
   });

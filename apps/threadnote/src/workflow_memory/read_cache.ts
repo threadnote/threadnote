@@ -5,12 +5,14 @@ import {
   type NativeWorkflowState,
 } from '@threadnote/workflow-automations/native';
 import {sha256HexSync} from './native_digest.js';
+import {makeRequestCanonicalJson} from './canonical_json.js';
 import type {WorkflowBinding, WorkflowJournal, WorkflowOperation} from './protocol.js';
 
 /** Request-local memoization of immutable images, never file metadata or scope authority. */
 export interface WorkflowReadCache {
   readonly compactJournal?: boolean;
   readonly decodeNative: ReturnType<typeof makeNativeWorkflowStateDecoder>;
+  readonly stringify: ReturnType<typeof makeRequestCanonicalJson>;
   readonly manifests: {
     readonly binding: WorkflowBinding;
     readonly manifestUri: string;
@@ -54,6 +56,7 @@ export function withWorkflowReadCache<A, E, R>(
       Effect.provideService(CurrentWorkflowReadCache, {
         ...options,
         decodeNative: makeNativeWorkflowStateDecoder(sha256HexSync),
+        stringify: makeRequestCanonicalJson(),
         manifests: [],
         operations: new WeakMap(),
         executor: new WeakMap(),

@@ -429,11 +429,16 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
     const oldItems = new Map((prior?.items ?? []).map(item => [item.id, item]));
     const newItems = new Map(result.items.map(item => [item.id, item]));
     for (const item of result.items) {
+      const isNonActionableCiUpdate =
+        (result.source === 'checks' || result.source === 'statuses') && item.kind === 'ci_update';
       const old = oldItems.get(item.id);
       if (old) {
-        if (old.version !== item.version || old.kind !== item.kind || old.head !== item.head)
+        if (
+          (old.version !== item.version || old.kind !== item.kind || old.head !== item.head) &&
+          !isNonActionableCiUpdate
+        )
           events.push(eventForEntity(result.source, item, result.at));
-      } else if (prior?.lastCompleteAt !== undefined || item.bootstrap)
+      } else if ((prior?.lastCompleteAt !== undefined || item.bootstrap) && !isNonActionableCiUpdate)
         events.push(eventForEntity(result.source, item, result.at));
     }
     for (const item of prior?.items ?? [])

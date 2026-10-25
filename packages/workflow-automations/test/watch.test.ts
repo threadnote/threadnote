@@ -234,6 +234,50 @@ describe('native watch domain', () => {
     expect(repeatedFailure.events).toEqual(failed.events);
   });
 
+  it('checkpoints routine CI updates without relay events while preserving failures and aggregate completion', () => {
+    const sourceResults = (at: number, checkVersion: string, statusVersion: string) =>
+      allComplete(at).map(result =>
+        result.source === 'checks'
+          ? {...result, items: [entity('check-1', {kind: 'ci_update', version: checkVersion})]}
+          : result.source === 'statuses'
+            ? {...result, items: [entity('status-1', {kind: 'ci_update', version: statusVersion})]}
+            : result,
+      );
+    let current = reconcileNativeWatch(
+      state(),
+      sweep({at: 1_000, sources: sourceResults(1_000, digest('a'), digest('a'))}),
+    );
+    expect(current.events).toEqual([]);
+    for (let index = 1; index <= 6; index++) {
+      current = reconcileNativeWatch(
+        current,
+        sweep({at: 1_000 + index * 1_000, sources: sourceResults(1_000 + index * 1_000, digest('b'), digest('c'))}),
+      );
+      expect(current.events).toEqual([]);
+    }
+    expect(current.sources.find(item => item.source === 'checks')?.items[0]?.version).toBe(digest('b'));
+    expect(current.sources.find(item => item.source === 'statuses')?.items[0]?.version).toBe(digest('c'));
+
+    const failed = reconcileNativeWatch(
+      current,
+      sweep({
+        at: 8_000,
+        sources: sourceResults(8_000, digest('d'), digest('c')).map(result =>
+          result.source === 'checks'
+            ? {...result, items: [entity('check-1', {kind: 'ci_error', version: digest('d')})]}
+            : result,
+        ),
+      }),
+    );
+    expect(failed.events.map(event => event.kind)).toEqual(['ci_error']);
+    expect(failed.sources.find(item => item.source === 'checks')?.items[0]?.kind).toBe('ci_error');
+
+    const ci = {head: sha('a'), complete: true, count: 1, pending: 0, failed: 0, version: digest('e')};
+    const firstComplete = reconcileNativeWatch(state(), sweep({sources: allComplete(1_000), ci}));
+    const secondComplete = reconcileNativeWatch(firstComplete, sweep({at: 61_000, sources: allComplete(61_000), ci}));
+    expect(secondComplete.events.map(event => event.kind)).toEqual(['ci_complete']);
+  });
+
   it('emits head and terminal transitions once and ignores an initial head as noise', () => {
     const initial = reconcileNativeWatch(state(), sweep());
     expect(initial.events).toEqual([]);
