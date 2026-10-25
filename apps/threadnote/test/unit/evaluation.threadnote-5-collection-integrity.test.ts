@@ -22,6 +22,7 @@ import {
 import {
   COLLECTION_MAX_BYTES,
   collectionEnvironment,
+  collectionCleanupIsUnsafe,
   ownCollectionProcess,
   readPrivateCollectionJson,
   readPrivateCollectionJsonWithIdentity,
@@ -29,7 +30,7 @@ import {
 } from '../../../../scripts/threadnote-5-collection-process.js';
 import {CollectionMcpTransport} from '../../../../scripts/threadnote-5-collection-transport.js';
 
-function controlledMcpTransport() {
+function controlledMcpTransport(cleanupError?: Error) {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const stdin = new PassThrough();
@@ -48,11 +49,19 @@ function controlledMcpTransport() {
       return {
         child,
         done,
+        input: {
+          failed: new Promise<never>(() => {}),
+          closed: Promise.resolve(),
+          assertHealthy: () => {},
+          write: async () => {},
+          end: async () => {},
+        },
         terminate: async () => {
           stdout.end();
           stderr.end();
           finish(0);
           await done;
+          if (cleanupError !== undefined) throw cleanupError;
         },
       };
     },
@@ -193,6 +202,136 @@ describe('collection provenance and process integrity regressions', () => {
     expect(new Set(environments.map(env => env.TMPDIR)).size).toBe(homes.length);
     expect(environments.every((env, index) => env.TMPDIR === `${homes[index]}/tmp`)).toBe(true);
     expect(() => collectionEnvironment('/isolated', '/isolated/../personal')).toThrow();
+  });
+
+  it('preserves the first input failure across bounded callback, error, finish and close schedules', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.shuffledSubarray(['callback', 'first error', 'second error', 'finish', 'close'] as const, {
+          minLength: 5,
+          maxLength: 5,
+        }),
+        async events => {
+          const owned = ownCollectionProcess('/bin/cat', [], process.cwd(), {PATH: '/usr/bin:/bin'});
+          let callback!: (error?: Error | null) => void;
+          owned.child.stdin.end = ((_bytes: unknown, complete: typeof callback) => {
+            callback = complete;
+            return owned.child.stdin;
+          }) as typeof owned.child.stdin.end;
+          const result = owned.input.end('request').then(
+            () => undefined,
+            error => error,
+          );
+          const first = new Error('first error');
+          const second = new Error('second error');
+          let expected: Error | undefined;
+          let callbackSeen = false;
+          for (const event of events) {
+            if (event === 'callback') {
+              callbackSeen = true;
+              callback();
+            } else if (event === 'finish') owned.child.stdin.emit('finish');
+            else if (event === 'close') {
+              if (!callbackSeen && expected === undefined)
+                expected = new Error('Collection process input closed before completing.');
+              owned.child.stdin.emit('close');
+            } else {
+              const error = event === 'first error' ? first : second;
+              expected ??= error;
+              owned.child.stdin.emit('error', error);
+            }
+          }
+          try {
+            expect((await result)?.message).toBe(expected?.message);
+            expect(() => owned.input.assertHealthy()).toThrow(expected?.message);
+            await expect(owned.done).rejects.toThrow(expected?.message);
+          } finally {
+            owned.child.stdin.destroy();
+            await owned.terminate().catch(() => {});
+          }
+        },
+      ),
+      {numRuns: 20, seed: 20261025},
+    );
+  });
+
+  it('rejects every pending input write with the first callback or emitted error', async () => {
+    const owned = ownCollectionProcess('/bin/cat', [], process.cwd(), {PATH: '/usr/bin:/bin'});
+    const callbacks: ((error?: Error | null) => void)[] = [];
+    owned.child.stdin.write = ((_bytes: unknown, callback: (error?: Error | null) => void) => {
+      callbacks.push(callback);
+      return true;
+    }) as typeof owned.child.stdin.write;
+    const writes = [owned.input.write('first'), owned.input.write('second')];
+    const observed = Promise.all(writes.map(write => write.catch(error => error)));
+    const first = new Error('callback failure');
+    callbacks[0](first);
+    callbacks[1](new Error('later callback failure'));
+    owned.child.stdin.emit('error', new Error('later emitted error'));
+    expect(await observed).toEqual([first, first]);
+    await expect(owned.done).rejects.toBe(first);
+    await expect(owned.terminate()).rejects.toBe(first);
+  });
+
+  it('reports input failure consistently through MCP send, onerror and close after cleanup', async () => {
+    let owned!: ReturnType<typeof ownCollectionProcess>;
+    const transport = new CollectionMcpTransport({
+      executable: '/bin/cat',
+      cwd: process.cwd(),
+      env: {PATH: '/usr/bin:/bin'},
+      processFactory: () => {
+        owned = ownCollectionProcess('/bin/cat', [], process.cwd(), {PATH: '/usr/bin:/bin'});
+        return owned;
+      },
+    });
+    const errors: Error[] = [];
+    let closes = 0;
+    transport.onerror = error => errors.push(error);
+    transport.onclose = () => {
+      closes += 1;
+    };
+    await transport.start();
+    const first = new Error('input failed');
+    owned.child.stdin.emit('error', first);
+    await expect(transport.send({jsonrpc: '2.0', method: 'probe'})).rejects.toBe(first);
+    await expect(transport.close()).rejects.toBe(first);
+    expect(errors).toEqual([first]);
+    expect(closes).toBe(1);
+    await expect(owned.done).rejects.toBe(first);
+  });
+
+  it('handles real early-reader-close finalization in an isolated Bun process and preserves normal input bytes', async () => {
+    const module = resolve('scripts/threadnote-5-collection-process.ts');
+    for (const early of [true, false]) {
+      const program = `
+        import {ownCollectionProcess} from ${JSON.stringify(module)};
+        const early = ${early};
+        const peer = early
+          ? 'import os,signal;os.close(0);os.write(1,bytes([82]));signal.pause()'
+          : 'import sys;sys.stdout.buffer.write(sys.stdin.buffer.read())';
+        const owned = ownCollectionProcess('/usr/bin/python3', ['-I','-S','-c',peer], process.cwd(), {PATH:'/usr/bin:/bin'});
+        const output = [];
+        owned.child.stdout.on('data', chunk => output.push(chunk));
+        if (early) await new Promise(resolve => owned.child.stdout.once('data', resolve));
+        const bytes = Buffer.from("private input");
+        let failure;
+        try { await owned.input.write(bytes); await owned.input.end(); await owned.done; } catch (error) { failure = error; }
+        try { await owned.terminate(); } catch (error) { failure ??= error; }
+        if (early && !failure) throw new Error('false successful capture');
+        if (!early && (failure || !Buffer.concat(output).equals(bytes))) throw new Error('normal bytes changed');
+        process.stdout.write((early ? 'handled input failure' : 'exact bytes') + '\\n');
+      `;
+      const result = await runCollectionProcess(
+        process.execPath,
+        ['-e', program],
+        process.cwd(),
+        {...process.env} as Record<string, string>,
+        10_000,
+      );
+      expect(result.stderr).toBe('');
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toBe(early ? 'handled input failure' : 'exact bytes');
+    }
   });
 
   it('terminates successful leaders descendants before returning the native capture', async () => {
@@ -368,6 +507,28 @@ describe('collection provenance and process integrity regressions', () => {
       await transport.close().catch(() => {});
       await rm(root, {recursive: true, force: true});
     }
+  });
+
+  it('keeps unsafe cleanup observable ahead of an ordinary MCP failure and closes once', async () => {
+    const owned = ownCollectionProcess('/bin/sh', ['-c', 'exit 0'], process.cwd(), {PATH: '/usr/bin:/bin'});
+    owned.child.prependOnceListener('exit', () => Object.defineProperty(owned.child, 'pid', {value: undefined}));
+    const unsafe = await owned.done.catch(error => error);
+    expect(collectionCleanupIsUnsafe(unsafe)).toBe(true);
+    const {transport, stderr} = controlledMcpTransport(unsafe);
+    let closes = 0;
+    const errors: Error[] = [];
+    transport.onclose = () => {
+      closes += 1;
+    };
+    transport.onerror = error => errors.push(error);
+    await transport.start();
+    stderr.write(Buffer.from([0xff]));
+    await expect(transport.close()).rejects.toBe(unsafe);
+    await expect(transport.close()).rejects.toBe(unsafe);
+    await expect(transport.send({jsonrpc: '2.0', method: 'probe'})).rejects.toBe(unsafe);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('UTF-8');
+    expect(closes).toBe(1);
   });
 
   it('fails closed for a truncated stdout frame during normal close after clean EOF', async () => {
