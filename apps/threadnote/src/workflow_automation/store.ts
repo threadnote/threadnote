@@ -96,7 +96,7 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
         parsed !== null && typeof parsed === 'object' && 'format' in parsed && parsed.format === STATE_CODEC
           ? JSON.parse(await decodeBoundedWorkflowJson(bytes, STATE_CODEC, signal))
           : parsed;
-      return decodeNativeWorkflowState(value);
+      return decodeNativeWorkflowState(value, sha256HexSync);
     },
     error =>
       Schema.is(WorkflowAutomationError)(error)
@@ -119,7 +119,7 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
   expectedRevision: string | null,
 ) {
   const validated = yield* Effect.try({
-    try: () => decodeNativeWorkflowState(state),
+    try: () => decodeNativeWorkflowState(state, sha256HexSync),
     catch: error => error as WorkflowAutomationError,
   });
   const serialized = yield* Effect.try({

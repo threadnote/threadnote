@@ -241,7 +241,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   request: WriteRequest,
 ) {
   const intent = intentFrom(stored.state, request);
-  const digest = nativeWorkflowIntentDigest(intent);
+  const digest = nativeWorkflowIntentDigest(intent, sha256HexSync);
   const existing = stored.state.operations.find(operation => operation.intent.operationId === request.operationId);
   if (existing && existing.intentDigest !== digest)
     return yield* issue('operation-intent-conflict', 'This operationId already belongs to different native intent.');

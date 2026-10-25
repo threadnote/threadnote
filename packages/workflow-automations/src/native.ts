@@ -289,8 +289,11 @@ export function admitNativeAuthoringSave(
   return reservation;
 }
 
-export function nativeWorkflowIntentDigest(intent: WorkflowWriteIntent): string {
-  return sha256HexSync(`threadnote.native-workflow.intent.v1\n${JSON.stringify(sortedJson({version: 1, intent}))}`);
+export function nativeWorkflowIntentDigest(
+  intent: WorkflowWriteIntent,
+  hash: (value: string) => string = sha256HexSync,
+): string {
+  return hash(`threadnote.native-workflow.intent.v1\n${JSON.stringify(sortedJson({version: 1, intent}))}`);
 }
 
 function decode<A>(schema: Schema.ConstraintDecoder<A>, input: unknown, code: string, message: string): A {
@@ -312,7 +315,10 @@ export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowReque
   return request;
 }
 
-export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
+export function decodeNativeWorkflowState(
+  input: unknown,
+  hash: (value: string) => string = sha256HexSync,
+): NativeWorkflowState {
   const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
   if (
     candidate?.format !== 'threadnote-native-workflow' ||
@@ -350,7 +356,7 @@ export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
       operationIds.has(intent.operationId) ||
       intent.bindingId !== state.bindingId ||
       intent.sourceRunId !== state.runId ||
-      operation.intentDigest !== nativeWorkflowIntentDigest(intent) ||
+      operation.intentDigest !== nativeWorkflowIntentDigest(intent, hash) ||
       (operation.status === 'prepared' ? operation.artifact !== undefined : operation.artifact === undefined)
     )
       throw fail('invalid-state', 'The native workflow state contains a conflicting operation or intent digest.');
