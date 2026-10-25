@@ -10,7 +10,12 @@
     "./naming": "./src/naming.ts",
     "./native": "./src/native.ts",
     "./scenarios": "./src/scenarios.ts",
-    "./templates": "./src/templates.ts"
+    "./templates": "./src/templates.ts",
+    "./cycle": "./src/cycle.ts",
+    "./cycle-packet": "./src/cycle_packet.ts",
+    "./cycle-review": "./src/cycle_review.ts",
+    "./cycle-runtime": "./src/cycle_runtime.ts",
+    "./cycle-output": "./src/cycle_output.ts"
   },
   "dependencies": {
     "@threadnote/platform": "workspace:*",

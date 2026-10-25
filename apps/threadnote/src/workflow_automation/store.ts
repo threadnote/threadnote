@@ -23,6 +23,7 @@ function checkRunId(runId: string): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) ||
     runId.includes('..') ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(runId) ||
     ['constructor', 'prototype'].includes(runId)
   )
     throw issue('invalid-request', 'Native run IDs must be bounded portable identifiers, never paths.');

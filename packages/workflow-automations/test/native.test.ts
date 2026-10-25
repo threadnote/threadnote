@@ -129,7 +129,17 @@ describe('native workflow request protocol', () => {
   });
 
   it('enforces portable identifiers, bounded generation, and UTF-8 body bytes', () => {
-    for (const id of ['../escape', 'foo..bar', 'constructor', 'prototype', '__proto__'])
+    for (const id of [
+      '../escape',
+      'foo..bar',
+      'constructor',
+      'prototype',
+      '__proto__',
+      'prn',
+      'AUX.txt',
+      'com1',
+      'lpt9',
+    ])
       expect(
         caught(() =>
           decodeNativeWorkflowRequest({
@@ -143,6 +153,9 @@ describe('native workflow request protocol', () => {
           }),
         ),
       ).toMatchObject({code: 'invalid-request'});
+    expect(caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), runId: 'CON'}))).toMatchObject({
+      code: 'invalid-request',
+    });
     expect(caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), generation: 'g\n1'}))).toMatchObject({
       code: 'invalid-request',
     });
@@ -249,6 +262,30 @@ describe('native workflow state', () => {
       ],
     };
     expect(decodeNativeWorkflowState(verified).operations[0]).toMatchObject({status: 'verified', artifact});
+  });
+
+  it('keeps the v1 logical operation ID grammar for Windows device names in requests and persisted intents', () => {
+    expect(caught(() => decodeNativeWorkflowState({...stateBase, runId: 'CON'}))).toMatchObject({
+      code: 'invalid-state',
+    });
+    const request = decodeNativeWorkflowRequest({...validWriteRequest(), operationId: 'CON'});
+    expect(request).toMatchObject({action: 'write', operationId: 'CON'});
+    const persistedIntent = intent({operationId: 'CON'});
+    const persisted = {
+      ...stateBase,
+      operations: [
+        {
+          status: 'prepared',
+          intent: persistedIntent,
+          intentDigest: nativeWorkflowIntentDigest(persistedIntent),
+        },
+      ],
+    };
+    expect(decodeNativeWorkflowState(persisted).operations[0]).toMatchObject({
+      status: 'prepared',
+      intent: {operationId: 'CON'},
+      intentDigest: nativeWorkflowIntentDigest(persistedIntent),
+    });
   });
 
   it('rejects unknown and Python state markers or versions with fresh-run guidance', () => {

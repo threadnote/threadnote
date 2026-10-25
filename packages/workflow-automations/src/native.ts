@@ -1,6 +1,7 @@
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
+import {NativeCycleRuntimeSchema, decodeNativeCycleRuntime} from './cycle_runtime.js';
 import {
   WorkflowAutomationError,
   type WorkflowArtifact,
@@ -20,6 +21,16 @@ const portableId = Schema.String.check(
   Schema.makeFilter(value =>
     value.includes('..') || value === 'constructor' || value === 'prototype' || value === '__proto__'
       ? 'Reserved identifiers are not allowed.'
+      : undefined,
+  ),
+);
+// Run IDs become filenames in native state storage. Keep that filesystem
+// portability constraint separate from logical identifiers such as
+// operationId, whose v1 grammar already admitted Windows device names.
+const safeRunId = portableId.check(
+  Schema.makeFilter(value =>
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(value)
+      ? 'Windows device names are not allowed for run IDs.'
       : undefined,
   ),
 );
@@ -84,13 +95,13 @@ const requestBase = {
   protocolVersion: Schema.Literal(nativeWorkflowProtocolVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
 } as const;
-const commonRun = {runId: portableId, generation} as const;
+const commonRun = {runId: safeRunId, generation} as const;
 const actionSchemas = [
   Schema.Struct({...requestBase, action: Schema.Literal('capabilities')}),
   Schema.Struct({
     ...requestBase,
     action: Schema.Literal('init'),
-    runId: portableId,
+    runId: safeRunId,
     project: portableId,
     featureId: portableId,
     title: Schema.optionalKey(nonEmpty(4096)),
@@ -171,7 +182,7 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   format: Schema.Literal('threadnote-native-workflow'),
   stateVersion: Schema.Literal(nativeWorkflowStateVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
-  runId: portableId,
+  runId: safeRunId,
   project: portableId,
   featureId: portableId,
   title: Schema.optionalKey(nonEmpty(4096)),
@@ -182,6 +193,7 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   bindingId: digest,
   operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
   authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
+  cycle: Schema.optionalKey(NativeCycleRuntimeSchema),
 });
 export type NativeWorkflowState = typeof NativeWorkflowStateSchema.Type;
 
@@ -322,6 +334,11 @@ export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
     throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
   }
   const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
+  if (state.cycle) {
+    decodeNativeCycleRuntime(state.cycle);
+    if (state.cycle.state.plan.featureId !== state.featureId || state.cycle.state.plan.project !== state.project)
+      throw fail('invalid-state', 'Cycle and native run identities differ.');
+  }
   if (state.naming) {
     try {
       workflowFamilyStem(state.naming);

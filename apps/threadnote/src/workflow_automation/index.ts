@@ -24,7 +24,13 @@ import {
 } from './store.js';
 import {reserveWorkflowNameFamily} from './naming.js';
 import {runNativeAuthoring} from './authoring.js';
-import {CurrentWorkflowReadCache, immutableWorkflowImage} from '../workflow_memory/read_cache.js';
+import {runNativeCycle} from './cycle.js';
+import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
+import {
+  CurrentWorkflowReadCache,
+  immutableWorkflowImage,
+  withWorkflowReadCache,
+} from '../workflow_memory/read_cache.js';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -383,7 +389,8 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
       namingPolicyVersion: 1,
       authoringVersion: 1,
       status: 'ok' as const,
-      operations: ['init', 'inspect', 'read', 'preflight', 'write', 'recover', 'graph-ready', 'authoring'],
+      cycleVersion: 1,
+      operations: ['init', 'inspect', 'read', 'preflight', 'write', 'recover', 'graph-ready', 'authoring', 'cycle'],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],
     };
   if (request.action === 'init')
@@ -399,6 +406,38 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
 });
 
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'cycle') {
+    const request = input as Record<string, unknown>;
+    const detail: Record<string, string> =
+      request.command === 'validate-review' && typeof request.attemptId === 'string'
+        ? {attemptId: request.attemptId, detailKind: 'attempt'}
+        : typeof request.snapshotId === 'string'
+          ? {snapshotId: request.snapshotId, detailKind: 'manifest'}
+          : typeof request.phaseId === 'string'
+            ? {phaseId: request.phaseId, detailKind: 'phase'}
+            : {detailKind: 'overview'};
+    const maximumBytes = typeof request.maxBytes === 'number' ? request.maxBytes : 16_384;
+    const payload = yield* runNativeCycle(
+      config,
+      input,
+      request => runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      request =>
+        runNativeAuthoring(config, request, core =>
+          runCoreNative(config, core).pipe(Effect.mapError(nativeWorkflowError)),
+        ),
+    ).pipe(
+      program => withWorkflowReadCache(program, {compactJournal: true}),
+      Effect.map(value => boundNativeCycleOutput(value, maximumBytes - 512, detail)),
+    );
+    return 'status' in payload && payload.status === 'error'
+      ? {
+          ...version,
+          status: 'error' as const,
+          code: typeof payload.code === 'string' ? payload.code : 'cycle-operation-failed',
+          cycle: payload,
+        }
+      : {...version, status: 'ok' as const, cycle: payload};
+  }
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'authoring')
     return yield* runNativeAuthoring(config, input, request =>
       runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),

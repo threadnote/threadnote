@@ -4,6 +4,7 @@ import type {CliRuntimeRunner} from './cli.js';
 import {runWorkflowAutomation} from '../workflow_automation/index.js';
 import {nativeWorkflowError} from '../workflow_automation/memory.js';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
+import {SystemInfo} from '@threadnote/platform/system';
 
 export const nativeWorkflowInputByteLimit = 2_000_000;
 
@@ -60,16 +61,25 @@ export function makeWorkflowAutomationCommand(withRuntime: CliRuntimeRunner) {
         Effect.catchDefect(error => Effect.fail(nativeWorkflowError(error))),
         Effect.catch(error => {
           const failure = nativeWorkflowError(error);
-          return Effect.succeed({
-            protocolVersion: 1,
-            executorVersion: 1,
-            status: 'error',
-            code: failure.code,
-            message: failure.message,
-            ...(failure.retryable === undefined ? {} : {retryable: failure.retryable}),
+          return Effect.gen(function* () {
+            (yield* SystemInfo).setExitCode(1);
+            return {
+              protocolVersion: 1,
+              executorVersion: 1,
+              status: 'error',
+              code: failure.code,
+              message: failure.message,
+              ...(failure.retryable === undefined ? {} : {retryable: failure.retryable}),
+            };
           });
         }),
-        Effect.flatMap(result => Console.log(JSON.stringify(result))),
+        Effect.flatMap(result =>
+          Effect.gen(function* () {
+            if (typeof result === 'object' && result !== null && 'status' in result && result.status === 'error')
+              (yield* SystemInfo).setExitCode(1);
+            yield* Console.log(JSON.stringify(result));
+          }),
+        ),
       ),
     ),
   ).pipe(Command.withDescription('Opt-in structured native workflow execution for fresh runs'));

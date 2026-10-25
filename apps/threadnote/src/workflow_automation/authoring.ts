@@ -1457,6 +1457,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       return yield* fail('invalid-request', 'Phase branches must be explicit bounded Git references.');
     phases.push({
       id: phase.id,
+      definitionHash: sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase)),
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: [...phase.affectedPaths, ...phase.newPaths],
