@@ -1,6 +1,7 @@
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {runtimeOpenTextDirectoryNameReader} from '@threadnote/platform/system';
+import {fromPromise} from '@threadnote/platform/errors';
 import {hasCodeGraphEmbeddingDemand} from '../vector/demand.js';
 import {CodeGraphEmbeddingWorkerProcess} from '../runtime_ports.js';
 import {codeGraphRepositoriesRoot} from '../layout.js';
@@ -447,12 +448,14 @@ export const resumeExistingCodeGraphEmbeddingDemand = Effect.fn('codeGraph.resum
   if (Option.isNone(worker)) return false;
   const repositories = codeGraphRepositoriesRoot(path, threadnoteHome);
   const probe = Effect.acquireUseRelease(
-    Effect.tryPromise(() => (options.openDirectory ?? runtimeOpenTextDirectoryNameReader)(repositories)),
+    fromPromise('codeGraph.resumeEmbeddingDemand.openDirectory', () =>
+      (options.openDirectory ?? runtimeOpenTextDirectoryNameReader)(repositories),
+    ),
     directory =>
       Effect.gen(function* () {
         if (Option.isSome(yield* fs.readLink(repositories).pipe(Effect.option))) return false;
         do {
-          const page = yield* Effect.tryPromise(() => directory.readPage(64));
+          const page = yield* fromPromise('codeGraph.resumeEmbeddingDemand.readPage', () => directory.readPage(64));
           for (const checkoutId of page.names) {
             if (!/^[a-f0-9]{64}$/u.test(checkoutId)) continue;
             const pending = yield* Effect.gen(function* () {
@@ -477,7 +480,8 @@ export const resumeExistingCodeGraphEmbeddingDemand = Effect.fn('codeGraph.resum
           yield* Effect.yieldNow;
         } while (true);
       }),
-    directory => Effect.promise(() => directory.close()).pipe(Effect.ignoreCause),
+    directory =>
+      fromPromise('codeGraph.resumeEmbeddingDemand.closeDirectory', () => directory.close()).pipe(Effect.ignoreCause),
   ).pipe(Effect.orElseSucceed(() => false));
   const pending = yield* probe;
   return pending ? yield* worker.value.wake(threadnoteHome).pipe(Effect.orElseSucceed(() => false)) : false;
