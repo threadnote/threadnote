@@ -1,4 +1,4 @@
-import {Schema} from 'effect';
+import {Schema, type Effect} from 'effect';
 import type {CodeGraphScanningMetrics, CodeGraphSourceSizeBucket} from './progress/telemetry.js';
 import type {CodeGraphMonikerV1} from './cross_repository/types.js';
 
@@ -520,7 +520,15 @@ export type CodeGraphProgress =
       readonly unit: 'symbols';
     };
 
+export interface CodeGraphDeferredVectorPlan {
+  readonly complete: Effect.Effect<CodeGraphIndexSummary, unknown>;
+}
+
+export const CODE_GRAPH_DEFERRED_VECTORS: unique symbol = Symbol('codeGraph.deferredVectors');
+
 export interface CodeGraphIndexSummary {
+  /** @internal In-process work captured under structural publication gates; omitted from JSON. */
+  readonly [CODE_GRAPH_DEFERRED_VECTORS]?: CodeGraphDeferredVectorPlan;
   readonly diagnostics: readonly string[];
   readonly durationMs: number;
   readonly identity: RepositoryIdentity;

@@ -592,7 +592,7 @@ export const planCodeGraphVectorRetirementPreparation = Effect.fn('codeGraph.pla
         yield* sql.unsafe('PRAGMA foreign_keys = ON');
         yield* sql.unsafe('PRAGMA busy_timeout = 0');
         const versions = yield* sql.unsafe<{readonly user_version: unknown}>('PRAGMA user_version');
-        if (versions.length !== 1 || versions[0]?.user_version !== 2) {
+        if (versions.length !== 1 || ![2, 3].includes(Number(versions[0]?.user_version))) {
           return yield* CodeGraphVectorRetirementError.make({
             message: 'Code graph vector database version is unsupported.',
           });
@@ -1301,9 +1301,13 @@ const observeVectorRetirementAdmission = Effect.fn('codeGraph.observeVectorRetir
     generationRevision,
     pointerPresent: false,
   } satisfies CodeGraphVectorRetirementAdmissionObservation;
+  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+  const hasProgress =
+    versions[0]?.user_version === 3 &&
+    (yield* sql.unsafe('SELECT 1 FROM vector_generation_progress LIMIT 1')).length !== 0;
   if (
     (admissionScanRevision !== undefined && admissionScanRevision !== generationRevision) ||
-    (cursor === undefined && cleanGenerationRevision === generationRevision)
+    (!hasProgress && cursor === undefined && cleanGenerationRevision === generationRevision)
   ) {
     return revisionState;
   }
@@ -1353,7 +1357,7 @@ const observeVectorRetirementAdmission = Effect.fn('codeGraph.observeVectorRetir
     cursor,
     generationRevision,
     ...(marker === undefined ? {} : {marker}),
-    pointerPresent: pointers.length !== 0,
+    pointerPresent: pointers.length !== 0 || (yield* liveGenerationClaim(sql, generation)),
   } satisfies CodeGraphVectorRetirementAdmissionObservation;
 });
 
@@ -1464,6 +1468,10 @@ const applyVectorRetirementAdmissionObservation = Effect.fn('codeGraph.applyVect
     yield* sql.unsafe(
       `UPDATE vector_retirement_state
        SET admission_cursor = ?,
+           clean_generation_revision = CASE
+             WHEN clean_generation_revision = generation_revision THEN NULL
+             ELSE clean_generation_revision
+           END,
            admission_scan_revision = CASE
              WHEN admission_scan_revision IS NULL THEN generation_revision
              ELSE admission_scan_revision
@@ -1904,4 +1912,19 @@ export const admitOneCodeGraphVectorRetirement = Effect.fn('codeGraph.admitVecto
       return yield* applyVectorRetirementAdmissionObservation(sql, observed);
     }),
   );
+});
+
+const liveGenerationClaim = Effect.fn('codeGraph.liveGenerationClaim')(function* (
+  sql: SqlClient.SqlClient,
+  generation: string,
+) {
+  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+  if (versions[0]?.user_version !== 3) return false;
+  const rows = yield* sql.unsafe(
+    `SELECT 1 FROM vector_generation_progress
+    WHERE (generation = ? OR reusable_generation = ?)
+      AND expires_at > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) LIMIT 1`,
+    [generation, generation],
+  );
+  return rows.length !== 0;
 });
