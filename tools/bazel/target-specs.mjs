@@ -1,51 +1,75 @@
 import {fileURLToPath} from 'node:url';
 /* oxlint-disable effecttsgo/node-builtin-import -- Target discovery runs before the declared Bazel graph exists. */
-import {existsSync, readFileSync, readdirSync, statSync} from 'node:fs';
+import {existsSync, statSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {ciLongRunningTestGroups, ciRequiredLongRunningTestGroupNames} from '../ci/vitest-plan.ts';
 import {groupApplicationTests} from './application-test-groups.mjs';
-import {allowedRepositoryPath, sourceRepositoryPathCandidates} from './repository-inputs.mjs';
+import {allowedRepositoryPath, listRepositoryFiles, sourceRepositoryPathCandidates} from './repository-inputs.mjs';
 import {collectSourceClosure, sourceImports} from './source-closure.mjs';
 
 const defaultRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-export const createTargetSpecs = (root = defaultRoot) => {
-  const filesBelow = directory => {
-    const absolute = join(root, directory);
-    if (!existsSync(absolute)) return [];
-    return readdirSync(absolute, {withFileTypes: true}).flatMap(entry => {
-      if (['.DS_Store', '.git', '.context', 'BUILD', 'BUILD.bazel', 'node_modules'].includes(entry.name)) return [];
-      const path = `${directory}/${entry.name}`;
-      return entry.isDirectory() ? filesBelow(path) : [path];
-    });
+export const createTargetSpecs = async (root = defaultRoot) => {
+  const repositoryFiles = listRepositoryFiles(root);
+  const ignoredNames = new Set([
+    '.DS_Store',
+    '.git',
+    '.context',
+    '.bazel-inputs',
+    'BUILD',
+    'BUILD.bazel',
+    'node_modules',
+  ]);
+  const filesBelow = directory =>
+    [...repositoryFiles].filter(
+      path =>
+        path.startsWith(`${directory}/`) &&
+        !path.split('/').some(part => ignoredNames.has(part)) &&
+        existsSync(join(root, path)) &&
+        statSync(join(root, path)).isFile(),
+    );
+  const contents = new Map();
+  const readable = [...repositoryFiles].filter(
+    path => (/\.(?:[cm]?[jt]sx?)$/u.test(path) || /(?:^|\/)package\.json$/u.test(path)) && existsSync(join(root, path)),
+  );
+  for (let offset = 0; offset < readable.length; offset += 64)
+    await Promise.all(
+      readable.slice(offset, offset + 64).map(async path => {
+        contents.set(path, await Bun.file(join(root, path)).text());
+      }),
+    );
+  const readSource = path => {
+    if (!contents.has(path)) throw new Error(`Authored source was not preloaded: ${path}`);
+    return contents.get(path);
   };
   const testFilesBelow = directory =>
     filesBelow(directory)
       .filter(path => /\.test\.tsx?$/u.test(path))
       .sort();
-  const packageDirectories = readdirSync(join(root, 'packages'))
-    .sort()
-    .map(name => `packages/${name}`);
+  const packageDirectories = [...repositoryFiles]
+    .filter(path => /^packages\/[^/]+\/package\.json$/u.test(path))
+    .map(path => path.slice(0, -13))
+    .sort();
   const applicationWorkspaceDirectories = [
-    ...readdirSync(join(root, 'apps'))
-      .sort()
-      .map(name => `apps/${name}`),
+    ...[...repositoryFiles]
+      .filter(path => /^apps\/[^/]+\/package\.json$/u.test(path))
+      .map(path => path.slice(0, -13))
+      .sort(),
     ...packageDirectories,
   ].filter(path => existsSync(join(root, path, 'package.json')));
   const applicationWorkspaces = new Map(
     applicationWorkspaceDirectories.map(path => {
-      const manifest = JSON.parse(readFileSync(join(root, path, 'package.json'), 'utf8'));
+      const manifest = JSON.parse(readSource(`${path}/package.json`));
       return [manifest.name, {path, manifest}];
     }),
   );
   const sourceImportCache = new Map();
-  const readSource = path => readFileSync(join(root, path), 'utf8');
   const applicationSourceImports = path => {
     if (!sourceImportCache.has(path)) sourceImportCache.set(path, sourceImports(path, readSource(path)));
     return sourceImportCache.get(path);
   };
   const applicationSourceExists = path => {
     const absolute = join(root, path);
-    return existsSync(absolute) && statSync(absolute).isFile();
+    return repositoryFiles.has(path) && existsSync(absolute) && statSync(absolute).isFile();
   };
   const longRunningTests = new Set(Object.values(ciLongRunningTestGroups).flat());
   const applicationTests = [...testFilesBelow('apps/threadnote/test')].sort();
@@ -53,7 +77,7 @@ export const createTargetSpecs = (root = defaultRoot) => {
     path.startsWith('apps/threadnote/test/integrations/'),
   );
   const postgresTests = new Set(
-    applicationTests.filter(path => readFileSync(join(root, path), 'utf8').includes('THREADNOTE_TEST_POSTGRES_URL')),
+    applicationTests.filter(path => readSource(path).includes('THREADNOTE_TEST_POSTGRES_URL')),
   );
   const websiteReleaseTests = new Set([
     'apps/website/test/website-release-boundary.test.ts',
@@ -93,7 +117,7 @@ export const createTargetSpecs = (root = defaultRoot) => {
     'apps/threadnote/test/unit/mcp.test.ts',
     'apps/threadnote/test/unit/code-graph.maintenance-bounded.test.ts',
   ];
-  const rootManifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const rootManifest = JSON.parse(readSource('package.json'));
   const allNpm = Object.keys({...rootManifest.dependencies, ...rootManifest.devDependencies})
     .filter(name => !name.startsWith('@threadnote/'))
     .sort();
@@ -277,7 +301,7 @@ export const createTargetSpecs = (root = defaultRoot) => {
     const entries = testFilesBelow(`${directory}/test`);
     if (entries.length === 0) return [];
     const runtimeEntries = packageRuntimeTestEntries[directory]
-      ? entries.filter(path => readFileSync(join(root, path), 'utf8').includes('standalone.ts'))
+      ? entries.filter(path => readSource(path).includes('standalone.ts'))
       : [];
     const workspaceEntries = packageWorkspaceTestEntries[directory] ?? [];
     const standardEntries = entries.filter(path => !runtimeEntries.includes(path) && !workspaceEntries.includes(path));
@@ -431,8 +455,13 @@ export const createTargetSpecs = (root = defaultRoot) => {
       entries: toolingTests,
       data: [
         'apps/threadnote/test/evaluation/baselines/context-brief-citations-v1/scale-budgets.json',
+        // The consumer subprocess fixture copies these entrypoints by dynamic path.
+        'tools/bazel/run.ts',
         'tools/bazel/runner.mjs',
         'tools/bazel/targets.json',
+        'tools/ci/bazel-plan-shards.mjs',
+        'tools/ci/bazel-shards.mjs',
+        'tools/ci/selection.mjs',
         'tools/ci/bazel-run-selected.mjs',
         'tools/ci/bazel-select.mjs',
         'tools/ci/windows-workflow-prerequisites.py',

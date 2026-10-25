@@ -100,7 +100,10 @@ describe('platform benchmark workflow', () => {
       Object.entries(workflow.jobs).flatMap(([jobName, job]) =>
         (job.steps ?? []).flatMap(step => (step.run?.match(/\bbazel\b/u) ? [{jobName, run: step.run}] : [])),
       ),
-    ).toEqual([{jobName: 'benchmark-preflight', run: preflightRun}]);
+    ).toEqual([
+      {jobName: 'benchmark-preflight', run: 'bun tools/bazel/prepare.mjs'},
+      {jobName: 'benchmark-preflight', run: preflightRun},
+    ]);
 
     const captures = [...captureSteps(workflow), ...captureSteps(productionLarge)];
     expect(captures.length).toBeGreaterThan(10);

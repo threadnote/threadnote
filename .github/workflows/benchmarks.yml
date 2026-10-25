@@ -99,6 +99,9 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
+      - name: Prepare Bazel workspace
+        run: bun tools/bazel/prepare.mjs
+
       - name: Validate declared benchmark harness inputs and contracts
         run: bun run bazel -- test //:platform_benchmark_preflight --test_output=errors --cache_test_results=no
 

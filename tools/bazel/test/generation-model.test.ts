@@ -46,13 +46,20 @@ describe('buildGenerationModel', () => {
         JSON.stringify({name: '@fixture/threadnote', dependencies: {}}),
       );
       writeFileSync(join(root, 'tools/bazel/project-vitest.config.ts'), 'export {};');
+      execFileSync('git', ['init', '-q'], {cwd: root});
+      await Bun.write(join(root, '.gitignore'), '*.log\nignored.test.ts\n');
       const testPath = join(root, 'apps/threadnote/test/unit/freshness.test.ts');
       writeFileSync(testPath, 'import {it} from "vitest"; it("fresh", () => {});');
       const {createTargetSpecs} = await import('../target-specs.mjs');
-      const first = createTargetSpecs(root).targetSpecs.flatMap(target => target.entries);
+      const first = (await createTargetSpecs(root)).targetSpecs.flatMap(target => target.entries);
       expect(first).toContain('apps/threadnote/test/unit/freshness.test.ts');
+      await Bun.write(join(root, 'tools/bazel/debug.log'), 'ignored');
+      await Bun.write(join(root, 'apps/threadnote/test/unit/ignored.test.ts'), 'throw new Error("ignored");');
+      const scratch = await createTargetSpecs(root);
+      expect(scratch.targetSpecs.flatMap(target => target.entries)).toEqual(first);
+      expect(scratch.staticTargets.flatMap(target => target.inputs)).not.toContain('tools/bazel/debug.log');
       rmSync(testPath);
-      const second = createTargetSpecs(root).targetSpecs.flatMap(target => target.entries);
+      const second = (await createTargetSpecs(root)).targetSpecs.flatMap(target => target.entries);
       expect(second).not.toContain('apps/threadnote/test/unit/freshness.test.ts');
     } finally {
       rmSync(root, {recursive: true, force: true});
@@ -147,4 +154,20 @@ it('keeps generated inputs equal to independent source reachability, including c
     ),
     {numRuns: 20},
   );
+});
+
+it('resolves imports from authored files even when ignored emitted JavaScript exists', async () => {
+  const root = fixture();
+  try {
+    await Bun.write(join(root, '.gitignore'), '*.js\n');
+    await Bun.write(join(root, 'apps/demo/main.ts'), "import './dep.js';");
+    await Bun.write(join(root, 'apps/demo/dep.ts'), 'export const value = 1;');
+    const before = await runModel(root, [spec('authored')]);
+    await Bun.write(join(root, 'apps/demo/dep.js'), "import './missing.js';");
+    expect([...(await runModel(root, [spec('authored')])).output]).toEqual([...before.output]);
+    expect(before.inventory[0]?.inputs).toContain('apps/demo/dep.ts');
+    expect(before.inventory[0]?.inputs).not.toContain('apps/demo/dep.js');
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
 });

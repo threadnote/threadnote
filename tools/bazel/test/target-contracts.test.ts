@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import {readPreparedInventory} from '../prepare.mjs';
 import {ciRequiredLongRunningTestGroupNames} from '../../ci/vitest-plan.js';
 import {selectTargets} from '../../ci/selection.mjs';
 import {createVitestConfig} from '../../../vitest.config.js';
@@ -15,7 +16,8 @@ interface TargetInventoryEntry {
   readonly workspace: boolean;
 }
 
-const inventory = (await Bun.file('tools/bazel/targets.json').json()) as {
+const {inventory: preparedInventory} = await readPreparedInventory({allowStaged: true});
+const inventory = preparedInventory as {
   readonly testSuites: readonly {readonly name: string; readonly package: string; readonly tests: readonly string[]}[];
   readonly targets: readonly TargetInventoryEntry[];
 };

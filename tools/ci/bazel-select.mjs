@@ -1,8 +1,9 @@
-/* oxlint-disable effecttsgo/node-builtin-import -- Git and Bazel are external process boundaries used before the graph is available. */
-import {appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+/* oxlint-disable effecttsgo/node-builtin-import -- Filesystem directory creation/removal and baseline capability probes are native OS boundaries; file contents use Bun. */
+import {existsSync, mkdirSync, mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {bazelDiffPath, bazelPath} from '../bazel/cli-tools.mjs';
+import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {selectTargets} from './selection.mjs';
 
 const root = resolve(import.meta.dir, '../..');
@@ -10,8 +11,7 @@ const option = name => process.argv[process.argv.indexOf(name) + 1];
 const base = process.argv.includes('--base') ? option('--base') : undefined;
 const output = resolve(root, process.argv.includes('--output') ? option('--output') : '.context/bazel-selection');
 mkdirSync(output, {recursive: true});
-const inventory = JSON.parse(readFileSync(join(root, 'tools/bazel/targets.json'), 'utf8'));
-const run = async (args, cwd = root) => {
+const run = async (args, cwd = root, raw = false) => {
   const child = Bun.spawn(args, {cwd, stdout: 'pipe', stderr: 'pipe'});
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),
@@ -19,37 +19,53 @@ const run = async (args, cwd = root) => {
     child.exited,
   ]);
   if (code !== 0) throw new Error(`${args[0]} ${args[1]} failed (${code}): ${stderr.slice(-1500)}`);
-  return stdout.trim();
+  return raw ? stdout : stdout.trim();
 };
-const prepare = async cwd => {
-  const script = join(cwd, 'apps/website/tools/site-prepared-metadata.ts');
-  if (existsSync(script))
-    await run([process.execPath, script, '--output', join(cwd, 'apps/website/.bazel-inputs/metadata.json')], cwd);
-};
+// Capture authored paths before preparation publishes generated files.
+let revision;
+let changeFailure;
 let changedFiles = [];
+try {
+  if (!base || !/^[a-zA-Z0-9_./-]+$/u.test(base)) throw new Error('Missing or invalid baseline revision');
+  revision = await run(['git', 'rev-parse', '--verify', `${base}^{commit}`]);
+  const tracked = await run(['git', 'diff', '--name-only', '--no-renames', '-z', revision], root, true);
+  const untracked = await run(['git', 'ls-files', '--others', '--exclude-standard', '-z'], root, true);
+  changedFiles = [...new Set([tracked, untracked].flatMap(value => value.split('\0').filter(Boolean)))].sort();
+} catch (error) {
+  changeFailure = error instanceof Error ? error.message : String(error);
+}
+// An invalid head is fatal; only baseline/hash failures may select the valid full head.
+const {inventory, generation} = await readPreparedInventory({root});
+const prepareBaseline = async cwd => {
+  if (await Bun.file(join(cwd, 'tools/bazel/prepare.mjs')).exists()) {
+    await run([process.execPath, 'tools/bazel/prepare.mjs'], cwd);
+  } else {
+    const script = join(cwd, 'apps/website/tools/site-prepared-metadata.ts');
+    if (await Bun.file(script).exists())
+      await run([process.execPath, script, '--output', join(cwd, 'apps/website/.bazel-inputs/metadata.json')], cwd);
+    await run([process.execPath, 'tools/bazel/generate.mjs'], cwd);
+  }
+};
 let impacted = [];
 let failure;
 let baseInventory;
 let directory;
 let executable;
 try {
-  if (!base || !/^[a-zA-Z0-9_./-]+$/u.test(base)) throw new Error('Missing or invalid baseline revision');
-  const revision = await run(['git', 'rev-parse', '--verify', `${base}^{commit}`]);
-  const tracked = await run(['git', 'diff', '--name-only', '--no-renames', '-z', revision]);
-  const untracked = await run(['git', 'ls-files', '--others', '--exclude-standard', '-z']);
-  changedFiles = [...new Set([tracked, untracked].flatMap(value => value.split('\0').filter(Boolean)))].sort();
+  if (changeFailure) throw new Error(changeFailure);
   directory = mkdtempSync(join(tmpdir(), 'threadnote-bazel-base-'));
   await run(['git', 'worktree', 'add', '--detach', directory, revision]);
-  if (!existsSync(join(directory, 'MODULE.bazel')) || !existsSync(join(directory, 'tools/bazel/targets.json')))
+  if (
+    !existsSync(join(directory, 'MODULE.bazel')) ||
+    (!existsSync(join(directory, 'tools/bazel/generate.mjs')) &&
+      !existsSync(join(directory, 'tools/bazel/prepare.mjs')))
+  )
     throw new Error('Baseline has no modeled Bazel graph');
-  await prepare(root);
-  await run([process.execPath, 'tools/bazel/generate.mjs', '--check']);
   executable = await bazelPath(root);
   const diff = await bazelDiffPath(root);
   await run([process.execPath, 'install', '--frozen-lockfile', '--ignore-scripts'], directory);
-  await prepare(directory);
-  await run([process.execPath, 'tools/bazel/generate.mjs'], directory);
-  baseInventory = JSON.parse(readFileSync(join(directory, 'tools/bazel/targets.json'), 'utf8'));
+  await prepareBaseline(directory);
+  baseInventory = await Bun.file(join(directory, 'tools/bazel/targets.json')).json();
   for (const [name, cwd] of [
     ['base', directory],
     ['head', root],
@@ -80,7 +96,8 @@ try {
     '-o',
     join(output, 'impacted.txt'),
   ]);
-  impacted = readFileSync(join(output, 'impacted.txt'), 'utf8')
+  const impactedText = await Bun.file(join(output, 'impacted.txt')).text();
+  impacted = impactedText
     .split('\n')
     .map(value => value.trim())
     .filter(Boolean);
@@ -116,11 +133,19 @@ const result = selectTargets({
   targetInputs: Object.fromEntries(inventory.targets.map(target => [target.label, target.inputs])),
   failure,
 });
-writeFileSync(
+await Bun.write(
   join(output, 'selection.json'),
-  JSON.stringify({...result, base, changedFiles, modeledTargetCount: inventory.targets.length}, null, 2) + '\n',
+  JSON.stringify({...result, base, changedFiles, generation, modeledTargetCount: inventory.targets.length}, null, 2) +
+    '\n',
 );
-writeFileSync(join(output, 'targets.txt'), result.targets.join('\n') + (result.targets.length ? '\n' : ''));
+await Bun.write(join(output, 'targets.txt'), result.targets.join('\n') + (result.targets.length ? '\n' : ''));
+const appendOutput = async text =>
+  Bun.write(
+    process.env.GITHUB_OUTPUT,
+    (await Bun.file(process.env.GITHUB_OUTPUT)
+      .text()
+      .catch(() => '')) + text,
+  );
 if (process.env.GITHUB_OUTPUT) {
   const selected = new Set(result.targets);
   const lanes = new Set(
@@ -128,9 +153,9 @@ if (process.env.GITHUB_OUTPUT) {
   );
   for (const lane of [...lanes].sort()) {
     const enabled = inventory.targets.some(target => target.lane === lane && selected.has(target.label));
-    appendFileSync(process.env.GITHUB_OUTPUT, `${lane}=${enabled}\n`);
+    await appendOutput(`${lane}=${enabled}\n`);
   }
-  appendFileSync(process.env.GITHUB_OUTPUT, `targets=${JSON.stringify(result.targets)}\n`);
+  await appendOutput(`targets=${JSON.stringify(result.targets)}\n`);
 }
 process.stdout.write(
   `${result.mode}: ${result.targets.length}/${inventory.targets.length} modeled targets (${result.reason})\n`,
