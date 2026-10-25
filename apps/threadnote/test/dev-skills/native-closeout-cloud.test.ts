@@ -210,6 +210,13 @@ describe('verified personal cloud closeout', () => {
         });
         const rejected = yield* f.closeout('finish').pipe(Effect.result);
         expect(Result.isFailure(rejected)).toBe(true);
+        if (Result.isFailure(rejected)) {
+          expect(rejected.failure).toMatchObject({code: 'publication-incomplete'});
+          expect(rejected.failure.message).toContain('stage spec:create');
+          expect(rejected.failure.message).toContain('shared writer returned');
+          expect(rejected.failure.message).not.toContain(f.root);
+          expect(rejected.failure.message).not.toContain('Approved architecture');
+        }
         yield* active(f, loaded.owned);
         yield* f.fs.remove(hook);
         expect((yield* decode(preview)(yield* f.closeout('publication-preview'))).publication.approvalDigest).toBe(

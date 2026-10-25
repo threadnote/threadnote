@@ -506,6 +506,46 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             bindingId: journal.bindingId,
             approvalDigest: journal.approvalDigest,
           });
+          const pendingPublication =
+            typeof publication === 'object' &&
+            publication !== null &&
+            'status' in publication &&
+            publication.status === 'pending'
+              ? (publication as Record<string, unknown>)
+              : undefined;
+          if (pendingPublication) {
+            const rawStage = pendingPublication.stage;
+            const stage =
+              typeof rawStage === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(rawStage)
+                ? rawStage
+                : 'unknown';
+            const cause = pendingPublication.cause;
+            let causeSummary = 'the shared writer returned no publication receipt';
+            if (
+              typeof cause === 'object' &&
+              cause !== null &&
+              'kind' in cause &&
+              cause.kind === 'shared-writer-error'
+            ) {
+              const errorType =
+                'errorType' in cause &&
+                typeof cause.errorType === 'string' &&
+                /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(cause.errorType)
+                  ? cause.errorType
+                  : 'UnknownError';
+              const nativeCode =
+                'nativeCode' in cause &&
+                typeof cause.nativeCode === 'string' &&
+                /^[A-Z][A-Z0-9]{1,11}$/u.test(cause.nativeCode)
+                  ? ` (${cause.nativeCode})`
+                  : '';
+              causeSummary = `the shared writer returned ${errorType}${nativeCode}`;
+            }
+            return yield* fail(
+              'publication-incomplete',
+              `Publication remains pending at stage ${stage}: ${causeSummary}. Check the configured shared worktree and retry this approved publication.`,
+            );
+          }
           yield* withWorkflowLock(
             config,
             journal.bindingId,
