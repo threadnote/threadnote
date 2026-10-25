@@ -1,13 +1,13 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as BunHttpClient from '@effect/platform-bun/BunHttpClient';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Deferred, Effect, Exit, FileSystem, Fiber, Layer, Path, Schema} from 'effect';
+import {Cause, Context, Deferred, Effect, Exit, FileSystem, Fiber, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {McpSchema, McpServer} from 'effect/ai';
 import {expect} from 'vitest';
 import {CommandExecutor} from '@threadnote/platform/command';
-import {SystemInfo} from '@threadnote/platform/system';
+import {TestError} from '@threadnote/testing/test-error';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphIndexer, resumeExistingCodeGraphEmbeddingDemand} from '@threadnote/graph/indexer';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
@@ -16,13 +16,14 @@ import {CodeGraphEmbeddingIndex} from '@threadnote/graph/embedding';
 import {CodeGraphEmbeddingWorkerProcess} from '@threadnote/graph/runtime_ports';
 import {CodeGraphLanguagePackRegistry} from '@threadnote/graph/languages/registry';
 import {CodeGraphMaintenanceCoordinator} from '@threadnote/graph/maintenance/coordinator';
+import {withCodeGraphDatabaseWriteLock} from '@threadnote/graph/maintenance/gate';
 import {CodeGraphParserPool} from '@threadnote/graph/parser_worker';
 import {TreeSitterRuntime} from '@threadnote/graph/tree_sitter/runtime';
 import {resolveCodeGraphScopeRoute} from '@threadnote/graph/scope/routing';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {serveCodeGraphDiscoveryRead} from '@threadnote/graph/isolated/impact_query';
 import {readCodeGraphEmbeddingDemandPage} from '@threadnote/graph/vector/demand';
-import {runCodeGraphEmbeddingWorkerUnit} from '@threadnote/graph/vector/worker';
+import {runCodeGraphEmbeddingWorker, type CodeGraphEmbeddingWorkerOutcome} from '@threadnote/graph/vector/worker';
 import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
 import {LocalModelStore} from '@threadnote/inference/models/store';
 import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
@@ -100,11 +101,10 @@ for (const scoped of [false, true])
       const graph = Layer.mergeAll(CodeGraphQueryService.layer, CodeGraphWatcher.layer).pipe(
         Layer.provideMerge(indexed),
       );
-      return Effect.gen(function* () {
+      const run = Effect.fn(function* (home: string) {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const command = yield* CommandExecutor;
-        const home = yield* fs.makeTempDirectoryScoped({prefix: 'registered-graph-embedding-'});
         const repository = path.join(home, 'repo');
         const manifestPath = path.join(home, 'seed-manifest.yaml');
         yield* fs.makeDirectory(repository);
@@ -152,7 +152,6 @@ for (const scoped of [false, true])
         const query = yield* CodeGraphQueryService;
         const store = yield* CodeGraphStore;
         const indexer = yield* CodeGraphIndexer;
-        const system = yield* SystemInfo;
         const context = yield* Effect.context<Layer.Success<typeof graph>>();
         runRead = raw =>
           serveCodeGraphDiscoveryRead(JSON.parse(raw)).pipe(
@@ -167,34 +166,52 @@ for (const scoped of [false, true])
           );
         const scope = yield* Effect.scope;
         let worker: Fiber.Fiber<unknown, unknown> | undefined;
+        const workerOutcomes: CodeGraphEmbeddingWorkerOutcome[] = [];
+        let workerExit = 'not started';
+        const releaseClaimGate = yield* Deferred.make<void>();
+        let claimGateInjected = false;
+        let forcedContentionObserved = false;
         wake = selectedHome =>
           Effect.gen(function* () {
+            // A wake targets one home-scoped collector, not one nonblocking lane attempt.
+            if (workerExit === 'running') return true;
             const status = yield* query.status(selectedHome, repository, {manifestPath, requestMaintenance: false});
-            const layout = codeGraphLayout(
-              path,
-              selectedHome,
-              status.identity.checkoutId,
-              status.identity.worktreeId,
-              status.readySnapshot?.scopeId,
-            );
-            const lanes = yield* store.withSession(
-              layout.databasePath,
-              Effect.gen(function* () {
-                return yield* readCodeGraphEmbeddingDemandPage(yield* SqlClient.SqlClient);
+            workerExit = 'running';
+            worker = yield* runCodeGraphEmbeddingWorker(selectedHome, {
+              version: 'registered-route-fixture',
+              catalogPage: () => Effect.succeed({checkoutIds: [status.identity.checkoutId]}),
+              idleGraceMilliseconds: 10,
+              pollMilliseconds: 10,
+              onClaim: Effect.gen(function* () {
+                if (claimGateInjected) return;
+                claimGateInjected = true;
+                const gateHeld = yield* Deferred.make<void>();
+                // Force one real nonblocking attempt to defer, then require the collector to retry it.
+                const gate = yield* withCodeGraphDatabaseWriteLock(
+                  selectedHome,
+                  status.identity.checkoutId,
+                  Deferred.succeed(gateHeld, undefined).pipe(Effect.andThen(Deferred.await(releaseClaimGate))),
+                  0,
+                ).pipe(Effect.provide(context), Effect.forkIn(scope, {startImmediately: true}));
+                yield* Effect.raceFirst(Deferred.await(gateHeld), Fiber.join(gate));
               }),
-              {readOnly: true},
+              onUnitResult: outcome =>
+                Effect.gen(function* () {
+                  workerOutcomes.push(outcome);
+                  if (claimGateInjected && !forcedContentionObserved) {
+                    forcedContentionObserved = outcome.state === 'deferred';
+                    yield* Deferred.succeed(releaseClaimGate, undefined);
+                  }
+                }),
+            }).pipe(
+              Effect.onExit(exit =>
+                Effect.sync(() => {
+                  workerExit = Exit.isSuccess(exit) ? 'completed' : Cause.pretty(exit.cause);
+                }),
+              ),
+              Effect.provide(context),
+              Effect.forkIn(scope, {startImmediately: true}),
             );
-            if (!lanes[0]) return false;
-            worker = yield* runCodeGraphEmbeddingWorkerUnit({
-              home: selectedHome,
-              layout,
-              lane: lanes[0],
-              owner: {
-                token: 'registered-route-owner',
-                processId: process.pid,
-                processStartIdentity: (yield* system.processStartIdentity(process.pid)) ?? 'fixture-process',
-              },
-            }).pipe(Effect.provide(context), Effect.forkIn(scope, {startImmediately: true}));
             return true;
           }).pipe(Effect.provide(context));
         // An empty startup probe must not create storage or wake the process adapter.
@@ -248,7 +265,18 @@ for (const scoped of [false, true])
         // Strict path inspection takes the real registered cold-refresh route through the watcher/indexer.
         const initial = yield* invoke({operation: 'path', from: 'beta', to: 'alpha'});
         expect(initial.isError, JSON.stringify(initial)).not.toBe(true);
-        yield* Deferred.await(inferenceStarted).pipe(Effect.timeout(10000));
+        yield* Deferred.await(inferenceStarted).pipe(
+          Effect.timeoutOrElse({
+            duration: 10000,
+            orElse: () =>
+              Effect.fail(
+                TestError.make({
+                  message: `Automatic embedding inference did not start within 10s; wakes=${wakes}; worker=${workerExit}; outcomes=${JSON.stringify(workerOutcomes)}`,
+                }),
+              ),
+          }),
+        );
+        expect(forcedContentionObserved, 'the collector must retry a deferred attempt before inference').toBe(true);
         const pending = yield* query.status(home, repository, {manifestPath, requestMaintenance: false});
         expect(pending.readySnapshot).toBeDefined();
         expect(pending.readySnapshot?.scopeId !== undefined).toBe(scoped);
@@ -403,7 +431,11 @@ for (const scoped of [false, true])
         ])
           yield* command.execute('git', args, {cwd: structuralRepository});
         const beforeOffInference = inference;
-        const structural = yield* indexer.index({cwd: structuralRepository, threadnoteHome: home, vectorPolicy: 'off'});
+        const structural = yield* indexer.index({
+          cwd: structuralRepository,
+          threadnoteHome: home,
+          vectorPolicy: 'off',
+        });
         expect(structural.semantic?.state).toBe('not-requested');
         expect(wakes, 'explicit off').toBe(beforeWakes);
         const structuralStatus = yield* query.status(home, structuralRepository, {
@@ -443,7 +475,13 @@ for (const scoped of [false, true])
         yield* resumeExistingCodeGraphEmbeddingDemand(home);
         expect(wakes).toBe(beforeWakes);
         expect(inference).toBe(beforeOffInference);
-      }).pipe(provideTestLayer(graph), TestClock.withLive);
+      });
+      return Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        // Close graph watchers and child processes before removing their repository.
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'registered-graph-embedding-'});
+        return yield* run(home).pipe(provideTestLayer(graph));
+      }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive);
     },
     60000,
   );
