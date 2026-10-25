@@ -12,7 +12,7 @@ import {
 } from './vector/generation.js';
 import {inspectVectorPageStorageSql} from './vector/retirement/inspection.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Context, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
+import {Cause, Clock, Context, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -282,6 +282,8 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
   readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
   readonly ownerToken?: string;
   readonly abandonedOwnerToken?: string;
+  /** Retain completed ownership only when the caller will retry with the same token. */
+  readonly retainPublicationClaimOnFailure?: (cause: unknown) => boolean;
   readonly catalog: LocalModelCatalogShape;
   readonly force: boolean;
   readonly fs: FileSystem.FileSystem;
@@ -658,7 +660,11 @@ export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVect
         };
       }).pipe(
         Effect.onExit(exit =>
-          Exit.isFailure(exit) && (terminalValidationFailure || !preservePublicationClaim || Exit.hasInterrupts(exit))
+          Exit.isFailure(exit) &&
+          (terminalValidationFailure ||
+            !preservePublicationClaim ||
+            Cause.hasInterrupts(exit.cause) ||
+            input.retainPublicationClaimOnFailure?.(Cause.squash(exit.cause)) !== true)
             ? protect(1, 4096, lock(releaseCodeGraphGenerationClaim(sql, generation, ownerToken))).pipe(Effect.ignore)
             : Effect.void,
         ),
