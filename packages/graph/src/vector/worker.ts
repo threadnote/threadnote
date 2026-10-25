@@ -60,6 +60,17 @@ export interface CodeGraphEmbeddingWorkerOptions {
   readonly onUnitResult?: (result: CodeGraphEmbeddingWorkerOutcome) => Effect.Effect<void, unknown>;
 }
 
+/** Generation and demand ownership must agree about retrying the same token. */
+export function isCodeGraphEmbeddingWorkerContention(error: unknown): boolean {
+  const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
+  return (
+    (typeof error === 'object' && error !== null && 'recovery' in error && error.recovery === 'defer') ||
+    isFileLockTimeout(error) ||
+    tag === 'CodeGraphStoreBusyError' ||
+    tag === 'CodeGraphMaintenanceActiveError'
+  );
+}
+
 /** A single bounded lane turn; inference is outside every structural publication gate. */
 const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorkerUnit')(function* (input: {
   readonly home: string;
@@ -238,6 +249,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
           publication,
           abandonedOwnerToken,
           ownerToken: pinned.owner.token,
+          retainPublicationClaimOnFailure: isCodeGraphEmbeddingWorkerContention,
           maximumSteps: 1,
           maximumInferenceSymbolsPerStep: 32,
           inferenceBatchSize: 32,
@@ -275,13 +287,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
       const superseded = tag === 'CodeGraphEmbeddingWorkerSuperseded' || tag === 'CodeGraphVectorPublicationSuperseded';
       const modelInvalidated = tag === 'CodeGraphEmbeddingWorkerModelInvalidated';
-      const reservationContention =
-        typeof error === 'object' && error !== null && 'recovery' in error && error.recovery === 'defer';
-      const contention =
-        reservationContention ||
-        isFileLockTimeout(error) ||
-        tag === 'CodeGraphStoreBusyError' ||
-        tag === 'CodeGraphMaintenanceActiveError';
+      const contention = isCodeGraphEmbeddingWorkerContention(error);
       return Effect.gen(function* () {
         const publicationModelChanged =
           tag === 'CodeGraphVectorPublicationSuperseded'
