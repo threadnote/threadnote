@@ -2,6 +2,13 @@ import {Effect, Schema} from 'effect';
 import type {MemoryRelation} from '@threadnote/memory/document';
 import type {MemoryCodeCitationV1} from '@threadnote/memory/code/citation';
 import type {DeferredCodeAnchorWriteRequest} from '../memory/deferred/code_anchor.js';
+import type {WorkflowNameFamily} from '@threadnote/workflow-automations/naming';
+
+export const WorkflowNameFamilySchema = Schema.Struct({
+  policyVersion: Schema.Literal(1),
+  slug: Schema.String,
+  ordinal: Schema.Finite,
+});
 
 export const WORKFLOW_PROTOCOL_VERSION = 1 as const;
 export type WorkflowProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
@@ -33,6 +40,7 @@ export const WorkflowRequestSchema = Schema.Struct({
   workflowRunId: optionalText,
   project: optionalText,
   featureId: optionalText,
+  naming: Schema.optionalKey(WorkflowNameFamilySchema),
   generation: optionalText,
   profile: Schema.optionalKey(Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'])),
   team: optionalText,
@@ -41,6 +49,7 @@ export const WorkflowRequestSchema = Schema.Struct({
   artifactKey: optionalText,
   sourceRunId: optionalText,
   role: optionalText,
+  nameHint: optionalText,
   body: optionalText,
   bodySha256: optionalText,
   storageKind: Schema.optionalKey(Schema.Literals(['handoff', 'durable'])),
@@ -84,6 +93,7 @@ export type WorkflowOperationInspectionRequest = typeof WorkflowOperationInspect
 
 export interface WorkflowBinding {
   readonly bindingId: string;
+  readonly naming?: WorkflowNameFamily;
   readonly workflowRunId: string;
   readonly profile: WorkflowProfile;
   readonly project: string;
@@ -104,6 +114,7 @@ export interface WorkflowArtifact {
   readonly artifactKey: string;
   readonly sourceRunId: string;
   readonly role: string;
+  readonly naming?: {readonly role: string; readonly version: number; readonly archiveOrdinal?: number};
   readonly canonicalUri: string;
   readonly memoryId: string;
   readonly revision: string;

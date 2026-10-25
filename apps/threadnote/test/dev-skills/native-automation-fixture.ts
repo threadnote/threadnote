@@ -9,7 +9,9 @@ import {provideTestLayer} from '../helpers/effect-layer.js';
 export const provideNative = <A, E, R>(program: Effect.Effect<A, E, R>) =>
   program.pipe(provideTestLayer(ApplicationLayer));
 
-export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function* () {
+export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function* (
+  environment: Readonly<Record<string, string | undefined>> = {},
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -28,7 +30,7 @@ export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function
     agentContextHome: home,
     manifestPath: path.join(home, 'manifest.json'),
   };
-  const scopedSystem = {...system, currentDirectory: () => repo, environment: () => ({})};
+  const scopedSystem = {...system, currentDirectory: () => repo, environment: () => environment};
   const call = (input: unknown, current = config) =>
     runWorkflowAutomation(current, input).pipe(Effect.provideService(SystemInfo, scopedSystem));
   const base = (action: string, runId = 'native-run', generation = 'skill-generation-v1') => ({

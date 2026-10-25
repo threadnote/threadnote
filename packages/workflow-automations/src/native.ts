@@ -1,5 +1,6 @@
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
 import {
   WorkflowAutomationError,
   type WorkflowArtifact,
@@ -62,11 +63,13 @@ const relation = Schema.Struct({
 });
 const profile = Schema.Literals(['desktop', 'codex-cloud-personal', 'cursor-cloud-personal']);
 const revisions = Schema.NullOr(digest);
+const nameFamily = Schema.Struct({policyVersion: Schema.Literal(1), slug: Schema.String, ordinal: Schema.Finite});
 
 const intentFields = {
   operationId: portableId,
   artifactKey: portableId,
   role: portableId,
+  nameHint: Schema.optionalKey(nonEmpty(48).check(Schema.isPattern(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u))),
   body,
   expectedRevision: revisions,
   uri: Schema.optionalKey(uri),
@@ -89,6 +92,7 @@ const actionSchemas = [
     runId: portableId,
     project: portableId,
     featureId: portableId,
+    title: Schema.optionalKey(nonEmpty(4096)),
     generation,
     profile: Schema.optionalKey(profile),
     team: Schema.optionalKey(portableId),
@@ -115,6 +119,7 @@ const nativeIntentSchema = Schema.Struct({
   artifactKey: portableId,
   sourceRunId: portableId,
   role: portableId,
+  nameHint: Schema.optionalKey(nonEmpty(48)),
   body,
   expectedRevision: revisions,
   uri: Schema.optionalKey(uri),
@@ -150,6 +155,8 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   runId: portableId,
   project: portableId,
   featureId: portableId,
+  title: Schema.optionalKey(nonEmpty(4096)),
+  naming: Schema.optionalKey(nameFamily),
   generation,
   profile,
   team: Schema.optionalKey(portableId),
@@ -183,12 +190,14 @@ function decode<A>(schema: Schema.ConstraintDecoder<A>, input: unknown, code: st
 }
 
 export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowRequest {
-  return decode(
+  const request = decode(
     NativeWorkflowRequestSchema,
     input,
     'invalid-request',
     'The native workflow request is malformed or contains unsupported fields.',
   );
+  if (request.action === 'init') workflowTitleSlug(request.title ?? request.featureId);
+  return request;
 }
 
 export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
@@ -201,6 +210,15 @@ export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
     throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
   }
   const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
+  if (state.naming) {
+    try {
+      workflowFamilyStem(state.naming);
+      if (!state.title || workflowTitleSlug(state.title) !== state.naming.slug)
+        throw fail('invalid-state', 'The native title differs from its pinned name family.');
+    } catch {
+      throw fail('invalid-state', 'The native name family is invalid.');
+    }
+  }
   const operationIds = new Set<string>();
   for (const operation of state.operations) {
     const {intent} = operation;

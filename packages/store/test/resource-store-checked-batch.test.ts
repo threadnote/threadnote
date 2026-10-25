@@ -116,6 +116,50 @@ describe('checked ResourceStore batches', () => {
     }).pipe(TestClock.withLive, provideLayer(testLayer)),
   );
 
+  effectIt.effect('uses the caller clock for a store layer built under the default test clock', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'store-checked-live-lock-clock-'});
+      const acquired = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const contended = yield* Deferred.make<void>();
+      const layer = ResourceStore.layerWith({
+        onMutationLockAcquired: event =>
+          event.uri === sourceUri ? Deferred.succeed(acquired, undefined).pipe(Effect.asVoid) : Effect.void,
+        onMutationLockContention: event =>
+          event.uri === incomingUri ? Deferred.succeed(contended, undefined).pipe(Effect.asVoid) : Effect.void,
+      }).pipe(Layer.provide(dependencies));
+      // Deliberately build the service before entering withLive. Its captured lock
+      // context must not pin later account-lock retries to this TestClock.
+      const storeContext = yield* Layer.build(layer);
+      yield* Effect.gen(function* () {
+        const store = yield* ResourceStore;
+        const first = yield* store
+          .writeChecked(
+            location(home),
+            sourceUri,
+            'first writer',
+            {mode: 'create'},
+            Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          )
+          .pipe(Effect.forkChild({startImmediately: true}));
+        yield* Deferred.await(acquired);
+        const second = yield* store
+          .write(location(home), incomingUri, 'second writer', {mode: 'create'})
+          .pipe(Effect.forkChild({startImmediately: true}));
+        yield* Deferred.await(contended);
+        yield* Effect.sleep('60 millis');
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(first).pipe(Effect.timeout('2 seconds'));
+        yield* Fiber.join(second).pipe(Effect.timeout('2 seconds'));
+        expect(yield* store.read(location(home), sourceUri)).toBe('first writer');
+        expect(yield* store.read(location(home), incomingUri)).toBe('second writer');
+        yield* store.write(location(home), archiveUri, 'after contention', {mode: 'create'});
+        expect(yield* store.read(location(home), archiveUri)).toBe('after contention');
+      }).pipe(Effect.provide(storeContext), TestClock.withLive);
+    }).pipe(provideLayer(dependencies)),
+  );
+
   fcEffectProp(
     effectIt,
     'rejected checks leave every batch resource unchanged',

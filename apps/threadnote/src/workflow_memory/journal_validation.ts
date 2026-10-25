@@ -6,6 +6,14 @@ import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
 import {assertWorkflowEvidenceSnapshot, workflowEvidenceScopes} from './evidence.js';
+import {workflowFamilyStem, workflowMemoryStem} from '@threadnote/workflow-automations/naming';
+import {
+  workflowArtifactTopic,
+  workflowStateTopic,
+  workflowArtifactUri,
+  workflowArchiveUri,
+  workflowRoleName,
+} from './naming.js';
 import {
   portableKey,
   stableJson,
@@ -28,13 +36,10 @@ const object = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value);
 const same = (left: unknown, right: unknown) => stableJson(left) === stableJson(right);
 const root = (binding: WorkflowBinding) => `threadnote://user/${uriSegment(binding.user)}/memories`;
-const topic = (binding: WorkflowBinding, key: string) => `workflow-${binding.bindingId}-${key}`;
 const memoryId = (binding: WorkflowBinding, artifact: WorkflowArtifact) =>
   `tn_${sha256HexSync(`${binding.bindingId}\n${artifact.sourceRunId}\n${artifact.artifactKey}`).slice(0, 20)}`;
-const activeUri = (binding: WorkflowBinding, artifact: WorkflowArtifact) =>
-  `${root(binding)}/${artifact.storageKind === 'durable' ? 'durable/projects' : 'handoffs/active'}/${uriSegment(binding.project)}/${uriSegment(topic(binding, artifact.artifactKey))}.md`;
-const archiveUri = (binding: WorkflowBinding, artifact: WorkflowArtifact, operationId: string) =>
-  `${root(binding)}/${artifact.storageKind === 'durable' ? 'durable' : 'handoffs'}/archived/${uriSegment(binding.project)}/${topic(binding, `archive-${operationId}`)}.md`;
+const activeUri = workflowArtifactUri;
+const archiveUri = workflowArchiveUri;
 
 function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, uri: string): void {
   check(object(artifact));
@@ -46,8 +51,18 @@ function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, ur
   check(artifact.canonicalUri === uri && parseResourceId(uri).canonicalUri === uri);
   check(artifact.memoryId === memoryId(binding, artifact));
   check(/^[a-f0-9]{64}$/u.test(artifact.revision) && /^[a-f0-9]{64}$/u.test(artifact.bodySha256));
-  if (artifact.state === 'active') check(uri === activeUri(binding, artifact));
-  else {
+  if (binding.naming) {
+    check(artifact.naming);
+    workflowMemoryStem(binding.naming, artifact.naming.role, artifact.naming.version);
+  } else check(artifact.naming === undefined);
+  if (artifact.state === 'active') {
+    check(artifact.naming?.archiveOrdinal === undefined);
+    check(uri === activeUri(binding, artifact));
+  } else {
+    if (binding.naming) {
+      check(uri === archiveUri(binding, artifact, ''));
+      return;
+    }
     const prefix = archiveUri(binding, artifact, '');
     const suffix = uri.slice(prefix.length - 3, -3);
     portableKey(suffix, 'archive operationId');
@@ -60,7 +75,7 @@ function manifestArtifacts(state: WorkflowJournal, content: string): WorkflowJou
   const record = parseMemoryDocument(state.manifestUri, content);
   check(record && record.metadata.kind === 'handoff' && record.metadata.status === 'active');
   check(record.metadata.project === state.binding.project);
-  check(record.metadata.topic === topic(state.binding, 'manifest'));
+  check(record.metadata.topic === workflowStateTopic(state.binding));
   check(record.metadata.memoryId === `tn_${state.binding.bindingId.slice(0, 20)}`);
   check(record.metadata.sourceSessionId === state.binding.workflowRunId);
   const parsed: unknown = JSON.parse(record.body);
@@ -86,6 +101,9 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   check(operation.intentDigest === sha256HexSync(stableJson(request)));
   const artifact = operation.artifact;
   assertArtifact(binding, artifact, artifact?.canonicalUri);
+  if (binding.naming && request.action === 'create')
+    check(artifact.naming?.role === (request.nameHint ?? workflowRoleName(request.role!)));
+  if (binding.naming && request.nameHint !== undefined) check(artifact.naming?.role === request.nameHint);
   check(
     request.artifactKey === artifact.artifactKey &&
       request.sourceRunId === artifact.sourceRunId &&
@@ -94,7 +112,7 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
   check(typeof operation.desired === 'string' && artifact.revision === sha256HexSync(operation.desired));
   const record = parseMemoryDocument(artifact.canonicalUri, operation.desired);
   check(record && record.metadata.memoryId === artifact.memoryId && record.metadata.project === binding.project);
-  check(record.metadata.topic === topic(binding, artifact.artifactKey));
+  check(record.metadata.topic === workflowArtifactTopic(binding, artifact.artifactKey, artifact.naming));
   check(record.metadata.sourceSessionId === binding.workflowRunId && record.metadata.kind === artifact.storageKind);
   check(record.metadata.status === artifact.state && record.metadata.sourceAgentClient === 'threadnote');
   if (request.action === 'archive') {
@@ -122,7 +140,8 @@ function assertOperation(state: WorkflowJournal, key: string, operation: Workflo
     const before = parseMemoryDocument(operation.sourceUri, operation.before);
     check(before && before.metadata.memoryId === artifact.memoryId && before.metadata.status === 'active');
     check(
-      before.metadata.topic === topic(binding, artifact.artifactKey) && before.metadata.project === binding.project,
+      before.metadata.topic === workflowArtifactTopic(binding, artifact.artifactKey, artifact.naming) &&
+        before.metadata.project === binding.project,
     );
     check(before.metadata.sourceSessionId === binding.workflowRunId && before.metadata.kind === artifact.storageKind);
     if (request.action === 'archive') {
@@ -152,6 +171,12 @@ function assertSourceOwned(operation: WorkflowOperation, artifacts: WorkflowJour
   check(source?.state === 'active');
   for (const field of ['artifactKey', 'sourceRunId', 'role', 'memoryId', 'storageKind'] as const)
     check(source[field] === operation.artifact[field]);
+  check(
+    same(
+      source.naming && {...source.naming, archiveOrdinal: undefined},
+      operation.artifact.naming && {...operation.artifact.naming, archiveOrdinal: undefined},
+    ),
+  );
 }
 
 function assertPreparedRelations(
@@ -243,10 +268,11 @@ export function assertWorkflowJournalIntegrity(
 ): void {
   check(state.protocolVersion === 1 && object(state.binding) && object(state.artifacts) && object(state.operations));
   const {bindingId, ...identity} = state.binding;
+  if (state.binding.naming) workflowFamilyStem(state.binding.naming);
   check(bindingId === sha256HexSync(stableJson(identity)));
   check(
     state.manifestUri ===
-      `${root(state.binding)}/handoffs/active/${uriSegment(state.binding.project)}/${topic(state.binding, 'manifest')}.md`,
+      `${root(state.binding)}/handoffs/active/${uriSegment(state.binding.project)}/${uriSegment(workflowStateTopic(state.binding))}.md`,
   );
   const desired = manifestArtifacts(state, state.manifestContent);
   check(same(desired, state.artifacts));

@@ -148,8 +148,9 @@ describe('native workflow graph evidence contention', () => {
     Effect.gen(function* () {
       const f = yield* readyFixture();
       const request = citationWrite(f, 'readback-citations');
-      const bindingId = f.initialized.bindingId;
-      const targetUri = `threadnote://user/tester/memories/durable/projects/fixture/workflow-${bindingId}-readback-citations.md`;
+      const preflight = yield* f.f.call({...request, action: 'preflight'}, f.config);
+      if (!('uri' in preflight)) return yield* Effect.die('Expected the current named destination.');
+      const targetUri = preflight.uri;
       const store = yield* ResourceStore;
       let wrote = false;
       let busyReads = 0;

@@ -6,6 +6,7 @@
     "./contracts": "./src/contracts.ts",
     "./documents": "./src/documents.ts",
     "./inventory": "./src/inventory.ts",
+    "./naming": "./src/naming.ts",
     "./native": "./src/native.ts",
     "./scenarios": "./src/scenarios.ts"
   },
