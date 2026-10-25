@@ -1125,7 +1125,7 @@ describe('Manager retained reviewed provenance', () => {
         const privateInbox = await fetch(`${server.url}/api/reviews?project=threadnote&view=pending`, {headers});
         const inboxText = await privateInbox.text();
         expect(inboxText).not.toMatch(/Edited info\.|Changed private source\./u);
-        expect(inboxText).toContain('Source access is unavailable');
+        expect(inboxText).toContain('Open the exact review to check current source access.');
         if (mode === 'reject-stale-source') {
           const changedSelection = {
             project: 'threadnote',

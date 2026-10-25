@@ -26,6 +26,7 @@ import {
 } from '@threadnote/context/topic_maintenance';
 import {verifyTopicObsidianReviewSource} from './maintenance_obsidian.js';
 import {maintenanceContentHash} from './maintenance_policy.js';
+import {withAutomaticReviewCodeObservations} from './maintenance_review_code_observation.js';
 import {readContextMaintenanceSourceEpoch} from './maintenance_evidence.js';
 import {
   basisFromPacket,
@@ -282,4 +283,4 @@ export const verifyAutomaticMaintenanceReviewSource = Effect.fn('automaticMainte
       // Its positive current evidence is authoritative here; unrelated global inventory is not required.
     } else return yield* fail('Imported support requires its explicit retained-evidence provider review.');
   }
-});
+}, withAutomaticReviewCodeObservations);

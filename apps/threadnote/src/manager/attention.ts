@@ -19,7 +19,6 @@ import {collectContextHealth} from '../memory/context/health_commands.js';
 import {normalizeContextHealthSelector} from '../memory/context/health_selector.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {managerProjectPathIsForeign} from './project/roots.js';
-import {readTopicMaintenanceDraft} from '../memory/context/maintenance_draft.js';
 import {maintenanceContentHash} from '../memory/context/maintenance_policy.js';
 
 type ManagerAttentionResponse =
@@ -67,30 +66,10 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
               : isPending(candidate.state),
       ),
     );
-    // A view never needs source validation for reviews it will not display.
-    // Keep each displayed imported review private unless its exact stored journal
-    // passes a fresh source check, including when a check fails or races a write.
-    const accessible = yield* Effect.forEach(
-      visibleReviews,
-      review =>
-        review.maintenance?.version !== 2 && review.maintenance?.version !== 3
-          ? Effect.succeed(false)
-          : readTopicMaintenanceDraft(request.config, review.reviewId).pipe(
-              Effect.result,
-              Effect.map(
-                checked => Result.isSuccess(checked) && JSON.stringify(checked.success) === JSON.stringify(review),
-              ),
-            ),
-      {concurrency: 4},
-    );
-    const privateAccess = new Set(
-      visibleReviews.flatMap((review, index) => (accessible[index] ? [review.reviewId] : [])),
-    );
+    // Typed review cards display metadata only. Opening the exact review owns live authorization and source proof.
     const items = visibleReviews
       .map(review => {
-        const withheld =
-          (review.maintenance?.version === 2 || review.maintenance?.version === 3) &&
-          !privateAccess.has(review.reviewId);
+        const metadataOnly = review.maintenance?.version === 2 || review.maintenance?.version === 3;
         return {
           ...(review.maintenance
             ? {kind: review.maintenance.version === 3 ? ('automatic-memory' as const) : ('topic-maintenance' as const)}
@@ -110,20 +89,18 @@ export const handleManagerAttentionRequest = Effect.fn('managerAttention.handleR
               categories: candidate.categories,
               comparison: candidate.comparison,
               confidence: candidate.confidence,
-              proposedText: withheld ? '' : candidate.proposedText,
-              reason: withheld
-                ? 'Source access is unavailable. Refresh source access before opening this update.'
-                : candidate.reason,
+              proposedText: metadataOnly ? '' : candidate.proposedText,
+              reason: metadataOnly ? 'Open the exact review to check current source access.' : candidate.reason,
               recommendation: candidate.recommendation,
               state: candidate.state,
-              ...(withheld || candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
+              ...(metadataOnly || candidate.targetUri === undefined ? {} : {targetUri: candidate.targetUri}),
             })),
           createdAt: review.createdAt,
           project: review.project,
           reviewId: review.reviewId,
           revision: review.revision,
-          task: withheld ? 'Private topic update' : review.task,
-          topic: withheld ? 'Private topic update' : review.topic,
+          task: metadataOnly ? 'Prepared memory update' : review.task,
+          topic: metadataOnly ? 'Private topic update' : review.topic,
         };
       })
       .filter(review => review.candidates.length > 0)
