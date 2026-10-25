@@ -1,8 +1,15 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "nativeRequirements": {
+    "executorVersion": 1,
+    "authoringVersion": 1,
+    "cycleVersion": 1,
+    "watchVersion": 1,
+    "closeoutVersion": 1
+  },
   "workflowProtocol": 1,
   "stateSchema": 1,
-  "minimumRuntime": "5.3.0-beta.4",
+  "minimumRuntime": "5.3.0-beta.7",
   "skills": [
     {
       "id": "dev-spec",
@@ -12,12 +19,7 @@
         "agents/openai.yaml",
         "references/contract.md",
         "references/review.md",
-        "references/workflow.md",
-        "scripts/dev_spec.py",
-        "scripts/portable_lock.py",
-        "scripts/spec_closeout.py",
-        "scripts/support.py",
-        "scripts/workflow_transport.py"
+        "references/workflow.md"
       ]
     },
     {
@@ -28,14 +30,7 @@
         "agents/openai.yaml",
         "references/contract.md",
         "references/native-authoring.md",
-        "references/review.md",
-        "scripts/archive_transport.py",
-        "scripts/closeout.py",
-        "scripts/cloud_closeout.py",
-        "scripts/dev_plan.py",
-        "scripts/portable_lock.py",
-        "scripts/workflow.py",
-        "scripts/workflow_transport.py"
+        "references/review.md"
       ]
     },
     {
@@ -51,23 +46,17 @@
         "references/implementation.md",
         "references/learning-records.md",
         "references/learning.md",
+        "references/native-bootstrap.md",
+        "references/native.md",
         "references/phases.md",
         "references/review.md",
-        "references/state-and-snapshots.md",
-        "scripts/dev_cycle.py",
-        "scripts/phase_state.py"
+        "references/state-and-snapshots.md"
       ]
     },
     {
       "id": "watch-pr",
       "role": "support",
-      "files": [
-        "SKILL.md",
-        "agents/openai.yaml",
-        "references/background-worker.md",
-        "scripts/portable_lock.py",
-        "scripts/watch_pr.py"
-      ]
+      "files": ["SKILL.md", "agents/openai.yaml", "references/background-worker.md"]
     }
   ]
 }

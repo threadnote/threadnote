@@ -348,7 +348,7 @@ const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['
     stableJson({protocolVersion: 1, binding, artifacts}),
   );
 
-const workflowTransition = (
+export const workflowTransition = (
   previous: WorkflowJournal,
   updated: WorkflowJournal,
   timestamp: string,

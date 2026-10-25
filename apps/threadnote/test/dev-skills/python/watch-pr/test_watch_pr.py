@@ -2,8 +2,9 @@
 """Offline regression/property tests; no authenticated GitHub calls."""
 import sys
 from pathlib import Path
-PRODUCT_SKILLS = Path(__file__).resolve().parents[6] / "config/agent-skills"
-sys.path[:0] = [str(PRODUCT_SKILLS / skill / "scripts") for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+PRODUCT_SKILLS = configure_product_skills(__file__, 6)
 import copy
 from portable_lock import lock_exclusive
 import json
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import watch_pr as watcher
+assert_product_provenance(PRODUCT_SKILLS, "watch-pr-imports")
 
 
 def fixture():

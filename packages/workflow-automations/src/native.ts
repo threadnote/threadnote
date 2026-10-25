@@ -1,6 +1,7 @@
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
+import {NativeCycleRuntimeSchema, decodeNativeCycleRuntime} from './cycle_runtime.js';
 import {
   WorkflowAutomationError,
   type WorkflowArtifact,
@@ -20,6 +21,16 @@ const portableId = Schema.String.check(
   Schema.makeFilter(value =>
     value.includes('..') || value === 'constructor' || value === 'prototype' || value === '__proto__'
       ? 'Reserved identifiers are not allowed.'
+      : undefined,
+  ),
+);
+// Run IDs become filenames in native state storage. Keep that filesystem
+// portability constraint separate from logical identifiers such as
+// operationId, whose v1 grammar already admitted Windows device names.
+const safeRunId = portableId.check(
+  Schema.makeFilter(value =>
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(value)
+      ? 'Windows device names are not allowed for run IDs.'
       : undefined,
   ),
 );
@@ -84,13 +95,13 @@ const requestBase = {
   protocolVersion: Schema.Literal(nativeWorkflowProtocolVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
 } as const;
-const commonRun = {runId: portableId, generation} as const;
+const commonRun = {runId: safeRunId, generation} as const;
 const actionSchemas = [
   Schema.Struct({...requestBase, action: Schema.Literal('capabilities')}),
   Schema.Struct({
     ...requestBase,
     action: Schema.Literal('init'),
-    runId: portableId,
+    runId: safeRunId,
     project: portableId,
     featureId: portableId,
     title: Schema.optionalKey(nonEmpty(4096)),
@@ -111,6 +122,8 @@ const actionSchemas = [
   Schema.Struct({...requestBase, action: Schema.Literal('recover'), ...commonRun, operationId: portableId}),
 ] as const;
 
+export const NativeWorkflowInitRequestSchema = actionSchemas[1];
+export const NativeWorkflowReadRequestSchema = actionSchemas[3];
 export const NativeWorkflowRequestSchema = Schema.Union(actionSchemas);
 export type NativeWorkflowRequest = typeof NativeWorkflowRequestSchema.Type;
 
@@ -166,12 +179,31 @@ export const NativeAuthoringSaveReservationSchema = Schema.Struct({
   reservedBytes: boundedBytes,
 });
 export type NativeAuthoringSaveReservation = typeof NativeAuthoringSaveReservationSchema.Type;
+export const NativeCloseoutSaveReservationSchema = Schema.Struct({
+  reservedStoredBytes: boundedBytes,
+  journalStoredBytesAtStart: Schema.Finite.check(
+    Schema.isInt(),
+    Schema.isBetween({minimum: 0, maximum: 16 * 1024 * 1024}),
+  ),
+  transactionId: digest,
+  intentDigest: digest,
+  operationIds: Schema.Array(nonEmpty(256)).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(nativeWorkflowOperationLimit),
+  ),
+  operationStart: boundedCount,
+  operationLimit: boundedCount,
+  prefixDigest: digest,
+  journalBytesAtStart: boundedBytes,
+  stateBytesAtStart: boundedBytes,
+  reservedBytes: boundedBytes,
+});
 
 const nativeWorkflowStateFields = {
   format: Schema.Literal('threadnote-native-workflow'),
   stateVersion: Schema.Literal(nativeWorkflowStateVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
-  runId: portableId,
+  runId: safeRunId,
   project: portableId,
   featureId: portableId,
   title: Schema.optionalKey(nonEmpty(4096)),
@@ -181,8 +213,9 @@ const nativeWorkflowStateFields = {
   team: Schema.optionalKey(portableId),
   bindingId: digest,
   authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
+  closeoutSave: Schema.optionalKey(NativeCloseoutSaveReservationSchema),
+  cycle: Schema.optionalKey(NativeCycleRuntimeSchema),
 } as const;
-
 export const NativeWorkflowStateSchema = Schema.Struct({
   ...nativeWorkflowStateFields,
   operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
@@ -320,6 +353,11 @@ function validateNativeWorkflowState(
   hash: (value: string) => string,
   isCachedOperation: (operation: NativeOperation) => boolean = () => false,
 ): void {
+  if (state.cycle) {
+    decodeNativeCycleRuntime(state.cycle);
+    if (state.cycle.state.plan.featureId !== state.featureId || state.cycle.state.plan.project !== state.project)
+      throw fail('invalid-state', 'Cycle and native run identities differ.');
+  }
   if (state.naming) {
     try {
       workflowFamilyStem(state.naming);
@@ -340,6 +378,24 @@ function validateNativeWorkflowState(
       save.stateBytesAtStart + save.reservedBytes > byteLimit
     )
       throw fail('invalid-state', 'The authoring save reservation differs from its original receipts or capacity.');
+  }
+  if (state.closeoutSave) {
+    const save = state.closeoutSave;
+    if (
+      save.journalStoredBytesAtStart + save.reservedStoredBytes > 16 * 1024 * 1024 ||
+      state.authoringSave ||
+      save.operationStart > state.operations.length ||
+      state.operations.length > save.operationLimit ||
+      save.operationLimit - save.operationStart !== save.operationIds.length ||
+      new Set(save.operationIds).size !== save.operationIds.length ||
+      save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
+      save.journalBytesAtStart + save.reservedBytes > byteLimit ||
+      save.stateBytesAtStart + save.reservedBytes > byteLimit ||
+      state.operations
+        .slice(save.operationStart)
+        .some(operation => !save.operationIds.includes(operation.intent.operationId))
+    )
+      throw fail('invalid-state', 'The closeout reservation differs from its original receipts or capacity.');
   }
   const operationIds = new Set<string>();
   for (const operation of state.operations) {

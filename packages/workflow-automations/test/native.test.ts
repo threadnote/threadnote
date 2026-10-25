@@ -13,6 +13,7 @@ import {
 } from '../src/native.js';
 import type {NativeWorkflowState} from '../src/native.js';
 import type {WorkflowWriteIntent} from '../src/contracts.js';
+import {decodeNativeCyclePlan, initializeNativeCycle} from '../src/cycle.js';
 
 const hash = 'a'.repeat(64);
 const stateBase: NativeWorkflowState = {
@@ -131,7 +132,17 @@ describe('native workflow request protocol', () => {
   });
 
   it('enforces portable identifiers, bounded generation, and UTF-8 body bytes', () => {
-    for (const id of ['../escape', 'foo..bar', 'constructor', 'prototype', '__proto__'])
+    for (const id of [
+      '../escape',
+      'foo..bar',
+      'constructor',
+      'prototype',
+      '__proto__',
+      'prn',
+      'AUX.txt',
+      'com1',
+      'lpt9',
+    ])
       expect(
         caught(() =>
           decodeNativeWorkflowRequest({
@@ -145,6 +156,9 @@ describe('native workflow request protocol', () => {
           }),
         ),
       ).toMatchObject({code: 'invalid-request'});
+    expect(caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), runId: 'CON'}))).toMatchObject({
+      code: 'invalid-request',
+    });
     expect(caught(() => decodeNativeWorkflowRequest({...validWriteRequest(), generation: 'g\n1'}))).toMatchObject({
       code: 'invalid-request',
     });
@@ -220,6 +234,73 @@ describe('native workflow request protocol', () => {
 });
 
 describe('native workflow state', () => {
+  it('retains and validates native cycle runtime through the warmed cached decoder', () => {
+    const plan = decodeNativeCyclePlan({
+      format: 'threadnote-native-cycle-plan',
+      version: 1,
+      featureId: stateBase.featureId,
+      project: stateBase.project,
+      objective: 'Do work',
+      delivery: 'pr',
+      source: {
+        root: {uri: 'threadnote://user/me/plan', memoryId: 'tn_123', revision: hash},
+        binding: {bindingId: hash, runId: 'run', generation: 'gen', profile: 'desktop'},
+        documentHash: hash,
+      },
+      completion: {},
+      phases: [
+        {
+          id: 'one',
+          definitionHash: '1'.repeat(64),
+          title: 'One',
+          dependsOn: [],
+          allowedPaths: ['src/'],
+          acceptanceCriteria: ['works'],
+          safeToMergeReason: 'Safe',
+          branch: 'feature/one',
+          baseBranch: 'main',
+          status: 'pending',
+          acceptanceRefs: [{id: 'a1', criterion: 'works', requirements: ['req'], specScenarios: []}],
+        },
+      ],
+    });
+    const cycle = {
+      state: initializeNativeCycle(plan),
+      plans: [plan],
+      baselines: {},
+      reviewLimits: {},
+      reviewExpansions: [],
+      snapshots: [],
+      reviews: [],
+      attempts: [],
+    };
+    const operationIntent = intent();
+    const valid = {
+      ...stateBase,
+      cycle,
+      operations: [
+        {
+          status: 'prepared' as const,
+          intent: operationIntent,
+          intentDigest: nativeWorkflowIntentDigest(operationIntent),
+        },
+      ],
+    };
+
+    const decoder = makeNativeWorkflowStateDecoder();
+    const warmed = decoder(valid);
+    expect(warmed.cycle).toEqual(cycle);
+
+    const changedIdentity = {...warmed, featureId: 'other-feature'};
+    expect(caught(() => decodeNativeWorkflowState(changedIdentity))).toMatchObject({code: 'invalid-state'});
+    expect(caught(() => decoder(changedIdentity))).toMatchObject({code: 'invalid-state'});
+
+    if (!warmed.cycle) throw new Error('Expected cycle runtime to be retained.');
+    const corruptRuntime = {...warmed, cycle: {...warmed.cycle, reviewLimits: {one: 5}}};
+    expect(caught(() => decodeNativeWorkflowState(corruptRuntime))).toMatchObject({code: 'invalid-cycle-state'});
+    expect(caught(() => decoder(corruptRuntime))).toMatchObject({code: 'invalid-cycle-state'});
+  });
+
   it('accepts an empty native state and consistent prepared or verified operations', () => {
     expect(decodeNativeWorkflowState(stateBase)).toEqual(stateBase);
     const preparedIntent = intent();
@@ -251,6 +332,30 @@ describe('native workflow state', () => {
       ],
     };
     expect(decodeNativeWorkflowState(verified).operations[0]).toMatchObject({status: 'verified', artifact});
+  });
+
+  it('keeps the v1 logical operation ID grammar for Windows device names in requests and persisted intents', () => {
+    expect(caught(() => decodeNativeWorkflowState({...stateBase, runId: 'CON'}))).toMatchObject({
+      code: 'invalid-state',
+    });
+    const request = decodeNativeWorkflowRequest({...validWriteRequest(), operationId: 'CON'});
+    expect(request).toMatchObject({action: 'write', operationId: 'CON'});
+    const persistedIntent = intent({operationId: 'CON'});
+    const persisted = {
+      ...stateBase,
+      operations: [
+        {
+          status: 'prepared',
+          intent: persistedIntent,
+          intentDigest: nativeWorkflowIntentDigest(persistedIntent),
+        },
+      ],
+    };
+    expect(decodeNativeWorkflowState(persisted).operations[0]).toMatchObject({
+      status: 'prepared',
+      intent: {operationId: 'CON'},
+      intentDigest: nativeWorkflowIntentDigest(persistedIntent),
+    });
   });
 
   it('rejects unknown and Python state markers or versions with fresh-run guidance', () => {

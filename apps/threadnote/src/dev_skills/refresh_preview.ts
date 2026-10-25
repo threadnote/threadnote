@@ -22,7 +22,7 @@ import {
 } from './files.js';
 import {consumerId, enrollmentContext, homeIndexPath, parseHomeIndex, readReceipt, receiptPath} from './registry.js';
 import {inspectOwned, verifyReceiptProjection} from './inspection.js';
-import {loadDevSkillsBundleAt} from './manifest.js';
+import {loadDevSkillsBundleAt, parseNativeRequirements} from './manifest.js';
 import {installedSummary} from './capabilities.js';
 import {compareVersions} from '../release/version/compare.js';
 import {withRuntimeCoordinator} from './lease.js';
@@ -52,6 +52,15 @@ export const requirementsIssues = (
   installed: DevSkillsInstalled,
   capabilities: DevSkillsRuntimeCapabilities,
 ): DevSkillsIssue[] =>
+  (installed.manifestSchema === 2 &&
+    (capabilities.schemaVersion !== 2 ||
+      !capabilities.manifestSchemas?.includes(2) ||
+      !installed.nativeRequirements ||
+      !capabilities.nativeFeatures ||
+      Object.entries(installed.nativeRequirements).some(
+        ([key, required]) =>
+          capabilities.nativeFeatures?.[key as keyof typeof installed.nativeRequirements] !== required,
+      ))) ||
   !capabilities.workflowProtocols.includes(installed.workflowProtocol) ||
   !capabilities.stateSchemas.includes(installed.stateSchema) ||
   compareVersions(capabilities.runtimeVersion, installed.minimumRuntime) < 0
@@ -169,8 +178,47 @@ export const previewDevSkillsRefresh = Effect.fn('devSkills.previewRefresh')(fun
             Number.isSafeInteger(item.workflowProtocol) &&
             Number.isSafeInteger(item.stateSchema)
           ) {
-            issues.push(...requirementsIssues(item as unknown as DevSkillsInstalled, capabilities));
-            if (typeof item.schemaVersion === 'number' && item.schemaVersion !== 1)
+            if (typeof item.workflowProtocol === 'number' && typeof item.stateSchema === 'number')
+              issues.push(
+                ...requirementsIssues(
+                  {
+                    releaseVersion: item.releaseVersion,
+                    minimumRuntime: item.minimumRuntime,
+                    digest: item.digest,
+                    workflowProtocol: item.workflowProtocol,
+                    stateSchema: item.stateSchema,
+                  },
+                  capabilities,
+                ),
+              );
+            if (
+              item.schemaVersion === 2 &&
+              typeof item.workflowProtocol === 'number' &&
+              typeof item.stateSchema === 'number'
+            ) {
+              const native = yield* decode(json(item.nativeRequirements), parseNativeRequirements).pipe(Effect.result);
+              if (native._tag === 'Failure')
+                issues.push({
+                  code: 'incompatible',
+                  message: 'A retained native generation has invalid feature requirements.',
+                });
+              else
+                issues.push(
+                  ...requirementsIssues(
+                    {
+                      releaseVersion: item.releaseVersion,
+                      minimumRuntime: item.minimumRuntime,
+                      digest: item.digest,
+                      workflowProtocol: item.workflowProtocol,
+                      stateSchema: item.stateSchema,
+                      manifestSchema: 2,
+                      nativeRequirements: native.success,
+                    },
+                    capabilities,
+                  ),
+                );
+            }
+            if (typeof item.schemaVersion === 'number' && ![1, 2].includes(item.schemaVersion))
               issues.push({
                 code: 'incompatible',
                 message: 'A retained generation declares an unsupported manifest schema.',

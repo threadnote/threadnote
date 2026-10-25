@@ -104,7 +104,7 @@ def configure_product_skills(test_file, source_parents):
         validate_generation(root)
         root = root.resolve()
     else:
-        root = Path(test_file).resolve().parents[source_parents] / "config/agent-skills"
+        root = Path(test_file).resolve().parents[source_parents] / "apps/threadnote/test/dev-skills/python/oracle-skills"
         require(root.is_dir(), "source payload is missing; supply the explicit installed generation for copied fixtures")
     assert_product_provenance(root, "before-imports")
     sys.path[:0] = [str(root / skill / "scripts") for skill in ("dev-spec", "dev-plan", "dev-cycle", "watch-pr")]

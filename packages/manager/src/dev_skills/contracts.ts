@@ -55,14 +55,22 @@ export interface ManagerDevSkillMember {
   readonly role: 'primary' | 'support';
   readonly files: readonly string[];
 }
+export interface ManagerNativeWorkflowRequirements {
+  readonly executorVersion: number;
+  readonly authoringVersion: number;
+  readonly cycleVersion: number;
+  readonly watchVersion: number;
+  readonly closeoutVersion: number;
+}
 export interface ManagerDevSkillsManifest {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
+  readonly nativeRequirements?: ManagerNativeWorkflowRequirements;
   readonly workflowProtocol: 1;
   readonly stateSchema: 1;
   readonly minimumRuntime: string;
   readonly releaseVersion: string;
   readonly prerequisites: {
-    readonly python: string;
+    readonly python?: string;
     readonly commands: readonly string[];
     readonly prCommands: readonly string[];
   };
@@ -114,6 +122,8 @@ export interface ManagerDevSkillsTargetStatus extends ManagerDevSkillsEnrollment
 }
 
 export interface ManagerDevSkillsInstalled {
+  readonly manifestSchema?: 1 | 2;
+  readonly nativeRequirements?: ManagerNativeWorkflowRequirements;
   readonly releaseVersion: string;
   readonly digest: string;
   readonly workflowProtocol: number;

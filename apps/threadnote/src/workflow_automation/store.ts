@@ -12,6 +12,9 @@ import {CurrentWorkflowReadCache, immutableWorkflowImage} from '../workflow_memo
 export const CurrentNativeAuthoringSave = Context.Reference<string | undefined>('threadnote/NativeAuthoringSave', {
   defaultValue: () => undefined,
 });
+export const CurrentNativeCloseoutSave = Context.Reference<string | undefined>('threadnote/NativeCloseoutSave', {
+  defaultValue: () => undefined,
+});
 /** Internal test/service budget can reduce the ceiling, never increase the protocol limit. */
 export const CurrentNativeOperationLimit = Context.Reference<number>('threadnote/NativeOperationLimit', {
   defaultValue: () => 4096,
@@ -23,6 +26,7 @@ function checkRunId(runId: string): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(runId) ||
     runId.includes('..') ||
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(runId) ||
     ['constructor', 'prototype'].includes(runId)
   )
     throw issue('invalid-request', 'Native run IDs must be bounded portable identifiers, never paths.');
@@ -62,6 +66,17 @@ const statePath = Effect.fn('workflowAutomation.statePath')(function* (
   yield* Effect.try({try: () => checkRunId(runId), catch: error => error as WorkflowAutomationError});
   const directory = yield* stateDirectory(config, create);
   return directory === undefined ? undefined : (yield* Path.Path).join(directory, runId + '.json');
+});
+
+/** Fixed receipt namespace attached to an existing native run. */
+export const nativeCloseoutJournalPath = Effect.fn('workflowAutomation.closeoutJournalPath')(function* (
+  config: RuntimeConfig,
+  runId: string,
+) {
+  const file = yield* statePath(config, runId);
+  if (file === undefined || !(yield* readNativeWorkflowState(config, runId)))
+    return yield* issue('run-not-found', 'This native run does not exist. Start a fresh native run explicitly.');
+  return file + '.closeout.json';
 });
 
 const stateBytes = Effect.fn('workflowAutomation.stateBytes')(function* (file: string) {
@@ -112,6 +127,10 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
   return result;
 });
 
+/** Pure storage representation used by mutation-free transaction admission. */
+export const serializeNativeWorkflowState = (state: NativeWorkflowState, stringify = stableJson): string =>
+  encodeBoundedWorkflowJson(stringify(state) + '\n', STATE_CODEC);
+
 /** Call only under the run lock. CAS and rename preserve the old file on every failed preparation. */
 export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState')(function* (
   config: RuntimeConfig,
@@ -124,7 +143,7 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
     catch: error => error as WorkflowAutomationError,
   });
   const serialized = yield* Effect.try({
-    try: () => encodeBoundedWorkflowJson((cache?.stringify ?? stableJson)(validated) + '\n', STATE_CODEC),
+    try: () => serializeNativeWorkflowState(validated, cache?.stringify),
     catch: () =>
       issue('state-capacity', 'Native run state reached its byte limit. Existing receipts remain unchanged.'),
   });

@@ -97,6 +97,7 @@ const allNpm = Object.keys({...rootManifest.dependencies, ...rootManifest.devDep
   .sort();
 
 const packageDataRoots = {
+  'packages/workflow-automations': ['apps/threadnote/test/dev-skills/python/oracle-skills'],
   'packages/evidence': ['apps/threadnote/test/evaluation'],
   'packages/graph': [
     'assets/code-graph',

@@ -193,6 +193,8 @@ const nativePlanSchema = Schema.Struct({
   spec: Schema.optionalKey(linkedSpec),
 });
 
+export const NativeAuthoringSpecDocumentSchema = nativeSpecSchema;
+export const NativeAuthoringPlanDocumentSchema = nativePlanSchema;
 export const NativeAuthoringDocumentSchema = Schema.Union([nativeSpecSchema, nativePlanSchema]);
 export type NativeAuthoringDocument = typeof NativeAuthoringDocumentSchema.Type;
 

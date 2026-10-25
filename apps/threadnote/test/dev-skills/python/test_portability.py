@@ -13,11 +13,13 @@ import types
 import unittest
 from unittest.mock import patch
 
-SKILLS = Path(__file__).resolve().parents[5] / "config/agent-skills"
+from product_skills_fixture import configure_product_skills, assert_product_provenance
+SKILLS = configure_product_skills(__file__, 5)
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(SKILLS / "watch-pr/scripts"))
 import portable_lock
 import watch_pr
+assert_product_provenance(SKILLS, "portability-imports")
 
 
 class Portability(unittest.TestCase):

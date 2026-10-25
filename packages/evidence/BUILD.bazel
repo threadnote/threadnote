@@ -280,6 +280,7 @@ bun_test(
         "//apps/threadnote:src/value_report/events.ts",
         "//apps/threadnote:src/value_report/index.ts",
         "//apps/threadnote:src/worker_protocol.ts",
+        "//apps/threadnote:src/workflow_automation/features.ts",
         "//apps/threadnote:src/workflow_memory/profile.ts",
         "//apps/threadnote:src/workflow_memory/protocol.ts",
         "//apps/threadnote:src/workspace_component.ts",

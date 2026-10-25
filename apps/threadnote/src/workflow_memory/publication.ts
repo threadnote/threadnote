@@ -1,4 +1,4 @@
-import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Context, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {
@@ -613,4 +613,34 @@ export const assertWorkflowPublicationVerified = Effect.fn('workflowPublication.
     );
   yield* revalidateCitations(config, state.binding, journal.intent, true);
   return yield* verifyFinalGraph(config, state.binding, journal);
+});
+
+/** Internal coordinated closeout authority; never accepted from a CLI request. */
+export const CurrentWorkflowArchivePublication = Context.Reference<
+  {readonly bindingId: string; readonly approvalDigest: string} | undefined
+>('threadnote/WorkflowArchivePublication', {defaultValue: () => undefined});
+
+export const assertWorkflowArchivePublication = Effect.fn('workflowPublication.assertArchive')(function* (
+  config: RuntimeConfig,
+  binding: import('./protocol.js').WorkflowBinding,
+) {
+  const approval = yield* CurrentWorkflowArchivePublication;
+  const publishing = approval ? (yield* loadWorkflowJournal(config, approval.bindingId)).binding : binding;
+  if (
+    publishing.home !== binding.home ||
+    publishing.repo !== binding.repo ||
+    publishing.project !== binding.project ||
+    publishing.featureId !== binding.featureId ||
+    publishing.profile !== binding.profile ||
+    publishing.team !== binding.team ||
+    stableJson(publishing.sharedRoots) !== stableJson(binding.sharedRoots)
+  )
+    return yield* workflowError(
+      'publication-binding-drift',
+      'Publication does not authorize this feature and destination.',
+    );
+  const verified = yield* assertWorkflowPublicationVerified(config, publishing.bindingId);
+  if (approval && verified.approvalDigest !== approval.approvalDigest)
+    return yield* workflowError('publication-approval-changed', 'The approved closeout publication changed.');
+  return verified;
 });

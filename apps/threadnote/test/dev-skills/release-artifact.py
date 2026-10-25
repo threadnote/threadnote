@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import socket
 import subprocess
@@ -50,10 +51,11 @@ def inventory(root):
     return result
 
 
-def run(arguments, environment, cwd, timeout=120, evidence=None):
+def run(arguments, environment, cwd, timeout=120, evidence=None, input_text=None):
     # Own Python children use UTF-8 pipes; raw capture also preserves unexpected native diagnostics.
     result = subprocess.run(arguments, env={**environment, "PYTHONIOENCODING": "utf-8"}, cwd=cwd,
-                            capture_output=True, timeout=timeout)
+                            capture_output=True, timeout=timeout,
+                            input=None if input_text is None else input_text.encode("utf-8"))
 
     def decode(value, errors="strict"):
         return value.decode("utf-8", errors=errors).replace("\r\n", "\n").replace("\r", "\n")
@@ -91,7 +93,8 @@ def fixture_environment(root, runtime):
                    ("PATH", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC") if key in os.environ}
     user = root / "user"
     environment.update({
-        "PATH": str(runtime) + os.pathsep + environment.get("PATH", ""),
+        "PATH": str(runtime) + os.pathsep + str(root / "tools"),
+        "THREADNOTE_RELEASE_FIXTURE_ROOT": str(root),
         "HOME": str(user), "USERPROFILE": str(user), "THREADNOTE_HOME": str(root / "data"),
         "THREADNOTE_USER": "release-fixture", "THREADNOTE_AGENT_ID": "test",
         "THREADNOTE_BIN_DIR": str(root / "bin"), "THREADNOTE_INSTALL_ROOT": str(root / "runtime"),
@@ -320,6 +323,84 @@ def manager_checks_while_paused(root, binary, environment, checks):
                 manager.wait(timeout=10)
 
 
+def native_watch_checks(root, binary, environment):
+    base = {"protocolVersion": 1, "executorVersion": 1, "action": "watch", "watchId": "extracted-release",
+            "consumerId": "release-consumer", "wakeupId": "release-fixture"}
+    receipt = root / "provenance/watch-deliveries.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    deliveries = []
+
+    def call(command, **fields):
+        response = json.loads(run([str(binary), "workflow-automation"], environment, root,
+                                  input_text=json.dumps({**base, "command": command, **fields})))
+        require(response.get("status") == "ok", "Native watch failed: " + json.dumps(response))
+        return response
+
+    def settle(delivery, status):
+        dispositions = [{"eventId": event["id"], "status": status,
+                         "reason": "Private extracted-release lifecycle observation.",
+                         "evidence": "provenance/watch-deliveries.json"} for event in delivery["events"]]
+        deliveries.append({"delivery": delivery, "dispositions": dispositions})
+        with receipt.open("w", encoding="utf-8") as stream:
+            stream.write(json.dumps(deliveries, indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        call("disposition", deliveryId=delivery["id"], dispositions=dispositions)
+        return call("ack", deliveryId=delivery["id"])
+
+    started = False
+    try:
+        initial = call("start", pr="https://github.com/fixture/repo/pull/1")
+        started = True
+        require(initial["collector"]["alive"], "Native collector did not start")
+        deadline = time.monotonic() + 30
+        delivery = None
+        while time.monotonic() < deadline:
+            observed = call("wait", timeoutSeconds=1)
+            delivery = observed.get("delivery")
+            if delivery:
+                break
+        require(delivery is not None, "Native collector missed the private provider signals")
+        health = call("inspect")
+        require(not health["sourceErrors"] and len(health["sources"]) == 5,
+                "Native watch did not complete all five sources")
+        require(sorted(event["kind"] for event in delivery["events"]) ==
+                ["ci_error", "comment", "review_thread"], "Native provider signals were lost or invented")
+        requests = (root / "provider-requests.json").read_bytes()
+        require(call("relay")["delivery"] == delivery, "Unacknowledged native delivery did not replay")
+        require((root / "provider-requests.json").read_bytes() == requests,
+                "Relay consumption started a competing GitHub poll")
+        acknowledged = settle(delivery, "open")
+        require(acknowledged["pending"] == 0 and acknowledged["work"]["open"] == 3,
+                "ACK discarded actionable work")
+        work = call("work")["work"]["items"]
+        require({item["eventId"] for item in work} == {event["id"] for event in delivery["events"]},
+                "Actionable work was not durably retained")
+        health = call("inspect")
+        call("work-disposition", expectedRevision=health["revision"], dispositions=[
+            {"eventId": item["eventId"], "status": "resolved", "reason": "Synthetic fixture issues verified.",
+             "evidence": "provenance/watch-deliveries.json"} for item in work])
+        require(all(item["status"] == "resolved" for item in call("work")["work"]["items"]),
+                "Verified work disposition was not retained")
+        return {"nativeWatch": "passed", "signals": 3, "sources": 5, "replayed": True,
+                "ackRetainedOpenWork": True, "provider": "private compiled frozen fixture"}
+    finally:
+        if started:
+            call("stop")
+            deadline = time.monotonic() + 15
+            stopped = call("inspect")
+            while stopped["collector"]["alive"] and time.monotonic() < deadline:
+                time.sleep(0.05)
+                stopped = call("inspect")
+            require(not stopped["collector"]["alive"], "Fixture left an unowned native collector")
+            for _ in range(4):
+                pending = call("relay").get("delivery")
+                if not pending:
+                    break
+                settle(pending, "resolved")
+            require(call("inspect")["pending"] == 0, "Terminal fixture events were not recorded and acknowledged")
+
+
 def execute(root, checkout, enforced):
     release_root = root / "runtime/versions/payload"
     release = json.loads((release_root / "release.json").read_text(encoding="utf-8"))
@@ -330,6 +411,10 @@ def execute(root, checkout, enforced):
     checks = result["checks"]
     try:
         result["isolation"] = verify_isolation(checkout, enforced)
+        denial = subprocess.run([str(root / "tools" / ("python.exe" if sys.platform == "win32" else "python")),
+                                 "-c", "raise SystemExit(0)"], env=environment, cwd=root, capture_output=True, timeout=30)
+        require(denial.returncode == 97, "External interpreter denial proxy is not active")
+        (root / "interpreter-attempts.json").write_text("[]", encoding="utf-8")
         require(shutil.which("git", path=environment["PATH"]) and shutil.which("rg", path=environment["PATH"]),
                 "Installed workflow checks require Git and ripgrep")
 
@@ -348,14 +433,14 @@ def execute(root, checkout, enforced):
         require(installed["applied"], "Compiled CLI did not install the bundled skills")
         skills = Path(installed["target"]["skillRoot"])
         generation = skills / ".threadnote-dev-skills/generations" / installed["bundleDigest"]
-        environment.update(DEV_WORKFLOW_INSTALLED_SKILLS=str(generation),
-                           DEV_WORKFLOW_PROVENANCE_DIR=str(root / "provenance"))
-        proof = json.loads(run([sys.executable, "-B", str(root / "python/product_skills_fixture.py")], environment, root))
         manifest = json.loads((release_root / release["devSkills"]["manifest"]).read_text(encoding="utf-8"))
         require(manifest["digest"] == installed["bundleDigest"], "Installed bundle differs from the archive")
         require({name: digest(generation / name) for name in manifest["hashes"]} == manifest["hashes"],
                 "Installed helper bytes differ from the archive manifest")
-        result["installedProvenance"] = proof
+        require(manifest["schemaVersion"] == 2 and all(not name.endswith(".py") for name in manifest["hashes"]),
+                "New release includes a Python workflow payload or old manifest")
+        result["installedProvenance"] = {"generation": str(generation), "digest": manifest["digest"],
+                                         "files": len(manifest["hashes"]), "nativeOnly": True}
         for skill in manifest["skills"]:
             content = (skills / skill["id"] / "SKILL.md").read_text(encoding="utf-8")
             require(str(generation) in content and str(checkout) not in content and "{{THREADNOTE_" not in content,
@@ -363,28 +448,15 @@ def execute(root, checkout, enforced):
         for action in ("install", "update"):
             require(not cli(action, "--agent", "codex", "--json")["applied"], "Idempotent action changed files")
         manager_checks(root, binary, environment, checks)
-        native = [
-            ("dev-plan/test_dev_plan.py", "DEV_PLAN_NATIVE", ["Plans.test_native_threadnote_draft_roundtrip",
-              "Plans.test_native_current_citations_and_closeout"]),
-            ("dev-spec/test_dev_spec.py", "DEV_SPEC_NATIVE",
-             ["Specs.test_native_full_workflow_with_current_new_code_bindings"]),
-        ]
-        if sys.platform.startswith("linux"):
-            native.append(("test_personal_cloud_workflow.py", "DEV_WORKFLOW_CLOUD_NATIVE", ["PersonalCloudNative"]))
-        result["personalCloud"] = "local-bare-Git fixture" if sys.platform.startswith("linux") else "Linux-only profiles; pending Linux lane"
-        for filename, flag, cases in native:
-            evidence = root / (Path(filename).stem + "-native.log")
-            run([sys.executable, "-B", str(root / "python" / filename), *cases, "-v"],
-                {**environment, flag: "1"}, root, timeout=600, evidence=evidence)
-            count = 1 if filename.startswith("dev-spec/") else 2
-            output = evidence.read_text(encoding="utf-8")
-            require(re.search(r"Ran " + str(count) + r" tests? in", output) and "skipped" not in output,
-                    "Native lifecycle coverage was missing or skipped: " + output)
-            checks.append({"nativeSuite": filename, "cases": cases, "passed": count, "exitCode": 0})
+        controller = runpy.run_path(str(root / "native-release-workflows.py"))
+        result["nativeWorkflows"] = controller["run_workflows"](root, binary, environment, installed["bundleDigest"])
+        checks.append(native_watch_checks(root, binary, environment))
+        require(not json.loads((root / "interpreter-attempts.json").read_text(encoding="utf-8")),
+                "Product attempted to launch an external interpreter")
+        result["externalInterpreters"] = {"denied": True, "productAttempts": 0}
         require(cli("remove", "--agent", "codex", "--json")["applied"], "CLI remove did not apply")
         require(all(not (skills / skill["id"] / "SKILL.md").exists() for skill in manifest["skills"]),
                 "Removed entrypoint still exists")
-        run([sys.executable, "-B", str(root / "python/product_skills_fixture.py")], environment, root)
         require(before_release == inventory(release_root), "Running the installed workflows changed the release")
         result["status"] = "passed" if enforced else "functional-passed-isolation-pending"
         return result
@@ -419,8 +491,25 @@ def stage(arguments):
                 names.add(destination)
             stream.extractall(payload)
         require(inventory(payload) == expected, "Extracted archive inventory/bytes differ from the built release")
-        shutil.copytree(checkout / "apps/threadnote/test/dev-skills/python", root / "python",
-                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copyfile(checkout / "apps/threadnote/test/dev-skills/native-release-workflows.py",
+                        root / "native-release-workflows.py")
+        tool = Path(arguments.tools).resolve()
+        require(tool.is_file(), "Compile the native test tool proxy before release isolation")
+        tools = root / "tools"
+        tools.mkdir()
+        tool_paths = {name: shutil.which(name) for name in ("git", "rg")}
+        require(all(tool_paths.values()), "Native release fixtures require Git and ripgrep")
+        (root / "tool-paths.json").write_text(json.dumps(tool_paths), encoding="utf-8")
+        for name in ("git", "rg", "gh", "memory-read", "python", "python3", "python3.14", "node", "bun"):
+            target = tools / (name + (".exe" if sys.platform == "win32" else ""))
+            try:
+                os.link(tool, target)
+            except OSError:
+                shutil.copy2(tool, target)
+        (root / "interpreter-attempts.json").write_text("[]", encoding="utf-8")
+        (root / "provider-requests.json").write_text("[]", encoding="utf-8")
+        (root / "provider.json").write_text(json.dumps({"head": "a" * 40, "terminal": False, "revision": 1}),
+                                           encoding="utf-8")
         harness = root / "release-artifact.py"
         shutil.copyfile(__file__, harness)
         command = [sys.executable, "-B", str(harness), "--execute", str(root), "--checkout", str(checkout)]
@@ -466,10 +555,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkout", required=True)
     parser.add_argument("--report")
     parser.add_argument("--execute")
+    parser.add_argument("--tools")
     parser.add_argument("--functional-only", action="store_true")
     args = parser.parse_args()
     if args.execute:
         execute(Path(args.execute), Path(args.checkout), not args.functional_only)
     else:
-        require(args.archive and args.report, "Staging requires --archive and --report")
+        require(args.archive and args.report and args.tools, "Staging requires --archive, --report and --tools")
         stage(args)

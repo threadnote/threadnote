@@ -182,6 +182,9 @@ class ReleaseOutput(unittest.TestCase):
         fixtures = checkout / "apps/threadnote/test/dev-skills/python"
         fixtures.mkdir(parents=True)
         (fixtures / "fixture.py").write_text("# synthetic staging input\n")
+        (fixtures.parent / "native-release-workflows.py").write_text("# synthetic native controller; child is mocked\n")
+        tools = self.root / "native-test-tools"
+        tools.write_bytes(b"synthetic tool proxy; never executable")
         archive = self.root / "fixture.tar.gz"
         with tarfile.open(archive, "w:gz") as stream:
             stream.add(dist / "fixture", arcname="fixture")
@@ -204,16 +207,20 @@ class ReleaseOutput(unittest.TestCase):
             raise original
 
         with patch.object(release.tempfile, "mkdtemp", return_value=str(staging)), \
-                patch.object(release.sys, "platform", "win32"), patch.object(release, "run", side_effect=fail_child) as launch:
+                patch.object(release.sys, "platform", "win32"), \
+                patch.object(release.shutil, "which", side_effect=lambda name: str(tools)) as lookup, \
+                patch.object(release, "run", side_effect=fail_child) as launch:
             if copy_failure:
                 with patch.object(release, "copy_native_logs", side_effect=OSError("synthetic copy refusal")):
                     with self.assertRaises(RuntimeError) as caught:
-                        release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True))
+                        release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True, tools=tools))
             else:
                 with self.assertRaises(RuntimeError) as caught:
-                    release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True))
+                    release.stage(SimpleNamespace(checkout=checkout, archive=archive, report=report, functional_only=True, tools=tools))
         self.assertIs(caught.exception, original)
         self.assertEqual(launch.call_count, 1)
+        self.assertEqual([call.args[0] for call in lookup.call_args_list], ["git", "rg"])
+        self.assertEqual(json.loads((staging / "tool-paths.json").read_text()), {"git": str(tools), "rg": str(tools)})
         self.assertEqual(json.loads(report.read_text())["error"], str(original))
         self.assertTrue(staging.exists(), "Original failure retains its fixture")
         return report, expected

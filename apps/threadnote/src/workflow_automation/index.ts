@@ -1,3 +1,5 @@
+import {nativeRequestSchema} from './request_schema.js';
+import {nativeWorkflowFeatureVersions} from './features.js';
 import {Effect} from 'effect';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {WorkflowAutomationError, type WorkflowWriteIntent} from '@threadnote/workflow-automations/contracts';
@@ -18,6 +20,7 @@ import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} fr
 import {makeWorkflowGraphAdapter} from './graph.js';
 import {
   CurrentNativeAuthoringSave,
+  CurrentNativeCloseoutSave,
   CurrentNativeOperationLimit,
   readNativeWorkflowState,
   writeNativeWorkflowState,
@@ -25,7 +28,15 @@ import {
 } from './store.js';
 import {reserveWorkflowNameFamily} from './naming.js';
 import {runNativeAuthoring} from './authoring.js';
-import {CurrentWorkflowReadCache, immutableWorkflowImage} from '../workflow_memory/read_cache.js';
+import {runNativeCycle} from './cycle.js';
+import {runNativeWatch} from './watch.js';
+import {runNativeCloseout} from './closeout.js';
+import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
+import {
+  CurrentWorkflowReadCache,
+  immutableWorkflowImage,
+  withWorkflowReadCache,
+} from '../workflow_memory/read_cache.js';
 
 const version = {protocolVersion: 1 as const, executorVersion: 1 as const};
 const issue = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -102,7 +113,23 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
     admitted ?? (yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId)));
   const ids = new Set(state.operations.map(operation => operation.intent.operationId));
   const cache = yield* CurrentWorkflowReadCache;
-  if (Object.keys(native.state.operations).some(id => !ids.has(id)))
+  if (
+    Object.entries(native.state.operations).some(
+      ([id, operation]) =>
+        !ids.has(id) &&
+        !(
+          operation.request.action === 'archive' &&
+          operation.request.sourceRunId === state.runId &&
+          state.operations.some(
+            local =>
+              local.status === 'verified' &&
+              local.artifact?.uri === operation.sourceUri &&
+              local.intent.artifactKey === operation.request.artifactKey &&
+              local.intent.role === operation.request.role,
+          )
+        ),
+    )
+  )
     return yield* issue(
       'invalid-state',
       'Native intent is missing from this run’s receipts. Restore its original state; no import was applied.',
@@ -243,6 +270,13 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   memory: Memory,
   request: WriteRequest,
 ) {
+  const closeout = stored.state.closeoutSave;
+  if (
+    closeout &&
+    ((yield* CurrentNativeCloseoutSave) !== closeout.transactionId ||
+      !closeout.operationIds.includes(request.operationId))
+  )
+    return yield* issue('pending-operation', 'Finish this run’s admitted closeout before starting another write.');
   const intent = intentFrom(stored.state, request);
   const digest = nativeWorkflowIntentDigest(intent, sha256HexSync);
   const existing = stored.state.operations.find(operation => operation.intent.operationId === request.operationId);
@@ -285,7 +319,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   const operationLimit = Math.min(
     nativeWorkflowOperationLimit,
     yield* CurrentNativeOperationLimit,
-    reservation?.operationLimit ?? nativeWorkflowOperationLimit,
+    reservation?.operationLimit ?? closeout?.operationLimit ?? nativeWorkflowOperationLimit,
   );
   if (!existing && stored.state.operations.some(operation => operation.status === 'prepared'))
     return yield* issue(
@@ -335,6 +369,12 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
 ) {
   if (stored.state.authoringSave && (yield* CurrentNativeAuthoringSave) !== stored.state.authoringSave.intentDigest)
     return yield* issue('pending-operation', 'Resume the original authoring save before recovering its child writes.');
+  if (
+    stored.state.closeoutSave &&
+    ((yield* CurrentNativeCloseoutSave) !== stored.state.closeoutSave.transactionId ||
+      !stored.state.closeoutSave.operationIds.includes(operationId))
+  )
+    return yield* issue('pending-operation', 'Resume the original closeout before recovering its child writes.');
   const operation = stored.state.operations.find(item => item.intent.operationId === operationId);
   if (!operation)
     return yield* issue(
@@ -398,9 +438,22 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
       ...version,
       stateVersion: 1,
       namingPolicyVersion: 1,
-      authoringVersion: 1,
+      ...nativeWorkflowFeatureVersions,
       status: 'ok' as const,
-      operations: ['init', 'inspect', 'read', 'preflight', 'write', 'recover', 'graph-ready', 'authoring'],
+      operations: [
+        'request-schema',
+        'init',
+        'inspect',
+        'read',
+        'preflight',
+        'write',
+        'recover',
+        'graph-ready',
+        'authoring',
+        'cycle',
+        'watch',
+        'closeout',
+      ],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],
     };
   if (request.action === 'init')
@@ -416,6 +469,53 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
 });
 
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'request-schema')
+    return yield* Effect.try({try: () => nativeRequestSchema(input), catch: nativeWorkflowError});
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'closeout')
+    return yield* withWorkflowReadCache(
+      runNativeCloseout(config, input, request =>
+        typeof request === 'object' && request !== null && 'action' in request && request.action === 'authoring'
+          ? runNativeAuthoring(config, request, core =>
+              runCoreNative(config, core).pipe(Effect.mapError(nativeWorkflowError)),
+            )
+          : runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      ),
+      {compactJournal: true},
+    );
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'cycle') {
+    const request = input as Record<string, unknown>;
+    const detail: Record<string, string> =
+      request.command === 'validate-review' && typeof request.attemptId === 'string'
+        ? {attemptId: request.attemptId, detailKind: 'attempt'}
+        : typeof request.snapshotId === 'string'
+          ? {snapshotId: request.snapshotId, detailKind: 'manifest'}
+          : typeof request.phaseId === 'string'
+            ? {phaseId: request.phaseId, detailKind: 'phase'}
+            : {detailKind: 'overview'};
+    const maximumBytes = typeof request.maxBytes === 'number' ? request.maxBytes : 16_384;
+    const payload = yield* runNativeCycle(
+      config,
+      input,
+      request => runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      request =>
+        runNativeAuthoring(config, request, core =>
+          runCoreNative(config, core).pipe(Effect.mapError(nativeWorkflowError)),
+        ),
+    ).pipe(
+      program => withWorkflowReadCache(program, {compactJournal: true}),
+      Effect.map(value => boundNativeCycleOutput(value, maximumBytes - 512, detail)),
+    );
+    return 'status' in payload && payload.status === 'error'
+      ? {
+          ...version,
+          status: 'error' as const,
+          code: typeof payload.code === 'string' ? payload.code : 'cycle-operation-failed',
+          cycle: payload,
+        }
+      : {...version, status: 'ok' as const, cycle: payload};
+  }
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'watch')
+    return yield* runNativeWatch(config, input);
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'authoring')
     return yield* runNativeAuthoring(config, input, request =>
       runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),

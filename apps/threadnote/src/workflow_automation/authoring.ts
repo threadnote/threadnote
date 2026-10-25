@@ -82,7 +82,7 @@ const authoringIndexPage = Schema.Struct({
   depth: Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1, maximum: 3})),
   children: Schema.Array(AuthoringReferenceSchema).check(Schema.isBetweenLength(1, 8)),
 });
-const requestSchema = Schema.Struct({
+export const nativeAuthoringRequestSchema = Schema.Struct({
   protocolVersion: Schema.Literal(1),
   executorVersion: Schema.Literal(1),
   action: Schema.Literal('authoring'),
@@ -133,7 +133,7 @@ const requestSchema = Schema.Struct({
   userDecision: Schema.optionalKey(Schema.Literals(['approve', 'reject', 'defer'])),
   packet: Schema.optionalKey(Schema.Unknown),
 });
-type Request = typeof requestSchema.Type;
+type Request = typeof nativeAuthoringRequestSchema.Type;
 const utf8 = new TextEncoder();
 const hasControl = (value: string) =>
   [...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
@@ -351,7 +351,9 @@ const ownedAuthoringUris = (state: NativeWorkflowState) =>
 
 export const runNativeAuthoring = <R>(config: RuntimeConfig, input: unknown, call: NativeAuthoringCall<R>) =>
   Effect.gen(function* () {
-    let request = yield* Schema.decodeUnknownEffect(requestSchema, {onExcessProperty: 'error'})(input).pipe(
+    let request = yield* Schema.decodeUnknownEffect(nativeAuthoringRequestSchema, {onExcessProperty: 'error'})(
+      input,
+    ).pipe(
       Effect.mapError(() =>
         fail('invalid-request', 'The native authoring request is malformed or contains unsupported fields.'),
       ),
@@ -914,6 +916,7 @@ const saveAuthoring = <R>(
       const stored = yield* readNativeWorkflowState(config, request.runId);
       if (!stored) return yield* fail('run-not-found', 'The original native run is missing.');
       const state = stored.state;
+      if (state.closeoutSave) return yield* fail('pending-operation', 'Finish the admitted closeout before authoring.');
       const priorRootUri = state.authoringSave
         ? state.authoringSave.rootUri
         : ([...state.operations]
@@ -1239,7 +1242,7 @@ const saveAuthoring = <R>(
           false,
           Effect.gen(function* () {
             const current = yield* readNativeWorkflowState(config, request.runId);
-            if (!current || current.revision !== stored.revision)
+            if (!current || current.revision !== stored.revision || current.state.closeoutSave)
               return yield* fail(
                 'state-conflict',
                 'This native run changed before authoring admission. Retry from its current receipt.',
@@ -1457,6 +1460,7 @@ const exportAuthoring = Effect.fn('workflowAutomation.authoring.export')(functio
       return yield* fail('invalid-request', 'Phase branches must be explicit bounded Git references.');
     phases.push({
       id: phase.id,
+      definitionHash: sha256HexSync('threadnote.native-cycle.phase-definition.v1\n' + stableJson(phase)),
       title: phase.title,
       dependsOn: phase.dependsOn,
       allowedPaths: [...phase.affectedPaths, ...phase.newPaths],

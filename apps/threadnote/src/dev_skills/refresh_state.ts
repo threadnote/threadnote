@@ -12,7 +12,7 @@ import type {
 } from './contract.js';
 import {decode, hash, isRecord, readOptional, requireValue, stableJson} from './files.js';
 import {consumerId, enrollmentContext, parseRuntimeIndex, parseTarget, type Enrollment} from './registry.js';
-import {parseDevSkillsManifest} from './manifest.js';
+import {parseDevSkillsManifest, parseNativeRequirements} from './manifest.js';
 
 export interface RefreshMember {
   readonly consumerId: string;
@@ -50,23 +50,44 @@ export function keys(value: unknown, allowed: readonly string[]) {
   );
 }
 export function parseCapabilities(value: unknown): DevSkillsRuntimeCapabilities {
-  keys(value, ['schemaVersion', 'runtimeVersion', 'workflowProtocols', 'stateSchemas', 'enrollmentSchemas']);
   requireValue(
-    isRecord(value) && value.schemaVersion === 1 && version(value.runtimeVersion),
+    isRecord(value) && (value.schemaVersion === 1 || value.schemaVersion === 2) && version(value.runtimeVersion),
     'Invalid candidate runtime capabilities.',
   );
-  for (const field of ['workflowProtocols', 'stateSchemas', 'enrollmentSchemas']) {
-    const values = value[field];
+  keys(value, [
+    'schemaVersion',
+    'runtimeVersion',
+    'workflowProtocols',
+    'stateSchemas',
+    'enrollmentSchemas',
+    ...(value.schemaVersion === 2 ? ['manifestSchemas', 'nativeFeatures'] : []),
+  ]);
+  const numbers = (input: unknown): number[] => {
     requireValue(
-      Array.isArray(values) &&
-        values.length <= 32 &&
-        new Set(values).size === values.length &&
-        values.every(item => Number.isSafeInteger(item) && item > 0),
+      Array.isArray(input) &&
+        input.length <= 32 &&
+        new Set(input).size === input.length &&
+        input.every((item): item is number => typeof item === 'number' && Number.isSafeInteger(item) && item > 0),
       'Invalid candidate capability set.',
     );
-  }
-  return value as unknown as DevSkillsRuntimeCapabilities;
+    return input;
+  };
+  const common = {
+    runtimeVersion: value.runtimeVersion,
+    workflowProtocols: numbers(value.workflowProtocols),
+    stateSchemas: numbers(value.stateSchemas),
+    enrollmentSchemas: numbers(value.enrollmentSchemas),
+  };
+  return value.schemaVersion === 1
+    ? {schemaVersion: 1, ...common}
+    : {
+        schemaVersion: 2,
+        ...common,
+        manifestSchemas: numbers(value.manifestSchemas),
+        nativeFeatures: parseNativeRequirements(value.nativeFeatures),
+      };
 }
+
 function issues(value: unknown): readonly DevSkillsIssue[] {
   requireValue(Array.isArray(value) && value.length <= 2048, 'Invalid refresh diagnostics.');
   for (const issue of value) {
@@ -83,8 +104,16 @@ function issues(value: unknown): readonly DevSkillsIssue[] {
   }
   return value as DevSkillsIssue[];
 }
-function installed(value: unknown): DevSkillsInstalled {
-  keys(value, ['releaseVersion', 'digest', 'workflowProtocol', 'stateSchema', 'minimumRuntime']);
+export function parseInstalled(value: unknown): DevSkillsInstalled {
+  keys(value, [
+    'releaseVersion',
+    'digest',
+    'workflowProtocol',
+    'stateSchema',
+    'minimumRuntime',
+    'manifestSchema',
+    'nativeRequirements',
+  ]);
   requireValue(
     isRecord(value) &&
       version(value.releaseVersion) &&
@@ -94,7 +123,24 @@ function installed(value: unknown): DevSkillsInstalled {
       Number.isSafeInteger(value.stateSchema),
     'Invalid retained workflow requirements.',
   );
-  return value as unknown as DevSkillsInstalled;
+  requireValue(
+    typeof value.workflowProtocol === 'number' && typeof value.stateSchema === 'number',
+    'Invalid retained workflow versions.',
+  );
+  requireValue(
+    (value.manifestSchema === undefined && value.nativeRequirements === undefined) || value.manifestSchema === 2,
+    'Invalid retained manifest schema.',
+  );
+  return {
+    releaseVersion: value.releaseVersion,
+    digest: value.digest,
+    minimumRuntime: value.minimumRuntime,
+    workflowProtocol: value.workflowProtocol,
+    stateSchema: value.stateSchema,
+    ...(value.manifestSchema === 2
+      ? {manifestSchema: 2, nativeRequirements: parseNativeRequirements(value.nativeRequirements)}
+      : {}),
+  };
 }
 function parsePinned(value: unknown, path: Path.Path): DevSkillsConsumer {
   keys(value, ['home', 'installationRoot', 'target', 'state', 'enabled', 'createdBy']);
@@ -177,8 +223,8 @@ function parseRequest(value: unknown, root: string, path: Path.Path): RefreshReq
     return {
       consumerId: item.consumerId,
       enrollment,
-      retained: item.retained.map(installed),
-      ...(item.installed ? {installed: installed(item.installed)} : {}),
+      retained: item.retained.map(parseInstalled),
+      ...(item.installed ? {installed: parseInstalled(item.installed)} : {}),
       receiptHash: item.receiptHash as string | null,
       homeHash: item.homeHash as string | null,
       observedHash: item.observedHash as string | null,

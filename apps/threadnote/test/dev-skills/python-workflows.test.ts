@@ -5,10 +5,10 @@ import {describe, expect, it} from 'vitest';
 
 // Keep the payload and relocated suite paths explicit for the Bazel data closure.
 const payloads = [
-  'config/agent-skills/dev-spec',
-  'config/agent-skills/dev-plan',
-  'config/agent-skills/dev-cycle',
-  'config/agent-skills/watch-pr',
+  'apps/threadnote/test/dev-skills/python/oracle-skills/dev-spec',
+  'apps/threadnote/test/dev-skills/python/oracle-skills/dev-plan',
+  'apps/threadnote/test/dev-skills/python/oracle-skills/dev-cycle',
+  'apps/threadnote/test/dev-skills/python/oracle-skills/watch-pr',
   'apps/threadnote/test/dev-skills/python/product_skills_fixture.py',
   'apps/threadnote/test/dev-skills/release-artifact.py',
 ];
@@ -27,7 +27,7 @@ const suites = [
   'apps/threadnote/test/dev-skills/python/test_release_artifact.py',
 ];
 
-describe('bundled development workflow Python contracts', () => {
+describe('historical workflow oracle contracts', () => {
   for (const suite of suites) {
     it(
       suite,

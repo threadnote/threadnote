@@ -44,6 +44,7 @@ describe('native authoring templates', () => {
         'contracts:Contracts',
         'constraints:Constraints',
         'diagram:Diagram',
+        'references:References',
       ],
       'architecture-target': [
         'summary:Summary',

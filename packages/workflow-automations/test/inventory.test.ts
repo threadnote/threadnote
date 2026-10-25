@@ -1,11 +1,12 @@
 import {describe, expect, it} from 'vitest';
-import {readFile} from '@threadnote/testing/node-fs-promises';
+import {readFile, readdir} from '@threadnote/testing/node-fs-promises';
 import {workflowInventory} from '../src/inventory.js';
 import {workflowScenarios} from '../src/scenarios.js';
 
 describe('workflow contract inventory', () => {
-  it('matches exactly the Python files shipped by the independent manifest', async () => {
+  it('ships no Python and preserves the exact independent historical oracle inventory', async () => {
     const manifest = JSON.parse(await readFile('config/dev-skills.json', 'utf8')) as {
+      schemaVersion: number;
       skills: {id: string; files: string[]}[];
     };
     const shipped = manifest.skills
@@ -13,7 +14,17 @@ describe('workflow contract inventory', () => {
         skill.files.filter(file => file.endsWith('.py')).map(file => `config/agent-skills/${skill.id}/${file}`),
       )
       .sort();
-    expect(workflowInventory.map(item => item.path).sort()).toEqual(shipped);
+    expect(manifest.schemaVersion).toBe(2);
+    expect(shipped).toEqual([]);
+    const oracleRoot = 'apps/threadnote/test/dev-skills/python/oracle-skills';
+    const historical = (await readdir(oracleRoot, {recursive: true}))
+      .filter(file => file.endsWith('.py'))
+      .map(file => `config/agent-skills/${file.replaceAll('\\', '/')}`)
+      .sort();
+    expect(historical).toHaveLength(16);
+    expect(new Set(historical).size).toBe(16);
+    expect(workflowInventory).toHaveLength(16);
+    expect(workflowInventory.map(item => item.path).sort()).toEqual(historical);
   });
 
   it('has unique paths and explicit owner, command, state, and native replacement route classifications', () => {

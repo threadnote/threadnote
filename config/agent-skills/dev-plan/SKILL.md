@@ -1,32 +1,19 @@
 ---
 name: dev-plan
-description: Create or revise a code-grounded feature development plan in Threadnote, with separate current and target architecture diagrams and connected, verifiable implementation phases. Use for feature planning and design before implementation; discussing this skill does not start a feature plan.
+description: Turn approved feature intent into a code-grounded architecture and verifiable implementation phases connected to Threadnote memories. Use after dev-spec or for a requested implementation plan; discussing this skill does not start a plan.
 ---
 
 # Dev Plan
 
-Resource directory: {{THREADNOTE_SKILL_ROOT}}
+Resources: `{{THREADNOTE_SKILL_ROOT}}`; bundle: `{{THREADNOTE_BUNDLE_ROOT}}`. Use these pinned roots for linked files and generation identity. In an unrendered checkout, use this skill directory and its parent. Start with the [native bootstrap]({{THREADNOTE_BUNDLE_ROOT}}/dev-cycle/references/native-bootstrap.md).
 
-Bundle directory: {{THREADNOTE_BUNDLE_ROOT}}
+Use the installed Threadnote workflow-automation JSON interface as the authority for schemas and actions. Retrieve only the capability and command schema needed now. Do not reproduce full schemas, use legacy local scripts, or invent request fields. Runtime receipts, compare-and-swap, approval, and readback govern persistence.
 
-Use these roots for scripts and references. If unrendered, resolve the skill root through the host catalog. Resume with the run's pinned generation. Keep writable run files outside installed resources. The current helper requires Python 3.10+ (`python3` on POSIX; `py -3` or `python` on Windows).
+1. Start with `threadnote-context` and repository guidance. Prepare and verify the current checkout’s ready graph before unfamiliar graph discovery; then read the ready spec, bounded outlines, relevant sections and source evidence. Use `threadnote-code-graph` only for unfamiliar relationships or evidence gaps. Use `threadnote-memory` to verify and pin applicable decisions and record scoped no-match results.
+2. Resume or import the exact approved spec revision. Preserve its requirements, scenarios, constraints, decisions, and exclusions. Inspect the relevant current code before proposing components. Produce distinct current and target architecture diagrams and phases that name outcomes, scope, dependencies, acceptance, and real checks.
+3. Keep routine implementation choices open. Record considered alternatives and their rationale in the durable plan. Use the native challenge packet to classify design risk: record a justified routine skip, otherwise send it to one separate challenger before final review. The challenger returns at most two high-level alternatives with evidence and tradeoffs; the orchestrator records an accept/reject/adapt judgment and rationale against approved intent. Do not replace native authoring’s durable alternatives with a separate optional artifact.
+4. Validate scenario coverage, source citations, dependencies, and phase boundaries. A meaningful private draft must be saved and read back before pausing. Ready status requires current evidence, explicit approval of the exact plan intent, and any required independent review. Existing user authorization persists; do not ask generic permission or “continue?” again.
+5. Export the persisted plan through the native workflow for `dev-cycle`, preserving identity and bindings. Export does not authorize publication. Keep context and run identity stable through retries; recover interrupted writes instead of starting over.
+6. Close out through the native workflow only after all planned phases and final combined-source acceptance are verified. Preserve full rationale and implemented choices in linked durable knowledge, independently read back every output, and retire only drafts owned by the run. Personal cloud content stays task-local until exact publication approval and verified native publication.
 
-Ground an implementable plan in source and connected Threadnote memories. Planning does not authorize implementation or publication. Threadnote is authoritative; local files are drafts.
-
-## Plan
-
-1. If an approved spec exists, read its pinned root. Use `dev_spec.py export-plan` and `dev_plan.py from-spec`; preserve requirement/scenario IDs. The import is an incomplete plan.
-2. Use `threadnote-context` for the initial brief. Read repository guidance, code, callers, tests and contracts. Use `threadnote-code-graph` for unfamiliar relationships or evidence gaps; read known paths directly.
-3. After scoping, use `threadnote-memory` to recall relevant decisions. Verify claims in source, pin used memories and link relevant memories to each artifact; explain no-match results.
-4. Describe current and target architecture separately. Cite exact current graph anchors or inspected paths; use planned paths for new components. Record contracts, unknowns, and material alternatives. The orchestrator judges suggestions, chooses or adapts the design, and records rationale and affected phases.
-5. Define verifiable phases with outcomes, paths, contracts, dependencies and acceptance mapped to requirements/scenarios. Leave routine choices open. Plan compatibility or data migration when the feature requires it.
-6. Validate structure and citations. Get an independent review for substantial plans and resolve material findings. Save a meaningful private durable desktop draft before approval or pausing. Cloud saves are private task-local and may be lost; disclose this.
-7. Save the exact approved or requested revision in the same turn, before handoff. Ready status requires review when required and current citations. If blocked, save a draft and report why. Verify child/root readback and receipts; return URI and readiness. Keep the same context/generation for retries and recover interrupted writes. Keep the session handoff separate.
-
-Use `scripts/dev_plan.py --help` and [contract.md](references/contract.md) for commands and structure. For a native authoring run, follow [native authoring](references/native-authoring.md) and require `authoringVersion: 1` from the installed runtime. Without `--mermaid-cli`, report that diagram checks cover types/fences only.
-
-## Execution and closeout
-
-Use `load`, `diff` and `export-dev-cycle` to resume, inspect affected work and pass explicit delivery/branch choices. Export does not create branches or publish. See [the workflow](../dev-spec/references/workflow.md) for spec-backed closeout.
-
-Closeout verifies acceptance on final source, records implemented architecture/deviations and current citations, then preserves verified behavior before retiring only this plan's artifacts. Desktop saves private durable knowledge. Cloud requires an allowlisted preview and separate explicit sharing approval; keep private drafts until readback succeeds. See [the closeout contract](references/contract.md#implementation-closeout). Keep unrelated memories.
+See [contract]({{THREADNOTE_SKILL_ROOT}}/references/contract.md) for planning invariants, [native authoring]({{THREADNOTE_SKILL_ROOT}}/references/native-authoring.md) for the bounded JSON workflow, and [review]({{THREADNOTE_SKILL_ROOT}}/references/review.md) for independent challenge. Keep the handoff concise and evidence-backed.
