@@ -1,5 +1,5 @@
 import {execFile} from '@threadnote/testing/node-child-process';
-import {mkdir, mkdtemp, readFile, rm, stat, writeFile} from '@threadnote/testing/node-fs-promises';
+import {mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {join, resolve} from '@threadnote/testing/node-path';
 import {promisify} from '@threadnote/testing/node-util';
@@ -244,3 +244,70 @@ describe('public background model setup CLI boundary', () => {
     }
   }, 25_000);
 });
+
+describe('model setup child bootstrap', () => {
+  it('detects loading the application graph adapter in an isolated Bun child', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadnote-model-bootstrap-'));
+    roots.push(root);
+    const marker = join(root, 'forbidden-import');
+    const preload = await createImportSentinel(root, marker);
+    const probe = join(root, 'probe.ts');
+    await writeFile(
+      probe,
+      `await import(${JSON.stringify(join(checkout, 'apps/threadnote/src/code_graph/runtime_adapters.ts'))});`,
+    );
+
+    await expect(
+      execute(process.execPath, ['--preload', preload, probe], {cwd: root, env: process.env}),
+    ).rejects.toThrow();
+    expect(await readFile(marker, 'utf8')).toContain('runtime_adapters');
+  });
+
+  it('does not load the application graph adapter for erased-home requests or malformed worker no-ops', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'threadnote-model-bootstrap-'));
+    roots.push(root);
+    const marker = join(root, 'forbidden-import');
+    const preload = await createImportSentinel(root, marker);
+    const home = join(root, 'erased-home');
+    const environment = {...process.env};
+    for (const key of [
+      'CI',
+      'VITEST',
+      'NODE_ENV',
+      'THREADNOTE_TOOLSET',
+      'THREADNOTE_MCP_TOOLSET',
+      'THREADNOTE_MODEL_SETUP',
+    ])
+      delete environment[key];
+    environment.THREADNOTE_HOME = join(root, 'poison-home');
+    environment.THREADNOTE_INSTALL_ROOT = join(root, 'installation');
+    const standalone = join(checkout, 'apps/threadnote/src/standalone.ts');
+
+    await execute(
+      process.execPath,
+      ['--preload', preload, standalone, 'model-setup-request', '--home', home, '--identity', '1:2:3'],
+      {
+        cwd: root,
+        env: environment,
+        timeout: 15_000,
+      },
+    );
+    await execute(process.execPath, ['--preload', preload, standalone, 'model-setup-worker', '--invalid'], {
+      cwd: root,
+      env: environment,
+      timeout: 15_000,
+    });
+
+    expect(await readdir(root)).toEqual(['forbid-application-graph.ts']);
+    await expect(readFile(marker, 'utf8')).rejects.toMatchObject({code: 'ENOENT'});
+  });
+});
+
+async function createImportSentinel(root: string, marker: string): Promise<string> {
+  const preload = join(root, 'forbid-application-graph.ts');
+  await writeFile(
+    preload,
+    `import {plugin} from 'bun';\nimport {writeFileSync} from 'node:fs';\nplugin({name:'forbid-application-graph',setup(build){build.onLoad({filter:/runtime_adapters\\.ts$/u},args=>{writeFileSync(${JSON.stringify(marker)},args.path);throw new Error('forbidden application graph import');});}});\n`,
+  );
+  return preload;
+}
