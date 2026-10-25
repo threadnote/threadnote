@@ -1,6 +1,7 @@
 /* oxlint-disable threadnote/no-node-runtime, effecttsgo/node-builtin-import -- Private release engineering owns real CLI process groups and binary payloads. */
 import {createHash} from 'node:crypto';
 import {spawn} from 'node:child_process';
+import type {Writable} from 'node:stream';
 import {lstat, open, realpath} from 'node:fs/promises';
 import {constants, type BigIntStats} from 'node:fs';
 import {isAbsolute, resolve, sep} from 'node:path';
@@ -110,6 +111,91 @@ export function collectionEnvironment(root: string, home: string): Record<string
   };
 }
 
+interface CollectionProcessInput {
+  readonly failed: Promise<never>;
+  readonly closed: Promise<void>;
+  assertHealthy(): void;
+  write(bytes: string | Uint8Array): Promise<void>;
+  end(bytes?: string | Uint8Array): Promise<void>;
+}
+
+class OwnedCollectionInput implements CollectionProcessInput {
+  private failure?: Error;
+  private ending = false;
+  private readonly pending = new Set<(error: Error) => void>();
+  readonly failed: Promise<never>;
+  readonly closed: Promise<void>;
+  private rejectFailure!: (error: Error) => void;
+
+  constructor(
+    private readonly stream: Writable,
+    private readonly stop: () => void,
+  ) {
+    this.failed = new Promise((_, reject) => {
+      this.rejectFailure = reject;
+    });
+    void this.failed.catch(() => {});
+    this.closed = new Promise(resolvePromise =>
+      stream.once('close', () => {
+        if (this.pending.size > 0) this.fail(new Error('Collection process input closed before completing.'));
+        resolvePromise();
+      }),
+    );
+    stream.on('error', error => this.fail(error));
+  }
+
+  assertHealthy(): void {
+    if (this.failure !== undefined) throw this.failure;
+  }
+
+  private fail(error: Error): void {
+    if (this.failure !== undefined) return;
+    this.failure = error;
+    this.rejectFailure(error);
+    for (const reject of this.pending) reject(error);
+    this.pending.clear();
+    this.stop();
+  }
+
+  private async operate(bytes: string | Uint8Array, end: boolean): Promise<void> {
+    this.assertHealthy();
+    if (this.ending || this.stream.destroyed) throw new Error('Collection process input is closed.');
+    if (Buffer.byteLength(bytes) > COLLECTION_MAX_BYTES)
+      throw new Error('Collection process input exceeds the byte bound.');
+    this.ending = end;
+    await new Promise<void>((resolvePromise, reject) => {
+      this.pending.add(reject);
+      const complete = (error?: Error | null) => {
+        this.pending.delete(reject);
+        if (error) this.fail(error);
+        try {
+          this.assertHealthy();
+          resolvePromise();
+        } catch (failure) {
+          reject(failure);
+        }
+      };
+      try {
+        if (end) this.stream.end(bytes, complete);
+        else this.stream.write(bytes, complete);
+      } catch (error) {
+        this.fail(error instanceof Error ? error : new Error('Collection process input failed.'));
+      }
+    });
+    if (end) {
+      await Promise.race([this.closed, this.failed]);
+      this.assertHealthy();
+    }
+  }
+
+  write(bytes: string | Uint8Array): Promise<void> {
+    return this.operate(bytes, false);
+  }
+  end(bytes: string | Uint8Array = ''): Promise<void> {
+    return this.operate(bytes, true);
+  }
+}
+
 export function ownCollectionProcess(
   executable: string,
   argv: readonly string[],
@@ -132,32 +218,44 @@ export function ownCollectionProcess(
       throw error;
     }
   };
+  let cleanup: Promise<void> = Promise.resolve();
+  const input: CollectionProcessInput = new OwnedCollectionInput(child.stdin, () => {
+    cleanup = Promise.all([cleanup, killGroup()]).then(() => {});
+    void cleanup.catch(() => {});
+  });
   const done = new Promise<number | null>((resolvePromise, reject) => {
-    let cleanup: Promise<void> = Promise.resolve();
     child.once('error', error => {
       settled = true;
       reject(error);
     });
     child.once('exit', () => {
-      cleanup = killGroup().then(() => awaitCollectionGroupExit(child.pid));
+      cleanup = Promise.all([cleanup, killGroup().then(() => awaitCollectionGroupExit(child.pid))]).then(() => {});
       void cleanup.catch(() => {});
     });
     child.once('close', code => {
-      void cleanup.then(
-        () => {
-          settled = true;
-          resolvePromise(code);
-        },
-        error => {
-          settled = true;
-          reject(error);
-        },
-      );
+      void input.closed
+        .then(() => cleanup)
+        .then(
+          () => {
+            settled = true;
+            try {
+              input.assertHealthy();
+              resolvePromise(code);
+            } catch (error) {
+              reject(error);
+            }
+          },
+          error => {
+            settled = true;
+            reject(error);
+          },
+        );
     });
   });
   void done.catch(() => {});
   return {
     child,
+    input,
     done,
     terminate: async () => {
       await killGroup();
@@ -237,7 +335,8 @@ export async function runCollectionProcess(
 ) {
   const started = performance.now();
   const owned = ownCollectionProcess(executable, argv, cwd, env);
-  owned.child.stdin.end();
+  const sent = owned.input.end();
+  void sent.catch(() => {});
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let bytes = 0;
@@ -255,7 +354,7 @@ export async function runCollectionProcess(
   owned.child.stdout.on('data', collect(stdout));
   owned.child.stderr.on('data', collect(stderr));
   try {
-    const exitCode = await owned.done;
+    const [exitCode] = await Promise.all([owned.done, sent]);
     if (exceeded || exitCode === null)
       throw new Error('Collection process exceeded its time/output bound or was interrupted.');
     return {

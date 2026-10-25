@@ -7,6 +7,7 @@ import {canonicalJson} from '@threadnote/graph/checkpoint/canonical_json';
 import type {Threadnote5SourceV1} from '@threadnote/threadnote/evaluation/threadnote-5-release-readiness-contract';
 import {
   COLLECTION_MAX_BYTES,
+  collectionCleanupIsUnsafe,
   ownCollectionProcess,
   readCollectionPayloadIdentity,
   type CollectionPayloadIdentity,
@@ -262,7 +263,8 @@ export async function runVerifiedCollectionProcess(
     throw new Error('Invalid verified process capture byte bound.');
   const started = performance.now();
   const owned = ownCollectionProcess(command.executable, command.argv, cwd, env);
-  owned.child.stdin.end();
+  const sent = owned.input.end();
+  void sent.catch(() => {});
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let bytes = 0;
@@ -280,7 +282,7 @@ export async function runVerifiedCollectionProcess(
   owned.child.stdout.on('data', collect(stdout));
   owned.child.stderr.on('data', collect(stderr));
   try {
-    const exitCode = await owned.done;
+    const [exitCode] = await Promise.all([owned.done, sent]);
     if (exceeded || exitCode === null)
       throw new Error('Verified collection process exceeded its time/output bound or was interrupted.');
     return {
@@ -355,6 +357,7 @@ export class CollectionMcpTransport implements Transport {
       this.options.processFactory?.() ??
       ownCollectionProcess(command.executable, command.argv, this.options.cwd, this.options.env);
     this.process = owned;
+    void owned.input.failed.catch(error => this.fail(error));
     owned.child.stdout.on('data', (chunk: Buffer) => {
       if (!this.accept(chunk, false)) return;
       try {
@@ -399,14 +402,19 @@ export class CollectionMcpTransport implements Transport {
   }
 
   async send(message: JSONRPCMessage): Promise<void> {
+    if (this.failure !== undefined) await this.close();
     this.assertHealthy();
-    const input = this.process?.child.stdin;
+    const input = this.process?.input;
     if (input === undefined) throw new Error('Collection MCP transport is not running.');
     const bytes = serializeMessage(message);
     if (Buffer.byteLength(bytes) > COLLECTION_MAX_BYTES) throw new Error('MCP request exceeds the byte bound.');
-    await new Promise<void>((resolvePromise, reject) => {
-      input.write(bytes, error => (error ? reject(error) : resolvePromise()));
-    });
+    try {
+      await input.write(bytes);
+      this.assertHealthy();
+    } catch (error) {
+      this.fail(error instanceof Error ? error : new Error('Candidate MCP input failed.'));
+      await this.close();
+    }
   }
 
   async close(): Promise<void> {
@@ -428,6 +436,7 @@ export class CollectionMcpTransport implements Transport {
           }
         }
         this.notifyClosed();
+        if (cleanupError !== undefined && collectionCleanupIsUnsafe(cleanupError)) throw cleanupError;
         if (this.failure !== undefined) throw this.failure;
         if (cleanupError !== undefined) throw cleanupError;
       })();
@@ -435,6 +444,7 @@ export class CollectionMcpTransport implements Transport {
     try {
       await this.closePromise;
     } catch (error) {
+      if (collectionCleanupIsUnsafe(error)) throw error;
       if (this.failure !== undefined) throw this.failure;
       throw error;
     }

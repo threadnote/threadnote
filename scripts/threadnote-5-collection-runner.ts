@@ -695,15 +695,7 @@ async function runCollectionFileBroker(
     if (stderrBytes > 4096) stop();
     else stderr.push(chunk);
   });
-  const sent = new Promise<void>((resolvePromise, reject) => {
-    const failed = (error: Error) => reject(error);
-    owned.child.stdin.once('error', failed);
-    owned.child.stdin.write(input);
-    owned.child.stdin.end(() => {
-      owned.child.stdin.off('error', failed);
-      resolvePromise();
-    });
-  });
+  const sent = owned.input.end(input);
   try {
     const [exitCode] = await Promise.all([owned.done, sent]);
     const errorText = decodeCollectionFileBrokerOutput(Buffer.concat(stderr));
