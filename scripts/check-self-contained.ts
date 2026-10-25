@@ -97,7 +97,7 @@ const checkSelfContained = Effect.gen(function* () {
     }
     if (hasUndeclaredPythonRuntimeReference(relativePath, content)) {
       failures.push(
-        `Python runtime token outside migration, language metadata or optional workflow prerequisites: ${relativePath}`,
+        `Python runtime token outside migration, language or retained workflow ownership metadata: ${relativePath}`,
       );
     }
     if (/(?:viking:\/\/|data\/viking)/i.test(content) && !ALLOWED_LEGACY_IDENTIFIER_SOURCES.has(relativePath)) {

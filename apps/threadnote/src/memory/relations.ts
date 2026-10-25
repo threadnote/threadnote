@@ -1,6 +1,6 @@
 import {Data, Effect} from 'effect';
 import {ResourceStore} from '@threadnote/store/resource-store';
-import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
+import {makeResourceIdScopeChecker, parseResourceId} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
   isMemoryRelationType,
@@ -117,6 +117,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     readonly sourceUri?: string;
   },
 ) {
+  const resourceIds = makeResourceIdScopeChecker();
   const relations = yield* Effect.try({
     catch: cause =>
       cause instanceof MemoryRelationWriteError
@@ -129,17 +130,17 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
       cause instanceof MemoryRelationWriteError
         ? cause
         : relationError(cause instanceof Error ? cause.message : 'Relation source URI is invalid.'),
-    try: () => (options.sourceUri === undefined ? undefined : parseResourceId(options.sourceUri).canonicalUri),
+    try: () => (options.sourceUri === undefined ? undefined : resourceIds.parse(options.sourceUri).canonicalUri),
   });
   if (relations.length === 0) return {relations: undefined, targets: []} satisfies ResolvedAuthoredMemoryRelations;
-  const allowedUriScopes = options.allowedUriScopes.map(scope => parseResourceId(scope).canonicalUri);
+  const allowedUriScopes = options.allowedUriScopes.map(scope => resourceIds.parse(scope).canonicalUri);
   if (allowedUriScopes.length === 0) {
     return yield* relationError('Relation resolution requires an explicit authorized memory scope.');
   }
   for (const relation of relations) {
     if (
       memoryIdFromIdentityAlias(relation.uri) === undefined &&
-      !allowedUriScopes.some(scope => resourceIdIsWithin(relation.uri, scope))
+      !allowedUriScopes.some(scope => resourceIds.isWithin(relation.uri, scope))
     ) {
       return yield* relationError('Relation targets must stay inside the authorized memory scope.');
     }
@@ -153,7 +154,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
   const liveTargets = yield* Effect.forEach(initiallyResolved, (resolved, index) =>
     Effect.gen(function* () {
       const live = yield* readMemoryWithRelocations(config, resolved.canonicalUri, {allowedUriScopes});
-      if (!allowedUriScopes.some(scope => resourceIdIsWithin(live.canonicalUri, scope))) {
+      if (!allowedUriScopes.some(scope => resourceIds.isWithin(live.canonicalUri, scope))) {
         return yield* relationError('Relation target does not resolve inside the authorized active memory scope.');
       }
       yield* verifyResolvedMemoryIdentity(resolved, live.canonicalUri, live.content);

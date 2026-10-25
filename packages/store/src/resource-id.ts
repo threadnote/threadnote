@@ -106,6 +106,41 @@ export function resourceIdIsWithin(candidateUri: string, rootUri: string): boole
   );
 }
 
+/** Reuse only pure URI parsing within one evaluator; callers still compare every current scope. */
+export function makeResourceIdScopeChecker() {
+  const parsed = new Map<string, ResourceId>();
+  const maximumEntries = 4096;
+  const maximumCharacters = 1024 * 1024;
+  let retainedCharacters = 0;
+  const parse = (input: string): ResourceId => {
+    const cached = parsed.get(input);
+    if (cached !== undefined) return cached;
+    const result = parseResourceId(input);
+    Object.freeze(result.segments);
+    Object.freeze(result);
+    const characters =
+      input.length +
+      result.canonicalUri.length +
+      result.namespace.length +
+      result.segments.reduce((total, segment) => total + segment.length, 0) +
+      (result.anchor?.length ?? 0);
+    if (parsed.size < maximumEntries && characters <= maximumCharacters - retainedCharacters) {
+      parsed.set(input, result);
+      retainedCharacters += characters;
+    }
+    return result;
+  };
+  const isWithin = (candidateUri: string, rootUri: string): boolean => {
+    const candidate = resourceIdWithoutAnchor(parse(candidateUri));
+    const root = resourceIdWithoutAnchor(parse(rootUri));
+    return (
+      candidate.namespace === root.namespace &&
+      root.segments.every((segment, index) => candidate.segments[index] === segment)
+    );
+  };
+  return {parse, isWithin};
+}
+
 export function resourceIdIsManagedMemoryNamespace(uri: string): boolean {
   const resource = parseResourceId(uri);
   return (

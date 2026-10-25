@@ -4,6 +4,7 @@ import * as FC from 'fast-check';
 import {
   canonicalResourceUri,
   InvalidResourceId,
+  makeResourceIdScopeChecker,
   parseResourceId,
   resourceIdIsWithin,
   resourceIdWithoutAnchor,
@@ -270,3 +271,101 @@ function invalidSegmentFor(mutation: InvalidSegmentMutation, segment: string): s
       return `${segment}.`;
   }
 }
+
+describe('local ResourceId scope parsing', () => {
+  it('reuses immutable exact-input shapes without allowing returned objects to poison later checks', () => {
+    const checker = makeResourceIdScopeChecker();
+    const uri = 'threadnote://user/tester/memories/team-a/plan.md';
+    const parsed = checker.parse(uri);
+    expect(checker.parse(uri)).toBe(parsed);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(Object.isFrozen(parsed.segments)).toBe(true);
+    expect(() => Object.assign(parsed, {namespace: 'share'})).toThrow();
+    expect(() => (parsed.segments as string[]).push('escape')).toThrow();
+    expect(checker.isWithin(uri, 'threadnote://user/tester/memories/team-a')).toBe(true);
+    expect(checker.isWithin(uri, 'threadnote://user/tester/memories/team-b')).toBe(false);
+    expect(makeResourceIdScopeChecker().parse(uri)).not.toBe(parsed);
+  });
+
+  it('keys aliases separately and compares the currently supplied scopes after mutation', () => {
+    const checker = makeResourceIdScopeChecker();
+    const uri = 'threadnote://user/tester/memories/team-a/plan.md';
+    const alias = uri.replace('threadnote://', 'ViKiNg://');
+    expect(checker.parse(alias).inputScheme).toBe('viking');
+    expect(checker.parse(uri).inputScheme).toBe('threadnote');
+    const scopes = ['threadnote://user/tester/memories/team-a'];
+    const allowed = () => scopes.some(scope => checker.isWithin(uri, scope));
+    expect(allowed()).toBe(true);
+    scopes[0] = 'threadnote://user/tester/memories/team-b';
+    expect(allowed()).toBe(false);
+    scopes[0] = 'threadnote://user/tester/memories/team-a';
+    expect(allowed()).toBe(true);
+  });
+
+  it('preserves candidate-before-root errors, lazy root order and fresh failures', () => {
+    const checker = makeResourceIdScopeChecker();
+    const failure = (candidate: string, root: string) => {
+      try {
+        checker.isWithin(candidate, root);
+        throw new Error('Expected invalid URI');
+      } catch (error) {
+        expect(error).toBeInstanceOf(InvalidResourceId);
+        return error as InvalidResourceId;
+      }
+    };
+    expect(failure('bad-candidate', 'bad-root').input).toBe('bad-candidate');
+    const valid = 'threadnote://user/tester/memories/team-a';
+    const first = failure(valid, 'bad-root');
+    expect(first.input).toBe('bad-root');
+    expect(failure(valid, 'bad-root')).not.toBe(first);
+    expect([valid, 'bad-unused-root'].some(root => checker.isWithin(valid, root))).toBe(true);
+    expect(() => ['threadnote://share/other', 'bad-root', valid].some(root => checker.isWithin(valid, root))).toThrow(
+      InvalidResourceId,
+    );
+  });
+
+  it('bounds retained entries and keeps uncached overflow values equivalent', () => {
+    const checker = makeResourceIdScopeChecker();
+    const first = checker.parse('threadnote://user/first');
+    for (let index = 0; index < 4096; index++) checker.parse(`threadnote://user/entry-${index}`);
+    expect(checker.parse('threadnote://user/first')).toBe(first);
+    const uri = 'threadnote://user/overflow';
+    expect(checker.parse(uri)).toEqual(parseResourceId(uri));
+    expect(checker.parse(uri)).not.toBe(checker.parse(uri));
+  });
+
+  it('bounds retained characters independently of the entry limit', () => {
+    const checker = makeResourceIdScopeChecker();
+    const longPath = Array.from({length: 64}, () => 'a'.repeat(200));
+    const firstUri = canonicalResourceUri('user', [...longPath, 'first']);
+    const first = checker.parse(firstUri);
+    for (let index = 0; index < 40; index++)
+      checker.parse(canonicalResourceUri('user', [...longPath, `entry-${index}`]));
+    expect(checker.parse(firstUri)).toBe(first);
+    const overflow = canonicalResourceUri('user', [...longPath, 'overflow']);
+    expect(checker.parse(overflow)).toEqual(parseResourceId(overflow));
+    expect(checker.parse(overflow)).not.toBe(checker.parse(overflow));
+  });
+
+  fcProp(
+    it,
+    'matches uncached parsing and scope membership for generated aliases and anchors',
+    {
+      namespace: portableSegmentArbitrary,
+      rootSegments: FC.array(portableSegmentArbitrary, {maxLength: 5}),
+      childSegments: FC.array(portableSegmentArbitrary, {maxLength: 5}),
+      anchor: optionalAnchorArbitrary,
+    },
+    ({namespace, rootSegments, childSegments, anchor}) => {
+      const checker = makeResourceIdScopeChecker();
+      const root = canonicalResourceUri(namespace, rootSegments, anchor);
+      const candidate = canonicalResourceUri(namespace, [...rootSegments, ...childSegments], anchor);
+      const inputs = [root, candidate, candidate.replace('threadnote://', 'ViKiNg://')];
+      for (const input of inputs) {
+        expect(checker.parse(input)).toEqual(parseResourceId(input));
+        for (const scope of inputs) expect(checker.isWithin(input, scope)).toBe(resourceIdIsWithin(input, scope));
+      }
+    },
+    {fastCheck: {numRuns: 250}},
+  );
+});

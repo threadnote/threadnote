@@ -4,7 +4,7 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {fileSystemModeIsPrivate, runtimePlatform} from '@threadnote/platform/system';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {threadnoteStorageLayout} from '@threadnote/store/layout';
-import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
+import {makeResourceIdScopeChecker, parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {parseMemoryDocument, type MemoryRecord} from '@threadnote/memory/document';
 
@@ -114,10 +114,11 @@ export const readMemoryWithRelocations = Effect.fn('memoryRelocation.read')(func
   requestedInput: string,
   options: {readonly allowedUriScopes?: readonly string[]} = {},
 ) {
+  const resourceIds = makeResourceIdScopeChecker();
   const requestedUri = yield* canonicalManagedMemoryUri(config, requestedInput);
-  const allowedUriScopes = options.allowedUriScopes?.map(scope => parseResourceId(scope).canonicalUri);
+  const allowedUriScopes = options.allowedUriScopes?.map(scope => resourceIds.parse(scope).canonicalUri);
   const isAuthorized = (uri: string) =>
-    allowedUriScopes === undefined || allowedUriScopes.some(scope => resourceIdIsWithin(uri, scope));
+    allowedUriScopes === undefined || allowedUriScopes.some(scope => resourceIds.isWithin(uri, scope));
   if (!isAuthorized(requestedUri)) {
     return yield* new MemoryPointerNotFound({
       message: `Memory resource does not exist: ${requestedUri}`,
