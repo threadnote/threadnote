@@ -16,6 +16,17 @@ type Phase =
   | 'retirement-guard'
   | 'remote-verification'
   | 'canonical-readback'
+  | 'first-preview'
+  | 'first-approve'
+  | 'first-blocked-push'
+  | 'first-revoke'
+  | 'second-binding-preview'
+  | 'second-approve'
+  | 'second-blocked-publish'
+  | 'revoked-approval-check'
+  | 'renew-first-approval'
+  | 'resume-first'
+  | 'resume-second'
   | 'teardown';
 
 const gitOperations = new Set([
@@ -50,7 +61,12 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
   let phaseStart = 0;
   let commandCount = 0;
   let activeCount = 0;
-  const phases: {phase: Phase; startedMs: number; elapsedMs: number}[] = [];
+  const phases: {
+    phase: Phase;
+    startedMs: number;
+    elapsedMs: number;
+    operations: Record<string, {count: number; durationMs: number}>;
+  }[] = [];
   const active = new Map<number, {sequence: number; operation: string; startedMs: number}>();
   const recent: {
     sequence: number;
@@ -59,12 +75,23 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
     elapsedMs: number;
     outcome: 'Success' | 'Failure';
   }[] = [];
+  const operationTotals: Record<string, {count: number; durationMs: number}> = Object.create(null);
+  let phaseOperationTotals: Record<string, {count: number; durationMs: number}> = Object.create(null);
 
   return {
     phase: (phase: Phase) => {
       const at = elapsed();
-      phases.push({phase: currentPhase, startedMs: phaseStart, elapsedMs: at - phaseStart});
+      const operations: Record<string, {count: number; durationMs: number}> = Object.create(null);
+      for (const [name, totals] of Object.entries(operationTotals)) {
+        const previous = phaseOperationTotals[name] ?? {count: 0, durationMs: 0};
+        const delta = {count: totals.count - previous.count, durationMs: totals.durationMs - previous.durationMs};
+        if (delta.count > 0) operations[name] = delta;
+      }
+      phases.push({phase: currentPhase, startedMs: phaseStart, elapsedMs: at - phaseStart, operations});
       if (phases.length > 16) phases.shift();
+      phaseOperationTotals = Object.fromEntries(
+        Object.entries(operationTotals).map(([name, totals]) => [name, {...totals}]),
+      );
       currentPhase = phase;
       phaseStart = at;
     },
@@ -78,7 +105,11 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
             Effect.sync(() => {
               activeCount--;
               active.delete(command.sequence);
-              recent.push({...command, elapsedMs: elapsed() - command.startedMs, outcome: exit._tag});
+              const elapsedMs = elapsed() - command.startedMs;
+              const totals = (operationTotals[command.operation] ??= {count: 0, durationMs: 0});
+              totals.count++;
+              totals.durationMs += elapsedMs;
+              recent.push({...command, elapsedMs, outcome: exit._tag});
               if (recent.length > 16) recent.shift();
             }),
           ),
@@ -94,6 +125,9 @@ export const publicationDiagnostics = (now = () => performance.now()) => {
         phaseElapsedMs: at - phaseStart,
         phases: phases.map(entry => ({...entry})),
         commandCount,
+        operationTotals: Object.fromEntries(
+          Object.entries(operationTotals).map(([name, totals]) => [name, {...totals}]),
+        ),
         activeCount,
         unlistedActiveCount: activeCount - active.size,
         active: [...active.values()].map(entry => ({...entry, elapsedMs: at - entry.startedMs})),

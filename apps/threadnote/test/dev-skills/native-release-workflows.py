@@ -6,7 +6,10 @@ Python, Node or Bun to that PATH. Personal profiles use actual bootstrap and
 publication commands against isolated local bare Git, not live provider APIs.
 """
 
+import base64
+import gzip
 import hashlib
+import io
 import json
 import re
 import subprocess
@@ -55,6 +58,16 @@ def _run_profile(fixture, binary, environment, generation, profile):
     environment["THREADNOTE_USER"] = "release-fixture"
     environment["THREADNOTE_AGENT_ID"] = "release-fixture"
     environment["THREADNOTE_CURSOR_CLOUD_TEAM"] = "default"
+    if profile != "desktop":
+        # Bootstrap installs agent skills too; keep cloud consumers out of the desktop target.
+        user = fixture / "user"
+        user.mkdir()
+        environment.update({
+            "HOME": str(user), "USERPROFILE": str(user),
+            "XDG_CONFIG_HOME": str(user / ".config"), "XDG_DATA_HOME": str(user / ".local/share"),
+            "XDG_STATE_HOME": str(user / ".local/state"), "XDG_CACHE_HOME": str(user / ".cache"),
+            "APPDATA": str(user / "appdata"), "LOCALAPPDATA": str(user / "localappdata"),
+        })
     # The product's actual Git commits use only synthetic fixture identity.
     environment["GIT_AUTHOR_NAME"] = "Release Workflow Fixture"
     environment["GIT_AUTHOR_EMAIL"] = "fixture@example.invalid"
@@ -74,6 +87,148 @@ def _run_profile(fixture, binary, environment, generation, profile):
     common = {"protocolVersion": 1, "executorVersion": 1, "runId": run_id, "generation": generation}
     records = []
 
+    def persist_finish_publication_diagnostic(response):
+        """Emit a compact CI marker and optionally save its bounded fixture projection."""
+        state_path = home / "workflow-automations" / "native-v1" / f"{run_id}.json"
+        binding_id = None
+        capture_error = None
+
+        def read_journal(path, codec):
+            with path.open("rb") as stream:
+                raw = stream.read(16 * 1024 * 1024 + 1)
+            if len(raw) > 16 * 1024 * 1024:
+                raise ValueError("journal-too-large")
+            value = json.loads(raw)
+            if not isinstance(value, dict) or value.get("format") != codec:
+                return value
+            if set(value) != {"format", "expandedBytes", "sha256", "payload"}:
+                raise ValueError("journal-envelope-invalid")
+            expanded = value["expandedBytes"]
+            payload = value["payload"]
+            if not isinstance(expanded, int) or not 0 < expanded <= 64 * 1024 * 1024 or not isinstance(payload, str):
+                raise ValueError("journal-envelope-invalid")
+            compressed = base64.b64decode(payload, validate=True)
+            with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
+                decoded = stream.read(expanded + 1)
+            if len(decoded) != expanded or hashlib.sha256(decoded).hexdigest() != value["sha256"]:
+                raise ValueError("journal-envelope-integrity")
+            return json.loads(decoded)
+
+        try:
+            if not state_path.is_file():
+                capture_error = "native-state-missing"
+            else:
+                native_state = read_journal(state_path, "threadnote-native-workflow-state-gzip-v1")
+                binding_id = native_state.get("bindingId") if isinstance(native_state, dict) else None
+                if not isinstance(binding_id, str) or not re.fullmatch(r"[a-f0-9]{64}", binding_id):
+                    capture_error = "native-binding-invalid"
+        except Exception:
+            capture_error = "native-state-invalid"
+
+        publication = None
+        binding_journal = None
+        publication_path = None
+        if binding_id and capture_error is None:
+            publication_path = home / "workflow-memory" / f"{binding_id}.publication.json"
+            binding_path = home / "workflow-memory" / f"{binding_id}.json"
+            try:
+                if publication_path.is_file():
+                    publication = read_journal(publication_path, "threadnote-workflow-publication-journal-gzip-v1")
+                else:
+                    capture_error = "publication-journal-missing"
+            except Exception:
+                capture_error = "publication-journal-invalid"
+            try:
+                if binding_path.is_file():
+                    binding_journal = read_journal(binding_path, "threadnote-workflow-journal-gzip-v1")
+                    if isinstance(binding_journal, dict) and binding_journal.get("journalStorage") == "threadnote-workflow-journal-shared-values-v1":
+                        if not isinstance(binding_journal.get("journal"), dict):
+                            raise ValueError("binding-journal-invalid")
+                        binding_journal = binding_journal["journal"]
+                elif capture_error is None:
+                    capture_error = "binding-journal-missing"
+            except Exception:
+                if capture_error is None:
+                    capture_error = "binding-journal-invalid"
+
+        intent = publication.get("intent", {}) if isinstance(publication, dict) else {}
+        raw_stages = intent.get("stages", []) if isinstance(intent, dict) else []
+        raw_nodes = intent.get("nodes", []) if isinstance(intent, dict) else []
+        progress = publication.get("progress", {}) if isinstance(publication, dict) else {}
+        binding = binding_journal.get("binding", {}) if isinstance(binding_journal, dict) else {}
+        expected_remote = binding.get("remote") if isinstance(binding, dict) else None
+        expected_branch = binding.get("branch") if isinstance(binding, dict) else None
+        final_receipts = []
+        if isinstance(raw_stages, list) and isinstance(progress, dict):
+            node_keys = []
+            if isinstance(raw_nodes, list):
+                for node in raw_nodes[:3]:
+                    key = node.get("input", {}).get("key") if isinstance(node, dict) and isinstance(node.get("input"), dict) else None
+                    if isinstance(key, str) and key not in node_keys:
+                        node_keys.append(key)
+            for node_key in node_keys[:3]:
+                node = next(item for item in raw_nodes[:3] if isinstance(item, dict) and isinstance(item.get("input"), dict) and item["input"].get("key") == node_key)
+                stage = next(
+                    (item for item in reversed(raw_stages[:3]) if isinstance(item, dict) and item.get("nodeKey") == node_key),
+                    None,
+                )
+                if not isinstance(stage, dict):
+                    continue
+                stage_key = stage.get("key")
+                prepared = node.get("prepared", {})
+                uri = prepared.get("memoryUri") if isinstance(prepared, dict) else None
+                expected_path = uri.split("/shared/default/", 1)[1] if isinstance(uri, str) and "/shared/default/" in uri else None
+                memory = prepared.get("memory") if isinstance(prepared, dict) else None
+                expected_hash = hashlib.sha256(memory.encode("utf-8")).hexdigest() if isinstance(memory, str) else None
+                stage_progress = progress.get(stage_key, {}) if isinstance(stage_key, str) else {}
+                receipt = stage_progress.get("verified") if isinstance(stage_progress, dict) else None
+                if not isinstance(receipt, dict):
+                    receipt = {}
+                checks = {
+                    "commitFormat": isinstance(receipt.get("commit"), str) and re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", receipt["commit"]) is not None,
+                    "remoteMatches": receipt.get("remote") == expected_remote if expected_remote is not None else None,
+                    "branchMatches": receipt.get("branch") == expected_branch if expected_branch is not None else None,
+                    "pathMatches": expected_path is not None and receipt.get("path") == expected_path,
+                    "contentHashMatches": expected_hash is not None and receipt.get("contentHash") == expected_hash,
+                }
+                checks["verifyFinalGraphPredicate"] = bool(receipt) and all(value is True for value in checks.values())
+                final_receipts.append({
+                    "nodeKey": node_key[:64],
+                    "stageKey": str(stage_key or "")[:96],
+                    "started": isinstance(stage_progress, dict) and stage_progress.get("started") is True,
+                    "committedPresent": isinstance(stage_progress, dict) and isinstance(stage_progress.get("committed"), dict),
+                    "verifiedPresent": isinstance(stage_progress, dict) and isinstance(stage_progress.get("verified"), dict),
+                    "checks": checks,
+                })
+
+        diagnostic = {
+            "version": 1,
+            "profile": profile,
+            "bindingIdPrefix": binding_id[:12] if isinstance(binding_id, str) else None,
+            "captureError": capture_error,
+            "closeoutCode": str(response.get("code", ""))[:80] if isinstance(response, dict) else None,
+            "finalReceipts": final_receipts[:3],
+        }
+        diagnostic_path = fixture / "finish-publication-diagnostic.json"
+        diagnostic["localSnapshotSaved"] = False
+        try:
+            local_snapshot = {**diagnostic, "publicationJournalPath": str(publication_path) if publication_path else None}
+            diagnostic_path.write_text(json.dumps(local_snapshot, indent=2) + "\n", encoding="utf-8")
+            diagnostic["localSnapshotSaved"] = True
+        except Exception:
+            pass
+
+        marker = json.dumps(diagnostic, separators=(",", ":"), ensure_ascii=True)
+        if len(marker.encode("utf-8")) > 3800:
+            marker = json.dumps({
+                "version": 1,
+                "profile": profile,
+                "bindingIdPrefix": binding_id[:12] if isinstance(binding_id, str) else None,
+                "captureError": "marker-overflow",
+                "finalReceiptCount": len(final_receipts),
+            }, separators=(",", ":"), ensure_ascii=True)
+        sys.stderr.write("NATIVE_PUBLICATION_DIAGNOSTICS " + marker + "\n")
+        return diagnostic_path
     def call(request, expected_code=None):
         process = subprocess.run(
             [*cli, "workflow-automation", "--home", str(home)],
@@ -102,6 +257,11 @@ def _run_profile(fixture, binary, environment, generation, profile):
             assert process.returncode != 0 and value.get("code") == expected_code, value
             return value
         if process.returncode != 0 or not isinstance(value, dict) or value.get("status") != "ok":
+            if request.get("action") == "closeout" and request.get("command") == "finish":
+                try:
+                    persist_finish_publication_diagnostic(value)
+                except Exception:
+                    sys.stderr.write("NATIVE_PUBLICATION_DIAGNOSTICS " + json.dumps({"version": 1, "profile": profile, "captureError": "diagnostic-capture-failed"}, separators=(",", ":")) + "\n")
             raise RuntimeError(f"CLI request failed: {json.dumps(value, sort_keys=True)}\n{process.stderr[-2000:]}")
         return value
 

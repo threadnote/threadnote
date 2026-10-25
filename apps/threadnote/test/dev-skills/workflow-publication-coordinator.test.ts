@@ -359,79 +359,121 @@ describe('approved workflow graph publication', () => {
   for (const decision of ['reject', 'defer'] as const)
     effectIt.effect(
       `does not publish another binding's pending commit after its approval is revoked by ${decision}`,
-      () =>
-        Effect.gen(function* () {
-          const f = yield* fixture();
-          const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
-          const first = yield* f.preview([graph[0]]);
-          if (!('stages' in first)) return yield* Effect.die('Expected preview');
-          yield* f.approve(first.approvalDigest);
-          const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
-          yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {mode: 0o700});
-          const pending = yield* f.publish(first.approvalDigest);
-          expect(pending).toMatchObject({status: 'pending', committed: {version: 1}});
-          const firstCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
-          yield* f.approve(first.approvalDigest, decision);
-          yield* f.fs.remove(hook);
-          const binding = yield* resolveWorkflowBinding(f.config, {
-            protocolVersion: 1,
-            action: 'bind',
-            workflowRunId: 'independent-workflow',
-            project: 'fixture',
-            featureId: 'independent-feature',
-            generation: 'bundle-v1',
-          }).pipe(Effect.provideService(SystemInfo, f.context));
-          const state = yield* bindWorkflow(f.config, binding);
-          const call = (request: WorkflowPublicationRequest) =>
-            withWorkflowLock(f.config, binding.bindingId, runWorkflowPublication(f.config, state, request)).pipe(
-              Effect.provideService(SystemInfo, f.context),
-            );
-          const second = yield* call({
-            protocolVersion: 1,
-            bindingId: binding.bindingId,
-            action: 'publication-preview',
-            sourceCommit: f.sourceCommit,
-            graph: {nodes: [{...graph[0], topic: 'independent-design', body: 'Independently approved architecture.'}]},
-          });
-          yield* call({
-            protocolVersion: 1,
-            bindingId: binding.bindingId,
-            action: 'publication-approve',
-            approvalDigest: second.approvalDigest,
-            decision: 'approve',
-            approvalEvidence: 'Approve only the displayed independent graph.',
-          });
-          expect(
+      context => {
+        const diagnostics = publicationDiagnostics();
+        const report = (event: 'aborted' | 'finished') =>
+          process.stderr.write(
+            `WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({test: `revoked-${decision}`, event, ...diagnostics.snapshot()})}\n`,
+          );
+        const aborted = () => report('aborted');
+        context.signal.addEventListener('abort', aborted, {once: true});
+        context.onTestFinished(() => {
+          context.signal.removeEventListener('abort', aborted);
+          report('finished');
+        });
+        return Effect.gen(function* () {
+          const commands = yield* CommandExecutor;
+          return yield* Effect.gen(function* () {
+            diagnostics.phase('fixture');
+            const f = yield* fixture();
+            const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+            diagnostics.phase('first-preview');
+            const first = yield* f.preview([graph[0]]);
+            if (!('stages' in first)) return yield* Effect.die('Expected preview');
+            diagnostics.phase('first-approve');
+            yield* f.approve(first.approvalDigest);
+            const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
+            yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {mode: 0o700});
+            diagnostics.phase('first-blocked-push');
+            const pending = yield* f.publish(first.approvalDigest);
+            expect(pending).toMatchObject({status: 'pending', committed: {version: 1}});
+            const firstCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+            diagnostics.phase('first-revoke');
+            yield* f.approve(first.approvalDigest, decision);
+            yield* f.fs.remove(hook);
+            const binding = yield* resolveWorkflowBinding(f.config, {
+              protocolVersion: 1,
+              action: 'bind',
+              workflowRunId: 'independent-workflow',
+              project: 'fixture',
+              featureId: 'independent-feature',
+              generation: 'bundle-v1',
+            }).pipe(Effect.provideService(SystemInfo, f.context));
+            const state = yield* bindWorkflow(f.config, binding);
+            const call = (request: WorkflowPublicationRequest) =>
+              withWorkflowLock(f.config, binding.bindingId, runWorkflowPublication(f.config, state, request)).pipe(
+                Effect.provideService(SystemInfo, f.context),
+              );
+            diagnostics.phase('second-binding-preview');
+            const second = yield* call({
+              protocolVersion: 1,
+              bindingId: binding.bindingId,
+              action: 'publication-preview',
+              sourceCommit: f.sourceCommit,
+              graph: {
+                nodes: [{...graph[0], topic: 'independent-design', body: 'Independently approved architecture.'}],
+              },
+            });
+            diagnostics.phase('second-approve');
             yield* call({
               protocolVersion: 1,
               bindingId: binding.bindingId,
-              action: 'publication-publish',
+              action: 'publication-approve',
               approvalDigest: second.approvalDigest,
-            }),
-          ).toMatchObject({status: 'pending'});
-          expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
-          expect(
-            (yield* f.git(f.worktree, [
-              'show',
-              `${firstCommit}:${first.nodes[0].canonicalUri.split('/shared/default/')[1]}`,
-            ])).stdout,
-          ).toBe(first.stages[0].content);
-          expect(yield* f.publish(first.approvalDigest).pipe(Effect.result)).toMatchObject({
-            _tag: 'Failure',
-            failure: {code: 'publication-approval-required'},
-          });
-          // Nothing was discarded: explicit renewed approval lets A publish, then B retries its own commit.
-          yield* f.approve(first.approvalDigest);
-          expect(yield* f.publish(first.approvalDigest)).toMatchObject({verifiedReadback: true});
-          expect(
-            yield* call({
-              protocolVersion: 1,
-              bindingId: binding.bindingId,
-              action: 'publication-publish',
-              approvalDigest: second.approvalDigest,
-            }),
-          ).toMatchObject({verifiedReadback: true});
-        }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+              decision: 'approve',
+              approvalEvidence: 'Approve only the displayed independent graph.',
+            });
+            diagnostics.phase('second-blocked-publish');
+            expect(
+              yield* call({
+                protocolVersion: 1,
+                bindingId: binding.bindingId,
+                action: 'publication-publish',
+                approvalDigest: second.approvalDigest,
+              }),
+            ).toMatchObject({status: 'pending'});
+            diagnostics.phase('revoked-approval-check');
+            expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
+            expect(
+              (yield* f.git(f.worktree, [
+                'show',
+                `${firstCommit}:${first.nodes[0].canonicalUri.split('/shared/default/')[1]}`,
+              ])).stdout,
+            ).toBe(first.stages[0].content);
+            expect(yield* f.publish(first.approvalDigest).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-approval-required'},
+            });
+            // Nothing was discarded: explicit renewed approval lets A publish, then B retries its own commit.
+            diagnostics.phase('renew-first-approval');
+            yield* f.approve(first.approvalDigest);
+            diagnostics.phase('resume-first');
+            expect(yield* f.publish(first.approvalDigest)).toMatchObject({verifiedReadback: true});
+            diagnostics.phase('resume-second');
+            expect(
+              yield* call({
+                protocolVersion: 1,
+                bindingId: binding.bindingId,
+                action: 'publication-publish',
+                approvalDigest: second.approvalDigest,
+              }),
+            ).toMatchObject({verifiedReadback: true});
+          }).pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) =>
+                  diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+              }),
+            ),
+          );
+        }).pipe(
+          Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        );
+      },
     );
 
   for (const change of ['delete', 'archive', 'replace'] as const)
