@@ -150,7 +150,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       ) : loading ? (
         <ReviewProgress
           title="Loading the review inbox…"
-          description="Checking current review and source access. You can switch tabs while this loads."
+          description="Loading saved review summaries. You can switch tabs while this loads."
         />
       ) : !inbox || inbox.items.length === 0 ? (
         <AttentionEmpty
