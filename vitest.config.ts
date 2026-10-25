@@ -12,7 +12,7 @@ const lifecycleBetaVerbs = 'does|fails|sanitizes|streams|synchronously|treats|us
 const lifecycleBetaNested = 'full materialization fallback .* fails closed';
 const lifecycleGammaVerbs = 'holds|indexes|keeps|marks|pauses|performs|preserves|prunes|publishes|purges';
 const knownLifecycleVerbs = `${lifecycleAlphaVerbs}|${lifecycleBetaVerbs}|${lifecycleGammaVerbs}`;
-const lifecycleTestPrefix = 'native code graph lifecycle ';
+const lifecycleTestPrefix = 'native code graph lifecycle > ';
 
 const ciLongRunningTestPatterns: Partial<Record<string, RegExp>> = {
   'lifecycle-alpha': new RegExp(`${lifecycleTestPrefix}(?:${lifecycleAlphaVerbs})\\b`, 'u'),
