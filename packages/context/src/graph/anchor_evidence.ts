@@ -38,10 +38,7 @@ interface RankedEdge {
 export function contextBriefAnchoredRepositoryGraphRequests(
   plan: ContextBriefPlanV1['graph'],
 ): readonly ContextBriefAnchoredRepositoryGraphRequestV1[] {
-  if (
-    plan.codeRefs.length === 0 ||
-    (plan.mode !== 'locate' && plan.mode !== 'trace' && plan.mode !== 'impact' && plan.mode !== 'resume')
-  ) {
+  if (plan.codeRefs.length === 0) {
     return [];
   }
   return plan.codeRefs.map(ref => {
@@ -204,7 +201,7 @@ function anchoredNodePriority(
   const supportingRelationship = relationshipPriority !== undefined && relationshipPriority < 3;
   // Resume anchors come from the selected handoff, so the cited source must outrank
   // incidental task-text matches just as it does for an explicit trace or locate request.
-  if (mode === 'trace' || mode === 'locate' || mode === 'resume') {
+  if (mode === 'trace' || mode === 'locate' || mode === 'resume' || mode === 'brief' || mode === 'explain') {
     if (exact && (module || anchorIds.has(node.id))) return 0;
     if (directSourceRelationship) return 1;
     if (exact) return 2;
