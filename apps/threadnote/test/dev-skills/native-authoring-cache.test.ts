@@ -2,11 +2,16 @@ import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, Result} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
+import {formatMemoryDocument} from '@threadnote/memory/document';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
+import {workflowArtifactUri, workflowStateTopic} from '../../src/workflow_memory/naming.js';
+import {assertWorkflowJournalIntegrity} from '../../src/workflow_memory/journal_validation.js';
 import {
   CurrentWorkflowReadCache,
   immutableWorkflowImage,
   withWorkflowReadCache,
+  type WorkflowReadCache,
 } from '../../src/workflow_memory/read_cache.js';
 import {inspectWorkflowJournal} from '../../src/workflow_memory/journal.js';
 import {
@@ -15,6 +20,12 @@ import {
   writeNativeWorkflowState,
 } from '../../src/workflow_automation/store.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {
+  stableJson,
+  type WorkflowArtifact,
+  type WorkflowBinding,
+  type WorkflowJournal,
+} from '../../src/workflow_memory/protocol.js';
 
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
 
@@ -252,4 +263,208 @@ it('deep-freezes descendants even when the image root was already shallow-frozen
   expect(Object.isFrozen(image.nested.leaf)).toBe(true);
   expect(Object.isFrozen(image.rows)).toBe(true);
   expect(Object.isFrozen(image.rows[0])).toBe(true);
+});
+
+const manifestCacheTimestamp = '2026-10-20T12:00:00.000Z';
+const manifestCacheIdentity = {
+  workflowRunId: 'run-1',
+  profile: 'desktop' as const,
+  project: 'fixture',
+  featureId: 'feature',
+  generation: 'v1',
+  home: '/fixture/home',
+  repo: '/fixture/repo',
+  account: 'local',
+  user: 'tester',
+  agentId: 'test',
+  sharedRoots: [],
+  artifactLifetime: 'local-home' as const,
+};
+const manifestCacheBinding: WorkflowBinding = {
+  ...manifestCacheIdentity,
+  bindingId: sha256HexSync(stableJson(manifestCacheIdentity)),
+};
+
+function manifestCacheUri(value: WorkflowBinding): string {
+  return `threadnote://user/${value.user}/memories/handoffs/active/${value.project}/${workflowStateTopic(value)}.md`;
+}
+
+function manifestCacheDocument(
+  value: WorkflowBinding,
+  artifacts: WorkflowJournal['artifacts'],
+  stamp = manifestCacheTimestamp,
+): string {
+  return formatMemoryDocument(
+    'MEMORY',
+    {
+      kind: 'handoff',
+      status: 'active',
+      project: value.project,
+      topic: workflowStateTopic(value),
+      memoryId: `tn_${value.bindingId.slice(0, 20)}`,
+      timestamp: stamp,
+      sourceAgentClient: 'threadnote',
+      sourceSessionId: value.workflowRunId,
+    },
+    stableJson({protocolVersion: 1, binding: value, artifacts}),
+  );
+}
+
+const manifestCacheArtifactKey = 'draft';
+const manifestCacheArtifact: WorkflowArtifact = {
+  artifactKey: manifestCacheArtifactKey,
+  sourceRunId: 'writer',
+  role: 'root',
+  canonicalUri: workflowArtifactUri(manifestCacheBinding, {
+    artifactKey: manifestCacheArtifactKey,
+    storageKind: 'handoff',
+  }),
+  memoryId: `tn_${sha256HexSync(`${manifestCacheBinding.bindingId}\nwriter\n${manifestCacheArtifactKey}`).slice(0, 20)}`,
+  revision: 'a'.repeat(64),
+  bodySha256: 'b'.repeat(64),
+  storageKind: 'handoff',
+  state: 'active',
+};
+const manifestCacheArtifacts = {[manifestCacheArtifact.canonicalUri]: manifestCacheArtifact};
+
+function manifestCacheState(
+  value: WorkflowBinding = manifestCacheBinding,
+  owned: WorkflowJournal['artifacts'] = manifestCacheArtifacts,
+  content = manifestCacheDocument(value, owned),
+  uri = manifestCacheUri(value),
+): WorkflowJournal {
+  return {
+    protocolVersion: 1,
+    binding: value,
+    artifacts: owned,
+    operations: {},
+    manifestUri: uri,
+    manifestContent: content,
+    manifestCommitted: true,
+  };
+}
+
+const withManifestCache = <A>(body: (cache: WorkflowReadCache) => Effect.Effect<A>) =>
+  Effect.gen(function* () {
+    const cache = yield* CurrentWorkflowReadCache;
+    if (!cache) throw new Error('Expected a request-local workflow read cache.');
+    return yield* body(cache);
+  }).pipe(withWorkflowReadCache);
+
+describe('native authoring manifest cache', () => {
+  effectIt.effect('reuses only exact manifest keys while retaining state and source authority checks', () =>
+    withManifestCache(cache =>
+      Effect.gen(function* () {
+        const original = manifestCacheState();
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(original, original.manifestContent, [], cache));
+        expect(cache.manifests).toHaveLength(1);
+        const firstEntry = cache.manifests[0];
+        expect(firstEntry.binding).toBe(original.binding);
+        expect(firstEntry.manifestUri).toBe(original.manifestUri);
+        expect(firstEntry.content).toBe(original.manifestContent);
+        expect(Object.isFrozen(firstEntry.binding)).toBe(true);
+        expect(Object.isFrozen(firstEntry.artifacts)).toBe(true);
+        expect(Object.isFrozen(firstEntry.artifacts[manifestCacheArtifact.canonicalUri])).toBe(true);
+        expect(Reflect.set(firstEntry.artifacts[manifestCacheArtifact.canonicalUri], 'role', 'tampered')).toBe(false);
+
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(original, original.manifestContent, [], cache));
+        expect(cache.manifests[0]).toBe(firstEntry);
+
+        const editedMap = {...original, artifacts: {}};
+        expect(() => assertWorkflowJournalIntegrity(editedMap, editedMap.manifestContent, [], cache)).toThrow();
+        expect(cache.manifests[0]).toBe(firstEntry);
+
+        const changedUri = {...original, manifestUri: `${original.manifestUri}.other`};
+        expect(() => assertWorkflowJournalIntegrity(changedUri, changedUri.manifestContent, [], cache)).toThrow();
+        expect(cache.manifests[0]).toBe(firstEntry);
+
+        const changedBinding = {...manifestCacheBinding, project: 'other'};
+        const rebound = {...original, binding: changedBinding};
+        expect(() => assertWorkflowJournalIntegrity(rebound, rebound.manifestContent, [], cache)).toThrow();
+        expect(cache.manifests[0]).toBe(firstEntry);
+
+        const newContent = manifestCacheDocument(
+          manifestCacheBinding,
+          manifestCacheArtifacts,
+          '2026-10-21T12:00:00.000Z',
+        );
+        const changedManifest = manifestCacheState(manifestCacheBinding, manifestCacheArtifacts, newContent);
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(changedManifest, newContent, [], cache));
+        expect(cache.manifests[0].content).toBe(newContent);
+        expect(cache.manifests).toHaveLength(2);
+
+        const equalBindingClone = {...manifestCacheBinding};
+        const sameBytesDifferentBinding = manifestCacheState(
+          equalBindingClone,
+          manifestCacheArtifacts,
+          original.manifestContent,
+        );
+        yield* Effect.sync(() =>
+          assertWorkflowJournalIntegrity(sameBytesDifferentBinding, original.manifestContent, [], cache),
+        );
+        expect(cache.manifests[0].binding).toBe(equalBindingClone);
+        expect(cache.manifests[0].binding).not.toBe(original.binding);
+        expect(cache.manifests).toHaveLength(2);
+
+        const thirdContent = manifestCacheDocument(
+          manifestCacheBinding,
+          manifestCacheArtifacts,
+          '2026-10-22T12:00:00.000Z',
+        );
+        const thirdManifest = manifestCacheState(manifestCacheBinding, manifestCacheArtifacts, thirdContent);
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(thirdManifest, thirdContent, [], cache));
+        expect(cache.manifests).toHaveLength(2);
+        expect(cache.manifests[0].content).toBe(thirdContent);
+      }),
+    ),
+  );
+
+  effectIt.effect('keeps manifest entries isolated between workflow requests', () =>
+    Effect.gen(function* () {
+      const first = yield* withManifestCache(cache =>
+        Effect.sync(() => {
+          const current = manifestCacheState();
+          assertWorkflowJournalIntegrity(current, current.manifestContent, [], cache);
+          return cache;
+        }),
+      );
+      const second = yield* withManifestCache(cache =>
+        Effect.sync(() => {
+          const current = manifestCacheState();
+          assertWorkflowJournalIntegrity(current, current.manifestContent, [], cache);
+          return cache;
+        }),
+      );
+      expect(first).not.toBe(second);
+      expect(first.manifests).toHaveLength(1);
+      expect(second.manifests).toHaveLength(1);
+      expect(first.manifests[0]).not.toBe(second.manifests[0]);
+    }),
+  );
+
+  effectIt.effect('caches the desired and previous manifest images under their exact content keys', () =>
+    withManifestCache(cache =>
+      Effect.gen(function* () {
+        const previousContent = manifestCacheDocument(manifestCacheBinding, {}, manifestCacheTimestamp);
+        const desiredContent = manifestCacheDocument(manifestCacheBinding, {}, '2026-10-21T12:00:00.000Z');
+        const pending: WorkflowJournal = {
+          protocolVersion: 1,
+          binding: manifestCacheBinding,
+          artifacts: {},
+          operations: {},
+          manifestUri: manifestCacheUri(manifestCacheBinding),
+          manifestContent: desiredContent,
+          previousManifestContent: previousContent,
+          manifestCommitted: false,
+        };
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(pending, previousContent, [], cache));
+        expect(cache.manifests).toHaveLength(2);
+        expect(cache.manifests.map(entry => entry.content)).toContain(desiredContent);
+        expect(cache.manifests.map(entry => entry.content)).toContain(previousContent);
+        const entries = [...cache.manifests];
+        yield* Effect.sync(() => assertWorkflowJournalIntegrity(pending, previousContent, [], cache));
+        expect(cache.manifests).toEqual(entries);
+      }),
+    ),
+  );
 });

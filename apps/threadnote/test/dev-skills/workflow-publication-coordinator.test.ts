@@ -435,90 +435,130 @@ describe('approved workflow graph publication', () => {
     );
 
   for (const change of ['delete', 'archive', 'replace'] as const)
-    effectIt.effect(`keeps drafts when an external target has a remote ${change} hidden by stale native cache`, () =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
-        const input = {
-          operation: 'create' as const,
-          bodyText: 'Approved external architecture dependency.',
-          metadata: {
-            kind: 'durable' as const,
-            status: 'active' as const,
-            project: 'fixture',
-            topic: 'external-dependency',
-            memoryId: 'tn_1234567890abcdef1234',
-            timestamp: '2026-10-20T00:00:00.000Z',
-            sourceAgentClient: 'test',
-          },
-        };
-        const external = yield* prepareCursorCloudSharedMemory(f.config, scope, input);
-        expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
-        const body = 'Private draft retained until the complete approved graph is remotely verified.\n';
-        const draft = (yield* runWorkflowMemory(f.config, {
-          protocolVersion: 1,
-          bindingId: f.binding.bindingId,
-          action: 'create',
-          operationId: 'private-draft',
-          artifactKey: 'draft',
-          sourceRunId: 'writer',
-          role: 'root',
-          body,
-          bodySha256: sha256HexSync(body),
-          expectedRevision: null,
-        }).pipe(Effect.provideService(SystemInfo, f.context))) as WorkflowReadResult;
-        const draftBefore = yield* readOptionalResource(f.config, draft.canonicalUri);
-        const preview = yield* f.preview([{...graph[0], relations: [{type: 'depends_on', uri: external.memoryUri}]}]);
-        yield* f.approve(preview.approvalDigest);
-        expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
-        const peer = f.path.join(f.home, `peer-${change}`);
-        yield* f.git(f.home, ['clone', f.remote, peer]);
-        yield* f.git(peer, ['config', 'user.email', 'peer@example.invalid']);
-        yield* f.git(peer, ['config', 'user.name', 'External Target Peer']);
-        const path = external.memoryUri.split('/shared/default/')[1];
-        if (change === 'delete') yield* f.git(peer, ['rm', path]);
-        else {
-          const record = parseMemoryDocument(external.memoryUri, external.memory)!;
-          const modified = formatMemoryDocument(
-            record.headerTitle,
-            {
-              ...record.metadata,
-              ...(change === 'archive' ? {status: 'archived' as const} : {memoryId: 'tn_abcdef1234567890abcd'}),
-            },
-            record.body,
+    effectIt.effect(
+      `keeps drafts when an external target has a remote ${change} hidden by stale native cache`,
+      context => {
+        const diagnostics = publicationDiagnostics();
+        const report = (event: 'aborted' | 'finished') =>
+          process.stderr.write(
+            `WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({test: `external-${change}`, event, ...diagnostics.snapshot()})}\n`,
           );
-          yield* f.fs.writeFileString(f.path.join(peer, path), modified);
-          yield* f.git(peer, ['add', path]);
-        }
-        yield* f.git(peer, ['commit', '-m', `external dependency ${change}`]);
-        yield* f.git(peer, ['push', 'origin', 'main']);
-        expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
-        expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
+        const aborted = () => report('aborted');
+        context.signal.addEventListener('abort', aborted, {once: true});
+        context.onTestFinished(() => {
+          context.signal.removeEventListener('abort', aborted);
+          report('finished');
         });
-        expect(yield* f.guard.pipe(Effect.result)).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
-        });
-        expect(
-          yield* runWorkflowMemory(f.config, {
-            protocolVersion: 1,
-            bindingId: f.binding.bindingId,
-            action: 'archive',
-            operationId: 'retire-private-draft',
-            artifactKey: 'draft',
-            sourceRunId: 'writer',
-            role: 'root',
-            uri: draft.canonicalUri,
-            expectedRevision: draft.revision,
-          }).pipe(Effect.provideService(SystemInfo, f.context), Effect.result),
-        ).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
-        });
-        expect(yield* readOptionalResource(f.config, draft.canonicalUri)).toBe(draftBefore);
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+        return Effect.gen(function* () {
+          const commands = yield* CommandExecutor;
+          return yield* Effect.gen(function* () {
+            diagnostics.phase('fixture');
+            const f = yield* fixture();
+            const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
+            const input = {
+              operation: 'create' as const,
+              bodyText: 'Approved external architecture dependency.',
+              metadata: {
+                kind: 'durable' as const,
+                status: 'active' as const,
+                project: 'fixture',
+                topic: 'external-dependency',
+                memoryId: 'tn_1234567890abcdef1234',
+                timestamp: '2026-10-20T00:00:00.000Z',
+                sourceAgentClient: 'test',
+              },
+            };
+            const external = yield* prepareCursorCloudSharedMemory(f.config, scope, input);
+            expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
+            diagnostics.phase('preview');
+            const body = 'Private draft retained until the complete approved graph is remotely verified.\n';
+            const draft = (yield* runWorkflowMemory(f.config, {
+              protocolVersion: 1,
+              bindingId: f.binding.bindingId,
+              action: 'create',
+              operationId: 'private-draft',
+              artifactKey: 'draft',
+              sourceRunId: 'writer',
+              role: 'root',
+              body,
+              bodySha256: sha256HexSync(body),
+              expectedRevision: null,
+            }).pipe(Effect.provideService(SystemInfo, f.context))) as WorkflowReadResult;
+            const draftBefore = yield* readOptionalResource(f.config, draft.canonicalUri);
+            const preview = yield* f.preview([
+              {...graph[0], relations: [{type: 'depends_on', uri: external.memoryUri}]},
+            ]);
+            diagnostics.phase('approve');
+            yield* f.approve(preview.approvalDigest);
+            diagnostics.phase('publish');
+            expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
+            const peer = f.path.join(f.home, `peer-${change}`);
+            yield* f.git(f.home, ['clone', f.remote, peer]);
+            yield* f.git(peer, ['config', 'user.email', 'peer@example.invalid']);
+            yield* f.git(peer, ['config', 'user.name', 'External Target Peer']);
+            const path = external.memoryUri.split('/shared/default/')[1];
+            if (change === 'delete') yield* f.git(peer, ['rm', path]);
+            else {
+              const record = parseMemoryDocument(external.memoryUri, external.memory)!;
+              const modified = formatMemoryDocument(
+                record.headerTitle,
+                {
+                  ...record.metadata,
+                  ...(change === 'archive' ? {status: 'archived' as const} : {memoryId: 'tn_abcdef1234567890abcd'}),
+                },
+                record.body,
+              );
+              yield* f.fs.writeFileString(f.path.join(peer, path), modified);
+              yield* f.git(peer, ['add', path]);
+            }
+            yield* f.git(peer, ['commit', '-m', `external dependency ${change}`]);
+            yield* f.git(peer, ['push', 'origin', 'main']);
+            expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
+            diagnostics.phase('remote-verification');
+            expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('replay');
+            expect(yield* f.guard.pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('retirement-guard');
+            expect(
+              yield* runWorkflowMemory(f.config, {
+                protocolVersion: 1,
+                bindingId: f.binding.bindingId,
+                action: 'archive',
+                operationId: 'retire-private-draft',
+                artifactKey: 'draft',
+                sourceRunId: 'writer',
+                role: 'root',
+                uri: draft.canonicalUri,
+                expectedRevision: draft.revision,
+              }).pipe(Effect.provideService(SystemInfo, f.context), Effect.result),
+            ).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('canonical-readback');
+            expect(yield* readOptionalResource(f.config, draft.canonicalUri)).toBe(draftBefore);
+          }).pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) =>
+                  diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+              }),
+            ),
+          );
+        }).pipe(
+          Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        );
+      },
     );
 
   it('rejects private references through bounded JSON and URL encoding layers', () => {

@@ -167,7 +167,7 @@ export const NativeAuthoringSaveReservationSchema = Schema.Struct({
 });
 export type NativeAuthoringSaveReservation = typeof NativeAuthoringSaveReservationSchema.Type;
 
-export const NativeWorkflowStateSchema = Schema.Struct({
+const nativeWorkflowStateFields = {
   format: Schema.Literal('threadnote-native-workflow'),
   stateVersion: Schema.Literal(nativeWorkflowStateVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
@@ -180,10 +180,21 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   profile,
   team: Schema.optionalKey(portableId),
   bindingId: digest,
-  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
   authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
+} as const;
+
+export const NativeWorkflowStateSchema = Schema.Struct({
+  ...nativeWorkflowStateFields,
+  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
 });
 export type NativeWorkflowState = typeof NativeWorkflowStateSchema.Type;
+
+// The private decoder keeps the complete strict outer schema while admitting
+// operation objects to its identity cache only after full validation.
+const CachedNativeWorkflowStateSchema = Schema.Struct({
+  ...nativeWorkflowStateFields,
+  operations: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
+});
 
 function sortedJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortedJson);
@@ -304,30 +315,11 @@ function decode<A>(schema: Schema.ConstraintDecoder<A>, input: unknown, code: st
   }
 }
 
-export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowRequest {
-  const request = decode(
-    NativeWorkflowRequestSchema,
-    input,
-    'invalid-request',
-    'The native workflow request is malformed or contains unsupported fields.',
-  );
-  if (request.action === 'init') workflowTitleSlug(request.title ?? request.featureId);
-  return request;
-}
-
-export function decodeNativeWorkflowState(
-  input: unknown,
-  hash: (value: string) => string = sha256HexSync,
-): NativeWorkflowState {
-  const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
-  if (
-    candidate?.format !== 'threadnote-native-workflow' ||
-    candidate.stateVersion !== nativeWorkflowStateVersion ||
-    candidate.executorVersion !== nativeWorkflowExecutorVersion
-  ) {
-    throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
-  }
-  const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
+function validateNativeWorkflowState(
+  state: NativeWorkflowState,
+  hash: (value: string) => string,
+  isCachedOperation: (operation: NativeOperation) => boolean = () => false,
+): void {
   if (state.naming) {
     try {
       workflowFamilyStem(state.naming);
@@ -356,13 +348,99 @@ export function decodeNativeWorkflowState(
       operationIds.has(intent.operationId) ||
       intent.bindingId !== state.bindingId ||
       intent.sourceRunId !== state.runId ||
-      operation.intentDigest !== nativeWorkflowIntentDigest(intent, hash) ||
+      (!isCachedOperation(operation) && operation.intentDigest !== nativeWorkflowIntentDigest(intent, hash)) ||
       (operation.status === 'prepared' ? operation.artifact !== undefined : operation.artifact === undefined)
     )
       throw fail('invalid-state', 'The native workflow state contains a conflicting operation or intent digest.');
     operationIds.add(intent.operationId);
   }
+}
+
+export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowRequest {
+  const request = decode(
+    NativeWorkflowRequestSchema,
+    input,
+    'invalid-request',
+    'The native workflow request is malformed or contains unsupported fields.',
+  );
+  if (request.action === 'init') workflowTitleSlug(request.title ?? request.featureId);
+  return request;
+}
+
+export function decodeNativeWorkflowState(
+  input: unknown,
+  hash: (value: string) => string = sha256HexSync,
+): NativeWorkflowState {
+  const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+  if (
+    candidate?.format !== 'threadnote-native-workflow' ||
+    candidate.stateVersion !== nativeWorkflowStateVersion ||
+    candidate.executorVersion !== nativeWorkflowExecutorVersion
+  ) {
+    throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
+  }
+  const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
+  validateNativeWorkflowState(state, hash);
   return state;
+}
+
+function deepFreeze<A>(value: A, seen = new WeakSet<object>()): A {
+  if (value !== null && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * Create a request-local decoder that reuses only previously validated,
+ * deeply immutable operation objects. The default exported decoder remains
+ * the full-validation boundary for parsed or otherwise uncached state.
+ */
+export function makeNativeWorkflowStateDecoder(
+  hash: (value: string) => string = sha256HexSync,
+): (input: unknown) => NativeWorkflowState {
+  const validatedOperations = new WeakSet<object>();
+  return input => {
+    const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+    if (
+      candidate?.format !== 'threadnote-native-workflow' ||
+      candidate.stateVersion !== nativeWorkflowStateVersion ||
+      candidate.executorVersion !== nativeWorkflowExecutorVersion
+    ) {
+      throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
+    }
+    const decoded = decode(
+      CachedNativeWorkflowStateSchema,
+      input,
+      'invalid-state',
+      'The native workflow state is malformed.',
+    );
+    const freshOperations: NativeOperation[] = [];
+    const operations = decoded.operations.map(operation => {
+      if (typeof operation === 'object' && operation !== null && validatedOperations.has(operation))
+        return operation as NativeOperation;
+      const validated = decode(
+        nativeOperationSchema,
+        operation,
+        'invalid-state',
+        'The native workflow state contains a conflicting operation or intent digest.',
+      );
+      freshOperations.push(validated);
+      return validated;
+    });
+    const state = {...decoded, operations} as NativeWorkflowState;
+    validateNativeWorkflowState(state, hash, operation => validatedOperations.has(operation));
+    // Cache only after every state-wide invariant passed. Freezing all nested
+    // values prevents a caller from changing a cached operation through an
+    // array, relation, evidence reference, intent, or artifact reference.
+    for (const operation of freshOperations) {
+      deepFreeze(operation);
+      validatedOperations.add(operation);
+    }
+    return state;
+  };
 }
 
 export type {WorkflowArtifact, WorkflowEvidenceReference, WorkflowWriteIntent};

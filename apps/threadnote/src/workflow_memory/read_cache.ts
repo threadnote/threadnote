@@ -1,10 +1,22 @@
 import {Context, Effect} from 'effect';
-import type {NativeOperation, NativeWorkflowState} from '@threadnote/workflow-automations/native';
+import {
+  makeNativeWorkflowStateDecoder,
+  type NativeOperation,
+  type NativeWorkflowState,
+} from '@threadnote/workflow-automations/native';
+import {sha256HexSync} from './native_digest.js';
 import type {WorkflowBinding, WorkflowJournal, WorkflowOperation} from './protocol.js';
 
 /** Request-local memoization of immutable images, never file metadata or scope authority. */
 export interface WorkflowReadCache {
   readonly compactJournal?: boolean;
+  readonly decodeNative: ReturnType<typeof makeNativeWorkflowStateDecoder>;
+  readonly manifests: {
+    readonly binding: WorkflowBinding;
+    readonly manifestUri: string;
+    readonly content: string;
+    readonly artifacts: WorkflowJournal['artifacts'];
+  }[];
   native?: {
     readonly file: string;
     readonly bytes: string;
@@ -41,6 +53,8 @@ export function withWorkflowReadCache<A, E, R>(
     program.pipe(
       Effect.provideService(CurrentWorkflowReadCache, {
         ...options,
+        decodeNative: makeNativeWorkflowStateDecoder(sha256HexSync),
+        manifests: [],
         operations: new WeakMap(),
         executor: new WeakMap(),
       }),
