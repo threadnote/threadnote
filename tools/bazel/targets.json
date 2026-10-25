@@ -74988,6 +74988,7 @@
         "apps/threadnote/test/dev-skills/native-automation-naming-corruption.test.ts",
         "apps/threadnote/test/dev-skills/native-automation-naming.test.ts",
         "apps/threadnote/test/dev-skills/native-automation.test.ts",
+        "apps/threadnote/test/dev-skills/workflow-execution-diagnostics.ts",
         "apps/threadnote/test/evaluation/baselines/code-memory-link-scale-v1/budget.json",
         "apps/threadnote/test/helpers/code-memory-link-agent-lock-child.ts",
         "apps/threadnote/test/helpers/effect-filesystem.ts",
