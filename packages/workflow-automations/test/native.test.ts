@@ -1,5 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
+import {sha256HexSync} from '@threadnote/platform/sha256';
 import {
   admitNativeAuthoringSave,
   nativeAuthoringSaveByteBudget,
@@ -8,9 +9,11 @@ import {
   nativeWorkflowIntentDigest,
   decodeNativeWorkflowRequest,
   decodeNativeWorkflowState,
+  makeNativeWorkflowStateDecoder,
 } from '../src/native.js';
 import type {NativeWorkflowState} from '../src/native.js';
 import type {WorkflowWriteIntent} from '../src/contracts.js';
+import {decodeNativeCyclePlan, initializeNativeCycle} from '../src/cycle.js';
 
 const hash = 'a'.repeat(64);
 const stateBase: NativeWorkflowState = {
@@ -231,6 +234,73 @@ describe('native workflow request protocol', () => {
 });
 
 describe('native workflow state', () => {
+  it('retains and validates native cycle runtime through the warmed cached decoder', () => {
+    const plan = decodeNativeCyclePlan({
+      format: 'threadnote-native-cycle-plan',
+      version: 1,
+      featureId: stateBase.featureId,
+      project: stateBase.project,
+      objective: 'Do work',
+      delivery: 'pr',
+      source: {
+        root: {uri: 'threadnote://user/me/plan', memoryId: 'tn_123', revision: hash},
+        binding: {bindingId: hash, runId: 'run', generation: 'gen', profile: 'desktop'},
+        documentHash: hash,
+      },
+      completion: {},
+      phases: [
+        {
+          id: 'one',
+          definitionHash: '1'.repeat(64),
+          title: 'One',
+          dependsOn: [],
+          allowedPaths: ['src/'],
+          acceptanceCriteria: ['works'],
+          safeToMergeReason: 'Safe',
+          branch: 'feature/one',
+          baseBranch: 'main',
+          status: 'pending',
+          acceptanceRefs: [{id: 'a1', criterion: 'works', requirements: ['req'], specScenarios: []}],
+        },
+      ],
+    });
+    const cycle = {
+      state: initializeNativeCycle(plan),
+      plans: [plan],
+      baselines: {},
+      reviewLimits: {},
+      reviewExpansions: [],
+      snapshots: [],
+      reviews: [],
+      attempts: [],
+    };
+    const operationIntent = intent();
+    const valid = {
+      ...stateBase,
+      cycle,
+      operations: [
+        {
+          status: 'prepared' as const,
+          intent: operationIntent,
+          intentDigest: nativeWorkflowIntentDigest(operationIntent),
+        },
+      ],
+    };
+
+    const decoder = makeNativeWorkflowStateDecoder();
+    const warmed = decoder(valid);
+    expect(warmed.cycle).toEqual(cycle);
+
+    const changedIdentity = {...warmed, featureId: 'other-feature'};
+    expect(caught(() => decodeNativeWorkflowState(changedIdentity))).toMatchObject({code: 'invalid-state'});
+    expect(caught(() => decoder(changedIdentity))).toMatchObject({code: 'invalid-state'});
+
+    if (!warmed.cycle) throw new Error('Expected cycle runtime to be retained.');
+    const corruptRuntime = {...warmed, cycle: {...warmed.cycle, reviewLimits: {one: 5}}};
+    expect(caught(() => decodeNativeWorkflowState(corruptRuntime))).toMatchObject({code: 'invalid-cycle-state'});
+    expect(caught(() => decoder(corruptRuntime))).toMatchObject({code: 'invalid-cycle-state'});
+  });
+
   it('accepts an empty native state and consistent prepared or verified operations', () => {
     expect(decodeNativeWorkflowState(stateBase)).toEqual(stateBase);
     const preparedIntent = intent();
@@ -336,6 +406,173 @@ describe('native workflow state', () => {
     expect(caught(() => decodeNativeWorkflowState({...stateBase, unexpected: 'extra'}))).toMatchObject({
       code: 'invalid-state',
     });
+  });
+
+  it('matches full validation for generated states and corruptions while reusing only exact frozen operations', () => {
+    fc.assert(
+      fc.property(fc.array(fc.integer({min: 0, max: 9999}), {minLength: 1, maxLength: 8}), values => {
+        const operations = values.map((value, index) => {
+          const operationIntent = intent({
+            operationId: `write-${index}`,
+            artifactKey: `plan-${index}`,
+            body: `Generated plan ${value}.`,
+          });
+          return {
+            status: 'prepared' as const,
+            intent: operationIntent,
+            intentDigest: nativeWorkflowIntentDigest(operationIntent),
+          };
+        });
+        const valid = {...stateBase, operations};
+        const optimized = makeNativeWorkflowStateDecoder();
+        const actual = optimized(valid);
+        expect(actual).toEqual(decodeNativeWorkflowState(valid));
+        expect(actual.operations[0]).not.toBe(operations[0]);
+        expect(Object.isFrozen(actual.operations[0])).toBe(true);
+        expect(Object.isFrozen(actual.operations[0].intent)).toBe(true);
+
+        const first = actual.operations[0];
+        const wrongDigest = {...first, intentDigest: '0'.repeat(64)};
+        const corruptions = [
+          {...actual, operations: [...actual.operations, first]},
+          {...actual, operations: [wrongDigest, ...actual.operations.slice(1)]},
+          {...actual, unexpected: 'extra'},
+        ];
+        for (const corrupted of corruptions) {
+          const fullError = caught(() => decodeNativeWorkflowState(corrupted));
+          const cachedError = caught(() => optimized(corrupted));
+          expect(cachedError).toMatchObject({code: (fullError as {code: string}).code});
+          expect(fullError).toMatchObject({code: 'invalid-state'});
+        }
+      }),
+      {numRuns: 48},
+    );
+  });
+
+  it('revalidates state-wide invariants and every new operation before admitting it to the private cache', () => {
+    const decoder = makeNativeWorkflowStateDecoder();
+    const originalIntent = intent({
+      codeRefs: ['src/plan.ts'],
+      relations: [{type: 'references', uri: 'threadnote://memory/tn_1234567890'}],
+      evidenceRefs: [
+        {
+          uri: 'threadnote://user/tester/memories/durable/projects/repo/evidence.md',
+          memoryId: 'tn_1234567890',
+          revision: hash,
+        },
+      ],
+    });
+    const operation = {
+      status: 'prepared' as const,
+      intent: originalIntent,
+      intentDigest: nativeWorkflowIntentDigest(originalIntent),
+    };
+    const cached = decoder({...stateBase, operations: [operation]});
+    const cachedOperation = cached.operations[0];
+    expect(cachedOperation).toBeDefined();
+    expect(Object.isFrozen(cachedOperation.intent.codeRefs)).toBe(true);
+    expect(Object.isFrozen(cachedOperation.intent.relations)).toBe(true);
+    expect(Object.isFrozen(cachedOperation.intent.relations?.[0])).toBe(true);
+    expect(Object.isFrozen(cachedOperation.intent.evidenceRefs?.[0])).toBe(true);
+    expect(Reflect.set(cachedOperation.intent, 'body', 'mutated')).toBe(false);
+    expect(() => (cachedOperation.intent.codeRefs as string[]).push('src/other.ts')).toThrow();
+    expect(decoder(cached).operations[0]).toBe(cachedOperation);
+    expect(decoder(cached).operations[0].intent.body).toBe(originalIntent.body);
+
+    const wrongRun = {...cached, runId: 'other-run'};
+    const wrongBinding = {...cached, bindingId: 'b'.repeat(64)};
+    const duplicate = {...cached, operations: [cachedOperation, cachedOperation]};
+    const invalidName = {
+      ...cached,
+      title: 'Workflow title',
+      naming: {policyVersion: 1 as const, slug: 'wrong', ordinal: 0},
+    };
+    const invalidReservation = {
+      ...cached,
+      authoringSave: {
+        intentDigest: 'c'.repeat(64),
+        rootUri: null,
+        operationStart: 1,
+        operationLimit: 2,
+        prefixDigest: '0'.repeat(64),
+        journalBytesAtStart: 0,
+        stateBytesAtStart: 0,
+        reservedBytes: 0,
+      },
+    };
+    const overCapacityReservation = {
+      ...cached,
+      authoringSave: {
+        intentDigest: 'c'.repeat(64),
+        rootUri: null,
+        operationStart: 1,
+        operationLimit: 2,
+        prefixDigest: nativeAuthoringPrefixDigest(cached.operations),
+        journalBytesAtStart: 64 * 1024 * 1024,
+        stateBytesAtStart: 0,
+        reservedBytes: 1,
+      },
+    };
+    for (const invalidState of [
+      wrongRun,
+      wrongBinding,
+      duplicate,
+      invalidName,
+      invalidReservation,
+      overCapacityReservation,
+      {...cached, operations: {}},
+      {...cached, operations: [{...cachedOperation, status: 'unknown'}]},
+      {...cached, operations: [{...cachedOperation, unexpected: 'extra'}]},
+    ])
+      expect(caught(() => decoder(invalidState))).toMatchObject({code: 'invalid-state'});
+  });
+
+  it('hashes each validated operation once per decoder and each newly introduced identity once', () => {
+    let hashCalls = 0;
+    const decoder = makeNativeWorkflowStateDecoder(value => {
+      hashCalls++;
+      return sha256HexSync(value);
+    });
+    const firstIntent = intent();
+    const firstOperation = {
+      status: 'prepared' as const,
+      intent: firstIntent,
+      intentDigest: nativeWorkflowIntentDigest(firstIntent),
+    };
+    const first = decoder({...stateBase, operations: [firstOperation]});
+    expect(hashCalls).toBe(1);
+
+    const secondIntent = intent({operationId: 'write-2', artifactKey: 'plan-2'});
+    const secondOperation = {
+      status: 'prepared' as const,
+      intent: secondIntent,
+      intentDigest: nativeWorkflowIntentDigest(secondIntent),
+    };
+    const second = decoder({...first, operations: [...first.operations, secondOperation]});
+    expect(second.operations[0]).toBe(first.operations[0]);
+    expect(hashCalls).toBe(2);
+
+    const fullReload = decodeNativeWorkflowState(JSON.parse(JSON.stringify(second)));
+    expect(fullReload).toEqual(second);
+    expect(hashCalls).toBe(2);
+
+    let rejectedHashCalls = 0;
+    const rejectedDecoder = makeNativeWorkflowStateDecoder(value => {
+      rejectedHashCalls++;
+      return sha256HexSync(value);
+    });
+    const rejectedIntent = intent({operationId: 'write-rejected', artifactKey: 'plan-rejected'});
+    const rejectedOperation = {
+      status: 'prepared' as const,
+      intent: rejectedIntent,
+      intentDigest: nativeWorkflowIntentDigest(rejectedIntent),
+    };
+    expect(
+      caught(() => rejectedDecoder({...stateBase, runId: 'other-run', operations: [rejectedOperation]})),
+    ).toMatchObject({code: 'invalid-state'});
+    expect(rejectedHashCalls).toBe(0);
+    expect(rejectedDecoder({...stateBase, operations: [rejectedOperation]}).operations[0]).toBeDefined();
+    expect(rejectedHashCalls).toBe(1);
   });
 
   it('holds a single exact reservation across completed prefixes at the operation and byte ceilings', () => {

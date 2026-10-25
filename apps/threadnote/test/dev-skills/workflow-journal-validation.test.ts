@@ -485,6 +485,9 @@ describe('workflow journal codec', async () => {
     ).toBe('{"ok":true}\n');
     for (const bad of [
       {...good, payload: `${String(good.payload).slice(0, -4)}!!!!`},
+      {...good, payload: ` ${String(good.payload)}`},
+      {...good, payload: `${String(good.payload)}\n`},
+      {...good, payload: String(good.payload).slice(0, 4) + '!' + String(good.payload).slice(4)},
       {...good, expandedBytes: workflowJournalLimits.logicalBytes + 1},
       {...good, extra: true},
       {...good, sha256: '0'.repeat(64)},

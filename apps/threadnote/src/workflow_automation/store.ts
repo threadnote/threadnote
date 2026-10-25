@@ -97,7 +97,7 @@ export const readNativeWorkflowState = Effect.fn('workflowAutomation.readState')
         parsed !== null && typeof parsed === 'object' && 'format' in parsed && parsed.format === STATE_CODEC
           ? JSON.parse(await decodeBoundedWorkflowJson(bytes, STATE_CODEC, signal))
           : parsed;
-      return decodeNativeWorkflowState(value, sha256HexSync);
+      return cache ? cache.decodeNative(value) : decodeNativeWorkflowState(value, sha256HexSync);
     },
     error =>
       Schema.is(WorkflowAutomationError)(error)
@@ -119,8 +119,9 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
   state: NativeWorkflowState,
   expectedRevision: string | null,
 ) {
+  const cache = yield* CurrentWorkflowReadCache;
   const validated = yield* Effect.try({
-    try: () => decodeNativeWorkflowState(state, sha256HexSync),
+    try: () => (cache ? cache.decodeNative(state) : decodeNativeWorkflowState(state, sha256HexSync)),
     catch: error => error as WorkflowAutomationError,
   });
   const serialized = yield* Effect.try({
@@ -143,7 +144,6 @@ export const writeNativeWorkflowState = Effect.fn('workflowAutomation.writeState
       );
     yield* fs.rename(temporary, file);
     const result = {state: validated, revision: sha256HexSync(serialized)};
-    const cache = yield* CurrentWorkflowReadCache;
     if (cache) cache.native = {file, bytes: serialized, ...result, state: immutableWorkflowImage(validated)};
     return result;
   }).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));

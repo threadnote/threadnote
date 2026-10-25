@@ -136,14 +136,15 @@ if (
 }
 
 async function automaticModelSetupProgram(arguments_: readonly string[]) {
-  const [setup, runtime] = await Promise.all([import('./models/setup_lifecycle.js'), import('./effect/runtime.js')]);
-  return setup
-    .runAutomaticModelSetupChild(arguments_)
-    .pipe(Effect.provide(Layer.merge(runtime.ModelSetupWorkerLayer, runtime.StandaloneBrokerLayer)));
+  const [setup, runtime] = await Promise.all([
+    import('./models/setup_lifecycle.js'),
+    import('./effect/model-setup-runtime.js'),
+  ]);
+  return setup.runAutomaticModelSetupChild(arguments_).pipe(Effect.provide(runtime.ModelSetupRequestLayer));
 }
 
 async function modelSetupWorkerProgram(arguments_: readonly string[]) {
-  const [setup, runtime] = await Promise.all([import('./models/setup.js'), import('./effect/runtime.js')]);
+  const [setup, runtime] = await Promise.all([import('./models/setup.js'), import('./effect/model-setup-runtime.js')]);
   const parsed = setup.parseModelSetupWorkerArguments(arguments_);
   return parsed === undefined
     ? Effect.void

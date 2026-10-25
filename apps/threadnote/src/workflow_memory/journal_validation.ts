@@ -71,8 +71,16 @@ function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, ur
   }
 }
 
-function manifestArtifacts(state: WorkflowJournal, content: string): WorkflowJournal['artifacts'] {
+function manifestArtifacts(
+  state: WorkflowJournal,
+  content: string,
+  cache?: WorkflowReadCache,
+): WorkflowJournal['artifacts'] {
   check(typeof content === 'string');
+  const cached = cache?.manifests.find(
+    entry => entry.binding === state.binding && entry.manifestUri === state.manifestUri && entry.content === content,
+  );
+  if (cached) return cached.artifacts;
   const record = parseMemoryDocument(state.manifestUri, content);
   check(record && record.metadata.kind === 'handoff' && record.metadata.status === 'active');
   check(record.metadata.project === state.binding.project);
@@ -85,6 +93,12 @@ function manifestArtifacts(state: WorkflowJournal, content: string): WorkflowJou
   );
   const artifacts = parsed.artifacts as WorkflowJournal['artifacts'];
   for (const [uri, artifact] of Object.entries(artifacts)) assertArtifact(state.binding, artifact, uri);
+  if (cache) {
+    immutableWorkflowImage(state.binding);
+    immutableWorkflowImage(artifacts);
+    cache.manifests.unshift({binding: state.binding, manifestUri: state.manifestUri, content, artifacts});
+    if (cache.manifests.length > 2) cache.manifests.length = 2;
+  }
   return artifacts;
 }
 
@@ -277,7 +291,7 @@ export function assertWorkflowJournalIntegrity(
     state.manifestUri ===
       `${root(state.binding)}/handoffs/active/${uriSegment(state.binding.project)}/${uriSegment(workflowStateTopic(state.binding))}.md`,
   );
-  const desired = manifestArtifacts(state, state.manifestContent);
+  const desired = manifestArtifacts(state, state.manifestContent, cache);
   check(same(desired, state.artifacts));
   for (const [key, operation] of Object.entries(state.operations)) {
     const checked = cache?.operations.get(operation);
@@ -300,7 +314,7 @@ export function assertWorkflowJournalIntegrity(
     check(Object.keys(state.artifacts).length === 0 && Object.keys(state.operations).length === 0);
     return;
   }
-  const previous = manifestArtifacts(state, currentManifestContent);
+  const previous = manifestArtifacts(state, currentManifestContent, cache);
   const changed = Object.keys({...previous, ...state.artifacts}).filter(
     uri => !same(previous[uri], state.artifacts[uri]),
   );

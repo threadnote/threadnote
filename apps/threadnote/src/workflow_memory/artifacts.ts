@@ -343,7 +343,9 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* workflowError(
           'evidence-busy',
-          'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.',
+          captured.failure.recovery?.code === 'graph-writer-busy'
+            ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
+            : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
         );
       if (
         request.citationPolicy !== 'defer' ||

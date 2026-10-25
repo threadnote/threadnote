@@ -3,7 +3,6 @@ import {sha256HexSync} from './native_digest.js';
 
 const DISK_LIMIT = 16 * 1024 * 1024;
 const LOGICAL_LIMIT = 64 * 1024 * 1024;
-const FEED_SIZE = 256;
 const COMPRESSION_THRESHOLD = 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {fatal: true});
@@ -11,17 +10,13 @@ const FORMAT = 'threadnote-workflow-journal-gzip-v1';
 const digest = (bytes: Uint8Array) => sha256HexSync(bytes);
 
 function decodeBase64(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-  if (btoa(binary) !== value) throw new Error('Noncanonical base64');
+  const bytes = Uint8Array.fromBase64(value);
+  if (bytes.toBase64() !== value) throw new Error('Noncanonical base64');
   return bytes;
 }
 
 function encodeBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += FEED_SIZE)
-    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + FEED_SIZE, bytes.length)));
-  return btoa(binary);
+  return bytes.toBase64();
 }
 
 export function encodeWorkflowJournal(content: string): string {

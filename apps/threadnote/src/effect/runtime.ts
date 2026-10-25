@@ -4,16 +4,12 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {Effect, Layer} from 'effect';
 import {threadnoteCliFormatterLayer} from './cli/help.js';
 import {CliOutput} from './cli/output.js';
-import {HttpService} from '@threadnote/platform/http';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {integrationExternalSourcePolicyLayer} from '../integrations/access-policy.js';
 import {sourceConfigurationLayer} from '../integrations/config.js';
 import {syncSourcesBeforeRecall} from '../integrations/source.js';
 import {SourceSync} from '@threadnote/integration-core/source-sync';
 import {integrationCoordinatorClientLayer} from '../integrations/coordinator.js';
-import {LocalModelStore} from '@threadnote/inference/models/store';
-import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
-import {BUILTIN_MODEL_MANIFESTS} from '@threadnote/inference/models/builtin';
 import {isolatedLocalModelRuntimeLayer} from './ai/isolated-local-model-runtime.js';
 import {CodeGraphStore} from '@threadnote/graph/store';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
@@ -38,6 +34,7 @@ import {
   systemLayer,
   telemetryLayerForHome,
 } from './runtime-bootstrap.js';
+import {localModelCatalogLayer, localModelStoreLayer} from './model-setup-runtime.js';
 
 const cliOutputLayer = CliOutput.layer.pipe(Layer.provide(systemLayer));
 const integrationConfigurationLayer = sourceConfigurationLayer.pipe(Layer.provide(systemLayer));
@@ -60,11 +57,6 @@ const sourceSyncLayer = Layer.effect(
     return SourceSync.of({beforeRecall: config => syncSourcesBeforeRecall(config).pipe(Effect.provide(services))});
   }),
 ).pipe(Layer.provide(sourceCoordinatorLayer));
-const localModelStoreLayer = LocalModelStore.layer.pipe(
-  Layer.provideMerge(HttpService.layer),
-  Layer.provide(systemLayer),
-);
-const localModelCatalogLayer = LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS);
 
 // Keep native inference outside the application process in every runtime,
 // including `bun apps/threadnote/src/standalone.ts` during development. A fatal native crash
@@ -131,10 +123,7 @@ const ApplicationServicesLayer = Layer.mergeAll(
   systemLayer,
 );
 
-export const ModelSetupWorkerLayer = Layer.mergeAll(localModelCatalogLayer, localModelStoreLayer, systemLayer).pipe(
-  Layer.provideMerge(BunServices.layer),
-  Layer.provideMerge(BunHttpClient.layer),
-);
+export {ModelSetupWorkerLayer} from './model-setup-runtime.js';
 
 export const ApplicationLayer = ApplicationServicesLayer.pipe(
   Layer.provideMerge(codeGraphRuntimeAdapters),
