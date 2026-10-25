@@ -5,7 +5,7 @@ import {resolveCodeGraphRefreshRoute} from '../scope/routing.js';
 import {Clock, Effect, Path} from 'effect';
 import {observeCodeGraphAdmissionEnvironment} from '../admission_freshness.js';
 import {codeGraphBuildRequestKey} from '../indexer/build.js';
-import {codeGraphIndexEnsuresVectors, type CodeGraphIndexOptions} from '../indexer/types.js';
+import {codeGraphIndexVectorPolicy, type CodeGraphIndexOptions} from '../indexer/types.js';
 import {CodeGraphIndexOperationError, WorktreeChangedDuringIndex} from '../indexer/shared.js';
 import {inventoryRepository, worktreeBuildRequestState} from '../inventory.js';
 import {runIsolatedCodeGraphIndex, type CodeGraphIsolatedBuilderResult} from './builder.js';
@@ -123,7 +123,7 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
   const scope = scopedObservation?.scope;
   const requestedOverlay = yield* worktreeBuildRequestState(identity, options.threadnoteHome, scope);
   const admissionEnvironment = yield* observeCodeGraphAdmissionEnvironment(identity);
-  const ensureVectors = codeGraphIndexEnsuresVectors(options);
+  const vectorPolicy = codeGraphIndexVectorPolicy(options);
   const requestKey = options.force
     ? undefined
     : codeGraphBuildRequestKey(
@@ -131,7 +131,7 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
         requestedOverlay,
         languagePacks,
         options.incrementalOverlay,
-        ensureVectors,
+        vectorPolicy,
         admissionEnvironment,
         scope,
       );
@@ -144,7 +144,7 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
     full: options.force === true,
     ...(options.manifestPath === undefined ? {} : {manifestPath: options.manifestPath}),
     ...(options.manifestRevision === undefined ? {} : {manifestRevision: options.manifestRevision}),
-    noVectors: !ensureVectors,
+    vectorPolicy,
     onProgress: options.onProgress,
     ...(options.project === undefined ? {} : {project: options.project}),
     requestKey,
@@ -165,7 +165,7 @@ export const runIsolatedCodeGraphIndexSnapshot = Effect.fn('codeGraph.isolatedIn
           yield* worktreeBuildRequestState(completedIdentity, options.threadnoteHome, scope),
           languagePacks,
           options.incrementalOverlay,
-          ensureVectors,
+          vectorPolicy,
           completedEnvironment,
           scope,
         );

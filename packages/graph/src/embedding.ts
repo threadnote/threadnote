@@ -116,6 +116,8 @@ export interface CodeGraphEmbeddingIndexShape {
     threadnoteHome: string,
     layout: CodeGraphLayout,
     snapshotId: string,
+    /** Status observation reads installed metadata only; the default retains artifact verification. */
+    options?: {readonly metadataOnly?: boolean},
   ) => Effect.Effect<CodeGraphEmbeddingCheck, unknown>;
   readonly ensure: (
     threadnoteHome: string,
@@ -151,11 +153,17 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
       const crypto = yield* Crypto.Crypto;
       const system = yield* SystemInfo;
       return CodeGraphEmbeddingIndex.of({
-        check: (threadnoteHome, layout, snapshotId) =>
-          checkGraphVectors({catalog, fs, layout, modelStore, path, snapshotId, threadnoteHome}).pipe(
-            Effect.provideService(FileSystem.FileSystem, fs),
-            Effect.provideService(Path.Path, path),
-          ),
+        check: (threadnoteHome, layout, snapshotId, options) =>
+          checkGraphVectors({
+            catalog,
+            fs,
+            layout,
+            modelStore,
+            path,
+            snapshotId,
+            threadnoteHome,
+            metadataOnly: options?.metadataOnly,
+          }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path)),
         ensure: (threadnoteHome, layout, snapshot, symbols, options) =>
           executeCodeGraphVectorGeneration({
             catalog,
@@ -195,6 +203,7 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
 }
 
 const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: {
+  readonly metadataOnly?: boolean;
   readonly catalog: LocalModelCatalogShape;
   readonly fs: FileSystem.FileSystem;
   readonly layout: CodeGraphLayout;
@@ -203,7 +212,21 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
   readonly snapshotId: string;
   readonly threadnoteHome: string;
 }) {
-  const selected = yield* selectedEmbeddingModel(input.threadnoteHome, input.catalog, input.modelStore).pipe(
+  const select = input.metadataOnly
+    ? Effect.gen(function* () {
+        const selection = yield* readModelSelection(input.threadnoteHome);
+        const modelId = selection.roles.embedding;
+        if (!modelId) return yield* CodeGraphEmbeddingError.make({message: 'No core embedding model is selected.'});
+        const manifest = yield* input.catalog.get(modelId);
+        if (manifest.role !== 'embedding' || !manifest.dimensions)
+          return yield* CodeGraphEmbeddingError.make({message: 'Selected model is not an embedding model.'});
+        const installed = yield* input.modelStore.status(input.threadnoteHome, manifest);
+        if (!installed.installed || installed.bytes !== manifest.size)
+          return yield* CodeGraphEmbeddingError.make({message: 'Selected embedding model is unavailable.'});
+        return {manifest};
+      })
+    : selectedEmbeddingModel(input.threadnoteHome, input.catalog, input.modelStore);
+  const selected = yield* select.pipe(
     Effect.match({
       onFailure: cause => ({reason: messageOf(cause), state: 'unavailable'}) as const,
       onSuccess: value => value,
@@ -223,14 +246,27 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
       if (
         !active ||
         active.snapshot_id !== input.snapshotId ||
+        active.model_id !== selected.manifest.id ||
         active.model_sha256 !== selected.manifest.sha256 ||
         active.template_version !== CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION ||
         active.dimensions !== selected.manifest.dimensions
       ) {
         return {reason: 'Code graph vectors do not match the ready snapshot.', state: 'stale'} as const;
       }
+      if (input.metadataOnly) {
+        const currentSelection = yield* readModelSelection(input.threadnoteHome);
+        const currentId = currentSelection.roles.embedding;
+        const current = currentId ? yield* input.catalog.get(currentId) : undefined;
+        if (
+          current?.id !== selected.manifest.id ||
+          current.sha256 !== selected.manifest.sha256 ||
+          current.dimensions !== selected.manifest.dimensions
+        )
+          return {reason: 'Selected embedding model changed during observation.', state: 'stale'} as const;
+      }
       return {modelId: selected.manifest.id, reused: active.count, state: 'ready'} as const;
     }),
+    true,
   ).pipe(
     Effect.catch(cause =>
       Effect.succeed({reason: `Code graph vector database is invalid: ${messageOf(cause)}`, state: 'stale'} as const),
@@ -858,11 +894,16 @@ function vectorDatabasePath(path: Path.Path, vectorRoot: string, modelId: string
 function useVectorDatabase<A, E, R>(
   databasePath: string,
   effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
+  readOnly = false,
 ): Effect.Effect<A, E, Exclude<R, SqlClient.SqlClient>> {
   return Effect.scoped(
-    Layer.build(SqliteClient.layer({disableWAL: true, filename: databasePath}).pipe(Layer.orDie)).pipe(
-      Effect.flatMap(context => effect.pipe(Effect.provide(context))),
-    ),
+    Layer.build(
+      SqliteClient.layer({
+        disableWAL: true,
+        filename: databasePath,
+        ...(readOnly ? {readonly: true, create: false, readwrite: false, busyTimeout: 100} : {}),
+      }).pipe(Layer.orDie),
+    ).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))),
   );
 }
 

@@ -1,3 +1,4 @@
+import type {CodeGraphVectorPolicy} from '../types.js';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {packDerivationIdentity, type CodeGraphLanguagePackRegistryShape} from '../../languages/registry.js';
 import {compareCodeUnits} from '../../ordering.js';
@@ -10,7 +11,7 @@ export function codeGraphBuildRequestKey(
   overlay: {readonly dirty: boolean; readonly fingerprint?: string},
   languagePacks: CodeGraphLanguagePackRegistryShape,
   incrementalOverlay: boolean | undefined,
-  ensureVectors: boolean,
+  vectorPolicy: CodeGraphVectorPolicy | boolean,
   environmentFingerprint: string,
   scope?: CodeGraphScopeIdentity,
 ): string {
@@ -27,7 +28,11 @@ export function codeGraphBuildRequestKey(
       identity.headCommit,
       overlay.dirty ? (overlay.fingerprint ?? 'dirty-without-fingerprint') : 'clean',
       overlay.dirty && incrementalOverlay === false ? 'direct-full' : 'default',
-      ensureVectors ? 'vectors:required' : 'vectors:structural-only',
+      vectorPolicy === 'background'
+        ? 'vectors:background'
+        : vectorPolicy === true || vectorPolicy === 'wait'
+          ? 'vectors:required'
+          : 'vectors:structural-only',
       'ignore-policy:3',
       environmentFingerprint,
       parserIdentities,

@@ -201,7 +201,7 @@ describe('shouldReuseReadySnapshotForCleanCommit', () => {
 });
 
 describe('codeGraphWatcherRefreshIndexRequest', () => {
-  it('disables vector materialization for watcher-driven refresh', () => {
+  it('queues background vectors after watcher indexing publication', () => {
     expect(
       codeGraphWatcherRefreshIndexRequest({
         cwd: '/repo',
@@ -210,7 +210,7 @@ describe('codeGraphWatcherRefreshIndexRequest', () => {
       }),
     ).toEqual({
       cwd: '/repo',
-      ensureVectors: false,
+      vectorPolicy: 'background',
       onProgress: undefined,
       threadnoteHome: '/home',
     });
@@ -224,6 +224,6 @@ describe('codeGraphWatcherRefreshIndexRequest', () => {
         key: 'worktree',
         threadnoteHome: '/home',
       }),
-    ).toMatchObject({admissionClass: 'background', ensureVectors: false});
+    ).toMatchObject({admissionClass: 'background', vectorPolicy: 'background'});
   });
 });

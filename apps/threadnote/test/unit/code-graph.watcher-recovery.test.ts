@@ -206,6 +206,8 @@ describe('watcher admitted-attempt recovery', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  // The detached worker port captures its clock at layer construction, so this
+  // real process boundary needs live time around both the layer and the test.
   effectIt.effect(
     'recovers a blocked route after manifest repair through ordinary stale ready reads',
     () =>
@@ -317,7 +319,7 @@ describe('watcher admitted-attempt recovery', () => {
         expect(attempts).toBe(2);
         expect(Option.getOrUndefined(yield* watcher.cachedStatus(key, target))).toMatchObject({state: 'ready'});
         expect((yield* watcher.metrics).activeWatches).toBe(1);
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+      }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {timeout: 30_000},
   );
 });

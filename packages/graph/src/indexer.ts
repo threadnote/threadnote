@@ -1,3 +1,5 @@
+export {resumeExistingCodeGraphEmbeddingDemand} from './lifecycle/opportunity.js';
+export {observeCodeGraphSemanticStatus} from './vector/status.js';
 export {
   budgetCachedCodeGraphFacts,
   cachedCodeGraphFactBytes,
@@ -12,6 +14,8 @@ export {
 export {CodeGraphIndexer, codeGraphInventoryNeedsSynchronousReclamation} from './indexer/service.js';
 export {
   codeGraphIndexEnsuresVectors,
+  codeGraphIndexVectorPolicy,
+  type CodeGraphVectorPolicy,
   type CodeGraphCommitLease,
   type CodeGraphIndexerShape,
   type CodeGraphIndexOptions,

@@ -109,7 +109,7 @@ export const reuseReadySnapshot = Effect.fn('codeGraph.reuseReadySnapshot')(func
       .pipe(Effect.catch(cause => Effect.succeed({reason: messageOf(cause), state: 'unavailable'} as const)));
     if (vectorCheck.state !== 'ready') {
       diagnostics.push(
-        `Vector graph retrieval unavailable: ${vectorCheck.reason ?? 'deferred until an explicit vector refresh'}`,
+        `Vector graph retrieval unavailable: ${vectorCheck.reason ?? 'vectors are not yet materialized'}`,
       );
     }
     return {
