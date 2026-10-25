@@ -120,6 +120,139 @@ describe('native watch domain', () => {
     ).toEqual(next.events);
   });
 
+  it('replaces old-head CI checkpoints without removal noise or losing work', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom('checks' as const, 'statuses' as const),
+        fc.uniqueArray(fc.integer({min: 0, max: 30}), {maxLength: 20}),
+        fc.boolean(),
+        (source, ids, delayed) => {
+          const initial = reconcileNativeWatch(
+            state(),
+            sweep({
+              sources: [
+                {
+                  source,
+                  complete: true,
+                  head: sha('a'),
+                  at: 1_000,
+                  items: [
+                    entity('old-failure', {kind: 'ci_error', head: sha('a')}),
+                    ...ids.map(id => entity('old-' + id, {kind: 'ci_update', head: sha('a')})),
+                  ],
+                },
+                {
+                  source: 'comments',
+                  complete: true,
+                  at: 1_000,
+                  items: [entity('comment', {head: sha('a'), bootstrap: false})],
+                },
+              ],
+            }),
+          );
+          const relayed = relayNativeWatch(withConsumer(initial), 'consumer-1', 20);
+          const delivery = required(relayed.delivery);
+          const recorded = recordNativeWatchDispositions(
+            relayed.state,
+            'consumer-1',
+            delivery.id,
+            [
+              {
+                eventId: delivery.events[0].id,
+                status: 'open',
+                reason: 'Needs a verified fix',
+                evidence: 'Known old-head failure',
+              },
+            ],
+            21,
+          );
+          const before = acknowledgeNativeWatch(recorded, 'consumer-1', delivery.id, 22);
+          const original = JSON.stringify(before);
+          const waiting = delayed
+            ? reconcileNativeWatch(
+                before,
+                sweep({
+                  head: sha('b'),
+                  startedHead: sha('b'),
+                  at: 2_000,
+                  sources: [{source, complete: false, at: 2_000, error: {code: 'temporary', retryable: true}}],
+                }),
+              )
+            : before;
+          const next = reconcileNativeWatch(
+            waiting,
+            sweep({
+              head: sha('b'),
+              startedHead: sha('b'),
+              at: 3_000,
+              sources: [
+                {
+                  source,
+                  complete: true,
+                  head: sha('b'),
+                  at: 3_000,
+                  items: [entity('current-failure', {kind: 'ci_error', head: sha('b')})],
+                },
+                {source: 'comments', complete: true, at: 3_000, items: []},
+              ],
+            }),
+          );
+          expect(next.events.filter(event => event.kind === 'head_changed')).toHaveLength(1);
+          expect(next.events.filter(event => event.kind === 'removed').map(event => event.key)).toEqual(['comment']);
+          expect(next.events.filter(event => event.kind === 'ci_error').map(event => event.key)).toEqual([
+            'current-failure',
+          ]);
+          expect(next.sources.find(item => item.source === source)?.items.map(item => item.id)).toEqual([
+            'current-failure',
+          ]);
+          expect(next.work).toEqual(before.work);
+          expect(JSON.stringify(before)).toBe(original);
+          const removed = reconcileNativeWatch(
+            next,
+            sweep({
+              head: sha('b'),
+              startedHead: sha('b'),
+              at: 4_000,
+              sources: [{source, complete: true, head: sha('b'), at: 4_000, items: []}],
+            }),
+          );
+          expect(removed.events.slice(next.events.length)).toMatchObject([
+            {kind: 'removed', key: 'current-failure', head: sha('b')},
+          ]);
+          expect(removed.work).toEqual(before.work);
+        },
+      ),
+      {numRuns: 32, examples: [['checks', Array.from({length: 64}, (_, index) => index), false]]},
+    );
+  });
+
+  it('retains CI removal signals when the prior entity has no proven head', () => {
+    const before = reconcileNativeWatch(
+      state(),
+      sweep({
+        sources: [
+          {
+            source: 'checks',
+            complete: true,
+            head: sha('a'),
+            at: 1_000,
+            items: [entity('unknown-head', {kind: 'ci_update'})],
+          },
+        ],
+      }),
+    );
+    const after = reconcileNativeWatch(
+      before,
+      sweep({
+        head: sha('b'),
+        startedHead: sha('b'),
+        at: 2_000,
+        sources: [{source: 'checks', complete: true, head: sha('b'), at: 2_000, items: []}],
+      }),
+    );
+    expect(after.events.map(event => event.kind)).toEqual(['head_changed', 'removed']);
+  });
+
   it('accepts canonical external HTTPS entity URLs and rejects insecure or credential URLs', () => {
     const external = reconcileNativeWatch(
       state(),

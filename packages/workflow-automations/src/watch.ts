@@ -468,8 +468,15 @@ export function reconcileNativeWatch(input: NativeWatchState, rawSweep: NativeWa
       } else if ((prior?.lastCompleteAt !== undefined || item.bootstrap) && !isNonActionableCiUpdate)
         events.push(eventForEntity(result.source, item, result.at));
     }
-    for (const item of prior?.items ?? [])
-      if (!newItems.has(item.id)) events.push(eventForEntity(result.source, item, result.at, true));
+    for (const item of prior?.items ?? []) {
+      // Head changes already invalidate prior CI. Retain their work without
+      // turning the replaced checkpoint into one removal event per old check.
+      const supersededCi =
+        (result.source === 'checks' || result.source === 'statuses') &&
+        item.head !== undefined &&
+        item.head !== sweep.head;
+      if (!newItems.has(item.id) && !supersededCi) events.push(eventForEntity(result.source, item, result.at, true));
+    }
     checkpoints.set(result.source, {source: result.source, items: result.items, lastCompleteAt: result.at});
   }
   let ci: NativeWatchCiCheckpoint | null = null;
