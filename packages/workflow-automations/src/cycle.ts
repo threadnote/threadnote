@@ -222,7 +222,7 @@ function validatePlan(p: NativeCyclePlan): void {
     if (visiting.has(x)) err('Dependency cycle.');
     if (done.has(x)) return;
     visiting.add(x);
-    p.phases.find(y => y.id === x)!.dependsOn.forEach(visit);
+    nativeCycleEffectiveParents(p, x).forEach(visit);
     visiting.delete(x);
     done.add(x);
   };
@@ -349,18 +349,46 @@ export type NativeCycleAction = {
   readonly phaseId?: string;
   readonly reason?: string;
 };
-function depsReady(s: NativeCycleState, idValue: string): boolean {
-  return s.plan.phases
-    .find(p => p.id === idValue)!
-    .dependsOn.every(d => ['validated', 'published', 'merged'].includes(s.phases[d].status));
+/** Exact branch bindings add stack parents without changing authored material intent. */
+export function nativeCycleEffectiveParents(plan: NativeCyclePlan, idValue: string): readonly string[] {
+  const selected = plan.phases.find(p => p.id === idValue);
+  if (!selected) err('Unknown phase.');
+  return plan.phases
+    .filter(
+      p =>
+        selected.dependsOn.includes(p.id) ||
+        (p.id !== selected.id && selected.branch !== selected.baseBranch && p.branch === selected.baseBranch),
+    )
+    .map(p => p.id);
+}
+export function nativeCycleParentsReady(s: NativeCycleState, idValue: string): boolean {
+  // The plan is an admitted bounded DAG. Memoization is confined to this traversal.
+  const accepted = new Map<string, boolean>();
+  const ready = (id: string): boolean => {
+    const cached = accepted.get(id);
+    if (cached !== undefined) return cached;
+    const phase = s.phases[id];
+    const result =
+      ['validated', 'published', 'merged'].includes(phase.status) &&
+      (s.plan.delivery === 'local' || phase.delivery !== undefined) &&
+      nativeCycleEffectiveParents(s.plan, id).every(ready);
+    accepted.set(id, result);
+    return result;
+  };
+  return nativeCycleEffectiveParents(s.plan, idValue).every(ready);
 }
 export function nextNativeCycle(value: NativeCycleState): NativeCycleAction {
   const s = decodeNativeCycleState(value),
     ps = s.plan.phases;
   for (const p of ps)
-    if (s.phases[p.id].status === 'validated' && s.plan.delivery !== 'local' && !s.phases[p.id].delivery)
+    if (
+      s.phases[p.id].status === 'validated' &&
+      s.plan.delivery !== 'local' &&
+      !s.phases[p.id].delivery &&
+      nativeCycleParentsReady(s, p.id)
+    )
       return {action: 'deliver', phaseId: p.id};
-  const ready = ps.find(p => ['pending', 'active'].includes(s.phases[p.id].status) && depsReady(s, p.id));
+  const ready = ps.find(p => ['pending', 'active'].includes(s.phases[p.id].status) && nativeCycleParentsReady(s, p.id));
   if (ready) return {action: 'implement', phaseId: ready.id};
   const stuck = ps.find(p => ['stale', 'blocked'].includes(s.phases[p.id].status));
   if (stuck)
@@ -401,7 +429,7 @@ export function validateNativeCyclePhase(
     p = s.plan.phases.find(x => x.id === idValue);
   if (!r || !p) err('Unknown phase.');
   if (r.status === 'merged') err('Merged history cannot be rewritten.');
-  if (!depsReady(s, idValue)) err('Reconcile unvalidated dependencies before accepting this phase.');
+  if (!nativeCycleParentsReady(s, idValue)) err('Reconcile unvalidated dependencies before accepting this phase.');
   const pending = nextNativeCycle(s);
   if (pending.action === 'deliver' && pending.phaseId !== idValue) err('Finish the prior phase delivery first.');
   const v = decode(validationSchema, evidence, 'Invalid validation evidence.');
@@ -456,6 +484,9 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
     if (canonical(r.delivery) === canonical(d)) return s;
     err('Merged delivery history cannot be rewritten.');
   }
+  if (!nativeCycleParentsReady(s, idValue)) err('Reconcile and deliver effective parents before phase delivery.');
+  const pending = nextNativeCycle(s);
+  if (pending.action === 'deliver' && pending.phaseId !== idValue) err('Finish the prior phase delivery first.');
   if (
     d.phaseId !== idValue ||
     d.phaseHash !== r.phaseHash ||
@@ -496,16 +527,17 @@ export function recordNativeCycleDelivery(value: NativeCycleState, idValue: stri
   }
   return {...s, phases: {...s.phases, [idValue]: {...r, status, delivery: d}}};
 }
-function descendants(plan: NativeCyclePlan, idValue: string): Set<string> {
-  const found = new Set([idValue]);
+function descendants(plans: readonly NativeCyclePlan[], seeds: readonly string[]) {
+  const found = new Set(seeds);
   let changed = true;
   while (changed) {
     changed = false;
-    for (const p of plan.phases)
-      if (!found.has(p.id) && p.dependsOn.some(x => found.has(x))) {
-        found.add(p.id);
-        changed = true;
-      }
+    for (const plan of plans)
+      for (const p of plan.phases)
+        if (!found.has(p.id) && nativeCycleEffectiveParents(plan, p.id).some(id => found.has(id))) {
+          found.add(p.id);
+          changed = true;
+        }
   }
   return found;
 }
@@ -530,7 +562,7 @@ export function invalidateNativeCycle(value: NativeCycleState, idValue: string, 
   const s = decodeNativeCycleState(value);
   if (!reason.trim()) err('Record the concrete invalidation reason.');
   if (!s.phases[idValue]) err('Unknown phase.');
-  const affected = descendants(s.plan, idValue);
+  const affected = descendants([s.plan], [idValue]);
   for (const k of affected) if (s.phases[k].status === 'merged') err('Merged history cannot be rewritten.');
   const phases = {...s.phases};
   for (const k of affected) {
@@ -564,20 +596,12 @@ export function reconcileNativeCyclePlan(
   for (const p of old.phases)
     if (!plan.phases.some(x => x.id === p.id) && s.phases[p.id].status !== 'pending')
       err('Cannot remove evidence-bearing phases.');
-  const affected = new Set<string>();
+  const seeds = old.phases.filter(p => !plan.phases.some(x => x.id === p.id)).map(p => p.id);
   for (const p of plan.phases) {
     const before = old.phases.find(x => x.id === p.id);
-    if (!before || nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)) affected.add(p.id);
+    if (!before || nativeCyclePhaseHash(old, p.id) !== nativeCyclePhaseHash(plan, p.id)) seeds.push(p.id);
   }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const p of plan.phases)
-      if (!affected.has(p.id) && p.dependsOn.some(x => affected.has(x))) {
-        affected.add(p.id);
-        changed = true;
-      }
-  }
+  const affected = descendants([old, plan], seeds);
   for (const k of affected) if (s.phases[k]?.status === 'merged') err('Merged history cannot be rewritten.');
   const phases: Record<string, NativeCycleState['phases'][string]> = {};
   for (const p of plan.phases) {

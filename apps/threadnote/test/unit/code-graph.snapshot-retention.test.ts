@@ -295,35 +295,49 @@ describe('code graph ready snapshot retention', () => {
     ),
   );
 
-  it('carries retirement provenance from an expired lease to a renewed overlapping lease', async () => {
-    const root = await mkdtemp('threadnote-ready-retention-renewed-overlap-');
-    temporaryRoots.push(root);
-    const databasePath = join(root, 'graph-v3.sqlite');
-    const identity = repositoryIdentity(root);
-    const displaced = snapshot(identity, 'renew-displaced');
-    const current = snapshot(identity, 'renew-current');
+  effectIt.effect('carries retirement provenance from an expired lease to a renewed overlapping lease', () =>
+    TestClock.withLive(
+      Effect.acquireUseRelease(
+        Effect.promise(() => mkdtemp('threadnote-ready-retention-renewed-overlap-')),
+        root =>
+          Effect.gen(function* () {
+            const databasePath = join(root, 'graph-v3.sqlite');
+            const identity = repositoryIdentity(root);
+            const displaced = snapshot(identity, 'renew-displaced');
+            const current = snapshot(identity, 'renew-current');
+            const store = yield* CodeGraphStore;
+            yield* store.initialize(databasePath);
+            yield* registerReadySnapshots(store, databasePath, identity, [displaced]);
+            yield* Effect.sync(() => seedSymbol(databasePath, displaced.id));
+            yield* store.promote(databasePath, identity, displaced.id);
+            const expired = yield* store.acquireSnapshotLease(databasePath, displaced.id, 60_000);
+            const renewed = yield* store.acquireSnapshotLease(databasePath, displaced.id, 60_000);
+            yield* registerReadySnapshots(store, databasePath, identity, [current]);
+            yield* Effect.sync(() => seedSymbol(databasePath, current.id));
+            yield* store.promote(databasePath, identity, current.id);
+            yield* Effect.sync(() => expireLease(databasePath, expired));
 
-    await runEffect(
-      Effect.gen(function* () {
-        const store = yield* CodeGraphStore;
-        yield* store.initialize(databasePath);
-        yield* registerReadySnapshots(store, databasePath, identity, [displaced]);
-        yield* store.promote(databasePath, identity, displaced.id);
-        const expired = yield* store.acquireSnapshotLease(databasePath, displaced.id, 60_000);
-        const renewed = yield* store.acquireSnapshotLease(databasePath, displaced.id, 60_000);
-        yield* registerReadySnapshots(store, databasePath, identity, [current]);
-        yield* store.promote(databasePath, identity, current.id);
-        yield* Effect.sync(() => expireLease(databasePath, expired));
+            yield* store.renewSnapshotLease(databasePath, renewed, 60_000);
+            expect(readLeaseExpiration(databasePath, expired)).toBeUndefined();
+            expect(readLeaseRetirementFlag(databasePath, renewed)).toBe(1);
+            yield* store.pruneRetiredSnapshots(databasePath);
+            expect(readSnapshotState(databasePath, displaced.id)).toBe('ready');
+            expect(readSnapshotSymbolCount(databasePath, displaced.id)).toBe(1);
 
-        yield* store.renewSnapshotLease(databasePath, renewed, 60_000);
-        expect(readSnapshotState(databasePath, displaced.id)).toBe('ready');
-        yield* store.releaseSnapshotLease(databasePath, renewed);
-        yield* waitForSnapshotRemoval(databasePath, displaced.id);
-      }),
-    );
-
-    expect(readSnapshotState(databasePath, displaced.id)).toBeUndefined();
-  });
+            yield* store.releaseSnapshotLease(databasePath, renewed);
+            expect(['retired', undefined]).toContain(readSnapshotState(databasePath, displaced.id));
+            // Physical cleanup is resumable; drive it without a detached-fiber deadline.
+            yield* store.pruneRetiredSnapshots(databasePath);
+            expect(readSnapshotState(databasePath, displaced.id)).toBeUndefined();
+            expect(readSnapshotSymbolCount(databasePath, displaced.id)).toBe(0);
+            expect(readSnapshotState(databasePath, current.id)).toBe('ready');
+            expect(readSnapshotSymbolCount(databasePath, current.id)).toBe(1);
+            expect(readSnapshotLeaseTokens(databasePath)).toEqual([]);
+          }),
+        root => Effect.promise(() => rm(root, {force: true, recursive: true})),
+      ).pipe(provideTestLayer(ApplicationLayer)),
+    ),
+  );
 
   it('retires a lease acquired by ID when that snapshot is later promoted and displaced', async () => {
     const root = await mkdtemp('threadnote-ready-retention-acquire-promote-');
@@ -918,6 +932,19 @@ function leaseColumns(database: Database): readonly string[] {
       readonly name: string;
     }[]
   ).map(column => column.name);
+}
+
+function readLeaseRetirementFlag(databasePath: string, token: string): number | undefined {
+  const database = new Database(databasePath, {readonly: true, strict: true});
+  try {
+    return database
+      .query<{readonly retire_when_inactive: number}, [string]>(
+        'SELECT retire_when_inactive FROM snapshot_leases WHERE token = ?',
+      )
+      .get(token)?.retire_when_inactive;
+  } finally {
+    database.close(false);
+  }
 }
 
 function readLeaseExpiration(databasePath: string, token: string): number | undefined {

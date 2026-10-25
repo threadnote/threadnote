@@ -888,27 +888,48 @@ function assertCaseCompatible(fs: FileSystem.FileSystem, parent: string, desired
   });
 }
 
+/** A child may disappear during enumeration; containing directories remain authoritative. */
 function listEntries(fs: FileSystem.FileSystem, path: Path.Path, resolved: ResolvedResourcePath, recursive: boolean) {
+  const notFound = (error: unknown): boolean =>
+    error instanceof PlatformError.PlatformError && error.reason._tag === 'NotFound';
+  const validateDirectory = (directory: string) =>
+    verifyPathAtExpectedLocation(fs, path, {...resolved, path: directory}, directory, 'Directory');
+  const admitAbsentChild = (directory: string, childPath: string) =>
+    Effect.gen(function* () {
+      yield* validateDirectory(resolved.path);
+      yield* validateDirectory(directory);
+      const link = yield* fs.readLink(childPath).pipe(Effect.result);
+      if (link._tag === 'Success')
+        return yield* unsafe(resolved, 'Symbolic links are not allowed in resource inventory.');
+      if (!notFound(link.failure)) return yield* link.failure;
+      yield* validateDirectory(directory);
+      yield* validateDirectory(resolved.path);
+      return [] as ResourceStoreEntry[];
+    }).pipe(mapIoError('list', resolved.id.canonicalUri));
   return Effect.gen(function* () {
     const rootInfo = yield* verifyExistingPath(fs, path, resolved);
     if (rootInfo.type === 'File') return [entryForInfo(resolved.id.canonicalUri, rootInfo)];
     if (rootInfo.type !== 'Directory') return yield* unsafe(resolved, `Unsupported resource type ${rootInfo.type}.`);
-    const entries: ResourceStoreEntry[] = [];
-    const visit = (directory: string, segments: readonly string[]): Effect.Effect<void, unknown> =>
+    const visit = (directory: string, segments: readonly string[]): Effect.Effect<ResourceStoreEntry[], unknown> =>
       Effect.gen(function* () {
+        const entries: ResourceStoreEntry[] = [];
         for (const name of [...(yield* fs.readDirectory(directory))].sort()) {
           const childPath = path.join(directory, name);
-          const childResolved = {...resolved, path: childPath};
-          const info = yield* verifyPathAtExpectedLocation(fs, path, childResolved, childPath);
-          if (info.type !== 'Directory' && info.type !== 'File') continue;
-          const childSegments = [...segments, name.normalize('NFC')];
-          const uri = canonicalResourceUri(resolved.id.namespace, [...resolved.id.segments, ...childSegments]);
-          entries.push(entryForInfo(uri, info));
-          if (recursive && info.type === 'Directory') yield* visit(childPath, childSegments);
+          // Buffer the complete branch: a vanished directory must not expose a partial subtree.
+          const branch = yield* Effect.gen(function* () {
+            const childResolved = {...resolved, path: childPath};
+            const info = yield* verifyPathAtExpectedLocation(fs, path, childResolved, childPath);
+            if (info.type !== 'Directory' && info.type !== 'File') return [];
+            const childSegments = [...segments, name.normalize('NFC')];
+            const uri = canonicalResourceUri(resolved.id.namespace, [...resolved.id.segments, ...childSegments]);
+            const children = recursive && info.type === 'Directory' ? yield* visit(childPath, childSegments) : [];
+            return [entryForInfo(uri, info), ...children];
+          }).pipe(Effect.catchIf(notFound, () => admitAbsentChild(directory, childPath)));
+          for (const entry of branch) entries.push(entry);
         }
+        return entries;
       });
-    yield* visit(resolved.path, []);
-    return entries;
+    return yield* visit(resolved.path, []);
   });
 }
 

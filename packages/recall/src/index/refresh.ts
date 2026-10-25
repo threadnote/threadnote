@@ -170,6 +170,10 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
     );
   }
   yield* flushPendingSources();
+  yield* sql.unsafe(
+    `CREATE INDEX temp.${RECALL_REFRESH_SOURCE_TABLE}_locator_digest
+     ON ${RECALL_REFRESH_SOURCE_TABLE}(uri_locator_digest, uri)`,
+  );
   return {scannedSourceCount, skippedOversizedDocumentCount};
 });
 
@@ -491,10 +495,6 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       source_path TEXT NOT NULL, source_modified_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
       invalidated INTEGER NOT NULL CHECK (invalidated IN (0, 1))) WITHOUT ROWID`);
-    yield* sql.unsafe(
-      `CREATE INDEX temp.${RECALL_REFRESH_SOURCE_TABLE}_locator_digest
-       ON ${RECALL_REFRESH_SOURCE_TABLE}(uri_locator_digest, uri)`,
-    );
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),

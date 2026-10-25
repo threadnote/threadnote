@@ -5,6 +5,7 @@ import {
   decodeNativeCyclePlan,
   initializeNativeCycle,
   nextNativeCycle,
+  nativeCycleParentsReady,
   checkNativeCycleScope,
   validateNativeCyclePhase,
   recordNativeCycleDelivery,
@@ -435,10 +436,7 @@ export const runNativeCycle = <R>(
           const selected = yield* from(getPhase);
           const prior = state.phases[selected.id];
           const reason = yield* from(() => required(request.reason, 'the completed reconciliation evidence'));
-          if (
-            !['stale', 'blocked'].includes(prior.status) ||
-            selected.dependsOn.some(id => !['validated', 'published', 'merged'].includes(state.phases[id].status))
-          )
+          if (!['stale', 'blocked'].includes(prior.status) || !nativeCycleParentsReady(state, selected.id))
             return yield* fail('dependency-stale', 'Resume only the reconciled phase after its parent acceptance.');
           if (nextNativeCycle(state).action === 'deliver')
             return yield* fail('delivery-pending', 'Finish the outstanding delivery first.');
@@ -463,7 +461,7 @@ export const runNativeCycle = <R>(
           const next = nextNativeCycle(state);
           if (next.action === 'deliver' && next.phaseId !== selected.id)
             return yield* fail('delivery-pending', 'Deliver the accepted prior phase before the next implementation.');
-          if (selected.dependsOn.some(id => !['validated', 'published', 'merged'].includes(state.phases[id].status)))
+          if (!nativeCycleParentsReady(state, selected.id))
             return yield* fail('dependency-stale', 'Reconcile the affected parent acceptance first.');
           if (state.phases[selected.id].status === 'merged')
             return yield* fail('phase-complete', 'Merged phase history is immutable.');
@@ -762,6 +760,8 @@ export const runNativeCycle = <R>(
         }
         if (request.command === 'ready') {
           const selected = yield* from(getPhase);
+          if (!nativeCycleParentsReady(state, selected.id))
+            return yield* fail('dependency-stale', 'Reconcile and deliver every effective ancestor before acceptance.');
           const entry = yield* from(getSnapshot);
           if (
             entry.snapshot.phaseId !== selected.id ||
@@ -807,6 +807,15 @@ export const runNativeCycle = <R>(
         if (request.command === 'publication-ready' || request.command === 'record-delivery') {
           const selected = yield* from(getPhase);
           const proof = state.phases[selected.id];
+          if (request.command === 'record-delivery' && proof.status === 'merged') {
+            const replay = yield* from(() => recordNativeCycleDelivery(state, selected.id, request.delivery));
+            return {status: 'ok', revision: stored.revision, next: nextNativeCycle(replay)};
+          }
+          if (!nativeCycleParentsReady(state, selected.id))
+            return yield* fail('dependency-stale', 'Reconcile and deliver effective parents before publication.');
+          const pending = nextNativeCycle(state);
+          if (pending.action === 'deliver' && pending.phaseId !== selected.id)
+            return yield* fail('delivery-pending', 'Finish the outstanding delivery first.');
           if (!proof.validation || !proof.tree)
             return yield* fail('not-ready', 'Current phase validation is required.');
           const current = yield* captureNativeCycleSource(repo, 'HEAD');
