@@ -1,3 +1,4 @@
+import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
 import {Clock, Effect, FileSystem, Option, Path} from 'effect';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -7,7 +8,7 @@ import type {CodeGraphBuildResourceCoordinator} from '../build/resources.js';
 import {canonicalCodeGraphMonikers} from '../cross_repository/monikers.js';
 import {isNonResumableCodeGraphBuildFailure} from '../disk/capacity.js';
 import {coordinateCodeGraphBuild, measureCodeGraphAttribution} from './build_coordination.js';
-import type {CodeGraphEmbeddingIndexShape, CodeGraphEmbeddingStatus} from '../embedding.js';
+import type {CodeGraphEmbeddingIndexShape} from '../embedding.js';
 import {finalCodeGraphFactBatches, serializeBoundedCodeGraphFact} from '../fact/budget.js';
 import {
   assessIncrementalOverlay,
@@ -30,7 +31,6 @@ import {
   cachedFactsMetadata,
   codeGraphDirectPersistentCapacityProtector,
   deduplicateMaterializationRelationships,
-  embeddingSymbolSource,
   emptyMaterializationReplayMetrics,
   estimatedMaterializationStorageBytes,
   extractorSetIdentity,
@@ -1879,29 +1879,6 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
             subphase: 'complete',
           }) ?? Effect.void
         ).pipe(Effect.as(false));
-  const embedding = input.ensureVectors
-    ? yield* input.embedding
-        .ensure(
-          input.threadnoteHome,
-          input.layout,
-          activatedReady,
-          embeddingSymbolSource(input.store, input.layout.databasePath, activatedReady.id),
-          {
-            force: input.force,
-            onProgress: input.onProgress,
-          },
-        )
-        .pipe(
-          Effect.catch(cause =>
-            Effect.succeed({
-              embedded: 0,
-              ready: false,
-              reason: messageOf(cause),
-              reused: 0,
-            } satisfies CodeGraphEmbeddingStatus),
-          ),
-        )
-    : ({embedded: 0, ready: true, reused: 0} satisfies CodeGraphEmbeddingStatus);
   const foldForwardMaterialization =
     incrementalApplied && incrementalAssessment?.mode === 'eligible' && input.committedBase?.foldForward
       ? foldForwardMaterializationCounts(
@@ -1913,7 +1890,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
   if (input.activatePointer) {
     yield* input.fs.remove(input.layout.staleMarkerPath, {force: true}).pipe(Effect.ignore);
   }
-  return {
+  const summary = {
     diagnostics: [
       ...(input.inventory.diagnostics ?? []),
       ...extractionDiagnostics,
@@ -1941,7 +1918,6 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
       ...(analysisSummaryFailure
         ? [`Whole-graph analysis summary will be retried lazily: ${analysisSummaryFailure}`]
         : []),
-      ...(embedding.ready ? [] : [`Vector graph retrieval unavailable: ${embedding.reason ?? 'unknown reason'}`]),
     ].slice(0, 100),
     durationMs: (yield* Clock.currentTimeMillis) - input.startedAt,
     identity: input.identity,
@@ -1977,6 +1953,7 @@ const buildAndActivateInternal = Effect.fn('codeGraph.buildAndActivate')(functio
     skippedFiles: input.inventory.skipped,
     snapshot: activatedReady,
   } satisfies CodeGraphIndexSummary;
+  return input.ensureVectors ? yield* deferCodeGraphVectorCompletion({...input, summary}) : summary;
 });
 
 export function buildAndActivate(input: CodeGraphBuildAndActivateInput) {
