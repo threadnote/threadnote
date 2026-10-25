@@ -420,6 +420,9 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
   const git = yield* requiredExecutable('git');
   const worktree = team.config.worktree;
   const readOnly = shareTeamAccess(team.config) === 'read-only';
+  // Include this sync's auto-commit in the ingest diff, even when fetch/rebase
+  // brings no upstream changes. Pending failures still use the same replay path.
+  const beforeRev = yield* gitOutput(worktree, ['rev-parse', 'HEAD'], dryRun);
 
   if (!dryRun && !readOnly) {
     // Don't push here — sync's final push step (below) will deliver any
@@ -471,7 +474,6 @@ const runShareSyncForTeam = Effect.fn('share.runShareSyncForTeam')(function* (
     }
   }
 
-  const beforeRev = yield* gitOutput(worktree, ['rev-parse', 'HEAD'], dryRun);
   yield* maybeRun(dryRun, git, ['-C', worktree, 'fetch', DEFAULT_GIT_REMOTE_NAME]);
   const pullResult = dryRun
     ? undefined
