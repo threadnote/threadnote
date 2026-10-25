@@ -13,6 +13,7 @@ import {
   type WorkflowBinding,
   type WorkflowJournal,
   type WorkflowRequest,
+  type WorkflowOperationInspectionRequest,
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
@@ -254,6 +255,82 @@ export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')
   );
   return {state, needsRecovery};
 });
+
+/** Internal capability: one already-held journal lock, never request-supplied. */
+export const withWorkflowJournalSession = <A, E, R>(
+  config: RuntimeConfig,
+  bindingId: string,
+  use: (session: {
+    readonly admission: Effect.Success<ReturnType<typeof inspectWorkflowJournal>>;
+    readonly run: <B, F, S>(
+      request: WorkflowRequest | WorkflowOperationInspectionRequest,
+      body: (state: WorkflowJournal) => Effect.Effect<B, F, S>,
+    ) => Effect.Effect<
+      B,
+      F | Effect.Error<ReturnType<typeof loadWorkflowJournal>>,
+      S | Effect.Services<ReturnType<typeof loadWorkflowJournal>>
+    >;
+  }) => Effect.Effect<A, E, R>,
+) =>
+  withWorkflowLock(
+    config,
+    bindingId,
+    Effect.gen(function* () {
+      const admission = yield* inspectWorkflowJournal(config, bindingId);
+      const owner = yield* Effect.fiberId;
+      let active = true;
+      let busy = false;
+      const run = <B, F, S>(
+        request: WorkflowRequest | WorkflowOperationInspectionRequest,
+        body: (state: WorkflowJournal) => Effect.Effect<B, F, S>,
+      ) =>
+        Effect.gen(function* () {
+          if (!active || (yield* Effect.fiberId) !== owner || busy || request.bindingId !== bindingId)
+            return yield* workflowError(
+              'binding-drift',
+              'The native memory session is inactive, foreign or already in use.',
+            );
+          return yield* Effect.acquireUseRelease(
+            Effect.sync(() => {
+              busy = true;
+            }),
+            () =>
+              Effect.gen(function* () {
+                const state = yield* readJournalFile(config, bindingId);
+                if (!state || stableJson(state.binding) !== stableJson(admission.state.binding))
+                  return yield* workflowError('binding-drift', 'The native memory session binding changed.');
+                const evidenceRefs =
+                  request.action === 'recover'
+                    ? state.operations[request.operationId ?? '']?.request.evidenceRefs
+                    : 'evidenceRefs' in request
+                      ? request.evidenceRefs
+                      : undefined;
+                yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+                yield* reconcileManifest(
+                  config,
+                  state,
+                  !['read', 'preflight', 'inspect-operation'].includes(request.action),
+                );
+                const result = yield* body(state);
+                if (['create', 'replace', 'recover'].includes(request.action))
+                  yield* verifyWorkflowBinding(config, state.binding);
+                return result;
+              }),
+            () =>
+              Effect.sync(() => {
+                busy = false;
+              }),
+          );
+        });
+      return yield* Effect.suspend(() => use({admission, run})).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            active = false;
+          }),
+        ),
+      );
+    }),
+  );
 
 const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['artifacts'], timestamp: string) =>
   formatMemoryDocument(

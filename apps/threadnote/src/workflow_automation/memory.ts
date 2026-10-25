@@ -97,14 +97,24 @@ function artifact(result: unknown): WorkflowArtifact {
   };
 }
 
-/** Capture application services, not scope authority; every call revalidates the native binding. */
+/** Capture application services; an optional private call remains lock-scoped and revocable. */
 export const makeWorkflowMemoryAdapter = Effect.fn('workflowAutomation.memoryAdapter')(function* (
   config: RuntimeConfig,
   binding: WorkflowBinding,
+  sessionCall?: (
+    input: unknown,
+  ) => Effect.Effect<
+    unknown,
+    Effect.Error<ReturnType<typeof runWorkflowMemory>>,
+    Effect.Services<ReturnType<typeof runWorkflowMemory>>
+  >,
 ) {
   const context = yield* Effect.context<Effect.Services<ReturnType<typeof runWorkflowMemory>>>();
   const call = (input: unknown) =>
-    runWorkflowMemory(config, input).pipe(Effect.provideContext(context), Effect.mapError(nativeWorkflowError));
+    (sessionCall ? sessionCall(input) : runWorkflowMemory(config, input)).pipe(
+      Effect.provideContext(context),
+      Effect.mapError(nativeWorkflowError),
+    );
   const admitted = (bindingId: string) =>
     bindingId === binding.bindingId
       ? Effect.void
@@ -125,6 +135,8 @@ export const makeWorkflowMemoryAdapter = Effect.fn('workflowAutomation.memoryAda
       return admitted(intent.bindingId).pipe(
         Effect.andThen(call({...request, action: 'preflight', mutation: request.action})),
         Effect.flatMap(result =>
+          typeof result === 'object' &&
+          result !== null &&
           'canonicalUri' in result &&
           typeof result.canonicalUri === 'string' &&
           'bodySha256' in result &&
@@ -152,9 +164,12 @@ export const makeWorkflowMemoryAdapter = Effect.fn('workflowAutomation.memoryAda
           }),
         ),
         Effect.flatMap(result =>
+          typeof result === 'object' &&
+          result !== null &&
           'operationState' in result &&
           ['absent', 'prepared', 'verified'].includes(String(result.operationState)) &&
-          'intentDigest' in result
+          'intentDigest' in result &&
+          typeof result.intentDigest === 'string'
             ? Effect.succeed({
                 state: result.operationState as 'absent' | 'prepared' | 'verified',
                 intentDigest: result.intentDigest,

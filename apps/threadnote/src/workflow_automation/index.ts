@@ -10,6 +10,7 @@ import {
   type NativeWorkflowState,
 } from '@threadnote/workflow-automations/native';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
+import {withNativeWorkflowMemorySession} from '../workflow_memory/index.js';
 import {resolveWorkflowBinding} from '../workflow_memory/profile.js';
 import {bindWorkflow, inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journal.js';
 import {stableJson, type WorkflowBinding} from '../workflow_memory/protocol.js';
@@ -95,8 +96,10 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
   config: RuntimeConfig,
   state: NativeWorkflowState,
   binding: WorkflowBinding,
+  admitted?: Effect.Success<ReturnType<typeof inspectWorkflowJournal>>,
 ) {
-  const native = yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId));
+  const native =
+    admitted ?? (yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId)));
   const ids = new Set(state.operations.map(operation => operation.intent.operationId));
   const cache = yield* CurrentWorkflowReadCache;
   if (Object.keys(native.state.operations).some(id => !ids.has(id)))
@@ -358,20 +361,34 @@ const runBound = Effect.fn('workflowAutomation.bound')(function* (
   request: Exclude<NativeWorkflowRequest, {readonly action: 'init' | 'capabilities' | 'graph-ready'}>,
 ) {
   const stored = yield* load(config, request);
-  const binding = yield* currentBinding(config, stored.state);
-  const inspection = yield* inspectNative(config, stored.state, binding);
-  if (request.action === 'inspect') {
-    return inspection;
-  }
-  const memory = yield* makeWorkflowMemoryAdapter(config, binding);
-  if (request.action === 'read')
-    return {
-      ...version,
-      status: 'ok' as const,
-      artifact: yield* memory.read(binding.bindingId, request.uri, request.evidenceRefs),
-    };
-  if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId);
-  return yield* save(config, stored, memory, request);
+  return yield* withNativeWorkflowMemorySession(config, stored.state.bindingId, (admission, call) =>
+    Effect.gen(function* () {
+      const binding = admission.state.binding;
+      const expected = {...bindingRequest(stored.state), profile: stored.state.profile, team: stored.state.team};
+      if (
+        binding.bindingId !== stored.state.bindingId ||
+        binding.workflowRunId !== expected.workflowRunId ||
+        binding.project !== expected.project ||
+        binding.featureId !== expected.featureId ||
+        binding.generation !== expected.generation ||
+        binding.profile !== expected.profile ||
+        binding.team !== expected.team ||
+        stableJson(binding.naming) !== stableJson(stored.state.naming)
+      )
+        return yield* issue('binding-drift', 'Native run identity differs from its current journal admission.');
+      const inspection = yield* inspectNative(config, stored.state, binding, admission);
+      if (request.action === 'inspect') return inspection;
+      const memory = yield* makeWorkflowMemoryAdapter(config, binding, call);
+      if (request.action === 'read')
+        return {
+          ...version,
+          status: 'ok' as const,
+          artifact: yield* memory.read(binding.bindingId, request.uri, request.evidenceRefs),
+        };
+      if (request.action === 'recover') return yield* recover(config, stored, memory, request.operationId);
+      return yield* save(config, stored, memory, request);
+    }),
+  );
 });
 
 const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: RuntimeConfig, input: unknown) {
