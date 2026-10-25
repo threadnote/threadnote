@@ -462,7 +462,7 @@ describe('Manager topic review adapter', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('checks current source access only for imported reviews in the requested inbox view', () =>
+  effectIt.effect('lists only the requested imported review states without reading private sources', () =>
     Effect.gen(function* () {
       const pending = importedReview();
       const deferred = {
@@ -487,8 +487,8 @@ describe('Manager topic review adapter', () => {
         url: new URL('http://manager.test/api/reviews?project=alpha&view=pending'),
       });
       expect(result?.body).toMatchObject({pendingCount: 2, items: [{reviewId: pending.reviewId}]});
-      expect(mocks.read).toHaveBeenCalledTimes(1);
-      expect(mocks.read).toHaveBeenCalledWith(config, pending.reviewId);
+      expect(mocks.read).not.toHaveBeenCalled();
+      expect(JSON.stringify(result?.body)).not.toContain(pending.candidates[0].proposedText);
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 

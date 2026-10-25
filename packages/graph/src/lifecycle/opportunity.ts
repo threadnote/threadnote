@@ -1,4 +1,11 @@
-import {Effect, FileSystem, Option, Path, Predicate, Schema} from 'effect';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
+import * as SqlClient from 'effect/sql/SqlClient';
+import {runtimeOpenTextDirectoryNameReader} from '@threadnote/platform/system';
+import {fromPromise} from '@threadnote/platform/errors';
+import {hasCodeGraphEmbeddingDemand} from '../vector/demand.js';
+import {CodeGraphEmbeddingWorkerProcess} from '../runtime_ports.js';
+import {codeGraphRepositoriesRoot} from '../layout.js';
+import {Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {syncDirectoryBestEffort, syncWritableFile} from '@threadnote/platform/file/durability';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -405,3 +412,77 @@ function rememberOpportunityCursor(cursors: Map<string, string>, key: string, cu
     cursors.delete(oldest);
   }
 }
+
+/** Dedicated metadata connection: native SQLite lock waits must fit inside the optional probe budget. */
+const readExistingEmbeddingDemandCatalog = (databasePath: string) =>
+  Effect.scoped(
+    Layer.build(
+      SqliteClient.layer({
+        filename: databasePath,
+        readonly: true,
+        readwrite: false,
+        create: false,
+        disableWAL: true,
+        busyTimeout: 50,
+      }),
+    ).pipe(
+      Effect.flatMap(context =>
+        Effect.flatMap(SqlClient.SqlClient, hasCodeGraphEmbeddingDemand).pipe(Effect.provide(context)),
+      ),
+    ),
+  );
+
+/** Startup may resume recorded work, but never discover views to enqueue new work. */
+export const resumeExistingCodeGraphEmbeddingDemand = Effect.fn('codeGraph.resumeExistingEmbeddingDemand')(function* (
+  threadnoteHome: string,
+  options: {
+    /** @internal Directory lifetime seam for interruption and catalog-order tests. */
+    readonly openDirectory?: typeof runtimeOpenTextDirectoryNameReader;
+    /** @internal Metadata-read lifetime seam; production always uses the dedicated read-only client. */
+    readonly beforeReadCatalog?: (databasePath: string) => Effect.Effect<void>;
+  } = {},
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const worker = yield* Effect.serviceOption(CodeGraphEmbeddingWorkerProcess);
+  if (Option.isNone(worker)) return false;
+  const repositories = codeGraphRepositoriesRoot(path, threadnoteHome);
+  const probe = Effect.acquireUseRelease(
+    fromPromise('codeGraph.resumeEmbeddingDemand.openDirectory', () =>
+      (options.openDirectory ?? runtimeOpenTextDirectoryNameReader)(repositories),
+    ),
+    directory =>
+      Effect.gen(function* () {
+        if (Option.isSome(yield* fs.readLink(repositories).pipe(Effect.option))) return false;
+        do {
+          const page = yield* fromPromise('codeGraph.resumeEmbeddingDemand.readPage', () => directory.readPage(64));
+          for (const checkoutId of page.names) {
+            if (!/^[a-f0-9]{64}$/u.test(checkoutId)) continue;
+            const pending = yield* Effect.gen(function* () {
+              const layout = codeGraphLayout(path, threadnoteHome, checkoutId, '0'.repeat(64));
+              if (Option.isSome(yield* fs.readLink(layout.repositoryRoot).pipe(Effect.option))) return false;
+              if (Option.isSome(yield* fs.readLink(layout.databasePath).pipe(Effect.option))) return false;
+              if (!(yield* fs.exists(layout.databasePath))) return false;
+              yield* options.beforeReadCatalog?.(layout.databasePath) ?? Effect.void;
+              return yield* readExistingEmbeddingDemandCatalog(layout.databasePath);
+            }).pipe(
+              Effect.catchTags({
+                SqlError: () => Effect.succeed(false),
+                CodeGraphStoreError: () => Effect.succeed(false),
+                PlatformError: () => Effect.succeed(false),
+              }),
+              Effect.timeoutOption(200),
+            );
+            yield* Effect.yieldNow;
+            if (Option.isSome(pending) && pending.value) return true;
+          }
+          if (page.done) return false;
+          yield* Effect.yieldNow;
+        } while (true);
+      }),
+    directory =>
+      fromPromise('codeGraph.resumeEmbeddingDemand.closeDirectory', () => directory.close()).pipe(Effect.ignoreCause),
+  ).pipe(Effect.orElseSucceed(() => false));
+  const pending = yield* probe;
+  return pending ? yield* worker.value.wake(threadnoteHome).pipe(Effect.orElseSucceed(() => false)) : false;
+});

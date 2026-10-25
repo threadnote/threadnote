@@ -1,7 +1,7 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {it as effectIt} from '@effect/vitest';
-import {Context, Effect, Layer, Schema} from 'effect';
+import {Context, Effect, Exit, FileSystem, Layer, Path, Schema, Scope} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
@@ -22,7 +22,7 @@ import {
 
 effectIt.layer(BunServices.layer)(it => {
   it.effect.prop(
-    'retries and expired-owner resumes produce exactly the independently expected symbol set',
+    'disk reopen, retries and expired-owner resumes preserve exactly the independently expected symbol set',
     {
       pageSizes: Schema.Array(Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 8}))).check(
         Schema.isMinLength(1),
@@ -32,8 +32,17 @@ effectIt.layer(BunServices.layer)(it => {
     },
     ({pageSizes, resumes}) =>
       Effect.gen(function* () {
-        const context = yield* Layer.build(SqliteClient.layer({filename: ':memory:'}));
-        const sql = Context.get(context, SqlClient.SqlClient);
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-generation-property-'});
+        const filename = path.join(root, 'graph.sqlite');
+        const open = Effect.gen(function* () {
+          const scope = yield* Effect.acquireRelease(Scope.make(), scope => Scope.close(scope, Exit.void));
+          const context = yield* Layer.buildWithScope(SqliteClient.layer({filename}), scope);
+          return {scope, sql: Context.get(context, SqlClient.SqlClient)};
+        });
+        let connection = yield* open;
+        let sql = connection.sql;
         for (const definition of [
           CODE_GRAPH_VECTOR_GENERATIONS_TABLE_SQL,
           CODE_GRAPH_VECTORS_TABLE_SQL,
@@ -51,7 +60,17 @@ effectIt.layer(BunServices.layer)(it => {
         let cursor: string | null = null;
         yield* claimCodeGraphGeneration(sql, {generation: 'target', ownerToken: owner, requestEpoch: 'epoch'});
         for (const [index, size] of pageSizes.entries()) {
-          if (resumes[index]) {
+          // Close the previous client completely: a second live connection would not
+          // exercise recovery from a persisted checkpoint.
+          yield* Scope.close(connection.scope, Exit.void);
+          connection = yield* open;
+          sql = connection.sql;
+          expect(yield* sql.unsafe('SELECT cursor, array_offset, embedded FROM vector_generation_progress')).toEqual([
+            {cursor, array_offset: offset, embedded: offset},
+          ]);
+          const previousOwner = owner;
+          const reclaimed = index === 0 || resumes[index];
+          if (reclaimed) {
             yield* TestClock.adjust(CODE_GRAPH_GENERATION_LEASE_MILLISECONDS);
             owner = `owner-${index + 1}`;
             yield* claimCodeGraphGeneration(sql, {generation: 'target', ownerToken: owner, requestEpoch: 'epoch'});
@@ -78,11 +97,24 @@ effectIt.layer(BunServices.layer)(it => {
             reused: 0,
             rows,
           };
+          if (reclaimed) {
+            expect(
+              (yield* commitCodeGraphGenerationStep(sql, {...step, ownerToken: previousOwner}).pipe(Effect.result))
+                ._tag,
+            ).toBe('Failure');
+            expect((yield* completeCodeGraphGeneration(sql, 'target', previousOwner).pipe(Effect.result))._tag).toBe(
+              'Failure',
+            );
+            expect(yield* sql.unsafe('SELECT state FROM vector_generations')).toEqual([{state: 'building'}]);
+          }
           yield* commitCodeGraphGenerationStep(sql, step);
           yield* commitCodeGraphGenerationStep(sql, step);
           offset = next;
           cursor = step.nextCursor;
         }
+        yield* Scope.close(connection.scope, Exit.void);
+        connection = yield* open;
+        sql = connection.sql;
         const expectedCount = pageSizes.reduce((sum, size) => sum + size, 0);
         expect(yield* completeCodeGraphGeneration(sql, 'target', owner)).toBe(expectedCount);
         const rows = yield* sql.unsafe<{symbol_id: string; fingerprint: string; vector: Uint8Array}>(

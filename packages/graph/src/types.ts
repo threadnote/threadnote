@@ -529,6 +529,7 @@ export const CODE_GRAPH_DEFERRED_VECTORS: unique symbol = Symbol('codeGraph.defe
 export interface CodeGraphIndexSummary {
   /** @internal In-process work captured under structural publication gates; omitted from JSON. */
   readonly [CODE_GRAPH_DEFERRED_VECTORS]?: CodeGraphDeferredVectorPlan;
+  readonly semantic?: CodeGraphSemanticStatus;
   readonly diagnostics: readonly string[];
   readonly durationMs: number;
   readonly identity: RepositoryIdentity;
@@ -732,7 +733,20 @@ export interface CodeGraphQueryOptions {
   readonly to?: string;
 }
 
+/** Independent semantic completion for the selected structural view. */
+export const CodeGraphSemanticStatusSchema = Schema.Struct({
+  state: Schema.Literals(['not-requested', 'queued', 'embedding', 'ready', 'deferred', 'blocked', 'unavailable']),
+  snapshotId: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(128))),
+  modelId: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(256))),
+  attempt: Schema.optionalKey(Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 3}))),
+  completedSymbols: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  reason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(512))),
+  retryAt: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type CodeGraphSemanticStatus = typeof CodeGraphSemanticStatusSchema.Type;
+
 export interface CodeGraphStatus {
+  readonly semantic?: CodeGraphSemanticStatus;
   readonly projectCoverage?: CodeGraphProjectCoverage;
   readonly databasePath: string;
   readonly freshness: 'current' | 'deferred' | 'stale';

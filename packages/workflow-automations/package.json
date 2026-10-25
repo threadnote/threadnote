@@ -18,6 +18,6 @@
     "@effect/vitest": "4.0.3",
     "@threadnote/testing": "workspace:*",
     "fast-check": "4.10.2",
-    "vitest": "5.0.3"
+    "vitest": "5.0.5"
   }
 }

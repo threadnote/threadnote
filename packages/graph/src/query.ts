@@ -84,6 +84,7 @@ export type {
 } from './query/contract.js';
 import {codeGraphSymbolSearchScoreMultiplier, CodeGraphStore, type CodeGraphStoreShape} from './store.js';
 import {CodeGraphEmbeddingIndex, type CodeGraphEmbeddingIndexShape} from './embedding.js';
+import {observeCodeGraphSemanticStatus} from './vector/status.js';
 import {withCodeGraphReadTransaction} from './store/session.js';
 import {addUnavailableImpactBaseWarning} from './query/impact_base.js';
 import {loadSharedGraphQuerySource} from './sharing/provenance.js';
@@ -259,6 +260,12 @@ export class CodeGraphQueryService extends Context.Service<
               (yield* codeGraphQueryScopeCurrent(projectScope, store, layout, readySnapshot, identity, languagePacks));
             return attachCodeGraphStatusObservation(
               {
+                semantic: yield* observeCodeGraphSemanticStatus({
+                  threadnoteHome,
+                  layout,
+                  snapshot: compatible ? readySnapshot || undefined : undefined,
+                  embedding,
+                }),
                 databasePath: layout.databasePath,
                 freshness: current ? 'current' : 'stale',
                 identity,
@@ -308,6 +315,12 @@ export class CodeGraphQueryService extends Context.Service<
             readySnapshot.commit !== identity.headCommit ||
             (overlay !== undefined && !snapshotMatches(readySnapshot, identity.headCommit, overlay));
           const status = {
+            semantic: yield* observeCodeGraphSemanticStatus({
+              threadnoteHome,
+              layout,
+              snapshot: readySnapshot || undefined,
+              embedding,
+            }),
             ...(projectScope === undefined
               ? {}
               : {
@@ -530,6 +543,12 @@ export class CodeGraphQueryService extends Context.Service<
               return attachCodeGraphStatusObservation(
                 {
                   ...lockedStatus,
+                  semantic: yield* observeCodeGraphSemanticStatus({
+                    threadnoteHome,
+                    layout,
+                    snapshot: lockedCandidate,
+                    embedding,
+                  }),
                   freshness: stale ? 'stale' : 'current',
                   identity: promotionIdentity.value,
                   readySnapshot: {...lockedCandidate, worktreeId: promotionIdentity.value.worktreeId},
@@ -584,13 +603,20 @@ export class CodeGraphQueryService extends Context.Service<
         }
         if (candidate === undefined) {
           return attachCodeGraphStatusObservation(
-            {...status, freshness: 'stale', readySnapshot: undefined, stale: true},
+            {
+              ...status,
+              semantic: {state: 'unavailable', reason: 'no-ready-snapshot'},
+              freshness: 'stale',
+              readySnapshot: undefined,
+              stale: true,
+            },
             observation,
           );
         }
         return attachCodeGraphStatusObservation(
           {
             ...status,
+            semantic: yield* observeCodeGraphSemanticStatus({threadnoteHome, layout, snapshot: candidate, embedding}),
             freshness: 'stale',
             readySnapshot: {...candidate, worktreeId: identity.worktreeId},
             stale: true,
@@ -743,7 +769,7 @@ export class CodeGraphQueryService extends Context.Service<
                 yield* indexer.index({
                   project: projectScope?.project,
                   cwd: options.cwd,
-                  ensureVectors: false,
+                  vectorPolicy: 'background',
                   onProgress: options.onProgress,
                   threadnoteHome: options.threadnoteHome,
                 });
@@ -772,7 +798,7 @@ export class CodeGraphQueryService extends Context.Service<
                     yield* indexer.index({
                       project: projectScope?.project,
                       cwd: options.cwd,
-                      ensureVectors: false,
+                      vectorPolicy: 'background',
                       onProgress: options.onProgress,
                       threadnoteHome: options.threadnoteHome,
                     });

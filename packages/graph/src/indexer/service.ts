@@ -1,5 +1,10 @@
+import {observeCodeGraphSemanticStatus} from '../vector/status.js';
 import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
-import {CODE_GRAPH_EXPECTED_SCOPE_ID_ENV, CodeGraphScopeRoutingError} from '../scope/routing.js';
+import {
+  CODE_GRAPH_EXPECTED_SCOPE_ID_ENV,
+  CODE_GRAPH_ISOLATED_BUILDER_ENV,
+  CodeGraphScopeRoutingError,
+} from '../scope/routing.js';
 import {Cause, Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as HttpClient from 'effect/http/HttpClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -73,7 +78,12 @@ import type {
   CodeGraphIndexResourceGate,
   CodeGraphPreparedSpoolBudgetGate,
 } from './types.js';
-import {codeGraphIndexEnsuresVectors, codeGraphIndexTimingStore, withCodeGraphIndexTiming} from './types.js';
+import {
+  codeGraphIndexEnsuresVectors,
+  codeGraphIndexVectorPolicy,
+  codeGraphIndexTimingStore,
+  withCodeGraphIndexTiming,
+} from './types.js';
 import type {BoundedCodeGraphFact} from '../fact/budget.js';
 import {
   type CodeGraphInventory,
@@ -111,6 +121,7 @@ import {CodeGraphStore} from '../store.js';
 import {TreeSitterRuntime} from '../tree_sitter/runtime.js';
 import type {CodeGraphIndexSummary, CodeGraphInventoryFile, CodeGraphProgress, CodeGraphSnapshot} from '../types.js';
 import {
+  CodeGraphEmbeddingWorkerProcess,
   CodeGraphObservability,
   CodeGraphProcessActivity,
   type CodeGraphBuildAnonymousTelemetryReporter,
@@ -131,6 +142,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
       const unobservedStore = store;
       const maintenance = yield* CodeGraphMaintenanceCoordinator;
       const embedding = yield* CodeGraphEmbeddingIndex;
+      const embeddingWorker = yield* Effect.serviceOption(CodeGraphEmbeddingWorkerProcess);
       const languagePacks = yield* CodeGraphLanguagePackRegistry;
       const treeSitter = yield* TreeSitterRuntime;
       const parserPool = yield* CodeGraphParserPool;
@@ -267,10 +279,35 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
         anonymousTelemetry: CodeGraphBuildAnonymousTelemetryReporter,
         attempt = 0,
         bypassCachedFacts = false,
-      ): Effect.Effect<CodeGraphIndexSummary, unknown> =>
-        Effect.scoped(
+      ): Effect.Effect<CodeGraphIndexSummary, unknown> => {
+        let publishedBackgroundDemand = false;
+        const vectorPolicy = codeGraphIndexVectorPolicy(request);
+        // Intercept only indexing publications. Read attachment, startup, exact reuse and
+        // historical ensureCommit never pass this boundary and cannot authorize demand.
+        const publicationStore =
+          vectorPolicy !== 'background'
+            ? unobservedStore
+            : {
+                ...unobservedStore,
+                promote: (...args: Parameters<typeof unobservedStore.promote>) =>
+                  Effect.gen(function* () {
+                    const [databasePath, identity, snapshotId, promotionOptions] = args;
+                    const candidate = yield* unobservedStore.readySnapshotById(databasePath, snapshotId);
+                    const previous = yield* unobservedStore.readySnapshot(
+                      databasePath,
+                      identity.worktreeId,
+                      candidate?.scopeId,
+                    );
+                    yield* unobservedStore.promote(databasePath, identity, snapshotId, {
+                      ...promotionOptions,
+                      backgroundEmbeddingDemand: true,
+                    });
+                    if (previous?.id !== snapshotId) publishedBackgroundDemand = true;
+                  }),
+              };
+        return Effect.scoped(
           Effect.gen(function* () {
-            const store = codeGraphIndexTimingStore(unobservedStore, request.onTiming);
+            const store = codeGraphIndexTimingStore(publicationStore, request.onTiming);
             const initialIdentity = yield* resolveRepositoryIdentity(request.cwd);
             const producer = {
               platform: {
@@ -347,7 +384,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                   requestedOverlay,
                   languagePacks,
                   request.incrementalOverlay,
-                  ensureVectors,
+                  vectorPolicy,
                   admissionEnvironment,
                   scope,
                 );
@@ -460,7 +497,27 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                   });
                 }),
               );
-              if (reused !== undefined) return reused;
+              if (reused !== undefined) {
+                if (system.environment()[CODE_GRAPH_ISOLATED_BUILDER_ENV] !== '1') return reused;
+                // Even a structural no-op child owes its parent an exact, owned policy receipt.
+                // Keep vector waiting outside the structural scope and report success only afterward.
+                const reporter = yield* withCodeGraphMaintenanceRegistration(
+                  request.threadnoteHome,
+                  makeCodeGraphBuildReporter(initialIdentity, layout, requestKey ? {key: requestKey} : undefined),
+                );
+                return withCodeGraphDeferredCompletionReporter(
+                  reused,
+                  completed =>
+                    withCodeGraphIndexTiming(request.onTiming, 'reporter-completion', reporter.complete(completed)),
+                  reporter.heartbeat,
+                  cause =>
+                    reporter.fail(
+                      Cause.hasInterruptsOnly(cause)
+                        ? CodeGraphIndexOperationError.make({message: CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY})
+                        : Cause.squash(cause),
+                    ),
+                );
+              }
             }
             const reporter = yield* withCodeGraphMaintenanceRegistration(
               request.threadnoteHome,
@@ -1488,6 +1545,28 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
           }).pipe(effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope-body', effect)),
         ).pipe(
           Effect.flatMap(completeCodeGraphDeferredVectors),
+          Effect.flatMap(summary =>
+            observeCodeGraphSemanticStatus({
+              threadnoteHome: request.threadnoteHome,
+              layout: codeGraphLayout(
+                path,
+                request.threadnoteHome,
+                summary.identity.checkoutId,
+                summary.identity.worktreeId,
+                summary.snapshot.scopeId,
+              ),
+              snapshot: summary.snapshot,
+              embedding,
+            }).pipe(Effect.map(semantic => ({...summary, semantic}))),
+          ),
+          // Run after the indexing scope releases database sessions, leases and locks.
+          Effect.ensuring(
+            Effect.suspend(() =>
+              publishedBackgroundDemand && Option.isSome(embeddingWorker)
+                ? embeddingWorker.value.wake(request.threadnoteHome).pipe(Effect.ignoreCause)
+                : Effect.void,
+            ),
+          ),
           effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope', effect),
           Effect.provideService(CommandExecutor, command),
           Effect.provideService(Crypto.Crypto, crypto),
@@ -1512,6 +1591,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
             () => indexAttempt(request, anonymousTelemetry, attempt, true),
           ),
         );
+      };
       const index = (request: CodeGraphIndexOptions) =>
         Effect.flatMap(
           observability.makeBuildReporter(system.environment().THREADNOTE_MCP_BROKER_CHILD === '1' ? 'mcp' : 'cli'),
