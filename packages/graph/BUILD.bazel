@@ -1896,6 +1896,7 @@ bun_test(
         "//apps/threadnote:src/workflow_automation/store.ts",
         "//apps/threadnote:src/workflow_memory/artifact_validation.ts",
         "//apps/threadnote:src/workflow_memory/artifacts.ts",
+        "//apps/threadnote:src/workflow_memory/canonical_json.ts",
         "//apps/threadnote:src/workflow_memory/citation_recovery.ts",
         "//apps/threadnote:src/workflow_memory/evidence.ts",
         "//apps/threadnote:src/workflow_memory/index.ts",
