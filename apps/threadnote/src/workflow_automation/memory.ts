@@ -53,6 +53,7 @@ export function workflowWriteRequest(intent: WorkflowWriteIntent): WorkflowReque
     artifactKey: intent.artifactKey,
     sourceRunId: intent.sourceRunId,
     role: intent.role,
+    ...(intent.nameHint === undefined ? {} : {nameHint: intent.nameHint}),
     body: intent.body,
     bodySha256: sha256HexSync(intent.body),
     expectedRevision: intent.expectedRevision,

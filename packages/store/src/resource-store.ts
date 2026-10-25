@@ -227,7 +227,9 @@ export class ResourceStore extends Context.Service<ResourceStore, ResourceStoreS
         const path = yield* Path.Path;
         const recallInvalidation = yield* ResourceRecallInvalidation;
         const externalPolicy = yield* Effect.serviceOption(ExternalSourcePolicy);
-        const lockServices = yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>();
+        const lockServices = (yield* Effect.context<Crypto.Crypto | Path.Path | SystemInfo>()).pipe(
+          Context.pick(Crypto.Crypto, Path.Path, SystemInfo),
+        );
         const provideLockServices = <A, E, R>(
           effect: Effect.Effect<A, E, R>,
         ): Effect.Effect<A, E, Exclude<R, Crypto.Crypto | Path.Path | SystemInfo>> =>

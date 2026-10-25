@@ -43,6 +43,7 @@ import {
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
 import {reconcileWorkflowCitationEnrichment} from './citation_recovery.js';
 import {workflowOwnedArtifacts} from './journal_validation.js';
+import {allocateWorkflowArtifactName, workflowArtifactTopic, workflowArchiveUri} from './naming.js';
 import {
   portableKey,
   requiredText,
@@ -100,6 +101,8 @@ const allowedScopes = Effect.fn('workflowMemory.allowedScopes')(function* (
   return {scopes, sharedRoots};
 });
 function isExpectedUnwrittenUri(config: RuntimeConfig, state: WorkflowJournal, uri: string): boolean {
+  // Readable family prefixes do not grant ownership of similarly named handoffs.
+  if (state.binding.naming) return false;
   const roots = [
     `${nativeRoot(config)}/handoffs/active/${uriSegment(state.binding.project)}`,
     ...(state.binding.profile === 'desktop'
@@ -228,9 +231,11 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
   let before: string | undefined;
   let sourceUri: string | undefined;
   let previous: ReturnType<typeof parseMemoryDocument>;
+  let original: import('./protocol.js').WorkflowArtifact | undefined;
   if (action !== 'create') {
     sourceUri = yield* validateWorkflowInput(() => parseResourceId(requiredText(request.uri, 'uri')).canonicalUri);
     const owned = state.artifacts[sourceUri];
+    original = owned;
     if (
       !owned ||
       owned.state !== 'active' ||
@@ -254,6 +259,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       'Create requires an absent destination, without a replacement URI or revision.',
     );
   const timestamp = DateTime.formatIso(yield* DateTime.now);
+  const naming = yield* allocateWorkflowArtifactName(config, state, request, original);
   let desired: string;
   let canonicalUri: string;
   let metadata: MemoryMetadata;
@@ -269,7 +275,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
     });
     metadata = archiveMetadata;
     desired = formatMemoryDocument('MEMORY', archiveMetadata, memoryArchiveBody(previous!.body));
-    canonicalUri = `${nativeRoot(config)}/${metadata.kind === 'durable' ? 'durable' : 'handoffs'}/archived/${uriSegment(state.binding.project)}/${prefix(state)}archive-${request.operationId}.md`;
+    canonicalUri = workflowArchiveUri(state.binding, {...original!, ...(naming ? {naming} : {})}, request.operationId!);
   } else {
     const body = request.body;
     if (body === undefined || new TextEncoder().encode(body).byteLength > 60_000 || !body.trim())
@@ -337,7 +343,9 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       if (Schema.is(MemoryCodeCitationCaptureError)(captured.failure) && captured.failure.retryable)
         return yield* workflowError(
           'evidence-busy',
-          'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.',
+          captured.failure.recovery?.code === 'graph-writer-busy'
+            ? 'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.'
+            : 'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
         );
       if (
         request.citationPolicy !== 'defer' ||
@@ -357,7 +365,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       status: 'active',
       timestamp,
       project: state.binding.project,
-      topic: `${prefix(state)}${artifactKey}`,
+      topic: workflowArtifactTopic(state.binding, artifactKey, naming),
       memoryId,
       sourceAgentClient: 'threadnote',
       sourceSessionId: state.binding.workflowRunId,
@@ -396,6 +404,7 @@ export const prepareWorkflowOperation = Effect.fn('workflowMemory.prepareOperati
       artifactKey,
       sourceRunId,
       role,
+      ...(naming ? {naming} : {}),
       canonicalUri,
       memoryId: metadata.memoryId!,
       revision: yield* sha256Hex(desired),

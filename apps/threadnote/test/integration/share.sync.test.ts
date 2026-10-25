@@ -3,6 +3,9 @@ import {chmod, mkdir, mkdtemp, readFile, rm, writeFile} from '@threadnote/testin
 import {tmpdir} from '@threadnote/testing/node-os';
 import {dirname, join} from '@threadnote/testing/node-path';
 import fc from 'fast-check';
+import {it as effectIt} from '@effect/vitest';
+import {Effect, Schema} from 'effect';
+import {TestClock} from 'effect/testing';
 import {afterEach, beforeEach, describe, expect, it} from 'vitest';
 import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memory/code/citation';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
@@ -28,6 +31,8 @@ import type {ShareRuntime, ShareTeamsFile} from '@threadnote/threadnote/types';
 import {runCommand} from '@threadnote/threadnote/utils';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {runEffect} from '../helpers/effect-runtime.js';
+import {provideTestLayer} from '../helpers/effect-layer.js';
+import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 
 const runShareInit = (...args: Parameters<typeof runShareInitEffect>) => runEffect(runShareInitEffect(...args));
 const runSharePublish = (...args: Parameters<typeof runSharePublishEffect>) =>
@@ -313,6 +318,96 @@ describe('share sync git handling', () => {
       'share: test sync',
     );
   });
+
+  effectIt.effect('ingests an auto-committed local memory edit when upstream is unchanged', () =>
+    Effect.acquireUseRelease(
+      Effect.promise(makeShareRepo),
+      repo =>
+        Effect.gen(function* () {
+          const relativePath = 'durable/projects/threadnote/local-edit.md';
+          const uri = 'threadnote://user/denys/memories/shared/default/' + relativePath;
+          const original =
+            'MEMORY\nkind: durable\nstatus: active\nproject: threadnote\ntopic: local-edit\nmemory_id: tn_local_edit\n\nOriginal body.\n';
+          yield* Effect.promise(async () => {
+            await mkdir(dirname(join(repo.seed, relativePath)), {recursive: true});
+            await writeFile(join(repo.seed, relativePath), original, 'utf8');
+            await git(['add', relativePath], repo.seed);
+            await git(['commit', '-m', 'seed local edit'], repo.seed);
+            await git(['push', 'origin', 'main'], repo.seed);
+          });
+          yield* runShareSyncEffect(repo.config, {push: false});
+          yield* Effect.promise(() =>
+            writeFile(join(repo.worktree, relativePath), original.replace('Original body.', 'Edited locally.'), 'utf8'),
+          );
+
+          yield* runShareSyncEffect(repo.config, {message: 'sync local edit'});
+
+          const canonical = yield* Effect.promise(() => readFile(canonicalResourceFile(repo.home, uri), 'utf8'));
+          expect(canonical).toContain('Edited locally.');
+          expect(parseMemoryDocument(uri, canonical)?.metadata.memoryId).toBe('tn_local_edit');
+          const remote = yield* Effect.promise(() =>
+            gitOutput(['--git-dir', repo.remote, 'show', `main:${relativePath}`]),
+          );
+          expect(remote).toContain('Edited locally.');
+          expect(yield* Effect.promise(() => gitOutput(['status', '--porcelain'], repo.worktree))).toBe('');
+        }),
+      repo => Effect.promise(() => rm(repo.root, {recursive: true, force: true})),
+    ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect.prop(
+    'converges local add modify and removal edits independently of edit order and is idempotent',
+    {order: Schema.Literals(['amr', 'arm', 'mar', 'mra', 'ram', 'rma'])},
+    ({order}) =>
+      Effect.acquireUseRelease(
+        Effect.promise(makeShareRepo),
+        repo =>
+          Effect.gen(function* () {
+            const relative = (name: string) => `durable/projects/threadnote/local-${name}.md`;
+            const uri = (name: string) => `threadnote://user/denys/memories/shared/default/${relative(name)}`;
+            const document = (name: string, body: string) =>
+              `MEMORY\nkind: durable\nstatus: active\nproject: threadnote\ntopic: local-${name}\nmemory_id: tn_local_${name}\n\n${body}\n`;
+            yield* Effect.promise(async () => {
+              await mkdir(dirname(join(repo.seed, relative('modify'))), {recursive: true});
+              for (const name of ['modify', 'remove']) {
+                await writeFile(join(repo.seed, relative(name)), document(name, 'Original body.'), 'utf8');
+              }
+              await git(['add', 'durable'], repo.seed);
+              await git(['commit', '-m', 'seed mixed edits'], repo.seed);
+              await git(['push', 'origin', 'main'], repo.seed);
+            });
+            yield* runShareSyncEffect(repo.config, {push: false});
+            yield* Effect.promise(async () => {
+              for (const edit of order) {
+                if (edit === 'r') await rm(join(repo.worktree, relative('remove')));
+                else {
+                  const name = edit === 'a' ? 'add' : 'modify';
+                  await writeFile(join(repo.worktree, relative(name)), document(name, 'Current local body.'), 'utf8');
+                }
+              }
+            });
+            yield* runShareSyncEffect(repo.config, {push: false});
+            for (const name of ['add', 'modify']) {
+              const canonical = yield* Effect.promise(() =>
+                readFile(canonicalResourceFile(repo.home, uri(name)), 'utf8'),
+              );
+              expect(canonical).toContain('Current local body.');
+              expect(parseMemoryDocument(uri(name), canonical)?.metadata.memoryId).toBe(`tn_local_${name}`);
+            }
+            const removed = yield* Effect.tryPromise({
+              try: () => readFile(canonicalResourceFile(repo.home, uri('remove')), 'utf8'),
+              catch: cause => TestError.make({message: 'Read removed canonical memory', cause}),
+            }).pipe(Effect.result);
+            expect(removed).toMatchObject({_tag: 'Failure', failure: {cause: {code: 'ENOENT'}}});
+            const head = yield* Effect.promise(() => gitOutput(['rev-parse', 'HEAD'], repo.worktree));
+            yield* runShareSyncEffect(repo.config, {push: false});
+            expect(yield* Effect.promise(() => gitOutput(['rev-parse', 'HEAD'], repo.worktree))).toBe(head);
+            expect(yield* Effect.promise(() => gitOutput(['status', '--porcelain'], repo.worktree))).toBe('');
+          }),
+        repo => Effect.promise(() => rm(repo.root, {recursive: true, force: true})),
+      ).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+    {arbitrary: {runs: 4}},
+  );
 
   it('publishes a canonical personal memory into the separate worktree and remote', async () => {
     const {config, home, remote, worktree} = await makeShareRepo();

@@ -1,6 +1,7 @@
 import {Effect, FileSystem, Path, Schema} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import {sha256Hex} from '@threadnote/platform/digest';
+import {workflowFamilyStem} from '@threadnote/workflow-automations/naming';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {codexCloudMemoryScope} from '../codex/cloud.js';
 import {readCodexCloudProfile, sameCloudIdentity} from '../codex/profile.js';
@@ -106,6 +107,14 @@ export const resolveWorkflowBinding = Effect.fn('workflowMemory.resolveBinding')
   }));
   const context = {
     ...identifiers,
+    ...(request.naming
+      ? {
+          naming: yield* validateWorkflowInput(() => {
+            workflowFamilyStem(request.naming!);
+            return request.naming!;
+          }),
+        }
+      : {}),
     profile: detected,
     home,
     repo,

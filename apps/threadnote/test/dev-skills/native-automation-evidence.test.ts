@@ -4,7 +4,7 @@ import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {CodeGraphStore} from '@threadnote/graph/store';
-import {CodeGraphStoreBusyError} from '@threadnote/graph/types';
+import {CodeGraphStoreBusyError, CodeGraphStoreTransientIoError} from '@threadnote/graph/types';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {ResourceStore} from '@threadnote/store/resource-store';
@@ -56,6 +56,60 @@ const checkedCitations = (content: string) => {
 };
 
 describe('native workflow graph evidence contention', () => {
+  for (const [subtype, evidenceFailure] of [
+    ['transient I/O', CodeGraphStoreTransientIoError.of('synthetic evidence read I/O failure')],
+    ['busy read', CodeGraphStoreBusyError.of('synthetic evidence reader contention')],
+  ] as const) {
+    effectIt.effect(`preserves failed preflight intent without blaming a writer after ${subtype}`, () =>
+      Effect.gen(function* () {
+        const f = yield* readyFixture();
+        const statePath = f.f.statePath();
+        const journalPath = f.f.journalPath(f.initialized.bindingId);
+        const beforeState = yield* f.f.fs.readFileString(statePath);
+        const beforeJournal = yield* f.f.fs.readFileString(journalPath);
+        const graph = yield* CodeGraphStore;
+        let acquired = 0;
+        let released = 0;
+        let reads = 0;
+        const failedReader = CodeGraphStore.of({
+          ...graph,
+          acquireSnapshotLease: (...args: Parameters<typeof graph.acquireSnapshotLease>) =>
+            graph.acquireSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => acquired++))),
+          releaseSnapshotLease: (...args: Parameters<typeof graph.releaseSnapshotLease>) =>
+            graph.releaseSnapshotLease(...args).pipe(Effect.tap(() => Effect.sync(() => released++))),
+          effectiveSnapshotCitationEvidence: () => {
+            reads++;
+            return Effect.fail(evidenceFailure);
+          },
+        });
+        const request = citationWrite(f, 'reader-retry');
+        const denied = yield* failure(
+          f.f.call(request, f.config).pipe(Effect.provideService(CodeGraphStore, failedReader)),
+        );
+        expect(denied).toMatchObject({
+          failure: {
+            code: 'evidence-busy',
+            retryable: true,
+            message:
+              'Code evidence capture is temporarily unavailable. Preserve this binding and operationId; retry the same intent.',
+          },
+        });
+        expect({acquired, released, reads}).toEqual({acquired: 2, released: 2, reads: 2});
+        expect(yield* f.f.fs.readFileString(statePath)).toBe(beforeState);
+        expect(yield* f.f.fs.readFileString(journalPath)).toBe(beforeJournal);
+        expect(yield* f.f.store.read(f.f.location, f.rootUri)).toBe(f.rootBytes);
+
+        const saved = yield* f.f.call(request, f.config);
+        expect(saved).toMatchObject({status: 'ok', operationId: request.operationId});
+        const state = JSON.parse(yield* f.f.fs.readFileString(statePath));
+        expect(state.bindingId).toBe(f.initialized.bindingId);
+        expect(
+          state.operations.map((operation: {intent: {operationId: string}}) => operation.intent.operationId),
+        ).toEqual(['old-root', 'reader-retry']);
+      }).pipe(run),
+    );
+  }
+
   effectIt.effect('bounds busy initial preflight without preparing a new operation or changing existing bytes', () =>
     Effect.gen(function* () {
       const f = yield* readyFixture();
@@ -77,6 +131,12 @@ describe('native workflow graph evidence contention', () => {
         f.f.call(citationWrite(f, 'busy-preflight'), f.config).pipe(Effect.provideService(CodeGraphStore, busyGraph)),
       );
       expect(denied).toMatchObject(errorShape);
+      expect(denied).toMatchObject({
+        failure: {
+          message:
+            'Code evidence is busy. Preserve this binding and operationId; retry the same intent after the current graph writer finishes.',
+        },
+      });
       expect(attempts).toBe(2);
       expect(yield* f.f.fs.readFileString(statePath)).toBe(beforeState);
       expect(yield* f.f.fs.readFileString(journalPath)).toBe(beforeJournal);
@@ -148,8 +208,9 @@ describe('native workflow graph evidence contention', () => {
     Effect.gen(function* () {
       const f = yield* readyFixture();
       const request = citationWrite(f, 'readback-citations');
-      const bindingId = f.initialized.bindingId;
-      const targetUri = `threadnote://user/tester/memories/durable/projects/fixture/workflow-${bindingId}-readback-citations.md`;
+      const preflight = yield* f.f.call({...request, action: 'preflight'}, f.config);
+      if (!('uri' in preflight)) return yield* Effect.die('Expected the current named destination.');
+      const targetUri = preflight.uri;
       const store = yield* ResourceStore;
       let wrote = false;
       let busyReads = 0;
