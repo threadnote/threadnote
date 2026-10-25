@@ -8,6 +8,7 @@ import type {CodeGraphEmbeddingIndexShape, CodeGraphVectorPublication} from '../
 import {codeGraphVectorWriteLockPath, type CodeGraphLayout} from '../layout.js';
 import {withCodeGraphVectorPublicationWorktreeLock, withCodeGraphDatabaseWriteLock} from '../maintenance/gate.js';
 import {selectActiveViewFence} from '../store/active_views.js';
+import {withCodeGraphReadTransaction} from '../store/session.js';
 import type {CodeGraphStoreShape} from '../store.js';
 import {CODE_GRAPH_DEFERRED_VECTORS, type CodeGraphIndexSummary, type CodeGraphSnapshot} from '../types.js';
 export {CODE_GRAPH_DEFERRED_VECTORS};
@@ -29,7 +30,11 @@ export const captureCodeGraphVectorPublication = Effect.fn('codeGraph.captureVec
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
   const {layout, store, snapshot, threadnoteHome} = input;
-  const fence = yield* store.withSession(layout.databasePath, selectActiveViewFence(layout.worktreeId, layout.scopeId));
+  const fence = yield* withCodeGraphReadTransaction(
+    store,
+    layout.databasePath,
+    selectActiveViewFence(layout.worktreeId, layout.scopeId),
+  );
   if (!fence || fence.snapshotId !== snapshot.id) {
     return yield* CodeGraphVectorPublicationSuperseded.make({
       message: 'Code graph vector publication target is no longer active.',

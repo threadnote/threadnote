@@ -525,7 +525,8 @@
       "start-code-graph-snapshot",
       "summarize-code-graph-relationships",
       "use-code-graph-database-session",
-      "validate-code-graph-view-snapshot-lease"
+      "validate-code-graph-view-snapshot-lease",
+      "write-code-graph-vector-generation"
     ],
     "failureReason": ["crash", "exit", "protocol", "spawn", "timeout", "write"],
     "failureRecovery": [
