@@ -94,8 +94,8 @@ export function instrumentContextBriefCompilerDependencies<
             ),
           ),
         ),
-    graphEvidence: graphPlan =>
-      reporter.graph(sources.graphEvidence(graphPlan), contextBriefGraphPhaseOutcome).pipe(
+    graphEvidence: (graphPlan, readBudget) =>
+      reporter.graph(sources.graphEvidence(graphPlan, readBudget), contextBriefGraphPhaseOutcome).pipe(
         Effect.catchIf(
           error => !Schema.is(CodeGraphScopeRoutingError)(error),
           () => Effect.succeed(unavailableContextBriefGraphEvidence('graph-query-unavailable', requestedRepositories)),
@@ -212,9 +212,12 @@ const compileContextBriefRuntime = Effect.fn('contextBrief.compileRuntime')(func
         {
           citationValidation: (scope, candidates, fence) =>
             validateContextBriefMemoryCitations(config, scope, candidates, fence),
-          graphEvidence: graphPlan =>
-            retrieveContextBriefGraphEvidence(config, graphPlan, request =>
-              retrieveContextBriefSourceEvidence(request),
+          graphEvidence: (graphPlan, readBudget) =>
+            retrieveContextBriefGraphEvidence(
+              config,
+              graphPlan,
+              request => retrieveContextBriefSourceEvidence(request),
+              readBudget,
             ),
           codeLinkedMemoryEvidence: codePlan =>
             retrieveContextBriefCodeLinkedMemoryEvidence(config, codePlan, {

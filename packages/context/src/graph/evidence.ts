@@ -1,4 +1,4 @@
-import {Effect, Result, Schedule} from 'effect';
+import {Effect, Result, Schedule, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CodeGraphQueryService, observationFromCodeGraphStatus} from '@threadnote/graph/query';
 import {
@@ -37,8 +37,14 @@ const CONTEXT_BRIEF_GRAPH_READ_FAILED_WARNING =
 const CONTEXT_BRIEF_GRAPH_QUERY_READ_FAILED_WARNING =
   'The ready graph query failed after bounded retry; results are partial.';
 
-interface ContextBriefGraphRetryBudget {
+class ContextBriefGraphBudgetExhausted extends Schema.TaggedError<ContextBriefGraphBudgetExhausted>()(
+  'ContextBriefGraphBudgetExhausted',
+  {},
+) {}
+
+export interface ContextBriefGraphReadBudget {
   remaining: number;
+  primaryRemaining: number;
 }
 
 /** Read only ready graph state. This boundary may borrow compatible shared evidence, but never builds or requests maintenance. */
@@ -48,10 +54,11 @@ export const retrieveContextBriefGraphEvidence = Effect.fn('contextBrief.retriev
   sourceEvidence?: (
     request: ContextBriefSourceEvidenceRequest,
   ) => Effect.Effect<ContextBriefSourceEvidenceResult, unknown, R>,
+  readBudget?: ContextBriefGraphReadBudget,
 ) {
   return plan.scope.kind === 'workset'
     ? yield* retrieveWorksetGraphEvidence(config, plan)
-    : yield* retrieveRepositoryGraphEvidence(config, plan, sourceEvidence);
+    : yield* retrieveRepositoryGraphEvidence(config, plan, sourceEvidence, readBudget);
 });
 
 const retrieveWorksetGraphEvidence = Effect.fn('contextBrief.retrieveWorksetGraphEvidence')(function* (
@@ -78,6 +85,7 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
   sourceEvidence?: (
     request: ContextBriefSourceEvidenceRequest,
   ) => Effect.Effect<ContextBriefSourceEvidenceResult, unknown, R>,
+  readBudget?: ContextBriefGraphReadBudget,
 ) {
   if (plan.scope.kind !== 'repository') throw new Error('Context Brief repository graph plan has the wrong scope.');
   const callerCwd = plan.scope.callerCwd;
@@ -102,9 +110,19 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
       plan,
     );
   }
+  const retryBudget = readBudget ?? {remaining: CONTEXT_BRIEF_GRAPH_READ_RETRIES, primaryRemaining: 17};
+  if (retryBudget.primaryRemaining <= 0) {
+    return withSourceGapIfRequested(
+      unavailableReadyRepositoryGraphEvidence(
+        status,
+        ['graph-read-budget-exhausted'],
+        ['Ready graph inspection budget exhausted; results are partial.'],
+      ),
+      plan,
+    );
+  }
   const anchoredRequests = contextBriefAnchoredRepositoryGraphRequests(plan);
   if (anchoredRequests.length > 0) {
-    const retryBudget: ContextBriefGraphRetryBudget = {remaining: CONTEXT_BRIEF_GRAPH_READ_RETRIES};
     const outcomes = yield* Effect.forEach(
       anchoredRequests,
       request =>
@@ -247,7 +265,7 @@ const retrieveRepositoryGraphEvidence = Effect.fn('contextBrief.retrieveReposito
         strictFreshness: false,
         threadnoteHome: config.agentContextHome,
       }),
-      {remaining: CONTEXT_BRIEF_GRAPH_READ_RETRIES},
+      retryBudget,
     ),
   );
   if (Result.isFailure(result)) {
@@ -522,19 +540,23 @@ function unavailableReadyRepositoryGraphEvidence(
 
 function retryContextBriefGraphRead<A, E, R>(
   effect: Effect.Effect<A, E, R>,
-  budget: ContextBriefGraphRetryBudget,
-): Effect.Effect<A, E, R> {
-  return effect.pipe(
-    Effect.retry({
-      schedule: Schedule.spaced(CONTEXT_BRIEF_GRAPH_READ_RETRY_MILLISECONDS),
-      times: CONTEXT_BRIEF_GRAPH_READ_RETRIES,
-      while: error => {
-        if (!isCodeGraphStoreError(error) || !error.retryable || budget.remaining === 0) return false;
-        budget.remaining -= 1;
-        return true;
-      },
-    }),
-  );
+  budget: ContextBriefGraphReadBudget,
+): Effect.Effect<A, E | ContextBriefGraphBudgetExhausted, R> {
+  return Effect.suspend((): Effect.Effect<A, E | ContextBriefGraphBudgetExhausted, R> => {
+    if (budget.primaryRemaining <= 0) return Effect.fail(ContextBriefGraphBudgetExhausted.make({}));
+    budget.primaryRemaining -= 1;
+    return effect.pipe(
+      Effect.retry({
+        schedule: Schedule.spaced(CONTEXT_BRIEF_GRAPH_READ_RETRY_MILLISECONDS),
+        times: CONTEXT_BRIEF_GRAPH_READ_RETRIES,
+        while: error => {
+          if (!isCodeGraphStoreError(error) || !error.retryable || budget.remaining <= 0) return false;
+          budget.remaining -= 1;
+          return true;
+        },
+      }),
+    );
+  });
 }
 
 function stableGraphStrings(values: readonly string[]): readonly string[] {

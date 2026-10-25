@@ -1,8 +1,10 @@
 import {DateTime, Effect} from 'effect';
 import {succeedUndefined} from '@threadnote/platform/optional';
+import type {ContextBriefGraphReadBudget} from './graph/evidence.js';
 import type {VerifiedProcedureSelection} from './procedure/selection.js';
 import {
   contextBriefResumeTaskAlignmentScore,
+  contextBriefTaskGraphAnchors,
   unavailableContextBriefCodeLinkedMemoryEvidence,
   mergeContextBriefMemoryEvidence,
 } from './memory-evidence.js';
@@ -28,6 +30,7 @@ export interface ContextBriefCompilerDependencies<
 > {
   readonly graphEvidence: (
     plan: ContextBriefPlanV1['graph'],
+    readBudget?: ContextBriefGraphReadBudget,
   ) => Effect.Effect<ContextBriefGraphEvidenceV1, unknown, GraphR>;
   readonly memoryEvidence: (
     plan: ContextBriefPlanV1['memory'],
@@ -61,6 +64,12 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   input: ContextBriefRequestV1 | unknown,
 ) {
   const plan = planContextBrief(input);
+  const ordinaryTaskAnchors =
+    plan.scope.kind === 'repository' &&
+    (plan.mode === 'brief' || plan.mode === 'explain') &&
+    plan.graph.codeRefs.length === 0;
+  const readBudget = ordinaryTaskAnchors ? {remaining: 2, primaryRemaining: 17} : undefined;
+  const readGraph = (graphPlan: ContextBriefPlanV1['graph']) => dependencies.graphEvidence(graphPlan, readBudget);
   const observedAt = DateTime.formatIso(yield* DateTime.now);
   const codeLinkedMemory =
     plan.codeAnchors.codeRefs.length === 0
@@ -70,7 +79,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
         : dependencies.codeLinkedMemoryEvidence(plan.codeAnchors);
   const [eagerGraph, lexicalMemory, linkedMemory, procedureEvidence] = yield* Effect.all(
     [
-      plan.mode === 'resume' ? succeedUndefined : dependencies.graphEvidence(plan.graph),
+      plan.mode === 'resume' ? succeedUndefined : readGraph(plan.graph),
       dependencies.memoryEvidence(plan.memory),
       codeLinkedMemory,
       dependencies.procedureEvidence?.(plan) ?? Effect.succeed({gaps: [], procedures: []}),
@@ -79,9 +88,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   );
   const initialGraph =
     eagerGraph ??
-    (yield* dependencies.graphEvidence(
-      withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit),
-    ));
+    (yield* readGraph(withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit)));
   const memory = mergeContextBriefMemoryEvidence(
     lexicalMemory,
     linkedMemory,
@@ -94,6 +101,33 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
   let graph = initialGraph;
   let validatedMemory =
     initialValidations === undefined ? memory : {...memory, citationValidations: initialValidations};
+  if (ordinaryTaskAnchors) {
+    const codeRefs = contextBriefTaskGraphAnchors(plan.graph.query, lexicalMemory, initialGraph, 8);
+    if (codeRefs.length > 0) {
+      const anchored = yield* readGraph({...plan.graph, codeRefs});
+      // Locators are hints. An unresolved locator must never erase the truthful task-only read.
+      if (
+        anchored.citationValidationFence?.kind === 'repository' &&
+        initialGraph.citationValidationFence?.kind === 'repository' &&
+        anchored.citationValidationFence.repositoryId === initialGraph.citationValidationFence.repositoryId &&
+        anchored.resolvedSnapshots.some(snapshot => snapshot.freshness === 'fresh') &&
+        anchored.cards.some(card => codeRefs.includes(card.symbol.path)) &&
+        (plan.graph.detail !== 'source' || anchored.sourceExcerpts?.some(source => codeRefs.includes(source.path)))
+      ) {
+        graph = anchored;
+        if (!sameGraphValidationFence(initialGraph, graph)) {
+          const validations = dependencies.citationValidation
+            ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
+            : undefined;
+          validatedMemory = {...memory, citationValidations: validations};
+        }
+      } else {
+        graph = {...initialGraph, gaps: [...new Set([...initialGraph.gaps, 'task-anchor-source-unavailable'])]};
+      }
+    } else {
+      graph = {...initialGraph, gaps: [...new Set([...initialGraph.gaps, 'task-anchor-locators-unavailable'])]};
+    }
+  }
   if (plan.mode === 'resume' && plan.graph.codeRefs.length === 0) {
     const initialLogical = assembleContextBriefLogicalResult({
       graph,
@@ -107,7 +141,7 @@ export const compileContextBriefWith = Effect.fn('contextBrief.compileWith')(fun
     const selectedPlan = withSelectedResumeGraphAnchors(plan.graph, selected, plan.codeAnchors.candidateLimit);
     const initialPlan = withResumeMemoryGraphAnchors(plan.graph, lexicalMemory, plan.codeAnchors.candidateLimit);
     if (!sameCodeRefs(selectedPlan.codeRefs, initialPlan.codeRefs)) {
-      graph = yield* dependencies.graphEvidence(selectedPlan);
+      graph = yield* readGraph(selectedPlan);
       if (!sameGraphValidationFence(initialGraph, graph)) {
         const refreshedValidations = dependencies.citationValidation
           ? yield* dependencies.citationValidation(plan.scope, memory.candidates, graph.citationValidationFence)
