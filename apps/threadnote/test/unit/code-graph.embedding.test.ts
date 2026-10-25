@@ -5,15 +5,24 @@ import * as BunServices from '@effect/platform-bun/BunServices';
 import {Database} from 'bun:sqlite';
 import {renameSync, rmSync} from '@threadnote/testing/node-fs';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, Fiber, FileSystem, Layer, Path} from 'effect';
+import {Deferred, Effect, Fiber, FileSystem, Layer, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
-import {CodeGraphEmbeddingIndex, selectGraphEmbeddingSymbols} from '@threadnote/graph/embedding';
+import {
+  CodeGraphEmbeddingIndex,
+  executeCodeGraphVectorGeneration,
+  selectGraphEmbeddingSymbols,
+} from '@threadnote/graph/embedding';
+import {CodeGraphStore} from '@threadnote/graph/store';
+import {captureCodeGraphVectorPublication} from '@threadnote/graph/vector/publication';
+import type {RepositoryIdentity} from '@threadnote/graph/types';
 import {codeGraphLayout} from '@threadnote/graph/layout';
 import {codeGraphVectorViewId} from '@threadnote/graph/vector/identity';
 import {cleanupCodeGraphVectorPointers} from '@threadnote/graph/vector/maintenance';
 import type {CodeGraphSnapshot, CodeGraphSymbol} from '@threadnote/graph/types';
 import {
+  makeCodeGraphVectorRetirementCapacityProtector,
+  inspectCodeGraphVectorPageStorage,
   CODE_GRAPH_VECTOR_GENERATIONS_TABLE_SQL,
   CODE_GRAPH_VECTOR_POINTERS_TABLE_SQL,
   CODE_GRAPH_VECTOR_REUSE_INDEX_SQL,
@@ -97,6 +106,309 @@ describe('native code graph vector generations', () => {
         Layer.mergeAll(testEmbeddingLayer([]), LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS), TestSystemInfoLayer),
       ),
       provideTestLayer(BunServices.layer),
+    ),
+  );
+  effectIt.effect(
+    'keeps a completed generation pinned until attachment and adopts exact ready vectors without inference',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-attach-pin-'});
+        const catalog = yield* LocalModelCatalog;
+        yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+        const vectors = yield* CodeGraphEmbeddingIndex;
+        const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+        const target = snapshot('pinned-ready');
+        const atAttach = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const pending = yield* Effect.forkScoped(
+          vectors.ensure(home, layout, target, [symbol('alpha-pin', 'Alpha', 'alpha')], {
+            publication: {
+              validate: Effect.void,
+              attach: commit =>
+                Deferred.succeed(atAttach, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(commit),
+                ),
+            },
+          }),
+        );
+        yield* Deferred.await(atAttach);
+        expect(yield* vectors.check(home, layout, target.id)).toMatchObject({state: 'stale'});
+        yield* Effect.sync(() => {
+          const db = new Database(path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite'));
+          try {
+            expect(db.query('SELECT state FROM vector_generations').all()).toEqual([{state: 'ready'}]);
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_generation_progress').get()).toEqual({count: 1});
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_pointers').get()).toEqual({count: 0});
+            db.exec(
+              'INSERT INTO vector_generation_retirements (generation, snapshot_id) SELECT generation, snapshot_id FROM vector_generations',
+            );
+            expect(db.query('SELECT generation FROM vector_generation_retirements').all()).toEqual([]);
+          } finally {
+            db.close();
+          }
+        });
+        yield* Deferred.succeed(release, undefined);
+        expect(yield* Fiber.join(pending)).toMatchObject({ready: true, embedded: 1});
+        const sibling = {...layout, worktreeId: 'd'.repeat(64)};
+        const adoptionReady = yield* Deferred.make<void>();
+        const adopt = yield* Deferred.make<void>();
+        const adoption = yield* Effect.forkScoped(
+          vectors.ensure(
+            home,
+            sibling,
+            {...target, worktreeId: sibling.worktreeId},
+            [symbol('alpha-pin', 'Alpha', 'alpha')],
+            {
+              publication: {
+                validate: Effect.void,
+                attach: commit =>
+                  Deferred.succeed(adoptionReady, undefined).pipe(
+                    Effect.andThen(Deferred.await(adopt)),
+                    Effect.andThen(commit),
+                  ),
+              },
+            },
+          ),
+        );
+        yield* Deferred.await(adoptionReady);
+        yield* Effect.sync(() => {
+          const db = new Database(path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite'));
+          try {
+            expect(db.query('SELECT COUNT(*) AS count FROM vector_generation_progress').get()).toEqual({count: 1});
+            db.exec(
+              'INSERT INTO vector_generation_retirements (generation, snapshot_id) SELECT generation, snapshot_id FROM vector_generations',
+            );
+            expect(db.query('SELECT generation FROM vector_generation_retirements').all()).toEqual([]);
+          } finally {
+            db.close();
+          }
+        });
+        yield* Deferred.succeed(adopt, undefined);
+        expect(yield* Fiber.join(adoption)).toMatchObject({ready: true, embedded: 0, reused: 1});
+        expect((yield* vectors.search(home, sibling, target.id, 'alpha', 1)).get('alpha-pin')).toBeCloseTo(1);
+      }).pipe(
+        TestClock.withLive,
+        provideTestLayer(
+          Layer.mergeAll(testEmbeddingLayer([]), LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS), TestSystemInfoLayer),
+        ),
+        provideTestLayer(BunServices.layer),
+      ),
+  );
+  effectIt.effect('rejects a future vector schema without replacing the physical database or its payload', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-future-'});
+      const catalog = yield* LocalModelCatalog;
+      yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+      const vectors = yield* CodeGraphEmbeddingIndex;
+      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const target = snapshot('future-schema');
+      yield* vectors.ensure(home, layout, target, [symbol('alpha-future', 'Alpha', 'alpha')]);
+      const databasePath = path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite');
+      yield* Effect.sync(() => {
+        const db = new Database(databasePath);
+        try {
+          db.exec('PRAGMA user_version = 999');
+        } finally {
+          db.close();
+        }
+      });
+      const result = yield* vectors.ensure(home, layout, target, []).pipe(Effect.result);
+      expect(result._tag).toBe('Failure');
+      yield* Effect.sync(() => {
+        const db = new Database(databasePath);
+        try {
+          expect(db.query('PRAGMA user_version').get()).toEqual({user_version: 999});
+          expect(db.query('SELECT symbol_id FROM vectors').all()).toEqual([{symbol_id: 'alpha-future'}]);
+        } finally {
+          db.close();
+        }
+      });
+    }).pipe(
+      provideTestLayer(
+        Layer.mergeAll(testEmbeddingLayer([]), LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS), TestSystemInfoLayer),
+      ),
+      provideTestLayer(BunServices.layer),
+    ),
+  );
+  effectIt.effect('preserves the prior searchable generation when capacity denies a replacement', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-capacity-'});
+      const catalog = yield* LocalModelCatalog;
+      yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+      const vectors = yield* CodeGraphEmbeddingIndex;
+      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const source = [symbol('alpha-capacity', 'Alpha', 'alpha')];
+      yield* vectors.ensure(home, layout, snapshot('before-pressure'), source);
+      const databasePath = path.join(layout.vectorRoot, manifest.id, 'vectors-v2.sqlite');
+      const protect = yield* makeCodeGraphVectorRetirementCapacityProtector({
+        databasePath,
+        threadnoteHome: home,
+        availableDiskBytes: () => Effect.succeed(0),
+      });
+      const storage = yield* inspectCodeGraphVectorPageStorage(databasePath);
+      let wrote = false;
+      const denied = yield* protect(
+        {operation: 'write code graph vector generation', rowCount: 400, finalFactBytes: 1_000_000},
+        Effect.sync(() => {
+          wrote = true;
+        }),
+        storage,
+      ).pipe(Effect.result);
+      expect(denied._tag).toBe('Failure');
+      expect(wrote).toBe(false);
+      expect(yield* vectors.check(home, layout, 'before-pressure')).toMatchObject({state: 'ready'});
+      expect((yield* vectors.search(home, layout, 'before-pressure', 'alpha', 1)).get('alpha-capacity')).toBeCloseTo(1);
+    }).pipe(
+      provideTestLayer(
+        Layer.mergeAll(testEmbeddingLayer([]), LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS), TestSystemInfoLayer),
+      ),
+      provideTestLayer(BunServices.layer),
+    ),
+  );
+  effectIt.effect(
+    'resumes bounded inference checkpoints with the same payload and semantic scores as a clean build',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-resume-'});
+        const catalog = yield* LocalModelCatalog;
+        yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+        const vectors = yield* CodeGraphEmbeddingIndex;
+        const runtime = yield* LocalModelRuntime;
+        const modelStore = yield* LocalModelStore;
+        const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+        const clean = codeGraphLayout(path, home, 'c'.repeat(64), 'd'.repeat(64));
+        const symbols = Array.from({length: 9}, (_, n) =>
+          symbol(`resume-${n}`, n % 2 ? 'Beta' : 'Alpha', n % 2 ? 'beta' : 'alpha'),
+        );
+        const target = snapshot('resumed');
+        const input = {
+          catalog,
+          force: false,
+          fs,
+          layout,
+          modelStore,
+          path,
+          runtime,
+          snapshot: target,
+          symbols,
+          threadnoteHome: home,
+          maximumSteps: 1,
+          maximumInferenceSymbolsPerStep: 2,
+        };
+        let progress = yield* executeCodeGraphVectorGeneration(input);
+        expect(progress.ready).toBe(false);
+        expect(yield* vectors.check(home, layout, target.id)).toMatchObject({state: 'stale'});
+        let steps = 1;
+        while (!progress.ready && steps < 10) {
+          progress = yield* executeCodeGraphVectorGeneration({
+            ...input,
+            ownerToken: 'ownerToken' in progress ? progress.ownerToken : undefined,
+          });
+          steps += 1;
+        }
+        expect(progress.ready).toBe(true);
+        expect(steps).toBeGreaterThan(1);
+        yield* vectors.ensure(home, clean, {...target, worktreeId: clean.worktreeId}, symbols);
+        expect(yield* vectors.search(home, layout, target.id, 'alpha', 9)).toEqual(
+          yield* vectors.search(home, clean, target.id, 'alpha', 9),
+        );
+        yield* Effect.sync(() => {
+          const payload = (root: string) => {
+            const db = new Database(path.join(root, manifest.id, 'vectors-v2.sqlite'));
+            try {
+              return db
+                .query('SELECT symbol_id, fingerprint, hex(vector) AS vector FROM vectors ORDER BY symbol_id')
+                .all();
+            } finally {
+              db.close();
+            }
+          };
+          expect(payload(layout.vectorRoot)).toEqual(payload(clean.vectorRoot));
+        });
+      }).pipe(
+        provideTestLayer(
+          Layer.mergeAll(testEmbeddingLayer([]), LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS), TestSystemInfoLayer),
+        ),
+        provideTestLayer(BunServices.layer),
+      ),
+  );
+  effectIt.effect('attaches vectors through the real graph store without confusing graph and vector SQL sessions', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-vector-real-publication-'});
+      const catalog = yield* LocalModelCatalog;
+      yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+      const layout = codeGraphLayout(path, home, 'a'.repeat(64), 'b'.repeat(64));
+      const target = {...snapshot(`cgsn_${'1'.repeat(40)}`), symbolCount: 1};
+      const identity: RepositoryIdentity = {
+        caseMode: 'sensitive',
+        checkoutId: layout.checkoutId,
+        displayName: 'publication',
+        gitCommonDirectory: home,
+        headCommit: target.commit,
+        objectFormat: 'sha1',
+        repoRoot: home,
+        repositoryId: target.repositoryId,
+        worktreeId: layout.worktreeId,
+      };
+      const store = yield* CodeGraphStore;
+      yield* store.initialize(layout.databasePath);
+      yield* store.markBuilding(layout.databasePath, identity, target);
+      yield* Effect.sync(() => {
+        const db = new Database(layout.databasePath);
+        try {
+          db.query("UPDATE snapshots SET state = 'ready' WHERE id = ?").run(target.id);
+          db.query(
+            "INSERT INTO snapshot_extractor_generations (snapshot_id, generation) SELECT ?, CAST(value AS INTEGER) FROM schema_metadata WHERE key = 'minimum_extractor_generation'",
+          ).run(target.id);
+        } finally {
+          db.close();
+        }
+      });
+      yield* store.promote(layout.databasePath, identity, target.id);
+      const publication = yield* captureCodeGraphVectorPublication({
+        store,
+        layout,
+        threadnoteHome: home,
+        snapshot: target,
+      });
+      const vectors = yield* CodeGraphEmbeddingIndex;
+      expect(
+        yield* vectors.ensure(home, layout, target, [symbol('alpha-real', 'AlphaPublication', 'alpha')], {publication}),
+      ).toMatchObject({ready: true, embedded: 1});
+      expect(yield* vectors.check(home, layout, target.id)).toMatchObject({state: 'ready'});
+      expect((yield* vectors.search(home, layout, target.id, 'alpha', 1)).get('alpha-real')).toBeCloseTo(1);
+      expect((yield* store.readySnapshot(layout.databasePath, layout.worktreeId))?.id).toBe(target.id);
+      yield* Effect.sync(() => {
+        const db = new Database(layout.databasePath);
+        try {
+          expect(db.query("SELECT name FROM sqlite_master WHERE name IN ('vectors', 'vector_pointers')").all()).toEqual(
+            [],
+          );
+        } finally {
+          db.close();
+        }
+      });
+    }).pipe(
+      provideTestLayer(
+        Layer.mergeAll(
+          testEmbeddingLayer([]),
+          CodeGraphStore.layer.pipe(Layer.provide(TestSystemInfoLayer)),
+          LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
+        ),
+      ),
+      provideTestLayer(BunServices.layer),
+      TestClock.withLive,
     ),
   );
   it('keeps every eligible symbol instead of truncating vectors at the former 20k cap', () => {
@@ -280,6 +592,8 @@ describe('native code graph vector generations', () => {
               readonly detail: string;
             }[];
             const details = plan.map(row => row.detail);
+            expect(database.query('PRAGMA user_version').get()).toEqual({user_version: 3});
+            expect(result.databasePath.endsWith('/vectors-v2.sqlite')).toBe(true);
             expect(result.refreshed).toMatchObject({
               embedded: 0,
               ready: true,
@@ -523,7 +837,7 @@ function testEmbeddingLayer(
       }),
   );
   return CodeGraphEmbeddingIndex.layer.pipe(
-    Layer.provide(
+    Layer.provideMerge(
       Layer.mergeAll(
         LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS),
         modelStoreLayer,

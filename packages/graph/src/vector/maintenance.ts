@@ -1,3 +1,4 @@
+import {CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './generation_schema.js';
 import {Crypto, Effect, FileSystem, Option, Path, PlatformError, Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {isFileLockTimeout, withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -83,8 +84,7 @@ class CodeGraphVectorMaintenanceError extends Schema.TaggedError<CodeGraphVector
   },
 ) {}
 
-const VECTOR_DATABASE_VERSION = 2;
-const VECTOR_DATABASE_NAME = `vectors-v${VECTOR_DATABASE_VERSION}.sqlite`;
+const VECTOR_DATABASE_NAME = CODE_GRAPH_VECTOR_DATABASE_FILENAME;
 const VECTOR_DIRECTORY_ENTRY_LIMIT = 66;
 const VECTOR_PHASE_CURSOR =
   /^vp1:(r|n|a):([0-9a-f]{64})(?::([a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?))?(?::([0-9]+))?$/u;

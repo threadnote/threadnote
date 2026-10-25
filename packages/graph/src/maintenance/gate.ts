@@ -320,6 +320,26 @@ export const withCodeGraphTargetWorktreeLock = Effect.fn('codeGraph.withTargetWo
   );
 });
 
+/** Vector publication waits for its target and preserves expected supersession failures. */
+export const withCodeGraphVectorPublicationWorktreeLock = Effect.fn('codeGraph.withVectorPublicationWorktreeLock')(
+  function* <A, E, R>(
+    threadnoteHome: string,
+    checkoutId: string,
+    worktreeId: string,
+    effect: Effect.Effect<A, E, R>,
+    scopeId?: string,
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* withExclusiveFileLock(
+      fs,
+      codeGraphWorktreeLockPath(path, threadnoteHome, checkoutId, worktreeId, scopeId),
+      {...CODE_GRAPH_GATE_LOCK_OPTIONS, waitTimeoutMilliseconds: Number.POSITIVE_INFINITY},
+      effect,
+    );
+  },
+);
+
 function codeGraphWorktreeLockFiles(
   fs: FileSystem.FileSystem,
   path: Path.Path,
