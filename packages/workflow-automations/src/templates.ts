@@ -48,6 +48,7 @@ export const nativeDocumentTemplateDefinitions = {
       {id: 'contracts', heading: 'Contracts'},
       {id: 'constraints', heading: 'Constraints'},
       {id: 'diagram', heading: 'Diagram'},
+      {id: 'references', heading: 'References'},
     ],
   },
   'architecture-target': {

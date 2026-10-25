@@ -914,6 +914,7 @@ const saveAuthoring = <R>(
       const stored = yield* readNativeWorkflowState(config, request.runId);
       if (!stored) return yield* fail('run-not-found', 'The original native run is missing.');
       const state = stored.state;
+      if (state.closeoutSave) return yield* fail('pending-operation', 'Finish the admitted closeout before authoring.');
       const priorRootUri = state.authoringSave
         ? state.authoringSave.rootUri
         : ([...state.operations]
@@ -1239,7 +1240,7 @@ const saveAuthoring = <R>(
           false,
           Effect.gen(function* () {
             const current = yield* readNativeWorkflowState(config, request.runId);
-            if (!current || current.revision !== stored.revision)
+            if (!current || current.revision !== stored.revision || current.state.closeoutSave)
               return yield* fail(
                 'state-conflict',
                 'This native run changed before authoring admission. Retry from its current receipt.',

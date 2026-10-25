@@ -177,6 +177,25 @@ export const NativeAuthoringSaveReservationSchema = Schema.Struct({
   reservedBytes: boundedBytes,
 });
 export type NativeAuthoringSaveReservation = typeof NativeAuthoringSaveReservationSchema.Type;
+export const NativeCloseoutSaveReservationSchema = Schema.Struct({
+  reservedStoredBytes: boundedBytes,
+  journalStoredBytesAtStart: Schema.Finite.check(
+    Schema.isInt(),
+    Schema.isBetween({minimum: 0, maximum: 16 * 1024 * 1024}),
+  ),
+  transactionId: digest,
+  intentDigest: digest,
+  operationIds: Schema.Array(nonEmpty(256)).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(nativeWorkflowOperationLimit),
+  ),
+  operationStart: boundedCount,
+  operationLimit: boundedCount,
+  prefixDigest: digest,
+  journalBytesAtStart: boundedBytes,
+  stateBytesAtStart: boundedBytes,
+  reservedBytes: boundedBytes,
+});
 
 const nativeWorkflowStateFields = {
   format: Schema.Literal('threadnote-native-workflow'),
@@ -192,9 +211,9 @@ const nativeWorkflowStateFields = {
   team: Schema.optionalKey(portableId),
   bindingId: digest,
   authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
+  closeoutSave: Schema.optionalKey(NativeCloseoutSaveReservationSchema),
   cycle: Schema.optionalKey(NativeCycleRuntimeSchema),
 } as const;
-
 export const NativeWorkflowStateSchema = Schema.Struct({
   ...nativeWorkflowStateFields,
   operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
@@ -357,6 +376,24 @@ function validateNativeWorkflowState(
       save.stateBytesAtStart + save.reservedBytes > byteLimit
     )
       throw fail('invalid-state', 'The authoring save reservation differs from its original receipts or capacity.');
+  }
+  if (state.closeoutSave) {
+    const save = state.closeoutSave;
+    if (
+      save.journalStoredBytesAtStart + save.reservedStoredBytes > 16 * 1024 * 1024 ||
+      state.authoringSave ||
+      save.operationStart > state.operations.length ||
+      state.operations.length > save.operationLimit ||
+      save.operationLimit - save.operationStart !== save.operationIds.length ||
+      new Set(save.operationIds).size !== save.operationIds.length ||
+      save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
+      save.journalBytesAtStart + save.reservedBytes > byteLimit ||
+      save.stateBytesAtStart + save.reservedBytes > byteLimit ||
+      state.operations
+        .slice(save.operationStart)
+        .some(operation => !save.operationIds.includes(operation.intent.operationId))
+    )
+      throw fail('invalid-state', 'The closeout reservation differs from its original receipts or capacity.');
   }
   const operationIds = new Set<string>();
   for (const operation of state.operations) {

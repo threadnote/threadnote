@@ -17,6 +17,7 @@ import {makeWorkflowMemoryAdapter, nativeWorkflowError, workflowWriteRequest} fr
 import {makeWorkflowGraphAdapter} from './graph.js';
 import {
   CurrentNativeAuthoringSave,
+  CurrentNativeCloseoutSave,
   CurrentNativeOperationLimit,
   readNativeWorkflowState,
   writeNativeWorkflowState,
@@ -26,6 +27,7 @@ import {reserveWorkflowNameFamily} from './naming.js';
 import {runNativeAuthoring} from './authoring.js';
 import {runNativeCycle} from './cycle.js';
 import {runNativeWatch} from './watch.js';
+import {runNativeCloseout} from './closeout.js';
 import {boundNativeCycleOutput} from '@threadnote/workflow-automations/cycle-output';
 import {
   CurrentWorkflowReadCache,
@@ -106,7 +108,23 @@ const inspectNative = Effect.fn('workflowAutomation.inspectNative')(function* (
   const native = yield* withWorkflowLock(config, binding.bindingId, inspectWorkflowJournal(config, binding.bindingId));
   const ids = new Set(state.operations.map(operation => operation.intent.operationId));
   const cache = yield* CurrentWorkflowReadCache;
-  if (Object.keys(native.state.operations).some(id => !ids.has(id)))
+  if (
+    Object.entries(native.state.operations).some(
+      ([id, operation]) =>
+        !ids.has(id) &&
+        !(
+          operation.request.action === 'archive' &&
+          operation.request.sourceRunId === state.runId &&
+          state.operations.some(
+            local =>
+              local.status === 'verified' &&
+              local.artifact?.uri === operation.sourceUri &&
+              local.intent.artifactKey === operation.request.artifactKey &&
+              local.intent.role === operation.request.role,
+          )
+        ),
+    )
+  )
     return yield* issue(
       'invalid-state',
       'Native intent is missing from this run’s receipts. Restore its original state; no import was applied.',
@@ -247,6 +265,13 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   memory: Memory,
   request: WriteRequest,
 ) {
+  const closeout = stored.state.closeoutSave;
+  if (
+    closeout &&
+    ((yield* CurrentNativeCloseoutSave) !== closeout.transactionId ||
+      !closeout.operationIds.includes(request.operationId))
+  )
+    return yield* issue('pending-operation', 'Finish this run’s admitted closeout before starting another write.');
   const intent = intentFrom(stored.state, request);
   const digest = nativeWorkflowIntentDigest(intent, sha256HexSync);
   const existing = stored.state.operations.find(operation => operation.intent.operationId === request.operationId);
@@ -289,7 +314,7 @@ const save = Effect.fn('workflowAutomation.save')(function* (
   const operationLimit = Math.min(
     nativeWorkflowOperationLimit,
     yield* CurrentNativeOperationLimit,
-    reservation?.operationLimit ?? nativeWorkflowOperationLimit,
+    reservation?.operationLimit ?? closeout?.operationLimit ?? nativeWorkflowOperationLimit,
   );
   if (!existing && stored.state.operations.some(operation => operation.status === 'prepared'))
     return yield* issue(
@@ -339,6 +364,12 @@ const recover = Effect.fn('workflowAutomation.recover')(function* (
 ) {
   if (stored.state.authoringSave && (yield* CurrentNativeAuthoringSave) !== stored.state.authoringSave.intentDigest)
     return yield* issue('pending-operation', 'Resume the original authoring save before recovering its child writes.');
+  if (
+    stored.state.closeoutSave &&
+    ((yield* CurrentNativeCloseoutSave) !== stored.state.closeoutSave.transactionId ||
+      !stored.state.closeoutSave.operationIds.includes(operationId))
+  )
+    return yield* issue('pending-operation', 'Resume the original closeout before recovering its child writes.');
   const operation = stored.state.operations.find(item => item.intent.operationId === operationId);
   if (!operation)
     return yield* issue(
@@ -392,6 +423,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
       status: 'ok' as const,
       cycleVersion: 1,
       watchVersion: 1,
+      closeoutVersion: 1,
       operations: [
         'init',
         'inspect',
@@ -403,6 +435,7 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
         'authoring',
         'cycle',
         'watch',
+        'closeout',
       ],
       profiles: ['desktop', 'codex-cloud-personal', 'cursor-cloud-personal'],
     };
@@ -419,6 +452,17 @@ const runCoreNative = Effect.fn('workflowAutomation.run')(function* (config: Run
 });
 
 const dispatchNative = Effect.fn('workflowAutomation.dispatch')(function* (config: RuntimeConfig, input: unknown) {
+  if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'closeout')
+    return yield* withWorkflowReadCache(
+      runNativeCloseout(config, input, request =>
+        typeof request === 'object' && request !== null && 'action' in request && request.action === 'authoring'
+          ? runNativeAuthoring(config, request, core =>
+              runCoreNative(config, core).pipe(Effect.mapError(nativeWorkflowError)),
+            )
+          : runCoreNative(config, request).pipe(Effect.mapError(nativeWorkflowError)),
+      ),
+      {compactJournal: true},
+    );
   if (typeof input === 'object' && input !== null && 'action' in input && input.action === 'cycle') {
     const request = input as Record<string, unknown>;
     const detail: Record<string, string> =

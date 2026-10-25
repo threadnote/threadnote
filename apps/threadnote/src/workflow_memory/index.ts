@@ -12,7 +12,7 @@ import {resolveWorkflowBinding} from './profile.js';
 import {bindWorkflow, loadWorkflowJournal, withWorkflowLock} from './journal.js';
 import {executeWorkflowOperation, prepareWorkflowOperation, readWorkflowArtifact} from './artifacts.js';
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
-import {assertWorkflowPublicationVerified, runWorkflowPublication} from './publication.js';
+import {assertWorkflowArchivePublication, runWorkflowPublication} from './publication.js';
 import {inspectWorkflowOperation} from './inspection.js';
 
 export {readWorkflowReadiness} from './profile.js';
@@ -121,6 +121,6 @@ const runBoundRequest = Effect.fn('workflowMemory.boundRequest')(function* (
     (request.action === 'archive' ||
       (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive'))
   )
-    yield* assertWorkflowPublicationVerified(config, state.binding.bindingId);
+    yield* assertWorkflowArchivePublication(config, state.binding);
   return yield* executeWorkflowOperation(config, state, request);
 });
