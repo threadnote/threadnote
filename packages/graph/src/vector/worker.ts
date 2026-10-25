@@ -14,7 +14,11 @@ import {
   type CodeGraphLayout,
 } from '../layout.js';
 import {withCodeGraphDatabaseWriteLock} from '../maintenance/gate.js';
-import {executeCodeGraphVectorGeneration, type CodeGraphEmbeddingStatus} from '../embedding.js';
+import {
+  executeCodeGraphVectorGeneration,
+  releaseCodeGraphVectorOwner,
+  type CodeGraphEmbeddingStatus,
+} from '../embedding.js';
 import {captureCodeGraphVectorPublication} from './publication.js';
 import {makeCodeGraphVectorRetirementCapacityProtector} from './retirement.js';
 import {inspectVectorPageStorageSql} from './retirement/inspection.js';
@@ -63,8 +67,15 @@ export interface CodeGraphEmbeddingWorkerOptions {
 /** Generation and demand ownership must agree about retrying the same token. */
 export function isCodeGraphEmbeddingWorkerContention(error: unknown): boolean {
   const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
+  const recovery = typeof error === 'object' && error !== null && 'recovery' in error ? error.recovery : undefined;
   return (
-    (typeof error === 'object' && error !== null && 'recovery' in error && error.recovery === 'defer') ||
+    recovery === 'defer' ||
+    recovery === 'retry' ||
+    (recovery === 'retry-read-only' &&
+      typeof error === 'object' &&
+      error !== null &&
+      'retryable' in error &&
+      error.retryable === true) ||
     isFileLockTimeout(error) ||
     tag === 'CodeGraphStoreBusyError' ||
     tag === 'CodeGraphMaintenanceActiveError'
@@ -121,6 +132,17 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
         storage,
       );
     });
+  const now = yield* Clock.currentTimeMillis;
+  const expiredOwner = lane.active && lane.active.expiresAt <= now ? lane.active : undefined;
+  // Demand acknowledgements can fail after a vector checkpoint renewed its independent lease.
+  // Prove cleanup before either a new claim or the unavailable-model path forgets that token.
+  if (expiredOwner)
+    yield* releaseCodeGraphVectorOwner({
+      home,
+      layout,
+      modelId: expiredOwner.model.id,
+      ownerToken: expiredOwner.owner.token,
+    });
   const manifest = yield* Effect.gen(function* () {
     const selection = yield* readModelSelection(home);
     return selection.roles.embedding ? yield* catalog.get(selection.roles.embedding) : undefined;
@@ -129,7 +151,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     yield* mutate(
       Effect.gen(function* () {
         yield* blockUnclaimedCodeGraphEmbeddingDemand(yield* SqlClient.SqlClient, lane, {
-          now: yield* Clock.currentTimeMillis,
+          now,
           reason: 'model-unavailable',
         });
       }),
@@ -137,8 +159,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     return {state: 'unavailable' as const};
   }
   const model = {id: manifest.id, sha256: manifest.sha256, dimensions: manifest.dimensions, templateVersion: 1};
-  const now = yield* Clock.currentTimeMillis;
-  let abandonedOwnerToken: string | undefined;
+  let abandonedOwnerToken: string | undefined = expiredOwner?.owner.token;
   if (
     lane.active &&
     (lane.active.owner.processId !== owner.processId ||
@@ -163,6 +184,13 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
     abandonedOwnerToken = claim.owner.token;
     claim = undefined;
   }
+  if (abandonedOwnerToken && lane.active && abandonedOwnerToken !== expiredOwner?.owner.token)
+    yield* releaseCodeGraphVectorOwner({
+      home,
+      layout,
+      modelId: lane.active.model.id,
+      ownerToken: abandonedOwnerToken,
+    });
   if (!claim)
     claim = yield* mutate(
       Effect.gen(function* () {
@@ -171,7 +199,8 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
           abandonedOwnerToken,
           owner: {...owner, token: yield* crypto.randomUUIDv4()},
           model,
-          now: yield* Clock.currentTimeMillis,
+          // Use the cleanup cutoff: an owner expiring during this turn must wait for the next turn's proof.
+          now,
         });
       }),
     );
@@ -206,14 +235,22 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       return yield* CodeGraphEmbeddingWorkerSuperseded.make({message: 'Code graph embedding demand was superseded.'});
   }).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.provideService(Path.Path, path));
   const acknowledge = (ack: Omit<CodeGraphEmbeddingDemandAcknowledgement, 'now'>) =>
-    mutate(
-      Effect.gen(function* () {
-        return yield* acknowledgeCodeGraphEmbeddingDemand(yield* SqlClient.SqlClient, pinned, {
-          ...ack,
-          now: yield* Clock.currentTimeMillis,
-        });
-      }),
-    );
+    Effect.gen(function* () {
+      const retaining = ack.kind === 'checkpoint' || (ack.kind === 'defer' && ack.retainClaim && !ack.blocked);
+      // Generation cleanup is best effort on exit. Do not forget the durable owner if that cleanup failed.
+      if (!retaining)
+        yield* releaseCodeGraphVectorOwner({home, layout, modelId: pinned.model.id, ownerToken: pinned.owner.token});
+      return yield* mutate(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const now = yield* Clock.currentTimeMillis;
+          // A coalesced newer target would make even a retaining acknowledgement discard the old owner.
+          // Leave that owner recorded until the next superseded turn can prove vector cleanup instead.
+          if (retaining && !(yield* validateCodeGraphEmbeddingDemandClaim(sql, pinned, now))) return undefined;
+          return yield* acknowledgeCodeGraphEmbeddingDemand(sql, pinned, {...ack, now});
+        }),
+      );
+    });
   const execute = Effect.gen(function* () {
     const snapshot = yield* store.readySnapshotById(layout.databasePath, pinned.snapshotId);
     if (!snapshot)
@@ -287,6 +324,7 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
       const tag = typeof error === 'object' && error !== null && '_tag' in error ? String(error._tag) : '';
       const superseded = tag === 'CodeGraphEmbeddingWorkerSuperseded' || tag === 'CodeGraphVectorPublicationSuperseded';
       const modelInvalidated = tag === 'CodeGraphEmbeddingWorkerModelInvalidated';
+      const expired = tag === 'CodeGraphVectorOwnerExpired';
       const contention = isCodeGraphEmbeddingWorkerContention(error);
       return Effect.gen(function* () {
         const publicationModelChanged =
@@ -304,17 +342,19 @@ const processCodeGraphEmbeddingWorkerUnit = Effect.fn('codeGraph.embeddingWorker
             : false;
         const rebind = modelInvalidated || publicationModelChanged;
         return yield* acknowledge({
-          kind: rebind ? 'rebind' : superseded ? 'superseded' : contention ? 'defer' : 'failure',
+          kind: rebind ? 'rebind' : superseded ? 'superseded' : contention || expired ? 'defer' : 'failure',
           retainClaim: contention,
           reason: rebind
             ? 'model-changed'
             : superseded
               ? 'superseded'
-              : contention
-                ? 'contention'
-                : 'Embedding failed; inspect model installation and graph capacity, then retry.',
+              : expired
+                ? 'owner-expired'
+                : contention
+                  ? 'contention'
+                  : 'Embedding failed; inspect model installation and graph capacity, then retry.',
           blocked: !contention && /DiskCapacity|ModelNotInstalled/.test(tag),
-          retryAfterMilliseconds: contention ? 1000 : undefined,
+          retryAfterMilliseconds: contention || expired ? 1000 : undefined,
         }).pipe(
           Effect.map(lane => ({state: lane?.state === 'blocked' ? ('blocked' as const) : ('deferred' as const)})),
         );
@@ -329,6 +369,7 @@ function expectedWorkerFailure(error: unknown) {
     isFileLockTimeout(error) ||
     tag.startsWith('CodeGraphStore') ||
     tag.startsWith('CodeGraphDiskCapacity') ||
+    tag === 'CodeGraphVectorClaimCleanupPending' ||
     tag === 'CodeGraphMaintenanceActiveError'
   );
 }
@@ -337,8 +378,7 @@ function expectedWorkerFailure(error: unknown) {
 export const runCodeGraphEmbeddingWorkerUnit = (input: Parameters<typeof processCodeGraphEmbeddingWorkerUnit>[0]) =>
   processCodeGraphEmbeddingWorkerUnit(input).pipe(
     Effect.catchIf(expectedWorkerFailure, error => {
-      const recovery = typeof error === 'object' && error !== null && 'recovery' in error ? error.recovery : undefined;
-      const contention = isFileLockTimeout(error) || recovery === 'defer' || recovery === 'retry';
+      const contention = isCodeGraphEmbeddingWorkerContention(error);
       return Effect.succeed({
         state: contention ? ('deferred' as const) : ('blocked' as const),
         reason: contention

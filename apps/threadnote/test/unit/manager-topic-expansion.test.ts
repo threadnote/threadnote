@@ -1,5 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
-import {DateTime, Effect, FileSystem, Path} from 'effect';
+import * as BunServices from '@effect/platform-bun/BunServices';
+import {DateTime, Effect, FileSystem, Path, Scope} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {loadCandidateReview, saveCandidateReview} from '@threadnote/memory/candidate';
@@ -55,13 +56,17 @@ effectIt.effect('removes the owned topic-expansion fixture root after normal sco
     const fs = yield* FileSystem.FileSystem;
     const home = yield* Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeTopicExpansionFixture();
+        const ownerScope = yield* Effect.scope;
+        const fixture = yield* makeTopicExpansionFixture().pipe(
+          Scope.provide(ownerScope),
+          provideTestLayer(ApplicationLayer),
+        );
         expect(yield* fs.exists(fixture.memoryPath)).toBe(true);
         return fixture.home;
       }),
     );
     expect(yield* fs.exists(home)).toBe(false);
-  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
 );
 
 effectIt.effect('cleans up the topic-expansion fixture when its owned root is already absent', () =>
@@ -69,14 +74,19 @@ effectIt.effect('cleans up the topic-expansion fixture when its owned root is al
     const fs = yield* FileSystem.FileSystem;
     const home = yield* Effect.scoped(
       Effect.gen(function* () {
-        const fixture = yield* makeTopicExpansionFixture();
+        const ownerScope = yield* Effect.scope;
+        const fixture = yield* makeTopicExpansionFixture().pipe(
+          Scope.provide(ownerScope),
+          provideTestLayer(ApplicationLayer),
+        );
         expect(yield* fs.exists(fixture.memoryPath)).toBe(true);
         yield* fs.remove(fixture.home, {recursive: true});
+        expect(yield* fs.exists(fixture.home)).toBe(false);
         return fixture.home;
       }),
     );
     expect(yield* fs.exists(home)).toBe(false);
-  }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  }).pipe(provideTestLayer(BunServices.layer), TestClock.withLive),
 );
 
 effectIt.effect('inspects and previews a configured spaced project without changing the accepted memory', () =>
@@ -381,4 +391,6 @@ effectIt.effect(
       expect((yield* fs.stat(f.memoryPath)).mtime).toEqual(mtime);
       expect(yield* fs.readFileString(f.memoryPath)).toBe(accepted);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  // This real Git/graph restart-and-replay flow takes ~22s alone; allow bounded headroom for parallel files.
+  45_000,
 );

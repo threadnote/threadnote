@@ -1,6 +1,6 @@
 import {Database} from 'bun:sqlite';
 import {it as effectIt} from '@effect/vitest';
-import {Clock, Effect, FileSystem, Layer, Path, PlatformError} from 'effect';
+import {Clock, Effect, FileSystem, Layer, Path, PlatformError, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {expect} from 'vitest';
 import {TestError} from '@threadnote/testing/test-error';
@@ -12,7 +12,14 @@ import {LocalModelStore} from '@threadnote/inference/models/store';
 import {citationPlatformLayer} from '../helpers/citation-platform.js';
 import {executeCodeGraphVectorGeneration, type CodeGraphVectorPublication} from '../../src/embedding.js';
 import {codeGraphLayout} from '../../src/layout.js';
-import {CodeGraphStoreBusyError, type CodeGraphSnapshot, type CodeGraphSymbol} from '../../src/types.js';
+import {
+  CodeGraphDiskCapacityObservationError,
+  CodeGraphDiskCapacityPressureError,
+  CodeGraphStoreBusyError,
+  CodeGraphStoreTransientIoError,
+  type CodeGraphSnapshot,
+  type CodeGraphSymbol,
+} from '../../src/types.js';
 import {isCodeGraphEmbeddingWorkerContention} from '../../src/vector/worker.js';
 
 const manifest = BUILTIN_MODEL_MANIFESTS.find(model => model.id === 'bge-small-en-v1.5-q8')!;
@@ -154,6 +161,90 @@ const permissionDenied = () =>
   });
 
 effectIt.layer(Layer.mergeAll(citationPlatformLayer, LocalModelCatalog.layer(BUILTIN_MODEL_MANIFESTS)))(it => {
+  it.effect.prop(
+    'conserves the ready payload and owner across bounded transient publication failure sequences',
+    {
+      failures: Schema.Array(Schema.Literals(['busy', 'capacity', 'read'])).check(
+        Schema.isMinLength(1),
+        Schema.isMaxLength(3),
+      ),
+    },
+    ({failures}) =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        for (const kind of failures) {
+          const failure =
+            kind === 'capacity'
+              ? CodeGraphDiskCapacityObservationError.of()
+              : kind === 'read'
+                ? CodeGraphStoreTransientIoError.of('Read temporarily unavailable')
+                : CodeGraphStoreBusyError.of('Publication is busy');
+          expect(isCodeGraphEmbeddingWorkerContention(failure)).toBe(true);
+          expect(
+            yield* f
+              .run(
+                'same-owner',
+                {validate: Effect.void, attach: () => Effect.fail(failure)},
+                isCodeGraphEmbeddingWorkerContention,
+              )
+              .pipe(Effect.result),
+          ).toMatchObject({_tag: 'Failure', failure});
+          const state = yield* inspect(f.filename);
+          expect(state.progress).toMatchObject([{owner_token: 'same-owner'}]);
+          expect(state.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
+          expect(state.pointers).toEqual([]);
+          expect(f.batches).toEqual([2]);
+        }
+        const before = yield* inspect(f.filename);
+        expect(yield* f.run('same-owner', attach)).toMatchObject({ready: true, embedded: 0, reused: 2});
+        const after = yield* inspect(f.filename);
+        expect(after.payload).toEqual(before.payload);
+        expect(after.generations).toEqual(before.generations);
+        expect(after.progress).toEqual([]);
+        expect(after.pointers).toEqual([
+          {worktree_id: f.layout.worktreeId, generation: before.generations[0].generation},
+        ]);
+        expect(f.batches).toEqual([2]);
+        expect(
+          isCodeGraphEmbeddingWorkerContention(
+            CodeGraphDiskCapacityPressureError.make({message: 'No space', operation: 'publish'}),
+          ),
+        ).toBe(false);
+        expect(isCodeGraphEmbeddingWorkerContention(permissionDenied())).toBe(false);
+      }).pipe(TestClock.withLive),
+    {arbitrary: {runs: 8, seed: 22981}},
+  );
+
+  for (const state of ['building', 'ready'] as const) {
+    it.effect(`retains a ${state} generation when validation fails transiently after claiming it`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const failure = CodeGraphStoreBusyError.of('Validation temporarily unavailable');
+        const rejected = yield* f
+          .run(
+            'validation-owner',
+            {
+              validate: Effect.gen(function* () {
+                const current = yield* inspect(f.filename);
+                if (current.generations.some(row => row.state === state)) return yield* failure;
+              }),
+              attach: commit => commit,
+            },
+            isCodeGraphEmbeddingWorkerContention,
+          )
+          .pipe(Effect.result);
+        expect(rejected).toMatchObject({_tag: 'Failure', failure});
+        const before = yield* inspect(f.filename);
+        expect(before.generations).toMatchObject([{state}]);
+        expect(before.progress).toMatchObject([{owner_token: 'validation-owner'}]);
+        expect(before.progress[0].expires_at).toBeGreaterThan(yield* Clock.currentTimeMillis);
+        expect(yield* f.run('validation-owner', attach)).toMatchObject({ready: true});
+        expect((yield* inspect(f.filename)).progress).toEqual([]);
+        expect(f.batches).toEqual([2]);
+      }).pipe(TestClock.withLive),
+    );
+  }
+
   for (const scenario of [
     {name: 'Windows-shaped permission denial', error: permissionDenied, retain: isCodeGraphEmbeddingWorkerContention},
     {name: 'ordinary publication failure with the default release policy', error: () => new Error('Attachment failed')},
