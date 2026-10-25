@@ -1,10 +1,10 @@
 import {Clock, Effect, FileSystem, Option} from 'effect';
-import type {CodeGraphEmbeddingIndexShape, CodeGraphEmbeddingStatus} from '../embedding.js';
+import {deferCodeGraphVectorCompletion} from '../vector/publication.js';
+import type {CodeGraphEmbeddingIndexShape} from '../embedding.js';
 import {currentSnapshotReusableBaseReceipt, reusableBaseFileSetFingerprint} from './incremental.js';
 import {verifyCommittedIndexInput} from './input/verification.js';
 import {
   CODE_GRAPH_ACTIVATION_LEASE_MILLISECONDS,
-  embeddingSymbolSource,
   extractorSetIdentity,
   graphContentIdentity,
   messageOf,
@@ -126,31 +126,7 @@ export const reuseReadySnapshot = Effect.fn('codeGraph.reuseReadySnapshot')(func
       snapshot: input.snapshot,
     } satisfies CodeGraphIndexSummary;
   }
-  const vectorCheck = yield* input.embedding
-    .check(input.threadnoteHome, input.layout, input.snapshot.id)
-    .pipe(Effect.catch(cause => Effect.succeed({reason: messageOf(cause), state: 'unavailable'} as const)));
-  const symbols =
-    vectorCheck.state === 'ready'
-      ? []
-      : embeddingSymbolSource(input.store, input.layout.databasePath, input.snapshot.id);
-  const repaired = yield* input.embedding
-    .ensure(input.threadnoteHome, input.layout, input.snapshot, symbols, {
-      onProgress: input.onProgress,
-    })
-    .pipe(
-      Effect.catch(cause =>
-        Effect.succeed({
-          embedded: 0,
-          ready: false,
-          reason: messageOf(cause),
-          reused: 0,
-        } satisfies CodeGraphEmbeddingStatus),
-      ),
-    );
-  if (!repaired.ready) {
-    diagnostics.push(`Vector graph retrieval unavailable: ${repaired.reason ?? 'unknown reason'}`);
-  }
-  return {
+  const summary = {
     diagnostics,
     durationMs: (yield* Clock.currentTimeMillis) - input.startedAt,
     identity: input.identity,
@@ -163,6 +139,7 @@ export const reuseReadySnapshot = Effect.fn('codeGraph.reuseReadySnapshot')(func
     skippedFiles: input.skippedFiles,
     snapshot: input.snapshot,
   } satisfies CodeGraphIndexSummary;
+  return yield* deferCodeGraphVectorCompletion({...input, summary});
 });
 
 /**

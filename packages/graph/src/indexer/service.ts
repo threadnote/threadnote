@@ -1,5 +1,6 @@
+import {completeCodeGraphDeferredVectors, withCodeGraphDeferredCompletionReporter} from '../vector/publication.js';
 import {CODE_GRAPH_EXPECTED_SCOPE_ID_ENV, CodeGraphScopeRoutingError} from '../scope/routing.js';
-import {Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
+import {Cause, Clock, Context, Crypto, Effect, Exit, FileSystem, Layer, Option, Path, Schema} from 'effect';
 import * as HttpClient from 'effect/http/HttpClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {CommandExecutor} from '@threadnote/platform/command';
@@ -1412,8 +1413,23 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
                         }),
                       ),
                     ),
-                    Effect.tap(summary =>
-                      withCodeGraphIndexTiming(options.onTiming, 'reporter-completion', reporter.complete(summary)),
+                    Effect.map(summary =>
+                      withCodeGraphDeferredCompletionReporter(
+                        summary,
+                        completed =>
+                          withCodeGraphIndexTiming(
+                            options.onTiming,
+                            'reporter-completion',
+                            reporter.complete(completed),
+                          ),
+                        reporter.heartbeat,
+                        cause =>
+                          reporter.fail(
+                            Cause.hasInterruptsOnly(cause)
+                              ? CodeGraphIndexOperationError.make({message: CODE_GRAPH_INTERRUPTED_BUILD_SUMMARY})
+                              : Cause.squash(cause),
+                          ),
+                      ),
                     ),
                     Effect.tapError(cause => reporter.fail(cause)),
                   );
@@ -1471,6 +1487,7 @@ export class CodeGraphIndexer extends Context.Service<CodeGraphIndexer, CodeGrap
             return summary;
           }).pipe(effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope-body', effect)),
         ).pipe(
+          Effect.flatMap(completeCodeGraphDeferredVectors),
           effect => withCodeGraphIndexTiming(request.onTiming, 'index-scope', effect),
           Effect.provideService(CommandExecutor, command),
           Effect.provideService(Crypto.Crypto, crypto),

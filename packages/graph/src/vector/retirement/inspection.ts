@@ -1,3 +1,5 @@
+import {CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS} from '../generation_schema.js';
+import {requireCodeGraphGenerationSchema} from '../generation.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Effect, Layer} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -222,7 +224,7 @@ export const boundedVectorUserTableNames = Effect.fn('codeGraph.boundedVectorUse
      FROM sqlite_master
      WHERE type = 'table' AND name NOT GLOB 'sqlite_*'
      LIMIT ?`,
-    [VECTOR_CORE_TABLE_NAMES.length + VECTOR_RETIREMENT_TABLE_NAMES.length + 1],
+    [VECTOR_CORE_TABLE_NAMES.length + VECTOR_RETIREMENT_TABLE_NAMES.length + 2],
   );
   if (rows.some(row => typeof row.name !== 'string')) return undefined;
   return rows.map(row => String(row.name));
@@ -375,7 +377,14 @@ export const codeGraphVectorCoreSchemaState = Effect.fn('codeGraph.vectorCoreSch
     }
   }
   const userTables = yield* boundedVectorUserTableNames(sql);
-  const allowedTables = new Set<string>([...VECTOR_CORE_TABLE_NAMES, ...VECTOR_RETIREMENT_TABLE_NAMES]);
+  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+  const v3 = versions[0]?.user_version === 3;
+  if (v3) yield* requireCodeGraphGenerationSchema(sql);
+  const allowedTables = new Set<string>([
+    ...VECTOR_CORE_TABLE_NAMES,
+    ...VECTOR_RETIREMENT_TABLE_NAMES,
+    ...(v3 ? ['vector_generation_progress'] : []),
+  ]);
   if (
     userTables === undefined ||
     VECTOR_CORE_TABLE_NAMES.some(name => !userTables.includes(name)) ||
@@ -476,6 +485,9 @@ export function sameLegacyPointerIndexPlan(left: LegacyPointerIndexPlan, right: 
 export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorRetirementSchemaState')(function* (
   sql: SqlClient.SqlClient,
 ) {
+  const versions = yield* sql.unsafe<{readonly user_version: number}>('PRAGMA user_version');
+  const v3 = versions[0]?.user_version === 3;
+  if (v3) yield* requireCodeGraphGenerationSchema(sql);
   const expected = [
     {name: 'vector_retirement_state', sql: CODE_GRAPH_VECTOR_RETIREMENT_STATE_TABLE_SQL, type: 'table'},
     {name: 'vector_generation_retirements', sql: CODE_GRAPH_VECTOR_RETIREMENTS_TABLE_SQL, type: 'table'},
@@ -517,10 +529,11 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
          'vector_generation_retirements',
          'vector_generations',
          'vector_pointers',
-         'vectors'
+         'vectors',
+         'vector_generation_progress'
        )
      LIMIT ?`,
-    [CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.length + 1],
+    [CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.length + CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS.length + 1],
   );
   if (observed.every(state => state === 'absent')) {
     const userTables = yield* boundedVectorUserTableNames(sql);
@@ -532,7 +545,11 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
   if (!observed.every(state => state === 'current')) return 'incompatible' as const;
   const userTables = yield* boundedVectorUserTableNames(sql);
   if (
-    !sameStringSet(userTables, [...VECTOR_CORE_TABLE_NAMES, ...VECTOR_RETIREMENT_TABLE_NAMES]) ||
+    !sameStringSet(userTables, [
+      ...VECTOR_CORE_TABLE_NAMES,
+      ...VECTOR_RETIREMENT_TABLE_NAMES,
+      ...(v3 ? ['vector_generation_progress'] : []),
+    ]) ||
     !(yield* exactVectorIndexSet(sql, 'vector_retirement_state', VECTOR_RETIREMENT_STATE_INDEXES)) ||
     !(yield* exactVectorIndexSet(sql, 'vector_generation_retirements', VECTOR_RETIREMENT_MARKER_INDEXES)) ||
     !(yield* exactVectorForeignKeys(sql, 'vector_retirement_state', [])) ||
@@ -541,6 +558,7 @@ export const codeGraphVectorRetirementSchemaState = Effect.fn('codeGraph.vectorR
     return 'incompatible' as const;
   }
   const expectedTriggerNames = [
+    ...(v3 ? CODE_GRAPH_VECTOR_PROGRESS_TRIGGERS.map(trigger => `${trigger.name}\0${trigger.table}`) : []),
     ...CODE_GRAPH_VECTOR_RETIREMENT_TRIGGER_DEFINITIONS.map(
       trigger => `${trigger.name}\0${vectorRetirementTriggerTarget(trigger.name)}`,
     ),

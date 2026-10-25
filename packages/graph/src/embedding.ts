@@ -1,15 +1,24 @@
+import {CODE_GRAPH_VECTOR_DATABASE_VERSION, CODE_GRAPH_VECTOR_DATABASE_FILENAME} from './vector/generation_schema.js';
+import {
+  commitCodeGraphGenerationStep,
+  completeCodeGraphGeneration,
+  claimCodeGraphGeneration,
+  initializeCodeGraphGenerationSchema,
+  requireCodeGraphGenerationClaim,
+  requireCodeGraphGenerationSchema,
+  renewCodeGraphGenerationClaim,
+  releaseCodeGraphGenerationClaim,
+  type CodeGraphGenerationProgress,
+} from './vector/generation.js';
+import {inspectVectorPageStorageSql} from './vector/retirement/inspection.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
-import {Clock, Context, Crypto, DateTime, Effect, FileSystem, Layer, Path, Schema} from 'effect';
+import {Clock, Context, Crypto, DateTime, Effect, Exit, FileSystem, Layer, Path, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {SystemInfo} from '@threadnote/platform/system';
 import {LocalModelRuntime, type LocalModelRuntimeShape} from '@threadnote/inference/engine/local-model-runtime';
-import {
-  LocalModelCatalog,
-  type LocalModelCatalogShape,
-  type LocalModelManifest,
-} from '@threadnote/inference/models/catalog';
+import {LocalModelCatalog, type LocalModelCatalogShape} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/models/store';
 import {normalizeVector, searchExactVectors, type VectorSearchResult} from '@threadnote/inference/vector-search';
@@ -38,7 +47,7 @@ class CodeGraphEmbeddingError extends Schema.TaggedError<CodeGraphEmbeddingError
 
 const CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION = 1;
 const CODE_GRAPH_EMBEDDING_CONTEXT_CAP = 8;
-const CODE_GRAPH_VECTOR_DATABASE_VERSION = 2;
+
 const CODE_GRAPH_SEMANTIC_MINIMUM_SCORE = 0.64;
 const EMBED_BATCH_SIZE = 128;
 const VECTOR_PAGE_SIZE = 400;
@@ -72,11 +81,19 @@ interface ProjectedSymbol {
   readonly text: string;
 }
 
+export interface CodeGraphVectorPublication {
+  readonly validate: Effect.Effect<void, unknown>;
+  readonly attach: (commit: Effect.Effect<void, unknown>) => Effect.Effect<void, unknown>;
+}
+
 export interface CodeGraphEmbeddingStatus {
   readonly embedded: number;
+  readonly generation?: string;
+  readonly ownerToken?: string;
   readonly modelId?: string;
   readonly ready: boolean;
   readonly reason?: string;
+  readonly state?: 'checkpointed' | 'deferred';
   readonly reused: number;
 }
 
@@ -106,6 +123,7 @@ export interface CodeGraphEmbeddingIndexShape {
     snapshot: CodeGraphSnapshot,
     symbols: CodeGraphEmbeddingSymbolSource,
     options?: {
+      readonly publication?: CodeGraphVectorPublication;
       readonly force?: boolean;
       readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
     },
@@ -139,13 +157,14 @@ export class CodeGraphEmbeddingIndex extends Context.Service<CodeGraphEmbeddingI
             Effect.provideService(Path.Path, path),
           ),
         ensure: (threadnoteHome, layout, snapshot, symbols, options) =>
-          ensureGraphVectors({
+          executeCodeGraphVectorGeneration({
             catalog,
             force: options?.force === true,
             fs,
             layout,
             modelStore,
             onProgress: options?.onProgress,
+            publication: options?.publication,
             path,
             runtime,
             snapshot,
@@ -219,13 +238,19 @@ const checkGraphVectors = Effect.fn('codeGraph.checkVectors')(function* (input: 
   );
 });
 
-const ensureGraphVectors = Effect.fn('codeGraph.ensureVectors')(function* (input: {
+export const executeCodeGraphVectorGeneration = Effect.fn('codeGraph.executeVectorGeneration')(function* (input: {
+  readonly maximumSteps?: number;
+  readonly maximumInferenceSymbolsPerStep?: number;
+  readonly inferenceBatchSize?: number;
+  readonly embeddingContextPoolSize?: 1 | 2 | 4 | 8;
+  readonly ownerToken?: string;
   readonly catalog: LocalModelCatalogShape;
   readonly force: boolean;
   readonly fs: FileSystem.FileSystem;
   readonly layout: CodeGraphLayout;
   readonly modelStore: LocalModelStoreShape;
   readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
+  readonly publication?: CodeGraphVectorPublication;
   readonly path: Path.Path;
   readonly runtime: LocalModelRuntimeShape;
   readonly snapshot: CodeGraphSnapshot;
@@ -234,6 +259,13 @@ const ensureGraphVectors = Effect.fn('codeGraph.ensureVectors')(function* (input
 }) {
   const crypto = yield* Crypto.Crypto;
   const system = yield* SystemInfo;
+  for (const limit of [input.maximumSteps, input.maximumInferenceSymbolsPerStep, input.inferenceBatchSize]) {
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+      return yield* CodeGraphEmbeddingError.make({
+        message: 'Code graph vector generation limits must be positive safe integers.',
+      });
+    }
+  }
   if (
     (input.snapshot.scopeId ?? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY) !==
     (input.layout.scopeId ?? CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY)
@@ -244,7 +276,6 @@ const ensureGraphVectors = Effect.fn('codeGraph.ensureVectors')(function* (input
     Effect.catch(cause => Effect.succeed({reason: messageOf(cause)} as const)),
   );
   if ('reason' in selected) return {embedded: 0, ready: false, reason: selected.reason, reused: 0};
-
   const root = input.path.join(input.layout.vectorRoot, selected.manifest.id);
   const databasePath = vectorDatabasePath(input.path, input.layout.vectorRoot, selected.manifest.id);
   const writeLockPath = codeGraphVectorWriteLockPath(
@@ -253,230 +284,339 @@ const ensureGraphVectors = Effect.fn('codeGraph.ensureVectors')(function* (input
     input.layout.checkoutId,
     sha256HexSync(selected.manifest.id),
   );
+  const lock = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    withExclusiveFileLock(input.fs, writeLockPath, CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS, effect).pipe(
+      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(Path.Path, input.path),
+      Effect.provideService(SystemInfo, system),
+    );
   const worktreeId = requiredWorktreeId(input.layout);
+  const ownerToken = input.ownerToken ?? (yield* crypto.randomUUIDv4());
+  const requestEpoch = input.force ? ownerToken : input.snapshot.id;
   yield* input.fs.makeDirectory(root, {recursive: true, mode: 0o700});
+  const capacity = yield* makeCodeGraphVectorRetirementCapacityProtector({
+    databasePath,
+    threadnoteHome: input.threadnoteHome,
+  });
   if (yield* input.fs.exists(databasePath)) {
-    const capacityProtector = yield* makeCodeGraphVectorRetirementCapacityProtector({
-      databasePath,
-      threadnoteHome: input.threadnoteHome,
-    });
     yield* prepareCodeGraphVectorRetirement(databasePath, {
-      capacityProtector: (boundary, transaction, storage) =>
-        capacityProtector(
-          boundary,
-          withExclusiveFileLock(input.fs, writeLockPath, CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS, transaction).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
-            Effect.provideService(Path.Path, input.path),
-            Effect.provideService(SystemInfo, system),
-          ),
-          storage,
-        ),
+      capacityProtector: (boundary, transaction, storage) => capacity(boundary, lock(transaction), storage),
     });
   }
-  const status = yield* withExclusiveFileLock(
-    input.fs,
-    writeLockPath,
-    CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS,
-    useVectorDatabase(
-      databasePath,
-      Effect.gen(function* () {
-        const sql = yield* SqlClient.SqlClient;
-        yield* initializeVectorDatabase(sql);
-        const active = yield* selectActiveGeneration(sql, worktreeId);
-        if (
-          !input.force &&
-          active?.snapshot_id === input.snapshot.id &&
-          active.model_sha256 === selected.manifest.sha256 &&
-          active.template_version === CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION &&
-          active.dimensions === selected.manifest.dimensions
-        ) {
-          return {embedded: 0, modelId: selected.manifest.id, ready: true, reused: active.count};
-        }
-
-        const exact = input.force
-          ? undefined
-          : yield* selectGenerationForSnapshot(
-              sql,
-              input.snapshot.id,
-              selected.manifest.sha256,
-              selected.manifest.dimensions!,
-            );
-        if (exact) {
-          yield* activateVectorGeneration(sql, worktreeId, exact.generation);
-          return {embedded: 0, modelId: selected.manifest.id, ready: true, reused: exact.count};
-        }
-
-        const reusable = input.force
-          ? undefined
-          : active &&
-              active.model_sha256 === selected.manifest.sha256 &&
-              active.template_version === CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION &&
-              active.dimensions === selected.manifest.dimensions
-            ? active
-            : undefined;
-        const generation = `${yield* Clock.currentTimeMillis}-${worktreeId.slice(-8)}-${input.snapshot.id.slice(-8)}-${(yield* crypto.randomUUIDv4()).slice(
-          0,
-          8,
-        )}`;
-        yield* sql`
-        INSERT INTO vector_generations (
-          generation, snapshot_id, model_id, model_sha256, dimensions,
-          template_version, count, state, created_at
-        ) VALUES (
-          ${generation}, ${input.snapshot.id}, ${selected.manifest.id}, ${selected.manifest.sha256},
-          ${selected.manifest.dimensions!}, ${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}, 0, 'building',
-          ${DateTime.formatIso(yield* DateTime.now)}
-        )
-      `;
-
-        const build = buildVectorGeneration({
-          generation,
-          onProgress: input.onProgress,
-          reusableGeneration: reusable?.generation,
-          runtime: input.runtime,
-          selected,
-          snapshot: input.snapshot,
-          source: input.symbols,
-          sql,
-        }).pipe(
-          Effect.tap(result =>
+  let terminalValidationFailure = false;
+  const validate = Effect.gen(function* () {
+    yield* input.publication?.validate ?? Effect.void;
+    const selection = yield* readModelSelection(input.threadnoteHome);
+    const modelId = selection.roles.embedding;
+    const current = modelId ? yield* input.catalog.get(modelId) : undefined;
+    if (
+      current?.id !== selected.manifest.id ||
+      current.sha256 !== selected.manifest.sha256 ||
+      current.dimensions !== selected.manifest.dimensions
+    ) {
+      return yield* CodeGraphEmbeddingError.make({message: 'Code graph embedding model changed during generation.'});
+    }
+  }).pipe(
+    Effect.provideService(FileSystem.FileSystem, input.fs),
+    Effect.provideService(Path.Path, input.path),
+    Effect.tapError(() =>
+      Effect.sync(() => {
+        terminalValidationFailure = true;
+      }),
+    ),
+  );
+  return yield* useVectorDatabase(
+    databasePath,
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      // Capacity admission happens outside publication/model gates, including metadata migration.
+      const protect = <A, E, R>(rows: number, bytes: number, transaction: Effect.Effect<A, E, R>) =>
+        Effect.flatMap(inspectVectorPageStorageSql(sql), storage =>
+          capacity(
+            {
+              operation: 'write code graph vector generation',
+              rowCount: rows,
+              finalFactBytes: bytes,
+            },
+            transaction,
+            storage,
+          ),
+        );
+      yield* protect(32, 65_536, lock(initializeVectorDatabase(sql)));
+      let prepared:
+        {readonly generation: VectorGenerationRow; readonly progress: CodeGraphGenerationProgress} | undefined;
+      while (!prepared) {
+        yield* validate;
+        prepared = yield* protect(
+          3,
+          4096,
+          lock(
             sql.withTransaction(
               Effect.gen(function* () {
-                yield* sql`
-                UPDATE vector_generations
-                SET count = ${result.count}, state = 'ready'
-                WHERE generation = ${generation}
-              `;
-                yield* activateVectorGeneration(sql, worktreeId, generation);
+                yield* requireVectorDatabaseReady(sql);
+                const exact = input.force
+                  ? undefined
+                  : yield* selectGenerationForSnapshot(
+                      sql,
+                      input.snapshot.id,
+                      selected.manifest.sha256,
+                      selected.manifest.dimensions!,
+                    );
+                let generation = exact;
+                if (!generation) {
+                  const candidates = yield* sql.unsafe<VectorGenerationRow>(
+                    `SELECT generation.* FROM vector_generations AS generation
+            JOIN vector_generation_progress AS progress ON progress.generation = generation.generation
+            WHERE generation.snapshot_id = ? AND generation.model_sha256 = ? AND generation.dimensions = ?
+              AND generation.template_version = ? AND generation.state = 'building' AND progress.request_epoch = ?
+              AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = generation.generation)
+              AND (progress.reusable_generation IS NULL OR EXISTS (
+                SELECT 1 FROM vector_generations AS reusable WHERE reusable.generation = progress.reusable_generation AND reusable.state = 'ready'
+                  AND NOT EXISTS (SELECT 1 FROM vector_generation_retirements WHERE generation = reusable.generation)))
+            ORDER BY generation.created_at DESC LIMIT 1`,
+                    [
+                      input.snapshot.id,
+                      selected.manifest.sha256,
+                      selected.manifest.dimensions!,
+                      CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION,
+                      requestEpoch,
+                    ],
+                  );
+                  generation = candidates[0];
+                }
+                let reusable: VectorGenerationRow | undefined;
+                if (!generation) {
+                  if (!input.force) {
+                    const active = yield* selectActiveGeneration(sql, worktreeId);
+                    reusable =
+                      active?.model_sha256 === selected.manifest.sha256 &&
+                      active.template_version === CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION &&
+                      active.dimensions === selected.manifest.dimensions
+                        ? active
+                        : undefined;
+                  }
+                  const id = `${yield* Clock.currentTimeMillis}-${yield* crypto.randomUUIDv4()}`;
+                  yield* sql`INSERT INTO vector_generations (generation, snapshot_id, model_id, model_sha256, dimensions, template_version, count, state, created_at)
+            VALUES (${id}, ${input.snapshot.id}, ${selected.manifest.id}, ${selected.manifest.sha256}, ${selected.manifest.dimensions!},
+              ${CODE_GRAPH_EMBEDDING_TEMPLATE_VERSION}, 0, 'building', ${DateTime.formatIso(yield* DateTime.now)})`;
+                  generation = (yield* sql.unsafe<VectorGenerationRow>(
+                    'SELECT * FROM vector_generations WHERE generation = ?',
+                    [id],
+                  ))[0]!;
+                }
+                const progress = yield* claimCodeGraphGeneration(sql, {
+                  generation: generation.generation,
+                  ownerToken,
+                  requestEpoch,
+                  reusableGeneration: reusable?.generation,
+                });
+                return progress ? {generation, progress} : undefined;
               }),
             ),
           ),
         );
-        const built = yield* build;
-        yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
+        if (!prepared && input.maximumSteps !== undefined)
+          return {
+            embedded: 0,
+            reused: 0,
+            ready: false,
+            modelId: selected.manifest.id,
+            state: 'deferred' as const,
+            reason: 'Code graph vector generation has another live owner.',
+          };
+        if (!prepared) yield* Effect.sleep('100 millis');
+      }
+      const generation = prepared.generation.generation;
+      const initialGeneration = prepared.generation;
+      const initialProgress = prepared.progress;
+      let preservePublicationClaim = initialGeneration.state === 'ready';
+      return yield* Effect.gen(function* () {
+        let progress = initialProgress;
+        const total = yield* embeddingSymbolCount(input.symbols);
+        let steps = 0;
+        const maximumSteps = Math.max(1, Math.floor(input.maximumSteps ?? Number.POSITIVE_INFINITY));
+        const stepInferenceLimit = Math.max(
+          1,
+          Math.min(VECTOR_PAGE_SIZE, Math.floor(input.maximumInferenceSymbolsPerStep ?? VECTOR_PAGE_SIZE)),
+        );
+        const inferenceBatchSize = Math.max(
+          1,
+          Math.min(EMBED_BATCH_SIZE, Math.floor(input.inferenceBatchSize ?? EMBED_BATCH_SIZE)),
+        );
+        if (initialGeneration.state !== 'ready') {
+          for (;;) {
+            yield* validate;
+            progress = yield* lock(requireCodeGraphGenerationClaim(sql, generation, ownerToken));
+            const cursor: CodeGraphSymbolCursor | undefined = progress.cursor ? JSON.parse(progress.cursor) : undefined;
+            let rawPage = isSymbolPageSource(input.symbols)
+              ? yield* input.symbols.loadPage(cursor, VECTOR_PAGE_SIZE)
+              : input.symbols.slice(progress.array_offset, progress.array_offset + VECTOR_PAGE_SIZE);
+            if (rawPage.length === 0) break;
+            let projectedPage = selectGraphEmbeddingSymbols(rawPage).map(projectSymbol);
+            const existing =
+              projectedPage.length === 0
+                ? []
+                : yield* sql.unsafe<{readonly symbol_id: string}>(
+                    `SELECT symbol_id FROM vectors WHERE generation = ? AND symbol_id IN (${projectedPage.map(() => '?').join(', ')})`,
+                    [generation, ...projectedPage.map(item => item.id)],
+                  );
+            const inserted = new Set(existing.map(row => row.symbol_id));
+            let projected = projectedPage.filter(item => !inserted.has(item.id));
+            // A step consumes at most one inference batch. Cursor advances only over its raw prefix.
+            const reusable = progress.reusable_generation
+              ? yield* loadReusableVectors(sql, progress.reusable_generation, projected, selected.manifest.dimensions!)
+              : new Map<string, Uint8Array>();
+            // A background step may stop within a structural page; its cursor covers only that prefix.
+            const missingIds = new Set(projected.filter(item => !reusable.has(item.id)).map(item => item.id));
+            let missingCount = 0;
+            let consumed = rawPage.length;
+            const seen = new Set<string>();
+            for (const [index, item] of rawPage.entries()) {
+              if (missingIds.has(item.id) && !seen.has(item.id)) {
+                if (missingCount === stepInferenceLimit) {
+                  consumed = index;
+                  break;
+                }
+                missingCount += 1;
+                seen.add(item.id);
+              }
+            }
+            const truncated = consumed < rawPage.length;
+            rawPage = rawPage.slice(0, consumed);
+            if (truncated) {
+              projectedPage = selectGraphEmbeddingSymbols(rawPage).map(projectSymbol);
+              projected = projectedPage.filter(item => !inserted.has(item.id));
+            }
+            const rows: Array<readonly [string, string, string, Uint8Array]> = [];
+            const missing: ProjectedSymbol[] = [];
+            for (const item of projected) {
+              const vector = reusable.get(item.id);
+              if (vector) rows.push([generation, item.id, item.fingerprint, vector]);
+              else missing.push(item);
+            }
+            // Persist a whole bounded page; inference requests remain bounded and carry no file lock.
+            let embedded = 0;
+            for (let offset = 0; offset < missing.length; offset += inferenceBatchSize) {
+              yield* validate;
+              const batch = missing.slice(offset, offset + inferenceBatchSize);
+              const vectors = yield* withExclusiveFileLock(
+                input.fs,
+                `${writeLockPath}.inference`,
+                CODE_GRAPH_VECTOR_WRITE_LOCK_OPTIONS,
+                Effect.gen(function* () {
+                  yield* validate;
+                  yield* protect(1, 4096, lock(renewCodeGraphGenerationClaim(sql, generation, ownerToken)));
+                  return yield* input.runtime.embedMany({
+                    embeddingContextPoolSize: input.embeddingContextPoolSize ?? CODE_GRAPH_EMBEDDING_CONTEXT_CAP,
+                    inputs: batch.map(item => `${selected.manifest.promptPrefixes?.document ?? ''}${item.text}`),
+                    manifest: selected.manifest,
+                    modelPath: selected.modelPath,
+                  });
+                }),
+              );
+              yield* validate;
+              if (vectors.length !== batch.length)
+                return yield* CodeGraphEmbeddingError.make({message: 'Embedding model returned an incomplete batch.'});
+              for (const [index, item] of batch.entries())
+                rows.push([
+                  generation,
+                  item.id,
+                  item.fingerprint,
+                  encodeVector(normalizeVector(vectors[index]), selected.manifest.dimensions!),
+                ]);
+              embedded += batch.length;
+            }
+            yield* validate;
+            const last = rawPage.at(-1)!;
+            const nextCursor = JSON.stringify({id: last.id, path: last.path, qualifiedName: last.qualifiedName});
+            progress = yield* protect(
+              rows.length + 1,
+              rows.reduce((sum, row) => sum + row[3].byteLength + row[1].length + row[2].length + 256, 4096),
+              lock(
+                commitCodeGraphGenerationStep(sql, {
+                  generation,
+                  ownerToken,
+                  expectedCursor: progress.cursor,
+                  expectedOffset: progress.array_offset,
+                  nextCursor,
+                  nextOffset: progress.array_offset + rawPage.length,
+                  embedded,
+                  reused: rows.length - embedded,
+                  rows,
+                }),
+              ),
+            );
+            yield* input.onProgress?.({
+              completed: progress.embedded + progress.reused,
+              embedded: progress.embedded,
+              reused: progress.reused,
+              phase: 'embedding',
+              total,
+              unit: 'symbols',
+            }) ?? Effect.void;
+            steps += 1;
+            if (!truncated && rawPage.length < VECTOR_PAGE_SIZE) break;
+            if (steps >= maximumSteps)
+              return {
+                embedded: progress.embedded,
+                reused: progress.reused,
+                generation,
+                ownerToken,
+                modelId: selected.manifest.id,
+                ready: false,
+                state: 'checkpointed' as const,
+                reason: 'Code graph vector generation checkpointed.',
+              };
+          }
+          yield* protect(2, 4096, lock(completeCodeGraphGeneration(sql, generation, ownerToken, total)));
+          preservePublicationClaim = true;
+        }
+        // Completion retains ownership until the independent publication fence has committed.
+        const commit = sql.withTransaction(
+          Effect.gen(function* () {
+            yield* validate;
+            yield* requireCodeGraphGenerationClaim(sql, generation, ownerToken);
+            const ready = yield* sql.unsafe(
+              "SELECT 1 FROM vector_generations WHERE generation = ? AND state = 'ready'",
+              [generation],
+            );
+            if (ready.length !== 1)
+              return yield* CodeGraphEmbeddingError.make({message: 'Code graph generation is not complete.'});
+            yield* sql.unsafe(
+              'UPDATE vector_generation_progress SET reusable_generation = NULL WHERE generation = ? AND owner_token = ?',
+              [generation, ownerToken],
+            );
+            yield* activateVectorGeneration(sql, worktreeId, generation);
+            yield* sql.unsafe('DELETE FROM vector_generation_progress WHERE generation = ? AND owner_token = ?', [
+              generation,
+              ownerToken,
+            ]);
+            yield* validate;
+          }),
+        );
+        yield* protect(
+          2,
+          4096,
+          input.publication
+            ? input.publication.attach(commit.pipe(Effect.provideService(SqlClient.SqlClient, sql)))
+            : lock(commit),
+        );
+        yield* removeLegacyVectorSidecars(input.fs, input.path, root);
         return {
-          embedded: built.embedded,
+          embedded: initialGeneration.state === 'ready' ? 0 : progress.embedded,
+          reused: initialGeneration.state === 'ready' ? initialGeneration.count : progress.reused,
           modelId: selected.manifest.id,
           ready: true,
-          reused: built.reused,
         };
-      }),
-    ),
-  );
-  yield* removeLegacyVectorSidecars(input.fs, input.path, root);
-  return status;
-});
-
-const buildVectorGeneration = Effect.fn('codeGraph.buildVectorGeneration')(function* (input: {
-  readonly generation: string;
-  readonly onProgress?: (progress: CodeGraphProgress) => Effect.Effect<void, unknown>;
-  readonly reusableGeneration?: string;
-  readonly runtime: LocalModelRuntimeShape;
-  readonly selected: {
-    readonly manifest: LocalModelManifest;
-    readonly modelPath: string;
-  };
-  readonly snapshot: CodeGraphSnapshot;
-  readonly source: CodeGraphEmbeddingSymbolSource;
-  readonly sql: SqlClient.SqlClient;
-}) {
-  const dimensions = input.selected.manifest.dimensions!;
-  const total = yield* embeddingSymbolCount(input.source);
-  let embedded = 0;
-  let reused = 0;
-  let cursor: CodeGraphSymbolCursor | undefined;
-  let arrayOffset = 0;
-  yield* input.onProgress?.({
-    completed: embedded + reused,
-    embedded,
-    phase: 'embedding',
-    reused,
-    total,
-    unit: 'symbols',
-  }) ?? Effect.void;
-
-  for (;;) {
-    const rawPage = isSymbolPageSource(input.source)
-      ? yield* input.source.loadPage(cursor, VECTOR_PAGE_SIZE)
-      : input.source.slice(arrayOffset, arrayOffset + VECTOR_PAGE_SIZE);
-    if (rawPage.length === 0) break;
-    const projected = selectGraphEmbeddingSymbols(rawPage).map(projectSymbol);
-    const fresh = yield* excludeAlreadyInserted(input.sql, input.generation, projected);
-    const reusable = input.reusableGeneration
-      ? yield* loadReusableVectors(input.sql, input.reusableGeneration, fresh, dimensions)
-      : new Map<string, Uint8Array>();
-    const rows: Array<readonly [string, string, string, Uint8Array]> = [];
-    const missing: ProjectedSymbol[] = [];
-    for (const item of fresh) {
-      const vector = reusable.get(item.id);
-      if (vector) {
-        rows.push([input.generation, item.id, item.fingerprint, vector]);
-        reused += 1;
-      } else {
-        missing.push(item);
-      }
-    }
-    yield* insertVectorRows(input.sql, rows);
-    yield* input.onProgress?.({
-      completed: embedded + reused,
-      embedded,
-      phase: 'embedding',
-      reused,
-      total,
-      unit: 'symbols',
-    }) ?? Effect.void;
-
-    for (let start = 0; start < missing.length; start += EMBED_BATCH_SIZE) {
-      const batch = missing.slice(start, start + EMBED_BATCH_SIZE);
-      const vectors = yield* input.runtime.embedMany({
-        embeddingContextPoolSize: CODE_GRAPH_EMBEDDING_CONTEXT_CAP,
-        inputs: batch.map(item => `${input.selected.manifest.promptPrefixes?.document ?? ''}${item.text}`),
-        manifest: input.selected.manifest,
-        modelPath: input.selected.modelPath,
-      });
-      const embeddedRows = batch.map(
-        (item, index) =>
-          [
-            input.generation,
-            item.id,
-            item.fingerprint,
-            encodeVector(normalizeVector(vectors[index]), dimensions),
-          ] as const,
+      }).pipe(
+        Effect.onExit(exit =>
+          Exit.isFailure(exit) && (terminalValidationFailure || !preservePublicationClaim || Exit.hasInterrupts(exit))
+            ? protect(1, 4096, lock(releaseCodeGraphGenerationClaim(sql, generation, ownerToken))).pipe(Effect.ignore)
+            : Effect.void,
+        ),
       );
-      yield* insertVectorRows(input.sql, embeddedRows);
-      embedded += batch.length;
-      yield* input.onProgress?.({
-        completed: embedded + reused,
-        embedded,
-        phase: 'embedding',
-        reused,
-        total,
-        unit: 'symbols',
-      }) ?? Effect.void;
-    }
-
-    if (isSymbolPageSource(input.source)) {
-      const last = rawPage.at(-1)!;
-      cursor = {id: last.id, path: last.path, qualifiedName: last.qualifiedName};
-    } else {
-      arrayOffset += rawPage.length;
-    }
-    if (rawPage.length < VECTOR_PAGE_SIZE) break;
-  }
-
-  const rows = yield* input.sql<{readonly count: number}>`
-    SELECT COUNT(*) AS count FROM vectors WHERE generation = ${input.generation}
-  `;
-  const count = Number(rows[0]?.count ?? 0);
-  yield* input.onProgress?.({
-    completed: count,
-    embedded,
-    phase: 'embedding',
-    reused,
-    total: count,
-    unit: 'symbols',
-  }) ?? Effect.void;
-  return {count, embedded, reused};
+    }),
+  );
 });
 
 const searchGraphVectors = Effect.fn('codeGraph.searchVectors')(function* (input: {
@@ -619,21 +759,6 @@ function projectSymbol(symbol: CodeGraphSymbol): ProjectedSymbol {
   };
 }
 
-const excludeAlreadyInserted = Effect.fn('codeGraph.excludeAlreadyInserted')(function* (
-  sql: SqlClient.SqlClient,
-  generation: string,
-  symbols: readonly ProjectedSymbol[],
-) {
-  if (symbols.length === 0) return symbols;
-  const rows = yield* sql.unsafe<{readonly symbol_id: string}>(
-    `SELECT symbol_id FROM vectors
-     WHERE generation = ? AND symbol_id IN (${symbols.map(() => '?').join(', ')})`,
-    [generation, ...symbols.map(symbol => symbol.id)],
-  );
-  const existing = new Set(rows.map(row => row.symbol_id));
-  return symbols.filter(symbol => !existing.has(symbol.id));
-});
-
 const loadReusableVectors = Effect.fn('codeGraph.loadReusableVectors')(function* (
   sql: SqlClient.SqlClient,
   generation: string,
@@ -655,19 +780,6 @@ const loadReusableVectors = Effect.fn('codeGraph.loadReusableVectors')(function*
   }
   return reusable;
 });
-
-function insertVectorRows(sql: SqlClient.SqlClient, rows: readonly (readonly [string, string, string, Uint8Array])[]) {
-  return Effect.gen(function* () {
-    for (let start = 0; start < rows.length; start += 100) {
-      const batch = rows.slice(start, start + 100);
-      yield* sql.unsafe(
-        `INSERT OR IGNORE INTO vectors (generation, symbol_id, fingerprint, vector)
-         VALUES ${batch.map(() => '(?, ?, ?, ?)').join(', ')}`,
-        batch.flat(),
-      );
-    }
-  });
-}
 
 function encodeVector(vector: readonly number[], dimensions: number): Uint8Array {
   if (vector.length !== dimensions) {
@@ -728,7 +840,7 @@ function mergeSearchResults(
 }
 
 function vectorDatabasePath(path: Path.Path, vectorRoot: string, modelId: string): string {
-  return path.join(vectorRoot, modelId, `vectors-v${CODE_GRAPH_VECTOR_DATABASE_VERSION}.sqlite`);
+  return path.join(vectorRoot, modelId, CODE_GRAPH_VECTOR_DATABASE_FILENAME);
 }
 
 function useVectorDatabase<A, E, R>(
@@ -752,6 +864,18 @@ const initializeVectorDatabase = Effect.fn('codeGraph.initializeVectorDatabase')
     yield* sql.unsafe('PRAGMA journal_mode = WAL');
     return;
   }
+  if (version === 2) {
+    yield* requireCodeGraphVectorRetirementSchema(sql);
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* initializeCodeGraphGenerationSchema(sql);
+        yield* sql.unsafe(`PRAGMA user_version = ${CODE_GRAPH_VECTOR_DATABASE_VERSION}`);
+        yield* requireVectorDatabaseReady(sql);
+      }),
+    );
+    yield* sql.unsafe('PRAGMA journal_mode = WAL');
+    return;
+  }
   if (version !== 0) {
     return yield* CodeGraphEmbeddingError.make({message: 'Code graph vector database version is unsupported.'});
   }
@@ -771,6 +895,7 @@ const initializeVectorDatabase = Effect.fn('codeGraph.initializeVectorDatabase')
       yield* sql.unsafe(CODE_GRAPH_VECTORS_TABLE_SQL);
       yield* sql.unsafe(CODE_GRAPH_VECTOR_REUSE_INDEX_SQL);
       yield* initializeCodeGraphVectorRetirementSchema(sql);
+      yield* initializeCodeGraphGenerationSchema(sql);
       yield* sql.unsafe(`PRAGMA user_version = ${CODE_GRAPH_VECTOR_DATABASE_VERSION}`);
     }),
   );
@@ -781,10 +906,11 @@ const requireVectorDatabaseReady = Effect.fn('codeGraph.requireVectorDatabaseRea
   sql: SqlClient.SqlClient,
 ) {
   const versions = yield* sql.unsafe<{readonly user_version: unknown}>('PRAGMA user_version');
-  if (versions.length !== 1 || versions[0]?.user_version !== CODE_GRAPH_VECTOR_DATABASE_VERSION) {
+  if (versions.length !== 1 || ![2, CODE_GRAPH_VECTOR_DATABASE_VERSION].includes(Number(versions[0]?.user_version))) {
     return yield* CodeGraphEmbeddingError.make({message: 'Code graph vector database version is unsupported.'});
   }
   yield* requireCodeGraphVectorRetirementSchema(sql);
+  if (versions[0]?.user_version === CODE_GRAPH_VECTOR_DATABASE_VERSION) yield* requireCodeGraphGenerationSchema(sql);
 });
 
 const selectActiveGeneration = Effect.fn('codeGraph.selectActiveVectorGeneration')(function* (

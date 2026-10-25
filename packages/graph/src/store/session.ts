@@ -53,12 +53,15 @@ export function withCodeGraphDeferredTransaction<A, E, R>(sql: SqlClient.SqlClie
 export const withCodeGraphReadTransaction = <A, E, R>(
   store: Pick<CodeGraphStoreShape, 'withSession'>,
   databasePath: string,
-  read: Effect.Effect<A, E, R>,
+  read: Effect.Effect<A, E, R | SqlClient.SqlClient>,
 ) =>
   Effect.gen(function* () {
     const session = yield* Effect.serviceOption(CodeGraphDatabaseSession);
     if (Option.isSome(session) && session.value.databasePath === databasePath) {
-      return yield* withDeferredReadTransaction(session.value.sql, read);
+      return yield* withDeferredReadTransaction(
+        session.value.sql,
+        read.pipe(Effect.provideService(SqlClient.SqlClient, session.value.sql)),
+      );
     }
     return yield* store.withSession(
       databasePath,
