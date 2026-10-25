@@ -7,6 +7,7 @@ import {BunFileSystem} from '@effect/platform-bun';
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -132,7 +133,8 @@ describe('SystemInfo structural path adapter', () => {
             yield* fs.writeFileString(target, 'threadnote');
             const info = yield* fs.stat(target);
             const withoutInode = {...info, ino: Option.none<number>()};
-            const expected = {dev: BigInt(info.dev), ino: BigInt(Option.getOrThrow(info.ino))};
+            const exact = yield* Effect.sync(() => lstatSync(target, {bigint: true}));
+            const expected = {dev: exact.dev, ino: exact.ino};
 
             expect(yield* readPathFileSystemIdentity(target, withoutInode, 'File')).toEqual(Option.some(expected));
             yield* Effect.acquireUseRelease(
