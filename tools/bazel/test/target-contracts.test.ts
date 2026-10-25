@@ -1,4 +1,5 @@
 import {describe, expect, it} from 'vitest';
+import fc from 'fast-check';
 import {ciRequiredLongRunningTestGroupNames} from '../../ci/vitest-plan.js';
 import {selectTargets} from '../../ci/selection.mjs';
 import {createVitestConfig} from '../../../vitest.config.js';
@@ -412,10 +413,11 @@ describe('generated Bazel test contracts', () => {
 
   it('keeps lifecycle partitions distinct and preserves long-group timeouts and serialization', () => {
     const examples = {
-      'lifecycle-alpha': 'native code graph lifecycle aliases a checkout',
-      'lifecycle-beta': 'native code graph lifecycle fails closed',
-      'lifecycle-gamma': 'native code graph lifecycle preserves a snapshot',
-      'lifecycle-delta': 'native code graph lifecycle reconciles an unknown verb',
+      'lifecycle-alpha': 'native code graph lifecycle > aliases a checkout',
+      'lifecycle-beta': 'native code graph lifecycle > fails closed',
+      'lifecycle-gamma':
+        'native code graph lifecycle > keeps status read-only and converges disposable incomplete graph state',
+      'lifecycle-delta': 'native code graph lifecycle > reconciles an unknown verb',
     } as const;
 
     for (const [group, title] of Object.entries(examples)) {
@@ -431,5 +433,32 @@ describe('generated Bazel test contracts', () => {
     const serialized = createVitestConfig('heavy-state');
     expect(serialized.test).toMatchObject({fileParallelism: false, maxWorkers: 1, testTimeout: 180_000});
     expect(createVitestConfig('load-evidence').test?.testTimeout).toBe(600_000);
+  });
+
+  it('assigns runtime lifecycle names to their intended group for arbitrary test suffixes', () => {
+    const cases = [
+      {group: 'lifecycle-alpha', title: 'aliases a checkout'},
+      {group: 'lifecycle-beta', title: 'fails closed'},
+      {group: 'lifecycle-beta', title: 'full materialization fallback > fails closed'},
+      {group: 'lifecycle-gamma', title: 'keeps a ready snapshot'},
+      {group: 'lifecycle-delta', title: 'reconciles an unknown verb'},
+    ];
+    const groups = ['lifecycle-alpha', 'lifecycle-beta', 'lifecycle-gamma', 'lifecycle-delta'];
+    const patterns = groups.map(group => {
+      const pattern = createVitestConfig(group).test?.testNamePattern;
+      if (!(pattern instanceof RegExp)) throw new Error(`Missing lifecycle pattern for ${group}`);
+      return {group, pattern};
+    });
+    const suffix = fc
+      .array(fc.integer({min: 32, max: 126}), {maxLength: 48})
+      .map(characters => String.fromCharCode(...characters));
+    fc.assert(
+      fc.property(fc.constantFrom(...cases), suffix, (example, tail) => {
+        const name = `native code graph lifecycle > ${example.title} ${tail}`;
+        const selected = patterns.filter(({pattern}) => pattern.test(name)).map(({group}) => group);
+        expect(selected).toEqual([example.group]);
+      }),
+      {numRuns: 40},
+    );
   });
 });
