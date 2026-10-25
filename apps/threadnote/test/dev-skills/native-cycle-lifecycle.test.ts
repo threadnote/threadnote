@@ -2,18 +2,61 @@ import {Effect, FileSystem, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {sha256HexSync} from '@threadnote/platform/sha256';
-import {captureNativeCycleSource} from '../../src/workflow_automation/cycle_git.js';
+import {captureNativeCycleSource as captureSource} from '../../src/workflow_automation/cycle_git.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
+import {CycleDiagnostics, cycleDiagnostics} from './native-cycle-diagnostics.js';
 
 const object = (value: unknown): Record<string, unknown> => {
   if (!value || typeof value !== 'object') throw new Error('Expected object response');
   return value as Record<string, unknown>;
 };
-const run = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect.pipe(TestClock.withLive, provideNative);
+const diagnosticOutputEnabled = process.env.THREADNOTE_NATIVE_CYCLE_DIAGNOSTICS === '1';
+const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    const diagnostics = cycleDiagnostics();
+    return Effect.gen(function* () {
+      const commands = yield* CommandExecutor;
+      return yield* effect.pipe(
+        Effect.provideService(CycleDiagnostics, diagnostics),
+        Effect.provideService(
+          CommandExecutor,
+          CommandExecutor.of({
+            ...commands,
+            execute: (executable, args, options) =>
+              diagnostics.command('execute', executable, args, commands.execute(executable, args, options)),
+            ...(commands.executeBytes
+              ? {
+                  executeBytes: (executable, args, options) =>
+                    diagnostics.command(
+                      'executeBytes',
+                      executable,
+                      args,
+                      commands.executeBytes!(executable, args, options),
+                    ),
+                }
+              : {}),
+          }),
+        ),
+      );
+    }).pipe(
+      TestClock.withLive,
+      provideNative,
+      Effect.onExit(exit =>
+        Effect.sync(() => {
+          if (exit._tag === 'Failure' || diagnosticOutputEnabled) diagnostics.report(exit._tag);
+        }),
+      ),
+    );
+  });
+const captureNativeCycleSource = (...args: Parameters<typeof captureSource>) =>
+  Effect.gen(function* () {
+    const diagnostics = yield* CycleDiagnostics;
+    return yield* diagnostics.action('source-capture', captureSource(...args));
+  });
 const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   phaseIds: readonly string[] = ['one', 'two'],
   delivery: 'pr' | 'local' = 'pr',
@@ -22,7 +65,16 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   stacked = true,
   initialBindings?: Record<string, {branch: string; baseBranch: string}>,
 ) {
-  const f = yield* nativeFixture();
+  const diagnostics = yield* CycleDiagnostics;
+  const original = yield* diagnostics.action('provisioning', nativeFixture());
+  const f = {
+    ...original,
+    init: (...args: Parameters<typeof original.init>) => diagnostics.action('init', original.init(...args)),
+    call: (input: unknown) => {
+      const request = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
+      return diagnostics.action(request.command ?? request.action, original.call(input));
+    },
+  };
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', f.repo, ...args]);
   yield* git(['config', 'user.email', 'fixture@example.invalid']);
   yield* git(['config', 'user.name', 'Private fixture']);

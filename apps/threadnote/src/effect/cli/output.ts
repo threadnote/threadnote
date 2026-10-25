@@ -131,6 +131,10 @@ export class CliOutput extends Context.Service<CliOutput, CliOutputShape>()(
   );
 }
 
+/** Apply outside runtime layers so their acquisition, background fibers and finalizers inherit stderr logging. */
+export const withCliDiagnostics = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(Effect.provideService(Logger.LogToStderr, true));
+
 /** Routes Effect Console output through the same awaited, backpressured sinks as final payloads. */
 export const withCliOutputConsole = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
@@ -139,7 +143,7 @@ export const withCliOutputConsole = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       effect.pipe(
         // Machine-readable commands own stdout. Effect diagnostics, including failures from inherited detached
         // fibers, must use stderr so a late log line cannot follow and invalidate the final JSON document.
-        Effect.provideService(Logger.LogToStderr, true),
+        withCliDiagnostics,
         Effect.provideService(Console.Console, {
           ...parent,
           debug: (...arguments_: readonly unknown[]) => output.enqueueOutput(formatConsoleArguments(arguments_)),

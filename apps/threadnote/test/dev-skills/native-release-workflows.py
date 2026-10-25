@@ -201,6 +201,57 @@ def _run_profile(fixture, binary, environment, generation, profile):
                     "checks": checks,
                 })
 
+        stage_receipts = []
+        pending_stage = None
+        for stage in raw_stages[:3] if isinstance(raw_stages, list) else []:
+            if not isinstance(stage, dict):
+                continue
+            state = progress.get(stage.get("key"), {}) if isinstance(progress, dict) else {}
+            state = state if isinstance(state, dict) else {}
+            stage_receipts.append({"key": str(stage.get("key", ""))[:96],
+                                   "started": state.get("started") is True,
+                                   "committed": isinstance(state.get("committed"), dict),
+                                   "verified": isinstance(state.get("verified"), dict)})
+            if pending_stage is None and state.get("started") is True and not state.get("verified"):
+                pending_stage = stage
+
+        # Probe only this disposable fixture; emit no paths, command text or file contents.
+        worktree_probe = None
+        if pending_stage is not None:
+            try:
+                teams = json.loads((home / "share/teams.json").read_text(encoding="utf-8"))
+                worktree = Path(teams["teams"]["default"]["worktree"])
+                prepared = pending_stage["prepared"]
+                relative = prepared["memoryUri"].split("/shared/default/", 1)[1]
+                target = worktree.joinpath(*relative.split("/"))
+                expected = prepared["memory"].encode("utf-8")
+
+                def probe_git(args):
+                    result = subprocess.run(["git", "-C", str(worktree), *args], env=environment,
+                                            capture_output=True, timeout=10)
+                    error = result.stderr.lower()
+                    failure = next((label for token, label in [
+                        (b"filename too long", "path-too-long"), (b"invalid path", "invalid-path"),
+                        (b"permission denied", "permission-denied"), (b"index.lock", "index-lock"),
+                    ] if token in error), None)
+                    return result, {"exit": result.returncode, "failure": failure}
+
+                worktree_probe = {"targetExists": target.is_file(), "targetPathBytes": len(str(target).encode("utf-8")),
+                                  "targetPathCharacters": len(str(target)),
+                                  "canonicalPathMatches": str(target.resolve()) == str(worktree.resolve().joinpath(*relative.split("/")))}
+                if target.is_file():
+                    content = target.read_bytes()
+                    worktree_probe["worktreeMatches"] = content == expected
+                for label, revision in [("head", "HEAD"), ("index", "")]:
+                    result, detail = probe_git(["show", revision + ":" + relative])
+                    worktree_probe[label] = {**detail, "matches": result.returncode == 0 and result.stdout == expected}
+                for label, option in [("longpaths", "core.longpaths"), ("autocrlf", "core.autocrlf")]:
+                    result, detail = probe_git(["config", "--get", option])
+                    value = result.stdout.strip().decode("ascii", errors="replace")
+                    worktree_probe[label] = {**detail, "value": value if value in ("true", "false", "input", "") else "other"}
+            except Exception:
+                worktree_probe = {"captureError": "worktree-probe-failed"}
+
         diagnostic = {
             "version": 1,
             "profile": profile,
@@ -208,6 +259,8 @@ def _run_profile(fixture, binary, environment, generation, profile):
             "captureError": capture_error,
             "closeoutCode": str(response.get("code", ""))[:80] if isinstance(response, dict) else None,
             "finalReceipts": final_receipts[:3],
+            "stageReceipts": stage_receipts,
+            "worktreeProbe": worktree_probe,
         }
         diagnostic_path = fixture / "finish-publication-diagnostic.json"
         diagnostic["localSnapshotSaved"] = False
