@@ -36,14 +36,28 @@ const applicationWorkspaces = new Map(
   }),
 );
 const sourceImportCache = new Map();
-const readSource = path => readFileSync(join(root, path), 'utf8');
+const sourceContentCache = new Map();
+const readSource = path => {
+  if (!sourceContentCache.has(path)) sourceContentCache.set(path, readFileSync(join(root, path), 'utf8'));
+  return sourceContentCache.get(path);
+};
 const applicationSourceImports = path => {
   if (!sourceImportCache.has(path)) sourceImportCache.set(path, sourceImports(path, readSource(path)));
   return sourceImportCache.get(path);
 };
+const sourceExistsCache = new Map();
 const applicationSourceExists = path => {
-  const absolute = join(root, path);
-  return existsSync(absolute) && statSync(absolute).isFile();
+  if (!sourceExistsCache.has(path)) {
+    const absolute = join(root, path);
+    sourceExistsCache.set(path, existsSync(absolute) && statSync(absolute).isFile());
+  }
+  return sourceExistsCache.get(path);
+};
+const sourcePathCandidatesCache = new Map();
+const applicationSourcePathCandidates = path => {
+  if (!sourcePathCandidatesCache.has(path))
+    sourcePathCandidatesCache.set(path, sourceRepositoryPathCandidates(path, readSource(path)));
+  return sourcePathCandidatesCache.get(path);
 };
 const longRunningTests = new Set(Object.values(ciLongRunningTestGroups).flat());
 const applicationTests = [...testFilesBelow('apps/threadnote/test')].sort();
@@ -196,7 +210,7 @@ const applicationTestSourceClosure = path => {
       )
         continue;
       scanned.add(source);
-      for (const candidate of sourceRepositoryPathCandidates(source, readSource(source))) {
+      for (const candidate of applicationSourcePathCandidates(source)) {
         if (!allowedRepositoryPath(candidate, applicationReferencedInputRoots)) continue;
         const candidates = [candidate];
         if (/\.[cm]?jsx?$/u.test(candidate)) candidates.push(candidate.replace(/\.[cm]?jsx?$/u, '.ts'));

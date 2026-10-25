@@ -14,8 +14,17 @@ const read = path => {
   if (!readCache.has(path)) readCache.set(path, readFileSync(join(root, path), 'utf8'));
   return readCache.get(path);
 };
-const exists = path => existsSync(join(root, path)) && statSync(join(root, path)).isFile();
-const isDirectory = path => existsSync(join(root, path)) && statSync(join(root, path)).isDirectory();
+// Generation reads a fixed input tree; its generated BUILD outputs are excluded.
+const statCache = new Map();
+const inputStat = path => {
+  if (!statCache.has(path)) {
+    const absolute = join(root, path);
+    statCache.set(path, existsSync(absolute) ? statSync(absolute) : undefined);
+  }
+  return statCache.get(path);
+};
+const exists = path => inputStat(path)?.isFile() ?? false;
+const isDirectory = path => inputStat(path)?.isDirectory() ?? false;
 const repositoryFiles = new Set(
   execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
     cwd: root,
@@ -24,14 +33,20 @@ const repositoryFiles = new Set(
     .split('\0')
     .filter(Boolean),
 );
+const directoryFilesCache = new Map();
 const filesBelow = directory => {
+  if (directoryFilesCache.has(directory)) return directoryFilesCache.get(directory);
   const absolute = join(root, directory);
-  if (!existsSync(absolute) || !statSync(absolute).isDirectory()) return [];
-  return readdirSync(absolute, {withFileTypes: true}).flatMap(entry => {
-    if (['.git', '.DS_Store', '.bazel-inputs', 'BUILD', 'BUILD.bazel', 'node_modules'].includes(entry.name)) return [];
-    const path = `${directory}/${entry.name}`;
-    return entry.isDirectory() ? filesBelow(path) : repositoryFiles.has(path) ? [path] : [];
-  });
+  const files = isDirectory(directory)
+    ? readdirSync(absolute, {withFileTypes: true}).flatMap(entry => {
+        if (['.git', '.DS_Store', '.bazel-inputs', 'BUILD', 'BUILD.bazel', 'node_modules'].includes(entry.name))
+          return [];
+        const path = `${directory}/${entry.name}`;
+        return entry.isDirectory() ? filesBelow(path) : repositoryFiles.has(path) ? [path] : [];
+      })
+    : [];
+  directoryFilesCache.set(directory, files);
+  return files;
 };
 const bazelPackagesBelow = directory => {
   const absolute = join(root, directory);

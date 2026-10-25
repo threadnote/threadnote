@@ -1,3 +1,4 @@
+import {cancelCodeGraphEmbeddingDemandSql} from '../../vector/demand.js';
 import {withCodeGraphLeaseTiming} from '../lease_timing.js';
 import {DateTime, Effect, Option, Schema} from 'effect';
 import * as SqlClient from 'effect/sql/SqlClient';
@@ -689,10 +690,16 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
           }),
         );
         for (;;) {
-          const plan = yield* useDatabase(databasePath, prepareSnapshotPromotionCapacity(identity, snapshotId));
+          const plan = yield* useDatabase(
+            databasePath,
+            prepareSnapshotPromotionCapacity(identity, snapshotId, options?.backgroundEmbeddingDemand === true),
+          );
           const transaction = withWriterGate(
             databasePath,
-            useDatabase(databasePath, promoteSnapshot(identity, snapshotId, plan)),
+            useDatabase(
+              databasePath,
+              promoteSnapshot(identity, snapshotId, plan, options?.backgroundEmbeddingDemand === true),
+            ),
             options?.waitTimeoutMilliseconds,
           );
           const attempted = yield* (
@@ -887,13 +894,24 @@ export function makeCodeGraphStoreLifecycleMethods(runtime: CodeGraphStoreRuntim
             } else {
               yield* initializeSchema(sql);
             }
-            return yield* removeActiveView(
-              sql,
-              worktreeId,
-              expectedSnapshotId,
-              options?.requireReconciliationSchema === true,
-              options?.cleanupEvidence,
-              options?.scopeId,
+            return yield* sql.withTransaction(
+              Effect.gen(function* () {
+                const result = yield* removeActiveView(
+                  sql,
+                  worktreeId,
+                  expectedSnapshotId,
+                  options?.requireReconciliationSchema === true,
+                  options?.cleanupEvidence,
+                  options?.scopeId,
+                );
+                if (result.state === 'removed' || result.state === 'already-removed')
+                  yield* cancelCodeGraphEmbeddingDemandSql(sql, {
+                    worktreeId,
+                    scopeId: options?.scopeId,
+                    snapshotId: expectedSnapshotId,
+                  });
+                return result;
+              }),
             );
           });
           const result = yield* options?.requireReconciliationSchema === true

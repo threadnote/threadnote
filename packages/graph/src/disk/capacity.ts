@@ -16,6 +16,7 @@ const SQLITE_WAL_HEADER_BYTES = 32;
 const SQLITE_WAL_FRAME_HEADER_BYTES = 24;
 
 export type CodeGraphDirectPersistentCapacityOperation =
+  | 'write code graph embedding demand'
   | 'write code graph vector generation'
   | 'admit code graph vector retirement'
   | 'apply persistent code graph materialization spool'
@@ -45,6 +46,7 @@ export type CodeGraphDirectPersistentCapacityOperation =
   | 'stage temporary code graph workspace';
 
 export const CODE_GRAPH_DIRECT_PERSISTENT_CAPACITY_OPERATIONS = [
+  'write code graph embedding demand',
   'write code graph vector generation',
   'admit code graph vector retirement',
   'cache code graph file facts',
@@ -166,6 +168,14 @@ export const CODE_GRAPH_SPOOL_SORT_CAPACITY_CALIBRATION = {
  * a calibration for normalized lexical facts.
  */
 /** Conservative metadata/payload envelope, independently identified from cleanup writes. */
+export const CODE_GRAPH_EMBEDDING_DEMAND_CAPACITY_CALIBRATION = {
+  identityBase: `graph-v3:embedding-demand-r1:capacity-v${CODE_GRAPH_DISK_CAPACITY_MODEL_VERSION}`,
+  mainFactAmplification: 8,
+  mainRowBytes: 1_024,
+  transientFactAmplification: 8,
+  transientRowBytes: 1_024,
+} as const;
+
 export const CODE_GRAPH_VECTOR_GENERATION_CAPACITY_CALIBRATION = {
   identityBase: `vector-v3:generation-r1:capacity-v${CODE_GRAPH_DISK_CAPACITY_MODEL_VERSION}`,
   mainFactAmplification: 8,
@@ -391,19 +401,21 @@ export function codeGraphVectorRetirementCapacityDemand(
   input: CodeGraphDirectPersistentCapacityDemandInput,
 ): CodeGraphDiskCapacityDemand {
   const calibration =
-    input.operation === 'write code graph vector generation'
-      ? CODE_GRAPH_VECTOR_GENERATION_CAPACITY_CALIBRATION
-      : input.operation === 'prepare code graph vector retirement schema'
-        ? CODE_GRAPH_VECTOR_RETIREMENT_SCHEMA_CAPACITY_CALIBRATION
-        : input.operation === 'retire code graph vector generation'
-          ? CODE_GRAPH_VECTOR_RETIREMENT_PAGE_CAPACITY_CALIBRATION
-          : input.operation === 'admit code graph vector retirement'
-            ? CODE_GRAPH_VECTOR_RETIREMENT_ADMISSION_CAPACITY_CALIBRATION
-            : input.operation === 'maintain code graph vector retirement'
-              ? CODE_GRAPH_VECTOR_RETIREMENT_ORDINARY_UNIT_CAPACITY_CALIBRATION
-              : input.operation === 'retire code graph vector pointer'
-                ? CODE_GRAPH_VECTOR_RETIREMENT_POINTER_CAPACITY_CALIBRATION
-                : undefined;
+    input.operation === 'write code graph embedding demand'
+      ? CODE_GRAPH_EMBEDDING_DEMAND_CAPACITY_CALIBRATION
+      : input.operation === 'write code graph vector generation'
+        ? CODE_GRAPH_VECTOR_GENERATION_CAPACITY_CALIBRATION
+        : input.operation === 'prepare code graph vector retirement schema'
+          ? CODE_GRAPH_VECTOR_RETIREMENT_SCHEMA_CAPACITY_CALIBRATION
+          : input.operation === 'retire code graph vector generation'
+            ? CODE_GRAPH_VECTOR_RETIREMENT_PAGE_CAPACITY_CALIBRATION
+            : input.operation === 'admit code graph vector retirement'
+              ? CODE_GRAPH_VECTOR_RETIREMENT_ADMISSION_CAPACITY_CALIBRATION
+              : input.operation === 'maintain code graph vector retirement'
+                ? CODE_GRAPH_VECTOR_RETIREMENT_ORDINARY_UNIT_CAPACITY_CALIBRATION
+                : input.operation === 'retire code graph vector pointer'
+                  ? CODE_GRAPH_VECTOR_RETIREMENT_POINTER_CAPACITY_CALIBRATION
+                  : undefined;
   return calibration === undefined
     ? {
         calibrationIdentity: 'vector-v2:retirement-r1:operation-unknown',
@@ -419,6 +431,7 @@ function codeGraphPersistentCapacityDemandForCalibration(
     | typeof CODE_GRAPH_DIRECT_PERSISTENT_CAPACITY_CALIBRATION
     | typeof CODE_GRAPH_CACHE_PERSISTENT_CAPACITY_CALIBRATION
     | typeof CODE_GRAPH_SPOOL_SORT_CAPACITY_CALIBRATION
+    | typeof CODE_GRAPH_EMBEDDING_DEMAND_CAPACITY_CALIBRATION
     | typeof CODE_GRAPH_VECTOR_GENERATION_CAPACITY_CALIBRATION
     | typeof CODE_GRAPH_VECTOR_RETIREMENT_ADMISSION_CAPACITY_CALIBRATION
     | typeof CODE_GRAPH_VECTOR_RETIREMENT_ORDINARY_UNIT_CAPACITY_CALIBRATION
@@ -750,6 +763,7 @@ function capacityOperation(operation: string): CodeGraphCapacityFailureOperation
     case 'cache code graph file facts':
     case 'cache materialized code graph file shards':
     case 'maintain code graph vector retirement':
+    case 'write code graph embedding demand':
     case 'write code graph vector generation':
     case 'prepare code graph vector retirement schema':
     case 'publish persistent code graph snapshot':

@@ -7,6 +7,7 @@ import {describe, expect} from 'vitest';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {CODE_GRAPH_FULL_REPOSITORY_SCOPE_KEY, type ResolvedCodeGraphIndexScope} from '@threadnote/graph/index_scope';
+import {CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT} from '@threadnote/graph/store/schema/revision';
 import {initializeSchema} from '@threadnote/graph/store/schema/initialization';
 import {selectActiveViewFence} from '@threadnote/graph/store/active_views';
 import {legacyCodeGraphAuthorityStatements} from '@threadnote/graph/test/helpers/code-graph-legacy-authority';
@@ -82,12 +83,13 @@ describe('composite code graph scope authority', () => {
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* initializeSchema(sql);
-      yield* sql`UPDATE schema_metadata SET value = '19' WHERE key = 'persistent_extension_schema_revision'`;
+      const futureRevision = String(CODE_GRAPH_PERSISTENT_SCHEMA_CURRENT.value + 1);
+      yield* sql`UPDATE schema_metadata SET value = ${futureRevision} WHERE key = 'persistent_extension_schema_revision'`;
       const before = yield* sql`SELECT name, sql FROM sqlite_master ORDER BY name`;
       expect((yield* initializeSchema(sql).pipe(Effect.exit))._tag).toBe('Failure');
       expect(yield* sql`SELECT name, sql FROM sqlite_master ORDER BY name`).toEqual(before);
       expect(yield* sql`SELECT value FROM schema_metadata WHERE key = 'persistent_extension_schema_revision'`).toEqual([
-        {value: '19'},
+        {value: futureRevision},
       ]);
     }).pipe(provideTestLayer(SqliteClient.layer({filename: ':memory:', disableWAL: true}))),
   );
