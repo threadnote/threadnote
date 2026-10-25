@@ -2,13 +2,14 @@ import {it} from '@effect/vitest';
 import {Effect, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
-import {runCommandEffect} from '@threadnote/platform/command';
+import {CommandExecutor, isGitExecutable, runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {decodeNativeCloseoutProposal} from '@threadnote/workflow-automations/closeout';
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
 import {provideNative} from './native-automation-fixture.js';
+import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 
 type Fixture = Effect.Success<ReturnType<typeof nativeCloseoutFixture>>;
 const decode = Schema.decodeUnknownEffect;
@@ -196,6 +197,81 @@ describe('verified personal cloud closeout', () => {
       {timeout: 60_000},
     );
   }
+  it.effect(
+    'retains drafts after a committed readback mismatch and retries the approved graph without duplicate commits',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeCloseoutFixture(true, 'codex-cloud-personal');
+        const loaded = yield* f.load();
+        const {projected} = yield* prepare(f);
+        yield* approve(f, projected.publication.approvalDigest);
+        const commands = yield* CommandExecutor;
+        const worktree = f.path.join(f.root, 'shared');
+        let mismatched = false;
+        const interrupted = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) =>
+            commands.execute(executable, args, options).pipe(
+              Effect.map(result => {
+                if (
+                  !mismatched &&
+                  isGitExecutable(executable) &&
+                  args[0] === '-C' &&
+                  args[1] === worktree &&
+                  args[2] === 'show' &&
+                  /^[a-f0-9]{40}(?:[a-f0-9]{24})?:/u.test(args[3] ?? '')
+                ) {
+                  mismatched = true;
+                  return {...result, stdout: f.root + projected.publication.nodes[0].body};
+                }
+                return result;
+              }),
+            ),
+        });
+        const rejected = yield* f
+          .closeout('finish')
+          .pipe(Effect.provideService(CommandExecutor, interrupted), Effect.result);
+        expect(mismatched).toBe(true);
+        expect(rejected).toMatchObject({_tag: 'Failure', failure: {code: 'publication-incomplete'}});
+        if (Result.isFailure(rejected)) {
+          expect(rejected.failure.message).toContain('stage architecture:create:');
+          expect(rejected.failure.message).toContain('[commit-content-changed]');
+          expect(rejected.failure.message).not.toContain(f.root);
+          expect(rejected.failure.message).not.toContain(projected.publication.nodes[0].body);
+          expect(rejected.failure.message).not.toContain('Shared publication commit content changed.');
+        }
+        // The actual commit exists locally, before receipt persistence or push.
+        expect((yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout.trim()).toBe(
+          '2',
+        );
+        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('1');
+        yield* active(f, loaded.owned);
+        const state = yield* readNativeWorkflowState(f.config, f.controllerRunId);
+        if (!state) throw new Error('Missing native closeout binding.');
+        const publication = yield* decode(
+          Schema.Struct({approvalDigest: Schema.String, decision: Schema.Literal('approve')}),
+        )(
+          JSON.parse(
+            yield* f.fs.readFileString(
+              f.path.join(f.home, 'workflow-memory', `${state.state.bindingId}.publication.json`),
+            ),
+          ),
+        );
+        expect(publication.approvalDigest).toBe(projected.publication.approvalDigest);
+        expect(publication.decision).toBe('approve');
+        expect((yield* decode(summary)(yield* f.closeout('finish'))).closeout.state).toBe('complete');
+        yield* readRemote(f, projected);
+        yield* verifyRetirement(f, loaded.owned);
+        expect((yield* git(f, ['rev-list', '--count', 'main'])).stdout.trim()).toBe('4');
+        expect((yield* runCommandEffect('git', ['-C', worktree, 'rev-list', '--count', 'HEAD'])).stdout.trim()).toBe(
+          '4',
+        );
+        const head = (yield* git(f, ['rev-parse', 'main'])).stdout;
+        yield* f.closeout('finish');
+        expect((yield* git(f, ['rev-parse', 'main'])).stdout).toBe(head);
+      }).pipe(TestClock.withLive, provideNative),
+    {timeout: 60_000},
+  );
   it.effect(
     'retains drafts after private push rejection and retries the same approved graph without duplicates',
     () =>

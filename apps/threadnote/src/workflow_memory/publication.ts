@@ -44,6 +44,7 @@ import {
   assertPublicationText,
   normalizePublicationNodes,
   publicationDigest,
+  PublicationWriterReasonSchema,
   publicationPreview,
   WorkflowPublicationRequestSchema,
   type PublicationIntent,
@@ -82,6 +83,14 @@ const nativeWriterErrorCodes = new Set([
   'ECONNRESET',
   'EPERM',
 ]);
+// Only fixed share/git.ts diagnostics may cross this privacy boundary.
+const pendingWriterReason = (text: string | undefined): typeof PublicationWriterReasonSchema.Type | undefined => {
+  if (text === 'Shared publication commit content changed.') return 'commit-content-changed';
+  if (text?.startsWith('Shared commit readback failed:')) return 'commit-readback-failed';
+  if (text?.startsWith('Shared publication verification failed:')) return 'git-verification-failed';
+  if (text?.startsWith('git commit failed:')) return 'git-commit-failed';
+  return undefined;
+};
 const pendingWriterCause = (result: {
   readonly isError?: boolean;
   readonly content?: readonly {readonly type: string; readonly text?: string}[];
@@ -91,10 +100,15 @@ const pendingWriterCause = (result: {
     ?.filter(item => item.type === 'text')
     .flatMap(item => item.text?.match(/\bE[A-Z0-9]{2,12}\b/gu) ?? [])
     .find(code => nativeWriterErrorCodes.has(code));
+  const reason = result.content
+    ?.filter(item => item.type === 'text')
+    .map(item => pendingWriterReason(item.text))
+    .find(value => value !== undefined);
   return {
     kind: 'shared-writer-error' as const,
     errorType: diagnostic?.errorType ?? 'UnknownError',
     ...(boundedErrorCode ? {nativeCode: boundedErrorCode} : {}),
+    ...(reason ? {reason} : {}),
   };
 };
 
@@ -627,7 +641,7 @@ export const runWorkflowPublication = Effect.fn('workflowPublication.run')(funct
         committed: journal.progress[stage.key]?.committed,
         cause,
         message: writerCause
-          ? `The shared writer returned ${writerCause.errorType}${writerCause.nativeCode ? ` (${writerCause.nativeCode})` : ''}.`
+          ? `The shared writer returned ${writerCause.errorType}${writerCause.nativeCode ? ` (${writerCause.nativeCode})` : ''}${writerCause.reason ? ` [${writerCause.reason}]` : ''}.`
           : 'The shared writer returned no publication receipt.',
       };
     }

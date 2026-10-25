@@ -12,6 +12,7 @@ import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journ
 import {assertWorkflowPublicationVerified, CurrentWorkflowArchivePublication} from '../workflow_memory/publication.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {PublicationWriterReasonSchema} from '../workflow_memory/publication_contract.js';
 import {CurrentNativeCloseoutSave, readNativeWorkflowState} from './store.js';
 import {reserveNativeCloseoutCapacity, clearNativeCloseoutCapacity} from './closeout_capacity.js';
 import {captureNativeCycleSource} from './cycle_git.js';
@@ -539,7 +540,9 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
                 /^[A-Z][A-Z0-9]{1,11}$/u.test(cause.nativeCode)
                   ? ` (${cause.nativeCode})`
                   : '';
-              causeSummary = `the shared writer returned ${errorType}${nativeCode}`;
+              const reason =
+                'reason' in cause && Schema.is(PublicationWriterReasonSchema)(cause.reason) ? ` [${cause.reason}]` : '';
+              causeSummary = `the shared writer returned ${errorType}${nativeCode}${reason}`;
             }
             return yield* fail(
               'publication-incomplete',
