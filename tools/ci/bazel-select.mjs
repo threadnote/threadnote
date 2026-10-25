@@ -36,6 +36,9 @@ try {
 }
 // An invalid head is fatal; only baseline/hash failures may select the valid full head.
 const {inventory, generation} = await readPreparedInventory({root});
+// Preserve the exact prepared model alongside hashes after outputs leave Git.
+await Bun.write(join(output, 'inventory.json'), Bun.file(join(root, 'tools/bazel/targets.json')));
+await Bun.write(join(output, 'generation-receipt.json'), Bun.file(join(root, '.context/bazel-generated/receipt.json')));
 const prepareBaseline = async cwd => {
   if (await Bun.file(join(cwd, 'tools/bazel/prepare.mjs')).exists()) {
     await run([process.execPath, 'tools/bazel/prepare.mjs'], cwd);
@@ -46,6 +49,10 @@ const prepareBaseline = async cwd => {
     await run([process.execPath, 'tools/bazel/generate.mjs'], cwd);
   }
 };
+for (const name of ['base-inventory.json', 'base-generation-receipt.json']) {
+  const file = Bun.file(join(output, name));
+  if (await file.exists()) await file.delete();
+}
 let impacted = [];
 let failure;
 let baseInventory;
@@ -65,7 +72,11 @@ try {
   const diff = await bazelDiffPath(root);
   await run([process.execPath, 'install', '--frozen-lockfile', '--ignore-scripts'], directory);
   await prepareBaseline(directory);
-  baseInventory = await Bun.file(join(directory, 'tools/bazel/targets.json')).json();
+  const baseInventoryFile = Bun.file(join(directory, 'tools/bazel/targets.json'));
+  baseInventory = await baseInventoryFile.json();
+  await Bun.write(join(output, 'base-inventory.json'), baseInventoryFile);
+  const baseReceipt = Bun.file(join(directory, '.context/bazel-generated/receipt.json'));
+  if (await baseReceipt.exists()) await Bun.write(join(output, 'base-generation-receipt.json'), baseReceipt);
   for (const [name, cwd] of [
     ['base', directory],
     ['head', root],

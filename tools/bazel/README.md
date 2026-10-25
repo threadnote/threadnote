@@ -3,7 +3,6 @@
 The normal contributor entrypoints are:
 
 ```sh
-bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun run bazel:generate
 bun run bazel:check
 bun run bazel:affected
@@ -11,12 +10,32 @@ bun run bazel -- test //packages/graph:test
 ```
 
 These commands download the pinned tools when needed. Contributors and agents do
-not install Bazel, Bun toolchains, or bazel-diff globally. Generated BUILD files
-and `targets.json` must be regenerated rather than edited directly.
+not install Bazel, Bun toolchains, or bazel-diff globally. Graph-consuming wrapper
+commands, selection consumers, and repository checks prepare the checkout before
+reading its inventory or invoking Bazel. A fresh checkout works without generated
+files or website metadata already present.
 
-Prepare website metadata before generation or declaration checks, even for
-non-website changes: the inventory includes the website build's declared input.
-The metadata file is ignored by Git and absent in a fresh checkout.
+The root, app, and package `BUILD.bazel` files and the exact
+`tools/bazel/targets.json` inventory are ignored local outputs at their usual
+paths. Handwritten BUILD files under assets, config, infrastructure, tooling, and
+training remain tracked. Edit source, manifests, target specs, or shared rules;
+ordinary changes produce no expanded declaration Git diff.
+
+Use `bun run bazel:generate` to repair missing, stale, or corrupted generated
+outputs and to bootstrap before invoking raw pinned Bazel directly. Preparation
+runs the website metadata producer automatically and validates every target's
+declared data. The standalone producer remains available when metadata alone is
+needed:
+
+```sh
+bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
+```
+
+`bun run bazel:check` prepares and validates generated semantics, byte-stable
+regeneration, and target analysis. Direct `bun tools/bazel/generate.mjs --check`
+is verification-only: it requires existing prepared inputs and does not repair
+outputs. Checks compare against the authored model, without requiring a generated
+Git diff.
 
 Run the focused gate without installing Bazel globally:
 
@@ -130,9 +149,8 @@ each `bun_test` and `bun_action` retains its exact, generated `srcs` closure. Th
 export globs grant visibility only; they are not broad target dependencies.
 
 ```sh
-bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
-bun tools/bazel/generate.mjs
-bun tools/bazel/generate.mjs --check
+bun run bazel:generate
+bun run bazel:check
 bun tools/bazel/run.ts test //apps/website:test //apps/website:typecheck
 bun tools/bazel/run.ts build //apps/website:build
 ```
@@ -145,14 +163,17 @@ test suite has a package-owned target. Application tests are split into the
 ordinary suite, PostgreSQL integration, and the existing long-running groups.
 Telemetry infrastructure also has native `rules_go` targets.
 
-The `CI` workflow first checks generated declarations and computes base/head graph hashes with SHA-pinned
+The `CI` planner captures authored changes, prepares its head checkout, and computes base/head graph hashes with SHA-pinned
 [bazel-diff 49.1.0](https://github.com/Tinder/bazel-diff/releases/tag/v49.1.0), and
 then greedily balances executable targets across at most eight parallel Bazel
 jobs. Each job runs one Bazel test target at a time so target-internal Vitest
 workers do not compete with another test process. PostgreSQL tests share one service-enabled shard, which may also carry ordinary targets. Platform and evaluation jobs consume outputs from the
 same authoritative plan and run alongside the Bazel shards. Selector regression validation runs alongside them instead of delaying matrix fanout. The selector uses a disposable detached baseline
 worktree; the caller's checkout and HEAD are unchanged. Selection JSON and graph
-hashes, plus the exact shard plan, are retained as workflow artifacts.
+hashes, plus the exact shard plan, are retained as workflow artifacts. Validation
+checks generated declarations alongside the execution jobs. Selection and shard
+artifacts include head, source, and inventory generation fingerprints; each
+worker prepares its own checkout and rejects a mismatched generation.
 
 ```sh
 bun tools/ci/bazel-select.mjs --base origin/main
@@ -161,9 +182,10 @@ bun tools/ci/bazel-run-selected.mjs
 bun tools/bazel/verify-selection.mjs
 ```
 
-Missing baseline graphs, invalid diff output, unmapped changed paths, and tooling
-failures select every target. Both baseline and head ownership inventories
-participate, so deleted and renamed files remain recognized. Generated BUILD files
+Missing baseline graphs, invalid diff output, unmapped changed paths, and
+base/hash tooling failures select every valid head target. Invalid head
+preparation fails the planner before a success selection can be written. Both
+baseline and head ownership inventories participate, so deleted and renamed files remain recognized. Generated BUILD files
 and the inventory are accepted only after source-closure verification. Build-rule,
 toolchain, manifest, lockfile, and other unmodeled changes conservatively broaden
 selection. A new source file under a declared website source directory changes

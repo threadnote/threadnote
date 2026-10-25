@@ -14,10 +14,12 @@ nearest checked-in guidance remain authoritative.
 - Never hand-edit generated `BUILD.bazel` files or `tools/bazel/targets.json`.
   Change source, manifests, or `tools/bazel/target-specs.mjs`, then run
   `bun run bazel:generate`.
-- Before Bazel generation or repository checks, prepare website metadata with
-  `bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json`.
-  This ignored input is required even for non-website changes because generation
-  validates every target's declared data.
+- Generated root, app, and package `BUILD.bazel` files and `tools/bazel/targets.json`
+  are ignored local outputs. Supported Bazel wrappers, selection commands, and
+  repository checks prepare them and website metadata automatically, including
+  in a fresh checkout. Use `bun run bazel:generate` to repair missing or stale
+  outputs, and before invoking raw pinned Bazel directly. Handwritten resource,
+  infrastructure, and tooling BUILD files remain tracked.
 - Run `bun run check:repo` for repository contracts and use
   `bun run bazel -- test <label>` for the narrowest affected target. Use
   `bun run bazel:affected` to inspect the base/head selection before a pull

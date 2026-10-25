@@ -9,15 +9,16 @@ Bazel declarations, and run the repository contracts plus the narrowest affected
 test:
 
 ```bash
-bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
 bun run bazel:generate
 bun run check:repo
 bun run bazel -- test //packages/<owner>:test
 ```
 
-Prepare website metadata before generation or repository checks, including for
-non-website changes. Generation validates every target's declared data, and the
-ignored metadata file is absent in a fresh checkout.
+The supported Bazel wrapper and repository checks prepare ignored declarations,
+the exact inventory, and website metadata automatically, including in a fresh
+checkout. `bun run bazel:generate` explicitly repairs missing or stale outputs;
+run it before invoking raw pinned Bazel directly. Generation validates every
+target's declared data.
 
 Source-mode `manage` also requires the Manager browser bundle in `dist/manager`.
 Run `bun run build` from the repository root before starting Manager after a
@@ -100,12 +101,14 @@ those locations, while production typechecking and coverage exclude test code.
    imports and discovers referenced scripts, fixtures, assets, documentation,
    and executable entrypoints automatically. Add an explicit target-spec input
    only for a genuinely dynamic path that cannot be inferred.
-5. Add the manifest to `MODULE.bazel`, run `bun install`, prepare website metadata
-   as shown above, then run `bun run bazel:generate` and `bun run check:repo`.
+5. Add the manifest to `MODULE.bazel`, run `bun install`, then run
+   `bun run bazel:generate` and `bun run check:repo`.
 
-Generated `BUILD.bazel` files and `tools/bazel/targets.json` are reviewable build
-artifacts, not editing surfaces. Resource and infrastructure BUILD files are
-hand-written because those trees have non-TypeScript ownership and native rules.
+Generated root, app, and package `BUILD.bazel` files and
+`tools/bazel/targets.json` are ignored local build artifacts. Edit their authored
+sources and regenerate; ordinary source or test changes produce no generated Git
+diff. Handwritten BUILD files under assets, config, infrastructure, tooling, and
+training remain tracked because those trees own resource and native rules.
 
 ## Dependency boundaries
 
@@ -131,9 +134,9 @@ Each is a Bazel package or an explicit input to an app target. Moving release re
 
 See [the Bazel development guide](../tools/bazel/README.md) for pinned toolchain commands and target generation. Bazel hosts the Bun/Vitest runner, Go telemetry targets, website build, runtime build, formatting, lint, workspace checks, and typechecks. The dependency repository consumes `bun.lock`; no pnpm lockfile, paid Aspect service, or remote cache is required.
 
-`tools/bazel/target-specs.mjs` discovers every colocated test suite and declares its source and data closure. Generation emits checked-in BUILD files and `targets.json`. The package export helper uses package-local globs for visibility while test and action targets retain exact generated inputs for `bazel-diff`.
+`tools/bazel/target-specs.mjs` discovers every colocated test suite and declares its source and data closure. Generation emits ignored local BUILD files and the exact `targets.json` inventory. The package export helper uses package-local globs for visibility while test and action targets retain exact generated inputs for `bazel-diff`.
 
-Pull-request CI compares base and head target hashes with pinned open-source `bazel-diff`. A short planning job records the authoritative selection, then balances executable targets across at most eight parallel Bazel shards. Expensive selector regression checks run in a validation job alongside the shards instead of delaying fanout. The Threadnote application suite is generated into bounded feature groups from test filenames and their actual source and repository-input closures; adding a normal test requires no Bazel edit. Large feature families split into deterministic hash buckets, and `//apps/threadnote:test` remains the aggregate for focused contributor use. PostgreSQL tests stay in one service-enabled shard, which may also carry ordinary targets to keep the runner busy. Each shard runs one Bazel test target at a time, leaving target-internal Vitest workers free to use that runner without process-level oversubscription. Platform and quality jobs that require a particular GitHub runner are selected from the same Bazel inventory and start after planning, in parallel with those shards. Unknown inputs, absent baselines, or failed analysis fail safe by selecting the complete inventory. The stable aggregate check requires the planner, selector validation, every selected shard, and every selected platform lane. The previous path classifier and shadow workflow are removed.
+Pull-request CI compares base and head target hashes with pinned open-source `bazel-diff`. A short planning job records the authoritative selection, then balances executable targets across at most eight parallel Bazel shards. Expensive selector regression checks run in a validation job alongside the shards instead of delaying fanout. The Threadnote application suite is generated into bounded feature groups from test filenames and their actual source and repository-input closures; adding a normal test requires no Bazel edit. Large feature families split into deterministic hash buckets, and `//apps/threadnote:test` remains the aggregate for focused contributor use. PostgreSQL tests stay in one service-enabled shard, which may also carry ordinary targets to keep the runner busy. Each shard runs one Bazel test target at a time, leaving target-internal Vitest workers free to use that runner without process-level oversubscription. Platform and quality jobs that require a particular GitHub runner are selected from the same Bazel inventory and start after planning, in parallel with those shards. Unknown inputs, absent baselines, or failed base/hash analysis select the complete valid head inventory. Invalid head preparation fails the planner. Selection and shard artifacts carry generation fingerprints; workers reject a different head, source, or inventory. The stable aggregate check requires the planner, selector validation, every selected shard, and every selected platform lane. The previous path classifier and shadow workflow are removed.
 
 Website builds consume prepared metadata produced before the sandbox. Cached actions do not discover Git history or call release APIs. Article, release, performance, public, and prepared metadata are explicit website inputs. A website-only change selects website checks without selecting graph package tests; shared dependency changes select every dependent target.
 
@@ -159,8 +162,10 @@ measurements. Moving a capture behind `bazel test` requires a focused experiment
 that proves measurement parity.
 
 Preview selection with `bun run bazel:affected`. The command writes the exact
-selection, changed paths, fallback reason, base/head graph evidence, and shard plan under
+selection, generation fingerprints, changed paths, fallback reason, base/head graph evidence, and shard plan under
 `.context/bazel-selection/`, which is ignored by Git and suitable for attaching to
 a debugging handoff. Use `bun run bazel -- test <label>` for focused execution;
-`bun run bazel:check` validates generated declarations and target analysis without
-running every product test.
+`bun run bazel:check` prepares and validates generated declaration semantics,
+byte-stable regeneration, and target analysis without running every product test.
+It compares generated output with the current authored model, without requiring
+a generated Git diff.

@@ -29,7 +29,10 @@ export async function prepareBazelWorkspace() {
 export async function readPreparedInventory({expectedGeneration} = {}) {
   await prepareBazelWorkspace();
   if (expectedGeneration && JSON.stringify(expectedGeneration) !== JSON.stringify(generation)) throw new Error('generation drift');
-  return {generation, inventory: {targets: [{label:'//:test', kind:'test', inputs:[], entries:[], env:{}, weight:1}]}};
+  const inventory = {targets: [{label:'//:test', kind:'test', inputs:[], entries:[], env:{}, weight:1}]};
+  await Bun.write('tools/bazel/targets.json', JSON.stringify(inventory));
+  await Bun.write('.context/bazel-generated/receipt.json', JSON.stringify({version:2,...generation}));
+  return {generation, inventory};
 }
 `,
   );
@@ -155,10 +158,14 @@ it.each(['legacy', 'prepared'])(
       await Bun.write(
         join(root, 'tools/bazel/prepare.mjs'),
         `
-export async function prepareBazelWorkspace() { await Bun.write('tools/bazel/targets.json', '{}'); }
+const inventory = {targets:[{label:'//:test',kind:'test',inputs:['tools/bazel/prepare.mjs','tools/bazel/cli-tools.mjs'], entries:[],env:{}}]};
+export async function prepareBazelWorkspace() {
+  await Bun.write('tools/bazel/targets.json', JSON.stringify(inventory));
+  await Bun.write('.context/bazel-generated/receipt.json', JSON.stringify({version:2,...${JSON.stringify(generation)}}));
+}
 export async function readPreparedInventory() {
   await prepareBazelWorkspace();
-  return {generation:${JSON.stringify(generation)},inventory:{targets:[{label:'//:test',kind:'test',inputs:['tools/bazel/prepare.mjs','tools/bazel/cli-tools.mjs'], entries:[],env:{}}]}};
+  return {generation:${JSON.stringify(generation)},inventory};
 }`,
       );
       await Bun.write(
@@ -173,6 +180,8 @@ export async function readPreparedInventory() {
       // Executable mode is an OS capability required by the external diff subprocess.
       const chmod = Bun.spawn(['chmod', '+x', executable]);
       expect(await chmod.exited).toBe(0);
+      await Bun.write(join(root, '.context/bazel-selection/base-generation-receipt.json'), '{"stale":true}');
+      await Bun.write(join(root, '.context/bazel-selection/base-inventory.json'), '{"stale":true}');
       const result = await run(root, 'tools/ci/bazel-select.mjs', ['--base', revision], {
         EVENT_LOG: join(root, 'events'),
         DIFF_EXECUTABLE: executable,
@@ -186,6 +195,16 @@ export async function readPreparedInventory() {
       expect(selection.changedFiles).not.toContain('tools/bazel/targets.json');
       expect(selection.changedFiles).toContain('deleted.ts');
       expect(selection.generation).toEqual(generation);
+      for (const [archived, original] of [
+        ['inventory.json', 'tools/bazel/targets.json'],
+        ['generation-receipt.json', '.context/bazel-generated/receipt.json'],
+      ])
+        expect(await Bun.file(join(root, '.context/bazel-selection', archived)).text()).toBe(
+          await Bun.file(join(root, original)).text(),
+        );
+      const baseInventory = await Bun.file(join(root, '.context/bazel-selection/base-inventory.json')).json();
+      expect(baseInventory.targets[0].inputs).toContain('deleted.ts');
+      expect(await Bun.file(join(root, '.context/bazel-selection/base-generation-receipt.json')).exists()).toBe(false);
       expect(await git('rev-parse', 'HEAD')).toBe(revision);
     } finally {
       rmSync(root, {recursive: true, force: true});
