@@ -319,7 +319,7 @@ describe('collection provenance and process integrity regressions', () => {
         try { await owned.terminate(); } catch (error) { failure ??= error; }
         if (early && !failure) throw new Error('false successful capture');
         if (!early && (failure || !Buffer.concat(output).equals(bytes))) throw new Error('normal bytes changed');
-        console.log(early ? 'handled input failure' : 'exact bytes');
+        process.stdout.write((early ? 'handled input failure' : 'exact bytes') + '\\n');
       `;
       const result = await runCollectionProcess(
         process.execPath,
