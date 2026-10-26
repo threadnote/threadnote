@@ -105,6 +105,7 @@ import {
   runShareSync,
   runShareUnpublish,
 } from './share.js';
+import {makeShareReconcileCommand, runShareReconcile} from '../share/reconcile.js';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {maybeNotifyUpdate, maybeRunPostUpdateAfterRepair, runPostUpdate} from '../release/index.js';
 import {errorMessage} from '@threadnote/platform/errors';
@@ -1814,6 +1815,7 @@ const share = Command.make('share').pipe(
     shareInit,
     shareStatus,
     shareSync,
+    makeShareReconcileCommand((uri, options) => withRuntimeEffect(config => runShareReconcile(config, uri, options))),
     shareConflicts,
     shareConflict,
     sharePropose,
