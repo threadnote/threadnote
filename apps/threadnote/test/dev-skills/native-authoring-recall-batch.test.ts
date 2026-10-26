@@ -2,6 +2,10 @@ import {it} from '@effect/vitest';
 import {Cause, Context, Deferred, Effect, Fiber, Result, Schema} from 'effect';
 import {expect} from 'vitest';
 import {TestClock} from 'effect/testing';
+import {
+  CurrentResourceRecallInvalidationObserver,
+  consumeResourceRecallInvalidationReceipt,
+} from '@threadnote/store/resource/recall-invalidation';
 import {makeWorkflowRecallRefresh} from '../../src/workflow_memory/recall_refresh.js';
 
 const config = {
@@ -269,5 +273,97 @@ it.effect('does not impose a timeout on normal complete refresh or retry after i
     yield* TestClock.adjust('5 seconds');
     yield* Fiber.join(stopping);
     expect(attempts).toBe(2);
+  }),
+);
+
+it.effect('only reuses lexical markers after fully covered artifact and manifest verification', () =>
+  Effect.gen(function* () {
+    for (const variant of [
+      'covered',
+      'missing-manifest',
+      'failed-manifest',
+      'missing-verification',
+      'outer-failure',
+      'custom-store',
+      'wrong-scope',
+      'repeated-uri',
+    ]) {
+      const calls: {uris: readonly string[]; covered: boolean}[] = [];
+      const location = {home: config.agentContextHome, account: config.account, user: config.user};
+      const f = makeWorkflowRecallRefresh((_config, uris, receipt) =>
+        Effect.sync(() => {
+          calls.push({uris, covered: consumeResourceRecallInvalidationReceipt(receipt, location, uris)});
+        }),
+      );
+      const result = yield* f
+        .withBatch(
+          config,
+          Effect.gen(function* () {
+            const observer = yield* CurrentResourceRecallInvalidationObserver;
+            for (const [index, uri] of ['artifact', 'manifest'].entries()) {
+              yield* f.track(config, [uri]);
+              if (variant !== 'custom-store' && !(variant === 'missing-manifest' && uri === 'manifest')) {
+                for (const scope of [false, true])
+                  observer!.begin(
+                    {...location, ...(variant === 'wrong-scope' ? {account: 'other'} : {})},
+                    [uri],
+                    {previousGeneration: `generation-${index}`, currentGeneration: `generation-${index + 1}`},
+                    scope,
+                  )(!(variant === 'failed-manifest' && uri === 'manifest' && scope));
+              }
+              if (!(variant === 'missing-verification' && uri === 'artifact')) yield* f.verified(config, [uri]);
+            }
+            if (variant === 'repeated-uri') {
+              yield* f.track(config, ['artifact']);
+              yield* f.verified(config, ['artifact']);
+            }
+            if (variant === 'outer-failure') return yield* Effect.fail('native-state-commit-failed');
+          }),
+        )
+        .pipe(Effect.result);
+      expect(Result.isFailure(result)).toBe(variant === 'outer-failure');
+      expect(calls).toEqual([{uris: ['artifact', 'manifest'], covered: variant === 'covered'}]);
+    }
+  }),
+);
+
+it.effect('deduplicates aliases within a hook while counting repeated mutations across hooks', () =>
+  Effect.gen(function* () {
+    const location = {home: config.agentContextHome, account: config.account, user: config.user};
+    for (const [calls, transitions] of [
+      [1, 1],
+      [2, 1],
+      [2, 2],
+    ]) {
+      let covered = false;
+      const f = makeWorkflowRecallRefresh((_config, uris, receipt) =>
+        Effect.sync(() => {
+          expect(uris).toEqual(['root']);
+          covered = consumeResourceRecallInvalidationReceipt(receipt, location, uris);
+        }),
+      );
+      yield* f.withBatch(
+        config,
+        Effect.gen(function* () {
+          const observer = yield* CurrentResourceRecallInvalidationObserver;
+          for (let index = 0; index < calls; index++) {
+            yield* f.track(config, ['root', 'root']);
+            if (index < transitions)
+              for (const scope of [false, true])
+                observer!.begin(
+                  location,
+                  ['root'],
+                  {
+                    previousGeneration: `before-${index}`,
+                    currentGeneration: `after-${index}`,
+                  },
+                  scope,
+                )(true);
+            yield* f.refresh(config, ['root', 'root']);
+          }
+        }),
+      );
+      expect(covered).toBe(transitions === calls);
+    }
   }),
 );

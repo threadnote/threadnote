@@ -19,7 +19,11 @@ import {
   advanceCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
 } from './resource/mutation_generation.js';
-import {ResourceRecallInvalidation, type ResourceRecallInvalidationShape} from './resource/recall-invalidation.js';
+import {
+  CurrentResourceRecallInvalidationObserver,
+  ResourceRecallInvalidation,
+  type ResourceRecallInvalidationShape,
+} from './resource/recall-invalidation.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   canonicalResourceUri,
@@ -297,24 +301,54 @@ function createResourceStoreOperations(
     invalidatedUris: readonly string[],
     canonicalMutationGeneration: CanonicalMutationGenerationTransition,
   ) =>
-    Effect.forEach(
-      [false, true],
-      includeInactive =>
-        invalidateRecall(location, includeInactive, invalidatedUris, canonicalMutationGeneration).pipe(
-          Effect.retry(Schedule.recurs(2)),
-          Effect.catchCause(() => {
-            const event = {
-              account: location.account,
-              includeInactive,
-              invalidatedUriCount: invalidatedUris.length,
-            } satisfies ResourceRecallInvalidationFailureEvent;
-            return Effect.logWarning(
-              `Recall index per-URI invalidation failed after a canonical mutation attempt (${includeInactive ? 'with-inactive' : 'active'} scope); the durable canonical generation will force recovery on the next read.`,
-            ).pipe(Effect.andThen(layerOptions.onRecallInvalidationFailed?.(event) ?? Effect.void), Effect.ignoreCause);
+    Effect.gen(function* () {
+      // Read the request reference at operation time, before invalidator service
+      // provision. The prebuilt-store test proves propagation through the
+      // enclosing lock provision, even when the store predates the request.
+      const observer = yield* CurrentResourceRecallInvalidationObserver;
+      yield* Effect.forEach(
+        [false, true],
+        includeInactive =>
+          Effect.suspend(() => {
+            let complete: ((succeeded: boolean) => void) | undefined;
+            try {
+              complete = observer?.begin(location, invalidatedUris, canonicalMutationGeneration, includeInactive);
+            } catch {
+              // Observation is optional; bookkeeping must not change write semantics.
+            }
+            const acknowledge = (succeeded: boolean) =>
+              Effect.sync(() => {
+                try {
+                  complete?.(succeeded);
+                } catch {
+                  // Observation is optional; bookkeeping must not change write semantics.
+                }
+              });
+            return invalidateRecall(location, includeInactive, invalidatedUris, canonicalMutationGeneration).pipe(
+              Effect.retry(Schedule.recurs(2)),
+              Effect.tap(() => acknowledge(true)),
+              Effect.catchCause(() => {
+                const event = {
+                  account: location.account,
+                  includeInactive,
+                  invalidatedUriCount: invalidatedUris.length,
+                } satisfies ResourceRecallInvalidationFailureEvent;
+                return acknowledge(false).pipe(
+                  Effect.andThen(
+                    Effect.logWarning(
+                      `Recall index per-URI invalidation failed after a canonical mutation attempt (${includeInactive ? 'with-inactive' : 'active'} scope); the durable canonical generation will force recovery on the next read.`,
+                    ).pipe(
+                      Effect.andThen(layerOptions.onRecallInvalidationFailed?.(event) ?? Effect.void),
+                      Effect.ignoreCause,
+                    ),
+                  ),
+                );
+              }),
+            );
           }),
-        ),
-      {concurrency: 2, discard: true},
-    ).pipe(Effect.uninterruptible);
+        {concurrency: 2, discard: true},
+      );
+    }).pipe(Effect.uninterruptible);
   const withLock = <A, E, R>(location: ResourceStoreLocation, id: ResourceId, effect: Effect.Effect<A, E, R>) => {
     const lockPath = resourceAccountMutationLockPath(path, location.home, location.account);
     const event = {account: location.account, lockPath, uri: id.canonicalUri};

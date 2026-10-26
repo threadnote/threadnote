@@ -16,6 +16,11 @@ import {LocalModelStore, type LocalModelStoreShape} from '@threadnote/inference/
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {
+  CurrentResourceRecallInvalidationObserver,
+  makeResourceRecallInvalidationObservation,
+  type ResourceRecallInvalidationReceipt,
+} from '@threadnote/store/resource/recall-invalidation';
+import {
   applyMaintenanceMetadata,
   previewMaintenanceMetadata,
 } from '@threadnote/threadnote/memory/maintenance/metadata_commands';
@@ -191,74 +196,93 @@ describe('MCP recall background vector refresh', () => {
     ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
-  effectIt.effect('restores lexical and selected installed vector indexes after a trusted mutation', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-trusted-recall-refresh-'});
-        const config = {account: 'local', agentContextHome: home, user: 'tester'};
-        const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'trusted.md');
-        const uri = 'threadnote://resources/repos/threadnote/trusted.md';
-        const store = yield* ResourceStore;
-        const addedUri = 'threadnote://resources/repos/threadnote/added-during-model-check.md';
-        let addDuringModelCheck = false;
-        const embedded = yield* Ref.make<readonly string[]>([]);
-        yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
-        yield* fs.writeFileString(resource, '# Trusted mutation\n\nOriginal semantic content.\n');
-        const runtime = fakeRuntime((inputs, dimensions) =>
-          Ref.update(embedded, prior => [...prior, ...inputs]).pipe(
-            Effect.as(inputs.map(() => unitVector(dimensions))),
-          ),
-        );
-        const modelStore = installedModelStore(home);
-        const observedStore = LocalModelStore.of({
-          ...modelStore,
-          status: (...args) =>
-            Effect.gen(function* () {
-              if (addDuringModelCheck) {
-                addDuringModelCheck = false;
+  for (const covered of [false, true])
+    effectIt.effect(
+      `restores lexical and selected installed vector indexes after a trusted mutation (covered=${covered})`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-trusted-recall-refresh-'});
+            const config = {account: 'local', agentContextHome: home, user: 'tester'};
+            const resource = path.join(home, 'data', 'local', 'resources', 'repos', 'threadnote', 'trusted.md');
+            const uri = 'threadnote://resources/repos/threadnote/trusted.md';
+            const store = yield* ResourceStore;
+            const addedUri = 'threadnote://resources/repos/threadnote/added-during-model-check.md';
+            let addDuringModelCheck = false;
+            const embedded = yield* Ref.make<readonly string[]>([]);
+            yield* fs.makeDirectory(path.dirname(resource), {recursive: true});
+            yield* fs.writeFileString(resource, '# Trusted mutation\n\nOriginal semantic content.\n');
+            const runtime = fakeRuntime((inputs, dimensions) =>
+              Ref.update(embedded, prior => [...prior, ...inputs]).pipe(
+                Effect.as(inputs.map(() => unitVector(dimensions))),
+              ),
+            );
+            const modelStore = installedModelStore(home);
+            const observedStore = LocalModelStore.of({
+              ...modelStore,
+              status: (...args) =>
+                Effect.gen(function* () {
+                  if (addDuringModelCheck) {
+                    addDuringModelCheck = false;
+                    yield* store
+                      .write(
+                        {account: 'local', home, user: 'tester'},
+                        addedUri,
+                        '# Added during model check\n\nLatest unrelated corpus member.\n',
+                        {mode: 'create'},
+                      )
+                      .pipe(Effect.orDie);
+                  }
+                  return yield* modelStore.status(...args);
+                }),
+            });
+
+            yield* Effect.gen(function* () {
+              const catalog = yield* LocalModelCatalog;
+              yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
+              const initial = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
+              yield* ensureVectorIndex(config, manifest, initial.candidates, {corpusGeneration: initial.generation});
+
+              let receipt: ResourceRecallInvalidationReceipt | undefined;
+              if (covered) {
+                const location = {account: config.account, home, user: config.user};
+                const observation = makeResourceRecallInvalidationObservation(location);
+                observation.expect([uri]);
                 yield* store
-                  .write(
-                    {account: 'local', home, user: 'tester'},
-                    addedUri,
-                    '# Added during model check\n\nLatest unrelated corpus member.\n',
-                    {mode: 'create'},
-                  )
-                  .pipe(Effect.orDie);
+                  .write(location, uri, '# Trusted mutation\n\nChanged semantic content.\n', {mode: 'replace'})
+                  .pipe(Effect.provideService(CurrentResourceRecallInvalidationObserver, observation.observer));
+                observation.verify([uri]);
+                receipt = observation.finish(true, [uri]);
+                expect(receipt).toBeDefined();
+                // Foreground identity admission has already consumed the lexical marker;
+                // selected vectors still need the changed member of the full corpus.
+                yield* loadRecallIndexData(config, {includeInactive: false});
+              } else {
+                yield* fs.writeFileString(resource, '# Trusted mutation\n\nChanged semantic content.\n');
               }
-              return yield* modelStore.status(...args);
-            }),
-        });
+              expect((yield* recallIndexStatus(config)).ready).toBe(true);
+              yield* Ref.set(embedded, []);
+              addDuringModelCheck = true;
 
-        yield* Effect.gen(function* () {
-          const catalog = yield* LocalModelCatalog;
-          yield* selectLocalModel(home, catalog, 'embedding', manifest.id);
-          const initial = yield* loadRecallIndexData(config, {forceRefresh: true, includeInactive: false});
-          yield* ensureVectorIndex(config, manifest, initial.candidates, {corpusGeneration: initial.generation});
+              const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, [uri], receipt);
+              expect(outcome.state).toBe('current');
 
-          yield* fs.writeFileString(resource, '# Trusted mutation\n\nChanged semantic content.\n');
-          expect((yield* recallIndexStatus(config)).ready).toBe(true);
-          yield* Ref.set(embedded, []);
-          addDuringModelCheck = true;
-
-          const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, [uri]);
-          expect(outcome.state).toBe('current');
-
-          const refreshed = yield* recallIndexStatus(config);
-          expect(refreshed.ready).toBe(true);
-          expect(refreshed.generation).not.toBe(initial.generation);
-          expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('current');
-          const inputs = yield* Ref.get(embedded);
-          expect(inputs.some(input => input.includes('Changed semantic content'))).toBe(true);
-          expect(inputs.some(input => input.includes('Latest unrelated corpus member'))).toBe(true);
-        }).pipe(
-          Effect.provideService(LocalModelRuntime, runtime),
-          Effect.provideService(LocalModelStore, observedStore),
-        );
-      }),
-    ).pipe(provideTestLayer(ApplicationLayer)),
-  );
+              const refreshed = yield* recallIndexStatus(config);
+              expect(refreshed.ready).toBe(true);
+              expect(refreshed.generation).not.toBe(initial.generation);
+              expect(yield* vectorIndexGenerationReadiness(home, manifest, refreshed.generation!)).toBe('current');
+              const inputs = yield* Ref.get(embedded);
+              expect(inputs.some(input => input.includes('Changed semantic content'))).toBe(true);
+              expect(inputs.some(input => input.includes('Latest unrelated corpus member'))).toBe(true);
+            }).pipe(
+              Effect.provideService(LocalModelRuntime, runtime),
+              Effect.provideService(LocalModelStore, observedStore),
+            );
+          }),
+        ).pipe(provideTestLayer(ApplicationLayer)),
+    );
 
   effectIt.effect('does not construct an absent vector index while healing lexical mutation readiness', () =>
     Effect.scoped(

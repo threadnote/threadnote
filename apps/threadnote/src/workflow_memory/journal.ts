@@ -2,6 +2,7 @@ import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {trackPotentialWorkflowMutation, verifyWorkflowMutation} from './recall_refresh.js';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -202,10 +203,14 @@ export const reconcileManifest = Effect.fn('workflowMemory.reconcileManifest')(f
       'binding-recovery-needed',
       'An interrupted workflow manifest update requires recovery before reading or previewing.',
     );
+  yield* trackPotentialWorkflowMutation(config, [state.manifestUri]);
   yield* store.write(workflowLocation(config), state.manifestUri, state.manifestContent, {
     mode: current === undefined ? 'create' : 'replace',
     ...(current === undefined ? {} : {expectedFingerprint: yield* store.fingerprint(current)}),
   });
+  if ((yield* store.read(workflowLocation(config), state.manifestUri)) !== state.manifestContent)
+    return yield* workflowError('readback-conflict', 'Manifest readback differs from the exact journaled document.');
+  yield* verifyWorkflowMutation(config, [state.manifestUri]);
 });
 
 export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(function* (
