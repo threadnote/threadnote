@@ -324,12 +324,112 @@ describe('built self-contained distribution', () => {
         .match(/[a-z0-9_]+/g) ?? [],
     );
     expect(semanticQuery.split(' ').every(term => !repositoryTokens.has(term))).toBe(true);
+    const semanticStartedAt = new Date().toISOString();
+    const semanticStart = performance.now();
+    let semanticOutput: {readonly stderr: string; readonly stdout: string} | undefined;
     const semantic = await runCliJson<{
-      readonly nodes?: ReadonlyArray<{readonly path?: string; readonly score?: number}>;
-    }>(['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json']);
-    expect(semantic.nodes).toEqual(
-      expect.arrayContaining([expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)})]),
-    );
+      readonly freshness?: string;
+      readonly warnings?: readonly string[];
+      readonly snapshot?: {readonly id?: string; readonly worktreeId?: string; readonly commit?: string};
+      readonly nodes?: ReadonlyArray<{
+        readonly id?: string;
+        readonly kind?: string;
+        readonly path?: string;
+        readonly score?: number;
+      }>;
+    }>(['graph', 'query', '--cwd', graphRepository, '--query', semanticQuery, '--json'], {}, output => {
+      semanticOutput = output;
+    });
+    const semanticElapsedMs = performance.now() - semanticStart;
+    try {
+      expect(semantic.nodes).toEqual(
+        expect.arrayContaining([expect.objectContaining({path: 'docs/architecture.md', score: expect.any(Number)})]),
+      );
+    } catch (cause) {
+      try {
+        const scrub = (text: string | undefined, limit: number) => {
+          let value = text ?? '';
+          for (const [path, replacement] of [
+            [home, '<fixture-home>'],
+            [userHome, '<fixture-user>'],
+            [temporaryRoot, '<fixture>'],
+            [root, '<checkout>'],
+          ])
+            for (const spelling of [path, path.replaceAll('\\', '/'), path.replaceAll('/', '\\')])
+              value = value.replaceAll(spelling, replacement);
+          return value.slice(0, limit);
+        };
+        const packet = {
+          schemaVersion: 1,
+          sourceCommit: process.env.GITHUB_SHA?.slice(0, 64) ?? 'unavailable',
+          platform: process.platform,
+          arch: process.arch,
+          queryCase: 'mutual-exclusion',
+          command: {
+            startedAt: semanticStartedAt,
+            elapsedMs: semanticElapsedMs,
+            exitCode: 0,
+            stderr: scrub(semanticOutput?.stderr, 2_048),
+          },
+          indexOutput: scrub(rebuilt, 4_096),
+          indexProgress: rebuilt
+            .split('\n')
+            .filter(line => /^(?:Semantic vectors:|Embedding)/.test(line))
+            .slice(-3)
+            .map(line => scrub(line, 256)),
+          query: {
+            operation: 'query',
+            freshness: scrub(semantic.freshness, 128),
+            snapshot: {
+              id: scrub(semantic.snapshot?.id, 128),
+              worktreeId: scrub(semantic.snapshot?.worktreeId, 128),
+              commit: scrub(semantic.snapshot?.commit, 128),
+            },
+            warningCount: semantic.warnings?.length ?? 0,
+            omittedWarnings: Math.max(0, (semantic.warnings?.length ?? 0) - 8),
+            warnings: (semantic.warnings ?? []).slice(0, 8).map(warning => scrub(warning, 256)),
+            nodeCount: semantic.nodes?.length ?? 0,
+            omittedNodes: Math.max(0, (semantic.nodes?.length ?? 0) - 12),
+            nodes: (semantic.nodes ?? []).slice(0, 12).map(node => ({
+              id: scrub(node.id, 128),
+              path: scrub(node.path, 256),
+              kind: scrub(node.kind, 64),
+              score: Number.isFinite(node.score) ? node.score : null,
+            })),
+          },
+          model: {
+            metadataUnavailable: coreEmbeddingManifest ? undefined : 'manifest-absent',
+            id: coreEmbeddingManifest?.id,
+            sha256: coreEmbeddingManifest?.sha256,
+            dimensions: coreEmbeddingManifest?.dimensions,
+          },
+          // This is a post-failure observation, not evidence of query-time readiness.
+          readonlyFixture: scrub(await graphIndexFailureEvidence(home, semantic.snapshot), 4_096),
+          truncated: false,
+        };
+        let text = JSON.stringify(packet);
+        if (new TextEncoder().encode(text).byteLength > 16_320) {
+          packet.indexOutput = 'omitted: packet-size-limit';
+          packet.readonlyFixture = 'omitted: packet-size-limit';
+          packet.query.nodes = packet.query.nodes.slice(0, 2);
+          packet.query.warnings = packet.query.warnings.slice(0, 2);
+          packet.query.omittedNodes = packet.query.nodeCount - packet.query.nodes.length;
+          packet.query.omittedWarnings = packet.query.warningCount - packet.query.warnings.length;
+          packet.truncated = true;
+          text = JSON.stringify(packet);
+        }
+        if (new TextEncoder().encode(text).byteLength > 16_320)
+          text = JSON.stringify({
+            schemaVersion: 1,
+            queryCase: 'mutual-exclusion',
+            metadataUnavailable: 'packet-size-limit',
+          });
+        process.stderr.write(`Packaged semantic fixture: ${text}\n`);
+      } catch {
+        // Diagnostics are best effort; retain the original assertion and stack.
+      }
+      throw cause;
+    }
 
     const missing = await runCliJson<{readonly nodes?: readonly unknown[]}>([
       'graph',
@@ -1334,8 +1434,13 @@ async function runCli(
   return `${result.stdout}${result.stderr}`;
 }
 
-async function runCliJson<T>(args: readonly string[], environment: NodeJS.ProcessEnv = {}): Promise<T> {
+async function runCliJson<T>(
+  args: readonly string[],
+  environment: NodeJS.ProcessEnv = {},
+  observeOutput?: (output: {readonly stderr: string; readonly stdout: string}) => void,
+): Promise<T> {
   const result = await runCliOutput(args, environment);
+  observeOutput?.(result);
   expect(result.stdout).not.toContain('[node-llama-cpp]');
   return JSON.parse(result.stdout.trim().split('\n').at(-1) ?? '{}') as T;
 }
@@ -1375,13 +1480,18 @@ async function runCliOutput(
   }
 }
 
-async function graphIndexFailureEvidence(targetHome: string): Promise<string> {
+async function graphIndexFailureEvidence(
+  targetHome: string,
+  view?: {readonly id?: string; readonly worktreeId?: string},
+): Promise<string> {
   // Read only bounded fixture state after failure; never launch another index or copy source/model payloads.
   const repositoriesRoot = join(targetHome, 'indexes', 'code-graph', 'repositories');
-  const repositories = (await readdir(repositoriesRoot).catch(() => []))
-    .filter(name => /^[a-f0-9]{64}$/.test(name))
-    .slice(0, 3);
-  const inspect = (filename: string, queries: Readonly<Record<string, string>>) => {
+  const repositoryEntries = await readdir(repositoriesRoot).catch(() => undefined);
+  const repositories = (repositoryEntries ?? []).filter(name => /^[a-f0-9]{64}$/.test(name)).slice(0, 3);
+  const inspect = (
+    filename: string,
+    queries: Readonly<Record<string, {readonly sql: string; readonly parameters?: readonly (string | null)[]}>>,
+  ) => {
     let database: Database | undefined;
     try {
       database = new Database(filename, {readonly: true});
@@ -1389,14 +1499,14 @@ async function graphIndexFailureEvidence(targetHome: string): Promise<string> {
       return Object.fromEntries(
         Object.entries(queries).map(([name, query]) => {
           try {
-            return [name, database!.query(query).all()];
+            return [name, database!.query(query.sql).all(...(query.parameters ?? []))];
           } catch {
-            return [name, 'unavailable'];
+            return [name, {metadataUnavailable: 'query-or-schema'}];
           }
         }),
       );
     } catch {
-      return {state: 'unavailable'};
+      return {metadataUnavailable: 'database-open'};
     } finally {
       database?.close();
     }
@@ -1404,27 +1514,43 @@ async function graphIndexFailureEvidence(targetHome: string): Promise<string> {
   const catalogs = [];
   for (const repository of repositories) {
     const directory = join(repositoriesRoot, repository);
-    const models = (await readdir(join(directory, 'vectors')).catch(() => []))
-      .filter(name => /^[a-zA-Z0-9._-]+$/.test(name))
-      .slice(0, 3);
+    const modelEntries = await readdir(join(directory, 'vectors'), {withFileTypes: true}).catch(() => undefined);
+    const models = (modelEntries ?? [])
+      .filter(entry => entry.isDirectory() && entry.name === coreEmbeddingModelId)
+      .map(entry => entry.name);
     catalogs.push({
       repository,
+      metadataUnavailable: modelEntries ? undefined : 'vector-directory',
       graph: inspect(join(directory, 'graph-v3.sqlite'), {
-        active: 'SELECT worktree_id, scope_id, snapshot_id, activated_at FROM active_snapshots LIMIT 8',
-        demand: 'SELECT state, attempt, not_before, reason, active_json FROM embedding_demand LIMIT 8',
+        active: {
+          sql: 'SELECT worktree_id, scope_id, snapshot_id, activated_at FROM active_snapshots WHERE (?1 IS NULL OR worktree_id=?1) AND (?2 IS NULL OR snapshot_id=?2) LIMIT 8',
+          parameters: [view?.worktreeId ?? null, view?.id ?? null],
+        },
+        demand: {
+          sql: "SELECT state, attempt, not_before, substr(reason,1,256) AS reason, active_json IS NOT NULL AS claim_present, json_extract(active_json,'$.expiresAt') AS claim_expires_at FROM embedding_demand WHERE (?1 IS NULL OR worktree_id=?1) AND (?2 IS NULL OR snapshot_id=?2) LIMIT 8",
+          parameters: [view?.worktreeId ?? null, view?.id ?? null],
+        },
       }),
       vectors: models.map(model => ({
         model,
         ...inspect(join(directory, 'vectors', model, 'vectors-v2.sqlite'), {
-          generations: 'SELECT generation, snapshot_id, state, count FROM vector_generations LIMIT 8',
-          progress:
-            'SELECT generation, owner_token, expires_at, array_offset, embedded, reused FROM vector_generation_progress LIMIT 8',
-          pointers: 'SELECT worktree_id, generation FROM vector_pointers LIMIT 8',
+          generations: {
+            sql: 'SELECT generation, snapshot_id, state, count, model_sha256, dimensions, template_version FROM vector_generations WHERE (?1 IS NULL OR snapshot_id=?1) LIMIT 8',
+            parameters: [view?.id ?? null],
+          },
+          progress: {
+            sql: 'SELECT generation, expires_at, array_offset, embedded, reused FROM vector_generation_progress WHERE (?1 IS NULL OR generation IN (SELECT generation FROM vector_generations WHERE snapshot_id=?1)) LIMIT 8',
+            parameters: [view?.id ?? null],
+          },
+          pointers: {
+            sql: 'SELECT worktree_id, generation FROM vector_pointers WHERE (?1 IS NULL OR worktree_id=?1) AND (?2 IS NULL OR generation IN (SELECT generation FROM vector_generations WHERE snapshot_id=?2)) LIMIT 8',
+            parameters: [view?.worktreeId ?? null, view?.id ?? null],
+          },
         }),
       })),
     });
   }
-  return `Graph fixture state: ${boundedFailureOutput(JSON.stringify({observedAt: Date.now(), catalogs}))}`;
+  return `Graph fixture state: ${boundedFailureOutput(JSON.stringify({observedAt: Date.now(), metadataUnavailable: repositoryEntries ? undefined : 'repository-directory', catalogs}))}`;
 }
 
 async function coordinatorFailureEvidence(targetHome: string, environment: NodeJS.ProcessEnv): Promise<string> {

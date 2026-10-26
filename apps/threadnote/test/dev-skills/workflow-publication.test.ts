@@ -21,10 +21,10 @@ import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {ShareOperationError} from '../../src/share/core.js';
 
-const fixture = Effect.fn('test.workflowPublicationFixture')(function* () {
+const fixture = Effect.fn('test.workflowPublicationFixture')(function* (prefix = 'threadnote-workflow-publish-') {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const home = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-workflow-publish-'});
+  const home = yield* fs.makeTempDirectoryScoped({prefix});
   const remote = path.join(home, 'remote.git');
   const worktree = path.join(home, 'shared');
   const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
@@ -161,6 +161,51 @@ describe('personal workflow publication', () => {
       expect(receipt.contentHash).toBe(sha256HexSync(content));
       expect((yield* f.git(f.remote, ['show', `main:${relativePath}`])).stdout).toBe(content);
       expect((yield* f.git(f.worktree, ['rev-list', '--count', 'HEAD'])).stdout).toBe(before);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+
+  it.effect('reads exact committed bodies across full-SHA filename disambiguation boundaries', () =>
+    Effect.gen(function* () {
+      const f = yield* fixture('tn-');
+      const prefixBytes = Buffer.byteLength(f.path.join(f.worktree, 'x')) - 1;
+      // Windows limits the absolute candidate path; Unix limits each component.
+      // Keep three distinct real Windows targets at most 249 bytes, with ASCII
+      // basenames at most 220 bytes, while SHA40 + colon adds another 41.
+      const windowsBase = Math.min(245 - prefixBytes, 216);
+      const lengths = process.platform === 'win32' ? [windowsBase, windowsBase + 2, windowsBase + 4] : [214, 215, 220];
+      const content = 'Independent approved body — 仕様.\nTrailing newline retained.\n';
+      for (const length of lengths) {
+        expect(length).toBeGreaterThanOrEqual(4);
+        expect(length).toBeLessThanOrEqual(220);
+        const relativePath = 'x'.repeat(length - 3) + '.md';
+        expect(Buffer.byteLength(relativePath)).toBe(length);
+        if (process.platform === 'win32') {
+          const absoluteTarget = f.path.join(f.worktree, relativePath);
+          expect(Buffer.byteLength(absoluteTarget)).toBe(prefixBytes + length);
+          expect(Buffer.byteLength(absoluteTarget)).toBeLessThanOrEqual(249);
+          expect(absoluteTarget.length).toBeLessThan(260);
+          expect(absoluteTarget.length + 41).toBeGreaterThan(260);
+        }
+        yield* writeSharedWorktreeFile(f.worktree, relativePath, content);
+        const options = {content, expectedRemote: f.remote, expectedBranch: 'main'};
+        const receipt = yield* publishShareGitChangeVerified(
+          f.worktree,
+          relativePath,
+          'publish long filename',
+          options,
+        );
+        expect(receipt.path).toBe(relativePath);
+        expect(receipt.contentHash).toBe(sha256HexSync(content));
+        const head = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+        expect(receipt.commit).toBe(head);
+        expect((yield* f.git(f.remote, ['show', `${receipt.commit}:${relativePath}`, '--'])).stdout).toBe(content);
+        const replay = yield* publishShareGitChangeVerified(f.worktree, relativePath, 'replay long filename', {
+          ...options,
+          committed: receipt,
+        });
+        expect(replay).toEqual(receipt);
+        expect((yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim()).toBe(head);
+      }
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
   );
 

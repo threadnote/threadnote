@@ -338,10 +338,14 @@ export const publishShareGitChangeVerified = Effect.fn('share.publishShareGitCha
   if ((yield* fs.readFileString(filename)) !== options.content)
     return yield* ShareOperationError.make({message: 'Shared publication worktree content changed.'});
   const contentHash = sha256HexSync(options.content);
+  // Mark the object expression as a revision so Git never stats it as a filename.
   const readCommitPath = (commit: string) =>
-    runGitCommand(false, git, ['-C', worktree, 'show', `${commit}:${path}`], 'Shared commit readback failed').pipe(
-      Effect.map(result => result!.stdout),
-    );
+    runGitCommand(
+      false,
+      git,
+      ['-C', worktree, 'show', `${commit}:${path}`, '--'],
+      'Shared commit readback failed',
+    ).pipe(Effect.map(result => result!.stdout));
   let receipt = options.committed;
   if (receipt !== undefined) {
     if (
