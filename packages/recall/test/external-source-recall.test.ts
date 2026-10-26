@@ -17,7 +17,7 @@ import {
 } from '@threadnote/store/external-resource';
 import {ResourceStore} from '@threadnote/store/resource-store';
 import {deriveRecallEligibilityPolicy} from '@threadnote/recall/eligibility';
-import {loadRecallExactMatches, loadRecallIndexData} from '@threadnote/recall/index';
+import {loadRecallExactMatches, loadRecallIndexData, withRecallDatabaseSession} from '@threadnote/recall/index';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
 import * as Effect2 from 'effect';
@@ -153,6 +153,7 @@ describe('external source recall', () => {
           }),
         ).toEqual([]);
       }).pipe(
+        withRecallDatabaseSession,
         TestClock.withLive,
         provideLayer(Layer.merge(dependencies, ResourceStore.layer.pipe(Layer.provide(dependencies)))),
       );
