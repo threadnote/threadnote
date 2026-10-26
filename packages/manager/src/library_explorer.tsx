@@ -1,12 +1,41 @@
-import {Folder, FileText} from 'lucide-react';
-import React, {useEffect, useRef, useState} from 'react';
+import {ArrowLeft, ArrowRight, Folder, FileText} from 'lucide-react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import type {TreeNode} from '@threadnote/manager/ui/contracts';
-import {nodeMatches, treeItemClass} from '@threadnote/manager/ui/support';
+import {treeItemClass} from '@threadnote/manager/ui/support';
 
 import {ActionMenu, type MenuAction} from './action_menu.js';
-import {descendantMemoryUris, libraryExplorerNodes, libraryItemTitle} from './library_model.js';
+import {descendantMemoryUris, libraryExplorerNodes, libraryItemTitle, librarySearchTree} from './library_model.js';
 
 const EMPTY_SELECTED_URIS: ReadonlySet<string> = new Set();
+
+export function LibraryHistoryControls(props: {
+  readonly backDisabled: boolean;
+  readonly forwardDisabled: boolean;
+  readonly onNavigate: (direction: -1 | 1) => void;
+}): React.ReactElement {
+  return (
+    <div className="library-history" role="group" aria-label="Memory navigation">
+      <button
+        className="quiet-icon"
+        aria-label="Back to previous memory"
+        title="Back to previous memory"
+        disabled={props.backDisabled}
+        onClick={() => props.onNavigate(-1)}
+      >
+        <ArrowLeft aria-hidden="true" />
+      </button>
+      <button
+        className="quiet-icon"
+        aria-label="Forward to next memory"
+        title="Forward to next memory"
+        disabled={props.forwardDisabled}
+        onClick={() => props.onNavigate(1)}
+      >
+        <ArrowRight aria-hidden="true" />
+      </button>
+    </div>
+  );
+}
 
 export function LibraryExplorer(props: {
   readonly scopeLabel?: string;
@@ -22,11 +51,24 @@ export function LibraryExplorer(props: {
   readonly onTab: (tab: 'memories' | 'resources') => void;
   readonly onToggleSelection: (node: TreeNode, checked: boolean) => void;
   readonly resourceTree?: TreeNode;
+  readonly recalledUris?: readonly string[];
+  readonly searchStatus?: string;
   readonly selectedUri?: string;
   readonly selectedUris: ReadonlySet<string>;
   readonly showSystem: boolean;
   readonly tree?: TreeNode;
 }): React.ReactElement {
+  const sourceTree = props.navTreeTab === 'resources' ? props.resourceTree : props.tree;
+  const visibleUris = useMemo(() => {
+    const result = new Set<string>();
+    const visit = (node: TreeNode) => {
+      result.add(node.uri);
+      node.children?.forEach(visit);
+    };
+    const filtered = librarySearchTree(sourceTree, props.filter, new Set(props.recalledUris), props.showSystem);
+    if (filtered) visit(filtered);
+    return result;
+  }, [sourceTree, props.filter, props.recalledUris, props.showSystem]);
   return (
     <aside className="library-explorer" id="library-navigator" aria-label="Memory browser">
       <header className="explorer-heading">
@@ -37,8 +79,13 @@ export function LibraryExplorer(props: {
             : 0}
         </span>
       </header>
+      {props.searchStatus ? (
+        <p className="explorer-search-status" role="status">
+          {props.searchStatus}
+        </p>
+      ) : null}
       <nav className="tree" aria-label="Context tree">
-        {libraryExplorerNodes(props.navTreeTab === 'resources' ? props.resourceTree : props.tree).map(node => (
+        {libraryExplorerNodes(sourceTree).map(node => (
           <Tree
             key={node.uri}
             depth={0}
@@ -52,8 +99,12 @@ export function LibraryExplorer(props: {
             selectedUris={props.selectedUris}
             selectionDisabled={props.busy || props.controlsBlocked}
             showSystem={props.showSystem}
+            visibleUris={visibleUris}
           />
         ))}
+        {props.filter.trim() && visibleUris.size === 0 ? (
+          <p className="explorer-note">No matching memories or resources.</p>
+        ) : null}
       </nav>
       <p className="explorer-note">
         {props.navTreeTab === 'resources'
@@ -76,19 +127,34 @@ function Tree(props: {
   readonly selectedUris?: ReadonlySet<string>;
   readonly selectionDisabled?: boolean;
   readonly showSystem: boolean;
+  readonly visibleUris: ReadonlySet<string>;
 }): React.ReactElement | null {
   const [open, setOpen] = useState((props.depth ?? 0) === 0);
+  const [searchOpen, setSearchOpen] = useState(true);
+  const searching = props.filter.trim().length > 0;
+  useEffect(() => {
+    if (searching) setSearchOpen(true);
+  }, [searching, props.filter, props.visibleUris]);
+  useEffect(() => {
+    if (props.node.isDir && props.selectedUri?.startsWith(props.node.uri + '/')) setOpen(true);
+  }, [props.node.isDir, props.node.uri, props.selectedUri]);
   const selectable = props.selectable !== false && !props.node.isSystem;
   const selectedUris = props.selectedUris ?? EMPTY_SELECTED_URIS;
   if (!props.showSystem && props.node.isSystem) return null;
-  if (props.filter && !nodeMatches(props.node, props.filter)) return null;
+  if (!props.visibleUris.has(props.node.uri)) return null;
   if (props.node.isDir) {
     const selectableUris = selectable ? descendantMemoryUris(props.node) : [];
     const selectedCount = selectableUris.filter(uri => selectedUris.has(uri)).length;
     const checked = selectableUris.length > 0 && selectedCount === selectableUris.length;
     const indeterminate = selectedCount > 0 && selectedCount < selectableUris.length;
     return (
-      <details open={open} onToggle={event => setOpen(event.currentTarget.open)}>
+      <details
+        open={searching ? searchOpen : open}
+        onToggle={event => {
+          if (searching) setSearchOpen(event.currentTarget.open);
+          else setOpen(event.currentTarget.open);
+        }}
+      >
         <summary
           className={treeItemClass(props.selectedUri === props.node.uri, !selectable)}
           title={props.node.uri}

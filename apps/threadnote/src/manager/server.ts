@@ -37,6 +37,7 @@ import {
 import {startManagerContextSchedulers} from './context_runtime.js';
 import {handleManagerModelSetupRequest, readManagerModelSetupBody} from './model_setup.js';
 import {ManagerOperationError} from './operation_error.js';
+import {searchManagerLibrary} from './library_search.js';
 import {assertManagerSourceAssets} from './source_assets.js';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {
@@ -184,7 +185,6 @@ import {assertResourceUri, findExecutable, runCommand, safeTimestamp, sha256} fr
 import {errorMessage} from '@threadnote/platform/errors';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {isRawMemoryDocument} from '../memory/parse.js';
-
 interface ManagerDirectoryEntry {
   readonly name: string;
   readonly isDirectory: () => boolean;
@@ -667,9 +667,10 @@ const handleRequestLegacy = Effect.fn('manager.handleRequestLegacy')(function* (
 
   if (request.method === 'GET' && url.pathname === '/api/tree') {
     const [tree, resourceTree] = yield* Effect.all([memoryTree(context.config), resourcesTree(context.config)]);
-    writeJson(response, 200, {resourcesTree: resourceTree, tree});
-    return;
+    return writeJson(response, 200, {resourcesTree: resourceTree, tree});
   }
+  if (request.method === 'GET' && url.pathname === '/api/library/search')
+    return writeJson(response, 200, yield* searchManagerLibrary(context.config, url));
   if (request.method === 'GET' && url.pathname === '/api/graphs')
     return writeJson(response, 200, yield* graphProjects.managerGraphProjectCatalog(context.config));
   if (request.method === 'GET' && url.pathname === '/api/graphs/status') {

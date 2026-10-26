@@ -7103,6 +7103,26 @@ h4 {
   color: var(--muted);
   width: 228px;
   max-width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
+  transition:
+    width 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+.library-search:focus-within {
+  width: 400px;
+  border-color: var(--accent);
+}
+.library-history {
+  display: flex;
+  gap: 4px;
+}
+.explorer-search-status {
+  margin: 0;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 11px;
 }
 .library-search input {
   padding: 0;
