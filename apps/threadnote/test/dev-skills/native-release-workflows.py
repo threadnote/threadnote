@@ -12,6 +12,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,7 @@ def _run_profile(fixture, binary, environment, generation, profile):
     home.mkdir(parents=True)
     repo.mkdir()
     environment = dict(environment)
+    environment.pop("THREADNOTE_RELEASE_PUBLICATION_TRACE", None)
     environment["THREADNOTE_HOME"] = str(home)
     environment["THREADNOTE_USER"] = "release-fixture"
     environment["THREADNOTE_AGENT_ID"] = "release-fixture"
@@ -87,8 +89,82 @@ def _run_profile(fixture, binary, environment, generation, profile):
     common = {"protocolVersion": 1, "executorVersion": 1, "runId": run_id, "generation": generation}
     records = []
 
+    trace_root = Path(environment["THREADNOTE_RELEASE_FIXTURE_ROOT"]).resolve()
+    # The enclosing archive harness owns this disposable root and its tool map.
+    assert trace_root in fixture.resolve().parents and (trace_root / "tool-paths.json").is_file()
+    trace_directory = trace_root / "publication-producer-events"
+    trace_setup = "disabled"
+
+    def snapshot_producer():
+        """Read bounded producer records before any later Git probes."""
+        events = []
+        corrupt = 0
+        missing = 0
+        fields = {"version", "pid", "event", "verb", "argc", "specForm", "pathCharacters", "pathBytes",
+                  "pathControl", "pathBackslash", "timeMs", "elapsedMs", "exit", "signal", "success",
+                  "stdoutBytes", "stderrBytes", "stderrCategory", "stdoutWritten", "stderrWritten", "complete",
+                  "phase", "errorCode", "syscall"}
+        enums = {
+            "event": {"start", "result", "forwarded", "exception"},
+            "verb": {"show", "rev-parse", "config", "add", "commit", "status", "push", "fetch", "other"},
+            "specForm": {"SHA40", "SHA64", "HEAD", "index", "other"},
+            "signal": {"none", "SIGTERM", "SIGKILL", "SIGPIPE", "SIGABRT", "SIGSEGV", "SIGINT", "other"},
+            "stderrCategory": {"none", "missing-path", "missing-object", "not-repository", "unsafe-repository",
+                               "path-too-long", "path-invalid", "permission", "index-lock", "unknown"},
+            "phase": {"load", "spawn", "stdout", "stderr"},
+            "errorCode": {"ENOENT", "EACCES", "EPERM", "EPIPE", "EBADF", "EINVAL", "ENOSPC", "other"},
+            "syscall": {"spawn", "write", "open", "read", "other"},
+        }
+        for slot in range(128 if trace_setup == "enabled" else 0):
+            try:
+                with (trace_directory / f"{slot}.json").open("rb") as stream:
+                    raw = stream.read(481)
+                value = json.loads(raw)
+                if len(raw) > 480 or not isinstance(value, dict) or set(value) - fields or value.get("version") != 1:
+                    raise ValueError("invalid-record")
+                if any(value.get(key) not in allowed for key, allowed in enums.items() if key in value):
+                    raise ValueError("invalid-category")
+                if any(type(item) not in (int, bool) for key, item in value.items() if key not in enums):
+                    raise ValueError("invalid-field")
+                if not {"version", "pid", "event", "verb"} <= set(value):
+                    raise ValueError("missing-field")
+                events.append(value)
+            except FileNotFoundError:
+                missing += 1
+            except Exception:
+                corrupt += 1
+        starts = [event for event in events if event["event"] == "start"]
+        latest = next((event for event in reversed(starts) if event["verb"] == "show"),
+                      next((event for event in reversed(events) if event["verb"] == "show"), None))
+        relevant = [event for event in events if latest and event["pid"] == latest["pid"]]
+        counts = {"events": len(events), "corrupt": corrupt, "unusedOrMissingSlots": missing,
+                  "exceptions": sum(event["event"] == "exception" for event in events),
+                  "orphanResults": sum(not any(row["pid"] == event["pid"] for row in starts)
+                                       for event in events if event["event"] == "result"),
+                  "unmatchedStarts": sum(not any(row["pid"] == event["pid"] and row["event"] == "result"
+                                                for row in events) for event in starts),
+                  "unforwardedResults": sum(not any(row["pid"] == event["pid"] and row["event"] == "forwarded"
+                                                   for row in events) for event in events if event["event"] == "result")}
+        projection = {"phase": "producer-before-postfailure-probes", "setup": trace_setup,
+                      "state": "present" if events else "missing-or-unreadable", "counts": counts,
+                      "latestShow": relevant[-4:]}
+        try:
+            artifact = trace_root / f"{profile}-publication-producer-native.log"
+            snapshot = json.dumps({"projection": projection, "events": events}, separators=(",", ":")) + "\n"
+            if len(snapshot.encode("utf-8")) > 64 * 1024:
+                raise ValueError("snapshot-too-large")
+            artifact.write_text(snapshot, encoding="utf-8")
+            # Existing archive failure retention copies each native log with both
+            # raw-pipe companions; diagnostic-only artifacts have empty pipes.
+            artifact.with_name(artifact.name + ".stdout.bin").write_bytes(b"")
+            artifact.with_name(artifact.name + ".stderr.bin").write_bytes(b"")
+        except Exception:
+            projection["snapshotWriteFailed"] = True
+        return projection
+
     def persist_finish_publication_diagnostic(response):
         """Emit a compact CI marker and optionally save its bounded fixture projection."""
+        producer = snapshot_producer()
         state_path = home / "workflow-automations" / "native-v1" / f"{run_id}.json"
         binding_id = None
         capture_error = None
@@ -221,6 +297,7 @@ def _run_profile(fixture, binary, environment, generation, profile):
             try:
                 teams = json.loads((home / "share/teams.json").read_text(encoding="utf-8"))
                 worktree = Path(teams["teams"]["default"]["worktree"])
+                assert home.resolve() in worktree.resolve().parents
                 prepared = pending_stage["prepared"]
                 relative = prepared["memoryUri"].split("/shared/default/", 1)[1]
                 target = worktree.joinpath(*relative.split("/"))
@@ -234,9 +311,10 @@ def _run_profile(fixture, binary, environment, generation, profile):
                         (b"filename too long", "path-too-long"), (b"invalid path", "invalid-path"),
                         (b"permission denied", "permission-denied"), (b"index.lock", "index-lock"),
                     ] if token in error), None)
-                    return result, {"exit": result.returncode, "failure": failure}
+                    return result, {"exit": result.returncode, "failure": failure or ("none" if not error else "unknown"),
+                                    "stdoutBytes": len(result.stdout), "stderrBytes": len(result.stderr)}
 
-                worktree_probe = {"targetExists": target.is_file(), "targetPathBytes": len(str(target).encode("utf-8")),
+                worktree_probe = {"phase": "postfailure", "targetExists": target.is_file(), "targetPathBytes": len(str(target).encode("utf-8")),
                                   "targetPathCharacters": len(str(target)),
                                   "canonicalPathMatches": str(target.resolve()) == str(worktree.resolve().joinpath(*relative.split("/")))}
                 if target.is_file():
@@ -245,6 +323,13 @@ def _run_profile(fixture, binary, environment, generation, profile):
                 for label, revision in [("head", "HEAD"), ("index", "")]:
                     result, detail = probe_git(["show", revision + ":" + relative])
                     worktree_probe[label] = {**detail, "matches": result.returncode == 0 and result.stdout == expected}
+                resolved, _ = probe_git(["rev-parse", "--verify", "HEAD"])
+                revision = resolved.stdout.strip()
+                if resolved.returncode == 0 and re.fullmatch(rb"[a-fA-F0-9]{40}(?:[a-fA-F0-9]{24})?", revision):
+                    result, detail = probe_git(["show", revision.decode("ascii") + ":" + relative])
+                    worktree_probe["fullSha"] = {**detail, "matches": result.returncode == 0 and result.stdout == expected}
+                else:
+                    worktree_probe["fullSha"] = {"failure": "invalid-or-missing-head"}
                 for label, option in [("longpaths", "core.longpaths"), ("autocrlf", "core.autocrlf")]:
                     result, detail = probe_git(["config", "--get", option])
                     value = result.stdout.strip().decode("ascii", errors="replace")
@@ -261,6 +346,7 @@ def _run_profile(fixture, binary, environment, generation, profile):
             "finalReceipts": final_receipts[:3],
             "stageReceipts": stage_receipts,
             "worktreeProbe": worktree_probe,
+            "producer": producer,
         }
         diagnostic_path = fixture / "finish-publication-diagnostic.json"
         diagnostic["localSnapshotSaved"] = False
@@ -279,22 +365,44 @@ def _run_profile(fixture, binary, environment, generation, profile):
                 "bindingIdPrefix": binding_id[:12] if isinstance(binding_id, str) else None,
                 "captureError": "marker-overflow",
                 "finalReceiptCount": len(final_receipts),
+                "producer": producer,
             }, separators=(",", ":"), ensure_ascii=True)
         sys.stderr.write("NATIVE_PUBLICATION_DIAGNOSTICS " + marker + "\n")
         return diagnostic_path
     def call(request, expected_code=None):
-        process = subprocess.run(
-            [*cli, "workflow-automation", "--home", str(home)],
-            input=json.dumps(request),
-            cwd=repo,
-            env=environment,
-            text=True,
-            capture_output=True,
-            timeout=180,
-        )
+        nonlocal trace_setup
+        capture = request.get("action") == "closeout" and request.get("command") == "finish"
+        # Only this actual finish request inherits capture. Later Python probes do not.
+        environment.pop("THREADNOTE_RELEASE_PUBLICATION_TRACE", None)
+        try:
+            if capture:
+                try:
+                    shutil.rmtree(trace_directory, ignore_errors=True)
+                    trace_directory.mkdir()
+                    environment["THREADNOTE_RELEASE_PUBLICATION_TRACE"] = "1"
+                    trace_setup = "enabled"
+                except Exception:
+                    trace_setup = "reset-failed"
+            process = subprocess.run(
+                [*cli, "workflow-automation", "--home", str(home)],
+                input=json.dumps(request),
+                cwd=repo,
+                env=environment,
+                text=True,
+                capture_output=True,
+                timeout=180,
+            )
+        except BaseException:
+            if capture:
+                snapshot_producer()
+            raise
+        finally:
+            environment.pop("THREADNOTE_RELEASE_PUBLICATION_TRACE", None)
         try:
             value = json.loads(process.stdout)
         except json.JSONDecodeError as error:
+            if capture:
+                snapshot_producer()
             raise RuntimeError(f"CLI returned non-JSON output for {request.get('action')}.") from error
         records.append(
             {

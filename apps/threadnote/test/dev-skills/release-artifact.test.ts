@@ -1,6 +1,6 @@
 import {spawn, spawnSync} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
-import {mkdtemp, rm, writeFile} from '@threadnote/testing/node-fs-promises';
+import {mkdir, mkdtemp, readFile, readdir, rm, writeFile} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
@@ -154,6 +154,134 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(failure.code, diagnostic(failure)).toBe(expected.status);
     expect(failure.stdout.equals(expected.stdout)).toBe(true);
     expect(failure.stderr.equals(expected.stderr)).toBe(true);
+  } finally {
+    await rm(temporary, {recursive: true, force: true});
+  }
+}, 60_000);
+
+it('captures bounded closed producer diagnostics only when the compiled Git fixture opts in', async () => {
+  const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-trace-'));
+  try {
+    const nativeGit = Bun.which('git');
+    if (!nativeGit) throw new Error('Git is required for the compiled fixture boundary.');
+    const proxy = resolve(temporary, process.platform === 'win32' ? 'git.exe' : 'git');
+    const repo = resolve(temporary, 'repo');
+    const trace = resolve(temporary, 'publication-producer-events');
+    const build = await Bun.build({
+      entrypoints: [resolve('apps/threadnote/test/dev-skills/release-tools-fixture.ts')],
+      compile: {outfile: proxy},
+    });
+    expect(build.success, JSON.stringify(build.logs)).toBe(true);
+    await writeFile(resolve(temporary, 'tool-paths.json'), JSON.stringify({git: nativeGit}));
+    const git = (...args: string[]) => spawnSync(nativeGit, args, {timeout: 15_000});
+    expect(git('init', repo).status).toBe(0);
+    const sentinel = 'private-sentinel-path.txt';
+    const content = Buffer.from('private-sentinel-content 日本語\n');
+    await writeFile(resolve(repo, sentinel), content);
+    expect(git('-C', repo, 'add', sentinel).status).toBe(0);
+    expect(
+      git(
+        '-C',
+        repo,
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-m',
+        'fixture',
+      ).status,
+    ).toBe(0);
+    const sha = git('-C', repo, 'rev-parse', 'HEAD').stdout.toString('utf8').trim();
+    const invoke = (spec: string, enabled: boolean) =>
+      spawnSync(proxy, ['-C', repo, 'show', spec], {
+        env: {
+          ...process.env,
+          THREADNOTE_RELEASE_FIXTURE_ROOT: temporary,
+          THREADNOTE_RELEASE_PUBLICATION_TRACE: enabled ? '1' : '0',
+        },
+        timeout: 15_000,
+      });
+    await mkdir(trace);
+    const disabled = invoke(`${sha}:${sentinel}`, false);
+    expect(disabled.status).toBe(0);
+    expect(disabled.stdout.equals(content)).toBe(true);
+    expect(await readdir(trace)).toEqual([]);
+    const success = invoke(`${sha}:${sentinel}`, true);
+    expect(success.status).toBe(0);
+    expect(success.stdout.equals(content)).toBe(true);
+    expect(success.stderr.length).toBe(0);
+    for (const spec of [`private-missing-object:${sentinel}`, 'HEAD:private-missing-path']) {
+      const expected = git('-C', repo, 'show', spec);
+      const actual = invoke(spec, true);
+      expect(actual.status).toBe(expected.status);
+      expect(actual.stdout.equals(expected.stdout)).toBe(true);
+      expect(actual.stderr.equals(expected.stderr)).toBe(true);
+    }
+    const files = await readdir(trace);
+    const raw = (await Promise.all(files.map(file => readFile(resolve(trace, file), 'utf8')))).join('');
+    for (const secret of [sentinel, 'private-sentinel-content', repo, sha, 'private-missing-path']) {
+      expect(raw).not.toContain(secret);
+    }
+    const events = raw
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+    const allowed = new Set([
+      'version',
+      'pid',
+      'event',
+      'verb',
+      'argc',
+      'specForm',
+      'pathCharacters',
+      'pathBytes',
+      'pathControl',
+      'pathBackslash',
+      'timeMs',
+      'elapsedMs',
+      'exit',
+      'signal',
+      'success',
+      'stdoutBytes',
+      'stderrBytes',
+      'stderrCategory',
+      'stdoutWritten',
+      'stderrWritten',
+      'complete',
+      'phase',
+      'errorCode',
+      'syscall',
+    ]);
+    expect(events).toHaveLength(9);
+    for (const event of events) expect(Object.keys(event).every(key => allowed.has(key))).toBe(true);
+    expect(
+      events
+        .filter(event => event.event === 'result')
+        .map(event => event.stderrCategory)
+        .sort(),
+    ).toEqual(['missing-object', 'missing-path', 'none']);
+    expect(events.filter(event => event.event === 'forwarded').every(event => event.complete === true)).toBe(true);
+    expect(events.some(event => event.specForm === 'SHA40')).toBe(true);
+    // Exhaust the finite slots without spawning an unrelated workload.
+    for (let slot = 9; slot < 127; slot++) await writeFile(resolve(trace, `${slot}.json`), '{}\n');
+    const bounded = invoke(`${sha}:${sentinel}`, true);
+    expect(bounded.status).toBe(0);
+    expect(bounded.stdout.equals(content)).toBe(true);
+    expect(await readdir(trace)).toHaveLength(128);
+    expect(JSON.parse(await readFile(resolve(trace, '127.json'), 'utf8')).event).toBe('start');
+    const exhausted = invoke(`${sha}:${sentinel}`, true);
+    expect(exhausted.status).toBe(0);
+    expect(exhausted.stdout.equals(content)).toBe(true);
+    expect(await readdir(trace)).toHaveLength(128);
+    await rm(trace, {recursive: true});
+    await writeFile(trace, 'diagnostic I/O unavailable');
+    const unavailable = invoke(`${sha}:${sentinel}`, true);
+    expect(unavailable.status).toBe(0);
+    expect(unavailable.stdout.equals(content)).toBe(true);
+    expect(unavailable.stderr.length).toBe(0);
   } finally {
     await rm(temporary, {recursive: true, force: true});
   }

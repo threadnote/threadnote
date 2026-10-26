@@ -1,4 +1,4 @@
-import {Effect, FileSystem, Result} from 'effect';
+import {Context, Effect, FileSystem, Result} from 'effect';
 import {it as effectIt} from '@effect/vitest';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
@@ -6,6 +6,8 @@ import {CommandExecutor, runCommandEffect} from '@threadnote/platform/command';
 import {decodeNativeAuthoringDocument} from '@threadnote/workflow-automations/authoring';
 import {decodeNativeCycleRuntime} from '@threadnote/workflow-automations/cycle-runtime';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {CodeGraphQueryService} from '@threadnote/graph/query';
+import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {captureNativeCycleSource as captureSource} from '../../src/workflow_automation/cycle_git.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 import {CycleDiagnostics, cycleDiagnostics} from './native-cycle-diagnostics.js';
@@ -15,13 +17,87 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>;
 };
 const diagnosticOutputEnabled = process.env.THREADNOTE_NATIVE_CYCLE_DIAGNOSTICS === '1';
+type GraphStage = 'status-before' | 'index' | 'status-after';
+const graphDiagnostics = () => {
+  const origin = performance.now();
+  const elapsed = () => Math.min(2_147_483_647, Math.max(0, Math.round(performance.now() - origin)));
+  const events: {
+    stage: GraphStage;
+    event: 'entry' | 'exit';
+    atMs: number;
+    durationMs?: number;
+    outcome?: 'Success' | 'Failure';
+  }[] = [];
+  let dropped = 0;
+  const append = (event: (typeof events)[number]) => {
+    events.push(event);
+    if (events.length > 32) {
+      events.shift();
+      dropped = Math.min(2_147_483_647, dropped + 1);
+    }
+  };
+  const observe = <A, E, R>(stage: GraphStage, program: Effect.Effect<A, E, R>) =>
+    Effect.suspend(() => {
+      const atMs = elapsed();
+      append({stage, event: 'entry', atMs});
+      return program.pipe(
+        Effect.onExit(exit =>
+          Effect.sync(() =>
+            append({stage, event: 'exit', atMs: elapsed(), durationMs: elapsed() - atMs, outcome: exit._tag}),
+          ),
+        ),
+      );
+    });
+  return {
+    prepare: <A, E, R>(program: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const query = yield* CodeGraphQueryService;
+        const indexer = yield* CodeGraphIndexer;
+        let indexStarted = false;
+        return yield* program.pipe(
+          Effect.provideService(
+            CodeGraphQueryService,
+            CodeGraphQueryService.of({
+              ...query,
+              status: (...args) => observe(indexStarted ? 'status-after' : 'status-before', query.status(...args)),
+            }),
+          ),
+          Effect.provideService(
+            CodeGraphIndexer,
+            CodeGraphIndexer.of({
+              ...indexer,
+              index: (...args) =>
+                Effect.suspend(() => {
+                  indexStarted = true;
+                  return observe('index', indexer.index(...args));
+                }),
+            }),
+          ),
+        );
+      }),
+    report: (outcome: 'Success' | 'Failure') => {
+      try {
+        process.stderr.write(
+          'NATIVE_CYCLE_GRAPH_DIAGNOSTICS ' + JSON.stringify({version: 1, outcome, dropped, events}) + '\n',
+        );
+      } catch {
+        // Preserve the original outcome if diagnostic output is unavailable.
+      }
+    },
+  };
+};
+class GraphDiagnostics extends Context.Service<GraphDiagnostics, ReturnType<typeof graphDiagnostics>>()(
+  '@threadnote/threadnote/test/dev-skills/native-cycle-lifecycle.test/GraphDiagnostics',
+) {}
 const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.suspend(() => {
     const diagnostics = cycleDiagnostics();
+    const graph = graphDiagnostics();
     return Effect.gen(function* () {
       const commands = yield* CommandExecutor;
       return yield* effect.pipe(
         Effect.provideService(CycleDiagnostics, diagnostics),
+        Effect.provideService(GraphDiagnostics, graph),
         Effect.provideService(
           CommandExecutor,
           CommandExecutor.of({
@@ -47,7 +123,10 @@ const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       provideNative,
       Effect.onExit(exit =>
         Effect.sync(() => {
-          if (exit._tag === 'Failure' || diagnosticOutputEnabled) diagnostics.report(exit._tag);
+          if (exit._tag === 'Failure' || diagnosticOutputEnabled) {
+            diagnostics.report(exit._tag);
+            graph.report(exit._tag);
+          }
         }),
       ),
     );
@@ -66,13 +145,18 @@ const fixture = Effect.fn('test.nativeCycle.fixture')(function* (
   initialBindings?: Record<string, {branch: string; baseBranch: string}>,
 ) {
   const diagnostics = yield* CycleDiagnostics;
+  const graph = yield* GraphDiagnostics;
   const original = yield* diagnostics.action('provisioning', nativeFixture());
   const f = {
     ...original,
     init: (...args: Parameters<typeof original.init>) => diagnostics.action('init', original.init(...args)),
     call: (input: unknown) => {
       const request = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
-      return diagnostics.action(request.command ?? request.action, original.call(input));
+      const program = original.call(input);
+      return diagnostics.action(
+        request.command ?? request.action,
+        request.action === 'graph-ready' || request.command === 'packet' ? graph.prepare(program) : program,
+      );
     },
   };
   const git = (args: readonly string[]) => runCommandEffect('git', ['-C', f.repo, ...args]);
