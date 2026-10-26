@@ -139,7 +139,7 @@
     "@tree-sitter-grammars/tree-sitter-lua": "0.4.1",
     "@tree-sitter-grammars/tree-sitter-svelte": "1.0.2",
     "@tree-sitter-grammars/tree-sitter-zig": "1.1.2",
-    "@types/bun": "1.4.2",
+    "@types/bun": "1.4.4",
     "@types/js-yaml": "^4.0.9",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
