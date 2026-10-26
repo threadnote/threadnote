@@ -2,7 +2,7 @@ import {Effect, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError, type WorkflowArtifact} from '@threadnote/workflow-automations/contracts';
 import {NativeAuthoringDocumentSchema} from '@threadnote/workflow-automations/authoring';
-import {NativeCycleStateSchema} from '@threadnote/workflow-automations/cycle';
+import {NativeCycleStateSchema, nativeCycleHasControl} from '@threadnote/workflow-automations/cycle';
 import {prepareNativeCloseout, NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {renderNativeDocument} from '@threadnote/workflow-automations/documents';
 import {planNativeCloseoutDocuments} from './closeout_documents.js';
@@ -95,6 +95,51 @@ const journalSchema = Schema.Struct({
 });
 type Journal = typeof journalSchema.Type;
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
+
+/** Reobserve HEAD and cleanliness together at each closeout mutation boundary. */
+export const verifyNativeCloseoutSource = Effect.fn('workflowAutomation.closeout.verifySource')(function* (
+  repo: string,
+  expectedHead: string,
+) {
+  const result = yield* runCommandEffect(
+    'git',
+    [
+      '--no-optional-locks',
+      '-C',
+      repo,
+      'status',
+      '--porcelain=v2',
+      '-z',
+      '--branch',
+      '--no-ahead-behind',
+      '--ignore-submodules=none',
+    ],
+    {timeoutMs: 30_000},
+  );
+  const records = result.stdout.endsWith('\0') ? result.stdout.slice(0, -1).split('\0') : [];
+  let head: string | undefined;
+  let branch = false;
+  let dirty = false;
+  let malformed = records.length === 0;
+  const metadata = new Set<string>();
+  for (const record of records) {
+    if (record.startsWith('# ')) {
+      const match = /^# branch\.(oid|head|upstream|ab) (.+)$/u.exec(record);
+      if (!match || nativeCycleHasControl(record) || metadata.has(match[1])) {
+        malformed = true;
+        continue;
+      }
+      metadata.add(match[1]);
+      if (match[1] === 'oid') {
+        head = match[2];
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(head)) malformed = true;
+      } else if (match[1] === 'head') branch = true;
+      else if (match[1] === 'ab' && !/^(?:\+\d+ -\d+|\+\? -\?)$/u.test(match[2])) malformed = true;
+    } else dirty = true;
+  }
+  if (malformed || !branch || head !== expectedHead || dirty)
+    return yield* fail('closeout-source-drift', 'Source changed during closeout; keep remaining drafts.');
+});
 const attempt = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
 const hash = (value: unknown) => sha256HexSync(stableJson(value));
 const ref = (artifact: WorkflowArtifact) => ({
@@ -385,26 +430,7 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             hash(current.state.cycle.state) !== hash(journal.cycle)
           )
             return yield* fail('closeout-drift', 'Cycle acceptance or binding changed; keep remaining drafts.');
-          const head = yield* runCommandEffect(
-            'git',
-            ['--no-optional-locks', '-C', journal.source.repo, 'rev-parse', '--verify', 'HEAD'],
-            {timeoutMs: 30_000},
-          );
-          const dirty = yield* runCommandEffect(
-            'git',
-            [
-              '--no-optional-locks',
-              '-C',
-              journal.source.repo,
-              'status',
-              '--porcelain=v2',
-              '-z',
-              '--ignore-submodules=none',
-            ],
-            {timeoutMs: 30_000},
-          );
-          if (head.stdout.trim() !== journal.source.head || dirty.stdout.length !== 0)
-            return yield* fail('closeout-source-drift', 'Source changed during closeout; keep remaining drafts.');
+          yield* verifyNativeCloseoutSource(journal.source.repo, journal.source.head);
         });
         for (const item of journal.owned) {
           const archived = journal.archives[item.uri];

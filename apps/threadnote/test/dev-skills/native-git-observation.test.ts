@@ -1,0 +1,281 @@
+import {it as effectIt} from '@effect/vitest';
+import {Effect, Result} from 'effect';
+import {TestClock} from 'effect/testing';
+import {describe, expect} from 'vitest';
+import {CommandExecutor, CommandTimedOut, runCommandEffect} from '@threadnote/platform/command';
+import {captureNativeCycleSource} from '../../src/workflow_automation/cycle_git.js';
+import {verifyNativeCloseoutSource} from '../../src/workflow_automation/closeout.js';
+import {nativeFixture, provideNative} from './native-automation-fixture.js';
+
+const run = <A, E, R>(program: Effect.Effect<A, E, R>) => program.pipe(TestClock.withLive, provideNative);
+const git = (repo: string, ...args: string[]) =>
+  runCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args]).pipe(Effect.map(result => result.stdout));
+const commit = (repo: string, ...args: string[]) =>
+  git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Fixture', ...args);
+const initialObjects = (args: readonly string[]) => args.includes('HEAD^{commit}') && !args.includes('--verify');
+const refused = <A, E>(result: Result.Result<A, E>, code: string) => {
+  expect(Result.isFailure(result)).toBe(true);
+  if (Result.isFailure(result)) expect(result.failure).toMatchObject({code});
+};
+
+describe('native Git observations', () => {
+  effectIt.effect('captures both Git object formats with one initial frame and an independent closing HEAD', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      for (const format of ['sha1', 'sha256']) {
+        const repo = f.path.join(f.root, format);
+        yield* f.fs.makeDirectory(repo);
+        yield* git(repo, 'init', '--initial-branch=main', `--object-format=${format}`);
+        yield* f.fs.writeFileString(f.path.join(repo, 'source.ts'), 'source\n');
+        yield* git(repo, 'add', '.');
+        yield* commit(repo);
+        yield* git(repo, 'checkout', '--detach');
+        const head = (yield* git(repo, 'rev-parse', 'HEAD')).trim();
+        const tree = (yield* git(repo, 'rev-parse', 'HEAD^{tree}')).trim();
+        const before = yield* f.fs.readFile(f.path.join(repo, '.git', 'index'));
+        const observed: (readonly string[])[] = [];
+        const snapshot = yield* captureNativeCycleSource(repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, {
+            ...commands,
+            executeBytes: (executable, args, options) => {
+              observed.push(args);
+              return binary(executable, args, options).pipe(
+                Effect.map(result =>
+                  initialObjects(args)
+                    ? {
+                        ...result,
+                        stdout: new TextEncoder().encode(
+                          new TextDecoder().decode(result.stdout).replace(/\n/gu, '\r\n'),
+                        ),
+                      }
+                    : result,
+                ),
+              );
+            },
+          }),
+        );
+        expect(snapshot).toMatchObject({head, tree, baseTree: tree, files: {}});
+        expect(head).toHaveLength(format === 'sha1' ? 40 : 64);
+        expect(observed.filter(initialObjects)).toHaveLength(1);
+        expect(observed.filter(args => args.includes('rev-parse'))).toHaveLength(4);
+        expect(observed.at(-1)).toContain('HEAD^{commit}');
+        expect(observed.at(-1)).toContain('--verify');
+        expect(yield* f.fs.readFile(f.path.join(repo, '.git', 'index'))).toEqual(before);
+        yield* verifyNativeCloseoutSource(repo, head);
+      }
+    }).pipe(run),
+  );
+
+  effectIt.effect('rejects partial or malformed initial objects before touching the private index', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      const hash = 'a'.repeat(40);
+      const index = f.path.join(f.repo, '.git', 'index');
+      const before = yield* f.fs.readFile(index);
+      for (const stdout of [
+        '',
+        `${hash}\n`,
+        `${hash}\n${hash}`,
+        `${hash}\n${hash}\nextra\n`,
+        `${hash.toUpperCase()}\n${hash}\n`,
+        `${hash}\n${'a'.repeat(64)}\n`,
+        ` ${hash}\n${hash}\n`,
+        `${hash}\r\r\n${hash}\n`,
+        `${hash}\nHEAD^{tree}\n`,
+      ]) {
+        let indexWrites = 0;
+        const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+          Effect.provideService(CommandExecutor, {
+            ...commands,
+            executeBytes: (executable, args, options) => {
+              if (args.includes('add')) indexWrites++;
+              return initialObjects(args)
+                ? Effect.succeed({exitCode: 0, stderr: '', stdout: new TextEncoder().encode(stdout)})
+                : binary(executable, args, options);
+            },
+          }),
+          Effect.result,
+        );
+        refused(result, 'invalid-snapshot');
+        expect(indexWrites).toBe(0);
+        expect(yield* f.fs.readFile(index)).toEqual(before);
+      }
+    }).pipe(run),
+  );
+
+  effectIt.effect(
+    'rejects unborn, missing and injected revisions and retains external HEAD and index drift checks',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* nativeFixture();
+        expect(Result.isFailure(yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(Effect.result))).toBe(true);
+        refused(yield* verifyNativeCloseoutSource(f.repo, 'a'.repeat(40)).pipe(Effect.result), 'closeout-source-drift');
+        yield* git(f.repo, 'add', '.');
+        yield* commit(f.repo);
+        for (const base of ['HEAD\nHEAD', '', ' '.repeat(2), 'a'.repeat(513)])
+          refused(yield* captureNativeCycleSource(f.repo, base).pipe(Effect.result), 'invalid-snapshot');
+        for (const base of ['missing-ref', '--show-toplevel'])
+          expect(Result.isFailure(yield* captureNativeCycleSource(f.repo, base).pipe(Effect.result))).toBe(true);
+        const commands = yield* CommandExecutor;
+        const binary = commands.executeBytes;
+        if (!binary) throw new Error('Expected binary command support.');
+        for (const mutation of [
+          commit(f.repo, '--allow-empty'),
+          git(f.repo, 'update-index', '--assume-unchanged', 'source.ts'),
+        ]) {
+          let moved = false;
+          const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+            Effect.provideService(CommandExecutor, {
+              ...commands,
+              executeBytes: (executable, args, options) =>
+                binary(executable, args, options).pipe(
+                  Effect.tap(() => {
+                    if (!args.includes('diff') || moved) return Effect.void;
+                    moved = true;
+                    return mutation.pipe(Effect.provideService(CommandExecutor, commands));
+                  }),
+                ),
+            }),
+            Effect.result,
+          );
+          expect(moved).toBe(true);
+          refused(result, 'source-drift');
+        }
+      }).pipe(run),
+  );
+
+  effectIt.effect('reobserves real clean, dirty, detached and moved HEAD states without sharing freshness', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      yield* git(f.repo, 'branch', 'upstream');
+      yield* git(f.repo, 'branch', '--set-upstream-to=upstream', 'main');
+      yield* commit(f.repo, '--allow-empty', '-m', 'main divergence');
+      yield* git(f.repo, 'checkout', 'upstream');
+      yield* commit(f.repo, '--allow-empty', '-m', 'upstream divergence');
+      yield* git(f.repo, 'checkout', 'main');
+      expect((yield* git(f.repo, 'rev-list', '--left-right', '--count', 'HEAD...upstream')).trim()).toBe('1\t1');
+      const head = (yield* git(f.repo, 'rev-parse', 'HEAD')).trim();
+      const commands = yield* CommandExecutor;
+      const observed: (readonly string[])[] = [];
+      const frames: string[] = [];
+      const verify = verifyNativeCloseoutSource(f.repo, head).pipe(
+        Effect.provideService(CommandExecutor, {
+          ...commands,
+          execute: (executable, args, options) => {
+            observed.push(args);
+            return commands
+              .execute(executable, args, options)
+              .pipe(Effect.tap(result => Effect.sync(() => frames.push(result.stdout))));
+          },
+        }),
+      );
+      yield* verify;
+      expect(frames[0]).toContain(`# branch.oid ${head}\0`);
+      expect(frames[0]).toContain('# branch.upstream upstream\0');
+      expect(frames[0]).toContain('# branch.ab +? -?\0');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'untracked'), 'untracked\n');
+      refused(yield* verify.pipe(Effect.result), 'closeout-source-drift');
+      yield* f.fs.remove(f.path.join(f.repo, 'untracked'));
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'changed\n');
+      refused(yield* verify.pipe(Effect.result), 'closeout-source-drift');
+      yield* git(f.repo, 'checkout', '--', 'source.ts');
+      yield* git(f.repo, 'checkout', '--detach');
+      yield* verify;
+      yield* commit(f.repo, '--allow-empty');
+      refused(yield* verify.pipe(Effect.result), 'closeout-source-drift');
+      expect(observed).toHaveLength(5);
+      expect(
+        observed.every(
+          args => args.includes('status') && args.includes('--branch') && args.includes('--no-ahead-behind'),
+        ),
+      ).toBe(true);
+    }).pipe(run),
+  );
+
+  effectIt.effect('accepts only complete clean status frames and fails closed on unknown or duplicate metadata', () =>
+    Effect.gen(function* () {
+      const commands = yield* CommandExecutor;
+      for (const length of [40, 64]) {
+        const hash = 'a'.repeat(length);
+        const clean = `# branch.oid ${hash}\0# branch.head main\0`;
+        const verify = (stdout: string) =>
+          verifyNativeCloseoutSource('/unused', hash).pipe(
+            Effect.provideService(CommandExecutor, {
+              ...commands,
+              execute: () => Effect.succeed({exitCode: 0, stderr: '', stdout}),
+            }),
+            Effect.result,
+          );
+        for (const stdout of [
+          clean,
+          clean.replace('main', '(detached)'),
+          `${clean}# branch.upstream origin/main\0# branch.ab +1 -0\0`,
+          `${clean}# branch.upstream origin/main\0# branch.ab +? -?\0`,
+        ])
+          expect(Result.isSuccess(yield* verify(stdout))).toBe(true);
+        for (const stdout of [
+          '',
+          clean.slice(0, -1),
+          clean.replace(hash, '(initial)'),
+          clean.replace(hash, hash.slice(1)),
+          clean.replace(hash, hash.toUpperCase()),
+          clean.replace(hash, `${hash}\r\n`),
+          `# branch.oid ${hash}\0`,
+          `${clean}# branch.oid ${hash}\0`,
+          `${clean}# branch.head other\0`,
+          `${clean}# branch.future unknown\0`,
+          clean.replace('main', 'main\tinvalid'),
+          `${clean}# branch.ab invalid\0`,
+          `${clean}# branch.ab +? -1\0`,
+          `${clean}# branch.ab +1 -?\0`,
+          `${clean}# branch.ab +?? -?\0`,
+          `${clean}# branch.ab +? -?\0# branch.ab +? -?\0`,
+          `${clean}\0`,
+          `${clean}? untracked\0`,
+          `${clean}1 .M N... changed\0`,
+          `${clean}2 R. N... renamed\0# branch.oid ${hash}\0`,
+        ])
+          refused(yield* verify(stdout), 'closeout-source-drift');
+      }
+    }).pipe(run),
+  );
+
+  effectIt.effect('propagates command timeouts from both observations without retry or partial authority', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      const timeout = CommandTimedOut.make({
+        executable: 'git',
+        args: [],
+        timeoutMs: 30_000,
+        message: 'fixture timeout',
+      });
+      const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+        Effect.provideService(CommandExecutor, {
+          ...commands,
+          executeBytes: (executable, args, options) =>
+            initialObjects(args) ? Effect.fail(timeout) : binary(executable, args, options),
+        }),
+        Effect.result,
+      );
+      expect(Result.isFailure(result) && result.failure).toBe(timeout);
+      const closed = yield* verifyNativeCloseoutSource(f.repo, 'a'.repeat(40)).pipe(
+        Effect.provideService(CommandExecutor, {...commands, execute: () => Effect.fail(timeout)}),
+        Effect.result,
+      );
+      expect(Result.isFailure(closed) && closed.failure).toBe(timeout);
+    }).pipe(run),
+  );
+});

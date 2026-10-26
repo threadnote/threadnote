@@ -104,7 +104,7 @@ it.effect('keeps reentrant, child and nested sessions independent and revokes in
   ),
 );
 
-it.effect('falls back to fresh scopes when file identity is missing or unsafe', () =>
+it.effect('falls back to fresh scopes when normalized and native handle identity are unavailable', () =>
   fixture(path =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -112,6 +112,20 @@ it.effect('falls back to fresh scopes when file identity is missing or unsafe', 
         const uncertain = FileSystem.make({
           ...fs,
           stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino}))),
+          open: (value, options) =>
+            fs.open(value, options).pipe(
+              Effect.map(
+                file =>
+                  new Proxy(file, {
+                    get: (target, key, receiver) =>
+                      key === 'fd'
+                        ? undefined
+                        : key === 'stat'
+                          ? file.stat.pipe(Effect.map(info => ({...info, ino})))
+                          : Reflect.get(target, key, receiver),
+                  }),
+              ),
+            ),
         });
         yield* withRecallDatabaseSession(
           Effect.gen(function* () {
@@ -122,6 +136,105 @@ it.effect('falls back to fresh scopes when file identity is missing or unsafe', 
       }
     }),
   ),
+);
+
+it.effect('retains when Effect omits an inode but the native handle and path prove its exact identity', () =>
+  fixture(path =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const omitted = FileSystem.make({
+        ...fs,
+        stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<number>()}))),
+        open: (value, options) =>
+          fs.open(value, options).pipe(
+            Effect.map(
+              file =>
+                new Proxy(file, {
+                  get: (target, key, receiver) =>
+                    key === 'stat'
+                      ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<number>()})))
+                      : Reflect.get(target, key, receiver),
+                }),
+            ),
+          ),
+      });
+      yield* withRecallDatabaseSession(
+        Effect.gen(function* () {
+          yield* useRecallDatabase(path, mark);
+          expect(yield* useRecallDatabase(path, marker)).toBe(true);
+        }),
+      ).pipe(Effect.provideService(FileSystem.FileSystem, omitted));
+    }),
+  ),
+);
+
+it.effect.prop(
+  'preserves exact large native identities and rejects a mismatching path identity',
+  {
+    additionalBits: Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 8})),
+    matches: Schema.Boolean,
+  },
+  ({additionalBits, matches}) =>
+    fixture(path =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const native = process.getBuiltinModule('fs');
+        const fstat = native.fstatSync;
+        const lstat = native.promises.lstat;
+        const offset = 1n << BigInt(54 + additionalBits);
+        const opened = vi.spyOn(native, 'fstatSync').mockImplementation((fd, options) => {
+          const actual = fstat(fd, options);
+          return new Proxy(actual, {
+            get: (target, key, receiver) =>
+              key === 'ino' && typeof target.ino === 'bigint'
+                ? target.ino + offset
+                : Reflect.get(target, key, receiver),
+          });
+        });
+        const current = vi.spyOn(native.promises, 'lstat').mockImplementation(async (value, options) => {
+          const actual = await lstat(value, options);
+          return new Proxy(actual, {
+            get: (target, key, receiver) =>
+              key === 'ino' && typeof target.ino === 'bigint'
+                ? target.ino + offset + (matches ? 0n : 1n)
+                : Reflect.get(target, key, receiver),
+          });
+        });
+        const omitted = FileSystem.make({
+          ...fs,
+          stat: value => fs.stat(value).pipe(Effect.map(info => ({...info, ino: Option.none<number>()}))),
+          open: (value, options) =>
+            fs.open(value, options).pipe(
+              Effect.map(
+                file =>
+                  new Proxy(file, {
+                    get: (target, key, receiver) =>
+                      key === 'stat'
+                        ? file.stat.pipe(Effect.map(info => ({...info, ino: Option.none<number>()})))
+                        : Reflect.get(target, key, receiver),
+                  }),
+              ),
+            ),
+        });
+        yield* withRecallDatabaseSession(
+          Effect.gen(function* () {
+            yield* useRecallDatabase(path, mark);
+            expect(yield* useRecallDatabase(path, marker)).toBe(matches);
+            expect(opened).toHaveBeenCalled();
+            expect(current).toHaveBeenCalled();
+          }),
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, omitted),
+          Effect.ensuring(
+            Effect.sync(() => {
+              opened.mockRestore();
+              current.mockRestore();
+            }),
+          ),
+        );
+      }),
+    ),
+  {arbitrary: {runs: 12}},
 );
 
 it.effect('does not serve an old client after a same-path replacement', () =>

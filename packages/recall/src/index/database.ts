@@ -1,6 +1,11 @@
 import {Context, Effect, Exit, FileSystem, Layer, Option, Path, Scope} from 'effect';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {
+  readOpenedFileSystemIdentity,
+  readPathFileSystemIdentity,
+  type FileSystemIdentity,
+} from '@threadnote/platform/system';
 
 type DatabaseContext = Context.Context<SqliteClient.SqliteClient | SqlClient.SqlClient>;
 type Identity = {readonly database: string; readonly files: string};
@@ -35,19 +40,13 @@ export const withRecallDatabaseSession = <A, E, R>(program: Effect.Effect<A, E, 
       }),
   );
 
-function identity(info: FileSystem.File.Info): string | undefined {
-  // Zero/missing/rounded inode values cannot establish that an open connection
-  // still addresses this path. Unsupported filesystems retain fresh scopes.
-  if (
-    info.type !== 'File' ||
-    !Number.isSafeInteger(info.dev) ||
-    info.dev < 0 ||
-    Option.isNone(info.ino) ||
-    !Number.isSafeInteger(info.ino.value) ||
-    info.ino.value <= 0
-  )
-    return undefined;
-  return `${info.dev}:${info.ino.value}`;
+function identity(value: Option.Option<FileSystemIdentity>): string | undefined {
+  // Effect's File.Info omits inodes beyond Number.MAX_SAFE_INTEGER. The platform
+  // readers recover precise bigint identities from this handle and path; never
+  // round an identity or accept absent/zero IDs in their place.
+  return Option.isSome(value) && value.value.dev >= 0n && value.value.ino > 0n
+    ? `${value.value.dev}:${value.value.ino}`
+    : undefined;
 }
 
 const probe = (path: string, requireAuxiliaries = false) =>
@@ -60,8 +59,8 @@ const probe = (path: string, requireAuxiliaries = false) =>
       // A live handle must not bypass a newly denied open/ACL. Do not create or
       // chmod here: a fresh SQLite open would precede the query's normal chmod.
       const file = yield* fs.open(path, {flag: 'r+'});
-      const opened = identity(yield* file.stat);
-      const current = identity(yield* fs.stat(path));
+      const opened = identity(yield* readOpenedFileSystemIdentity(file, yield* file.stat, 'File'));
+      const current = identity(yield* readPathFileSystemIdentity(path, yield* fs.stat(path), 'File'));
       if (opened === undefined || opened !== current) return undefined;
       const files = [opened];
       for (const auxiliary of [`${path}-wal`, `${path}-shm`]) {
@@ -71,8 +70,9 @@ const probe = (path: string, requireAuxiliaries = false) =>
           continue;
         }
         const file = yield* fs.open(auxiliary, {flag: 'r+'});
-        const opened = identity(yield* file.stat);
-        if (opened === undefined || opened !== identity(yield* fs.stat(auxiliary))) return undefined;
+        const opened = identity(yield* readOpenedFileSystemIdentity(file, yield* file.stat, 'File'));
+        const current = identity(yield* readPathFileSystemIdentity(auxiliary, yield* fs.stat(auxiliary), 'File'));
+        if (opened === undefined || opened !== current) return undefined;
         files.push(opened);
       }
       return {database: opened, files: files.join('|')};

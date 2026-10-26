@@ -56,6 +56,26 @@ const resolveObject = Effect.fn('workflowAutomation.cycle.resolveObject')(functi
   return value;
 });
 
+/** One initial observation only; the closing HEAD check remains independent. */
+const resolveSourceObjects = Effect.fn('workflowAutomation.cycle.resolveSourceObjects')(function* (
+  repo: string,
+  base: string,
+) {
+  if (!base.trim() || base.length > 512 || nativeCycleHasControl(base))
+    return yield* fail('invalid-snapshot', 'Use one bounded Git revision.');
+  const output = yield* git(repo, ['rev-parse', '--revs-only', '--end-of-options', 'HEAD^{commit}', `${base}^{tree}`]);
+  const records = output.split(/\r?\n/u);
+  if (
+    records.length !== 3 ||
+    records[2] !== '' ||
+    !objectId.test(records[0]) ||
+    !objectId.test(records[1]) ||
+    records[0].length !== records[1].length
+  )
+    return yield* fail('invalid-snapshot', 'Git did not return two complete object identities.');
+  return {head: records[0], baseTree: records[1]};
+});
+
 /** Read one exact Git tree entry, including its executable/symlink/submodule mode. */
 export const readNativeCycleTreeEntry = Effect.fn('workflowAutomation.cycle.readTreeEntry')(function* (
   repo: string,
@@ -115,8 +135,7 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const root = yield* canonicalRepo(repo);
-  const head = yield* resolveObject(root, 'HEAD', 'commit');
-  const baseTree = yield* resolveObject(root, base, 'tree');
+  const {head, baseTree} = yield* resolveSourceObjects(root, base);
   if ((yield* git(root, ['ls-files', '--unmerged', '-z'])).length)
     return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
   const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
