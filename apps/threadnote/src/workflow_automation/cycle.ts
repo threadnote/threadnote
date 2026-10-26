@@ -128,6 +128,9 @@ export const nativeCycleSemanticPrerequisites = (command: string) => ({
         report: 'A complete cycle-review payload; retrieve its semantic prerequisites with topic cycle-review.',
       }
     : {}),
+  ...(command === 'reconcile'
+    ? {userAuthority: 'Required when admitting an approved revision of the same linked specification.'}
+    : {}),
   ...(command === 'detail' || command === 'schema' ? {minimumMaxBytes: nativeCycleDetailMinimumBytes} : {}),
 });
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
@@ -473,6 +476,7 @@ export const runNativeCycle = <R>(
               state,
               verifiedPlan!,
               required(request.reason, 'a concrete reconciliation reason'),
+              request.userAuthority,
             ),
           );
           return {
