@@ -136,20 +136,22 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
   const path = yield* Path.Path;
   const root = yield* canonicalRepo(repo);
   const {head, baseTree} = yield* resolveSourceObjects(root, base);
-  if ((yield* git(root, ['ls-files', '--unmerged', '-z'])).length)
-    return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
   const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
   const statusRecords = status.split('\0');
+  let unmerged = false;
+  let dirtySubmodule = false;
   for (let index = 0; index < statusRecords.length; index++) {
     const record = statusRecords[index];
     if (!record) continue;
     const renamed = record.startsWith('2 ');
     if (renamed) index++; // porcelain-v2 -z stores the original path in the next NUL record
+    if (record.startsWith('u ')) unmerged = true;
     if (!record.startsWith('1 ') && !renamed) continue;
     const submodule = record.split(' ', 4)[2];
-    if (submodule?.startsWith('S') && submodule.slice(2) !== '..')
-      return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
+    if (submodule?.startsWith('S') && submodule.slice(2) !== '..') dirtySubmodule = true;
   }
+  if (unmerged) return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
+  if (dirtySubmodule) return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
   const indexName = (yield* git(root, ['rev-parse', '--git-path', 'index'])).trim();
   const realIndex = path.isAbsolute(indexName) ? indexName : path.resolve(root, indexName);
   if (Option.isSome(yield* fs.readLink(realIndex).pipe(Effect.option)))

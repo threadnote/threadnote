@@ -494,6 +494,150 @@ effectIt.effect('records database lifetime labels without retaining their privat
   }),
 );
 
+const refreshAttributes = (forceAllSources = false) => ({
+  forceAllSources,
+  forceRefresh: false,
+  forceFromMarker: false,
+  canonicalMutationChanged: true,
+  continuityAllowed: !forceAllSources,
+  scannedSources: 8,
+  changedSources: 1,
+  removedSources: 0,
+});
+const annotateRefresh = (span: Tracer.Span, attributes: Record<string, unknown>) => {
+  for (const [key, value] of Object.entries(attributes)) span.attribute(`recall.refresh.${key}`, value);
+};
+
+effectIt.effect.prop(
+  'matches an independent bounded refresh decision model without retaining private attributes',
+  {
+    events: Schema.Array(
+      Schema.Struct({
+        forceAllSources: Schema.Boolean,
+        forceRefresh: Schema.Boolean,
+        forceFromMarker: Schema.Boolean,
+        canonicalMutationChanged: Schema.Boolean,
+        continuityAllowed: Schema.Boolean,
+        scannedSources: Schema.Literals([0, 1, 8, 255, 2_147_483_648]),
+        changedSources: Schema.Literals([0, 1, 8, 255, 2_147_483_648]),
+        removedSources: Schema.Literals([0, 1, 8, 255, 2_147_483_648]),
+      }),
+    ).check(Schema.isMaxLength(20)),
+  },
+  ({events}) =>
+    Effect.sync(() => {
+      const observer = make();
+      for (const event of events) {
+        const span = observer.tracer.span(spanOptions('recall.refreshDatabase'));
+        annotateRefresh(span, event);
+        span.attribute('PRIVATE', {PRIVATE: 'contents and paths'});
+        span.event('PRIVATE', 1n, {PRIVATE: 'content'});
+        span.end(3_000_000n, Exit.succeed('PRIVATE'));
+        span.end(4_000_000n, Exit.fail('PRIVATE'));
+      }
+      const snapshot = observer.snapshot();
+      const clamp = (value: number) => Math.min(2_147_483_647, value);
+      const bucket = (all: boolean) => {
+        const matching = events.filter(event => event.forceAllSources === all);
+        return {
+          count: matching.length,
+          scannedSources: clamp(matching.reduce((sum, event) => sum + event.scannedSources, 0)),
+          changedSources: clamp(matching.reduce((sum, event) => sum + event.changedSources, 0)),
+          removedSources: clamp(matching.reduce((sum, event) => sum + event.removedSources, 0)),
+          maxChangedSources: clamp(Math.max(0, ...matching.map(event => event.changedSources))),
+        };
+      };
+      expect(snapshot.refreshDecisions).toEqual({
+        observed: events.length,
+        forceRefresh: events.filter(event => event.forceRefresh).length,
+        forceFromMarker: events.filter(event => event.forceFromMarker).length,
+        canonicalMutationChanged: events.filter(event => event.canonicalMutationChanged).length,
+        continuityMissing: events.filter(event => !event.continuityAllowed).length,
+        allSources: bucket(true),
+        incremental: bucket(false),
+      });
+      expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
+      snapshot.refreshDecisions.allSources.count = -1;
+      expect(observer.snapshot().refreshDecisions.allSources.count).toBe(bucket(true).count);
+    }),
+  {arbitrary: {runs: 25}},
+);
+
+effectIt.effect('rejects incomplete or nonprimitive refresh attributes and attributes on other spans', () =>
+  Effect.sync(() => {
+    const observer = make();
+    const privateValue = {
+      get PRIVATE() {
+        throw new Error('PRIVATE getter');
+      },
+    };
+    for (const key of Object.keys(refreshAttributes())) {
+      for (const malformed of [undefined, null, 'PRIVATE', privateValue, NaN, Infinity, -1, 0.5]) {
+        const span = observer.tracer.span(spanOptions('recall.refreshDatabase'));
+        annotateRefresh(span, {...refreshAttributes(), [key]: malformed});
+        span.end(3_000_000n, Exit.fail(privateValue));
+      }
+    }
+    const other = observer.tracer.span(spanOptions('recall.writeRefresh'));
+    annotateRefresh(other, refreshAttributes(true));
+    other.end(3_000_000n, Exit.succeed(undefined));
+    expect(observer.snapshot().refreshDecisions.observed).toBe(0);
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect('observes coarse refresh phases and explicit close finalization while keeping success quiet', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const observer = make({sink: line => lines.push(line)});
+    const value = {PRIVATE: 'original result'};
+    let released = 0;
+    const result = yield* reportNativeFailure(
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* Effect.acquireRelease(Effect.void, () =>
+            Effect.sync(() => {
+              released++;
+            }).pipe(Effect.withSpan('recall.closeDatabase')),
+          );
+          return yield* Effect.gen(function* () {
+            yield* Effect.annotateCurrentSpan(
+              Object.fromEntries(
+                Object.entries(refreshAttributes()).map(([key, item]) => [`recall.refresh.${key}`, item]),
+              ),
+            );
+            yield* Effect.void.pipe(Effect.withSpan('recall.assembleRefreshSources'));
+            yield* Effect.void.pipe(Effect.withSpan('recall.hashRefreshGeneration'));
+            yield* Effect.all([
+              Effect.void.pipe(Effect.withSpan('recall.rebuildIdentityConflicts')),
+              Effect.void.pipe(Effect.withSpan('recall.resolveLegacyMemoryLinks')),
+            ]).pipe(Effect.withSpan('recall.writeRefresh'));
+            return value;
+          }).pipe(Effect.withSpan('recall.refreshDatabase'));
+        }),
+      ).pipe(Effect.withTracer(observer.tracer)),
+      observer,
+    );
+    expect(result).toBe(value);
+    expect(released).toBe(1);
+    expect(lines).toHaveLength(0);
+    for (const label of [
+      'recall.assembleRefreshSources',
+      'recall.hashRefreshGeneration',
+      'recall.writeRefresh',
+      'recall.rebuildIdentityConflicts',
+      'recall.resolveLegacyMemoryLinks',
+      'recall.closeDatabase',
+    ])
+      expect(observer.snapshot().totals[label]).toMatchObject({started: 1, ended: 1, failed: 0});
+    expect(observer.snapshot().refreshDecisions.incremental).toMatchObject({count: 1, changedSources: 1});
+    observer.reportFailure();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
 effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and the worst-case failure line', () =>
   Effect.sync(() => {
     const readings = [100, 110, NaN, Infinity, -100, 105, 120];

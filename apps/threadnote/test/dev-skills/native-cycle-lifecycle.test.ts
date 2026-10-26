@@ -945,10 +945,32 @@ describe('native cycle lifecycle', () => {
         .pipe(Effect.result);
       expect(scope).toMatchObject({failure: {code: 'phase-scope'}});
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'export const changed = true;\n');
-      const drift = yield* f
-        .call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options})
-        .pipe(Effect.result);
+      const query = yield* CodeGraphQueryService;
+      const indexer = yield* CodeGraphIndexer;
+      let graphObservations = 0;
+      let graphPreparations = 0;
+      const drift = yield* f.call({...f.base('cycle'), command: 'packet', phaseId: 'one', packet: options}).pipe(
+        Effect.provideService(CodeGraphQueryService, {
+          ...query,
+          status: (...args) =>
+            Effect.suspend(() => {
+              graphObservations++;
+              return query.status(...args);
+            }),
+        }),
+        Effect.provideService(CodeGraphIndexer, {
+          ...indexer,
+          index: (...args) =>
+            Effect.suspend(() => {
+              graphPreparations++;
+              return indexer.index(...args);
+            }),
+        }),
+        Effect.result,
+      );
       expect(drift).toMatchObject({failure: {code: 'source-drift'}});
+      expect(graphObservations).toBe(0);
+      expect(graphPreparations).toBe(0);
     }).pipe(run),
   );
 

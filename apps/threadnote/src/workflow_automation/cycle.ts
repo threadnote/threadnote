@@ -1,4 +1,4 @@
-import {Effect, FileSystem, Path, Schema} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {
@@ -295,6 +295,20 @@ export const runNativeCycle = <R>(
         inspectWorkflowJournal(config, state.state.bindingId),
       );
       sourceBeforeGraph = yield* captureNativeCycleSource(journal.state.binding.repo, 'HEAD');
+      // Preserve later eligibility/schema errors, but do not index a valid proof's contradicted source.
+      const packet = yield* Schema.decodeUnknownEffect(NativeCyclePacketOptionsSchema, {
+        onExcessProperty: 'error',
+      })(request.packet).pipe(Effect.option);
+      const next = nextNativeCycle(state.state.cycle.state);
+      if (
+        next.action === 'implement' &&
+        next.phaseId === request.phaseId &&
+        Option.isSome(packet) &&
+        (packet.value.graphProof.head !== sourceBeforeGraph.head ||
+          packet.value.graphProof.tree !== sourceBeforeGraph.tree ||
+          packet.value.graphProof.repositoryRoot !== journal.state.binding.repo)
+      )
+        return yield* fail('source-drift', 'Packet graph evidence does not match exact current checkout bytes.');
     }
     const graph = request.command === 'packet' ? yield* call(base('graph-ready')) : undefined;
     return yield* withNativeWorkflowLock(
