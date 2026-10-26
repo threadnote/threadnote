@@ -9,6 +9,36 @@ const collect = (files: Record<string, string>, entries = ['src/0.ts'], workspac
     workspaces,
   });
 
+it('retains namespace dependencies after interpolated templates', () => {
+  const files = {
+    'src/0.ts': 'const label = `${1}`; export * as ns from "./1.js";',
+    'src/1.ts': 'import "runtime-npm"; export const value = 1;',
+  };
+  expect(collect(files)).toEqual({files: ['src/0.ts', 'src/1.ts'], npm: ['runtime-npm']});
+  fc.assert(
+    fc.property(
+      fc.array(
+        fc.constantFrom(
+          '`${1}`;',
+          '`outer ${`inner ${1}`}`;',
+          '`outer ${{value: `inner ${2}`}.value}`;',
+          'String.raw`tagged ${1}`;',
+          '/[`}]/.test("}");',
+          '"export * as fake from \'fake\'";',
+          '/* export * as fake from "fake" */',
+        ),
+        {maxLength: 8},
+      ),
+      prefixes => {
+        expect(sourceImports('file.ts', `${prefixes.join('\n')}\nexport * as ns from './value.js';`)).toEqual([
+          './value.js',
+        ]);
+      },
+    ),
+    {numRuns: 50},
+  );
+});
+
 it('recognizes namespace exports across arbitrary bounded trivia', () => {
   fc.assert(
     fc.property(
