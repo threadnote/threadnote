@@ -278,4 +278,64 @@ describe('native Git observations', () => {
       expect(Result.isFailure(closed) && closed.failure).toBe(timeout);
     }).pipe(run),
   );
+
+  effectIt.effect('rejects a real unmerged index from status before any private-index write', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      yield* git(f.repo, 'branch', 'conflict-side');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'main content\n');
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      yield* git(f.repo, 'checkout', 'conflict-side');
+      yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'side content\n');
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      const merge = yield* runCommandEffect('git', ['-C', f.repo, 'merge', 'main'], {allowFailure: true});
+      expect(merge.exitCode).toBe(1);
+      expect(yield* git(f.repo, 'status', '--porcelain=v2', '-z')).toMatch(/^u /u);
+      const index = f.path.join(f.repo, '.git', 'index');
+      const before = yield* f.fs.readFile(index);
+      const source = yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'));
+      const commands = yield* CommandExecutor;
+      const binary = commands.executeBytes;
+      if (!binary) throw new Error('Expected binary command support.');
+      const observed: (readonly string[])[] = [];
+      const result = yield* captureNativeCycleSource(f.repo, 'HEAD').pipe(
+        Effect.provideService(CommandExecutor, {
+          ...commands,
+          executeBytes: (executable, args, options) => {
+            observed.push(args);
+            return binary(executable, args, options);
+          },
+        }),
+        Effect.result,
+      );
+      refused(result, 'unmerged-index');
+      expect(observed.filter(args => args.includes('status'))).toHaveLength(1);
+      expect(observed.some(args => args.includes('ls-files') || args.includes('add'))).toBe(false);
+      expect(yield* f.fs.readFile(index)).toEqual(before);
+      expect(yield* f.fs.readFileString(f.path.join(f.repo, 'source.ts'))).toBe(source);
+    }).pipe(run),
+  );
+
+  effectIt.effect('does not mistake a rename original path beginning with u for an unmerged status record', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const original = 'u conflict-looking name';
+      yield* f.fs.writeFileString(f.path.join(f.repo, original), 'rename content\n');
+      yield* git(f.repo, 'add', '.');
+      yield* commit(f.repo);
+      yield* git(f.repo, 'mv', original, 'renamed.txt');
+      const status = yield* git(f.repo, 'status', '--porcelain=v2', '-z');
+      expect(status).toContain(`renamed.txt\0${original}\0`);
+      const index = f.path.join(f.repo, '.git', 'index');
+      const before = yield* f.fs.readFile(index);
+      const snapshot = yield* captureNativeCycleSource(f.repo, 'HEAD');
+      expect(snapshot.files).toHaveProperty(original);
+      expect(snapshot.files).toHaveProperty('renamed.txt');
+      expect(yield* f.fs.readFile(index)).toEqual(before);
+    }).pipe(run),
+  );
 });

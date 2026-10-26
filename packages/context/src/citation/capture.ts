@@ -373,22 +373,16 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
   const fs = yield* FileSystem.FileSystem;
   // A copied ready snapshot needs a fresh closing observation, even inside a caller read transaction.
   const readReadyEvidence = query.withStatusSession ? store.readReadySnapshotCitationEvidence : undefined;
-  const before = yield* query
-    .status(config.agentContextHome, cwd, {
-      project,
-      manifestPath: config.manifestPath,
-      observeWorktree: true,
-      requestMaintenance: false,
-    })
-    .pipe(Effect.mapError(error => captureError(cwd, error)));
-  if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(before, expectedCallerIdentity);
-  if (expectedProjectScope) yield* requireExpectedProjectScope(before, expectedProjectScope);
-  const snapshot = yield* Effect.try({
-    try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets)),
-    catch: cause => captureError(cwd, cause),
-  });
-  return yield* Effect.scoped(
-    Effect.gen(function* () {
+  const captureAtStatus = (before: CodeGraphStatus) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(before, expectedCallerIdentity);
+        if (expectedProjectScope) yield* requireExpectedProjectScope(before, expectedProjectScope);
+        const snapshot = yield* Effect.try({
+          try: () => requireExactCurrentSnapshot(before, captureGroupPreparation(targets)),
+          catch: cause => captureError(cwd, cause),
+        });
+
       // Request adapters bound uninterruptible scoped lease admission/release;
       // internal maintenance retains its existing writer-wait contract. A
       // denied release leaves only the existing bounded, expiring lease.
@@ -628,8 +622,15 @@ const captureRepositoryGroup = Effect.fn('memoryCodeCitation.captureRepositoryGr
       if (expectedCallerIdentity) yield* requireExpectedCallerIdentity(after, expectedCallerIdentity);
       if (expectedProjectScope) yield* requireExpectedProjectScope(after, expectedProjectScope);
       return retainedTargets;
-    }),
-  );
+      }),
+    );
+  const options = {project, manifestPath: config.manifestPath, observeWorktree: true, requestMaintenance: false};
+  // Retain one repository session through capture, then independently reobserve its source fence.
+  return yield* (
+    query.withStatusSession
+      ? query.withStatusSession(config.agentContextHome, cwd, undefined, options, captureAtStatus)
+      : query.status(config.agentContextHome, cwd, options).pipe(Effect.flatMap(captureAtStatus))
+  ).pipe(Effect.mapError(error => captureError(cwd, error)));
 });
 
 const requireExpectedCallerIdentity = Effect.fn('memoryCodeCitation.requireExpectedCallerIdentity')(function* (
