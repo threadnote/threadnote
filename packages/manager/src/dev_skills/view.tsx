@@ -246,15 +246,22 @@ export function DevSkillsPanel(): React.ReactElement {
   }
 
   const target = status?.targets[0];
+  // Legacy execution stays blocked; only verified, clean ownership can request a mutation preview.
+  const legacyRepairable =
+    target?.enrolled === true &&
+    target.installed !== undefined &&
+    target.issues.length === 1 &&
+    target.issues[0].code === 'legacy-workflow-update-required';
   const actionable =
     !!selector &&
     !!target &&
     !busy &&
     !applying &&
     target.installationState !== 'unsupported' &&
-    target.installationState !== 'incompatible';
+    (target.installationState !== 'incompatible' || legacyRepairable);
   const canInstall =
     actionable &&
+    !legacyRepairable &&
     (!target.enrolled ||
       !target.enabled ||
       target.enrollmentState === 'removed' ||

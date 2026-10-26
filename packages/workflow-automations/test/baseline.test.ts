@@ -17,16 +17,16 @@ async function makeGitFixture() {
   roots.push(root);
   const docs = join(root, 'config/agent-skills/dev-spec');
   await mkdir(join(docs, 'references'), {recursive: true});
-  await mkdir(join(docs, 'scripts'), {recursive: true});
   const manifest = {
+    schemaVersion: 2,
+    nativeRequirements: {executorVersion: 1, authoringVersion: 1, cycleVersion: 1, watchVersion: 1, closeoutVersion: 1},
     workflowProtocol: 7,
     stateSchema: 3,
-    skills: [{id: 'dev-spec', files: ['SKILL.md', 'references/contract.md', 'scripts/helper.py']}],
+    skills: [{id: 'dev-spec', files: ['SKILL.md', 'references/contract.md']}],
   };
   await writeFile(join(root, 'config/dev-skills.json'), `${JSON.stringify(manifest)}\n`);
   await writeFile(join(docs, 'SKILL.md'), 'Workflow café 🧭\n');
   await writeFile(join(docs, 'references/contract.md'), 'Résumé: naïve façade\n');
-  await writeFile(join(docs, 'scripts/helper.py'), '# π workflow helper\n');
   await writeFile(join(root, 'ignored.txt'), 'not shipped\n');
   for (const args of [
     ['init', '-q'],
@@ -35,7 +35,6 @@ async function makeGitFixture() {
       'config/dev-skills.json',
       'config/agent-skills/dev-spec/SKILL.md',
       'config/agent-skills/dev-spec/references/contract.md',
-      'config/agent-skills/dev-spec/scripts/helper.py',
     ],
     ['-c', 'user.name=Baseline Test', '-c', 'user.email=baseline@example.invalid', 'commit', '-qm', 'fixture'],
   ]) {
@@ -54,7 +53,6 @@ async function makeEncodedPathCliCheckout() {
   const currentPackage = join(dirname(fileURLToPath(import.meta.url)), '..');
   for (const [source, target] of [
     [join(currentPackage, 'test/helpers/capture-baseline.ts'), join(packagePath, 'test/helpers/capture-baseline.ts')],
-    [join(currentPackage, 'src/inventory.ts'), join(packagePath, 'src/inventory.ts')],
     [join(currentPackage, 'src/scenarios.ts'), join(packagePath, 'src/scenarios.ts')],
   ])
     await writeFile(target, await readFile(source));
@@ -88,27 +86,35 @@ describe('workflow baseline capture', () => {
     const second = await captureBaseline({repo: root});
     const firstMeasurements = first.sourceMeasurements as {
       skillDocuments: {files: {path: string; bytes: number}[]; totalBytes: number};
-      shippedPython: {files: {path: string; bytes: number}[]; totalBytes: number};
       scenarios: {count: number; cases: {id: string; expectedInvariants: string[]; measurementUnits: string[]}[]};
     };
     const secondMeasurements = second.sourceMeasurements as typeof firstMeasurements;
     expect(first.source).toEqual(second.source);
     expect(firstMeasurements).toEqual(secondMeasurements);
-    for (const collection of [firstMeasurements.skillDocuments, firstMeasurements.shippedPython]) {
-      let total = 0;
-      for (const file of collection.files) {
-        const bytes = await readFile(join(root, file.path));
-        expect(file.bytes).toBe(bytes.byteLength);
-        total += bytes.byteLength;
-      }
-      expect(collection.totalBytes).toBe(total);
+    const collection = firstMeasurements.skillDocuments;
+    let total = 0;
+    for (const file of collection.files) {
+      const bytes = await readFile(join(root, file.path));
+      expect(file.bytes).toBe(bytes.byteLength);
+      total += bytes.byteLength;
     }
+    expect(collection.totalBytes).toBe(total);
+    expect(first.schemaVersion).toBe(2);
+    expect(first.source).toMatchObject({
+      manifestSchemaVersion: 2,
+      workflowProtocol: 7,
+      stateSchema: 3,
+      nativeRequirements: {
+        executorVersion: 1,
+        authoringVersion: 1,
+        cycleVersion: 1,
+        watchVersion: 1,
+        closeoutVersion: 1,
+      },
+    });
     expect(firstMeasurements.skillDocuments.files.map(file => file.path)).toEqual([
       'config/agent-skills/dev-spec/SKILL.md',
       'config/agent-skills/dev-spec/references/contract.md',
-    ]);
-    expect(firstMeasurements.shippedPython.files.map(file => file.path)).toEqual([
-      'config/agent-skills/dev-spec/scripts/helper.py',
     ]);
     expect(firstMeasurements.skillDocuments.totalBytes).toBeGreaterThan(0);
     expect(firstMeasurements.scenarios.count).toBe(workflowScenarios.length);

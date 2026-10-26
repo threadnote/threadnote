@@ -7,6 +7,14 @@ import type {PreparedSharedMemoryWrite, WriteDurableMemoryParams} from '../mcp/s
 import type {ShareGitCommitReceipt, ShareGitPublicationReceipt} from '../share/git.js';
 import {portableKey, stableJson, workflowError, type WorkflowBinding} from './protocol.js';
 
+/** Closed diagnostic vocabulary only; never include writer message text. */
+export const PublicationWriterReasonSchema = Schema.Literals([
+  'commit-content-changed',
+  'commit-readback-failed',
+  'git-verification-failed',
+  'git-commit-failed',
+]);
+
 const envelope = {protocolVersion: Schema.Literal(1), bindingId: Schema.String};
 export const WorkflowPublicationNodeSchema = Schema.Struct({
   key: Schema.String,

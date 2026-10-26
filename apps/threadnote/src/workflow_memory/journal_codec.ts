@@ -1,9 +1,8 @@
-import {gzipSync} from 'fflate';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {gzipSync as fflateGzipSync} from 'fflate';
+import {sha256HexSync} from './native_digest.js';
 
 const DISK_LIMIT = 16 * 1024 * 1024;
 const LOGICAL_LIMIT = 64 * 1024 * 1024;
-const FEED_SIZE = 256;
 const COMPRESSION_THRESHOLD = 1024 * 1024;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', {fatal: true});
@@ -11,17 +10,13 @@ const FORMAT = 'threadnote-workflow-journal-gzip-v1';
 const digest = (bytes: Uint8Array) => sha256HexSync(bytes);
 
 function decodeBase64(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-  if (btoa(binary) !== value) throw new Error('Noncanonical base64');
+  const bytes = Uint8Array.fromBase64(value);
+  if (bytes.toBase64() !== value) throw new Error('Noncanonical base64');
   return bytes;
 }
 
 function encodeBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += FEED_SIZE)
-    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + FEED_SIZE, bytes.length)));
-  return btoa(binary);
+  return bytes.toBase64();
 }
 
 export function encodeWorkflowJournal(content: string): string {
@@ -33,18 +28,29 @@ export function encodeBoundedWorkflowJson(content: string, format: string): stri
   const plainBytes = encoder.encode(content);
   if (plainBytes.byteLength > LOGICAL_LIMIT) throw new RangeError('Workflow journal logical size limit exceeded');
   if (plainBytes.byteLength <= COMPRESSION_THRESHOLD) return content;
-  const compressed = gzipSync(plainBytes, {level: 6, mtime: 0});
-  const envelope = JSON.stringify({
-    format,
-    expandedBytes: plainBytes.byteLength,
-    sha256: digest(plainBytes),
-    payload: encodeBase64(compressed),
-  });
-  const storedBytes = encoder.encode(envelope).byteLength;
+  const makeEnvelope = (compressed: Uint8Array) =>
+    JSON.stringify({
+      format,
+      expandedBytes: plainBytes.byteLength,
+      sha256: digest(plainBytes),
+      payload: encodeBase64(compressed),
+    });
+  const nativeCompressed = Bun.gzipSync(plainBytes, {level: 6});
+  // The OS field is advisory; normalize it so the same deterministic payload is emitted on every host.
+  nativeCompressed[9] = 255;
+  const nativeEnvelope = makeEnvelope(nativeCompressed);
+  const nativeStoredBytes = encoder.encode(nativeEnvelope).byteLength;
   // Compression is optional: it must never shrink the capacity of valid plain journals.
-  if (plainBytes.byteLength <= DISK_LIMIT && storedBytes >= plainBytes.byteLength) return content;
-  if (storedBytes > DISK_LIMIT) throw new RangeError('Workflow journal disk size limit exceeded');
-  return envelope;
+  if (plainBytes.byteLength <= DISK_LIMIT && nativeStoredBytes >= plainBytes.byteLength) return content;
+  if (nativeStoredBytes <= DISK_LIMIT) return nativeEnvelope;
+
+  // Keep the prior codec as a bounded compatibility fallback for histories whose native gzip
+  // representation crosses the stored limit but whose established fflate representation fits.
+  const fallbackEnvelope = makeEnvelope(fflateGzipSync(plainBytes, {level: 6, mtime: 0}));
+  const fallbackStoredBytes = encoder.encode(fallbackEnvelope).byteLength;
+  if (plainBytes.byteLength <= DISK_LIMIT && fallbackStoredBytes >= plainBytes.byteLength) return content;
+  if (fallbackStoredBytes > DISK_LIMIT) throw new RangeError('Workflow journal disk size limit exceeded');
+  return fallbackEnvelope;
 }
 
 /** Native gzip parsing avoids repeated optional-header scans in JS streaming decoders. */

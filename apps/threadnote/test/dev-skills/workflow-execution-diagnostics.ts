@@ -16,6 +16,19 @@ export const WORKFLOW_EXECUTION_PHASES = [
   'journal-after-recovery',
   'archive',
   'retired-replay',
+  'authoring-provisioning',
+  'authoring-git-setup',
+  'authoring-profile-setup',
+  'authoring-init',
+  'authoring-draft-save',
+  'authoring-replay',
+  'authoring-load',
+  'authoring-child-reads',
+  'authoring-acceptance',
+  'authoring-review',
+  'authoring-ready-save',
+  'authoring-readback',
+  'authoring-private-remote',
   'assertions',
   'teardown',
   'completed',
@@ -33,7 +46,11 @@ type Command = {sequence: number; channel: Channel; startedMs: number};
 type Recent =
   | {event: 'phase'; phase: Phase; startedMs: number; elapsedMs: number}
   | (Command & {event: 'command-exit'; elapsedMs: number; outcome: Outcome});
-type Options = {readonly now?: () => number; readonly write?: (line: string) => void};
+type Options = {
+  readonly now?: () => number;
+  readonly write?: (line: string) => void;
+  readonly testTag?: 'native-authoring-cloud';
+};
 const MAX_COUNT = 1_000_000;
 const MAX_TIME = 86_400_000;
 const safely = (observe: () => void) => {
@@ -169,7 +186,7 @@ export function createWorkflowExecutionDiagnostics(options: Options = {}) {
     const at = elapsed();
     return {
       version: 1,
-      test: 'workflow-citation-recovery',
+      test: options.testTag ?? 'workflow-citation-recovery',
       scope: 'existing-command-effect-spans',
       elapsedOrigin: 'observer-created',
       elapsedMs: at,

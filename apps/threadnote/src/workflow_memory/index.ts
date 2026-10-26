@@ -6,13 +6,14 @@ import {
   requiredText,
   validateWorkflowInput,
   type WorkflowRequest,
+  type WorkflowJournal,
   workflowError,
 } from './protocol.js';
 import {resolveWorkflowBinding} from './profile.js';
-import {bindWorkflow, loadWorkflowJournal, withWorkflowLock} from './journal.js';
+import {bindWorkflow, loadWorkflowJournal, withWorkflowLock, withWorkflowJournalSession} from './journal.js';
 import {executeWorkflowOperation, prepareWorkflowOperation, readWorkflowArtifact} from './artifacts.js';
 import {WorkflowPublicationRequestSchema} from './publication_contract.js';
-import {assertWorkflowPublicationVerified, runWorkflowPublication} from './publication.js';
+import {assertWorkflowArchivePublication, runWorkflowPublication} from './publication.js';
 import {inspectWorkflowOperation} from './inspection.js';
 
 export {readWorkflowReadiness} from './profile.js';
@@ -97,6 +98,14 @@ const runBoundRequest = Effect.fn('workflowMemory.boundRequest')(function* (
     !['read', 'preflight'].includes(request.action),
     request,
   );
+  return yield* runLoadedRequest(config, state, request);
+});
+
+const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
+  config: RuntimeConfig,
+  state: WorkflowJournal,
+  request: WorkflowRequest,
+) {
   if (request.action === 'read')
     return yield* readWorkflowArtifact(
       config,
@@ -121,6 +130,44 @@ const runBoundRequest = Effect.fn('workflowMemory.boundRequest')(function* (
     (request.action === 'archive' ||
       (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive'))
   )
-    yield* assertWorkflowPublicationVerified(config, state.binding.bindingId);
+    yield* assertWorkflowArchivePublication(config, state.binding);
   return yield* executeWorkflowOperation(config, state, request);
 });
+
+type NativeSessionCall = (
+  input: unknown,
+) => Effect.Effect<
+  unknown,
+  Effect.Error<ReturnType<typeof runWorkflowMemory>>,
+  Effect.Services<ReturnType<typeof runWorkflowMemory>>
+>;
+/** App-internal lower dispatcher; its capability expires with the journal lock. */
+export const withNativeWorkflowMemorySession = <A, E, R>(
+  config: RuntimeConfig,
+  bindingId: string,
+  use: (
+    admission: {readonly state: WorkflowJournal; readonly needsRecovery: boolean},
+    call: NativeSessionCall,
+  ) => Effect.Effect<A, E, R>,
+) =>
+  withWorkflowJournalSession(config, bindingId, session => {
+    const call: NativeSessionCall = input =>
+      Effect.gen(function* () {
+        const request = yield* Schema.decodeUnknownEffect(
+          Schema.Union([WorkflowRequestSchema, WorkflowOperationInspectionRequestSchema]),
+        )(input, {onExcessProperty: 'error'});
+        if (
+          !['read', 'preflight', 'create', 'replace', 'recover', 'inspect-operation'].includes(request.action) ||
+          (request.action === 'preflight' && request.mutation !== 'create' && request.mutation !== 'replace')
+        )
+          return yield* workflowError('invalid-request', 'Native child sessions cannot bind, archive or publish.');
+        if (request.action === 'inspect-operation')
+          return yield* session.run(request, state => inspectWorkflowOperation(state, request));
+        return yield* session.run(request, state => {
+          if (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive')
+            return Effect.fail(workflowError('invalid-request', 'Native child sessions cannot recover archives.'));
+          return runLoadedRequest(config, state, request);
+        });
+      });
+    return use(session.admission, call);
+  });

@@ -1,3 +1,4 @@
+import {nativeWorkflowFeatureVersions} from '../workflow_automation/features.js';
 import {Context, Effect, FileSystem, Option, Path} from 'effect';
 import {toolRoot} from '@threadnote/workspace/installation';
 import {getThreadnoteVersion, isStandaloneThreadnoteBuild} from '@threadnote/workspace/runtime-version';
@@ -6,7 +7,28 @@ import type {DevSkillMember, DevSkillsBundle, DevSkillsIssue, DevSkillsManifest}
 import {decode, enumerateFiles, fail, hash, isRecord, readOptional, requireValue} from './files.js';
 
 const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u;
-const prerequisites = {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
+const historicalPrerequisites = {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
+export const nativeRequirements = nativeWorkflowFeatureVersions;
+const prerequisites = {commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']};
+export function parseNativeRequirements(value: unknown) {
+  requireValue(
+    isRecord(value) &&
+      Object.keys(value).length === Object.keys(nativeRequirements).length &&
+      Object.keys(value).every(key => key in nativeRequirements) &&
+      Object.values(value).every(item => Number.isSafeInteger(item) && typeof item === 'number' && item > 0),
+    'Invalid native workflow requirements.',
+  );
+  const {executorVersion, authoringVersion, cycleVersion, watchVersion, closeoutVersion} = value;
+  requireValue(
+    typeof executorVersion === 'number' &&
+      typeof authoringVersion === 'number' &&
+      typeof cycleVersion === 'number' &&
+      typeof watchVersion === 'number' &&
+      typeof closeoutVersion === 'number',
+    'Missing native workflow requirements.',
+  );
+  return {executorVersion, authoringVersion, cycleVersion, watchVersion, closeoutVersion};
+}
 export function validDevSkillPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
@@ -27,10 +49,10 @@ const primaryIds = ['dev-cycle', 'dev-plan', 'dev-spec'];
 export const DEV_SKILLS_MAX_HISTORICAL_SUPPORT_MEMBERS = 16;
 export const hasHistoricalDevSkillsMembers = (manifest: DevSkillsManifest) =>
   manifest.skills.map(skill => skill.id).join(',') !== 'dev-cycle,dev-plan,dev-spec,watch-pr';
-function parseInventory(value: unknown, historical = false) {
+export function parseDevSkillsInventory(value: unknown, historical = false) {
   requireValue(
     isRecord(value) &&
-      value.schemaVersion === 1 &&
+      (value.schemaVersion === 2 || (historical && value.schemaVersion === 1)) &&
       value.workflowProtocol === 1 &&
       value.stateSchema === 1 &&
       typeof value.minimumRuntime === 'string' &&
@@ -43,6 +65,7 @@ function parseInventory(value: unknown, historical = false) {
     Object.keys(value).every(key =>
       [
         'schemaVersion',
+        ...(value.schemaVersion === 2 ? ['nativeRequirements'] : []),
         'workflowProtocol',
         'stateSchema',
         'minimumRuntime',
@@ -55,6 +78,13 @@ function parseInventory(value: unknown, historical = false) {
     ),
     'Unknown bundle manifest fields.',
   );
+  if ('prerequisites' in value)
+    requireValue(
+      JSON.stringify(value.prerequisites) ===
+        JSON.stringify(value.schemaVersion === 1 ? historicalPrerequisites : prerequisites),
+      'Invalid development workflow prerequisites.',
+    );
+  const native = value.schemaVersion === 2 ? parseNativeRequirements(value.nativeRequirements) : undefined;
   const skills: DevSkillMember[] = value.skills
     .map((skill: unknown): DevSkillMember => {
       requireValue(
@@ -99,7 +129,7 @@ function parseInventory(value: unknown, historical = false) {
         skills.every(skill => skill.role === (skill.id === 'watch-pr' ? 'support' : 'primary')),
       'The complete development bundle must contain all four workflows.',
     );
-  return {value, skills, minimumRuntime: value.minimumRuntime};
+  return {value, skills, minimumRuntime: value.minimumRuntime, native};
 }
 /** Mirrors the release builder's canonical digest without importing its executable entrypoint. */
 export function parseDevSkillsManifest(value: unknown): DevSkillsManifest {
@@ -110,13 +140,14 @@ export function parseHistoricalDevSkillsManifest(value: unknown): DevSkillsManif
   return parseManifest(value, true);
 }
 function parseManifest(value: unknown, historical: boolean): DevSkillsManifest {
-  const inventory = parseInventory(value, historical);
+  const inventory = parseDevSkillsInventory(value, historical);
   const v = inventory.value;
   requireValue(
     typeof v.releaseVersion === 'string' &&
       version.test(v.releaseVersion) &&
       isRecord(v.hashes) &&
-      JSON.stringify(v.prerequisites) === JSON.stringify(prerequisites),
+      JSON.stringify(v.prerequisites) ===
+        JSON.stringify(v.schemaVersion === 1 ? historicalPrerequisites : prerequisites),
     'Invalid enriched bundle manifest.',
   );
   const hashes: Record<string, string> = {};
@@ -129,12 +160,13 @@ function parseManifest(value: unknown, historical: boolean): DevSkillsManifest {
     }
   requireValue(Object.keys(v.hashes).length === Object.keys(hashes).length, 'Unexpected bundle hashes.');
   const manifest = {
-    schemaVersion: 1 as const,
+    schemaVersion: v.schemaVersion === 1 ? (1 as const) : (2 as const),
+    ...(inventory.native ? {nativeRequirements: inventory.native} : {}),
     workflowProtocol: 1 as const,
     stateSchema: 1 as const,
     minimumRuntime: inventory.minimumRuntime,
     releaseVersion: v.releaseVersion,
-    prerequisites,
+    prerequisites: v.schemaVersion === 1 ? historicalPrerequisites : prerequisites,
     skills: inventory.skills,
     hashes,
   };
@@ -152,7 +184,7 @@ export const loadDevSkillsBundleAt = Effect.fn('devSkills.loadBundleAt')(functio
   const content = yield* readOptional(path.join(canonical, 'config', 'dev-skills.json'));
   if (content === null)
     return yield* fail('missing-bundle', 'This Threadnote installation has no development skills manifest.');
-  const inventory = yield* decode(content, parseInventory);
+  const inventory = yield* decode(content, parseDevSkillsInventory);
   const files: Record<string, string> = {};
   const hashes: Record<string, string> = {};
   let size = 0;
@@ -184,7 +216,8 @@ export const loadDevSkillsBundleAt = Effect.fn('devSkills.loadBundleAt')(functio
     if (!version.test(runtimeVersion))
       return yield* fail('incompatible', 'Cannot identify the executing Threadnote version.');
     const enriched = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
+      nativeRequirements: inventory.native!,
       workflowProtocol: 1 as const,
       stateSchema: 1 as const,
       minimumRuntime: inventory.minimumRuntime,
@@ -197,6 +230,8 @@ export const loadDevSkillsBundleAt = Effect.fn('devSkills.loadBundleAt')(functio
   }
   if (!version.test(runtimeVersion) || compareVersions(runtimeVersion, manifest.minimumRuntime) < 0)
     return yield* fail('incompatible', `Development workflows require Threadnote ${manifest.minimumRuntime} or newer.`);
+  const incompatibility = devSkillsCompatibility(manifest, runtimeVersion);
+  if (incompatibility.length) return yield* fail('incompatible', incompatibility[0].message);
   return {manifest, files} satisfies DevSkillsBundle;
 });
 export class DevSkillsSource extends Context.Service<
@@ -208,9 +243,26 @@ export const devSkillsRuntimeVersion = Effect.fn('devSkills.runtimeVersion')(fun
   return Option.isSome(source) ? source.value.runtimeVersion : yield* getThreadnoteVersion();
 });
 export function devSkillsCompatibility(manifest: DevSkillsManifest, runtimeVersion: string): DevSkillsIssue[] {
-  if (manifest.schemaVersion !== 1 || manifest.workflowProtocol !== 1 || manifest.stateSchema !== 1)
+  if (manifest.schemaVersion === 1)
+    return [
+      {
+        code: 'legacy-workflow-update-required',
+        message:
+          'Retained Python workflow ownership is recognized. Explicitly update or repair these workflows before running them.',
+      },
+    ];
+  if (manifest.schemaVersion !== 2 || manifest.workflowProtocol !== 1 || manifest.stateSchema !== 1)
     return [
       {code: 'incompatible', message: 'Installed development workflows require an unsupported runtime protocol.'},
+    ];
+  if (
+    !manifest.nativeRequirements ||
+    Object.entries(nativeRequirements).some(
+      ([key, supported]) => manifest.nativeRequirements?.[key as keyof typeof nativeRequirements] !== supported,
+    )
+  )
+    return [
+      {code: 'incompatible', message: 'Installed development workflows require unsupported native workflow features.'},
     ];
   return !version.test(runtimeVersion) || compareVersions(runtimeVersion, manifest.minimumRuntime) < 0
     ? [

@@ -107,6 +107,75 @@ describe('stable memory identity resolution', () => {
     }).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  effectIt.effect('keeps retained-scope identity reads current across homes, accounts and users', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const store = yield* ResourceStore;
+      const firstHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-identity-first-'});
+      const secondHome = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-identity-second-'});
+      const configs = [
+        {agentContextHome: firstHome, account: 'first', user: 'me'},
+        {agentContextHome: firstHome, account: 'second', user: 'me'},
+        {agentContextHome: secondHome, account: 'first', user: 'other'},
+      ].map(config => ({
+        ...config,
+        agentId: 'threadnote',
+        manifestPath: path.join(config.agentContextHome, 'manifest.yaml'),
+      }));
+      for (const home of [firstHome, secondHome])
+        yield* fs.writeFileString(path.join(home, 'manifest.yaml'), 'version: 1\nprojects: []\n');
+      const uris = configs.map(
+        (config, index) => `threadnote://user/${config.user}/memories/durable/projects/threadnote/target-${index}.md`,
+      );
+      for (const [index, config] of configs.entries())
+        yield* store.write(
+          {home: config.agentContextHome, account: config.account, user: config.user},
+          uris[index],
+          memory('tn_same_id', 'active', `Current corpus ${index}.`),
+          {mode: 'create'},
+        );
+      for (const index of [0, 1, 2, 0, 1]) {
+        const config = configs[index];
+        const scopes = [
+          ...Array.from(
+            {length: 200},
+            (_, ordinal) => `threadnote://user/${config.user}/memories/durable/retained-${ordinal}.md`,
+          ),
+          uris[index],
+        ];
+        const [resolved] = yield* resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes);
+        expect(resolved).toMatchObject({canonicalUri: uris[index], expectedMemoryId: 'tn_same_id'});
+        const content = yield* store.read(
+          {home: config.agentContextHome, account: config.account, user: config.user},
+          resolved.canonicalUri,
+        );
+        yield* verifyResolvedMemoryIdentity(resolved, resolved.canonicalUri, content);
+        expect(content).toContain(`Current corpus ${index}.`);
+      }
+      const config = configs[0];
+      const location = {home: config.agentContextHome, account: config.account, user: config.user};
+      const conflictUri = uris[0].replace('target-0.md', 'conflict.md');
+      const scopes = [
+        ...Array.from({length: 200}, (_, index) => `threadnote://user/me/memories/durable/retained-${index}.md`),
+        uris[0],
+        conflictUri,
+      ];
+      yield* store.write(location, conflictUri, memory('tn_same_id', 'active', 'New conflicting identity.'), {
+        mode: 'create',
+      });
+      for (const options of [{}, {validateNow: true}]) {
+        const conflict = yield* Effect.flip(
+          resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes, options),
+        );
+        expect(conflict).toMatchObject({reason: 'ambiguous'});
+      }
+      yield* store.remove(location, conflictUri);
+      const [restored] = yield* resolveMemoryIdentityAliases(config, [memoryIdentityAlias('tn_same_id')], scopes);
+      expect(restored.canonicalUri).toBe(uris[0]);
+    }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   effectIt.effect('uses one private relocation receipt to recover an active id-less destination', () =>
     Effect.scoped(
       Effect.gen(function* () {

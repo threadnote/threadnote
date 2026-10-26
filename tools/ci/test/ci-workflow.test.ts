@@ -194,13 +194,13 @@ it.each(['windows-smoke', 'self-contained-distribution'])(
     expect(setup).toMatchObject({
       shell: 'pwsh',
       'timeout-minutes': 5,
-      run: 'python -B tools/ci/windows-workflow-prerequisites.py',
+      run: 'bun tools/ci/windows-workflow-prerequisites.ts',
     });
     const steps = job?.steps ?? [];
     expect(steps.indexOf(setup!)).toBeGreaterThan(
-      steps.findIndex(candidate => candidate.uses === 'actions/setup-python@v7'),
+      steps.findIndex(candidate => candidate.uses === 'oven-sh/setup-bun@v2'),
     );
-    expect(steps.indexOf(setup!)).toBeLessThan(
+    expect(steps.indexOf(setup!)).toBeGreaterThan(
       steps.findIndex(candidate => candidate.run === 'bun install --frozen-lockfile'),
     );
     expect(job?.['timeout-minutes']).toBe(name === 'windows-smoke' ? 30 : 45);

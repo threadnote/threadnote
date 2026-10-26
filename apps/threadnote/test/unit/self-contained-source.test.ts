@@ -11,12 +11,12 @@ const workflowSources = [
 ].map(path => ({path, content: readFileSync(path, 'utf8')}));
 
 describe('self-contained source Python boundary', () => {
-  it.each(workflowSources)('accepts the declared optional workflow prerequisite in $path', ({path, content}) => {
+  it.each(workflowSources)('accepts only retained workflow ownership metadata in $path', ({path, content}) => {
     expect(hasUndeclaredPythonRuntimeReference(path, content)).toBe(false);
     expect(hasUndeclaredPythonRuntimeReference(path, content.replaceAll('\n', '\r\n'))).toBe(false);
   });
 
-  it('rejects Python execution added to every prerequisite source or another runtime file', () => {
+  it('rejects Python execution added to every workflow metadata source or another runtime file', () => {
     fc.assert(
       fc.property(
         fc.oneof(
@@ -40,14 +40,32 @@ describe('self-contained source Python boundary', () => {
     );
   });
 
-  it('rejects a fatal workflow probe and undeclared metadata in a neighboring file', () => {
-    const probe = workflowSources.find(source => source.path.endsWith('/readiness.ts'))!;
+  it('rejects interpreter probes and prerequisites even in workflow metadata files', () => {
+    const readiness = workflowSources.find(source => source.path.endsWith('/readiness.ts'))!;
     expect(
       hasUndeclaredPythonRuntimeReference(
-        probe.path,
-        probe.content.replace('.pipe(Effect.orElseSucceed(() => undefined))', ''),
+        readiness.path,
+        `${readiness.content}\nconst python = findWorkingExecutable(['python3']).pipe(Effect.orElseSucceed(() => undefined));`,
       ),
     ).toBe(true);
+    for (const contract of workflowSources.filter(source => /\/contracts?\.ts$/u.test(source.path)))
+      for (const field of ['readonly python?: string;', 'readonly python: string;'])
+        expect(
+          hasUndeclaredPythonRuntimeReference(
+            contract.path,
+            contract.content.replace('readonly prerequisites: {', `readonly prerequisites: {\n    ${field}`),
+          ),
+        ).toBe(true);
+    const manifest = workflowSources.find(source => source.path.endsWith('/manifest.ts'))!;
+    expect(
+      hasUndeclaredPythonRuntimeReference(
+        manifest.path,
+        manifest.content.replace("python: '>=3.10'", "python: '>=3.11'"),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects undeclared metadata in a neighboring file', () => {
     expect(
       hasUndeclaredPythonRuntimeReference('apps/threadnote/src/dev_skills/new.ts', "const python = 'required';"),
     ).toBe(true);

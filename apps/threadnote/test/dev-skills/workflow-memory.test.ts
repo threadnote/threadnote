@@ -232,14 +232,25 @@ describe('private workflow artifact protocol', () => {
   effectIt.effect('previews without creating an artifact and replays an exact native write', () =>
     Effect.gen(function* () {
       const f = yield* fixture();
+      const store = yield* ResourceStore;
       const preview = yield* f.call({...f.write, action: 'preflight', mutation: 'create'});
       if (!('canonicalUri' in preview)) throw new Error('Expected preview URI');
       expect(
         yield* f.call({protocolVersion: 1, action: 'read', bindingId: f.binding.bindingId, uri: preview.canonicalUri}),
       ).toMatchObject({status: 'not-found'});
       const written = (yield* f.call(f.write)) as WorkflowReadResult;
+      const journalPath = f.path.join(f.home, 'workflow-memory', `${f.binding.bindingId}.json`);
+      const journalBeforeReplay = yield* f.fs.readFileString(journalPath);
+      const artifactBeforeReplay = yield* store.read(
+        {account: f.config.account, home: f.home, user: f.config.user},
+        written.canonicalUri,
+      );
       const repeated = yield* f.call(f.write);
       expect(repeated).toEqual(written);
+      expect(yield* f.fs.readFileString(journalPath)).toBe(journalBeforeReplay);
+      expect(
+        yield* store.read({account: f.config.account, home: f.home, user: f.config.user}, written.canonicalUri),
+      ).toBe(artifactBeforeReplay);
       expect(written).toMatchObject({
         status: 'ok',
         state: 'active',
@@ -251,6 +262,12 @@ describe('private workflow artifact protocol', () => {
         .call({...f.write, body: 'Changed\n', bodySha256: sha256HexSync('Changed\n')})
         .pipe(Effect.result);
       expect(changed).toMatchObject({_tag: 'Failure', failure: {code: 'operation-intent-conflict'}});
+      const changedWriter = yield* f.call({...f.write, sourceRunId: 'different-writer'}).pipe(Effect.result);
+      expect(changedWriter).toMatchObject({_tag: 'Failure', failure: {code: 'operation-intent-conflict'}});
+      expect(yield* f.fs.readFileString(journalPath)).toBe(journalBeforeReplay);
+      expect(
+        yield* store.read({account: f.config.account, home: f.home, user: f.config.user}, written.canonicalUri),
+      ).toBe(artifactBeforeReplay);
       const absent = yield* f
         .call({protocolVersion: 1, action: 'recover', bindingId: f.binding.bindingId, operationId: 'never-invoked'})
         .pipe(Effect.result);

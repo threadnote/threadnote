@@ -64,7 +64,7 @@ beforeEach(() => {
       stateSchema: 1,
       minimumRuntime: '5.3.0',
       releaseVersion: '5.3.1',
-      prerequisites: {python: '3', commands: ['git'], prCommands: ['gh']},
+      prerequisites: {commands: ['git'], prCommands: ['gh']},
       skills: [],
       hashes: {},
       digest,
@@ -494,3 +494,71 @@ it('preserves the authoritative whitespace-suffixed project identity through pre
     expect(call.body?.selector).toEqual({agent: 'codex', profile: 'desktop', scope: 'project', cwd: exactPath});
   expect(calls.some(call => call.url === '/api/worksets')).toBe(false);
 });
+
+it.each(['update', 'remove'] as const)(
+  'allows an ownership-fenced legacy %s preview while execution stays blocked',
+  async action => {
+    target = {
+      ...target,
+      installationState: 'incompatible',
+      enrolled: true,
+      enrollmentState: 'enrolled',
+      enabled: true,
+      installed: {
+        releaseVersion: '5.2.0',
+        digest,
+        workflowProtocol: 1,
+        stateSchema: 1,
+        minimumRuntime: '5.2.0',
+      },
+      installedDigest: digest,
+      issues: [
+        {code: 'legacy-workflow-update-required', message: 'Explicitly update before running legacy workflows.'},
+      ],
+      readiness: {
+        planning: {state: 'blocked', reasons: []},
+        publication: {state: 'blocked', reasons: []},
+        watch: {state: 'blocked', reasons: []},
+      },
+    };
+    await render();
+    expect(button('Preview install').disabled).toBe(true);
+    expect(button('Preview update').disabled).toBe(false);
+    expect(button('Preview remove').disabled).toBe(false);
+    expect(document.body.textContent).toContain('Planning: blocked');
+    await click('Preview ' + action);
+    expect(calls.find(call => call.url.endsWith('/preview'))?.body).toEqual({
+      action,
+      selector: {agent: 'codex', profile: 'desktop', scope: 'user'},
+    });
+    expect(document.body.textContent).toContain(previewDigest);
+    expect(calls.some(call => call.url.endsWith('/apply'))).toBe(false);
+  },
+);
+
+it.each(['modified', 'incompatible', 'historical-ownership-conflict'])(
+  'does not admit a legacy repair UI transition with %s evidence',
+  async code => {
+    target = {
+      ...target,
+      installationState: 'incompatible',
+      enrolled: true,
+      enrollmentState: 'enrolled',
+      installed: {
+        releaseVersion: '5.2.0',
+        digest,
+        workflowProtocol: 1,
+        stateSchema: 1,
+        minimumRuntime: '5.2.0',
+      },
+      issues: [
+        {code: 'legacy-workflow-update-required', message: 'Legacy workflow'},
+        {code, message: 'Preserve conflicting evidence'},
+      ],
+    };
+    await render();
+    expect(button('Preview update').disabled).toBe(true);
+    expect(button('Preview remove').disabled).toBe(true);
+    expect(calls.some(call => call.url.endsWith('/preview'))).toBe(false);
+  },
+);

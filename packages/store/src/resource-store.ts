@@ -19,7 +19,11 @@ import {
   advanceCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
 } from './resource/mutation_generation.js';
-import {ResourceRecallInvalidation, type ResourceRecallInvalidationShape} from './resource/recall-invalidation.js';
+import {
+  CurrentResourceRecallInvalidationObserver,
+  ResourceRecallInvalidation,
+  type ResourceRecallInvalidationShape,
+} from './resource/recall-invalidation.js';
 import {SystemInfo} from '@threadnote/platform/system';
 import {
   canonicalResourceUri,
@@ -297,24 +301,54 @@ function createResourceStoreOperations(
     invalidatedUris: readonly string[],
     canonicalMutationGeneration: CanonicalMutationGenerationTransition,
   ) =>
-    Effect.forEach(
-      [false, true],
-      includeInactive =>
-        invalidateRecall(location, includeInactive, invalidatedUris, canonicalMutationGeneration).pipe(
-          Effect.retry(Schedule.recurs(2)),
-          Effect.catchCause(() => {
-            const event = {
-              account: location.account,
-              includeInactive,
-              invalidatedUriCount: invalidatedUris.length,
-            } satisfies ResourceRecallInvalidationFailureEvent;
-            return Effect.logWarning(
-              `Recall index per-URI invalidation failed after a canonical mutation attempt (${includeInactive ? 'with-inactive' : 'active'} scope); the durable canonical generation will force recovery on the next read.`,
-            ).pipe(Effect.andThen(layerOptions.onRecallInvalidationFailed?.(event) ?? Effect.void), Effect.ignoreCause);
+    Effect.gen(function* () {
+      // Read the request reference at operation time, before invalidator service
+      // provision. The prebuilt-store test proves propagation through the
+      // enclosing lock provision, even when the store predates the request.
+      const observer = yield* CurrentResourceRecallInvalidationObserver;
+      yield* Effect.forEach(
+        [false, true],
+        includeInactive =>
+          Effect.suspend(() => {
+            let complete: ((succeeded: boolean) => void) | undefined;
+            try {
+              complete = observer?.begin(location, invalidatedUris, canonicalMutationGeneration, includeInactive);
+            } catch {
+              // Observation is optional; bookkeeping must not change write semantics.
+            }
+            const acknowledge = (succeeded: boolean) =>
+              Effect.sync(() => {
+                try {
+                  complete?.(succeeded);
+                } catch {
+                  // Observation is optional; bookkeeping must not change write semantics.
+                }
+              });
+            return invalidateRecall(location, includeInactive, invalidatedUris, canonicalMutationGeneration).pipe(
+              Effect.retry(Schedule.recurs(2)),
+              Effect.tap(() => acknowledge(true)),
+              Effect.catchCause(() => {
+                const event = {
+                  account: location.account,
+                  includeInactive,
+                  invalidatedUriCount: invalidatedUris.length,
+                } satisfies ResourceRecallInvalidationFailureEvent;
+                return acknowledge(false).pipe(
+                  Effect.andThen(
+                    Effect.logWarning(
+                      `Recall index per-URI invalidation failed after a canonical mutation attempt (${includeInactive ? 'with-inactive' : 'active'} scope); the durable canonical generation will force recovery on the next read.`,
+                    ).pipe(
+                      Effect.andThen(layerOptions.onRecallInvalidationFailed?.(event) ?? Effect.void),
+                      Effect.ignoreCause,
+                    ),
+                  ),
+                );
+              }),
+            );
           }),
-        ),
-      {concurrency: 2, discard: true},
-    ).pipe(Effect.uninterruptible);
+        {concurrency: 2, discard: true},
+      );
+    }).pipe(Effect.uninterruptible);
   const withLock = <A, E, R>(location: ResourceStoreLocation, id: ResourceId, effect: Effect.Effect<A, E, R>) => {
     const lockPath = resourceAccountMutationLockPath(path, location.home, location.account);
     const event = {account: location.account, lockPath, uri: id.canonicalUri};
@@ -888,27 +922,48 @@ function assertCaseCompatible(fs: FileSystem.FileSystem, parent: string, desired
   });
 }
 
+/** A child may disappear during enumeration; containing directories remain authoritative. */
 function listEntries(fs: FileSystem.FileSystem, path: Path.Path, resolved: ResolvedResourcePath, recursive: boolean) {
+  const notFound = (error: unknown): boolean =>
+    error instanceof PlatformError.PlatformError && error.reason._tag === 'NotFound';
+  const validateDirectory = (directory: string) =>
+    verifyPathAtExpectedLocation(fs, path, {...resolved, path: directory}, directory, 'Directory');
+  const admitAbsentChild = (directory: string, childPath: string) =>
+    Effect.gen(function* () {
+      yield* validateDirectory(resolved.path);
+      yield* validateDirectory(directory);
+      const link = yield* fs.readLink(childPath).pipe(Effect.result);
+      if (link._tag === 'Success')
+        return yield* unsafe(resolved, 'Symbolic links are not allowed in resource inventory.');
+      if (!notFound(link.failure)) return yield* link.failure;
+      yield* validateDirectory(directory);
+      yield* validateDirectory(resolved.path);
+      return [] as ResourceStoreEntry[];
+    }).pipe(mapIoError('list', resolved.id.canonicalUri));
   return Effect.gen(function* () {
     const rootInfo = yield* verifyExistingPath(fs, path, resolved);
     if (rootInfo.type === 'File') return [entryForInfo(resolved.id.canonicalUri, rootInfo)];
     if (rootInfo.type !== 'Directory') return yield* unsafe(resolved, `Unsupported resource type ${rootInfo.type}.`);
-    const entries: ResourceStoreEntry[] = [];
-    const visit = (directory: string, segments: readonly string[]): Effect.Effect<void, unknown> =>
+    const visit = (directory: string, segments: readonly string[]): Effect.Effect<ResourceStoreEntry[], unknown> =>
       Effect.gen(function* () {
+        const entries: ResourceStoreEntry[] = [];
         for (const name of [...(yield* fs.readDirectory(directory))].sort()) {
           const childPath = path.join(directory, name);
-          const childResolved = {...resolved, path: childPath};
-          const info = yield* verifyPathAtExpectedLocation(fs, path, childResolved, childPath);
-          if (info.type !== 'Directory' && info.type !== 'File') continue;
-          const childSegments = [...segments, name.normalize('NFC')];
-          const uri = canonicalResourceUri(resolved.id.namespace, [...resolved.id.segments, ...childSegments]);
-          entries.push(entryForInfo(uri, info));
-          if (recursive && info.type === 'Directory') yield* visit(childPath, childSegments);
+          // Buffer the complete branch: a vanished directory must not expose a partial subtree.
+          const branch = yield* Effect.gen(function* () {
+            const childResolved = {...resolved, path: childPath};
+            const info = yield* verifyPathAtExpectedLocation(fs, path, childResolved, childPath);
+            if (info.type !== 'Directory' && info.type !== 'File') return [];
+            const childSegments = [...segments, name.normalize('NFC')];
+            const uri = canonicalResourceUri(resolved.id.namespace, [...resolved.id.segments, ...childSegments]);
+            const children = recursive && info.type === 'Directory' ? yield* visit(childPath, childSegments) : [];
+            return [entryForInfo(uri, info), ...children];
+          }).pipe(Effect.catchIf(notFound, () => admitAbsentChild(directory, childPath)));
+          for (const entry of branch) entries.push(entry);
         }
+        return entries;
       });
-    yield* visit(resolved.path, []);
-    return entries;
+    return yield* visit(resolved.path, []);
   });
 }
 

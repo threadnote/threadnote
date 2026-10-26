@@ -9,14 +9,21 @@ import {AGENT_SKILLS} from '../../src/agent_integration/skills.js';
 
 const ids = ['dev-spec', 'dev-plan', 'dev-cycle', 'watch-pr'];
 const sourceManifest = () => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
+  nativeRequirements: {
+    executorVersion: 1,
+    authoringVersion: 1,
+    cycleVersion: 1,
+    watchVersion: 1,
+    closeoutVersion: 1,
+  },
   workflowProtocol: 1,
   stateSchema: 1,
   minimumRuntime: '5.3.0-beta.4',
   skills: ids.map(id => ({
     id,
     role: id === 'watch-pr' ? 'support' : 'primary',
-    files: ['SKILL.md', 'scripts/helper.py'],
+    files: ['SKILL.md', 'references/helper.md'],
   })),
 });
 
@@ -27,9 +34,9 @@ const fixture = Effect.gen(function* () {
   const manifest = sourceManifest();
   for (const member of manifest.skills) {
     const directory = path.join(root, 'config', 'agent-skills', member.id);
-    yield* fs.makeDirectory(path.join(directory, 'scripts'), {recursive: true});
+    yield* fs.makeDirectory(path.join(directory, 'references'), {recursive: true});
     yield* fs.writeFileString(path.join(directory, 'SKILL.md'), `---\nname: ${member.id}\n---\nWorkflow`);
-    yield* fs.writeFileString(path.join(directory, 'scripts', 'helper.py'), 'print("fixture")\n');
+    yield* fs.writeFileString(path.join(directory, 'references', 'helper.md'), 'Fixture reference\n');
   }
   const manifestPath = path.join(root, 'config', 'dev-skills.json');
   yield* fs.writeFileString(manifestPath, JSON.stringify(manifest));
@@ -87,8 +94,8 @@ describe('first-party development bundle', () => {
       expect((yield* buildDevSkillsManifest(root, '5.3.0-beta.5')).digest).not.toBe(first.digest);
       const path = yield* Path.Path;
       yield* fs.writeFileString(
-        path.join(root, 'config', 'agent-skills', 'dev-spec', 'scripts', 'helper.py'),
-        'print("changed")\n',
+        path.join(root, 'config', 'agent-skills', 'dev-spec', 'references', 'helper.md'),
+        'Changed fixture reference\n',
       );
       expect((yield* buildDevSkillsManifest(root, '5.3.0-beta.4')).digest).not.toBe(first.digest);
     }).pipe(provideTestLayer(BunServices.layer)),
@@ -111,7 +118,7 @@ describe('first-party development bundle', () => {
       yield* fs.writeFileString(extra, 'not in release inventory');
       yield* expectFailure();
       yield* fs.remove(extra);
-      manifest.skills[0].files.push('scripts/HELPER.py');
+      manifest.skills[0].files.push('references/HELPER.md');
       yield* fs.writeFileString(manifestPath, JSON.stringify(manifest));
       yield* expectFailure();
       manifest.skills[0].files.pop();
@@ -129,8 +136,11 @@ describe('first-party development bundle', () => {
         'dev-plan',
         'dev-spec',
       ]);
-      expect(manifest.hashes['dev-plan/scripts/workflow.py']).toMatch(/^[a-f0-9]{64}$/u);
-      expect(manifest.hashes['watch-pr/scripts/watch_pr.py']).toMatch(/^[a-f0-9]{64}$/u);
+      expect(manifest.nativeRequirements).toEqual(sourceManifest().nativeRequirements);
+      expect(manifest.prerequisites).not.toHaveProperty('python');
+      expect(Object.keys(manifest.hashes).some(file => file.endsWith('.py'))).toBe(false);
+      expect(manifest.hashes['dev-plan/references/native-authoring.md']).toMatch(/^[a-f0-9]{64}$/u);
+      expect(manifest.hashes['watch-pr/references/background-worker.md']).toMatch(/^[a-f0-9]{64}$/u);
     }).pipe(provideTestLayer(BunServices.layer)),
   );
 
@@ -141,8 +151,8 @@ describe('first-party development bundle', () => {
         const {root, manifestPath} = yield* fixture;
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const helper = path.join(root, 'config', 'agent-skills', 'dev-plan', 'scripts', 'helper.py');
-        const outside = path.join(root, 'outside.py');
+        const helper = path.join(root, 'config', 'agent-skills', 'dev-plan', 'references', 'helper.md');
+        const outside = path.join(root, 'outside.md');
         yield* fs.rename(helper, outside);
         yield* fs.symlink(outside, helper);
         expect(yield* buildDevSkillsManifest(root, '5.3.0-beta.4').pipe(Effect.flip)).toBeDefined();

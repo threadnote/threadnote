@@ -35,7 +35,15 @@ const commands = Effect.fn('test.update.commands')(function* (
             exitCode: 0,
             stderr: '',
             stdout: JSON.stringify({
-              schemaVersion: 1,
+              schemaVersion: 2,
+              manifestSchemas: [1, 2],
+              nativeFeatures: {
+                executorVersion: 1,
+                authoringVersion: 1,
+                cycleVersion: 1,
+                watchVersion: 1,
+                closeoutVersion: 1,
+              },
               runtimeVersion: version,
               workflowProtocols: [1],
               stateSchemas: [1],

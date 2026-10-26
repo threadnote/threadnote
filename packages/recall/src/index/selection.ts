@@ -11,6 +11,7 @@ import {
 } from './lexical.js';
 import {
   combineRecallSqlPredicates,
+  recallIdentityUriScopePredicate,
   recallUriScopePredicate,
   recallWorkspaceScopePredicate,
   type RecallSqlPredicate,
@@ -74,7 +75,7 @@ export function selectRecallDocumentRowsByMemoryIds(
   return Effect.gen(function* () {
     const rows: RecallDocumentSampleRow[] = [];
     const scope = combineRecallSqlPredicates(
-      recallUriScopePredicate('d', allowedUriScopes),
+      recallIdentityUriScopePredicate('d', allowedUriScopes),
       recallEligibilityPredicate('d', eligibility),
     );
     for (let index = 0; index < memoryIds.length; index += 400) {

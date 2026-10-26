@@ -125,7 +125,9 @@ export const planMutation = Effect.fn('devSkills.planMutation')(function* (
   ];
   const active = receipt && Object.keys(receipt.consumers).length > 0;
   const compatibility = active ? devSkillsCompatibility(receipt.manifest, yield* devSkillsRuntimeVersion()) : [];
-  issues.push(...compatibility);
+  issues.push(
+    ...compatibility.filter(issue => action !== 'update' || issue.code !== 'legacy-workflow-update-required'),
+  );
   const enrolled = context.homeIndex.targets[id]?.state === 'enrolled';
   if (
     enrolled !== Boolean(receipt?.consumers[id]) ||

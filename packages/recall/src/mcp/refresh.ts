@@ -1,4 +1,8 @@
 import {Effect, FileSystem, Path, Schema} from 'effect';
+import {
+  consumeResourceRecallInvalidationReceipt,
+  type ResourceRecallInvalidationReceipt,
+} from '@threadnote/store/resource/recall-invalidation';
 import {LocalModelCatalog, type LocalModelManifest} from '@threadnote/inference/models/catalog';
 import {readModelSelection} from '@threadnote/inference/models/selection';
 import {LocalModelStore} from '@threadnote/inference/models/store';
@@ -121,16 +125,26 @@ const refreshMcpRecallDerivedIndexes = Effect.fn('recall.refreshMcpDerivedIndexe
  * previously absent vector index.
  */
 export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refreshDerivedIndexesFromSelection')(
-  function* (config: McpRecallRefreshConfig, invalidatedUris: readonly string[]) {
+  function* (
+    config: McpRecallRefreshConfig,
+    invalidatedUris: readonly string[],
+    receipt?: ResourceRecallInvalidationReceipt,
+  ) {
     const uris = [...new Set(invalidatedUris)];
     const forceRefresh =
-      uris.length === 0
+      uris.length === 0 ||
+      consumeResourceRecallInvalidationReceipt(
+        receipt,
+        {home: config.agentContextHome, account: config.account, user: config.user},
+        uris,
+      )
         ? false
         : yield* expireRecallIndexValidation(config.agentContextHome, false, uris).pipe(
             Effect.as(false),
             Effect.catchCause(() => Effect.succeed(true)),
           );
-    const index = yield* refreshRecallLexicalIndex(config, forceRefresh);
+    // Complete lexical freshness before deciding whether any vector caller needs candidate data.
+    yield* refreshRecallLexicalIndex(config, forceRefresh, true);
     return yield* Effect.gen(function* () {
       const selection = yield* readModelSelection(config.agentContextHome);
       const modelId = selection.roles.embedding;
@@ -143,6 +157,7 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
       if (!installed.installed) return {state: 'unavailable' as const};
       const vectorStatus = yield* vectorIndexStatus(config.agentContextHome, manifest);
       if (!vectorStatus.ready && vectorStatus.reason === 'not built') return {state: 'unavailable' as const};
+      const index = yield* loadRecallIndexData(config, {includeInactive: false});
       yield* refreshRecallVectorIndex(config, manifest, index);
       const readiness = yield* vectorIndexGenerationReadiness(config.agentContextHome, manifest, index.generation);
       if (readiness !== 'current') {
@@ -163,8 +178,12 @@ export const refreshRecallDerivedIndexesFromSelection = Effect.fn('recall.refres
 /** Canonical memory commits are durable even when optional derived-index repair fails. */
 export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
   'recall.refreshDerivedIndexesAfterCanonicalMutation',
-)(function* (config: McpRecallRefreshConfig, invalidatedUris: readonly string[]) {
-  const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris).pipe(
+)(function* (
+  config: McpRecallRefreshConfig,
+  invalidatedUris: readonly string[],
+  receipt?: ResourceRecallInvalidationReceipt,
+) {
+  const outcome = yield* refreshRecallDerivedIndexesFromSelection(config, invalidatedUris, receipt).pipe(
     Effect.catchCause(() =>
       Effect.succeed({repair: 'Run `threadnote repair` to retry derived-index refresh.', state: 'deferred' as const}),
     ),
@@ -180,12 +199,17 @@ export const refreshRecallDerivedIndexesAfterCanonicalMutation = Effect.fn(
 const refreshRecallLexicalIndex = Effect.fn('recall.refreshDerivedLexicalIndex')(function* (
   config: McpRecallRefreshConfig,
   forceRefresh = false,
+  metadataOnly = false,
 ) {
   const lexicalStatus = yield* recallIndexStatus(config, false);
   if (lexicalRefreshDisposition(lexicalStatus) === 'unsafe') {
     return yield* McpRecallBackgroundRefreshBlocked.make({message: ''});
   }
-  return yield* loadRecallIndexData(config, {forceRefresh, includeInactive: false});
+  return yield* loadRecallIndexData(config, {
+    forceRefresh,
+    includeInactive: false,
+    ...(metadataOnly ? {memoryIds: []} : {}),
+  });
 });
 
 const refreshRecallVectorIndex = Effect.fn('recall.refreshDerivedVectorIndex')(function* (
