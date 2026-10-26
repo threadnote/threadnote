@@ -1,9 +1,10 @@
 import {it as effectIt} from '@effect/vitest';
-import {Context, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import {Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
+import {makeIdempotentFixtureTempDirectoryScoped} from '@threadnote/testing/fixture-temp-directory';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {codeGraphLayout} from '@threadnote/graph/layout';
@@ -167,7 +168,7 @@ describe('Context Health graph observation', () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
-        const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-status-readonly-'});
+        const root = yield* makeReadonlyFixtureRoot(fs);
         const repository = yield* makeRepository(path.join(root, 'repository'));
         const home = path.join(root, 'home');
         yield* fs.makeDirectory(home);
@@ -184,15 +185,78 @@ describe('Context Health graph observation', () => {
           );
           expect(status.readySnapshot).toBeUndefined();
           expect(status.stale).toBe(true);
-          expect(yield* fs.exists(layout.databasePath)).toBe(false);
+          yield* assertReadonlyFixture(fs, root, repository, layout.databasePath);
         }
         expect(yield* fs.readFileString(path.join(repository, 'src/price.ts'))).toBe(SOURCE);
       }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
     {fastCheck: {numRuns: 8}},
   );
+
+  effectIt.effect('cleans an already-absent read-only fixture after its body without touching its neighbor', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const neighbor = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-readonly-neighbor-'});
+      yield* fs.writeFileString(path.join(neighbor, 'untouched.txt'), SOURCE);
+      let bodyVerified = false;
+      const result = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const root = yield* makeReadonlyFixtureRoot(fs);
+          const repository = yield* makeRepository(path.join(root, 'repository'));
+          yield* assertReadonlyFixture(fs, root, repository, path.join(root, 'absent.sqlite'));
+          bodyVerified = true;
+          // Simulate disappearance only AFTER every live-body oracle has passed.
+          yield* fs.remove(root, {recursive: true});
+        }),
+      ).pipe(Effect.exit);
+      expect(bodyVerified).toBe(true);
+      expect(Exit.isSuccess(result)).toBe(true);
+      expect(yield* fs.readFileString(path.join(neighbor, 'untouched.txt'))).toBe(SOURCE);
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('keeps missing or changed live read-only fixtures visible as body failures', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      for (const fault of ['missing-root', 'changed-source'] as const) {
+        const result = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const root = yield* makeReadonlyFixtureRoot(fs);
+            const repository = yield* makeRepository(path.join(root, 'repository'));
+            if (fault === 'missing-root') yield* fs.remove(root, {recursive: true});
+            else yield* fs.writeFileString(path.join(repository, 'src/price.ts'), 'unexpected bytes\n');
+            yield* assertReadonlyFixture(fs, root, repository, path.join(root, 'absent.sqlite'));
+          }),
+        ).pipe(Effect.exit);
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result))
+          expect(Cause.pretty(result.cause)).toContain(
+            fault === 'missing-root'
+              ? 'owned read-only fixture root must remain present'
+              : 'read-only fixture source bytes must remain unchanged',
+          );
+      }
+    }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
 });
 
 const SOURCE = 'export const price = (amount: number) => amount * 2;\n';
+const makeReadonlyFixtureRoot = (fs: FileSystem.FileSystem) =>
+  makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-status-readonly-');
+const assertReadonlyFixture = Effect.fn('test.health.assertReadonlyFixture')(function* (
+  fs: FileSystem.FileSystem,
+  root: string,
+  repository: string,
+  databasePath: string,
+) {
+  expect(yield* fs.exists(root), 'owned read-only fixture root must remain present').toBe(true);
+  expect(
+    yield* fs.readFileString(`${repository}/src/price.ts`),
+    'read-only fixture source bytes must remain unchanged',
+  ).toBe(SOURCE);
+  expect(yield* fs.exists(databasePath)).toBe(false);
+});
 const makeRepository = Effect.fn('test.health.makeRepository')(function* (repository: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
