@@ -422,7 +422,7 @@
     "effect": "4.0.3",
     "fflate": "0.8.3",
     "jose": "6.2.12",
-    "js-yaml": "^5.4.3",
+    "js-yaml": "^5.5.0",
     "jsonc-parser": "3.3.1",
     "pxpipe-proxy": "0.14.0",
     "smol-toml": "1.9.1",

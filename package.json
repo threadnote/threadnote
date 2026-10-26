@@ -174,7 +174,7 @@
     "effect": "4.0.3",
     "fflate": "0.8.3",
     "jose": "6.2.12",
-    "js-yaml": "^5.4.3",
+    "js-yaml": "^5.5.0",
     "jsonc-parser": "3.3.1",
     "node-llama-cpp": "3.22.1",
     "postgres": "3.4.9",

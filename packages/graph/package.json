@@ -462,7 +462,7 @@
     "effect": "4.0.3",
     "fflate": "0.8.3",
     "jose": "6.2.12",
-    "js-yaml": "^5.4.3",
+    "js-yaml": "^5.5.0",
     "typescript-compiler": "npm:typescript@5.9.3",
     "unpdf": "1.8.1",
     "web-tree-sitter": "0.27.1"
