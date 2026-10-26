@@ -66,6 +66,8 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     status: ManagerContextMaintenanceStatusV2;
   }>();
   const [error, setError] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [blockedProject, setBlockedProject] = useState<string>();
   const [legacyStatusFreshProject, setLegacyStatusFreshProject] = useState<string>();
   const [notice, setNotice] = useState('');
   const [automatic, setAutomatic] = useState<{project: string; ready: number; pending: boolean}>();
@@ -108,7 +110,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     snapshot?.project === props.project ? reconcileAppliedMaintenanceCases(snapshot.status, appliedCases) : undefined;
   const report = reconcileAppliedHealthReport(props.report, appliedCases, status);
   const statusUnconfirmed =
-    live.active && live.snapshot.status !== 'ready' && !(legacyStatus && legacyStatusFreshProject === props.project);
+    checking ||
+    !!error ||
+    (live.active && live.snapshot.status !== 'ready' && !(legacyStatus && legacyStatusFreshProject === props.project));
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -122,6 +126,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     setTask('');
     setInspectedCase(undefined);
     setLoadingHistory(false);
+    setError('');
   }, [props.project]);
   useEffect(() => {
     setLegacyStatusFreshProject(undefined);
@@ -130,7 +135,6 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     if (!legacyStatus) return;
     let cancelled = false;
     let timer: number | undefined;
-    setError('');
     setBusy(false);
     actionBusy.current = false;
     lastReportRevision.current = undefined;
@@ -140,13 +144,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         timer = window.setTimeout(() => void poll(), 1_000);
         return;
       }
+      setChecking(true);
+      setLegacyStatusFreshProject(undefined);
       try {
         const result = await api<ManagerContextMaintenanceStatusV2>(
           `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}`,
         );
         if (cancelled || mutationEpoch.current !== epoch) return;
-        if (result.version !== 2)
-          throw new Error('Maintenance status is unavailable. Refresh after updating Threadnote.');
+        if (!validMaintenanceStatus(result))
+          throw ManagerApiError.of('Maintenance status is unavailable. Refresh after updating Threadnote.', 409);
+        setBlockedProject(undefined);
         setSnapshot(previous => {
           const old = previous?.project === props.project ? previous.status : undefined;
           return {
@@ -182,10 +189,18 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           timer = window.setTimeout(() => void poll(), result.state === 'running' ? 1_000 : 30_000);
       } catch (cause) {
         if (!cancelled && mutationEpoch.current === epoch) {
+          if (maintenanceReadRequiresRedaction(cause)) {
+            setBlockedProject(props.project);
+            setSnapshot(undefined);
+            setSelected(undefined);
+            setInspectedCase(undefined);
+          }
           setLegacyStatusFreshProject(undefined);
           setError(errorMessage(cause));
           timer = window.setTimeout(() => void poll(), 30_000);
         }
+      } finally {
+        if (!cancelled && mutationEpoch.current === epoch) setChecking(false);
       }
     };
     void poll();
@@ -197,10 +212,16 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   useEffect(() => {
     if (legacyStatus || live.snapshot.status !== 'ready' || actionBusy.current) return;
     const result = live.snapshot.data;
-    if (result.version !== 2) {
+    if (!validMaintenanceStatus(result)) {
+      setBlockedProject(props.project);
+      setSnapshot(undefined);
+      setSelected(undefined);
+      setInspectedCase(undefined);
       setError('Maintenance status is unavailable. Refresh after updating Threadnote.');
       return;
     }
+    setBlockedProject(undefined);
+    setChecking(false);
     setSnapshot(previous => {
       const old = previous?.project === props.project ? previous.status : undefined;
       return {
@@ -231,6 +252,17 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     )
       onChanged.current();
     lastReportRevision.current = reportRevision;
+  }, [legacyStatus, live.snapshot, props.project]);
+  useEffect(() => {
+    if (legacyStatus || live.snapshot.status !== 'error') return;
+    if (maintenanceReadRequiresRedaction(live.snapshot.error)) {
+      setBlockedProject(props.project);
+      setSnapshot(undefined);
+      setSelected(undefined);
+      setInspectedCase(undefined);
+    }
+    setChecking(false);
+    setError(errorMessage(live.snapshot.error));
   }, [legacyStatus, live.snapshot, props.project]);
   useEffect(() => {
     const previous = lastLiveRefresh.current;
@@ -269,7 +301,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   }
 
   async function act(action: 'run-now' | 'pause' | 'resume' | 'undo', receiptId?: string) {
-    if (actionBusy.current) return;
+    if (actionBusy.current || statusUnconfirmed || props.healthLiveStale) return;
     const project = props.project;
     const epoch = projectEpoch.current;
     mutationEpoch.current += 1;
@@ -421,6 +453,21 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   const receipts = (status?.receipts ?? []).filter(item => item.project === props.project);
   const dispositionCount = (disposition: string) =>
     status?.counts?.[disposition] ?? cases.filter(item => item.disposition === disposition).length;
+  if (
+    blockedProject === props.project ||
+    (!legacyStatus &&
+      ((live.snapshot.status === 'error' && maintenanceReadRequiresRedaction(live.snapshot.error)) ||
+        (live.snapshot.status === 'ready' && !validMaintenanceStatus(live.snapshot.data))))
+  ) {
+    return (
+      <section className="panel attention-panel context-health is-active">
+        <p role="alert">{error || 'Current maintenance evidence is unavailable.'}</p>
+        <button type="button" onClick={() => setRefresh(value => value + 1)}>
+          Refresh maintenance status
+        </button>
+      </section>
+    );
+  }
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
       <AutomaticMemoryPanel
@@ -533,55 +580,70 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           <button
             type="button"
             className="health-primary-action"
-            disabled={busy || !status || status.paused || status.state === 'running'}
+            disabled={
+              busy ||
+              statusUnconfirmed ||
+              props.healthLiveStale ||
+              !status ||
+              status.paused ||
+              status.state === 'running'
+            }
             onClick={() => void act('run-now')}
           >
             {busy ? 'Working…' : 'Run maintenance now'}
           </button>
           <button
             type="button"
-            disabled={busy || !status}
+            disabled={busy || statusUnconfirmed || props.healthLiveStale || !status}
             onClick={() => void act(status?.paused ? 'resume' : 'pause')}
           >
             {status?.paused ? 'Resume automatic maintenance' : 'Pause automatic maintenance'}
           </button>
         </div>
       </section>
-      {props.reportError ? (
-        <p role="alert">
-          Evidence page changed or could not refresh: {props.reportError}{' '}
-          <button type="button" onClick={props.onRefresh}>
-            Refresh evidence from the first page
-          </button>
-        </p>
-      ) : null}
-      {statusUnconfirmed ? (
-        <p role="status">
-          Live maintenance updates are interrupted. The displayed evidence may be older than the current project.
-          <button type="button" onClick={() => setRefresh(value => value + 1)}>
-            Retry live status
-          </button>
-        </p>
-      ) : null}
-      {live.active && legacyStatus && legacyStatusFreshProject === props.project ? (
-        <p role="status">Live maintenance updates are unavailable; this view checks for changes periodically.</p>
-      ) : null}
-      {props.healthLiveStale ? (
-        <p role="status">
-          Context health evidence is being refreshed. Open reviews are paused until current evidence is checked.
-        </p>
-      ) : null}
-      {props.healthFallback ? (
-        <p role="status">Live context health updates are unavailable; this view checks for changes every 30 seconds.</p>
-      ) : null}
-      {error ? (
-        <p role="alert">
-          {error}{' '}
-          <button type="button" disabled={busy} onClick={() => setRefresh(value => value + 1)}>
-            Refresh maintenance status
-          </button>
-        </p>
-      ) : null}
+      <div className="health-refresh-status" style={{blockSize: '4.5rem', overflowY: 'auto'}}>
+        {props.reportError ? (
+          <p role="alert">
+            Evidence page changed or could not refresh: {props.reportError}{' '}
+            <button type="button" onClick={props.onRefresh}>
+              Refresh evidence from the first page
+            </button>
+          </p>
+        ) : null}
+        {statusUnconfirmed ? (
+          <p role="status">
+            {checking
+              ? 'Checking for maintenance updates. Open reviews are paused until current evidence is checked.'
+              : 'Maintenance evidence is unconfirmed. The displayed evidence may be older than the current project.'}
+            {!checking ? (
+              <button type="button" onClick={() => setRefresh(value => value + 1)}>
+                Retry maintenance status
+              </button>
+            ) : null}
+          </p>
+        ) : null}
+        {live.active && legacyStatus && legacyStatusFreshProject === props.project ? (
+          <p role="status">Live maintenance updates are unavailable; this view checks for changes periodically.</p>
+        ) : null}
+        {props.healthLiveStale && !props.reportError ? (
+          <p role="status">
+            Context health evidence is being refreshed. Open reviews are paused until current evidence is checked.
+          </p>
+        ) : null}
+        {props.healthFallback ? (
+          <p role="status">
+            Live context health updates are unavailable; this view checks for changes every 30 seconds.
+          </p>
+        ) : null}
+        {error ? (
+          <p role="alert">
+            {error}{' '}
+            <button type="button" disabled={busy} onClick={() => setRefresh(value => value + 1)}>
+              Refresh maintenance status
+            </button>
+          </p>
+        ) : null}
+      </div>
       {conflictSubjectUri ? (
         <button type="button" onClick={() => props.onOpenLibrary(conflictSubjectUri)}>
           Inspect current memory
@@ -1030,7 +1092,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
                 <button
                   type="button"
                   className="health-quiet-action"
-                  disabled={busy}
+                  disabled={busy || statusUnconfirmed || props.healthLiveStale}
                   onClick={() => void act('undo', receipt.receiptId)}
                 >
                   Undo this change
@@ -1158,6 +1220,20 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         />
       ) : null}
     </section>
+  );
+}
+
+function maintenanceReadRequiresRedaction(cause: unknown): boolean {
+  return Schema.is(ManagerApiError)(cause) && [400, 401, 403, 404, 409, 410].includes(cause.status);
+}
+
+function validMaintenanceStatus(result: ManagerContextMaintenanceStatusV2): boolean {
+  return (
+    !!result &&
+    result.version === 2 &&
+    Array.isArray(result.projects) &&
+    Array.isArray(result.cases) &&
+    Array.isArray(result.receipts)
   );
 }
 

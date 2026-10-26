@@ -9,7 +9,8 @@ import {DetailModal, MemoryBody} from '../detail_modal.js';
 import {MemoryExcerpt} from '../review_presentation.js';
 import {SourceExcerpt} from '../source_code.js';
 import {memoryDocumentParts} from '../library_model.js';
-import {api, errorMessage, ManagerApiError} from '../ui/support.js';
+import {api, ManagerApiError} from '../ui/support.js';
+import {evidenceReadError, retryEvidenceRead} from './evidence_refresh.js';
 import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenancePacketV2,
@@ -107,30 +108,32 @@ export function MaintenanceCaseDialog(props: {
     const refreshing = explicitRefresh.current;
     explicitRefresh.current = false;
     setLoading(true);
-    setError('');
-    setOutcome('');
     const current = () => !controller.signal.aborted;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
+    const read = <A,>(path: string, body?: Record<string, unknown>) =>
+      retryEvidenceRead(() => api<A>(path, body, options), controller.signal);
     const selectedUri =
       selection?.memoryUri ??
       (props.initialCase?.family === 'topic-maintenance' || item?.family === 'topic-maintenance'
         ? undefined
         : props.memoryUri);
     async function refreshSelected() {
-      const result = await api<ManagerMaintenanceRefreshResultV1>(
-        '/api/attention/context-maintenance',
-        {
-          action: 'refresh-case',
-          project: props.project,
-          caseId,
-          ...(selectedUri ? {memoryUri: selectedUri} : {}),
-          ...(selection ? {citationId: selection.citationId} : {}),
-        },
-        options,
-      );
+      const result = await read<ManagerMaintenanceRefreshResultV1>('/api/attention/context-maintenance', {
+        action: 'refresh-case',
+        project: props.project,
+        caseId,
+        ...(selectedUri ? {memoryUri: selectedUri} : {}),
+        ...(selection ? {citationId: selection.citationId} : {}),
+      });
       if (!current()) return;
-      if (!['ready', 'resolved', 'unavailable', 'changing', 'superseded'].includes(result.outcome))
+      if (!['ready', 'resolved', 'unavailable', 'changing', 'incomplete', 'superseded'].includes(result.outcome))
         throw new Error('The selected evidence check returned an incomplete response. Check again.');
+      if (result.outcome === 'incomplete') {
+        setBlocked(true);
+        setError('');
+        setOutcome(result.reason);
+        return;
+      }
       if (result.outcome !== 'ready' && result.outcome !== 'resolved') {
         setBlocked(true);
         setPacket(undefined);
@@ -158,6 +161,8 @@ export function MaintenanceCaseDialog(props: {
         return result.packet;
       }
       setBlocked(false);
+      setError('');
+      setOutcome('');
       setRedactedScopes(scopes => {
         const next = new Set(scopes);
         next.delete(scopeKey);
@@ -175,14 +180,12 @@ export function MaintenanceCaseDialog(props: {
           return;
         }
         const path = `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(caseId)}`;
-        const details = await api<ManagerContextMaintenanceStatusV2>(`${path}&view=status`, undefined, options);
+        const details = await read<ManagerContextMaintenanceStatusV2>(`${path}&view=status`);
         if (!current()) return;
         const currentCase = details.cases?.find(value => value.caseId === caseId);
         if (currentCase) setItem(currentCase);
-        const result = await api<ManagerContextMaintenancePacketV2>(
+        const result = await read<ManagerContextMaintenancePacketV2>(
           `${path}${selectedUri ? `&memoryUri=${encodeURIComponent(selectedUri)}` : ''}${selection ? `&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
-          undefined,
-          options,
         );
         if (!current()) return;
         if (result.version !== 2 || result.project !== props.project || result.caseId !== caseId)
@@ -195,6 +198,8 @@ export function MaintenanceCaseDialog(props: {
           return;
         }
         setBlocked(false);
+        setError('');
+        setOutcome('');
         if (currentCase) onEvidenceUpdated.current?.(currentCase);
       } catch (failure) {
         let cause = failure;
@@ -210,13 +215,13 @@ export function MaintenanceCaseDialog(props: {
         if (!current()) return;
         if (
           packet?.topicEvidence?.version === 2 ||
-          (Schema.is(ManagerApiError)(cause) && [403, 404].includes(cause.status))
+          (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status))
         ) {
           setPacket(undefined);
           setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
         }
         setBlocked(true);
-        setError(errorMessage(cause));
+        setError(evidenceReadError(cause));
       } finally {
         if (current()) setLoading(false);
       }
@@ -231,15 +236,15 @@ export function MaintenanceCaseDialog(props: {
   }
   const revalidate = (
     <>
-      {outcome ? <p role="status">{outcome}</p> : null}
-      {blocked ? (
-        <p role="alert">
-          {error || outcome}{' '}
-          <button type="button" disabled={loading} onClick={refreshEvidence}>
-            Check current evidence
-          </button>
-        </p>
-      ) : null}
+      <p role={outcome ? 'status' : undefined} style={{visibility: outcome ? 'visible' : 'hidden'}}>
+        {outcome || '\u00a0'}
+      </p>
+      <p role={blocked ? 'alert' : undefined} style={{visibility: blocked ? 'visible' : 'hidden'}}>
+        {error || outcome}{' '}
+        <button type="button" disabled={loading} onClick={refreshEvidence}>
+          Check current evidence
+        </button>
+      </p>
     </>
   );
   const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
@@ -359,7 +364,7 @@ export function MaintenanceCaseDialog(props: {
           ) : null}
         </section>
       ) : null}
-      {uri && !semanticReview ? <CaseMemory uri={uri} refresh={refresh} /> : null}
+      {uri && !semanticReview ? <CaseMemory key={uri} uri={uri} refresh={refresh} /> : null}
       <section aria-label="Case evidence" aria-busy={loading}>
         <header className="health-dialog-section-heading">
           <h3>{semanticReview ? 'Compare the original statements' : 'Source evidence'}</h3>
@@ -367,7 +372,9 @@ export function MaintenanceCaseDialog(props: {
             <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
           </button>
         </header>
-        {loading ? <p role="status">Loading this case and its evidence…</p> : null}
+        <p role="status" style={{visibility: loading ? 'visible' : 'hidden'}}>
+          {packet ? 'Checking current evidence…' : 'Loading this case and its evidence…'}
+        </p>
         {error ? (
           <div role="alert">
             <p>{error}</p>
@@ -519,34 +526,51 @@ export function MaintenanceCaseDialog(props: {
 function CaseMemory(props: {readonly uri: string; readonly refresh: number}): React.ReactElement {
   const [content, setContent] = useState<string>();
   const [error, setError] = useState('');
+  const contentUri = useRef(props.uri);
   useEffect(() => {
     const controller = new AbortController();
-    setContent(undefined);
-    setError('');
-    void api<{content: string}>(`/api/memory?uri=${encodeURIComponent(props.uri)}`, undefined, {
-      signal: controller.signal,
-      timeoutMilliseconds: 30_000,
-    })
+    if (contentUri.current !== props.uri) {
+      contentUri.current = props.uri;
+      setContent(undefined);
+      setError('');
+    }
+    void retryEvidenceRead(
+      () =>
+        api<{content: string}>(`/api/memory?uri=${encodeURIComponent(props.uri)}`, undefined, {
+          signal: controller.signal,
+          timeoutMilliseconds: 30_000,
+        }),
+      controller.signal,
+    )
       .then(result => {
-        if (!controller.signal.aborted) setContent(result.content);
+        if (!controller.signal.aborted) {
+          setContent(result.content);
+          setError('');
+        }
       })
       .catch(cause => {
-        if (!controller.signal.aborted) setError(errorMessage(cause));
+        if (!controller.signal.aborted) {
+          if (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status)) setContent(undefined);
+          setError(evidenceReadError(cause));
+        }
       });
     return () => controller.abort();
   }, [props.uri, props.refresh]);
   return (
     <section aria-label="Memory being reviewed" className="health-case-memory">
       <h3>Stored memory</h3>
-      {error ? (
-        <p role="alert">{error}</p>
-      ) : content === undefined ? (
-        <p role="status">Loading memory…</p>
+      {content === undefined ? (
+        error ? (
+          <p role="alert">{error}</p>
+        ) : (
+          <p role="status">Loading memory…</p>
+        )
       ) : (
         <MemoryExcerpt label="Stored memory">
           <MemoryBody content={memoryDocumentParts(content).body} />
         </MemoryExcerpt>
       )}
+      {error && content !== undefined ? <p role="alert">{error}</p> : null}
     </section>
   );
 }

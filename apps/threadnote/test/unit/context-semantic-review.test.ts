@@ -1,8 +1,11 @@
-import {observeSelectedMaintenanceCase} from '../../src/memory/context/maintenance_refresh.js';
+import {
+  observeSelectedMaintenanceCase,
+  refreshContextMaintenanceCase,
+} from '../../src/memory/context/maintenance_refresh.js';
 import type {MaintenanceState} from '../../src/memory/context/maintenance_contracts.js';
 import {SourceConfigurationStore} from '@threadnote/integration-core/config';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path, Result, Layer} from 'effect';
+import {Deferred, Effect, FileSystem, Path, Result, Layer} from 'effect';
 import {describe, expect, it} from 'vitest';
 import fc from 'fast-check';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -36,7 +39,7 @@ import {buildContextHealthReport} from '@threadnote/context/health';
 import {handleManagerAttentionAction, semanticReviewFailureResponse} from '../../src/manager/attention_actions.js';
 import {semanticReviewError} from '../../src/memory/context/semantic_review_state.js';
 import {ResourceConflict} from '@threadnote/store/resource-store';
-import {readContextMaintenanceStatus} from '../../src/memory/context/maintenance.js';
+import {readContextMaintenanceStatus, withStateLock} from '../../src/memory/context/maintenance.js';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {createMemoryCodeCitation} from '@threadnote/memory/code/citation';
 import {writeSemanticReviewState} from '../../src/memory/context/semantic_review_state.js';
@@ -44,6 +47,7 @@ import {
   previewSemanticReview,
   applySemanticReview,
   buildSemanticReviewPreview,
+  refreshSemanticComparison,
 } from '../../src/memory/context/semantic_review.js';
 
 function memory(name: string, body: string): MemoryRecord {
@@ -959,4 +963,322 @@ effectIt.effect('fences both terminal semantic and removed-citation supersession
       expect(state.cases[0].disposition).toBe('needs-decision');
     }
   }).pipe(provideTestLayer(reviewLayer)),
+);
+
+const refreshInput = () => {
+  const evidence = findContextHealthSemanticContradiction(records)!;
+  return {
+    project: 'threadnote',
+    contradictionId: evidence.contradictionId,
+    left: {
+      recordUri: evidence.left.recordUri,
+      recordContentFingerprint: evidence.left.recordContentFingerprint,
+      claimFingerprint: evidence.left.claimFingerprint,
+    },
+    right: {
+      recordUri: evidence.right.recordUri,
+      recordContentFingerprint: evidence.right.recordContentFingerprint,
+      claimFingerprint: evidence.right.claimFingerprint,
+    },
+  };
+};
+
+effectIt.effect(
+  'refreshes a projected health comparison with no maintenance state while its writer owns the lock',
+  () =>
+    Effect.gen(function* () {
+      const {config, store, location} = yield* fixture();
+      const acquired = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      yield* withStateLock(
+        config,
+        Deferred.succeed(acquired, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(acquired);
+      const request = (body: Record<string, unknown>) =>
+        handleManagerAttentionAction({
+          config,
+          method: 'POST',
+          url: new URL('http://manager.test/api/context-health/semantic/refresh'),
+          body: Effect.succeed(body),
+        });
+      const result = yield* request(refreshInput());
+      expect(result).toMatchObject({
+        status: 200,
+        body: {outcome: 'ready', evidence: {contradictionId: refreshInput().contradictionId}},
+      });
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      expect(yield* fs.exists(path.join(config.agentContextHome, 'context-maintenance', 'state-v2.json'))).toBe(false);
+      const unrelated = memory('unrelated', 'Independent metadata note.');
+      yield* store.write(location, unrelated.uri, unrelated.content, {mode: 'create'});
+      expect(yield* request(refreshInput())).toEqual(result);
+      expect(yield* store.read(location, records[0].uri)).toBe(records[0].content);
+      expect(yield* store.read(location, records[1].uri)).toBe(records[1].content);
+      yield* Deferred.succeed(release, undefined);
+    }).pipe(provideTestLayer(reviewLayer)),
+);
+
+effectIt.effect(
+  'rejects fabricated claim bindings, foreign projects and missing sources during direct comparison refresh',
+  () =>
+    Effect.gen(function* () {
+      const {config} = yield* fixture();
+      const selected = refreshInput();
+      const request = (body: Record<string, unknown>) =>
+        handleManagerAttentionAction({
+          config,
+          method: 'POST',
+          url: new URL('http://manager.test/api/context-health/semantic/refresh'),
+          body: Effect.succeed(body),
+        });
+      for (const patch of [
+        {left: {...selected.left, claimFingerprint: 'f'.repeat(64)}},
+        {
+          left: {...selected.left, recordUri: selected.right.recordUri},
+          right: {...selected.right, recordUri: selected.left.recordUri},
+        },
+        {contradictionId: 'f'.repeat(64)},
+      ])
+        expect((yield* request({...selected, ...patch}))?.status).toBe(400);
+      expect((yield* request({...selected, project: 'other'}))?.body).toMatchObject({outcome: 'unavailable'});
+      expect(
+        (yield* request({
+          ...selected,
+          left: {...selected.left, recordUri: records[0].uri.replace('a.md', 'missing.md')},
+        }))?.status,
+      ).toBe(404);
+      expect(
+        (yield* request({
+          ...selected,
+          left: {...selected.left, recordUri: records[0].uri.replace('/tester/', '/foreign/')},
+        }))?.status,
+      ).toBe(403);
+      const swapped = yield* request({...selected, left: selected.right, right: selected.left});
+      expect(swapped?.body).toMatchObject({outcome: 'ready'});
+    }).pipe(provideTestLayer(reviewLayer)),
+);
+
+effectIt.effect('reconstructs changed current statements and detects raw-source races without writing decisions', () =>
+  Effect.gen(function* () {
+    const {config, store, location} = yield* fixture();
+    const changed = memory('a', 'Timeout is 90 seconds.');
+    yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
+    const result = yield* refreshSemanticComparison(config, refreshInput());
+    expect(result).toMatchObject({outcome: 'ready'});
+    if (result.outcome === 'ready') {
+      expect([result.evidence.left.text, result.evidence.right.text].join(' ')).toContain('90');
+      expect(result.evidence.contradictionId).not.toBe(refreshInput().contradictionId);
+    }
+    let reads = 0;
+    const racing = ResourceStore.of({
+      ...store,
+      readBounded: (location, uri, limit) =>
+        Effect.gen(function* () {
+          const source = yield* store.readBounded(location, uri, limit);
+          if (++reads === 2)
+            yield* store.write(location, changed.uri, changed.content + '\nIndependent source edit.', {
+              mode: 'replace',
+            });
+          return source;
+        }),
+    });
+    expect(
+      (yield* refreshSemanticComparison(config, refreshInput()).pipe(Effect.provideService(ResourceStore, racing)))
+        .outcome,
+    ).toBe('changing');
+  }).pipe(provideTestLayer(reviewLayer)),
+);
+
+const boundedSemanticRefreshCases = [
+  {
+    name: 'body limit hides a still-present selected conflict',
+    reason: 'body-limit',
+    count: 0,
+    left: '```\n' + 'x'.repeat(65_536) + '\n```\nTimeout is 60 seconds.',
+    right: records[1].body,
+  },
+  {
+    name: 'claim limit hides a still-present selected conflict',
+    reason: 'claim-limit',
+    count: 0,
+    left:
+      Array.from({length: 23}, (_, index) => `Queue${index} is ${10 + index} seconds.`).join('\n') +
+      '\nTimeout is 60 seconds.',
+    right: records[1].body,
+  },
+  {
+    name: 'partial extraction exposes one different comparison without proving uniqueness',
+    reason: 'claim-limit',
+    count: 1,
+    left:
+      'Retries is 60 seconds.\n' +
+      Array.from({length: 21}, (_, index) => `Queue${index} is ${10 + index} seconds.`).join('\n') +
+      '\nTimeout is 60 seconds.',
+    right: 'Retries must be 30 seconds.\nTimeout must be 30 seconds.',
+  },
+];
+for (const scenario of boundedSemanticRefreshCases) {
+  effectIt.effect(`F007 retains a blocked comparison when ${scenario.name}`, () =>
+    Effect.gen(function* () {
+      const changed = [memory('a', scenario.left), memory('b', scenario.right)];
+      const report = buildContextHealthReport({
+        project: 'threadnote',
+        records: changed,
+        includeFindingCategories: ['semantic-contradiction'],
+        now: NOW,
+      });
+      expect(report.semanticCompleteness.state).not.toBe('complete');
+      expect(report.semanticCompleteness.unknownReasons.map(value => value.reason)).toContain(scenario.reason);
+      expect(report.findings.filter(value => value.semanticEvidence)).toHaveLength(scenario.count);
+      expect(changed[0].body).toContain(records[0].body);
+      expect(changed[1].body).toContain(records[1].body);
+      const {config, store, location} = yield* fixture();
+      for (const record of changed) yield* store.write(location, record.uri, record.content, {mode: 'replace'});
+      const result = yield* refreshSemanticComparison(config, refreshInput());
+      expect(result).toMatchObject({outcome: 'incomplete'});
+      expect('reason' in result && result.reason).toContain('bounded');
+      for (const record of changed) expect(yield* store.read(location, record.uri)).toBe(record.content);
+    }).pipe(provideTestLayer(reviewLayer)),
+  );
+}
+
+fcEffectProp(
+  effectIt,
+  'F007 never promotes a claim-limited current pair to absent or uniquely ready under bounded source permutations',
+  {extraClaims: fc.integer({min: 17, max: 48}), reverse: fc.boolean()},
+  ({extraClaims, reverse}) =>
+    Effect.gen(function* () {
+      const fillers = Array.from({length: extraClaims}, (_, index) => `Queue${index} is ${10 + index} seconds.`);
+      const changed = memory('a', (reverse ? fillers.reverse() : fillers).join('\n') + '\n' + records[0].body);
+      const {config, store, location} = yield* fixture();
+      yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
+      expect((yield* refreshSemanticComparison(config, refreshInput())).outcome).toBe('incomplete');
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const {item, state} = retainedSemanticState();
+      const stateFile = path.join(config.agentContextHome, 'context-maintenance', 'state-v2.json');
+      yield* fs.makeDirectory(path.dirname(stateFile), {recursive: true});
+      const encoded = JSON.stringify(state);
+      yield* fs.writeFileString(stateFile, encoded);
+      expect(
+        (yield* refreshContextMaintenanceCase(config, {
+          project: 'threadnote',
+          caseId: item.caseId,
+          cwd: config.agentContextHome,
+        })).outcome,
+      ).toBe('incomplete');
+      expect(yield* fs.readFileString(stateFile)).toBe(encoded);
+      expect(yield* store.read(location, changed.uri)).toBe(changed.content);
+      expect(yield* store.read(location, records[1].uri)).toBe(records[1].content);
+    }).pipe(provideTestLayer(reviewLayer)),
+  {fastCheck: {numRuns: 8, seed: 80407}},
+);
+
+function retainedSemanticState() {
+  const finding = buildContextHealthReport({project: 'threadnote', records, now: NOW}).findings[0];
+  const item = {
+    ...finding.caseIdentity!,
+    caseId: finding.caseId!,
+    evidenceRevision: 'saved',
+    disposition: 'needs-decision' as const,
+    reason: 'opposing-canonical-claims',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+    subjectContentHashes: records.map(record => ({
+      uri: record.uri,
+      hash: sha256HexSync(canonicalMemoryDocumentContent(record.content)),
+    })),
+  };
+  const state: MaintenanceState = {
+    version: 2,
+    paused: false,
+    state: 'needs-decision',
+    generation: 'saved',
+    projects: [],
+    receipts: [],
+    cases: [
+      item,
+      {...item, caseId: 'unrelated-retained-case', family: 'citation', slot: 'unrelated-anchor', memoryId: 'unrelated'},
+    ],
+    checkpoints: {},
+  };
+  return {item, state};
+}
+for (const scenario of boundedSemanticRefreshCases) {
+  effectIt.effect(`F007 retained maintenance case does not persist absence or uniqueness when ${scenario.name}`, () =>
+    Effect.gen(function* () {
+      const {config, store, location} = yield* fixture();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const {item, state} = retainedSemanticState();
+      const stateFile = path.join(config.agentContextHome, 'context-maintenance', 'state-v2.json');
+      yield* fs.makeDirectory(path.dirname(stateFile), {recursive: true});
+      const encoded = JSON.stringify(state);
+      yield* fs.writeFileString(stateFile, encoded);
+      const changed = [memory('a', scenario.left), memory('b', scenario.right)];
+      for (const record of changed) yield* store.write(location, record.uri, record.content, {mode: 'replace'});
+      const result = yield* refreshContextMaintenanceCase(config, {
+        project: 'threadnote',
+        caseId: item.caseId,
+        cwd: config.agentContextHome,
+      });
+      expect(result).toMatchObject({outcome: 'incomplete'});
+      expect('state' in result).toBe(false);
+      expect('item' in result).toBe(false);
+      expect(yield* fs.readFileString(stateFile)).toBe(encoded);
+      for (const record of changed) expect(yield* store.read(location, record.uri)).toBe(record.content);
+    }).pipe(provideTestLayer(reviewLayer)),
+  );
+}
+
+effectIt.effect(
+  'F007 retained incomplete analysis obeys the closing raw-source race fence before returning or persisting',
+  () =>
+    Effect.gen(function* () {
+      const {config, store, location} = yield* fixture();
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const {item, state} = retainedSemanticState();
+      const stateFile = path.join(config.agentContextHome, 'context-maintenance', 'state-v2.json');
+      yield* fs.makeDirectory(path.dirname(stateFile), {recursive: true});
+      const encoded = JSON.stringify(state);
+      yield* fs.writeFileString(stateFile, encoded);
+      const changed = memory('a', boundedSemanticRefreshCases[0].left);
+      yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
+      let openings = 0;
+      const racingFs = {
+        ...fs,
+        readFileString: (...args: Parameters<typeof fs.readFileString>) =>
+          fs
+            .readFileString(...args)
+            .pipe(
+              Effect.tap(() =>
+                args[0].endsWith('/a.md') && openings++ === 0
+                  ? fs.writeFileString(args[0], records[0].content)
+                  : Effect.void,
+              ),
+            ),
+      };
+      const observed = yield* observeSelectedMaintenanceCase(config, state, item, config.agentContextHome).pipe(
+        Effect.provideService(FileSystem.FileSystem, racingFs),
+      );
+      expect(observed.outcome).toBe('changing');
+      expect('state' in observed).toBe(false);
+      expect(yield* fs.readFileString(stateFile)).toBe(encoded);
+      expect(yield* store.read(location, records[0].uri)).toBe(records[0].content);
+      yield* store.write(location, changed.uri, changed.content, {mode: 'replace'});
+      openings = 0;
+      const refreshed = yield* refreshContextMaintenanceCase(config, {
+        project: 'threadnote',
+        caseId: item.caseId,
+        cwd: config.agentContextHome,
+      }).pipe(Effect.provideService(FileSystem.FileSystem, racingFs));
+      expect(refreshed.outcome).toBe('ready');
+      expect(openings).toBeGreaterThanOrEqual(3);
+      expect(yield* fs.readFileString(stateFile)).toBe(encoded);
+    }).pipe(provideTestLayer(reviewLayer)),
 );

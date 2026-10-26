@@ -1,10 +1,12 @@
 import {DateTime, Effect, FileSystem, Schema} from 'effect';
 import {findContextHealthSemanticContradiction} from '@threadnote/context/health_semantic';
+import {buildContextHealthReport} from '@threadnote/context/health';
 import {
   assertMemoryDocumentSchemaWritable,
   formatMemoryDocument,
   memoryArchiveBody,
   memoryArchiveMetadata,
+  parseMemoryDocument,
   type MemoryRecord,
 } from '@threadnote/memory/document';
 import {withMemoryUriLocks} from '@threadnote/memory/lock';
@@ -16,6 +18,8 @@ import type {
   ManagerSemanticReviewInputV1,
   ManagerSemanticReviewPreviewV1,
   ManagerSemanticReviewApplyResultV1,
+  ManagerSemanticRefreshInputV1,
+  ManagerSemanticRefreshResultV1,
 } from '@threadnote/manager/attention/contracts';
 import {readMemoryRecordsByUri, resourceStoreLocation} from '../../mcp/server/memory.js';
 import {discardDeferredCodeAnchorIntentsWithin} from '../deferred/code_anchor.js';
@@ -32,8 +36,7 @@ import {
   SemanticReviewError,
 } from './semantic_review_state.js';
 
-function validateInput(input: ManagerSemanticReviewInputV1) {
-  if (!['left', 'right', 'both'].includes(input.choice)) throw new Error('Choose an explicit semantic review choice.');
+function validateComparison(input: ManagerSemanticRefreshInputV1) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.project) || !/^[a-f0-9]{64}$/u.test(input.contradictionId))
     throw new Error('Select an exact semantic comparison and project.');
   for (const source of [input.left, input.right]) {
@@ -49,7 +52,11 @@ function validateInput(input: ManagerSemanticReviewInputV1) {
       'Retiring a memory requires two different source memories. Edit this memory to resolve its internal claims.',
     );
 }
-function selectedClaimFingerprints(input: ManagerSemanticReviewInputV1): readonly [string, string] | undefined {
+function validateInput(input: ManagerSemanticReviewInputV1) {
+  if (!['left', 'right', 'both'].includes(input.choice)) throw new Error('Choose an explicit semantic review choice.');
+  validateComparison(input);
+}
+function selectedClaimFingerprints(input: ManagerSemanticRefreshInputV1): readonly [string, string] | undefined {
   const left = input.left.claimFingerprint;
   const right = input.right.claimFingerprint;
   if (left === undefined && right === undefined) return undefined;
@@ -57,6 +64,94 @@ function selectedClaimFingerprints(input: ManagerSemanticReviewInputV1): readonl
     throw new Error('Select both exact source claims.');
   return [left, right];
 }
+
+/** A health comparison exists independently of the background maintenance inventory. */
+export const refreshSemanticComparison = Effect.fn('semanticReview.refresh')(function* (
+  config: RuntimeConfig,
+  input: ManagerSemanticRefreshInputV1,
+) {
+  const fingerprints = yield* Effect.try({
+    try: () => {
+      validateComparison(input);
+      const selected = selectedClaimFingerprints(input);
+      if (!selected) throw new Error('Select both exact source claims.');
+      return selected;
+    },
+    catch: () => semanticReviewError('Select both exact source claims and their project.'),
+  });
+  const store = yield* ResourceStore;
+  const uris = [input.left.recordUri, input.right.recordUri];
+  const read = Effect.forEach(uris, uri => store.readBounded(resourceStoreLocation(config), uri, 1_048_576));
+  const before = yield* read;
+  const contents = before.flatMap(source => (source.truncated ? [] : [source.content]));
+  if (contents.length !== 2)
+    return {
+      outcome: 'unavailable',
+      reason: 'A source memory is too large for this comparison. Review it in Library.',
+    } satisfies ManagerSemanticRefreshResultV1;
+  const records = contents.map((content, index) => parseMemoryDocument(uris[index], content));
+  if (
+    records.some(record => !record || record.metadata.status !== 'active' || record.metadata.project !== input.project)
+  )
+    return {
+      outcome: 'unavailable',
+      reason: 'A selected memory is no longer active in this project.',
+    } satisfies ManagerSemanticRefreshResultV1;
+  const current = records.filter((record): record is MemoryRecord => record !== undefined);
+  const exact = findContextHealthSemanticContradiction(current, input.contradictionId, fingerprints);
+  if (
+    exact &&
+    [input.left, input.right].some(source => {
+      const claim = [exact.left, exact.right].find(claim => claim.recordUri === source.recordUri);
+      return (
+        claim?.recordContentFingerprint !== source.recordContentFingerprint ||
+        claim.claimFingerprint !== source.claimFingerprint
+      );
+    })
+  )
+    return yield* semanticReviewError('The selected revisions do not match their source claims.');
+  if (
+    !exact &&
+    current.every(
+      (record, index) =>
+        sha256HexSync(record.content) === input[index === 0 ? 'left' : 'right'].recordContentFingerprint,
+    )
+  )
+    return yield* semanticReviewError('The selected comparison does not match these source claims.');
+  const report = exact
+    ? undefined
+    : buildContextHealthReport({
+        project: input.project,
+        records: current,
+        duplicateCorpus: current,
+        includeFindingCategories: ['semantic-contradiction'],
+        now: yield* DateTime.nowAsDate,
+      });
+  const comparisons = exact
+    ? [exact]
+    : report!.findings.flatMap(finding => (finding.semanticEvidence ? [finding.semanticEvidence] : []));
+  const after = yield* read;
+  if (after.some((source, index) => source.truncated || source.content !== contents[index]))
+    return {
+      outcome: 'changing',
+      reason: 'The selected memories changed during the check. Checking again shortly.',
+    } satisfies ManagerSemanticRefreshResultV1;
+  if (report && report.semanticCompleteness.state !== 'complete')
+    return {
+      outcome: 'incomplete',
+      reason:
+        'The bounded comparison check could not review every statement. Your choice is saved; check current evidence after reviewing the source memories.',
+    } satisfies ManagerSemanticRefreshResultV1;
+  if (comparisons.length !== 1)
+    return {
+      outcome: 'superseded',
+      reason:
+        comparisons.length === 0
+          ? 'These statements no longer conflict. No memory content was changed.'
+          : 'The updated memories contain several comparisons. Review their current statements before choosing a new decision.',
+    } satisfies ManagerSemanticRefreshResultV1;
+  return {outcome: 'ready', evidence: comparisons[0]} satisfies ManagerSemanticRefreshResultV1;
+});
 export function buildSemanticReviewPreview(
   input: ManagerSemanticReviewInputV1,
   records: readonly MemoryRecord[],

@@ -283,7 +283,12 @@ export type ManagerMaintenanceRefreshResultV1 =
       readonly packet: ManagerContextMaintenancePacketV2;
     }
   | {
-      readonly outcome: 'changing' | 'unavailable' | 'superseded';
+      readonly outcome: 'changing' | 'incomplete' | 'unavailable' | 'superseded';
       readonly reason: string;
       readonly item?: ManagerContextMaintenanceCaseV2;
     };
+
+export type ManagerSemanticRefreshInputV1 = Omit<ManagerSemanticReviewInputV1, 'choice'>;
+export type ManagerSemanticRefreshResultV1 =
+  | {readonly outcome: 'ready'; readonly evidence: ContextHealthSemanticContradictionV2}
+  | {readonly outcome: 'changing' | 'incomplete' | 'unavailable' | 'superseded'; readonly reason: string};

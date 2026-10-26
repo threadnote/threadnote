@@ -1,4 +1,8 @@
-import type {ManagerMaintenanceRefreshResultV1, ManagerContextMaintenanceCaseV2} from './attention/contracts.js';
+import type {
+  ManagerMaintenanceRefreshResultV1,
+  ManagerContextMaintenanceCaseV2,
+  ManagerSemanticRefreshResultV1,
+} from './attention/contracts.js';
 import {SemanticResolutionReview} from './attention/semantic_comparison.js';
 import {ArrowRight, BookOpen, FileCode2, Sparkles} from 'lucide-react';
 import {MemoryExcerpt, ReviewBadge, ReviewNotice} from './review_presentation.js';
@@ -11,6 +15,7 @@ import type {KnowledgeDeltaV1} from '@threadnote/memory/knowledge_delta';
 import type {ManagerContextHealthResponseV1} from './attention/contracts.js';
 import {DetailModal, MemoryBody} from './detail_modal.js';
 import {api, errorMessage, ManagerApiError} from './ui/support.js';
+import {evidenceReadError, retryEvidenceRead} from './attention/evidence_refresh.js';
 
 type ReviewPreview = {review: CandidateReview; delta: KnowledgeDeltaV1};
 
@@ -412,22 +417,85 @@ export function HealthDetail(props: {
     }
   }
   async function refreshSemanticEvidence() {
+    if (finding.category !== 'semantic-contradiction') {
+      await refreshMaintenanceEvidence();
+      return;
+    }
+    const selected = semanticEvidence ?? finding.semanticEvidence;
+    if (!selected) return;
+    semanticRequest.current?.abort();
+    const controller = new AbortController();
+    semanticRequest.current = controller;
+    setSemanticChecking(true);
+    setFrozen(true);
+    try {
+      const source = (claim: typeof selected.left) => ({
+        recordUri: claim.recordUri,
+        recordContentFingerprint: claim.recordContentFingerprint,
+        claimFingerprint: claim.claimFingerprint,
+      });
+      const result = await retryEvidenceRead(async () => {
+        const checked = await api<ManagerSemanticRefreshResultV1>(
+          '/api/context-health/semantic/refresh',
+          {
+            project: props.project,
+            contradictionId: selected.contradictionId,
+            left: source(selected.left),
+            right: source(selected.right),
+          },
+          {signal: controller.signal, timeoutMilliseconds: 30_000},
+        );
+        if (checked.outcome === 'changing') throw new Error(checked.reason);
+        return checked;
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      if (result.outcome === 'ready') {
+        const expected = [selected.left.recordUri, selected.right.recordUri].sort().join('\n');
+        if (
+          [result.evidence.left.recordUri, result.evidence.right.recordUri].sort().join('\n') !== expected ||
+          [result.evidence.left, result.evidence.right].some(claim => claim.context.project !== props.project)
+        )
+          throw new Error('The refreshed comparison does not match the selected memories.');
+        setSemanticEvidence(result.evidence);
+        setCurrentFinding(value => ({...value, semanticEvidence: result.evidence}));
+        setFrozen(false);
+        setSemanticUnavailable('');
+      } else if (result.outcome === 'unavailable' || result.outcome === 'superseded') {
+        setSemanticEvidence(undefined);
+        setSemanticUnavailable(result.reason);
+      } else if (result.outcome === 'incomplete') {
+        setSemanticUnavailable(result.reason);
+      } else throw new Error('The current comparison check was incomplete.');
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status)) setSemanticEvidence(undefined);
+      setSemanticUnavailable(evidenceReadError(cause));
+    } finally {
+      if (!controller.signal.aborted) setSemanticChecking(false);
+    }
+  }
+  async function refreshMaintenanceEvidence() {
     if (!finding.caseId) return;
     semanticRequest.current?.abort();
     const controller = new AbortController();
     semanticRequest.current = controller;
     setSemanticChecking(true);
     setFrozen(true);
-    setSemanticUnavailable('');
     try {
-      const result = await api<ManagerMaintenanceRefreshResultV1>(
-        '/api/attention/context-maintenance',
-        {action: 'refresh-case', project: props.project, caseId: finding.caseId},
-        {signal: controller.signal, timeoutMilliseconds: 30_000},
+      const result = await retryEvidenceRead(
+        () =>
+          api<ManagerMaintenanceRefreshResultV1>(
+            '/api/attention/context-maintenance',
+            {action: 'refresh-case', project: props.project, caseId: finding.caseId},
+            {signal: controller.signal, timeoutMilliseconds: 30_000},
+          ),
+        controller.signal,
       );
       if (controller.signal.aborted) return;
       if (result.outcome === 'ready' || result.outcome === 'resolved') {
         setFrozen(false);
+        setSemanticUnavailable('');
+        setError('');
         if (result.packet.semanticEvidence) {
           setSemanticEvidence(result.packet.semanticEvidence);
           setCurrentFinding(value => ({
@@ -453,8 +521,9 @@ export function HealthDetail(props: {
       }
     } catch (cause) {
       if (controller.signal.aborted) return;
-      if (Schema.is(ManagerApiError)(cause) && [403, 404].includes(cause.status)) setSemanticEvidence(undefined);
-      setSemanticUnavailable(errorMessage(cause));
+      if (Schema.is(ManagerApiError)(cause) && [401, 403, 404].includes(cause.status)) setSemanticEvidence(undefined);
+      setSemanticUnavailable(evidenceReadError(cause));
+      setError(evidenceReadError(cause));
     } finally {
       if (!controller.signal.aborted) setSemanticChecking(false);
     }
@@ -472,21 +541,28 @@ export function HealthDetail(props: {
     </p>
   );
   if (finding.category === 'semantic-contradiction') {
+    const evidenceNotice = (
+      <div>
+        <p role={semanticChecking ? 'status' : undefined} style={{visibility: semanticChecking ? 'visible' : 'hidden'}}>
+          Checking current statements…
+        </p>
+        <p
+          role={semanticUnavailable ? 'alert' : undefined}
+          style={{visibility: semanticUnavailable ? 'visible' : 'hidden'}}
+        >
+          {semanticUnavailable}{' '}
+          <button type="button" disabled={semanticChecking} onClick={() => void refreshSemanticEvidence()}>
+            Check current evidence
+          </button>
+        </p>
+      </div>
+    );
     return (
       <DetailModal
         title="Compare conflicting memories"
         onClose={props.onClose}
         className="semantic-review-dialog"
-        footer={
-          semanticUnavailable ? (
-            <p role="alert">
-              {semanticUnavailable}{' '}
-              <button type="button" disabled={semanticChecking} onClick={() => void refreshSemanticEvidence()}>
-                Check current evidence
-              </button>
-            </p>
-          ) : undefined
-        }
+        footer={!semanticEvidence ? evidenceNotice : undefined}
       >
         {semanticEvidence ? (
           <SemanticResolutionReview
@@ -499,13 +575,7 @@ export function HealthDetail(props: {
             }}
             onRefresh={refreshSemanticEvidence}
             writesDisabled={semanticChecking || !!semanticUnavailable}
-            reviewNotice={
-              semanticChecking ? (
-                <p role="status">Checking current statements…</p>
-              ) : semanticUnavailable ? (
-                <p role="alert">{semanticUnavailable}</p>
-              ) : undefined
-            }
+            reviewNotice={evidenceNotice}
           />
         ) : (
           <>

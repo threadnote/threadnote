@@ -87,6 +87,7 @@ afterEach(async () => {
   document.body.replaceChildren();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 async function render(node: React.ReactElement) {
   await act(async () => root.render(node));
@@ -372,4 +373,74 @@ it('explains source-changed ownership and offers a direct supported review step'
   const next = document.querySelector('.health-source-next-step');
   expect(next?.querySelector('button')?.textContent).toContain('Review with agent');
   expect(document.querySelector('.health-code-preview .source-excerpt code')?.textContent).toBe('current declaration');
+});
+
+it('retries an initial busy evidence read without a manual click or displaying the lock path', async () => {
+  vi.useFakeTimers();
+  let attempts = 0;
+  const fetch = serveCase(async () =>
+    ++attempts < 3 ? response({error: 'Timed out waiting for local lock /private/state.lock.'}, 503) : response(packet),
+  );
+  await render(<MaintenanceCaseDialog {...base} />);
+  expect(document.querySelector('dialog')?.textContent).not.toContain('/private/state.lock');
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(attempts).toBe(3);
+  expect(document.querySelector('dialog')?.textContent).toContain('current declaration');
+  expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+});
+
+it('retains stored memory and evidence nodes and scroll during a busy background refresh', async () => {
+  vi.useFakeTimers();
+  let busy = false;
+  let attempts = 0;
+  serveCase(async () => (busy && ++attempts < 3 ? response({error: 'Busy'}, 503) : response(packet)));
+  await render(<MaintenanceCaseDialog {...base} />);
+  const memory = document.querySelector('[aria-label="Memory being reviewed"] .memory-excerpt');
+  const evidenceNode = document.querySelector('.health-code-preview');
+  expect(memory).not.toBeNull();
+  expect(evidenceNode).not.toBeNull();
+  const body = document.querySelector('.detail-modal-body')!;
+  body.scrollTop = 100;
+  busy = true;
+  await render(<MaintenanceCaseDialog {...base} stale />);
+  expect(document.querySelector('[aria-label="Memory being reviewed"] .memory-excerpt')).toBe(memory);
+  expect(document.querySelector('.health-code-preview')).toBe(evidenceNode);
+  expect(body.scrollTop).toBe(100);
+  expect(document.querySelector('dialog')?.textContent).not.toContain('Loading memory…');
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(document.querySelector('.health-code-preview')).toBe(evidenceNode);
+  expect(body.scrollTop).toBe(100);
+});
+
+it('redacts the previous stored memory synchronously when selecting another source URI and ignores its late read', async () => {
+  const nextUri = memoryUri.replace('runtime-boundaries.md', 'another-source.md');
+  const pending = Promise.withResolvers<Response>();
+  const lateOld = Promise.withResolvers<Response>();
+  let firstReads = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (path: string) => {
+      if (path.startsWith('/api/memory?')) {
+        const uri = new URL(path, 'http://manager.test').searchParams.get('uri');
+        if (uri === nextUri) return pending.promise;
+        return ++firstReads === 1
+          ? response({content: 'MEMORY\nkind: durable\n\n# Previous private source\nOld retained content.'})
+          : lateOld.promise;
+      }
+      return response(path.includes('view=status') ? {version: 2, cases: [item]} : packet);
+    }),
+  );
+  await render(<MaintenanceCaseDialog {...base} memoryUri={memoryUri} />);
+  expect(document.querySelector('[aria-label="Memory being reviewed"]')?.textContent).toContain(
+    'Old retained content.',
+  );
+  await render(<MaintenanceCaseDialog {...base} memoryUri={memoryUri} stale />);
+  await render(<MaintenanceCaseDialog {...base} memoryUri={nextUri} />);
+  const memory = document.querySelector('[aria-label="Memory being reviewed"]')!;
+  expect(memory.textContent).not.toContain('Old retained content.');
+  expect(memory.textContent).toContain('Loading memory…');
+  await act(async () => lateOld.resolve(response({content: '# Superseded source response'})));
+  expect(memory.textContent).not.toContain('Superseded source response');
+  await act(async () => pending.resolve(response({content: '# Current selected source'})));
+  expect(memory.textContent).toContain('Current selected source');
 });

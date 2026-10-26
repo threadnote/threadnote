@@ -77,12 +77,19 @@ export const observeSelectedMaintenanceCase = Effect.fn('contextMaintenance.obse
       item.slot.split(':') as [string, string],
     );
     if (!evidence) {
-      const comparisons = buildContextHealthReport({
+      const report = buildContextHealthReport({
         project: item.project,
         records,
         duplicateCorpus: records,
         now: yield* DateTime.nowAsDate,
-      }).findings.filter(finding => finding.semanticEvidence);
+      });
+      if (report.semanticCompleteness.state !== 'complete')
+        return yield* close({
+          outcome: 'incomplete' as const,
+          reason:
+            'The bounded comparison check could not review every statement. Your choice is saved; check current evidence after reviewing the source memories.',
+        });
+      const comparisons = report.findings.filter(finding => finding.semanticEvidence);
       if (comparisons.length !== 1)
         return yield* close(
           superseded(

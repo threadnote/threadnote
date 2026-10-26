@@ -1,4 +1,5 @@
 import React, {useEffect, useRef, useState} from 'react';
+import {Schema} from 'effect';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -16,7 +17,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import {ReviewBadge, ReviewNotice, type ReviewTone} from '../review_presentation.js';
-import {api, errorMessage} from '../ui/support.js';
+import {api, errorMessage, ManagerApiError} from '../ui/support.js';
 import type {
   ManagerAutomaticMemoryItem,
   ManagerAutomaticMemoryStatus,
@@ -101,6 +102,7 @@ export function AutomaticMemoryPanel(props: {
 }) {
   const [statusState, setStatusState] = useState<{selection: string; value: ManagerAutomaticMemoryStatus}>();
   const [error, setError] = useState('');
+  const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState('');
   const [refresh, setRefresh] = useState(0);
   const previousRefresh = useRef(0);
@@ -114,7 +116,6 @@ export function AutomaticMemoryPanel(props: {
   const cursors = pagination.selection === selection ? pagination.cursors : [undefined];
   const afterUri = cursors.at(-1);
   const requestSelection = JSON.stringify([selection, afterUri]);
-  const status = statusState?.selection === requestSelection ? statusState.value : undefined;
   const setStatus = (next: ManagerAutomaticMemoryStatus | undefined) =>
     setStatusState(next ? {selection: requestSelection, value: next} : undefined);
   const live = useManagerLiveQuery<ManagerAutomaticMemoryStatus>(
@@ -128,6 +129,12 @@ export function AutomaticMemoryPanel(props: {
       ),
   );
   const fallback = !live.active || live.snapshot.status === 'unsupported';
+  const liveReadInvalid =
+    !fallback &&
+    ((live.snapshot.status === 'error' && automaticReadRequiresRedaction(live.snapshot.error)) ||
+      (live.snapshot.status === 'ready' && !validAutomaticStatus(live.snapshot.data, props.project)));
+  const status = statusState?.selection === requestSelection && !liveReadInvalid ? statusState.value : undefined;
+  const unconfirmed = checking || !!error || (!fallback && live.snapshot.status !== 'ready');
   const active = useRef(requestSelection);
   active.current = requestSelection;
   const mutation = useRef(0);
@@ -138,13 +145,16 @@ export function AutomaticMemoryPanel(props: {
     setNotice('');
   }, [selection]);
   useEffect(() => {
+    setError('');
+    summary.current?.(props.project, undefined);
+  }, [requestSelection]);
+  useEffect(() => {
     if (!fallback) return;
     const controller = new AbortController();
     let timer: number | undefined;
-    setStatus(undefined);
-    summary.current?.(props.project, undefined);
     const poll = async () => {
       const epoch = mutation.current;
+      setChecking(true);
       try {
         const result = await api<ManagerAutomaticMemoryStatus>(
           `/api/attention/automatic-memory?project=${encodeURIComponent(props.project)}${props.uri ? `&uri=${encodeURIComponent(props.uri)}` : afterUri ? `&afterUri=${encodeURIComponent(afterUri)}` : ''}`,
@@ -152,8 +162,8 @@ export function AutomaticMemoryPanel(props: {
           {signal: controller.signal},
         );
         if (controller.signal.aborted || active.current !== requestSelection || epoch !== mutation.current) return;
-        if (result.version !== 1 || result.project !== props.project || !Array.isArray(result.items))
-          throw new Error('Automatic memory status is unavailable. Refresh Manager.');
+        if (!validAutomaticStatus(result, props.project))
+          throw ManagerApiError.of('Automatic memory status is unavailable. Refresh Manager.', 409);
         setStatus(result);
         const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
         summary.current?.(props.project, {
@@ -162,7 +172,17 @@ export function AutomaticMemoryPanel(props: {
         });
         setError('');
       } catch (cause) {
-        if (!controller.signal.aborted && active.current === requestSelection) setError(errorMessage(cause));
+        if (!controller.signal.aborted && active.current === requestSelection && epoch === mutation.current) {
+          if (automaticReadRequiresRedaction(cause)) {
+            setStatus(undefined);
+            setSelected(undefined);
+            summary.current?.(props.project, undefined);
+          }
+          setError(errorMessage(cause));
+        }
+      } finally {
+        if (!controller.signal.aborted && active.current === requestSelection && epoch === mutation.current)
+          setChecking(false);
       }
       if (!controller.signal.aborted) timer = window.setTimeout(() => void poll(), 5_000);
     };
@@ -175,12 +195,25 @@ export function AutomaticMemoryPanel(props: {
   useEffect(() => {
     if (fallback) return;
     if (live.snapshot.status === 'error') {
+      if (automaticReadRequiresRedaction(live.snapshot.error)) {
+        setStatus(undefined);
+        setSelected(undefined);
+        summary.current?.(props.project, undefined);
+      }
+      setChecking(false);
       setError(errorMessage(live.snapshot.error));
       return;
     }
     if (live.snapshot.status !== 'ready') return;
     const result = live.snapshot.data;
-    if (result.version !== 1 || result.project !== props.project || !Array.isArray(result.items)) return;
+    if (!validAutomaticStatus(result, props.project)) {
+      setStatus(undefined);
+      setSelected(undefined);
+      summary.current?.(props.project, undefined);
+      setChecking(false);
+      setError('Automatic memory status is unavailable. Refresh Manager.');
+      return;
+    }
     setStatus(result);
     const retained = reconcileAutomaticMemoryItems(result.items, props.project, applied);
     summary.current?.(props.project, {
@@ -188,6 +221,7 @@ export function AutomaticMemoryPanel(props: {
       pending: result.incomplete === true || result.omitted > 0 || retained.some(item => item.state !== 'reviewed'),
     });
     setError('');
+    setChecking(false);
   }, [fallback, live.snapshot, requestSelection, props.project]);
   useEffect(() => {
     if (previousRefresh.current === refresh) return;
@@ -227,16 +261,16 @@ export function AutomaticMemoryPanel(props: {
           {notice}
         </ReviewNotice>
       ) : null}
-      {error ? (
-        <ReviewNotice title="Automatic status unavailable" tone="warning" role="alert">
-          {error}
-        </ReviewNotice>
-      ) : null}
-      {!status && !error ? (
-        <p role="status">
-          <LoaderCircle className="automatic-memory-spinner" size={16} /> Loading automatic assessment…
-        </p>
-      ) : null}
+      <div className="automatic-memory-refresh-status" style={{blockSize: '3.5rem', overflowY: 'auto'}}>
+        {error ? (
+          <p role="alert">Automatic status unavailable: {error}</p>
+        ) : !status || unconfirmed ? (
+          <p role="status">
+            <LoaderCircle className="automatic-memory-spinner" size={16} />{' '}
+            {status ? 'Checking for automatic updates…' : 'Loading automatic assessment…'}
+          </p>
+        ) : null}
+      </div>
       {groups.items.map(item => {
         const state = states[item.state];
         const Icon = state.icon;
@@ -314,6 +348,7 @@ export function AutomaticMemoryPanel(props: {
                 key={`${props.project}:${item.uri}:${item.targetHash}`}
                 project={props.project}
                 item={item}
+                disabled={unconfirmed}
                 onReady={openReview}
               />
             ) : null}
@@ -418,4 +453,12 @@ export function AutomaticMemoryPanel(props: {
       ) : null}
     </section>
   );
+}
+
+function automaticReadRequiresRedaction(cause: unknown): boolean {
+  return Schema.is(ManagerApiError)(cause) && [400, 401, 403, 404, 409, 410].includes(cause.status);
+}
+
+function validAutomaticStatus(result: ManagerAutomaticMemoryStatus, project: string): boolean {
+  return !!result && result.version === 1 && result.project === project && Array.isArray(result.items);
 }

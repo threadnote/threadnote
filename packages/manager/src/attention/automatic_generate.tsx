@@ -9,6 +9,7 @@ export function AutomaticGenerate(props: {
   readonly project: string;
   readonly item: ManagerAutomaticMemoryItem;
   readonly onReady: (reviewId: string) => void;
+  readonly disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [backend, setBackend] = useState<'local-ai' | 'effect-ai'>('local-ai');
@@ -24,7 +25,7 @@ export function AutomaticGenerate(props: {
     };
   }, []);
   async function generate() {
-    if (owned.current || !model.model) return;
+    if (owned.current || props.disabled || !model.model) return;
     owned.current = true;
     setBusy(true);
     setError('');
@@ -74,7 +75,7 @@ export function AutomaticGenerate(props: {
         </label>
         <ConsolidationModelPicker selection={model} disabled={busy} />
         {model.error ? <p role="alert">{model.error}</p> : null}
-        <button type="button" disabled={busy || !model.model} onClick={() => void generate()}>
+        <button type="button" disabled={props.disabled || busy || !model.model} onClick={() => void generate()}>
           {busy ? 'Preparing draft…' : 'Generate now'}
         </button>
       </fieldset>

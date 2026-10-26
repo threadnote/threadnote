@@ -865,6 +865,11 @@ describe('context maintenance view', () => {
             }
             return response(current);
           }
+          if (url.pathname === '/api/attention/context-maintenance' && init?.method === 'POST') {
+            const action = JSON.parse(String(init.body));
+            expect(action).toMatchObject({action: 'refresh-case', project: 'threadnote', caseId: item.caseId});
+            return response({outcome: 'ready', item, packet});
+          }
           if (url.pathname === '/api/context-health') {
             if (current.state === 'applied') return healthRefresh.promise;
             return response(healthReport);
@@ -1334,6 +1339,121 @@ describe('context maintenance view', () => {
     hidden.mockReturnValue(false);
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(fetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('keeps maintenance cards and an open dialog mounted while health refresh fails and recovers', async () => {
+    const memoryUri = 'threadnote://user/tester/memories/refresh-stability.md';
+    const item: ManagerContextMaintenanceStatusV2['cases'][number] = {
+      caseId: 'case-stable',
+      project: 'threadnote',
+      memoryId: 'memory-stable',
+      family: 'citation',
+      slot: 'anchor',
+      evidenceRevision: 'revision',
+      disposition: 'needs-decision',
+      reason: 'source-changed',
+      subjectContentHashes: [{uri: memoryUri, hash: 'hash'}],
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    const packet = {
+      version: 2,
+      project: 'threadnote',
+      caseId: item.caseId,
+      memoryUri,
+      evidenceRevision: 'revision',
+      expectedContentHash: 'hash',
+      reason: 'source-changed',
+      choices: ['Review the claim'],
+      allowedOperations: [],
+      instructions: 'Compare the source.',
+    };
+    const held = Promise.withResolvers<Response>();
+    const retry = Promise.withResolvers<Response>();
+    let healthReads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (url.pathname === '/api/context-health') {
+          healthReads++;
+          return healthReads === 1
+            ? Promise.resolve(new Response(JSON.stringify(report())))
+            : healthReads === 2
+              ? held.promise
+              : retry.promise;
+        }
+        if (url.pathname === '/api/attention/automatic-memory')
+          return Promise.resolve(
+            new Response(JSON.stringify({version: 1, project: 'threadnote', items: [], omitted: 0})),
+          );
+        if (url.pathname === '/api/memory')
+          return Promise.resolve(new Response(JSON.stringify({content: '# Stable private evidence'})));
+        if (init?.method === 'POST')
+          return Promise.resolve(new Response(JSON.stringify({version: 2, outcome: 'ready', item, packet})));
+        if (url.searchParams.has('caseId')) return Promise.resolve(new Response(JSON.stringify(packet)));
+        return Promise.resolve(new Response(JSON.stringify({...status(), cases: [item]})));
+      }),
+    );
+    const panel = (refreshGeneration: number) => (
+      <ContextHealthPanel {...props} project="threadnote" refreshGeneration={refreshGeneration} />
+    );
+    await render(panel(0));
+    const card = document.querySelector('.health-decision-card');
+    expect(card).not.toBeNull();
+    const review = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+      button => button.textContent === 'Review memory and evidence',
+    )!;
+    await act(async () => review.click());
+    const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
+    const body = dialog.querySelector<HTMLElement>('.detail-modal-body')!;
+    body.scrollTop = 180;
+    await act(async () => root?.render(panel(1)));
+    const slot = document.querySelector<HTMLElement>('.health-refresh-status')!;
+    expect(slot.textContent).toContain('Context health evidence is being refreshed');
+    expect(document.querySelector('.health-decision-card')).toBe(card);
+    expect(document.querySelector('dialog')).toBe(dialog);
+    expect(body.scrollTop).toBe(180);
+    await act(async () => held.reject(new Error('Temporary health refresh failure')));
+    const error = slot.querySelector('[role=alert]');
+    expect(error?.textContent).toContain('Temporary health refresh failure');
+    await act(async () => root?.render(panel(2)));
+    expect(slot.querySelector('[role=alert]')).toBe(error);
+    expect(document.querySelector('.health-decision-card')).toBe(card);
+    expect(document.querySelector('dialog')).toBe(dialog);
+    await act(async () => retry.resolve(new Response(JSON.stringify(report()))));
+    expect(slot.querySelector('[role=alert]')).toBeNull();
+    expect(document.querySelector('.health-refresh-status')).toBe(slot);
+    expect(document.querySelector('.health-decision-card')).toBe(card);
+    expect(document.querySelector('dialog')).toBe(dialog);
+    expect(dialog.open).toBe(true);
+    expect(body.scrollTop).toBe(180);
+  });
+
+  it('redacts retained maintenance and health evidence when the maintenance poll loses authorization', async () => {
+    vi.useFakeTimers();
+    let denied = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (url.pathname === '/api/attention/automatic-memory')
+          return new Response(JSON.stringify({version: 1, project: 'threadnote', items: [], omitted: 0}));
+        return denied
+          ? new Response(JSON.stringify({error: 'Maintenance access ended'}), {status: 403})
+          : new Response(JSON.stringify(status()));
+      }),
+    );
+    await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+    expect(document.querySelector('.automatic-memory-panel')).not.toBeNull();
+    denied = true;
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(document.querySelector('.automatic-memory-panel')).toBeNull();
+    expect(document.querySelector('.attention-metrics')).toBeNull();
+    expect(document.querySelector('[role=alert]')?.textContent).toContain('Maintenance access ended');
   });
 
   it('keeps the review visible when background maintenance advances its generation', async () => {

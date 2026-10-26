@@ -132,8 +132,93 @@ afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   root = undefined;
   document.body.replaceChildren();
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+it('retains the automatic card and model choice while checking, preserves failures until recovery, and pauses generation', async () => {
+  const held = Promise.withResolvers<Response>();
+  const retry = Promise.withResolvers<Response>();
+  let reads = 0;
+  const current = {version: 1, project: 'project', items: [item({canGenerate: true})], omitted: 0};
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((input: RequestInfo | URL) => {
+      const path = new URL(String(input), 'http://manager.test').pathname;
+      if (path === '/api/attention/automatic-memory') {
+        reads++;
+        return reads === 1 ? Promise.resolve(json(current)) : reads === 2 ? held.promise : retry.promise;
+      }
+      if (path === '/api/consolidation-models')
+        return Promise.resolve(
+          json({
+            models: [
+              {id: 'first', label: 'First'},
+              {id: 'chosen', label: 'Chosen'},
+            ],
+          }),
+        );
+      if (path === '/api/models/setup') return Promise.resolve(json({phase: 'ready', artifactReady: true}));
+      throw new Error(`Unexpected request ${String(input)}`);
+    }),
+  );
+  await render(<AutomaticMemoryPanel project="project" />);
+  const card = document.querySelector<HTMLElement>('.automatic-memory-card')!;
+  const disclosure = card.querySelector<HTMLDetailsElement>('details')!;
+  await act(async () => {
+    disclosure.open = true;
+    disclosure.dispatchEvent(new Event('toggle'));
+  });
+  const model = document.querySelector<HTMLSelectElement>('[aria-label="Consolidation model"]')!;
+  await act(async () => {
+    model.value = 'chosen';
+    model.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  const generate = button('Generate now');
+  expect(generate.disabled).toBe(false);
+  const status = document.querySelector('.automatic-memory-refresh-status');
+  model.focus();
+  card.scrollTop = 160;
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(document.querySelector('.automatic-memory-card')).toBe(card);
+  expect(disclosure.open).toBe(true);
+  expect(model.value).toBe('chosen');
+  expect(document.activeElement).toBe(model);
+  expect(model.disabled).toBe(false);
+  expect(generate.disabled).toBe(true);
+  expect(card.scrollTop).toBe(160);
+  await act(async () => held.reject(new Error('Transient automatic read failure')));
+  const alert = status?.querySelector('[role=alert]');
+  expect(alert?.textContent).toContain('Transient automatic read failure');
+  expect(generate.disabled).toBe(true);
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(status?.querySelector('[role=alert]')).toBe(alert);
+  await act(async () => retry.resolve(json(current)));
+  expect(status?.querySelector('[role=alert]')).toBeNull();
+  expect(document.querySelector('.automatic-memory-refresh-status')).toBe(status);
+  expect(document.querySelector('.automatic-memory-card')).toBe(card);
+  expect(model.value).toBe('chosen');
+  expect(document.activeElement).toBe(model);
+  expect(generate.disabled).toBe(false);
+});
+
+it.each([403, 404, 409])('redacts automatic cards after a denied or invalid refresh (HTTP %s)', async code => {
+  let denied = false;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      denied
+        ? json({error: 'Automatic access ended'}, code)
+        : json({version: 1, project: 'project', items: [item()], omitted: 0}),
+    ),
+  );
+  await render(<AutomaticMemoryPanel project="project" />);
+  expect(document.querySelector('.automatic-memory-card')).not.toBeNull();
+  denied = true;
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Refresh automatic updates"]')!.click());
+  expect(document.querySelector('.automatic-memory-card')).toBeNull();
+  expect(document.querySelector('[role=alert]')?.textContent).toContain('Automatic access ended');
 });
 async function render(element: React.ReactElement) {
   if (!root) {

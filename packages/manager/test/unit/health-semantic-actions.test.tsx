@@ -9,6 +9,8 @@ import {buildContextHealthReport} from '@threadnote/context/health';
 import type {MemoryRecord} from '@threadnote/memory/document';
 import {SemanticResolutionReview} from '../../src/attention/semantic_comparison.js';
 import {HealthDetail} from '../../src/attention_details.js';
+import {retryEvidenceRead} from '../../src/attention/evidence_refresh.js';
+import {ManagerApiError} from '../../src/ui/support.js';
 
 const record = (name: string, body: string): MemoryRecord => ({
   uri: `threadnote://memory/${name}`,
@@ -60,6 +62,7 @@ afterEach(async () => {
   host.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 async function render() {
   await act(async () =>
@@ -288,37 +291,12 @@ it('keeps a non-conflict operational error retryable without claiming that the m
 });
 
 it('revalidates a stale finding in place and retains the human choice', async () => {
-  const item = {
-    caseId: finding.caseId!,
-    project: 'threadnote',
-    memoryId: 'a',
-    family: 'semantic-contradiction',
-    slot: 'pair',
-    evidenceRevision: 'new-corpus',
-    disposition: 'needs-decision',
-    reason: 'opposing-canonical-claims',
-    firstSeen: 'now',
-    lastSeen: 'now',
-    lastChecked: 'now',
-    attemptCount: 1,
-    events: [],
-  };
   const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
     path.endsWith('/semantic/preview')
       ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
       : path.endsWith('/semantic/apply')
         ? response({result: {status: 'applied', choice: 'both'}})
-        : response({
-            outcome: 'ready',
-            item,
-            packet: {
-              version: 2,
-              project: 'threadnote',
-              caseId: finding.caseId,
-              evidenceRevision: 'new-corpus',
-              semanticEvidence: evidence,
-            },
-          }),
+        : response({outcome: 'ready', evidence}),
   );
   vi.stubGlobal('fetch', fetch);
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
@@ -580,3 +558,308 @@ it('revalidates a real duplicate finding through current health evidence despite
   expect(host.textContent).toContain('Archive the duplicate.');
   expect(fetch.mock.calls.some(([path]) => path === '/api/attention/context-maintenance')).toBe(false);
 });
+
+it('keeps comparison DOM, scroll, choice and preview stable through busy retries and recovers automatically', async () => {
+  vi.useFakeTimers();
+  let attempts = 0;
+  const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
+    path.endsWith('/semantic/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
+      : path.endsWith('/semantic/refresh')
+        ? ++attempts < 3
+          ? response({error: 'Timed out waiting for local lock /private/state.lock.'}, 503)
+          : response({outcome: 'ready', evidence})
+        : response({result: {status: 'applied'}}),
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const detail = (stale: boolean) => (
+    <HealthDetail
+      finding={finding}
+      project="threadnote"
+      repairsAvailable
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onChanged={resolved}
+      onClose={() => {}}
+    />
+  );
+  await act(async () => root.render(detail(false)));
+  await choose('both');
+  await click('Preview my choice');
+  const card = host.querySelector('.semantic-memory-card');
+  const dialog = host.querySelector('.detail-modal-body')!;
+  const status = host.querySelector('.semantic-resolution-footer p');
+  expect(status).not.toBeNull();
+  dialog.scrollTop = 91;
+  await act(async () => root.render(detail(true)));
+  expect(host.querySelector('.semantic-memory-card')).toBe(card);
+  expect(dialog.scrollTop).toBe(91);
+  expect(host.textContent).not.toContain('/private/state.lock');
+  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  expect(confirm.disabled).toBe(true);
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  expect(attempts).toBe(3);
+  expect(host.querySelector('.semantic-memory-card')).toBe(card);
+  expect(host.querySelector('.semantic-resolution-footer p')).toBe(status);
+  expect(dialog.scrollTop).toBe(91);
+  expect(confirm.disabled).toBe(false);
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/preview'))).toHaveLength(1);
+  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+});
+
+it.each([401, 403, 404])(
+  'redacts a direct health comparison immediately after a permanent %s and does not retry',
+  async status => {
+    const fetch = vi.fn(async () => response({error: 'A selected source is unavailable.'}, status));
+    vi.stubGlobal('fetch', fetch);
+    vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+    const detail = (stale: boolean) => (
+      <HealthDetail
+        finding={finding}
+        project="threadnote"
+        repairsAvailable
+        stale={stale}
+        onOpenLibrary={() => {}}
+        onChanged={resolved}
+        onClose={() => {}}
+      />
+    );
+    await act(async () => root.render(detail(false)));
+    await choose('both');
+    await act(async () => root.render(detail(true)));
+    expect(host.textContent).not.toContain(evidence.left.text);
+    expect(fetch).toHaveBeenCalledOnce();
+  },
+);
+
+it('bounds observation retries across generated transient, success and permanent failure schedules', async () => {
+  vi.useFakeTimers();
+  await fc.assert(
+    fc.asyncProperty(
+      fc.array(fc.constantFrom(200, 403, 404, 409, 422, 500, 503), {minLength: 1, maxLength: 6}),
+      async schedule => {
+        const attempted: number[] = [];
+        const controller = new AbortController();
+        const result = retryEvidenceRead(async () => {
+          const status = schedule[Math.min(attempted.length, schedule.length - 1)];
+          attempted.push(status);
+          if (status !== 200) throw ManagerApiError.of('Unavailable', status);
+          return true;
+        }, controller.signal).then(
+          () => true,
+          () => false,
+        );
+        await vi.runAllTimersAsync();
+        const observed = await result;
+        const model: number[] = [];
+        for (let index = 0; index < 3; index++) {
+          const status = schedule[Math.min(index, schedule.length - 1)];
+          model.push(status);
+          if (status < 500) break;
+        }
+        expect(attempted).toEqual(model);
+        expect(observed).toBe(model.at(-1) === 200);
+      },
+    ),
+    {numRuns: 32, seed: 80405},
+  );
+});
+
+it('cancels queued evidence retries on modal unmount without another source request', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn(async () => response({error: 'Busy'}, 503));
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  await act(async () =>
+    root.render(
+      <HealthDetail
+        finding={finding}
+        project="threadnote"
+        repairsAvailable
+        stale
+        onOpenLibrary={() => {}}
+        onChanged={resolved}
+        onClose={() => {}}
+      />,
+    ),
+  );
+  expect(fetch).toHaveBeenCalledOnce();
+  await act(async () => root.render(null));
+  await vi.runAllTimersAsync();
+  expect(fetch).toHaveBeenCalledOnce();
+});
+
+it('retains a completed failure banner until a later current check succeeds without flashing or losing the preview', async () => {
+  vi.useFakeTimers();
+  let failed = true;
+  const pending = Promise.withResolvers<Response>();
+  const fetch = vi.fn(async (path: string) =>
+    path.endsWith('/semantic/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
+      : failed
+        ? response({error: 'Busy'}, 503)
+        : pending.promise,
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const detail = (stale: boolean) => (
+    <HealthDetail
+      finding={finding}
+      project="threadnote"
+      repairsAvailable
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onChanged={resolved}
+      onClose={() => {}}
+    />
+  );
+  await act(async () => root.render(detail(false)));
+  await choose('both');
+  await click('Preview my choice');
+  await act(async () => root.render(detail(true)));
+  await act(async () => vi.advanceTimersByTimeAsync(1500));
+  const banner = host.querySelector<HTMLElement>('[role="alert"]')!;
+  expect(banner).not.toBeNull();
+  const failure = banner.textContent;
+  failed = false;
+  await click('Check current evidence');
+  expect(banner.textContent).toBe(failure);
+  expect(banner.style.visibility).toBe('visible');
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
+  await act(async () => pending.resolve(response({outcome: 'ready', evidence})));
+  expect(banner.isConnected).toBe(true);
+  expect(banner.style.visibility).toBe('hidden');
+  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  expect(confirm.disabled).toBe(false);
+});
+
+it('F007 preserves choice and preview through incomplete analysis while blocking confirmation and supports a current retry', async () => {
+  let incomplete = true;
+  let checks = 0;
+  const reason =
+    'The bounded comparison check could not review every statement. Your choice is saved; check current evidence after reviewing the source memories.';
+  const changed = {...evidence, left: {...evidence.left, recordContentFingerprint: 'changed-source'}};
+  const fetch = vi.fn(async (path: string) =>
+    path.endsWith('/semantic/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
+      : (++checks,
+        incomplete ? response({outcome: 'incomplete', reason}) : response({outcome: 'ready', evidence: changed})),
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const detail = (stale: boolean) => (
+    <HealthDetail
+      finding={finding}
+      project="threadnote"
+      repairsAvailable
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onChanged={resolved}
+      onClose={() => {}}
+    />
+  );
+  await act(async () => root.render(detail(false)));
+  await choose('both');
+  await click('Preview my choice');
+  const card = host.querySelector('.semantic-memory-card');
+  await act(async () => root.render(detail(true)));
+  expect(host.querySelector('.semantic-memory-card')).toBe(card);
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
+  expect(host.textContent).toContain(reason);
+  expect(checks).toBe(1);
+  const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+  expect(confirm.disabled).toBe(true);
+  await click('Confirm both apply');
+  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+  incomplete = false;
+  await click('Check current evidence');
+  expect(checks).toBe(2);
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
+  expect(host.textContent).not.toContain(reason);
+  expect(host.textContent).not.toContain('Confirm both apply');
+});
+
+it.each(['body-limit', 'claim-limit', 'partial-unique'])(
+  'F007 mounted retained comparison keeps its authorized choice and preview blocked on %s',
+  async scenario => {
+    const reason = `The bounded comparison check is incomplete (${scenario}). Check current evidence after reviewing the source memories.`;
+    const item = {
+      caseId: 'retained-case',
+      project: 'threadnote',
+      memoryId: 'a',
+      family: 'semantic-contradiction',
+      slot: 'pair',
+      evidenceRevision: 'saved',
+      disposition: 'needs-decision' as const,
+      reason: 'opposing-canonical-claims',
+      firstSeen: 'now',
+      lastSeen: 'now',
+      lastChecked: 'now',
+      attemptCount: 1,
+      events: [],
+    };
+    const packet = {
+      version: 2,
+      project: 'threadnote',
+      caseId: item.caseId,
+      evidenceRevision: 'saved',
+      expectedContentHash: 'hash',
+      reason: item.reason,
+      choices: [],
+      allowedOperations: [],
+      instructions: 'Compare current statements.',
+      semanticEvidence: evidence,
+    };
+    const adopted = vi.fn();
+    let checks = 0;
+    const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+      if (path.endsWith('/semantic/preview'))
+        return response({preview: {...preview, choice: 'both', mode: 'keep-both'}});
+      if (init?.method === 'POST') {
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          action: 'refresh-case',
+          project: 'threadnote',
+          caseId: item.caseId,
+        });
+        checks++;
+        return response({outcome: 'incomplete', reason});
+      }
+      return response(path.includes('view=status') ? {version: 2, cases: [item]} : packet);
+    });
+    vi.stubGlobal('fetch', fetch);
+    vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+    const element = (stale: boolean) => (
+      <MaintenanceCaseDialog
+        project="threadnote"
+        caseId={item.caseId}
+        initialCase={item}
+        stale={stale}
+        onEvidenceUpdated={adopted}
+        onOpenLibrary={() => {}}
+        onTask={() => {}}
+        onClose={() => {}}
+      />
+    );
+    await act(async () => root.render(element(false)));
+    await choose('both');
+    await click('Preview my choice');
+    adopted.mockClear();
+    const card = host.querySelector('.semantic-memory-card');
+    const body = host.querySelector('.detail-modal-body')!;
+    body.scrollTop = 87;
+    await act(async () => root.render(element(true)));
+    expect(host.textContent).toContain(reason);
+    expect(host.querySelector('.semantic-memory-card')).toBe(card);
+    expect(body.scrollTop).toBe(87);
+    expect(host.querySelector<HTMLInputElement>('input[value="both"]')!.checked).toBe(true);
+    const confirm = [...host.querySelectorAll('button')].find(button => button.textContent === 'Confirm both apply')!;
+    expect(confirm.disabled).toBe(true);
+    await click('Confirm both apply');
+    expect(checks).toBe(1);
+    expect(adopted).not.toHaveBeenCalled();
+    expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+    expect(host.textContent).not.toContain('no longer conflict');
+  },
+);

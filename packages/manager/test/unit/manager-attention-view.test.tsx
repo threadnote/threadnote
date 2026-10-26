@@ -3,6 +3,7 @@
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, describe, expect, it, vi} from 'vitest';
+import fc from 'fast-check';
 import {ContextHealthPanel, ReviewsPanel} from '@threadnote/manager/attention-view';
 
 let reactRoot: Root | undefined;
@@ -213,6 +214,245 @@ afterEach(async () => {
 });
 
 describe('Manager attention views', () => {
+  it('keeps loaded health cards, focus and scroll through a pending refresh and transient failure', async () => {
+    const pending = Promise.withResolvers<Response>();
+    const retry = Promise.withResolvers<Response>();
+    const originalFetch = fetch;
+    let reads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (url.pathname !== '/api/context-health') return originalFetch(input, init);
+        reads++;
+        return reads === 1
+          ? Promise.resolve(response(refreshReport('Retained memory')))
+          : reads === 2
+            ? pending.promise
+            : retry.promise;
+      }),
+    );
+    const panel = (refreshGeneration: number) => (
+      <ContextHealthPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project="threadnote"
+        projects={['threadnote']}
+        refreshGeneration={refreshGeneration}
+      />
+    );
+    await render(panel(0));
+    const card = document.querySelector<HTMLElement>('.health-record')!;
+    const list = document.querySelector<HTMLElement>('.health-record-list')!;
+    const openMemory = card.querySelector<HTMLButtonElement>('button')!;
+    const status = document.querySelector<HTMLElement>('.attention-refresh-status')!;
+    list.scrollTop = 240;
+    openMemory.focus();
+    await rerender(panel(1));
+    expect(document.querySelector('.health-record')).toBe(card);
+    expect(document.activeElement).toBe(openMemory);
+    expect(list.scrollTop).toBe(240);
+    expect(status.textContent).toContain('Checking for context updates');
+    expect(document.body.textContent).not.toContain('Checking project context');
+    await act(async () => pending.reject(new Error('Temporary health read failure')));
+    expect(document.querySelector('.health-record')).toBe(card);
+    const alert = status.querySelector('[role=alert]');
+    expect(alert?.textContent).toContain('Temporary health read failure');
+    await rerender(panel(2));
+    expect(status.querySelector('[role=alert]')).toBe(alert);
+    expect(document.querySelector('.health-record')).toBe(card);
+    await act(async () => retry.resolve(response(refreshReport('Retained memory'))));
+    expect(status.querySelector('[role=alert]')).toBeNull();
+    expect(document.querySelector('.health-record')).toBe(card);
+    expect(document.activeElement).toBe(openMemory);
+    expect(list.scrollTop).toBe(240);
+    expect(document.querySelector('.attention-refresh-status')).toBe(status);
+  });
+
+  it.each([401, 403, 404, 409, 410])('redacts previous health evidence when refresh returns HTTP %s', async code => {
+    const originalFetch = fetch;
+    let denied = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (new URL(String(input), 'http://manager.test').pathname !== '/api/context-health')
+          return originalFetch(input, init);
+        return Promise.resolve(
+          denied
+            ? new Response(JSON.stringify({error: 'Evidence access ended'}), {status: code})
+            : response(refreshReport('Private old evidence')),
+        );
+      }),
+    );
+    const panel = (refreshGeneration: number) => (
+      <ContextHealthPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project="threadnote"
+        projects={['threadnote']}
+        refreshGeneration={refreshGeneration}
+      />
+    );
+    await render(panel(0));
+    expect(document.body.textContent).toContain('Private old evidence');
+    denied = true;
+    await rerender(panel(1));
+    expect(document.body.textContent).not.toContain('Private old evidence');
+    expect(document.querySelector('[role=alert]')?.textContent).toContain('Evidence access ended');
+  });
+
+  it('keeps only the latest health refresh authoritative for bounded out-of-order completion schedules', async () => {
+    const originalFetch = fetch;
+    await fc.assert(
+      fc.asyncProperty(fc.shuffledSubarray([0, 1, 2, 3], {minLength: 4, maxLength: 4}), async order => {
+        const pending = Array.from({length: 4}, () => Promise.withResolvers<Response>());
+        let reads = -1;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+            if (new URL(String(input), 'http://manager.test').pathname !== '/api/context-health')
+              return originalFetch(input, init);
+            reads++;
+            return reads === 0
+              ? Promise.resolve(response(refreshReport('Original evidence')))
+              : pending[reads - 1].promise;
+          }),
+        );
+        const panel = (refreshGeneration: number) => (
+          <ContextHealthPanel
+            onOpenLibrary={() => undefined}
+            onProjectChange={() => undefined}
+            project="threadnote"
+            projects={['threadnote']}
+            refreshGeneration={refreshGeneration}
+          />
+        );
+        await render(panel(0));
+        const card = document.querySelector('.health-record');
+        for (let generation = 1; generation <= 4; generation++) {
+          await rerender(panel(generation));
+          expect(document.querySelector('.health-record')).toBe(card);
+        }
+        let latestCompleted = false;
+        for (const index of order) {
+          await act(async () => pending[index].resolve(response(refreshReport(`Revision ${index}`))));
+          if (index === 3) latestCompleted = true;
+          expect(document.querySelector('.health-record')).toBe(card);
+          expect(card?.textContent).toContain(latestCompleted ? 'Revision 3' : 'Original evidence');
+        }
+        await act(async () => reactRoot?.unmount());
+        reactRoot = undefined;
+        document.body.replaceChildren();
+      }),
+      {numRuns: 12},
+    );
+  });
+
+  it('redacts old-project health immediately and ignores its delayed response in the new project', async () => {
+    const originalFetch = fetch;
+    const old = Promise.withResolvers<Response>();
+    let hold = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (hold && url.pathname === '/api/context-health' && url.searchParams.get('project') === 'threadnote')
+          return old.promise;
+        return originalFetch(input, init);
+      }),
+    );
+    const panel = (project: string, refreshGeneration: number) => (
+      <ContextHealthPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project={project}
+        projects={['threadnote', 'grouped']}
+        refreshGeneration={refreshGeneration}
+      />
+    );
+    await render(panel('threadnote', 0));
+    expect(document.body.textContent).toContain('Memory 100');
+    hold = true;
+    await rerender(panel('threadnote', 1));
+    await rerender(panel('grouped', 1));
+    expect(document.body.textContent).not.toContain('Memory 100');
+    expect(document.body.textContent).toContain('Grouped memory');
+    await act(async () =>
+      old.resolve(new Response(JSON.stringify({error: 'Old project access ended'}), {status: 403})),
+    );
+    expect(document.body.textContent).toContain('Grouped memory');
+    expect(document.body.textContent).not.toContain('Old project access ended');
+  });
+
+  it.each([null, {...refreshReport('Wrong project evidence'), project: 'other-project'}])(
+    'redacts retained health when a successful read has an invalid project contract (%j)',
+    async invalid => {
+      const originalFetch = fetch;
+      let next: unknown = refreshReport('Original private evidence');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+          new URL(String(input), 'http://manager.test').pathname === '/api/context-health'
+            ? Promise.resolve(response(next))
+            : originalFetch(input, init),
+        ),
+      );
+      const panel = (refreshGeneration: number) => (
+        <ContextHealthPanel
+          onOpenLibrary={() => undefined}
+          onProjectChange={() => undefined}
+          project="threadnote"
+          projects={['threadnote']}
+          refreshGeneration={refreshGeneration}
+        />
+      );
+      await render(panel(0));
+      expect(document.body.textContent).toContain('Original private evidence');
+      next = invalid;
+      await rerender(panel(1));
+      expect(document.querySelector('.health-record')).toBeNull();
+      expect(document.body.textContent).not.toContain('Original private evidence');
+      expect(document.body.textContent).not.toContain('Wrong project evidence');
+      expect(document.querySelector('[role=alert]')?.textContent).toContain('does not match this project');
+    },
+  );
+
+  it('retains review cards during same-scope refresh and redacts them when changing review scope', async () => {
+    const originalFetch = fetch;
+    const pending = Promise.withResolvers<Response>();
+    let hold = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+        hold && new URL(String(input), 'http://manager.test').pathname === '/api/reviews'
+          ? pending.promise
+          : originalFetch(input, init),
+      ),
+    );
+    const panel = (refreshGeneration: number) => (
+      <ReviewsPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project="threadnote"
+        projects={['threadnote']}
+        refreshGeneration={refreshGeneration}
+      />
+    );
+    await render(panel(0));
+    const card = document.querySelector('.attention-card');
+    hold = true;
+    await rerender(panel(1));
+    expect(document.querySelector('.attention-card')).toBe(card);
+    expect(document.body.textContent).not.toContain('Loading the review inbox');
+    await act(async () =>
+      [...document.querySelectorAll<HTMLButtonElement>('[role=tab]')]
+        .find(button => button.textContent === 'Deferred')!
+        .click(),
+    );
+    expect(document.querySelector('.attention-card')).toBeNull();
+    expect(document.body.textContent).toContain('Loading the review inbox');
+  });
+
   it('shows the exact pending review instead of routing the user to the Library', async () => {
     await render(
       <ReviewsPanel
@@ -570,6 +810,21 @@ function healthPreviews(start: number, count: number) {
 
 function response(value: unknown): Response {
   return new Response(JSON.stringify(value), {headers: {'content-type': 'application/json'}, status: 200});
+}
+
+function refreshReport(title: string) {
+  return {
+    findings: healthFindings(1, 1),
+    limit: 100,
+    omittedFindings: 0,
+    project: 'threadnote',
+    recordPreviews: healthPreviews(1, 1).map(preview => ({...preview, title})),
+    recordsScanned: 1,
+    repositoryEvidence: {state: 'available'},
+    semanticCompleteness: {state: 'complete'},
+    status: 'findings',
+    version: 1,
+  };
 }
 
 function backgroundRepairJob(status: 'completed' | 'failed' | 'running', unresolvedCount?: number) {
