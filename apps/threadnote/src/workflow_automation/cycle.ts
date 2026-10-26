@@ -93,6 +93,38 @@ export const nativeCycleRequestSchema = Schema.Struct({
   sourceDigest: Schema.optionalKey(digest),
   maxBytes: Schema.optionalKey(Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 1024, maximum: 65_536}))),
 });
+const nativeCycleReadOnlyCommands = new Set([
+  'inspect',
+  'next',
+  'check',
+  'check-phase',
+  'detail',
+  'packet',
+  'publication-ready',
+  'learning-packet',
+  'closeout-packet',
+  'schema',
+  'validate-plan',
+]);
+export const nativeCycleRequiresRevision = (command: string) => !nativeCycleReadOnlyCommands.has(command);
+export const nativeCycleDetailMinimumBytes = 8192;
+
+/** Bounded semantic help, not a replacement for decoding or runtime admission. */
+export const nativeCycleSemanticPrerequisites = (command: string) => ({
+  ...(nativeCycleRequiresRevision(command)
+    ? {expectedRevision: 'Use the exact revision returned by cycle inspect, including before cycle init.'}
+    : {}),
+  ...(command === 'snapshot' ? {phaseId: 'A phase from this plan.', snapshotId: 'A fresh immutable identifier.'} : {}),
+  ...(command === 'validate-review'
+    ? {
+        snapshotId: 'An existing current immutable snapshot.',
+        attemptId:
+          'An immutable review attempt identifier; retain rejected attempts and use a new ID for a changed report.',
+        report: 'A complete cycle-review payload; retrieve its semantic prerequisites with topic cycle-review.',
+      }
+    : {}),
+  ...(command === 'detail' || command === 'schema' ? {minimumMaxBytes: nativeCycleDetailMinimumBytes} : {}),
+});
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const from = <A>(f: () => A) => Effect.try({try: f, catch: nativeWorkflowError});
 const required = <A>(value: A | undefined, name: string): A => {
@@ -174,7 +206,8 @@ export const runNativeCycle = <R>(
     ).pipe(Effect.mapError(() => fail('invalid-request', 'Provide a closed native cycle request.')));
     if (request.command === 'schema') {
       const budget = request.maxBytes ?? 16_384;
-      if (budget < 8192) return {available: false, reason: 'detail-budget-too-small', minimumBytes: 8192};
+      if (budget < nativeCycleDetailMinimumBytes)
+        return {available: false, reason: 'detail-budget-too-small', minimumBytes: nativeCycleDetailMinimumBytes};
       return yield* from(() => ({
         status: 'ok',
         schemaPage: nativeCycleTextPage(stableJson(Schema.toJsonSchemaDocument(nativeCycleRequestSchema)), {
@@ -281,17 +314,7 @@ export const runNativeCycle = <R>(
         let runtime = stored.state.cycle;
         if (checkedPlanSource && checkedPlanSource !== stableJson(runtime?.state.plan.source))
           return yield* fail('state-conflict', 'The cycle plan changed during source-pin verification.');
-        const mutation = ![
-          'inspect',
-          'next',
-          'check',
-          'check-phase',
-          'detail',
-          'packet',
-          'publication-ready',
-          'learning-packet',
-          'closeout-packet',
-        ].includes(request.command);
+        const mutation = nativeCycleRequiresRevision(request.command);
         if (
           mutation &&
           (stored.state.authoringSave || stored.state.operations.some(operation => operation.status === 'prepared'))
@@ -538,7 +561,8 @@ export const runNativeCycle = <R>(
         }
         if (request.command === 'detail') {
           const budget = request.maxBytes ?? 16_384;
-          if (budget < 8192) return {available: false, reason: 'detail-budget-too-small', minimumBytes: 8192};
+          if (budget < nativeCycleDetailMinimumBytes)
+            return {available: false, reason: 'detail-budget-too-small', minimumBytes: nativeCycleDetailMinimumBytes};
           const kind = request.detailKind ?? 'patch';
           let body: string;
           let snapshot: NativeCycleSnapshot | undefined;

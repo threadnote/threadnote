@@ -76,6 +76,8 @@ const safePath = (value: string) =>
   !value.startsWith('/') &&
   value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
 
+export const nativeCycleOrchestratorLane = 'orchestrator';
+
 export function validateNativeCycleReview(
   snapshot: NativeCycleSnapshot,
   input: unknown,
@@ -96,8 +98,9 @@ export function validateNativeCycleReview(
     fail('Review source or mode does not match its immutable snapshot.');
   const selected = new Set(review.selected),
     lanes = new Set(review.lanes.map(lane => lane.name));
+  if (!selected.has(nativeCycleOrchestratorLane))
+    fail('Select the required orchestrator review lane and include its complete report.');
   if (
-    !selected.has('orchestrator') ||
     selected.size !== review.selected.length ||
     lanes.size !== review.lanes.length ||
     selected.size !== lanes.size ||

@@ -10,12 +10,12 @@ import {
   NativeAuthoringPlanDocumentSchema,
 } from '@threadnote/workflow-automations/authoring';
 import {NativeCyclePlanSchema, NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
-import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
+import {NativeCycleReviewSchema, nativeCycleOrchestratorLane} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
 import {nativeAuthoringRequestSchema} from './authoring.js';
-import {nativeCycleRequestSchema} from './cycle.js';
+import {nativeCycleRequestSchema, nativeCycleSemanticPrerequisites} from './cycle.js';
 import {nativeWatchRequestSchema} from './watch.js';
 import {nativeCloseoutRequestSchema} from './closeout.js';
 
@@ -127,8 +127,19 @@ export function nativeRequestSchema(input: unknown) {
       ...(request.command === undefined ? {} : {command: request.command}),
       schemaKind: 'decoding-envelope' as const,
       runtimeValidationRequired: true as const,
+      ...(request.topic === 'cycle' && request.command !== undefined
+        ? {semanticPrerequisites: nativeCycleSemanticPrerequisites(request.command)}
+        : request.topic === 'cycle-review'
+          ? {
+              semanticPrerequisites: {
+                requiredSelectedLane: nativeCycleOrchestratorLane,
+                requiredCompletedLane: nativeCycleOrchestratorLane,
+                specialistLanes: 'Optional; every selected lane must have a complete report.',
+              },
+            }
+          : {}),
       constraintNote:
-        'Runtime refinements and command prerequisites remain authoritative; JSON Schema does not encode all custom filters (including reserved identifiers, control characters and UTF-8 byte limits).',
+        'This is a decoding envelope. Semantic prerequisites are additional, bounded guidance, not an exhaustive admission schema. Runtime refinements remain authoritative (including reserved identifiers, control characters and UTF-8 byte limits).',
       schemaPage: nativeCycleTextPage(source, {
         maxBytes: pageBytes,
         offsetBytes: request.offsetBytes,

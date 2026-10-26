@@ -142,6 +142,27 @@ describe('native cycle review validation', () => {
       });
   });
 
+  it('identifies the missing orchestrator even when selected and completed names match', () => {
+    const current = snapshot({previous: undefined, previousTree: undefined});
+    const rootOnly = review(
+      {mode: 'full', selected: ['root'], lanes: [{name: 'root', status: 'complete'}], findings: []},
+      current,
+    );
+    expect(caught(() => validateNativeCycleReview(current, rootOnly))).toMatchObject({
+      code: 'invalid-cycle-review',
+      message: 'Select the required orchestrator review lane and include its complete report.',
+    });
+    const orchestratorOnly = {
+      ...rootOnly,
+      selected: ['orchestrator'],
+      lanes: [{name: 'orchestrator', status: 'complete'}],
+    };
+    expect(validateNativeCycleReview(current, orchestratorOnly).summary.blockingIssueCount).toBe(0);
+    expect(
+      caught(() => validateNativeCycleReview(current, {...orchestratorOnly, selected: ['orchestrator', 'simplicity']})),
+    ).toMatchObject({code: 'invalid-cycle-review', message: 'Selected and completed review lanes differ.'});
+  });
+
   it('rejects stale source identity, tree, and mode', () => {
     const current = snapshot();
     for (const input of [

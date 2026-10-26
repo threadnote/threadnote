@@ -100,6 +100,47 @@ describe('native request schema discovery', () => {
     });
   });
 
+  it.each([
+    ['init', {expectedRevision: expect.stringContaining('cycle inspect')}],
+    [
+      'snapshot',
+      {
+        expectedRevision: expect.stringContaining('cycle inspect'),
+        phaseId: expect.any(String),
+        snapshotId: expect.stringContaining('fresh immutable'),
+      },
+    ],
+    [
+      'validate-review',
+      {
+        expectedRevision: expect.stringContaining('cycle inspect'),
+        snapshotId: expect.stringContaining('existing current'),
+        attemptId: expect.stringContaining('immutable review attempt'),
+        report: expect.stringContaining('cycle-review'),
+      },
+    ],
+    ['detail', {minimumMaxBytes: 8192}],
+    ['inspect', {}],
+    ['validate-plan', {}],
+    ['schema', {minimumMaxBytes: 8192}],
+  ])('reports bounded semantic prerequisites separately for cycle %s', (command, prerequisites) => {
+    const response = nativeRequestSchema({...base, topic: 'cycle', command});
+    expect(response).toMatchObject({schemaKind: 'decoding-envelope', runtimeValidationRequired: true});
+    expect(response).toHaveProperty('semanticPrerequisites', prerequisites);
+    expect(JSON.parse(response.schemaPage.text).schema.required).not.toContain('expectedRevision');
+  });
+
+  it('discovers the mandatory root lane without requiring a specialist', () => {
+    const response = nativeRequestSchema({...base, topic: 'cycle-review'});
+    expect(response).toMatchObject({
+      semanticPrerequisites: {
+        requiredSelectedLane: 'orchestrator',
+        requiredCompletedLane: 'orchestrator',
+        specialistLanes: expect.stringContaining('Optional'),
+      },
+    });
+  });
+
   effectIt.effect('dispatches discovery without initialized run state', () =>
     Effect.gen(function* () {
       const response = yield* runWorkflowAutomation(
