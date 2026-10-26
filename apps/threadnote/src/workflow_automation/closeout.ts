@@ -12,6 +12,7 @@ import {inspectWorkflowJournal, withWorkflowLock} from '../workflow_memory/journ
 import {assertWorkflowPublicationVerified, CurrentWorkflowArchivePublication} from '../workflow_memory/publication.js';
 import {sha256HexSync} from '../workflow_memory/native_digest.js';
 import {stableJson} from '../workflow_memory/protocol.js';
+import {withWorkflowRecallRefreshBatch} from '../workflow_memory/recall_refresh.js';
 import {PublicationWriterReasonSchema} from '../workflow_memory/publication_contract.js';
 import {CurrentNativeCloseoutSave, readNativeWorkflowState} from './store.js';
 import {reserveNativeCloseoutCapacity, clearNativeCloseoutCapacity} from './closeout_capacity.js';
@@ -729,31 +730,40 @@ export const runNativeCloseout = <R>(config: RuntimeConfig, input: unknown, nati
             return yield* fail('closeout-owned-drift', 'An owned draft or archive changed. Keep all remaining drafts.');
         }
         yield* save({...journal, status: 'archiving'});
-        for (const item of journal.owned) {
-          if (journal.archives[item.uri]) continue;
-          yield* fresh;
-          const archived = yield* archiveCall({
-            protocolVersion: 1,
-            action: 'archive',
-            bindingId: item.bindingId,
-            operationId: item.operationId,
-            artifactKey: item.artifactKey,
-            role: item.role,
-            sourceRunId: item.sourceRunId,
-            uri: item.uri,
-            expectedRevision: item.revision,
-          });
-          if (archived.uri !== item.destination || archived.memoryId !== item.memoryId || archived.state !== 'archived')
-            return yield* fail('invalid-readback', 'Archive result differs from its admitted owned destination.');
-          const independentlyRead = yield* read(item.bindingId, archived.uri);
-          if (
-            independentlyRead.memoryId !== archived.memoryId ||
-            independentlyRead.revision !== archived.revision ||
-            independentlyRead.state !== 'archived'
-          )
-            return yield* fail('invalid-readback', 'Archive failed independent current readback.');
-          yield* save({...journal, archives: {...journal.archives, [item.uri]: ref(independentlyRead)}});
-        }
+        yield* withWorkflowRecallRefreshBatch(
+          config,
+          Effect.gen(function* () {
+            for (const item of journal.owned) {
+              if (journal.archives[item.uri]) continue;
+              yield* fresh;
+              const archived = yield* archiveCall({
+                protocolVersion: 1,
+                action: 'archive',
+                bindingId: item.bindingId,
+                operationId: item.operationId,
+                artifactKey: item.artifactKey,
+                role: item.role,
+                sourceRunId: item.sourceRunId,
+                uri: item.uri,
+                expectedRevision: item.revision,
+              });
+              if (
+                archived.uri !== item.destination ||
+                archived.memoryId !== item.memoryId ||
+                archived.state !== 'archived'
+              )
+                return yield* fail('invalid-readback', 'Archive result differs from its admitted owned destination.');
+              const independentlyRead = yield* read(item.bindingId, archived.uri);
+              if (
+                independentlyRead.memoryId !== archived.memoryId ||
+                independentlyRead.revision !== archived.revision ||
+                independentlyRead.state !== 'archived'
+              )
+                return yield* fail('invalid-readback', 'Archive failed independent current readback.');
+              yield* save({...journal, archives: {...journal.archives, [item.uri]: ref(independentlyRead)}});
+            }
+          }),
+        );
         yield* save({...journal, status: 'complete'});
         yield* clearNativeCloseoutCapacity(config, request.runId, journal.transactionId);
         return summary(journal, saved.revision);
