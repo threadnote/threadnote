@@ -1,0 +1,611 @@
+{
+  "schemaVersion": 1,
+  "phase": "P00",
+  "status": "incomplete",
+  "observedOn": "2026-10-26",
+  "requiredPlatformsSource": "scripts/release-targets.ts",
+  "requiredPlatforms": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-arm64-musl",
+    "linux-x64-baseline",
+    "linux-x64-musl-baseline",
+    "windows-arm64",
+    "windows-x64-baseline"
+  ],
+  "automaticDownloadOrExecution": false,
+  "providers": [
+    {
+      "id": "typescript-language-server",
+      "languages": ["typescript", "javascript"],
+      "version": "6.0.2",
+      "runtime": {
+        "typescript": "6.0.3",
+        "nodeObserved": "24.19.0",
+        "nodeMinimum": ">=22.22.2"
+      },
+      "license": {
+        "reported": "Apache-2.0",
+        "evidence": ["https://github.com/typescript-language-server/typescript-language-server/blob/v6.0.2/LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://registry.npmjs.org/typescript-language-server/-/typescript-language-server-6.0.2.tgz",
+          "integrity": "sha512-Ph7Ql+xkUJvMamnkh1h+aKP6HxLR7lrWIYkPn9/LZBkJdJZgtIj7OoVhkDYtQ7zFPTPmqZHOVXaUKGyz9M2q1Q==",
+          "kind": "npm-archive"
+        },
+        {
+          "url": "https://registry.npmjs.org/typescript/-/typescript-6.0.3.tgz",
+          "integrity": "sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==",
+          "kind": "npm-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file unsaved definition, complete references and rename observed after didChange version 2; CRLF preserved; disk unchanged; owned process group drained without forced termination."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "JavaScript-specific fixture, code actions, full lifecycle, all other platform rows and final product conformance remain unqualified."
+      ]
+    },
+    {
+      "id": "typescript-native",
+      "languages": ["typescript", "javascript"],
+      "version": "7.0.2",
+      "runtime": {
+        "kind": "native"
+      },
+      "license": {
+        "reported": "Apache-2.0",
+        "evidence": ["https://github.com/microsoft/TypeScript/blob/main/LICENSE.txt"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
+          "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
+          "kind": "npm-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": ["Correct cross-file unsaved references/rename observed; shutdown failed in this fixture."]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": ["Native shutdown panicked in file-watcher teardown; not selected for the initial pilot."]
+    },
+    {
+      "id": "basedpyright",
+      "languages": ["python"],
+      "version": "1.40.2",
+      "runtime": {
+        "pythonObserved": "3.12.13",
+        "nodeObserved": "24.19.0"
+      },
+      "license": {
+        "reported": "MIT",
+        "evidence": ["https://github.com/DetachHead/basedpyright/blob/1.40.2/LICENSE.txt"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/de/53/0031b22e118264a57a3b64dfc0c8f0659b81af5bccd419ac62933013c601/basedpyright-1.40.2-py3-none-any.whl",
+          "sha256": "3a53aeb93a86675ded0e12bc27bd8476c1742356de07ad8cab67bff18110c690",
+          "kind": "python-wheel"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file unsaved definition, complete references and rename observed after didChange version 2; CRLF preserved; disk unchanged; owned process group drained without forced termination."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Representative edit-based code action, interpreter switching, dynamic analysis limits, other platforms and final product conformance remain unqualified."
+      ]
+    },
+    {
+      "id": "python-lsp-server+pylsp-rope",
+      "languages": ["python"],
+      "version": "1.15.0+0.1.17",
+      "runtime": {
+        "pythonObserved": "3.12.13",
+        "rope": "1.15.0",
+        "jedi": "0.20.1"
+      },
+      "license": {
+        "reported": "MIT",
+        "evidence": [
+          "https://github.com/python-lsp/python-lsp-server/blob/v1.15.0/LICENSE",
+          "https://github.com/python-rope/pylsp-rope/blob/main/LICENSE"
+        ],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://files.pythonhosted.org/packages/c2/4a/b4abc04dcc65c985fa66d6486393ad3051ff485ccabd9727aea43a242f88/python_lsp_server-1.15.0-py3-none-any.whl",
+          "sha256": "d6ac11b467021310498f2dffb2edf09629bbcfe0d3073156db2337334a60463f",
+          "kind": "python-wheel"
+        },
+        {
+          "url": "https://files.pythonhosted.org/packages/42/0d/92a83f4f3f0a15017a7831589d7c01408ba8eaede0028eadf6ca022050ee/pylsp_rope-0.1.17-py3-none-any.whl",
+          "sha256": "6be821913b3834b3125e64457a8bcf2030c4f1d5cd629bce4c26ba5c2c12f30b",
+          "kind": "python-wheel"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Dirty declaration resolved; references omitted the unsaved dependent file; rename changed CRLF formatting."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": ["Does not pass the exact unsaved workspace oracle. Rejected for initial Python pilot."]
+    },
+    {
+      "id": "gopls",
+      "languages": ["go"],
+      "version": "v0.24.0",
+      "runtime": {
+        "goMinimum": "1.27.0",
+        "hostGoObserved": "1.25.14"
+      },
+      "license": {
+        "reported": "BSD-3-Clause",
+        "evidence": ["https://cs.opensource.google/go/x/tools/+/gopls/v0.24.0:LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://proxy.golang.org/golang.org/x/tools/gopls/@v/v0.24.0.zip",
+          "sha256": "a6e8f2c45e4c561d2322ef15088b20afd9ba08cf8b0b51077ad510591528fed2",
+          "kind": "source-module"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Source artifact pinned; executable build/toolchain, process probe and every platform cell remain unqualified."
+      ]
+    },
+    {
+      "id": "rust-analyzer",
+      "languages": ["rust"],
+      "version": "2026-10-26",
+      "runtime": {
+        "kind": "native",
+        "cargoAndRustToolchain": "not qualified"
+      },
+      "license": {
+        "reported": "MIT OR Apache-2.0",
+        "evidence": ["https://github.com/rust-lang/rust-analyzer/tree/2026-10-26"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-apple-darwin.gz",
+          "sha256": "8fb90cb58f5910d8d8b24ac1a93cca49f053365cbf0eb3c682144ad0a0027dcf",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-pc-windows-msvc.zip",
+          "sha256": "e5f758de3ece10656d7bba6565b92e65fb52843810dc1bd0a911e307755d63ad",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-aarch64-unknown-linux-gnu.gz",
+          "sha256": "1b225c4c9ae329ca96e8a75a5bbcb5562a7f1d25c57c8b55d3e02299a3dbe836",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-arm-unknown-linux-gnueabihf.gz",
+          "sha256": "1086e4b0fbb5839b2946078acc1d2534bf6bdae3ad4a5f95df0d6e1ebd24fb2f",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-i686-pc-windows-msvc.zip",
+          "sha256": "bcc329d619b70eed8250f349ee28f0e95872675dac7abe1fd0988f318c4fcfc2",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-apple-darwin.gz",
+          "sha256": "b3e4904877bcf7013a4a342c449cff1bf0ea0b91d5a1a30ac8df3d32142519c0",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-pc-windows-msvc.zip",
+          "sha256": "13549dd0c380647685c82c87b8d80904f81bc4de92a82c099b6083c5b9aa1ca1",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-gnu.gz",
+          "sha256": "4c83773525f93b636ed79761389568b4d2a89c05fa7ecc440245032d49ad80ce",
+          "kind": "native-archive"
+        },
+        {
+          "url": "https://github.com/rust-lang/rust-analyzer/releases/download/2026-10-26/rust-analyzer-x86_64-unknown-linux-musl.gz",
+          "sha256": "b12c272401af57558d68afb6310a47f27729bdd65bb11b7171582d9d7f286d32",
+          "kind": "native-archive"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Provider process and toolchain/project fixtures have not run; all platform rows remain unqualified."
+      ]
+    },
+    {
+      "id": "jdtls",
+      "languages": ["java"],
+      "version": "1.63.0-202610191322",
+      "runtime": {
+        "javaMinimumObserved": "25",
+        "javaObserved": "Eclipse Temurin 25.0.5+8",
+        "projectJavaLevel": "21",
+        "documentationMismatch": "Upstream README says Java21 minimum; the exact distribution bundles org.eclipse.core.filesystem requiring JavaSE25. Java21 startup failed with exit13."
+      },
+      "license": {
+        "reported": "EPL-2.0",
+        "evidence": ["https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://codeload.github.com/eclipse-jdtls/eclipse.jdt.ls/tar.gz/d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "sha256": "59bf4c6a6442a61739e1f0bf7e35130a172b2c6b957b7f5e4f6fbd8376960c35",
+          "version": "v1.63.0",
+          "commit": "d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "kind": "source-only"
+        },
+        {
+          "kind": "distribution",
+          "version": "1.63.0-202610191322",
+          "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+          "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+        },
+        {
+          "kind": "runtime-darwin-arm64",
+          "version": "25.0.5+8.0.LTS",
+          "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_mac_hotspot_25.0.5_8.tar.gz",
+          "sha256": "36dc14d797aaff6d89aab302cd053fdba6207dfdcf772052fa7b023a94b0e857"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact dirty definition/references/complete rename passed for a two-file Maven fixture with Unicode/CRLF and project language21; source disk unchanged; provider exit0 and owned group drained.",
+            "Java21 startup failed; Java25 matches the distribution requirement."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Gradle, diagnostics/symbols/hover/actions, build-import denial, complete distribution licensing and all production/platform qualification remain unresolved. Kotlin is deferred."
+      ]
+    },
+    {
+      "id": "kotlin-lsp",
+      "languages": ["kotlin", "java"],
+      "version": "263.7084.0",
+      "runtime": {
+        "bundledJavaMinimum": "25",
+        "projectTypes": ["JVM Maven", "JVM Gradle", "mixed Java/Kotlin"]
+      },
+      "license": {
+        "reported": "Distribution terms unresolved; repository Apache-2.0 is insufficient",
+        "evidence": [
+          "https://github.com/Kotlin/kotlin-lsp",
+          "https://blog.jetbrains.com/idea/2026/10/intellij-idea-s-java-and-kotlin-for-cursor-and-vs-code-hits-1-0/"
+        ],
+        "redistribution": "not bundled; distribution obligations remain a release gate"
+      },
+      "artifacts": [
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/263.7084.0/kotlin-server-263.7084.0-aarch64.sit",
+          "sha256": "b403bf8a54bd458e3ba6731cf8abb3340be08b439c03576dfc02b13faf3694b8",
+          "bytes": 360201117,
+          "version": "263.7084.0"
+        },
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/263.6379.0/kotlin-server-263.6379.0-aarch64.sit",
+          "sha256": "ebef2e13cd4adc4ec9e04084b848000a3ec7a9d2917c64f269574ce2efe9ecad",
+          "version": "263.6379.0"
+        },
+        {
+          "url": "https://download.jetbrains.com/language-server/kotlin-server/262.9593.0/kotlin-server-262.9593.0-aarch64.sit",
+          "sha256": "6ba6021a706b21e64cef33f7e2b79f187c0910320722bb2d3ed05ad1115ec43f",
+          "version": "262.9593.0"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "263.7084.0 and 263.6379.0: bundled --show-eula exits 12, EULA.txt missing. 262.9593.0: server exits 7 because build expired."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Kotlin qualification is deferred; preserved observations are historical and do not block the Java-only release gate.",
+        "Mixed-JVM reads/rename have not run. No EULA was accepted, expiry bypassed or license activated. Purely agentic deployment terms and Linux musl/Windows/macOS rows remain unqualified."
+      ],
+      "releaseGate": false,
+      "disposition": "deferred"
+    }
+  ],
+  "editorEvidence": {
+    "darwin-arm64": {
+      "vscode": "1.137.0",
+      "cursorApplication": "3.22.7",
+      "cursorHostAPI": "1.128.0",
+      "checks": [
+        "dirty-buffer apply",
+        "concurrent edit at first host write",
+        "concurrent edit after first target",
+        "ownership transfer after first target",
+        "idempotent retry",
+        "unqualified client receives no edit",
+        "owned POSIX process group drained after complete host report"
+      ],
+      "status": "disposable-prototype-passed",
+      "limitations": [
+        "In-memory authority and retry state only. Does not certify cross-process ownership, crash recovery, standard LSP mutation, resource operations or other OS/architectures.",
+        "Unqualified-client fixture tests a local branch only; it does not exercise a production LSP initialization/capability exchange. Process cleanup covers the owned POSIX process group; deliberately detached descendants and Windows tree cleanup are not qualified."
+      ]
+    }
+  },
+  "releaseLanguages": ["typescript", "javascript", "python", "go", "rust", "java"],
+  "deferredLanguages": {
+    "kotlin": "Deferred by user direction 2026-10-26; mixed Java/Kotlin, Kotlin JVM, Android and KMP are not current release gates."
+  }
+}
