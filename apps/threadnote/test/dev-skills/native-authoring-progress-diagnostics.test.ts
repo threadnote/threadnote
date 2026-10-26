@@ -666,6 +666,138 @@ effectIt.effect(
     }),
 );
 
+const refreshTransactionSpans = (observer: ReturnType<typeof make>, bodyStart = 3_000_000n) => {
+  const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+  const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+  const body = observer.tracer.span({
+    ...spanOptions('recall.writeRefreshBody', Option.some(transaction)),
+    startTime: bodyStart,
+  });
+  return {outer, transaction, body};
+};
+
+effectIt.effect.prop(
+  'accounts for fixed commit-event intervals without retaining events, attributes or SQL',
+  {
+    acquireAndBeginMs: Schema.Literals([0, 1, 7, 255]),
+    bodyMs: Schema.Literals([0, 1, 7, 255]),
+    preCommitMs: Schema.Literals([0, 1, 7, 255]),
+    commitAndReleaseMs: Schema.Literals([0, 1, 7, 255]),
+  },
+  intervals =>
+    Effect.sync(() => {
+      const lines: string[] = [];
+      const observer = make({sink: line => lines.push(line)});
+      const bodyStart = 1_000_000n + BigInt(intervals.acquireAndBeginMs) * 1_000_000n;
+      const {outer, transaction, body} = refreshTransactionSpans(observer, bodyStart);
+      const bodyEnd = bodyStart + BigInt(intervals.bodyMs) * 1_000_000n;
+      const commit = bodyEnd + BigInt(intervals.preCommitMs) * 1_000_000n;
+      const end = commit + BigInt(intervals.commitAndReleaseMs) * 1_000_000n;
+      let privateReads = 0;
+      const attributes = {
+        get PRIVATE() {
+          privateReads++;
+          throw new Error('PRIVATE');
+        },
+      };
+      transaction.attribute('db.query.text', 'PRIVATE SQL');
+      transaction.event('effect.sql.transaction.commit', commit, attributes);
+      body.end(bodyEnd, Exit.succeed('PRIVATE'));
+      transaction.end(end, Exit.succeed('PRIVATE'));
+      transaction.end(end + 1n, Exit.fail('PRIVATE'));
+      outer.end(end, Exit.succeed('PRIVATE'));
+      expect(observer.snapshot().transactionBoundaries).toEqual({observed: 1, rejected: 0, ...intervals});
+      expect(privateReads).toBe(0);
+      expect(observer.snapshot().totals['recall.writeRefreshBody'].ended).toBe(1);
+      expect(observer.snapshot().totals).not.toHaveProperty('sql.transaction');
+      expect(lines).toHaveLength(0);
+      const snapshot = observer.snapshot();
+      snapshot.transactionBoundaries.bodyMs = -1;
+      expect(observer.snapshot().transactionBoundaries.bodyMs).toBe(intervals.bodyMs);
+      observer.reportFailure();
+      expect(lines).toHaveLength(1);
+      expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+      expect(lines[0]).not.toContain('PRIVATE');
+      expect(JSON.parse(lines[0].slice(lines[0].indexOf('{'))).transactionBoundaries).toEqual({
+        observed: 1,
+        rejected: 0,
+        ...intervals,
+      });
+    }),
+  {arbitrary: {runs: 25}},
+);
+
+effectIt.effect('rejects absent, duplicate, out-of-order and oversized commit events without changing span exits', () =>
+  Effect.sync(() => {
+    const cases: readonly (readonly (readonly [string, bigint])[])[] = [
+      [],
+      [['PRIVATE', 9_000_000n]],
+      [
+        ['effect.sql.transaction.commit', 9_000_000n],
+        ['effect.sql.transaction.commit', 9_000_000n],
+      ],
+      [['effect.sql.transaction.commit', 6_000_000n]],
+      [['effect.sql.transaction.commit', 13_000_000n]],
+      Array.from({length: 5}, () => ['effect.sql.transaction.commit', 9_000_000n] as const),
+    ];
+    const observer = make();
+    for (const events of cases) {
+      const {outer, transaction, body} = refreshTransactionSpans(observer);
+      for (const [name, at] of events) transaction.event(name, at, {PRIVATE: 'ignored'});
+      const exit = Exit.succeed({PRIVATE: 'original value'});
+      body.end(7_000_000n, exit);
+      transaction.end(12_000_000n, exit);
+      outer.end(13_000_000n, exit);
+      if (transaction.status._tag === 'Ended') expect(transaction.status.exit).toBe(exit);
+      else throw new Error('Expected delegated transaction end');
+    }
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: cases.length});
+    expect(observer.snapshot().totals['recall.writeRefreshBody']).toMatchObject({
+      started: cases.length,
+      ended: cases.length,
+      failed: 0,
+    });
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect('requires exact observed immediate parents and one successful body for transaction intervals', () =>
+  Effect.sync(() => {
+    const observer = make();
+    const unrelated = Tracer.nativeTracer.span(spanOptions('recall.writeRefresh'));
+    const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(unrelated)));
+    const body = observer.tracer.span(spanOptions('recall.writeRefreshBody', Option.some(transaction)));
+    transaction.event('effect.sql.transaction.commit', 9_000_000n);
+    body.end(7_000_000n, Exit.void);
+    transaction.end(12_000_000n, Exit.void);
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: 0});
+    for (const invalid of [
+      'missing-body',
+      'wrong-parent',
+      'duplicate-body',
+      'failed-body',
+      'failed-transaction',
+    ] as const) {
+      const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+      const tx = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+      if (invalid !== 'missing-body') {
+        const child = observer.tracer.span(
+          spanOptions('recall.writeRefreshBody', Option.some(invalid === 'wrong-parent' ? outer : tx)),
+        );
+        child.end(7_000_000n, invalid === 'failed-body' ? Exit.fail('PRIVATE') : Exit.void);
+        if (invalid === 'duplicate-body')
+          observer.tracer.span(spanOptions('recall.writeRefreshBody', Option.some(tx))).end(7_000_000n, Exit.void);
+      }
+      tx.event('effect.sql.transaction.commit', 9_000_000n);
+      tx.end(12_000_000n, invalid === 'failed-transaction' ? Exit.fail('PRIVATE') : Exit.void);
+      outer.end(13_000_000n, Exit.void);
+    }
+    expect(observer.snapshot().transactionBoundaries).toMatchObject({observed: 0, rejected: 5});
+    expect(observer.snapshot().activeCount).toBe(0);
+  }),
+);
+
 effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and the worst-case failure line', () =>
   Effect.sync(() => {
     const readings = [100, 110, NaN, Infinity, -100, 105, 120];

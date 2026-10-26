@@ -1,7 +1,7 @@
-import {Context, Effect, Exit, type FileSystem, Tracer} from 'effect';
+import {Context, Effect, Exit, type FileSystem, Option, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
 
-// Test-only vocabulary: only fixed primitive refresh counters are read from attributes.
+// Test-only vocabulary: fixed primitive refresh counters and a fixed commit-event timestamp only.
 // Input, output, arbitrary attributes, IDs, paths and errors never enter this recorder.
 export const nativeProgressBoundaries = [
   'init',
@@ -74,6 +74,44 @@ type BoundaryRecord = {
 type SpanRecord = {label: string; sequence: number; startedMs: number};
 type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
 type Counts = {started: number; succeeded: number; failed: number};
+type RefreshTransaction = {
+  start: bigint;
+  invalid: boolean;
+  body?: {start: bigint; end?: bigint; succeeded?: boolean};
+};
+const transactionIntervals = (span: Tracer.Span, transaction: RefreshTransaction, end: bigint) => {
+  try {
+    const body = transaction.body;
+    if (transaction.invalid || !body?.succeeded || body.end === undefined || !(span instanceof Tracer.NativeSpan))
+      return undefined;
+    const events = span.events;
+    if (events.length > 4) return undefined;
+    let commit: bigint | undefined;
+    for (let index = 0; index < events.length; index++) {
+      const event = events[index];
+      if (event[0] !== 'effect.sql.transaction.commit') continue;
+      if (commit !== undefined || typeof event[1] !== 'bigint') return undefined;
+      commit = event[1];
+    }
+    if (
+      commit === undefined ||
+      transaction.start > body.start ||
+      body.start > body.end ||
+      body.end > commit ||
+      commit > end
+    )
+      return undefined;
+    const milliseconds = (duration: bigint) => bounded(Number(duration) / 1_000_000);
+    return {
+      acquireAndBeginMs: milliseconds(body.start - transaction.start),
+      bodyMs: milliseconds(body.end - body.start),
+      preCommitMs: milliseconds(commit - body.end),
+      commitAndReleaseMs: milliseconds(end - commit),
+    };
+  } catch {
+    return undefined;
+  }
+};
 const refreshBucket = () => ({count: 0, scannedSources: 0, changedSources: 0, removedSources: 0, maxChangedSources: 0});
 const refreshDecision = (span: Tracer.Span) => {
   const forceAllSources = span.attributes.get('recall.refresh.forceAllSources');
@@ -162,6 +200,16 @@ export const makeNativeProgressDiagnostics = (
     nativeProgressBoundaries.map(label => [label, {started: 0, succeeded: 0, failed: 0}]),
   ) as Record<NativeProgressBoundary, Counts>;
   const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
+  const refreshWrites = new WeakSet<Tracer.Span>();
+  const refreshTransactions = new WeakMap<Tracer.Span, RefreshTransaction>();
+  const transactionBoundaries = {
+    observed: 0,
+    rejected: 0,
+    acquireAndBeginMs: 0,
+    bodyMs: 0,
+    preCommitMs: 0,
+    commitAndReleaseMs: 0,
+  };
   const refreshDecisions = {
     observed: 0,
     forceRefresh: 0,
@@ -197,13 +245,36 @@ export const makeNativeProgressDiagnostics = (
     span(spanOptions) {
       // Preserve the active backend and any observer already wrapping this exact span.
       const span = delegate.span.call(delegate, spanOptions);
-      if (!selectedLabels.has(spanOptions.name)) return span;
+      const selected = selectedLabels.has(spanOptions.name);
+      let transaction: RefreshTransaction | undefined;
+      let bodyTransaction: RefreshTransaction | undefined;
       safely(() => {
-        const total = (totals[spanOptions.name] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0});
-        total.started = bounded(total.started + 1);
-        const entry = {label: spanOptions.name, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()};
-        activeCount = bounded(activeCount + 1);
-        if (active.size < 8) active.set(span, entry);
+        const parent = Option.getOrUndefined(spanOptions.parent);
+        if (spanOptions.name === 'recall.writeRefresh') refreshWrites.add(span);
+        if (parent?._tag !== 'Span') return;
+        if (spanOptions.name === 'sql.transaction' && refreshWrites.has(parent)) {
+          transaction = {start: spanOptions.startTime, invalid: false};
+          refreshTransactions.set(span, transaction);
+        } else if (spanOptions.name === 'recall.writeRefreshBody') {
+          bodyTransaction = refreshTransactions.get(parent);
+          if (!bodyTransaction) return;
+          if (bodyTransaction.body) bodyTransaction.invalid = true;
+          else bodyTransaction.body = {start: spanOptions.startTime};
+        }
+      });
+      if (!selected && !transaction) return span;
+      safely(() => {
+        const total = selected
+          ? (totals[spanOptions.name] ??= {started: 0, ended: 0, failed: 0, inclusiveMs: 0})
+          : undefined;
+        const entry = total
+          ? {label: spanOptions.name, sequence: (sequence = bounded(sequence + 1)), startedMs: elapsed()}
+          : undefined;
+        if (total && entry) {
+          total.started = bounded(total.started + 1);
+          activeCount = bounded(activeCount + 1);
+          if (active.size < 8) active.set(span, entry);
+        }
         const end = span.end.bind(span);
         let ended = false;
         span.end = (at, exit) => {
@@ -212,6 +283,25 @@ export const makeNativeProgressDiagnostics = (
           safely(() => {
             if (ended) return;
             ended = true;
+            if (bodyTransaction?.body) {
+              bodyTransaction.body.end = at;
+              bodyTransaction.body.succeeded = Exit.isSuccess(exit);
+            }
+            if (transaction) {
+              const intervals = Exit.isSuccess(exit) ? transactionIntervals(span, transaction, at) : undefined;
+              if (intervals) {
+                transactionBoundaries.observed = bounded(transactionBoundaries.observed + 1);
+                transactionBoundaries.acquireAndBeginMs = bounded(
+                  transactionBoundaries.acquireAndBeginMs + intervals.acquireAndBeginMs,
+                );
+                transactionBoundaries.bodyMs = bounded(transactionBoundaries.bodyMs + intervals.bodyMs);
+                transactionBoundaries.preCommitMs = bounded(transactionBoundaries.preCommitMs + intervals.preCommitMs);
+                transactionBoundaries.commitAndReleaseMs = bounded(
+                  transactionBoundaries.commitAndReleaseMs + intervals.commitAndReleaseMs,
+                );
+              } else transactionBoundaries.rejected = bounded(transactionBoundaries.rejected + 1);
+            }
+            if (!total || !entry) return;
             activeCount = Math.max(0, activeCount - 1);
             active.delete(span);
             total.ended = bounded(total.ended + 1);
@@ -314,6 +404,7 @@ export const makeNativeProgressDiagnostics = (
           allSources: {...refreshDecisions.allSources},
           incremental: {...refreshDecisions.incremental},
         },
+        transactionBoundaries: {...transactionBoundaries},
         activeCount,
         unlistedActiveCount: activeCount - active.size,
         active: [...active.values()].map(entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),
