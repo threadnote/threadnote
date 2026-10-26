@@ -1,5 +1,10 @@
 import type {ConsolidationProvenance, ConsolidationSource} from '@threadnote/memory/consolidation';
 import type {ReviewedMemorySupportV1} from '@threadnote/memory/reviewed-support';
+export interface LibrarySearchResponse {
+  readonly uris: readonly string[];
+  readonly semantic: 'available' | 'unavailable' | 'timed-out' | 'failed';
+  readonly warnings: readonly string[];
+}
 
 export interface ConsolidationModelOption {
   readonly id: string;
