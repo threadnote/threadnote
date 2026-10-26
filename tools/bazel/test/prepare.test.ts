@@ -59,9 +59,9 @@ it('serializes concurrent preparers and releases the native lock after process d
       [
         process.execPath,
         '-e',
-        `import {Database} from 'bun:sqlite'; const db = new Database(${JSON.stringify(database)}); db.exec('BEGIN IMMEDIATE'); console.log('locked'); await Bun.sleep(60000);`,
+        "import {Database} from 'bun:sqlite'; const db = new Database(process.env.FIXTURE_PREPARE_DATABASE); db.exec('BEGIN IMMEDIATE'); process.stdout.write('locked'); await Bun.sleep(60000);",
       ],
-      {stdout: 'pipe', stderr: 'pipe'},
+      {stdout: 'pipe', stderr: 'pipe', env: {...process.env, FIXTURE_PREPARE_DATABASE: database}},
     );
     try {
       const reader = child.stdout.getReader();
