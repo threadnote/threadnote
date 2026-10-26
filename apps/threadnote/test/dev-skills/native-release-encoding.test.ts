@@ -1,110 +1,123 @@
-import {spawnSync} from '@threadnote/testing/node-child-process';
-import {resolve} from '@threadnote/testing/node-path';
+import {createHash} from '@threadnote/testing/node-crypto';
+import {mkdtempSync, readFileSync, rmSync} from '@threadnote/testing/node-fs';
+import {tmpdir} from '@threadnote/testing/node-os';
+import {join} from '@threadnote/testing/node-path';
 import {expect, it} from 'vitest';
 import fc from 'fast-check';
+import {ReleaseCommandError, runReleaseCommand} from './native-release-process.js';
 
-// Host test controller only: exercise real pipe codecs without a release build.
-const controller = 'apps/threadnote/test/dev-skills/native-release-workflows.py';
-const program = String.raw`import hashlib, json, locale, runpy, subprocess, sys
-from unittest.mock import patch
-
-run_utf8 = runpy.run_path(sys.argv[1])["_run_utf8"]
-body = json.load(sys.stdin)["body"]
-options = {"text": True, "capture_output": True, "check": True, "timeout": 5}
-producer = "import sys;sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))"
-reader = ("import json,sys;body=sys.stdin.read();"
-          "sys.stdout.buffer.write(json.dumps({'body':body},ensure_ascii=False).encode('utf-8'))")
-def emit(data, runner=run_utf8):
-    return runner([sys.executable, "-c", producer, data.hex()], **options)
-def digest(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-def roundtrip(value):
-    # Git document bytes -> Python text -> UTF-8 reader stdin -> native JSON stdout.
-    raw = emit(value.encode("utf-8")).stdout
-    result = run_utf8([sys.executable, "-c", reader], input=raw, **options)
-    durable = json.loads(result.stdout)["body"].strip() + "\n"
-    expected = value.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
-    assert durable == expected
-    assert digest(durable) == digest(expected)
-    return durable
-
-# Deterministic Windows-style ANSI default on every CI host. Only the locale
-# selector is controlled; Popen, pipes, codecs, JSON and SHA-256 remain real.
-assert sys.flags.utf8_mode == 0
-text_wrapper = subprocess.io.TextIOWrapper
-def ansi_default(buffer, *args, **kwargs):
-    # Python 3.9 delegates the omitted encoding to TextIOWrapper's C locale;
-    # newer Python versions select it through locale.getencoding instead.
-    if kwargs.get("encoding") is None:
-        kwargs["encoding"] = "cp1252"
-    return text_wrapper(buffer, *args, **kwargs)
-with patch.object(subprocess.io, "TextIOWrapper", side_effect=ansi_default), \
-     patch.object(locale, "getpreferredencoding", return_value="cp1252"), \
-     patch.object(locale, "getencoding", return_value="cp1252", create=True):
-    roundtrip(body)
-    if sys.argv[2] == "examples":
-        # PYTHONIOENCODING configures Python stdio, not Popen's default text codec.
-        assert sys.stdout.encoding.lower().replace("-", "") == "utf8"
-        wire = json.dumps({"body": body}, ensure_ascii=False).encode("utf-8")
-        implicit = emit(wire, subprocess.run).stdout
-        corrupted = json.loads(implicit)["body"].strip() + "\n"
-        assert corrupted != body.strip() + "\n"
-        assert digest(corrupted) != digest(body.strip() + "\n")
-        # The existing full-body assertion can agree with equally misdecoded
-        # preview JSON while the independent expected SHA correctly rejects it.
-        assert corrupted == json.loads(emit(wire, subprocess.run).stdout)["body"].strip() + "\n"
-        assert json.loads(emit(wire).stdout)["body"] == body
-        assert roundtrip(body.replace("\n", "\r\n")) == body.strip() + "\n"
-        for stream in ("stdout", "stderr"):
-            invalid = [sys.executable, "-c", "import sys;sys." + stream + ".buffer.write(bytes.fromhex('ff'))"]
-            try:
-                run_utf8(invalid, **options)
-            except UnicodeDecodeError:
-                pass
-            else:
-                raise AssertionError("Malformed UTF-8 was accepted on " + stream)
-        try:
-            run_utf8([sys.executable, "-c", "import sys;sys.stderr.buffer.write(bytes.fromhex('636166c3a9'));sys.exit(7)"], **options)
-        except subprocess.CalledProcessError as error:
-            assert error.returncode == 7 and error.stderr == "caf\u00e9"
-        else:
-            raise AssertionError("Nonzero exit was accepted")
-        # The wrapper does not replace or project TimeoutExpired; the existing
-        # finish handler remains responsible for its bounded stdout projection.
-        timeout = subprocess.TimeoutExpired(["fixture"], 180, output=b'{"status":"ok"}')
-        with patch.object(subprocess, "run", side_effect=timeout):
-            try:
-                run_utf8(["fixture"], timeout=180)
-            except subprocess.TimeoutExpired as error:
-                assert error is timeout and error.stdout == b'{"status":"ok"}'
-            else:
-                raise AssertionError("Timeout was accepted")
-print(json.dumps({"status": "passed"}))
-`;
-
-const check = (body: string, mode: 'examples' | 'roundtrip') => {
-  const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
-  const result = spawnSync(python, ['-B', '-X', 'utf8=0', '-c', program, resolve(controller), mode], {
-    encoding: 'utf8',
-    input: JSON.stringify({body}),
-    env: {...process.env, PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1'},
-    timeout: 15_000,
-  });
-  expect(result.error, result.error?.message).toBeUndefined();
-  expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toEqual({status: 'passed'});
+// Real binary pipes through a tiny host-runtime producer; no release build needed.
+const producer = (program: string, ...args: string[]) => [process.execPath, '-e', program, ...args];
+const run = (command: readonly string[], options: Parameters<typeof runReleaseCommand>[3] = {}) =>
+  runReleaseCommand(command, {...process.env}, process.cwd(), {timeoutMs: 5000, ...options});
+const digest = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+const normalize = (text: string) => text.replace(/\r\n?/g, '\n');
+const echo = producer("const fs = require('fs'); process.stdout.write(fs.readFileSync(0));");
+const captureError = (command: readonly string[], options?: Parameters<typeof runReleaseCommand>[3]) => {
+  try {
+    run(command, options);
+    throw new Error('Expected a process failure');
+  } catch (error) {
+    expect(error).toBeInstanceOf(ReleaseCommandError);
+    return error as ReleaseCommandError;
+  }
 };
 
-it('preserves native UTF-8 bodies and hashes under an ANSI locale and rejects malformed pipes', () => {
-  check('café — λ 測試 🧪\nnext → €\n', 'examples');
+it('roundtrips UTF-8 stdin and binary document/JSON stdout with explicit newline normalization and independent hashes', () => {
+  const body = 'café — λ 測試 🧪\nnext → €\n';
+  expect(run(echo, {input: body})).toBe(body);
+  const wire = JSON.stringify({body});
+  const emitted = run(
+    producer("process.stdout.write(Buffer.from(process.argv[1], 'hex'))", Buffer.from(wire).toString('hex')),
+  );
+  expect(JSON.parse(emitted).body).toBe(body);
+  const reader = producer(
+    "const fs=require('fs'); const body=fs.readFileSync(0,'utf8'); process.stdout.write(JSON.stringify({body}));",
+  );
+  const durable = `${JSON.parse(run(reader, {input: run(echo, {input: body.replace(/\n/g, '\r\n')})})).body.trim()}\n`;
+  expect(durable).toBe(body);
+  expect(digest(durable)).toBe(digest(body));
+  expect(run(echo, {input: 'café\r\nline\rlast\n'})).toBe('café\nline\nlast\n');
 });
 
-it('roundtrips bounded Unicode and newline combinations through real document and JSON pipes', () => {
+it('roundtrips bounded Unicode and newline combinations through real UTF-8 pipes', () => {
   fc.assert(
     fc.property(
       fc.array(fc.constantFrom('é', '—', 'λ', '測', '🧪', '\n', '\r\n', '\r', 'a'), {minLength: 1, maxLength: 12}),
-      values => check(values.join(''), 'roundtrip'),
+      values => {
+        const body = values.join('');
+        const actual = run(echo, {input: body});
+        expect(actual).toBe(normalize(body));
+        expect(digest(actual)).toBe(digest(normalize(body)));
+      },
     ),
     {numRuns: 8, seed: 931},
   );
+});
+
+it('rejects malformed UTF-8 independently on either successful pipe and retains raw evidence before decoding', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'native-release-encoding-'));
+  try {
+    for (const stream of ['stdout', 'stderr']) {
+      const path = join(directory, `${stream}.log`);
+      expect(() => run(producer(`process.${stream}.write(Buffer.from([255]));`), {evidencePath: path})).toThrow();
+      expect(readFileSync(`${path}.${stream}.bin`)).toEqual(Buffer.from([255]));
+      expect(readFileSync(path, 'utf8')).toContain('�');
+    }
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+it('keeps nonzero status, command arguments and both raw pipes even when UTF-8 is malformed', () => {
+  const command = producer(
+    'process.stdout.write(Buffer.from([255]));process.stderr.write(Buffer.from([254]));process.exitCode=7;',
+  );
+  const error = captureError(command);
+  expect(error.command).toBe(command);
+  expect(error.args).toBe(command);
+  expect(error.cmd).toBe(command);
+  expect(error.status).toBe(7);
+  expect(error.returncode).toBe(7);
+  expect(error.stdout).toEqual(Buffer.from([255]));
+  expect(error.output).toBe(error.stdout);
+  expect(error.stderr).toEqual(Buffer.from([254]));
+  expect(error.timedOut).toBe(false);
+});
+
+it('writes bounded human diagnostics alongside complete raw failure pipes', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'native-release-diagnostic-'));
+  try {
+    const path = join(directory, 'failure.log');
+    const error = captureError(
+      producer(
+        "process.stdout.write(Buffer.alloc(20000,255));process.stderr.write(Buffer.from('café\\r\\nline\\rlast\\n'));process.exitCode=7;",
+      ),
+      {evidencePath: path},
+    );
+    expect(readFileSync(`${path}.stdout.bin`)).toEqual(error.stdout);
+    expect(readFileSync(`${path}.stderr.bin`)).toEqual(error.stderr);
+    expect(error.stdout.length).toBe(20000);
+    const diagnostic = readFileSync(path, 'utf8');
+    expect(diagnostic).toContain('status=7');
+    expect(diagnostic).toContain('café\nline\nlast\n');
+    expect(diagnostic.length).toBeLessThan(17_000);
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
+});
+
+it('preserves timeout cause, status, args and unmodified binary captures without success decoding', () => {
+  const command = producer(
+    "process.on('SIGTERM',()=>{});const fs=require('fs');fs.writeSync(1,Buffer.from('{\"status\":\"ok\"}'));fs.writeSync(2,Buffer.from([114,97,119,13,10,255]));setTimeout(()=>{},10000);",
+  );
+  const started = performance.now();
+  const error = captureError(command, {timeoutMs: 1000});
+  expect(performance.now() - started).toBeLessThan(5000);
+  expect(error.timedOut).toBe(true);
+  expect(error.cause?.code).toBe('ETIMEDOUT');
+  expect(error.args).toBe(command);
+  expect(error.status).toBeNull();
+  expect(error.stdout).toEqual(Buffer.from('{"status":"ok"}'));
+  expect(error.stderr).toEqual(Buffer.from([114, 97, 119, 13, 10, 255]));
 });

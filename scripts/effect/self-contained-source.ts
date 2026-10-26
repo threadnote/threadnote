@@ -16,12 +16,7 @@ const HISTORICAL_WORKFLOW_DIAGNOSTIC =
 export function hasUndeclaredPythonRuntimeReference(relativePath: string, content: string): boolean {
   if (PYTHON_METADATA_SOURCES.has(relativePath)) return false;
   let source = content.replaceAll('\r\n', '\n');
-  if (
-    relativePath === 'apps/threadnote/src/dev_skills/contract.ts' ||
-    relativePath === 'packages/manager/src/dev_skills/contracts.ts'
-  ) {
-    source = source.replace('    readonly python?: string;', '');
-  } else if (relativePath === 'apps/threadnote/src/dev_skills/manifest.ts') {
+  if (relativePath === 'apps/threadnote/src/dev_skills/manifest.ts') {
     source = source.replace(HISTORICAL_WORKFLOW_PREREQUISITES, '').replace(HISTORICAL_WORKFLOW_DIAGNOSTIC, '');
   }
   return /\bpython(?:\d+(?:\.\d+)*)?\b/i.test(source);

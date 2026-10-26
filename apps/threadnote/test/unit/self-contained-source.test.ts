@@ -40,7 +40,7 @@ describe('self-contained source Python boundary', () => {
     );
   });
 
-  it('rejects interpreter probes and required prerequisites even in workflow metadata files', () => {
+  it('rejects interpreter probes and prerequisites even in workflow metadata files', () => {
     const readiness = workflowSources.find(source => source.path.endsWith('/readiness.ts'))!;
     expect(
       hasUndeclaredPythonRuntimeReference(
@@ -48,13 +48,14 @@ describe('self-contained source Python boundary', () => {
         `${readiness.content}\nconst python = findWorkingExecutable(['python3']).pipe(Effect.orElseSucceed(() => undefined));`,
       ),
     ).toBe(true);
-    const contract = workflowSources.find(source => source.path.endsWith('/contract.ts'))!;
-    expect(
-      hasUndeclaredPythonRuntimeReference(
-        contract.path,
-        contract.content.replace('readonly python?: string;', 'readonly python: string;'),
-      ),
-    ).toBe(true);
+    for (const contract of workflowSources.filter(source => /\/contracts?\.ts$/u.test(source.path)))
+      for (const field of ['readonly python?: string;', 'readonly python: string;'])
+        expect(
+          hasUndeclaredPythonRuntimeReference(
+            contract.path,
+            contract.content.replace('readonly prerequisites: {', `readonly prerequisites: {\n    ${field}`),
+          ),
+        ).toBe(true);
     const manifest = workflowSources.find(source => source.path.endsWith('/manifest.ts'))!;
     expect(
       hasUndeclaredPythonRuntimeReference(

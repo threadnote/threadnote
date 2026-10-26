@@ -1,10 +1,12 @@
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
-import {expect} from 'vitest';
+import {afterAll, beforeAll, expect} from 'vitest';
 import fc from 'fast-check';
 import {ChildProcess, spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
+import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
+import {tmpdir} from '@threadnote/testing/node-os';
 import {TestError} from '@threadnote/testing/test-error';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -16,16 +18,20 @@ import {handleManagerDevSkillsRequest} from '../../src/manager/dev_skills.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
-const harness = 'apps/threadnote/test/dev-skills/release-artifact.py';
-const holderProgram = `import importlib.util,sys
-from pathlib import Path
-spec=importlib.util.spec_from_file_location('release_fence_fixture',sys.argv[1])
-module=importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-with module.hold_account_mutation_lock(Path(sys.argv[2])):
-    print('ready',flush=True)
-    if sys.stdin.readline() != 'release\\n': raise RuntimeError('Invalid fixture release token')
-`;
+let harnessDirectory: string | undefined;
+let harness: string;
+beforeAll(async () => {
+  harnessDirectory = await mkdtemp(resolve(tmpdir(), 'threadnote-release-fence-'));
+  harness = resolve(harnessDirectory, process.platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
+  const build = await Bun.build({
+    entrypoints: [resolve('apps/threadnote/test/dev-skills/release-artifact.ts')],
+    compile: {outfile: harness},
+  });
+  expect(build.success, JSON.stringify(build.logs)).toBe(true);
+}, 30_000);
+afterAll(async () => {
+  if (harnessDirectory) await rm(harnessDirectory, {recursive: true, force: true});
+});
 
 const readinessFrame = () => {
   const prefix = [114, 101, 97, 100, 121];
@@ -93,13 +99,12 @@ const waitExit = (child: ChildProcessWithoutNullStreams) =>
       child.off('close', closed);
     });
   });
-const withPythonFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>) =>
+const withNativeFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
     Effect.gen(function* () {
       const system = yield* SystemInfo;
       const environment = system.environment();
-      const python = environment.THREADNOTE_TEST_PYTHON ?? (system.platform === 'win32' ? 'python' : 'python3');
-      const child = spawn(python, ['-B', '-c', holderProgram, resolve(harness), root], {
+      const child = spawn(harness, ['--hold-account-lock', root], {
         env: {
           ...environment,
           HOME: resolve(root, 'user'),
@@ -108,8 +113,6 @@ const withPythonFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>)
           TMPDIR: root,
           TMP: root,
           TEMP: root,
-          PYTHONDONTWRITEBYTECODE: '1',
-          PYTHONPATH: '',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -204,7 +207,7 @@ effectIt.effect('fences the full Manager update preview while the actual settled
     const attempted = yield* Deferred.make<void>();
     const fs = observedFileSystem(f.fs, f.lock, attempted);
     let completed = false;
-    const reader = yield* withPythonFence(
+    const reader = yield* withNativeFence(
       f.root,
       Effect.gen(function* () {
         const token = yield* f.fs.readFileString(f.lock);
@@ -240,11 +243,11 @@ effectIt.effect('fences the full Manager update preview while the actual settled
   }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
 );
 
-effectIt.effect('interrupting the observation releases the Python fixture token and admits the settled reader', () =>
+effectIt.effect('interrupting the observation releases the native fixture token and admits the settled reader', () =>
   Effect.gen(function* () {
     const f = yield* makeFixture;
     const entered = yield* Deferred.make<void>();
-    const observer = yield* withPythonFence(
+    const observer = yield* withNativeFence(
       f.root,
       Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
     ).pipe(Effect.forkChild);
@@ -273,7 +276,7 @@ fcEffectProp(
       const fs = observedFileSystem(f.fs, f.lock, attempted);
       const original = TestError.make({message: 'original controlled preview failure'});
       let reader: Fiber.Fiber<string, unknown> | undefined;
-      const result = yield* withPythonFence(
+      const result = yield* withNativeFence(
         f.root,
         Effect.gen(function* () {
           const token = yield* f.fs.readFileString(f.lock);

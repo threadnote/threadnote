@@ -64,7 +64,7 @@ beforeEach(() => {
       stateSchema: 1,
       minimumRuntime: '5.3.0',
       releaseVersion: '5.3.1',
-      prerequisites: {python: '3', commands: ['git'], prCommands: ['gh']},
+      prerequisites: {commands: ['git'], prCommands: ['gh']},
       skills: [],
       hashes: {},
       digest,

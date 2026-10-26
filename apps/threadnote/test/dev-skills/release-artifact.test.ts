@@ -7,7 +7,7 @@ import fc from 'fast-check';
 
 // This OS/compiled CLI boundary exercises the extracted native release.
 // The literal directory declares the copied fixture/helper closure to Bazel.
-const nativeFixtures = ['native-release-workflows.py', 'release-tools-fixture.ts'];
+const nativeFixtures = ['native-release-workflows.ts', 'release-tools-fixture.ts', 'release-artifact.ts'];
 const archive = process.env.THREADNOTE_RELEASE_ARCHIVE;
 it.skipIf(!archive)(
   'runs extracted native workflows without external interpreters or source access',
@@ -16,17 +16,20 @@ it.skipIf(!archive)(
     const temporary = await mkdtemp(resolve(tmpdir(), 'threadnote-release-tools-'));
     try {
       const tools = resolve(temporary, process.platform === 'win32' ? 'fixture-tools.exe' : 'fixture-tools');
+      const harness = resolve(temporary, process.platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
       const build = await Bun.build({
         entrypoints: [resolve('apps/threadnote/test/dev-skills/release-tools-fixture.ts')],
         compile: {outfile: tools},
       });
       expect(build.success, JSON.stringify(build.logs)).toBe(true);
-      const python = process.env.THREADNOTE_TEST_PYTHON ?? (process.platform === 'win32' ? 'python' : 'python3');
+      const harnessBuild = await Bun.build({
+        entrypoints: [resolve('apps/threadnote/test/dev-skills/release-artifact.ts')],
+        compile: {outfile: harness},
+      });
+      expect(harnessBuild.success, JSON.stringify(harnessBuild.logs)).toBe(true);
       const result = spawnSync(
-        python,
+        harness,
         [
-          '-B',
-          resolve('apps/threadnote/test/dev-skills/release-artifact.py'),
           '--archive',
           resolve(archive),
           '--checkout',

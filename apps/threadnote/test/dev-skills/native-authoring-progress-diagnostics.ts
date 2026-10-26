@@ -312,6 +312,22 @@ export const reportNativeFailure = <A, E, R>(program: Effect.Effect<A, E, R>, ob
   );
 
 // These returned facades are never provided back into the application service graph.
+const storeFacades = new WeakMap<NativeProgressDiagnostics, WeakMap<object, object>>();
+const progressStore = <S extends Pick<ResourceStoreShape, 'read'>>(
+  store: S,
+  observer: NativeProgressDiagnostics,
+): S => {
+  let facades = storeFacades.get(observer);
+  if (!facades) {
+    facades = new WeakMap();
+    storeFacades.set(observer, facades);
+  }
+  const existing = facades.get(store);
+  if (existing) return existing as S;
+  const facade = {...store, read: nativeProgressMethod(store, store.read, () => 'fixture-raw-store-read', observer)};
+  facades.set(store, facade);
+  return facade;
+};
 export const nativeProgressFacades = <
   S extends Pick<ResourceStoreShape, 'read'>,
   F extends Pick<FileSystem.FileSystem, 'readFileString'>,
@@ -323,7 +339,7 @@ export const nativeProgressFacades = <
 ): {store: S; fs: F} =>
   observer
     ? {
-        store: {...store, read: nativeProgressMethod(store, store.read, () => 'fixture-raw-store-read', observer)},
+        store: progressStore(store, observer),
         fs: {
           ...fs,
           readFileString: nativeProgressMethod(

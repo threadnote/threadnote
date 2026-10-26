@@ -90,6 +90,9 @@ effectIt.effect('forwards the original call/read Effects, arguments, options and
       },
     };
     const returned = nativeProgressFacades(store, fs, 'PRIVATE/state', observer);
+    expect(nativeProgressFacades(store, fs, 'PRIVATE/other', observer).store).toBe(returned.store);
+    expect(nativeProgressFacades({...store}, fs, 'PRIVATE/state', observer).store).not.toBe(returned.store);
+    expect(nativeProgressFacades(store, fs, 'PRIVATE/state', make()).store).not.toBe(returned.store);
     expect(yield* returned.store.read(location, 'PRIVATE', options)).toBe('original bytes');
     expect(yield* returned.fs.readFileString('PRIVATE/state', 'utf8')).toBe('original state');
     expect(yield* returned.fs.readFileString('PRIVATE/other', 'utf8')).toBe('original state');

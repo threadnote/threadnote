@@ -77,7 +77,6 @@ export interface DevSkillsManifest {
   readonly minimumRuntime: string;
   readonly releaseVersion: string;
   readonly prerequisites: {
-    readonly python?: string;
     readonly commands: readonly string[];
     readonly prCommands: readonly string[];
   };
