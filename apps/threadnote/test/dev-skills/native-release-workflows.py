@@ -162,44 +162,171 @@ def _run_profile(fixture, binary, environment, generation, profile):
             projection["snapshotWriteFailed"] = True
         return projection
 
-    def persist_finish_publication_diagnostic(response):
+    def timeout_stdout_projection(error):
+        raw = error.stdout  # TimeoutExpired may retain bytes even with text=True.
+        if raw is None or raw == b"" or raw == "":
+            return {"capture": "no-output"}
+        if not isinstance(raw, (bytes, str)):
+            return {"capture": "incomplete"}
+        if len(raw) > 65536:
+            return {"capture": "oversize"}
+        if isinstance(raw, str):
+            try:
+                raw = raw.encode("utf-8")
+            except UnicodeEncodeError:
+                return {"capture": "incomplete"}
+        if len(raw) > 65536:
+            return {"capture": "oversize"}
+        try:
+            value = json.loads(raw.decode("utf-8"))
+            if not isinstance(value, dict):
+                return {"capture": "incomplete"}
+            closeout = value.get("closeout")
+            closeout = closeout if isinstance(closeout, dict) else {}
+            status = value.get("status")
+            state = closeout.get("state")
+            return {"capture": "complete-json", "status": status if status in ("ok", "error") else "other",
+                    "closeoutState": state if state in ("prepared", "archiving", "complete") else "other"}
+        except Exception:
+            return {"capture": "incomplete"}
+
+    def persist_finish_publication_diagnostic(response, *, timed_out=False, producer=None, timeout_output=None):
         """Emit a compact CI marker and optionally save its bounded fixture projection."""
-        producer = snapshot_producer()
+        producer = snapshot_producer() if producer is None else producer
         state_path = home / "workflow-automations" / "native-v1" / f"{run_id}.json"
         binding_id = None
         capture_error = None
+        native_state = None
 
-        def read_journal(path, codec):
+        def read_journal(path, codec, *, small=False):
+            def admitted(value):
+                if small:
+                    if not isinstance(value, dict):
+                        raise ValueError("journal-shape-invalid")
+                    if codec is None:
+                        if "format" in value or not isinstance(value.get("intent"), dict) or not isinstance(value["intent"].get("stages"), list) or not isinstance(value.get("progress"), dict):
+                            raise ValueError("publication-shape-invalid")
+                    else:
+                        expected = {"threadnote-native-workflow-state-gzip-v1": "threadnote-native-workflow",
+                                    "threadnote-native-closeout-state-gzip-v1": "threadnote-native-closeout"}.get(codec)
+                        if expected is None or value.get("format") != expected:
+                            raise ValueError("journal-format-invalid")
+                return value
+
+            stored_limit = 1024 * 1024 if small else 16 * 1024 * 1024
+            expanded_limit = 4 * 1024 * 1024 if small else 64 * 1024 * 1024
+            if small and (path.is_symlink() or (path.exists() and not path.is_file())):
+                raise ValueError("journal-not-regular")
             with path.open("rb") as stream:
-                raw = stream.read(16 * 1024 * 1024 + 1)
-            if len(raw) > 16 * 1024 * 1024:
+                raw = stream.read(stored_limit + 1)
+            if len(raw) > stored_limit:
                 raise ValueError("journal-too-large")
             value = json.loads(raw)
-            if not isinstance(value, dict) or value.get("format") != codec:
-                return value
+            if codec is None or not isinstance(value, dict) or value.get("format") != codec:
+                return admitted(value)
             if set(value) != {"format", "expandedBytes", "sha256", "payload"}:
                 raise ValueError("journal-envelope-invalid")
             expanded = value["expandedBytes"]
             payload = value["payload"]
-            if not isinstance(expanded, int) or not 0 < expanded <= 64 * 1024 * 1024 or not isinstance(payload, str):
+            if not isinstance(expanded, int) or not 0 < expanded <= expanded_limit or not isinstance(payload, str):
                 raise ValueError("journal-envelope-invalid")
             compressed = base64.b64decode(payload, validate=True)
             with gzip.GzipFile(fileobj=io.BytesIO(compressed), mode="rb") as stream:
                 decoded = stream.read(expanded + 1)
             if len(decoded) != expanded or hashlib.sha256(decoded).hexdigest() != value["sha256"]:
                 raise ValueError("journal-envelope-integrity")
-            return json.loads(decoded)
+            return admitted(json.loads(decoded))
 
         try:
             if not state_path.is_file():
                 capture_error = "native-state-missing"
             else:
-                native_state = read_journal(state_path, "threadnote-native-workflow-state-gzip-v1")
+                native_state = read_journal(state_path, "threadnote-native-workflow-state-gzip-v1", small=timed_out)
                 binding_id = native_state.get("bindingId") if isinstance(native_state, dict) else None
                 if not isinstance(binding_id, str) or not re.fullmatch(r"[a-f0-9]{64}", binding_id):
                     capture_error = "native-binding-invalid"
         except Exception:
             capture_error = "native-state-invalid"
+
+        if timed_out:
+            # Persisted receipt boundaries only, not an inferred live execution stage.
+            # No Git/config/index/provider probe is reachable from this branch.
+            def closed_status(value, choices):
+                return value if isinstance(value, str) and value in choices else "other"
+
+            def count(value, kind):
+                return len(value) if isinstance(value, kind) else None
+
+            def snapshot(path, codec):
+                try:
+                    value = read_journal(path, codec, small=True)
+                    return (value, "present") if isinstance(value, dict) else ({}, "invalid-or-over-limit")
+                except FileNotFoundError:
+                    return {}, "missing"
+                except Exception:
+                    return {}, "invalid-or-over-limit"
+
+            closeout, closeout_read = snapshot(
+                Path(str(state_path) + ".closeout.json"), "threadnote-native-closeout-state-gzip-v1")
+            publication, publication_read = ({}, "binding-unavailable")
+            if binding_id and capture_error is None:
+                publication, publication_read = snapshot(
+                    home / "workflow-memory" / f"{binding_id}.publication.json",
+                    None)  # Publication journals are bounded plain JSON, not gzip envelopes.
+            native = native_state if isinstance(native_state, dict) else {}
+            operation_count = count(native.get("operations"), list)
+            operations = native.get("operations")
+            operations = operations if isinstance(operations, list) else []
+            last = operations[-1] if operations and isinstance(operations[-1], dict) else {}
+            stages = publication.get("intent", {}).get("stages", []) if isinstance(publication.get("intent"), dict) else []
+            progress = publication.get("progress")
+            progress = progress if isinstance(progress, dict) else {}
+            rows = []
+            for index, stage in enumerate(stages[:3] if isinstance(stages, list) else []):
+                key = stage.get("key") if isinstance(stage, dict) else None
+                receipt = progress.get(key, {}) if isinstance(key, str) else {}
+                receipt = receipt if isinstance(receipt, dict) else {}
+                rows.append({"ordinal": index, "stage": closed_status(key, {
+                    "architecture:create", "spec:create", "architecture:final"}),
+                    "started": receipt.get("started") is True,
+                    "committed": isinstance(receipt.get("committed"), dict),
+                    "verified": isinstance(receipt.get("verified"), dict)})
+            counts = producer.get("counts", {}) if isinstance(producer, dict) else {}
+            marker_value = {
+                "version": 1, "phase": "persisted-after-finish-timeout", "timeoutSeconds": 180,
+                "stdout": timeout_output,
+                "producerRetainedShow": isinstance(producer, dict) and bool(producer.get("latestShow")),
+                "native": {"captureError": capture_error, "operations": operation_count,
+                           "prepared": sum(isinstance(item, dict) and item.get("status") == "prepared" for item in operations) if operation_count is not None else None,
+                           "verified": sum(isinstance(item, dict) and item.get("status") == "verified" for item in operations) if operation_count is not None else None,
+                           "lastOperationInArray": {"ordinal": len(operations) - 1 if operations else None,
+                               "status": closed_status(last.get("status"), {"prepared", "verified"}),
+                               "artifactPresent": isinstance(last.get("artifact"), dict)}},
+                "closeout": {"read": closeout_read,
+                             "status": closed_status(closeout.get("status"), {"prepared", "archiving", "complete"}),
+                             "documents": count(closeout.get("documents"), list),
+                             "outputs": count(closeout.get("outputs"), dict),
+                             "owned": count(closeout.get("owned"), list),
+                             "archives": count(closeout.get("archives"), dict),
+                             "publicationSaved": isinstance(closeout.get("publication"), dict)},
+                "publication": {"read": publication_read, "stages": rows},
+                "producer": {key: counts.get(key) if type(counts.get(key)) is int and 0 <= counts[key] <= 128 else None
+                             for key in ("events", "corrupt", "unusedOrMissingSlots", "exceptions", "orphanResults",
+                                         "unmatchedStarts", "unforwardedResults")},
+            }
+            prefix = "NATIVE_CLOSEOUT_TIMEOUT_DIAGNOSTICS "
+            marker = prefix + json.dumps(marker_value, separators=(",", ":"), ensure_ascii=True) + "\n"
+            if len(marker.encode("utf-8")) > 2048:
+                marker = prefix + '{"version":1,"phase":"persisted-after-finish-timeout","captureError":"marker-overflow"}\n'
+            try:
+                artifact = trace_root / f"{profile}-closeout-timeout-native.log"
+                artifact.write_text(marker, encoding="utf-8")
+                artifact.with_name(artifact.name + ".stdout.bin").write_bytes(b"")
+                artifact.with_name(artifact.name + ".stderr.bin").write_bytes(b"")
+            except BaseException:
+                pass
+            sys.stderr.write(marker)
+            return None
 
         publication = None
         binding_journal = None
@@ -392,6 +519,18 @@ def _run_profile(fixture, binary, environment, generation, profile):
                 capture_output=True,
                 timeout=180,
             )
+        except subprocess.TimeoutExpired as error:
+            if capture:
+                try:
+                    output = timeout_stdout_projection(error)
+                    producer = snapshot_producer()
+                    persist_finish_publication_diagnostic({}, timed_out=True, producer=producer, timeout_output=output)
+                except BaseException:
+                    try:
+                        sys.stderr.write('NATIVE_CLOSEOUT_TIMEOUT_DIAGNOSTICS {"version":1,"captureError":"summary-failed"}\n')
+                    except BaseException:
+                        pass
+            raise  # Preserve the original TimeoutExpired object and traceback.
         except BaseException:
             if capture:
                 snapshot_producer()
