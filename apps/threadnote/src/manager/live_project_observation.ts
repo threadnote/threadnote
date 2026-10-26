@@ -1,4 +1,5 @@
-import {Effect, FileSystem, Path} from 'effect';
+import {invalidateManagerReviewReadiness} from './review_actionability.js';
+import {Clock, Effect, FileSystem, Path} from 'effect';
 import {managerLiveResourceKey, type ManagerLiveResource} from '@threadnote/manager/live/contracts';
 import {candidateReviewObservationPaths} from '@threadnote/memory/candidate';
 import {sha256HexSync} from '@threadnote/platform/sha256';
@@ -8,13 +9,17 @@ import {draftQueueObservationDirectory} from '../memory/context/maintenance_draf
 import {automaticPreparationObservationDirectory} from '../memory/context/maintenance_preparation_state.js';
 import {contextMaintenanceStatePath} from '../memory/context/maintenance.js';
 import {selectedGenerationObservationPaths} from '../models/setup.js';
-import {makeManagerHealthLiveSources} from './live_health_sources.js';
+import {makeManagerHealthLiveSources, type ManagerHealthObservation} from './live_health_sources.js';
 import {
   makeManagerSourceObservation,
   managerSourceDirectoryFiles,
   managerSourceFilesProbe,
   type ManagerSourceCallbacks,
 } from './live_source_observation.js';
+
+// The health observer admits at most 32 selectors. Retain one overflow selector to refuse coverage, never trim it.
+const HEALTH_SOURCE_LIMIT = 32;
+type HealthSelector = ManagerHealthObservation['citations'][number];
 
 /** Source clocks for project projections. Full health/value/model projections run only in REST readers. */
 export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.observe')(function* (
@@ -26,16 +31,20 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
   const healthAvailable = new Map<string, boolean>();
   const healthRevisions = new Map<string, string>();
   const clocks = new Map<string, number>();
+  const accountSourceProjects = new Set<string>();
+  const retainedHealthInputs = new Map<string, ManagerHealthObservation>();
   let wake = Effect.void;
   let healthInvalidate = (_project: string, _revision: string): Effect.Effect<void> => Effect.void;
   const health = yield* makeManagerHealthLiveSources(config, {
     onInvalidate: (project, revision) =>
       Effect.gen(function* () {
+        invalidateManagerReviewReadiness(config);
         healthRevisions.set(project, revision);
         yield* healthInvalidate(project, revision);
       }),
     onAvailability: (project, available) =>
       Effect.gen(function* () {
+        invalidateManagerReviewReadiness(config);
         healthAvailable.set(project, available);
         yield* wake;
       }),
@@ -77,7 +86,9 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
         config.account,
       );
       const healthRevision =
-        resource.topic === 'home' && 'project' in resource ? healthRevisions.get(resource.project) : undefined;
+        'project' in resource
+          ? healthRevisions.get(resource.project)
+          : JSON.stringify([[...healthRevisions].sort(), [...healthAvailable].sort()]);
       return {
         ...probe,
         revision: sha256HexSync(JSON.stringify([probe.revision, canonical, healthRevision])),
@@ -86,16 +97,36 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
     }),
   );
   wake = observer.wake;
-  healthInvalidate = (project, revision) => observer.invalidate({topic: 'home', project}, revision);
+  healthInvalidate = (project, revision) =>
+    Effect.all(
+      [
+        observer.invalidate({topic: 'home', scope: 'account'}, revision),
+        observer.invalidate({topic: 'home', project}, revision),
+        observer.invalidate({topic: 'automatic-memory', project}, revision),
+      ],
+      {discard: true},
+    );
   const connections = new Map<string, readonly ManagerLiveResource[]>();
+  const accountSubscribed = () =>
+    [...connections.values()].some(resources =>
+      resources.some(resource => resource.topic === 'home' && 'scope' in resource),
+    );
+  const syncAccountSources = Effect.gen(function* () {
+    if (!accountSubscribed()) {
+      accountSourceProjects.clear();
+      yield* health.release('review-account-sources');
+    } else yield* health.subscribe('review-account-sources', [...accountSourceProjects]);
+  });
   const prune = () => {
     const retained = new Set([...connections.values()].flat().map(managerLiveResourceKey));
     for (const key of clocks.keys()) if (!retained.has(key)) clocks.delete(key);
     const projects = new Set(
       [...connections.values()].flatMap(resources =>
-        resources.flatMap(resource => (resource.topic === 'home' && 'project' in resource ? [resource.project] : [])),
+        resources.flatMap(resource => ('project' in resource ? [resource.project] : [])),
       ),
     );
+    for (const project of accountSourceProjects) projects.add(project);
+    for (const project of retainedHealthInputs.keys()) if (!projects.has(project)) retainedHealthInputs.delete(project);
     for (const project of healthAvailable.keys())
       if (!projects.has(project)) {
         healthAvailable.delete(project);
@@ -104,18 +135,67 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
   };
   return {
     ...observer,
-    healthHints: health.hints,
+    reviewReadiness: (project: string) =>
+      (retainedHealthInputs.get(project)?.citations.length ?? 0) > HEALTH_SOURCE_LIMIT
+        ? false
+        : healthAvailable.get(project),
+    healthHints: {
+      register: (project: string, observation: Parameters<typeof health.hints.register>[1]) =>
+        Effect.gen(function* () {
+          if (accountSubscribed() && (accountSourceProjects.has(project) || accountSourceProjects.size < 8)) {
+            accountSourceProjects.add(project);
+            yield* syncAccountSources;
+          }
+          const retained =
+            accountSourceProjects.has(project) ||
+            [...connections.values()].some(resources =>
+              resources.some(resource => 'project' in resource && resource.project === project),
+            );
+          if (!retained) return;
+          const cwd = yield* fs.realPath(observation.cwd).pipe(Effect.orElseSucceed(() => observation.cwd));
+          const previous = retainedHealthInputs.get(project);
+          const sameRoot = previous?.cwd === cwd;
+          const key = (citation: HealthSelector) => `${citation.repositoryId}:${citation.sourceCommit}`;
+          const citations = new Map((sameRoot ? previous.citations : []).map(citation => [key(citation), citation]));
+          for (const citation of observation.citations) {
+            const identity = key(citation);
+            if (citations.has(identity)) continue;
+            if (citations.size > HEALTH_SOURCE_LIMIT) break;
+            // A Pick type does not remove the extra fields of a full citation at runtime.
+            citations.set(identity, {repositoryId: citation.repositoryId, sourceCommit: citation.sourceCommit});
+          }
+          const now = yield* Clock.currentTimeMillis;
+          const deadlines = [sameRoot ? previous.nextChangeAt : undefined, observation.nextChangeAt].filter(
+            (value): value is number => value !== undefined && Number.isFinite(value) && value > now,
+          );
+          const input: ManagerHealthObservation = {
+            cwd,
+            citations: [...citations.values()].sort((a, b) => key(a).localeCompare(key(b))),
+            ...(deadlines.length ? {nextChangeAt: Math.min(...deadlines)} : {}),
+          };
+          retainedHealthInputs.set(project, input);
+          yield* health.hints.register(project, input);
+        }),
+    },
     clockHints: {
       register: (topic: 'home' | 'automatic-memory', project: string, nextChangeAt?: number) =>
-        Effect.suspend(() => {
-          const resource = {topic, project} as const;
-          if (!observer.hasResource(resource)) return Effect.void;
+        Effect.gen(function* () {
+          const resource = topic === 'home' && !project ? {topic, scope: 'account' as const} : {topic, project};
+          if (!observer.hasResource(resource)) return;
           const key = managerLiveResourceKey(resource);
-          const next = nextChangeAt !== undefined && Number.isFinite(nextChangeAt) ? nextChangeAt : undefined;
-          if (clocks.get(key) === next) return Effect.void;
+          const contributed = nextChangeAt !== undefined && Number.isFinite(nextChangeAt) ? nextChangeAt : undefined;
+          const current = clocks.get(key);
+          const now = yield* Clock.currentTimeMillis;
+          const next =
+            current !== undefined && current > now
+              ? contributed === undefined
+                ? current
+                : Math.min(current, contributed)
+              : contributed;
+          if (clocks.get(key) === next) return;
           if (next === undefined) clocks.delete(key);
           else clocks.set(key, next);
-          return observer.wake;
+          yield* observer.wake;
         }),
     },
     subscribe: (connection: string, requested: readonly ManagerLiveResource[]) =>
@@ -124,16 +204,18 @@ export const makeManagerProjectLiveObservation = Effect.fn('manager.projectLive.
           resource => resource.topic === 'home' || resource.topic === 'automatic-memory',
         );
         connections.set(connection, resources);
+        yield* syncAccountSources;
         prune();
         yield* health.subscribe(
           connection,
-          resources.flatMap(resource => (resource.topic === 'home' && 'project' in resource ? [resource.project] : [])),
+          resources.flatMap(resource => ('project' in resource ? [resource.project] : [])),
         );
         return yield* observer.subscribe(connection, resources);
       }),
     release: (connection: string) =>
       Effect.gen(function* () {
         connections.delete(connection);
+        yield* syncAccountSources;
         prune();
         yield* health.release(connection);
         yield* observer.release(connection);

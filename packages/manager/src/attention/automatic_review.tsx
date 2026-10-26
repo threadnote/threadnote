@@ -323,10 +323,24 @@ export function AutomaticMemoryReviewDialog(props: {
         />
       ) : null}
       {recovery ? (
-        <ReviewNotice title="Source access changed" tone="warning">
+        <ReviewNotice
+          title={
+            recovery.reason === 'target-changed'
+              ? 'Memory changed'
+              : recovery.reason === 'source-changed'
+                ? 'Source evidence changed'
+                : recovery.reason === 'scope-changed'
+                  ? 'Source scope changed'
+                  : recovery.reason === 'policy-changed'
+                    ? 'Source policy changed'
+                    : 'Source verification unavailable'
+          }
+          tone="warning"
+        >
           <p>
-            Private memory and source text are withheld. You can discard this exact obsolete review without changing the
-            memory, or restore source access and reload.
+            Private memory and source text are withheld until the exact target and all required sources can be verified.
+            Automatic proposals are checked again when evidence or source readiness changes. This does not establish
+            that source permissions changed.
           </p>
           <p>
             Review state: {recovery.state} · revision {recovery.revision}

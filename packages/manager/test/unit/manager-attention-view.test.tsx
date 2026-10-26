@@ -453,6 +453,125 @@ describe('Manager attention views', () => {
     expect(document.body.textContent).toContain('Loading the review inbox');
   });
 
+  it('keeps an open authorized review and its operation choice when readiness moves its card to grouped waiting', async () => {
+    const originalFetch = fetch;
+    let waiting = false;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input), 'http://manager.test');
+        if (url.pathname === '/api/reviews' && waiting)
+          return response({
+            version: 1,
+            project: 'threadnote',
+            items: [],
+            pendingCount: 0,
+            background: {assessments: 0, awaitingSources: 1, obsolete: 0, reasons: {checking: 1}},
+          });
+        if (url.pathname === '/api/reviews/preview')
+          return response({
+            review: {
+              version: 2,
+              reviewId: 'review-1',
+              revision: 1,
+              project: 'threadnote',
+              task: 'Authorized fixture proposal.',
+              candidates: [
+                {
+                  candidateId: 'candidate-1',
+                  state: 'pending',
+                  kind: 'durable',
+                  topic: 'fixture',
+                  proposedText: 'Retained authorized proposal.',
+                  reason: 'Choose its exact operation.',
+                  evidence: [],
+                },
+              ],
+            },
+            delta: {
+              items: [
+                {
+                  candidateId: 'candidate-1',
+                  mutationPreview: {operation: 'requires_explicit_operation', truncated: false},
+                },
+              ],
+            },
+          });
+        return originalFetch(input, init);
+      }),
+    );
+    const panel = (refreshGeneration: number) => (
+      <ReviewsPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project="threadnote"
+        projects={['threadnote']}
+        refreshGeneration={refreshGeneration}
+      />
+    );
+    await render(panel(0));
+    await clickButton('Review and decide →');
+    await waitFor('Authorized fixture proposal.');
+    const dialog = document.querySelector('dialog');
+    const choice = dialog!.querySelector('select')!;
+    await act(async () => {
+      choice.value = 'create';
+      choice.dispatchEvent(new Event('change', {bubbles: true}));
+    });
+    choice.focus();
+    waiting = true;
+    await rerender(panel(1));
+    await waitFor('1 updates waiting for source verification');
+    expect(document.querySelector('dialog')).toBe(dialog);
+    expect(dialog!.textContent).toContain('Retained authorized proposal.');
+    expect(choice.value).toBe('create');
+    expect(document.activeElement).toBe(choice);
+  });
+
+  it('uses only the finite response retry boundary when live updates are unsupported', async () => {
+    vi.useFakeTimers();
+    const intervals = vi.spyOn(window, 'setInterval');
+    let reads = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        reads++;
+        return response({
+          version: 1,
+          project: 'threadnote',
+          pendingCount: 0,
+          items: [],
+          background: {
+            assessments: 100,
+            awaitingSources: 5,
+            obsolete: 0,
+            reasons: {checking: 5},
+            ...(reads === 1 ? {nextRetryAt: Date.now() + 100} : {}),
+          },
+        });
+      }),
+    );
+    await render(
+      <ReviewsPanel
+        onOpenLibrary={() => undefined}
+        onProjectChange={() => undefined}
+        project="threadnote"
+        projects={['threadnote']}
+        refreshGeneration={0}
+      />,
+    );
+    expect(reads).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(reads).toBe(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(reads).toBe(2);
+    expect(intervals).not.toHaveBeenCalled();
+  });
+
   it('shows the exact pending review instead of routing the user to the Library', async () => {
     await render(
       <ReviewsPanel
@@ -718,6 +837,35 @@ describe('Manager attention views', () => {
     expect(document.body.textContent).not.toContain('Repairing citations in background');
     expect(buttonWithText('Repair all in background')?.disabled).toBe(false);
   });
+});
+
+it('keeps 100 background assessments and five unavailable proposals grouped without individual review chores', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      response({
+        version: 1,
+        project: 'threadnote',
+        pendingCount: 0,
+        items: [],
+        background: {assessments: 100, awaitingSources: 5, obsolete: 0, reasons: {'source-unavailable': 5}},
+      }),
+    ),
+  );
+  await render(
+    <ReviewsPanel
+      onOpenLibrary={() => undefined}
+      onProjectChange={() => undefined}
+      project="threadnote"
+      projects={['threadnote']}
+      refreshGeneration={0}
+    />,
+  );
+  expect(document.body.textContent).toContain('100 background assessments');
+  expect(document.body.textContent).toContain('5 updates waiting for source verification');
+  expect(document.body.textContent).toContain('No review or discard is required');
+  expect(document.querySelectorAll('button[data-review-id]')).toHaveLength(0);
+  expect(document.body.textContent).not.toContain('Reject obsolete');
 });
 
 async function render(element: React.ReactElement): Promise<void> {

@@ -220,6 +220,74 @@ const fixture = Effect.fn('automaticBackground.publicFixture')(function* (body =
 });
 
 describe('automatic ordinary-memory background controls', () => {
+  effectIt.effect(
+    'converges a conclusively stale untouched model proposal after preserving its complete revision',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* Effect.gen(function* () {
+          yield* f.prepare;
+          const input = {
+            uri: f.uri,
+            expectedContentHash: hash(f.content),
+            backend: 'local-ai' as const,
+            modelId: f.modelId,
+          };
+          let dispatches = 0;
+          const generate: typeof runSelectedDraft = (...args) =>
+            Effect.sync(() => {
+              dispatches++;
+            }).pipe(Effect.andThen(f.generate(...args)));
+          const first = yield* requestAutomaticMemoryDraft(f.config, input, generate);
+          expect(first.maintenance?.proposal.body).toBe('The timeout is 60 seconds.');
+          const file = f.path.join(f.home, 'threadnote/candidates/v1/reviews', `${f.reviewId}.json`);
+          const firstBytes = yield* f.fs.readFileString(file);
+          yield* f.fs.writeFileString(f.sourcePath, f.source.replace('60 seconds', '90 seconds'));
+          const successor = yield* requestAutomaticMemoryDraft(f.config, input, generate);
+          expect(successor.revision).toBe(first.revision + 1);
+          expect(successor.maintenance?.proposal.body).toBe('The timeout is 90 seconds.');
+          expect(dispatches).toBe(2);
+          const archive = f.path.join(
+            f.home,
+            'threadnote/candidates/v1/revision-history',
+            f.reviewId,
+            `${first.revision}.json`,
+          );
+          expect(yield* f.fs.readFileString(archive)).toBe(firstBytes);
+          expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+          const repeat = yield* requestAutomaticMemoryDraft(f.config, input, generate).pipe(Effect.result);
+          expect(Result.isFailure(repeat)).toBe(true);
+          expect(dispatches).toBe(2);
+          expect(yield* loadCandidateReview(f.home, f.reviewId)).toEqual(successor);
+        }).pipe(Effect.provideService(LocalModelStore, f.installed));
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
+  effectIt.effect(
+    'retains a pending model proposal when a required source becomes unavailable without spending generation',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* Effect.gen(function* () {
+          yield* f.prepare;
+          const input = {
+            uri: f.uri,
+            expectedContentHash: hash(f.content),
+            backend: 'local-ai' as const,
+            modelId: f.modelId,
+          };
+          const first = yield* requestAutomaticMemoryDraft(f.config, input, f.generate);
+          yield* f.fs.remove(f.sourcePath);
+          const missing = yield* requestAutomaticMemoryDraft(f.config, input, () =>
+            Effect.die('Unavailable evidence must not dispatch inference.'),
+          ).pipe(Effect.result);
+          expect(Result.isFailure(missing)).toBe(true);
+          expect(yield* loadCandidateReview(f.home, f.reviewId)).toEqual(first);
+          expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+        }).pipe(Effect.provideService(LocalModelStore, f.installed));
+      }).pipe(provideTestLayer(ApplicationLayer)),
+  );
+
   for (const paragraphs of [64, 65]) {
     effectIt.effect(`checks the ${paragraphs}-paragraph admission boundary before queueing or spending quota`, () =>
       Effect.gen(function* () {

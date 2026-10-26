@@ -1,3 +1,4 @@
+import {automaticReviewCanConverge} from './maintenance_review_classification.js';
 import {saveTopicGenerationReceipt} from '@threadnote/memory/candidate-generation';
 import {Cause, Clock, DateTime, Effect, Exit, Option, Result, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -56,6 +57,7 @@ import {
   loadCandidateReview,
   loadCandidateReviewOptional,
   saveCandidateReview,
+  preserveCandidateReviewRevision,
   withCandidateReviewLock,
   type CandidateReview,
   type MemoryCandidate,
@@ -1324,8 +1326,11 @@ export const requestAutomaticMemoryReview = Effect.fn('automaticMaintenance.requ
         prior?.maintenanceApproval?.stage === 'written' &&
         prior.maintenance?.basis.targetHash !== packet.basis.targetHash;
       const changedDecision =
+        queuedClaim?.work.foreground !== false &&
         (state === 'rejected' || state === 'deferred') &&
         prior?.maintenance?.basis.observationRevision !== packet.basis.observationRevision;
+      const automaticSuccessor =
+        generation?.origin === 'model' && !!prior && automaticReviewCanConverge(prior, live.prepared);
       const manualRetry =
         state === 'rejected' &&
         input.desiredBody !== undefined &&
@@ -1347,6 +1352,7 @@ export const requestAutomaticMemoryReview = Effect.fn('automaticMaintenance.requ
         prior &&
         !terminal &&
         !changedDecision &&
+        !automaticSuccessor &&
         !manualRetry &&
         !manualRevision &&
         (state !== 'pending' || prior.maintenanceApproval)
@@ -1360,8 +1366,16 @@ export const requestAutomaticMemoryReview = Effect.fn('automaticMaintenance.requ
               : 'review-preview-pending',
           'Resolve the existing edited, previewed, applying, deferred, rejected or conflicted review first.',
         );
+      if (generation?.origin === 'model' && prior && !automaticSuccessor && !terminal && !changedDecision)
+        return yield* blocked(
+          prior,
+          'review-pending',
+          'The prior review is protected or current source readiness cannot prove a safe successor.',
+        );
       if (!prior && (input.reviewId !== undefined || input.revision !== undefined))
         return yield* fail('The selected ordinary-memory review is missing.');
+      if (prior && generation?.origin === 'model' && (automaticSuccessor || changedDecision || terminal))
+        yield* preserveCandidateReviewRevision(config.agentContextHome, prior);
       const review = privateReview(
         prior,
         packet.basis,
@@ -1467,20 +1481,19 @@ export const requestAutomaticMemoryDraft = Effect.fn('automaticMaintenance.reque
   const reviewId = topicReviewId(input.uri);
   const prior = yield* loadCandidateReviewOptional(config.agentContextHome, reviewId);
   const changedDecision =
+    queuedClaim?.work.foreground !== false &&
     prior &&
     ['rejected', 'deferred'].includes(prior.candidates[0]?.state ?? '') &&
     prior.maintenance?.basis.observationRevision !== packet.basis.observationRevision;
-  // An unanswered assessment is not an approval or user decision. New material evidence may
-  // replace only that exact unapproved assessment; publication still echoes its revision under lock.
+  // Fresh complete-enough evidence may supersede only an untouched machine journal; publication echoes its revision.
   const changedAssessment =
-    prior?.candidates[0]?.state === 'pending' &&
-    !prior.maintenanceApproval &&
-    prior.maintenance?.version === 3 &&
-    prior.maintenance.proposal.draft.purpose === 'automatic' &&
-    ['insufficient-evidence', 'policy-conflict'].includes(prior.maintenance.proposal.draft.outcome) &&
-    prior.maintenance.basis.targetUri === packet.basis.targetUri &&
-    prior.maintenance.basis.targetHash === packet.basis.targetHash &&
-    prior.maintenance.basis.observationRevision !== packet.basis.observationRevision;
+    !!prior &&
+    automaticReviewCanConverge(prior, {
+      assessment: packet.basis.assessment,
+      reads: packet.basis.reads,
+      relevantRevision: packet.basis.observationRevision,
+      omissions: packet.omissions,
+    });
   if (prior && prior.candidates[0]?.state !== 'applied' && !changedDecision && !changedAssessment)
     return yield* blocked(
       prior,

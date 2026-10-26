@@ -68,6 +68,7 @@ export interface ManagerReviewCandidateV1 {
 }
 
 export interface ManagerReviewInboxItemV1 {
+  readonly queueStatus?: 'assessment' | 'obsolete';
   readonly kind?: 'topic-maintenance' | 'automatic-memory';
   readonly candidates: readonly ManagerReviewCandidateV1[];
   readonly createdAt: string;
@@ -79,10 +80,27 @@ export interface ManagerReviewInboxItemV1 {
 }
 
 export interface ManagerReviewInboxResponseV1 {
+  readonly background?: ManagerReviewBackgroundV1;
   readonly items: readonly ManagerReviewInboxItemV1[];
   readonly pendingCount: number;
   readonly project: string;
   readonly version: 1;
+}
+
+export type ManagerReviewReadinessReason =
+  | 'checking'
+  | 'target-changed'
+  | 'source-changed'
+  | 'source-unavailable'
+  | 'scope-changed'
+  | 'policy-changed'
+  | 'verification-unavailable';
+export interface ManagerReviewBackgroundV1 {
+  assessments: number;
+  awaitingSources: number;
+  obsolete: number;
+  reasons: Partial<Record<ManagerReviewReadinessReason, number>>;
+  readonly nextRetryAt?: number;
 }
 
 export interface ManagerContextHealthCodePreviewV1 {

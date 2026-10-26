@@ -84,6 +84,60 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
+  const live = useManagerLiveQuery<ManagerReviewInboxResponseV1>(
+    props.project ? {topic: 'automatic-memory', project: props.project} : {topic: 'home', scope: 'account'},
+    `reviews:${view}`,
+    signal =>
+      api<ManagerReviewInboxResponseV1>(
+        `/api/reviews?project=${encodeURIComponent(props.project)}&view=${view}`,
+        undefined,
+        {signal, timeoutMilliseconds: 8_000},
+      ),
+  );
+  const fallback = !live.active || live.snapshot.status === 'unsupported';
+  useEffect(() => {
+    const next = inbox?.background?.nextRetryAt;
+    if (!fallback || next === undefined || !Number.isFinite(next)) return;
+    let due = false;
+    const retry = () => {
+      due = true;
+      if (!document.hidden) {
+        due = false;
+        setGeneration(value => value + 1);
+      }
+    };
+    const visible = () => {
+      if (due && !document.hidden) retry();
+    };
+    const timer = window.setTimeout(retry, Math.max(25, next - Date.now()));
+    document.addEventListener('visibilitychange', visible);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', visible);
+    };
+  }, [fallback, inbox?.background?.nextRetryAt, scope]);
+  useEffect(() => {
+    if (fallback) return;
+    if (live.snapshot.status === 'ready') {
+      const result = live.snapshot.data;
+      if (result.version === 1 && result.project === props.project && Array.isArray(result.items)) {
+        setInbox({scope, value: result});
+        setError('');
+        setLoading(false);
+      } else {
+        setInbox(undefined);
+        setSelected(undefined);
+        setError('The review inbox does not match this selection. Refresh Manager.');
+      }
+    } else if (live.snapshot.status === 'error') {
+      if (attentionReadRequiresRedaction(live.snapshot.error)) {
+        setInbox(undefined);
+        setSelected(undefined);
+      }
+      setError(errorMessage(live.snapshot.error));
+      setLoading(false);
+    } else setLoading(true);
+  }, [fallback, live.snapshot, scope, props.project]);
   useEffect(() => {
     setSelected(undefined);
     setNotice('');
@@ -101,6 +155,10 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
     }
   }, [selected, inbox]);
   useEffect(() => {
+    if (!fallback) {
+      live.invalidate();
+      return;
+    }
     let cancelled = false;
     const controller = new AbortController();
     setLoading(true);
@@ -133,7 +191,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       cancelled = true;
       controller.abort();
     };
-  }, [props.project, props.refreshGeneration, generation, view]);
+  }, [props.project, props.refreshGeneration, generation, view, fallback]);
   const activeSelection =
     selected && selected.view === view && (!props.project || selected.project === props.project) ? selected : undefined;
 
@@ -153,6 +211,23 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
           </button>
         ))}
       </div>
+      {view === 'pending' &&
+      inbox?.background &&
+      (inbox.background.assessments > 0 || inbox.background.awaitingSources > 0 || inbox.background.obsolete > 0) ? (
+        <div className="review-notice" role="status">
+          <p>
+            {inbox.background.assessments} background assessments · {inbox.background.awaitingSources} updates waiting
+            for source verification.
+          </p>
+          <p>
+            Assessments and unavailable sources are checked automatically as evidence changes. No review or discard is
+            required.
+          </p>
+          {inbox.background.obsolete > 0 ? (
+            <p>{inbox.background.obsolete} obsolete generated reviews are retained in History.</p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="attention-refresh-status" style={{blockSize: '3.5rem', overflowY: 'auto'}}>
         {error ? (
           <div role="alert">
@@ -191,8 +266,18 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                   <h3>{review.task}</h3>
                 </div>
                 <ReviewBadge tone="proposal">
-                  <Sparkles size={12} aria-hidden="true" /> {review.candidates.length}{' '}
-                  {review.candidates.length === 1 ? 'proposal' : 'proposals'}
+                  {review.queueStatus ? (
+                    review.queueStatus === 'assessment' ? (
+                      'Background assessment'
+                    ) : (
+                      'Obsolete review'
+                    )
+                  ) : (
+                    <>
+                      <Sparkles size={12} aria-hidden="true" /> {review.candidates.length}{' '}
+                      {review.candidates.length === 1 ? 'proposal' : 'proposals'}
+                    </>
+                  )}
                 </ReviewBadge>
               </header>
               <p className="muted">
@@ -213,7 +298,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
                                 : 'neutral'
                         }
                       >
-                        {candidate.state}
+                        {review.queueStatus ?? candidate.state}
                       </ReviewBadge>
                       {!review.kind ? (
                         <>

@@ -11,6 +11,7 @@ import {
 import {aggregateValueReportV1} from '@threadnote/threadnote/value_report/index';
 import {buildContextHealthReport} from '@threadnote/context/health';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
+import {projectManagerReviewEligibility} from '../../src/manager/review_actionability.js';
 import {TestError} from '@threadnote/testing/test-error';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -504,6 +505,7 @@ function testSources(overrides: Partial<ManagerHomeSources> = {}): ManagerHomeSo
     ),
   )!;
   return {
+    eligibility: (_config, reviews) => Effect.succeed(projectManagerReviewEligibility(reviews)),
     records: () => Effect.succeed([record]),
     reviews: () => Effect.succeed([]),
     value: () =>

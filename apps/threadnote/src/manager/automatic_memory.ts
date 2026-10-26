@@ -34,6 +34,8 @@ import {
   projectTopicReviewRecovery,
   projectTopicReviewDecisionAcknowledgement,
 } from '../memory/context/maintenance_review_projection.js';
+import {automaticReviewIsAssessment} from '../memory/context/maintenance_review_classification.js';
+import {readManagerReviewEligibility, reviewReadinessReason} from './review_actionability.js';
 import {isManagerProjectName} from './project/name.js';
 import {ManagerConsumerClockHints} from './live_consumer_sources.js';
 
@@ -67,14 +69,17 @@ const selectedAutomaticReview = Effect.fn('managerAutomaticMemory.selectedReview
     : undefined;
 });
 
-function automaticRecovery(review: CandidateReview) {
+function automaticRecovery(
+  review: CandidateReview,
+  reason?: import('@threadnote/manager/attention/contracts').ManagerReviewReadinessReason,
+) {
   const recovery = projectTopicReviewRecovery(review);
   if (!recovery) return undefined;
   const approval = review.maintenanceApproval;
   const canReject =
     (recovery.state === 'pending' && (!approval || approval.stage === 'preview' || approval.stage === 'parked')) ||
     (recovery.state === 'conflict' && approval?.stage === 'conflict');
-  return {...recovery, ...(canReject ? {recovery: {action: 'reject' as const}} : {})};
+  return {...recovery, ...(reason ? {reason} : {}), ...(canReject ? {recovery: {action: 'reject' as const}} : {})};
 }
 
 /** Metadata recovery never depends on source prose access; only full reads do. */
@@ -87,7 +92,12 @@ const readAutomaticReviewResponse = Effect.fn('managerAutomaticMemory.reviewResp
   if (!selected) return undefined;
   const authorized = yield* readManagerAutomaticReview(config, project, reviewId).pipe(Effect.result);
   return (
-    Result.isSuccess(authorized) && authorized.success ? authorized.success : automaticRecovery(selected)
+    Result.isSuccess(authorized) && authorized.success
+      ? authorized.success
+      : automaticRecovery(
+          selected,
+          Result.isFailure(authorized) ? reviewReadinessReason(authorized.failure) : 'verification-unavailable',
+        )
   ) satisfies ManagerAutomaticReviewResponse | undefined;
 });
 
@@ -137,6 +147,7 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
   const background = yield* readAutomaticDraftBackgroundStatus(config);
   yield* (yield* ManagerConsumerClockHints).register('automatic-memory', project, background.nextEligibleAt);
   const items: ManagerAutomaticMemoryItem[] = [];
+  const reviews: CandidateReview[] = [];
   let remainingBytes: number = contextMaintenanceInventoryAuthorityLimits.canonicalBytes;
   let lastUri: string | undefined;
   let processed = 0;
@@ -172,6 +183,7 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
       Result.isSuccess(loaded) && loaded.success?.maintenance?.basis.targetUri === record.uri
         ? loaded.success
         : undefined;
+    if (prior) reviews.push(prior);
     // Status exposes journal state only, never proposal/source prose or freshness authority.
     const approval = prior?.maintenanceApproval;
     const written =
@@ -255,7 +267,9 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
         : state === 'waiting-budget' && background.nextEligibleAt !== undefined
           ? {nextEligibleAt: background.nextEligibleAt}
           : {}),
-      ...(review && !review.verified ? {reviewId: review.reviewId, evidenceRevision: review.evidenceRevision} : {}),
+      ...(review && !review.verified && !(prior && automaticReviewIsAssessment(prior))
+        ? {reviewId: review.reviewId, evidenceRevision: review.evidenceRevision}
+        : {}),
       coverage: assessment?.coverage ?? {
         outcome: 'unknown',
         scope: 'none',
@@ -299,10 +313,24 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
     };
     if (selectedUri || state !== 'reviewed') items.push(item);
   }
+  const eligibility = yield* readManagerReviewEligibility(config, reviews);
+  const projectedItems = items.map(item => {
+    const state = item.reviewId ? eligibility.byReview.get(item.reviewId) : undefined;
+    if (state !== 'waiting' && state !== 'obsolete') return item;
+    const {reviewId: _reviewId, evidenceRevision: _evidenceRevision, ...backgroundItem} = item;
+    return {
+      ...backgroundItem,
+      state: 'retry' as const,
+      reason:
+        state === 'obsolete'
+          ? 'Previous generated review is retained in History. Waiting for current evidence.'
+          : 'Waiting for current source verification. Automatic checks will retry.',
+    };
+  });
   return {
     version: 1,
     project,
-    items,
+    items: projectedItems,
     omitted: page.omitted + unavailableRecords + page.uris.length - processed,
     incomplete: page.incomplete || unavailableRecords > 0 || lastUri !== page.uris.at(-1),
     ...(unavailableRecords ? {unavailableRecords} : {}),

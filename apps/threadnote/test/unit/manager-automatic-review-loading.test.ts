@@ -16,6 +16,10 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {handleManagerAutomaticMemory} from '../../src/manager/automatic_memory.js';
+import {
+  readManagerReviewEligibility,
+  invalidateManagerReviewReadiness,
+} from '../../src/manager/review_actionability.js';
 import {requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
@@ -128,6 +132,55 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
     review: yield* candidates.loadCandidateReview(home, proposed.reviewId),
   };
 });
+
+effectIt.effect(
+  'groups unavailable code readiness and restores the exact generated proposal without waiving its whole source vector',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      if (f.review.maintenance?.version !== 3) throw new Error('Expected automatic review');
+      const generated = {
+        ...f.review,
+        maintenance: {
+          ...f.review.maintenance,
+          generation: {
+            origin: 'model' as const,
+            agent: 'local-ai',
+            model: 'fixture',
+            promptVersion: 'fixture',
+            attempts: 1 as const,
+            usage: {status: 'unavailable' as const},
+          },
+        },
+      };
+      yield* candidates.saveCandidateReview(f.config.agentContextHome, generated);
+      expect(generated.maintenance.basis.reads.filter(read => read.uri.startsWith('code:'))).toHaveLength(4);
+      expect((yield* readManagerReviewEligibility(f.config, [generated])).pendingCount).toBe(1);
+      const query = yield* CodeGraphQueryService;
+      const stale: CodeGraphQueryService['Service'] = {
+        ...query,
+        status: (...args) =>
+          query.status(...args).pipe(Effect.map(status => ({...status, stale: true, freshness: 'stale' as const}))),
+      };
+      invalidateManagerReviewReadiness(f.config);
+      const unavailable = yield* readManagerReviewEligibility(f.config, [generated]).pipe(
+        Effect.provideService(CodeGraphQueryService, stale),
+      );
+      expect(unavailable.pendingCount).toBe(0);
+      expect(unavailable.background.awaitingSources).toBe(1);
+      expect(unavailable.background.obsolete).toBe(0);
+      const withheld = yield* f.read().pipe(Effect.provideService(CodeGraphQueryService, stale));
+      expect(withheld).toMatchObject({
+        status: 200,
+        body: {kind: 'topic-maintenance-recovery', reason: 'source-unavailable'},
+      });
+      expect(JSON.stringify(withheld)).not.toContain('The timeout is');
+      invalidateManagerReviewReadiness(f.config);
+      expect((yield* readManagerReviewEligibility(f.config, [generated])).pendingCount).toBe(1);
+      expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
+      expect(yield* candidates.loadCandidateReview(f.config.agentContextHome, generated.reviewId)).toEqual(generated);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+);
 
 effectIt.effect(
   'opens a four-source exact review with two live observations and withholds drift at its closing fence',

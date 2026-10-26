@@ -999,10 +999,21 @@ describe('ordinary memory exact public review', () => {
                 evidenceIds: [],
               },
             ];
-            const initial = yield* requestAutomaticMemoryReview(f.config, {
-              ...input,
-              draftJson: JSON.stringify(noUpdate),
-            });
+            const initial = yield* requestAutomaticMemoryReview(
+              f.config,
+              {
+                ...input,
+                draftJson: JSON.stringify(noUpdate),
+              },
+              {
+                origin: 'model',
+                agent: 'local-ai',
+                model: input.modelId,
+                promptVersion: 'fixture',
+                attempts: 1,
+                usage: {status: 'unavailable'},
+              },
+            );
             if (!('reviewId' in initial)) throw new Error('Expected a saved assessment.');
             const catalog = yield* LocalModelCatalog;
             const manifest = yield* catalog.get(input.modelId);
@@ -1067,11 +1078,10 @@ describe('ordinary memory exact public review', () => {
             yield* f.fs.writeFileString(f.targetPath, changedTarget);
             expect(
               Result.isFailure(
-                yield* requestAutomaticMemoryDraft(
-                  f.config,
-                  {...input, expectedContentHash: sha256HexSync(changedTarget)},
-                  generator,
-                ).pipe(Effect.provideService(LocalModelStore, installed), Effect.result),
+                yield* requestAutomaticMemoryDraft(f.config, input, generator).pipe(
+                  Effect.provideService(LocalModelStore, installed),
+                  Effect.result,
+                ),
               ),
             ).toBe(true);
             expect(calls).toBe(0);
@@ -1093,11 +1103,14 @@ describe('ordinary memory exact public review', () => {
               expect(saved.maintenance?.proposal.draft.outcome).toBe('propose-update');
               expect(saved.candidates[0].proposedText).toBe('The timeout is 90 seconds.');
               expect(saved.maintenanceApproval).toBeUndefined();
-              // Another source change cannot replace an actionable human review.
+              // Explicit human preview takes ownership before the next source change.
+              const preview = yield* f.review({action: 'preview', reviewId: saved.reviewId, revision: saved.revision});
+              expect(preview.isError).not.toBe(true);
+              const owned = yield* loadCandidateReview(f.home, saved.reviewId);
               yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '120 seconds'));
               expect(Result.isFailure(yield* run())).toBe(true);
               expect(calls).toBe(1);
-              expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(saved.revision);
+              expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(owned.revision);
             }
             expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
           }).pipe(provideTestLayer(ApplicationLayer)),
