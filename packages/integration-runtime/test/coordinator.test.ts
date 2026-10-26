@@ -1,8 +1,10 @@
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {layer as effectLayer} from '@effect/vitest';
+import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import {Database} from 'bun:sqlite';
-import {Deferred, Effect, Fiber, FileSystem, Layer, Ref, Schema} from 'effect';
+import {Deferred, Effect, Exit, Fiber, FileSystem, Layer, PlatformError, Ref, Schema, Scope} from 'effect';
 import * as TestClock from 'effect/testing/TestClock';
+import * as Reactivity from 'effect/reactivity/Reactivity';
 import * as fc from 'fast-check';
 import {expect, it} from 'vitest';
 import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-policy';
@@ -16,6 +18,7 @@ import {
 } from '@threadnote/integration-core/source-coordinator';
 import {coordinatorWorkerFailureMessage} from '../src/coordinator-transport.js';
 import {
+  assertCoordinatorFile,
   coordinatorPaths,
   makeCoordinatorEngine,
   makeSourceAdmission,
@@ -93,6 +96,198 @@ effectLayer(base)('durable integration coordinator', effectIt => {
       yield* store.cleanup;
       yield* store.cleanup;
       expect((yield* store.pending).map(({key, generation}) => ({key, generation}))).toEqual([ticket]);
+    }),
+  );
+
+  effectIt.effect('opens an alias store when a sidecar disappears between lstat and stat after peer close', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      for (const suffix of ['-wal', '-shm']) {
+        const current = yield* config;
+        const alias = `${current.agentContextHome}/alias`;
+        yield* fs.symlink(current.agentContextHome, alias);
+        const paths = yield* coordinatorPaths(current);
+        const firstScope = yield* Effect.acquireRelease(Scope.make(), scope => Scope.close(scope, Exit.void));
+        const secondScope = yield* Effect.acquireRelease(Scope.make(), scope => Scope.close(scope, Exit.void));
+        const first = yield* openCoordinatorStore(current).pipe(Scope.provide(firstScope));
+        const [ticket] = yield* first.enqueue(current, [descriptor('retained')], 'automatic');
+        const sibling = `${paths.directory}/sibling.txt`;
+        yield* fs.writeFileString(sibling, 'preserve sibling', {mode: 0o600});
+        const sidecar = `${paths.database}${suffix}`;
+        expect(yield* fs.exists(sidecar)).toBe(true);
+        const observed = yield* Deferred.make<void>();
+        const resume = yield* Deferred.make<void>();
+        const classifications: string[] = [];
+        let gated = false;
+        const opening = yield* openCoordinatorStore({...current, agentContextHome: alias}).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            stat: path =>
+              Effect.gen(function* () {
+                if (path === sidecar && !gated) {
+                  // runtimeLstat has already observed the live peer's sidecar.
+                  gated = true;
+                  yield* Deferred.succeed(observed, undefined);
+                  yield* Deferred.await(resume);
+                }
+                return yield* fs.stat(path).pipe(
+                  Effect.tapError(error =>
+                    Effect.sync(() => {
+                      if (path === sidecar && error.reason._tag === 'NotFound')
+                        classifications.push('sidecar-stat:NotFound');
+                    }),
+                  ),
+                );
+              }),
+          }),
+          Scope.provide(secondScope),
+          Effect.result,
+          Effect.forkScoped,
+        );
+        yield* Deferred.await(observed);
+        expect(yield* first.sql`PRAGMA wal_checkpoint(TRUNCATE)`).toMatchObject([{busy: 0}]);
+        yield* Scope.close(firstScope, Exit.void);
+        // Some SQLite/platform combinations retain closed sidecars. Force the
+        // legal absent-file transition only after checkpoint and peer release.
+        yield* fs.remove(sidecar, {force: true});
+        expect(yield* fs.exists(sidecar)).toBe(false);
+        yield* Deferred.succeed(resume, undefined);
+        const result = yield* Fiber.join(opening);
+        expect(classifications).toEqual(['sidecar-stat:NotFound']);
+        expect(result._tag, `sidecar ${suffix}: ${classifications.join(',')}`).toBe('Success');
+        if (result._tag !== 'Success') return;
+        expect(result.success.home).toBe(paths.home);
+        expect((yield* result.success.pending).map(({key, generation}) => ({key, generation}))).toEqual([ticket]);
+        expect(yield* fs.readFileString(sibling)).toBe('preserve sibling');
+      }
+    }),
+  );
+
+  effectIt.effect('keeps unsafe sidecars rejected with disappearance recovery enabled', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const system = yield* SystemInfo;
+      for (const kind of ['symlink', 'hardlink', 'directory', 'mode', 'owner']) {
+        if (system.platform === 'win32' && (kind === 'mode' || kind === 'owner')) continue;
+        const current = yield* config;
+        const sibling = `${current.agentContextHome}/sibling.txt`;
+        const sidecar = `${current.agentContextHome}/guard.sqlite-wal`;
+        yield* fs.writeFileString(sibling, 'preserve sibling', {mode: 0o600});
+        if (kind === 'symlink') yield* fs.symlink(sibling, sidecar);
+        else if (kind === 'hardlink') yield* fs.link(sibling, sidecar);
+        else if (kind === 'directory') yield* fs.makeDirectory(sidecar);
+        else yield* fs.writeFileString(sidecar, 'sidecar', {mode: kind === 'mode' ? 0o644 : 0o600});
+        const result = yield* assertCoordinatorFile(sidecar, true).pipe(
+          Effect.provideService(SystemInfo, {
+            ...system,
+            userId: kind === 'owner' ? system.userId! + 1 : system.userId,
+          }),
+          Effect.result,
+        );
+        expect(result, kind).toMatchObject({
+          _tag: 'Failure',
+          failure: {
+            _tag: 'SourceCoordinatorError',
+            message: 'Integration coordinator is unavailable. Retry the operation.',
+          },
+        });
+        expect(yield* fs.readFileString(sibling)).toBe('preserve sibling');
+      }
+    }),
+  );
+
+  effectIt.effect('rejects sidecar replacements and does not swallow other stat failures', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const current = yield* config;
+      const sibling = `${current.agentContextHome}/sibling.txt`;
+      const sidecar = `${current.agentContextHome}/guard.sqlite-wal`;
+      yield* fs.writeFileString(sibling, 'preserve sibling', {mode: 0o600});
+      yield* fs.writeFileString(sidecar, 'sidecar', {mode: 0o600});
+      const missing = PlatformError.systemError({_tag: 'NotFound', module: 'FileSystem', method: 'stat'});
+      const replacement = yield* assertCoordinatorFile(sidecar, true).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          stat: path =>
+            path === sidecar
+              ? fs
+                  .remove(sidecar)
+                  .pipe(Effect.andThen(fs.symlink(sibling, sidecar)), Effect.andThen(Effect.fail(missing)))
+              : fs.stat(path),
+        }),
+        Effect.result,
+      );
+      expect(replacement).toMatchObject({_tag: 'Failure', failure: {_tag: 'SourceCoordinatorError'}});
+      yield* fs.remove(sidecar);
+      yield* fs.writeFileString(sidecar, 'sidecar', {mode: 0o600});
+      const denied = PlatformError.systemError({_tag: 'PermissionDenied', module: 'FileSystem', method: 'stat'});
+      const other = yield* assertCoordinatorFile(sidecar, true).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          stat: path => (path === sidecar ? Effect.fail(denied) : fs.stat(path)),
+        }),
+        Effect.result,
+      );
+      expect(other._tag).toBe('Failure');
+      if (other._tag === 'Failure') expect(other.failure).toBe(denied);
+      expect(yield* fs.readFileString(sibling)).toBe('preserve sibling');
+    }),
+  );
+
+  effectIt.effect.prop(
+    'retains pending identities across bounded alias open and close schedules',
+    {aliases: Schema.Array(Schema.Boolean).check(Schema.isMinLength(1), Schema.isMaxLength(6))},
+    ({aliases}) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const current = yield* config;
+        const paths = yield* coordinatorPaths(current);
+        const alias = `${current.agentContextHome}/alias`;
+        yield* fs.symlink(current.agentContextHome, alias);
+        let expected: readonly {readonly key: string; readonly generation: number}[] | undefined;
+        for (const useAlias of aliases) {
+          const tickets = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const store = yield* openCoordinatorStore({
+                ...current,
+                agentContextHome: useAlias ? alias : current.agentContextHome,
+              });
+              expect(store.home).toBe(paths.home);
+              const tickets = yield* store.enqueue(current, [descriptor('retained')], 'automatic');
+              expect((yield* store.pending).map(({key, generation}) => ({key, generation}))).toEqual(tickets);
+              return tickets;
+            }),
+          );
+          // No worker consumes these requests: pending refreshes keep generation 1.
+          expect(tickets).toHaveLength(1);
+          expect(tickets[0].generation).toBe(1);
+          if (expected) expect(tickets).toEqual(expected);
+          expected = tickets;
+        }
+      }),
+    {arbitrary: {runs: 8}},
+  );
+
+  effectIt.effect('classifies a held WAL setup lock independently of sidecar disappearance', () =>
+    Effect.gen(function* () {
+      const current = yield* config;
+      const paths = yield* coordinatorPaths(current);
+      yield* (yield* FileSystem.FileSystem).writeFile(paths.database, new Uint8Array(), {mode: 0o600});
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const database = new Database(paths.database);
+          database.run('BEGIN EXCLUSIVE');
+          return database;
+        }),
+        database => Effect.sync(() => database.close()),
+      );
+      const sql = yield* SqliteClient.make({filename: paths.database, busyTimeout: 25, disableWAL: true}).pipe(
+        Effect.provideService(Reactivity.Reactivity, yield* Reactivity.make),
+      );
+      // Inspect only the normalized SQL category, before the coordinator's
+      // intentional public SourceCoordinatorError projection.
+      const result = yield* sql`PRAGMA journal_mode = WAL`.pipe(Effect.result);
+      expect(result).toMatchObject({_tag: 'Failure', failure: {reason: {_tag: 'LockTimeoutError'}}});
     }),
   );
 
