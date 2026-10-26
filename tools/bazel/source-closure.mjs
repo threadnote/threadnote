@@ -11,7 +11,17 @@ export function sourceImports(path, content) {
   const specifiers = ts.preProcessFile(content, true, true).importedFiles.map(item => item.fileName);
   // TypeScript's preprocessor omits namespace re-exports. Read these from the
   // syntax tree while retaining its established import/dynamic-import behavior.
-  if (/\bexport\b(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*(?:\n|$))*\*/u.test(content)) {
+  let namespaceExport = false;
+  if (content.includes('export') && content.includes('*')) {
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, content);
+    for (let token = scanner.scan(); token !== ts.SyntaxKind.EndOfFileToken; token = scanner.scan()) {
+      if (token === ts.SyntaxKind.ExportKeyword && scanner.scan() === ts.SyntaxKind.AsteriskToken) {
+        namespaceExport = true;
+        break;
+      }
+    }
+  }
+  if (namespaceExport) {
     const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, false);
     for (const statement of source.statements) {
       if (

@@ -5,8 +5,8 @@ import {join} from 'node:path';
 import {expect, it} from 'vitest';
 
 const generation = {headSha: 'head', sourceDigest: 'source', inventoryDigest: 'inventory'};
-const fixture = async () => {
-  const root = mkdtempSync(join(tmpdir(), 'bazel-consumers-'));
+const fixture = async (prefix = 'bazel-consumers-') => {
+  const root = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(root, 'tools/bazel'), {recursive: true});
   mkdirSync(join(root, 'tools/ci'), {recursive: true});
   for (const path of [
@@ -115,7 +115,7 @@ it('binds shard artifacts to the prepared generation and rejects drift in planne
 it.each(['legacy', 'prepared'])(
   'prepares a %s baseline with its own capability before reading an untracked inventory',
   async layout => {
-    const root = await fixture();
+    const root = await fixture('bazel consumers-');
     const git = async (...args: string[]) => {
       const child = Bun.spawn(['git', ...args], {cwd: root, stdout: 'pipe', stderr: 'pipe'});
       const [code, stdout, stderr] = await Promise.all([
@@ -175,7 +175,15 @@ export async function readPreparedInventory() {
       const executable = join(root, '.context/diff');
       await Bun.write(
         executable,
-        `#!${process.execPath}\nconst i=process.argv.indexOf('-o'); if(i>=0) await Bun.write(process.argv[i+1], '');`,
+        `#!${process.execPath}\nif(process.argv[2]==='shutdown') process.exit(0);
+const option=process.argv.find(value=>value.startsWith('--bazelStartupOptions=--bazelrc='));
+if(!option) throw new Error('missing read-only analysis config');
+const relative=option.slice('--bazelStartupOptions=--bazelrc='.length);
+if(relative!=='.context/bazel-generated/analysis.bazelrc') throw new Error('analysis path must survive naive startup splitting');
+const workspace=process.argv[process.argv.indexOf('-w')+1];
+const path=workspace+'/'+relative;
+if(await Bun.file(path).text()!=='build --lockfile_mode=off\\nquery --lockfile_mode=off\\nmod --lockfile_mode=off\\n') throw new Error('mutable module probe');
+const i=process.argv.indexOf('-o'); if(i>=0) await Bun.write(process.argv[i+1], '');`,
       );
       // Executable mode is an OS capability required by the external diff subprocess.
       const chmod = Bun.spawn(['chmod', '+x', executable]);
@@ -224,13 +232,13 @@ it('executes exactly the approved selected targets after matching preparation an
     expect(await chmod.exited).toBe(0);
     await Bun.write(
       join(root, 'tools/bazel/cli-tools.mjs'),
-      `export async function bazelPath(){return ${JSON.stringify(executable)}}`,
+      `export async function bazelPath(){return process.env.FIXTURE_BAZEL_EXECUTABLE}`,
     );
     await Bun.write(
       join(root, '.context/bazel-selection/selection.json'),
       JSON.stringify({generation, targets: ['//:test']}),
     );
-    const result = await run(root, 'tools/ci/bazel-run-selected.mjs');
+    const result = await run(root, 'tools/ci/bazel-run-selected.mjs', [], {FIXTURE_BAZEL_EXECUTABLE: executable});
     expect(result.code, result.stderr).toBe(0);
     expect(await Bun.file(join(root, 'executed.json')).json()).toEqual(['test', '--local_test_jobs=1', '//:test']);
     await Bun.write(join(root, '.context/bazel-selection/selection.json'), JSON.stringify({targets: ['//:test']}));

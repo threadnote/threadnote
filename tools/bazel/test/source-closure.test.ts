@@ -9,6 +9,24 @@ const collect = (files: Record<string, string>, entries = ['src/0.ts'], workspac
     workspaces,
   });
 
+it('recognizes namespace exports across arbitrary bounded trivia', () => {
+  fc.assert(
+    fc.property(
+      fc.array(fc.constantFrom(' ', '\t', '\n', '/**/', '/* *//* */', '// comment\n'), {
+        minLength: 1,
+        maxLength: 8,
+      }),
+      trivia => {
+        expect(sourceImports('file.ts', `export${trivia.join('')}* as domain from './value.js';`)).toEqual([
+          './value.js',
+        ]);
+      },
+    ),
+    {numRuns: 50},
+  );
+  expect(sourceImports('file.ts', `export ${'/* *//* */'.repeat(2_000)}const value = 1;`)).toEqual([]);
+});
+
 it('follows source additions, removals, and changed import edges', () => {
   const files = {'src/0.ts': 'export const first = 1;', 'src/1.ts': 'export const second = 2;'};
   expect(collect(files).files).toEqual(['src/0.ts']);

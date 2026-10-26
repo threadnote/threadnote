@@ -1,5 +1,5 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- Filesystem directory creation/removal and baseline capability probes are native OS boundaries; file contents use Bun. */
-import {existsSync, mkdirSync, mkdtempSync, rmSync} from 'node:fs';
+import {existsSync, mkdirSync, mkdtempSync, renameSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {bazelDiffPath, bazelPath} from '../bazel/cli-tools.mjs';
@@ -11,6 +11,22 @@ const option = name => process.argv[process.argv.indexOf(name) + 1];
 const base = process.argv.includes('--base') ? option('--base') : undefined;
 const output = resolve(root, process.argv.includes('--output') ? option('--output') : '.context/bazel-selection');
 mkdirSync(output, {recursive: true});
+// Pinned bazel-diff probes `mod graph` without command options and splits startup
+// options on spaces. A fixed relative rc covers probes and workspace paths with spaces.
+const analysisRcPath = '.context/bazel-generated/analysis.bazelrc';
+const analysisConfig = 'build --lockfile_mode=off\nquery --lockfile_mode=off\nmod --lockfile_mode=off\n';
+const analysisStartup = `--bazelStartupOptions=--bazelrc=${analysisRcPath}`;
+const materializeAnalysisRc = async cwd => {
+  const path = join(cwd, analysisRcPath);
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    await Bun.write(temporary, analysisConfig);
+    renameSync(temporary, path);
+  } finally {
+    const file = Bun.file(temporary);
+    if (await file.exists()) await file.delete();
+  }
+};
 const run = async (args, cwd = root, raw = false) => {
   const child = Bun.spawn(args, {cwd, stdout: 'pipe', stderr: 'pipe'});
   const [stdout, stderr, code] = await Promise.all([
@@ -36,6 +52,7 @@ try {
 }
 // An invalid head is fatal; only baseline/hash failures may select the valid full head.
 const {inventory, generation} = await readPreparedInventory({root});
+await Bun.write(join(output, 'analysis.bazelrc'), analysisConfig);
 // Preserve the exact prepared model alongside hashes after outputs leave Git.
 await Bun.write(join(output, 'inventory.json'), Bun.file(join(root, 'tools/bazel/targets.json')));
 await Bun.write(join(output, 'generation-receipt.json'), Bun.file(join(root, '.context/bazel-generated/receipt.json')));
@@ -81,6 +98,7 @@ try {
     ['base', directory],
     ['head', root],
   ]) {
+    await materializeAnalysisRc(cwd);
     await run([
       diff,
       'generate-hashes',
@@ -88,6 +106,7 @@ try {
       cwd,
       '-b',
       executable,
+      analysisStartup,
       '--bazelCommandOptions=--noshow_progress --lockfile_mode=off',
       join(output, `${name}.json`),
     ]);
@@ -99,6 +118,7 @@ try {
     root,
     '-b',
     executable,
+    analysisStartup,
     '--excludeExternalTargets=true',
     '--startingHashes',
     join(output, 'base.json'),
