@@ -3,6 +3,7 @@ import {TestClock} from 'effect/testing';
 import {CodeGraphQueryService} from '@threadnote/graph/query';
 import {CodeGraphIndexer} from '@threadnote/graph/indexer';
 import {provideNative} from './native-automation-fixture.js';
+import {closeoutSpanDiagnostics} from './native-closeout-span-diagnostics.js';
 
 const stages = new Set([
   'application-scope',
@@ -34,6 +35,7 @@ type Entry = {sequence: number; stage: string; startedMs: number};
 
 /** Test-only observer: closed labels, no request values or error messages. */
 export const closeoutDiagnostics = (now = () => performance.now()) => {
+  const spans = closeoutSpanDiagnostics(now);
   let origin: number | undefined;
   let previousElapsed = 0;
   const elapsed = () => {
@@ -70,6 +72,7 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
       const total = (totals[entry.stage] ??= {count: 0, elapsedMs: 0});
       total.count = bounded(total.count + 1);
       return program.pipe(
+        Effect.withSpan(`closeout.stage.${entry.stage}`),
         Effect.onExit(exit =>
           Effect.sync(() => {
             activeCount = Math.max(0, activeCount - 1);
@@ -88,6 +91,7 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
       );
     });
   return {
+    tracer: spans.tracer,
     stage,
     graph: <A, E, R>(program: Effect.Effect<A, E, R>) =>
       Effect.gen(function* () {
@@ -134,6 +138,7 @@ export const closeoutDiagnostics = (now = () => performance.now()) => {
               active: [...active.values()].map(entry => ({...entry, elapsedMs: bounded(at - entry.startedMs)})),
               recent,
               recentDropped,
+              spans: spans.snapshot(),
             }) +
             '\n',
         );
@@ -169,6 +174,7 @@ export const runCloseout = <A, E, R>(program: Effect.Effect<A, E, R>) =>
           .pipe(Effect.provideService(CloseoutDiagnostics, observer), TestClock.withLive, provideNative),
       )
       .pipe(
+        Effect.withTracer(observer.tracer),
         Effect.onExit(exit =>
           Effect.sync(() => {
             if (exit._tag === 'Failure') observer.report();
