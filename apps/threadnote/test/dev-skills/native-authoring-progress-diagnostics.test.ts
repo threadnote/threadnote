@@ -559,7 +559,10 @@ effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping c
 
 effectIt.effect('conserves the whole original lifecycle file and the existing layer ownership wiring', () =>
   Effect.sync(() => {
-    const original = readFileSync(new URL('./native-authoring-lifecycle.test.ts', import.meta.url));
+    // Git may check out this unchanged text file with CRLF on Windows.
+    const original = Buffer.from(
+      readFileSync(new URL('./native-authoring-lifecycle.test.ts', import.meta.url), 'utf8').replace(/\r\n/gu, '\n'),
+    );
     expect(original.byteLength).toBe(80683);
     expect(createHash('sha256').update(original).digest('hex')).toBe(
       'd354d96e996d7b514d0a242b9b9901adb2151a017480e9db479bb5c35179bb1d',
