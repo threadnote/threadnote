@@ -3,7 +3,7 @@ import type * as SqlClient from 'effect/sql/SqlClient';
 import type {RecallEligibilityPolicy} from '../eligibility.js';
 import {recallEligibilityPredicate} from './eligibility.js';
 import type {RecallCandidate} from '../rank.js';
-import {combineRecallSqlPredicates, recallUriScopePredicate} from './scope.js';
+import {combineRecallSqlPredicates, recallIdentityUriScopePredicate} from './scope.js';
 
 interface RecallIdentityConflictRow {
   readonly memory_id: string;
@@ -69,7 +69,7 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
     if (cached) return cached;
 
     const scope = combineRecallSqlPredicates(
-      recallUriScopePredicate('d', allowedUriScopes),
+      recallIdentityUriScopePredicate('d', allowedUriScopes),
       recallEligibilityPredicate('d', eligibility),
     );
     const rows: RecallIdentityConflictRow[] = [];

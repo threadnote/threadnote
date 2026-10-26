@@ -8,7 +8,6 @@ import {spawn, spawnSync, type ChildProcess} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import {request as httpRequest} from 'node:http';
-import {Socket} from 'node:net';
 import {constants, devNull, tmpdir} from 'node:os';
 import {basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep} from '@threadnote/testing/node-path';
 import * as BunServices from '@effect/platform-bun/BunServices';
@@ -17,6 +16,7 @@ import {isDeepStrictEqual} from 'node:util';
 import {extractGzipTar} from '../../src/effect/archive.js';
 import {runReleaseCommand} from './native-release-process.js';
 import {runNativeWorkflows} from './native-release-workflows.js';
+import {nativeSocketConnect, requireNativeNetworkDenial} from './native-release-network-probe.js';
 
 function requireCondition(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -231,7 +231,7 @@ function fixtureEnvironment(root: string, runtime: string): NodeJS.ProcessEnv {
   return environment;
 }
 
-async function verifyIsolation(checkout: string, enforced: boolean) {
+export async function verifyIsolation(checkout: string, enforced: boolean) {
   if (!enforced)
     return {enforced: false, reason: 'Functional native Windows lane; OS isolation acceptance is pending.'};
   let sourceErrno: number | undefined;
@@ -243,24 +243,11 @@ async function verifyIsolation(checkout: string, enforced: boolean) {
     sourceErrno = constants.errno[code as keyof typeof constants.errno];
   }
   requireCondition(sourceErrno !== undefined, 'The source checkout is readable inside the isolated fixture');
-  const denied = await new Promise<string>(done => {
-    const socket = new Socket();
-    const finish = (code: string) => {
-      socket.destroy();
-      done(code);
-    };
-    socket.setTimeout(2000, () => finish('ETIMEDOUT'));
-    socket.once('error', error => finish(errorCode(error) ?? 'UNKNOWN'));
-    socket.connect(443, '192.0.2.1', () => finish('CONNECTED'));
-  });
-  requireCondition(
-    ['EPERM', 'EACCES', 'ENETUNREACH'].includes(denied),
-    `Outbound network was not denied by the OS: ${denied}`,
-  );
+  const denied = requireNativeNetworkDenial(await nativeSocketConnect());
   return {
     enforced: true,
     sourceReadErrno: sourceErrno,
-    outboundConnectErrno: constants.errno[denied as keyof typeof constants.errno],
+    outboundConnectErrno: denied,
     exceptions:
       process.platform === 'darwin' ? ['/bin/ps only: system process-identity probe executes without sandbox'] : [],
   };
