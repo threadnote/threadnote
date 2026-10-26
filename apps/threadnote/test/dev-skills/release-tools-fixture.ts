@@ -20,8 +20,9 @@ if (name === 'git' || name === 'rg') {
   const executable = paths[name];
   if (!executable) throw new Error('Missing native fixture tool.');
   const child = Bun.spawnSync([executable, ...args], {env: process.env, stdin: 'inherit'});
-  await Bun.write(Bun.stdout, child.stdout);
-  await Bun.write(Bun.stderr, child.stderr);
+  // Empty Bun writes try to truncate pipes on Windows.
+  if (child.stdout.length > 0) await Bun.write(Bun.stdout, child.stdout);
+  if (child.stderr.length > 0) await Bun.write(Bun.stderr, child.stderr);
   process.exit(child.exitCode);
 }
 if (name !== 'gh') {

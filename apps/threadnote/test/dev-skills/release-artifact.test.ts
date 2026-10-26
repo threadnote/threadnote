@@ -122,6 +122,10 @@ it('forwards complete real Git bytes through the compiled fixture to a delayed c
     expect(piped.status, repositoryDiagnostic).toBe(0);
     expect(piped.stdout.trim(), repositoryDiagnostic).toBe('true');
     expect(piped.stderr.length, repositoryDiagnostic).toBe(0);
+    const empty = await delayed(['-C', repo, 'config', 'fixture.empty-output', 'true']);
+    expect(empty.code, diagnostic(empty)).toBe(0);
+    expect(empty.stdout.length, diagnostic(empty)).toBe(0);
+    expect(empty.stderr.length, diagnostic(empty)).toBe(0);
     // Bounded property: arbitrary large byte lengths retain every binary byte and UTF-8 tail.
     await fc.assert(
       fc.asyncProperty(fc.integer({min: 1_048_576, max: 4_194_304}), async size => {
