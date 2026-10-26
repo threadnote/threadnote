@@ -152,7 +152,7 @@
     "husky": "^9.1.7",
     "mitata": "1.0.34",
     "oxlint": "1.87.0",
-    "oxlint-tsgolint": "7.0.2003",
+    "oxlint-tsgolint": "7.0.2005",
     "prettier": "^3.9.10",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
