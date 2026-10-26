@@ -195,6 +195,9 @@ describe('memory code citation capture and validation', () => {
         refs: ['src/value.ts', MODULE_ID, SYMBOL_ID],
       }).pipe(provideTestLayer(fixture.layer));
 
+      const sessionsAfterCapture = fixture.statusSessions();
+      expect(sessionsAfterCapture).toBe(1);
+
       // A module-root cgs_ reference intentionally becomes the same file
       // citation as its path, then canonical citation IDs deduplicate it.
       expect(citations).toHaveLength(2);
@@ -248,7 +251,7 @@ describe('memory code citation capture and validation', () => {
       expect(second[0]?.cacheHits).toBe(2);
       expect(fixture.evidenceCalls()).toBe(callsAfterFirstValidation);
       expect(fixture.leases()).toEqual({acquired: 3, released: 3});
-      expect(fixture.validationSessions()).toBe(2);
+      expect(fixture.statusSessions() - sessionsAfterCapture).toBe(2);
     }).pipe(provideTestLayer(StandaloneBrokerLayer)),
   );
 
@@ -585,7 +588,7 @@ function citationFixture(
   let evidenceCalls = 0;
   let acquired = 0;
   let released = 0;
-  let validationSessions = 0;
+  let statusSessions = 0;
   const evidence = (request: CodeGraphEffectiveSnapshotCitationEvidenceRequest) => {
     evidenceCalls += 1;
     const paths = [
@@ -630,16 +633,18 @@ function citationFixture(
         : Effect.fail(statusOptions.evidenceFailure),
     releaseSnapshotLease: () => Effect.sync(() => void ++released),
   } as unknown as CodeGraphStoreShape);
+  const readStatus: Parameters<typeof CodeGraphQueryService.of>[0]['status'] = (_home, cwd, options) =>
+    Effect.sync(() => statusOptions.statusFor?.(cwd, options?.observeWorktree) ?? status);
   const withStatusSession: NonNullable<Parameters<typeof CodeGraphQueryService.of>[0]['withStatusSession']> = (
-    _home,
-    _cwd,
+    home,
+    cwd,
     _expected,
-    _options,
+    options,
     use,
-  ) => Effect.sync(() => void ++validationSessions).pipe(Effect.andThen(use(status)));
+  ) =>
+    Effect.sync(() => void ++statusSessions).pipe(Effect.andThen(readStatus(home, cwd, options)), Effect.flatMap(use));
   const query = CodeGraphQueryService.of({
-    status: (_home: string, cwd: string, options?: {readonly observeWorktree?: boolean}) =>
-      Effect.sync(() => statusOptions.statusFor?.(cwd, options?.observeWorktree) ?? status),
+    status: readStatus,
     withStatusSession,
   } as unknown as Parameters<typeof CodeGraphQueryService.of>[0]);
   return {
@@ -648,7 +653,7 @@ function citationFixture(
     leases: () => ({acquired, released}),
     status,
     symbol,
-    validationSessions: () => validationSessions,
+    statusSessions: () => statusSessions,
   };
 }
 

@@ -10,8 +10,9 @@ import {nativeFixture, provideNative} from './native-automation-fixture.js';
 const run = <A, E, R>(program: Effect.Effect<A, E, R>) => program.pipe(TestClock.withLive, provideNative);
 const git = (repo: string, ...args: string[]) =>
   runCommandEffect('git', ['--no-optional-locks', '-C', repo, ...args]).pipe(Effect.map(result => result.stdout));
+const fixtureGitIdentity = ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid'];
 const commit = (repo: string, ...args: string[]) =>
-  git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Fixture', ...args);
+  git(repo, ...fixtureGitIdentity, 'commit', '-m', 'Fixture', ...args);
 const initialObjects = (args: readonly string[]) => args.includes('HEAD^{commit}') && !args.includes('--verify');
 const refused = <A, E>(result: Result.Result<A, E>, code: string) => {
   expect(Result.isFailure(result)).toBe(true);
@@ -292,7 +293,9 @@ describe('native Git observations', () => {
       yield* f.fs.writeFileString(f.path.join(f.repo, 'source.ts'), 'side content\n');
       yield* git(f.repo, 'add', '.');
       yield* commit(f.repo);
-      const merge = yield* runCommandEffect('git', ['-C', f.repo, 'merge', 'main'], {allowFailure: true});
+      const merge = yield* runCommandEffect('git', ['-C', f.repo, ...fixtureGitIdentity, 'merge', 'main'], {
+        allowFailure: true,
+      });
       expect(merge.exitCode).toBe(1);
       expect(yield* git(f.repo, 'status', '--porcelain=v2', '-z')).toMatch(/^u /u);
       const index = f.path.join(f.repo, '.git', 'index');

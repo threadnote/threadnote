@@ -308,8 +308,11 @@ const reviewed = Effect.fn('test.nativeCycle.reviewed')(function* () {
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator'],
-    lanes: [{name: 'orchestrator', status: 'complete'}],
+    selected: ['orchestrator', 'simplicity'],
+    lanes: [
+      {name: 'orchestrator', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
     findings: [],
   };
   return {...f, snapshot, report};
@@ -344,8 +347,11 @@ const completeLocalPhase = Effect.fn('test.nativeCycle.completeLocalPhase')(func
       snapshotTree: snapshot.tree,
       status: 'complete',
       mode: snapshot.previous ? 'incremental' : 'full',
-      selected: ['orchestrator'],
-      lanes: [{name: 'orchestrator', status: 'complete'}],
+      selected: ['orchestrator', 'simplicity'],
+      lanes: [
+        {name: 'orchestrator', status: 'complete'},
+        {name: 'simplicity', status: 'complete'},
+      ],
       findings: [],
     },
   });
@@ -426,8 +432,11 @@ describe('native cycle lifecycle', () => {
           snapshotTree: first.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       });
@@ -546,8 +555,11 @@ describe('native cycle lifecycle', () => {
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       });
@@ -863,8 +875,11 @@ describe('native cycle lifecycle', () => {
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: previous ? 'incremental' : 'full',
-            selected: ['orchestrator'],
-            lanes: [{name: 'orchestrator', status: 'complete'}],
+            selected: ['orchestrator', 'simplicity'],
+            lanes: [
+              {name: 'orchestrator', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
             findings: [],
           },
         };
@@ -1287,8 +1302,11 @@ effectIt.effect(
             snapshotTree: snapshot.tree,
             status: 'complete',
             mode: 'full',
-            selected: ['orchestrator'],
-            lanes: [{name: 'orchestrator', status: 'complete'}],
+            selected: ['orchestrator', 'simplicity'],
+            lanes: [
+              {name: 'orchestrator', status: 'complete'},
+              {name: 'simplicity', status: 'complete'},
+            ],
             findings: [],
           },
         })).status,

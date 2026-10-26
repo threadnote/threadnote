@@ -1034,8 +1034,11 @@ function runProfile(
     snapshotTree: snapshot.tree,
     status: 'complete',
     mode: 'full',
-    selected: ['orchestrator'],
-    lanes: [{name: 'orchestrator', status: 'complete'}],
+    selected: ['orchestrator', 'simplicity'],
+    lanes: [
+      {name: 'orchestrator', status: 'complete'},
+      {name: 'simplicity', status: 'complete'},
+    ],
     findings: [],
   };
   mutateCycle('validate-review', {snapshotId: snapshot.snapshotId, attemptId: 'verify-read-review-1', report: review});

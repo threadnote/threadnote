@@ -10,7 +10,7 @@ import {
   NativeAuthoringPlanDocumentSchema,
 } from '@threadnote/workflow-automations/authoring';
 import {NativeCyclePlanSchema, NativeCycleValidationSchema} from '@threadnote/workflow-automations/cycle';
-import {NativeCycleReviewSchema, nativeCycleOrchestratorLane} from '@threadnote/workflow-automations/cycle-review';
+import {NativeCycleReviewSchema} from '@threadnote/workflow-automations/cycle-review';
 import {NativeCloseoutProposalSchema} from '@threadnote/workflow-automations/closeout';
 import {nativeCycleTextPage} from '@threadnote/workflow-automations/cycle-output';
 import {WorkflowAutomationError} from '@threadnote/workflow-automations/contracts';
@@ -132,9 +132,9 @@ export function nativeRequestSchema(input: unknown) {
         : request.topic === 'cycle-review'
           ? {
               semanticPrerequisites: {
-                requiredSelectedLane: nativeCycleOrchestratorLane,
-                requiredCompletedLane: nativeCycleOrchestratorLane,
-                specialistLanes: 'Optional; every selected lane must have a complete report.',
+                requiredSelectedLanes: ['orchestrator', 'simplicity'],
+                requiredCompletedLanes: ['orchestrator', 'simplicity'],
+                specialistLanes: 'Additional specialist lanes are optional; every selected lane must be complete.',
               },
             }
           : {}),

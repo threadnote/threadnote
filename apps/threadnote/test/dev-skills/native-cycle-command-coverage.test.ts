@@ -159,8 +159,11 @@ it.effect('dispatches bounded cycle discovery and exact read checks through a re
           snapshotTree: snapshot.tree,
           status: 'complete',
           mode: 'full',
-          selected: ['orchestrator'],
-          lanes: [{name: 'orchestrator', status: 'complete'}],
+          selected: ['orchestrator', 'simplicity'],
+          lanes: [
+            {name: 'orchestrator', status: 'complete'},
+            {name: 'simplicity', status: 'complete'},
+          ],
           findings: [],
         },
       }),
