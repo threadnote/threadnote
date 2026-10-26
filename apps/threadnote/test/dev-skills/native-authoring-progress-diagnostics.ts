@@ -32,6 +32,8 @@ export const nativeProgressSpanLabels = [
   'recall.resolveMemoryIdentityAliases',
   'recall.loadMemoryIdentities',
   'recall.executeIndexQuery',
+  'recall.acquireDatabase',
+  'recall.databaseBody',
   'recall.initializeDatabase',
   'recall.initializeIdentityIndex',
   'recall.selectIndexData',

@@ -170,11 +170,44 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     const proxy = resolve(temporary, process.platform === 'win32' ? 'git.exe' : 'git');
     const repo = resolve(temporary, 'repo');
     const trace = resolve(temporary, 'publication-producer-events');
+    const ioDirectory = resolve(temporary, 'trace-io');
+    await mkdir(ioDirectory);
+    let observerLoaded = false;
     const build = await Bun.build({
       entrypoints: [resolve('apps/threadnote/test/dev-skills/release-tools-fixture.ts')],
       compile: {outfile: proxy},
+      // Observe real filesystem calls inside independent compiled producers.
+      plugins: [
+        {
+          name: 'observe-producer-io',
+          setup(builder) {
+            // Bun resolves built-ins before onResolve, so redirect this import explicitly.
+            builder.onLoad({filter: /release-tools-fixture\.ts$/u}, async args => ({
+              contents: (await readFile(args.path, 'utf8')).replace("from 'node:fs'", "from 'producer-fs'"),
+              loader: 'ts',
+            }));
+            builder.onResolve({filter: /^producer-fs$/u}, () => ({path: 'producer-fs', namespace: 'producer-fs'}));
+            builder.onLoad({filter: /.*/u, namespace: 'producer-fs'}, () => {
+              observerLoaded = true;
+              return {
+                contents: `import fs from 'node:fs';
+                const counts = {checks: 0, opens: 0};
+                export const existsSync = (...args) => { counts.checks++; return fs.existsSync(...args); };
+                export const openSync = (...args) => { counts.opens++; return fs.openSync(...args); };
+                export const closeSync = fs.closeSync;
+                export const writeSync = fs.writeSync;
+                process.on('exit', () => fs.writeFileSync(
+                  ${JSON.stringify(ioDirectory)} + '/' + process.pid + '.json', JSON.stringify(counts)));
+              `,
+                loader: 'js',
+              };
+            });
+          },
+        },
+      ],
     });
     expect(build.success, JSON.stringify(build.logs)).toBe(true);
+    expect(observerLoaded).toBe(true);
     await writeFile(resolve(temporary, 'tool-paths.json'), JSON.stringify({git: nativeGit}));
     const git = (...args: string[]) => spawnSync(nativeGit, args, {timeout: 15_000});
     expect(git('init', repo).status).toBe(0);
@@ -198,13 +231,16 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
       ).status,
     ).toBe(0);
     const sha = git('-C', repo, 'rev-parse', 'HEAD').stdout.toString('utf8').trim();
+    const environment = (enabled: boolean) => ({
+      ...process.env,
+      THREADNOTE_RELEASE_FIXTURE_ROOT: temporary,
+      THREADNOTE_RELEASE_PUBLICATION_TRACE: enabled ? '1' : '0',
+    });
+    const io = async (pid: number) =>
+      JSON.parse(await readFile(resolve(ioDirectory, `${pid}.json`), 'utf8')) as {checks: number; opens: number};
     const invoke = (spec: string, enabled: boolean) =>
       spawnSync(proxy, ['-C', repo, 'show', spec], {
-        env: {
-          ...process.env,
-          THREADNOTE_RELEASE_FIXTURE_ROOT: temporary,
-          THREADNOTE_RELEASE_PUBLICATION_TRACE: enabled ? '1' : '0',
-        },
+        env: environment(enabled),
         timeout: 15_000,
       });
     await mkdir(trace);
@@ -212,10 +248,12 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     expect(disabled.status).toBe(0);
     expect(disabled.stdout.equals(content)).toBe(true);
     expect(await readdir(trace)).toEqual([]);
+    expect(await io(disabled.pid)).toEqual({checks: 0, opens: 0});
     const success = invoke(`${sha}:${sentinel}`, true);
     expect(success.status).toBe(0);
     expect(success.stdout.equals(content)).toBe(true);
     expect(success.stderr.length).toBe(0);
+    expect(await io(success.pid)).toEqual({checks: 3, opens: 6});
     for (const spec of [`private-missing-object:${sentinel}`, 'HEAD:private-missing-path']) {
       const expected = git('-C', repo, 'show', spec);
       const actual = invoke(spec, true);
@@ -268,17 +306,67 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     ).toEqual(['missing-object', 'missing-path', 'none']);
     expect(events.filter(event => event.event === 'forwarded').every(event => event.complete === true)).toBe(true);
     expect(events.some(event => event.specForm === 'SHA40')).toBe(true);
-    // Exhaust the finite slots without spawning an unrelated workload.
+    // Preserve the original sequential last-slot boundary and occupied prefix.
     for (let slot = 9; slot < 127; slot++) await writeFile(resolve(trace, `${slot}.json`), '{}\n');
+    const snapshot = async () =>
+      Promise.all(Array.from({length: 128}, (_, slot) => readFile(resolve(trace, `${slot}.json`), 'utf8')));
+    const prefix = await Promise.all(
+      Array.from({length: 127}, (_, slot) => readFile(resolve(trace, `${slot}.json`), 'utf8')),
+    );
     const bounded = invoke(`${sha}:${sentinel}`, true);
     expect(bounded.status).toBe(0);
     expect(bounded.stdout.equals(content)).toBe(true);
     expect(await readdir(trace)).toHaveLength(128);
     expect(JSON.parse(await readFile(resolve(trace, '127.json'), 'utf8')).event).toBe('start');
+    const saturated = await snapshot();
+    expect(saturated.slice(0, 127)).toEqual(prefix);
+    const concurrent = async () => {
+      const child = Bun.spawn([proxy, '-C', repo, 'show', `${sha}:${sentinel}`], {
+        env: environment(true),
+        stdout: 'pipe',
+        stderr: 'pipe',
+        timeout: 15_000,
+      });
+      const [status, stdout, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stdout).arrayBuffer(),
+        new Response(child.stderr).text(),
+      ]);
+      expect(status).toBe(0);
+      expect(Buffer.from(stdout).equals(content)).toBe(true);
+      expect(stderr).toBe('');
+      return io(child.pid);
+    };
+    // Fresh processes observe the terminal claim once per event, with no opens.
+    expect(await Promise.all(Array.from({length: 4}, concurrent))).toEqual(
+      Array.from({length: 4}, () => ({checks: 3, opens: 0})),
+    );
     const exhausted = invoke(`${sha}:${sentinel}`, true);
     expect(exhausted.status).toBe(0);
     expect(exhausted.stdout.equals(content)).toBe(true);
+    expect(exhausted.stderr.length).toBe(0);
+    expect(await io(exhausted.pid)).toEqual({checks: 3, opens: 0});
+    const expectedFailure = git('-C', repo, 'show', 'HEAD:private-missing-path');
+    const saturatedFailure = invoke('HEAD:private-missing-path', true);
+    expect(saturatedFailure.status).toBe(expectedFailure.status);
+    expect(saturatedFailure.stdout.equals(expectedFailure.stdout)).toBe(true);
+    expect(saturatedFailure.stderr.equals(expectedFailure.stderr)).toBe(true);
+    expect(await io(saturatedFailure.pid)).toEqual({checks: 3, opens: 0});
     expect(await readdir(trace)).toHaveLength(128);
+    expect(await snapshot()).toEqual(saturated);
+    // Reset the capture, then race independent producers over the last four slots.
+    await rm(trace, {recursive: true});
+    await mkdir(trace);
+    for (let slot = 0; slot < 124; slot++) await writeFile(resolve(trace, `${slot}.json`), saturated[slot] ?? '');
+    await Promise.all(Array.from({length: 4}, concurrent));
+    expect(await readdir(trace)).toHaveLength(128);
+    const raced = await snapshot();
+    expect(raced.slice(0, 124)).toEqual(saturated.slice(0, 124));
+    for (const record of raced.slice(124)) {
+      expect(Buffer.byteLength(record)).toBeLessThanOrEqual(480);
+      expect(['start', 'result', 'forwarded']).toContain(JSON.parse(record).event);
+      for (const secret of [sentinel, 'private-sentinel-content', repo, sha]) expect(record).not.toContain(secret);
+    }
     await rm(trace, {recursive: true});
     await writeFile(trace, 'diagnostic I/O unavailable');
     const unavailable = invoke(`${sha}:${sentinel}`, true);

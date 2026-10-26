@@ -1,7 +1,7 @@
 // Compiled test provider/proxy; copied outside the checkout before release isolation.
 // Bun 1.4.2 compile cannot bundle the testing node-fs export-star wrapper.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
-import {closeSync, openSync, writeSync} from 'node:fs';
+import {closeSync, existsSync, openSync, writeSync} from 'node:fs';
 import {join} from '@threadnote/testing/node-path';
 import {parseMemoryDocument} from '@threadnote/memory/document';
 const root = process.env.THREADNOTE_RELEASE_FIXTURE_ROOT;
@@ -31,6 +31,10 @@ if (name === 'git' || name === 'rg') {
   const trace = (event: string, fields: Record<string, string | number | boolean | null>) => {
     if (name !== 'git' || process.env.THREADNOTE_RELEASE_PUBLICATION_TRACE !== '1') return;
     try {
+      // Claims are immutable and scan in order: the last slot proves every
+      // earlier slot was claimed, even if a writer was interrupted. Check once
+      // per event so fresh producer processes do not reprobe a saturated prefix.
+      if (existsSync(join(root, 'publication-producer-events', '127.json'))) return;
       const record = JSON.stringify({version: 1, pid: process.pid, event, verb: closedVerb, ...fields}) + '\n';
       if (Buffer.byteLength(record) > 480) return;
       for (let slot = 0; slot < 128; slot++) {

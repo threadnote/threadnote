@@ -454,6 +454,46 @@ effectIt.effect('keeps active ages and facade positions separate from native inc
   }),
 );
 
+effectIt.effect('records database lifetime labels without retaining their private span data or exits', () =>
+  Effect.gen(function* () {
+    const lines: string[] = [];
+    const observer = make({sink: line => lines.push(line)});
+    const privateValue = {PRIVATE: 'database path, query and result'};
+    let released = 0;
+    for (const label of ['recall.acquireDatabase', 'recall.databaseBody'] as const) {
+      const exit = yield* Effect.scoped(
+        Effect.acquireRelease(Effect.succeed(privateValue), () =>
+          Effect.sync(() => {
+            released++;
+          }),
+        ).pipe(
+          Effect.flatMap(value =>
+            Effect.gen(function* () {
+              const span = yield* Effect.currentSpan;
+              span.attribute('PRIVATE', value);
+              span.event('PRIVATE', 1n, value);
+              return yield* Effect.fail(value);
+            }),
+          ),
+          Effect.withSpan(label),
+        ),
+      ).pipe(Effect.withTracer(observer.tracer), Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit))
+        expect(exit.cause.reasons.some(reason => Cause.isFailReason(reason) && reason.error === privateValue)).toBe(
+          true,
+        );
+      expect(observer.snapshot().totals[label]).toMatchObject({started: 1, ended: 1, failed: 1});
+    }
+    expect(released).toBe(2);
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(lines).toHaveLength(0);
+    observer.reportFailure();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
 effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and the worst-case failure line', () =>
   Effect.sync(() => {
     const readings = [100, 110, NaN, Infinity, -100, 105, 120];
