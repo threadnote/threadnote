@@ -26,6 +26,8 @@ import {
   numericMetadata,
   chunkRecallValues,
 } from './index/read_policy.js';
+import {useRecallDatabase} from './index/database.js';
+export {withRecallDatabaseSession} from './index/database.js';
 import {
   isExternalResourceUri,
   loadExternalResourceAccess,
@@ -54,7 +56,7 @@ import {
 import {selectRecallCodeLinks, type RecallCodeLinkQueryOptions} from './code_links.js';
 import {selectRecallMemoryLinks, type RecallMemoryLinkQueryOptions} from './memory/links.js';
 import * as RecallIndexIdentity from './index/identity.js';
-import {useRecallDatabase, withCanonicalResourceMutationLock, withRecallIndexLock} from './index/locks.js';
+import {withCanonicalResourceMutationLock, withRecallIndexLock} from './index/locks.js';
 import {
   failFastIdentityPreparation,
   normalizeRecallIdentityPreparation,
@@ -379,9 +381,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
 ) {
   let metadataStale = false;
   let selectorCanonicalMismatch = false;
-  return yield* (options.readyOnly ? useRecallDatabaseReadOnly : useRecallDatabase)(
-    databasePath,
-    Effect.gen(function* () {
+  const query = Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       if (!options.readyOnly) yield* initializeRecallDatabase(sql);
       const fs = yield* FileSystem.FileSystem;
@@ -534,8 +534,10 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
             ? result
             : withState(recallIndexDataResult(result));
       return finalResult;
-    }),
-  ).pipe(
+    });
+  return yield* (options.readyOnly
+    ? useRecallDatabaseReadOnly(databasePath, query)
+    : useRecallDatabase(databasePath, query, !prepareForActivation)).pipe(
     Effect.onError(cause =>
       options.readyOnly && selectorCanonicalMismatch && !Cause.hasInterrupts(cause)
         ? readyMaintenance.request(true).pipe(Effect.asVoid)

@@ -28,6 +28,7 @@ import {
   readRecallIndexDataBatch,
   readRecallExactMatches,
   recallIndexStatus,
+  withRecallDatabaseSession,
 } from '@threadnote/recall/index';
 import * as EffectRecord from 'effect/Record';
 import * as EffectString from 'effect/String';
@@ -429,6 +430,7 @@ describe('external source recall', () => {
         expect(afterRebuild.readState).toEqual({freshness: 'stale', maintenance: 'unavailable'});
         expect((yield* readRecallLexicalDemand({...config, includeInactive: false}))?.revision).toBe(pending?.revision);
       }).pipe(
+        withRecallDatabaseSession,
         TestClock.withLive,
         provideLayer(Layer.merge(dependencies, ResourceStore.layer.pipe(Layer.provide(dependencies)))),
       );
