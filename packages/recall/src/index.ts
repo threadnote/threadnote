@@ -8,6 +8,8 @@ import {
 } from './index/result.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
+import {useRecallDatabase} from './index/database.js';
+export {withRecallDatabaseSession} from './index/database.js';
 import {SEED_STATE_FILE} from '@threadnote/workspace/constants';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
@@ -388,6 +390,7 @@ const executeRecallIndexQuery = Effect.fn('recall.executeIndexQuery')(function* 
       }
       return finalResult;
     }),
+    !prepareForActivation,
   );
 });
 
@@ -1030,18 +1033,6 @@ const writeActiveRecallDatabasePointer = Effect.fn('recall.writeActiveDatabasePo
     .rename(temporaryPath, pointerPath)
     .pipe(Effect.ensuring(fs.remove(temporaryPath, {force: true}).pipe(Effect.ignore)));
 });
-
-function useRecallDatabase<A, E, R>(
-  databasePath: string,
-  effect: Effect.Effect<A, E, R | SqlClient.SqlClient>,
-): Effect.Effect<A, E, R> {
-  return Effect.scoped(
-    Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
-      Effect.withSpan('recall.acquireDatabase'),
-      Effect.flatMap(context => effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'))),
-    ),
-  );
-}
 
 function useRecallDatabaseReadOnly<A, E, R>(
   databasePath: string,

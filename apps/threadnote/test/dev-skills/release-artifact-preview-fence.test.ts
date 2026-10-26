@@ -3,7 +3,12 @@ import {Cause, Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
 import {afterAll, beforeAll, expect} from 'vitest';
 import fc from 'fast-check';
-import {ChildProcess, spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
+import {
+  ChildProcess,
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
 import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
 import {tmpdir} from '@threadnote/testing/node-os';
@@ -23,11 +28,16 @@ let harness: string;
 beforeAll(async () => {
   harnessDirectory = await mkdtemp(resolve(tmpdir(), 'threadnote-release-fence-'));
   harness = resolve(harnessDirectory, process.platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
-  const build = await Bun.build({
-    entrypoints: [resolve('apps/threadnote/test/dev-skills/release-artifact.ts')],
-    compile: {outfile: harness},
-  });
-  expect(build.success, JSON.stringify(build.logs)).toBe(true);
+  // Bun 1.4.2's Windows build API can mismatch the standalone main path,
+  // making import.meta.main false and exiting without running this controller.
+  // Use the native compiler CLI to preserve the controller's entrypoint guard.
+  const build = spawnSync(
+    process.execPath,
+    ['build', '--compile', resolve('apps/threadnote/test/dev-skills/release-artifact.ts'), '--outfile', harness],
+    {encoding: 'utf8', timeout: 30_000},
+  );
+  expect(build.error, build.error?.message).toBeUndefined();
+  expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
 }, 30_000);
 afterAll(async () => {
   if (harnessDirectory) await rm(harnessDirectory, {recursive: true, force: true});
