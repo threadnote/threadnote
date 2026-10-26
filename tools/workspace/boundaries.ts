@@ -71,6 +71,7 @@ const allowedDependencies: Readonly<Record<string, readonly string[]>> = {
   inference: ['platform', 'store'],
   recall: ['platform', 'store', 'memory', 'inference', 'workspace', 'protocol'],
   graph: ['platform', 'store', 'workspace', 'inference', 'protocol'],
+  semantic: ['platform', 'store', 'workspace', 'protocol'],
   context: ['platform', 'store', 'memory', 'inference', 'recall', 'graph', 'workspace', 'protocol', 'integrations'],
   'remote-memory': ['platform', 'store', 'memory', 'protocol', 'recall', 'workspace', 'context', 'graph'],
   'integration-core': ['platform', 'store', 'workspace'],

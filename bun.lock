@@ -511,6 +511,17 @@
         "vitest": "5.0.5",
       },
     },
+    "packages/semantic": {
+      "name": "@threadnote/semantic",
+      "dependencies": {
+        "effect": "4.0.3",
+      },
+      "devDependencies": {
+        "@effect/vitest": "4.0.3",
+        "fast-check": "4.10.2",
+        "vitest": "5.0.5",
+      },
+    },
     "packages/store": {
       "name": "@threadnote/store",
       "dependencies": {
@@ -1130,6 +1141,8 @@
     "@threadnote/recall": ["@threadnote/recall@workspace:packages/recall"],
 
     "@threadnote/remote-memory": ["@threadnote/remote-memory@workspace:packages/remote-memory"],
+
+    "@threadnote/semantic": ["@threadnote/semantic@workspace:packages/semantic"],
 
     "@threadnote/store": ["@threadnote/store@workspace:packages/store"],
 
