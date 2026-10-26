@@ -46,6 +46,7 @@ export const nativeProgressSpanLabels = [
   'recall.assembleRefreshSources',
   'recall.hashRefreshGeneration',
   'recall.writeRefresh',
+  'recall.writeRefreshBody',
   'recall.rebuildIdentityConflicts',
   'recall.resolveLegacyMemoryLinks',
   'recall.refreshDerivedIndexesAfterCanonicalMutation',

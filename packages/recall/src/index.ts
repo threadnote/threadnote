@@ -1592,7 +1592,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `);
       yield* onProgress?.({documentCount, phase: 'activating'}) ?? Effect.void;
-    }),
+    }).pipe(Effect.withSpan('recall.writeRefreshBody')),
   );
   yield* writeRefresh.pipe(Effect.withSpan('recall.writeRefresh'));
   yield* dropRecallSourceScan(sql);

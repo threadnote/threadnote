@@ -516,10 +516,28 @@ export const runNativeCycle = <R>(
           const prior = request.previous
             ? runtime.snapshots.find(item => item.snapshot.snapshotId === request.previous)?.snapshot
             : undefined;
-          const last = runtime.snapshots.filter(item => item.snapshot.phaseId === selected.id).at(-1)?.snapshot;
-          if ((last && prior?.snapshotId !== last.snapshotId) || (!last && request.previous))
+          const phaseSnapshots = runtime.snapshots.filter(item => item.snapshot.phaseId === selected.id);
+          const last = phaseSnapshots.at(-1)?.snapshot;
+          const reviewed = new Set(runtime.reviews.map(item => item.snapshotId));
+          if (last && prior?.snapshotId !== last.snapshotId) {
+            const priorIndex = phaseSnapshots.findIndex(item => item.snapshot.snapshotId === prior?.snapshotId);
+            if (
+              !prior ||
+              priorIndex < 0 ||
+              !reviewed.has(prior.snapshotId) ||
+              prior.phaseHash === state.phases[selected.id].phaseHash ||
+              last.phaseHash === state.phases[selected.id].phaseHash ||
+              phaseSnapshots.slice(priorIndex + 1).some(item => reviewed.has(item.snapshot.snapshotId))
+            )
+              return yield* fail('review-history', 'Continue from this phase’s latest immutable snapshot.');
+            if (!request.reason?.trim())
+              return yield* fail(
+                'review-history',
+                'Explain the material amendment before superseding unreviewed snapshots.',
+              );
+          } else if (!last && request.previous)
             return yield* fail('review-history', 'Continue from this phase’s latest immutable snapshot.');
-          if (prior && !runtime.reviews.some(item => item.snapshotId === prior.snapshotId))
+          if (prior && !reviewed.has(prior.snapshotId))
             return yield* fail('review-pending', 'Record the previous review before the next source iteration.');
           const baseline = runtime.baselines[selected.id];
           if (!baseline) return yield* fail('baseline-required', 'Run begin-phase before implementation.');

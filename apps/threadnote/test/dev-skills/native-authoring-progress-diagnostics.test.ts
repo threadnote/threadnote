@@ -638,6 +638,34 @@ effectIt.effect('observes coarse refresh phases and explicit close finalization 
   }),
 );
 
+effectIt.effect(
+  'retains distinct transaction body timing through its unrecorded SQL parent in the failure packet',
+  () =>
+    Effect.sync(() => {
+      const lines: string[] = [];
+      const observer = make({sink: line => lines.push(line)});
+      const outer = observer.tracer.span(spanOptions('recall.writeRefresh'));
+      const transaction = observer.tracer.span(spanOptions('sql.transaction', Option.some(outer)));
+      const body = observer.tracer.span({
+        ...spanOptions('recall.writeRefreshBody', Option.some(transaction)),
+        startTime: 2_000_000n,
+      });
+      expect(Option.getOrUndefined(body.parent)).toBe(transaction);
+      expect(Option.getOrUndefined(transaction.parent)).toBe(outer);
+      body.end(6_000_000n, Exit.succeed(undefined));
+      transaction.end(9_000_000n, Exit.succeed(undefined));
+      outer.end(10_000_000n, Exit.succeed(undefined));
+      expect(lines).toHaveLength(0);
+      observer.reportFailure();
+      expect(lines).toHaveLength(1);
+      const packet = JSON.parse(lines[0].slice(lines[0].indexOf('{')));
+      expect(packet.totals['recall.writeRefreshBody']).toMatchObject({ended: 1, inclusiveMs: 4});
+      expect(packet.totals['recall.writeRefresh']).toMatchObject({ended: 1, inclusiveMs: 9});
+      expect(packet.totals).not.toHaveProperty('sql.transaction');
+      expect(packet.activeCount).toBe(0);
+    }),
+);
+
 effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and the worst-case failure line', () =>
   Effect.sync(() => {
     const readings = [100, 110, NaN, Infinity, -100, 105, 120];
