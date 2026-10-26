@@ -299,7 +299,7 @@ export const assertShareGitPublicationImages = Effect.fn('share.assertGitPublica
       const current = yield* runGitCommand(
         false,
         git,
-        ['-C', worktree, 'show', `${revision}:${safePath}`],
+        ['-C', worktree, 'show', `${revision}:${safePath}`, '--'],
         'Shared publication preimage read failed',
       );
       if (current!.stdout !== expectedContent && !(resume && current!.stdout === desiredContent))
@@ -573,7 +573,9 @@ export function assertSharedWorktreeFileReady(
     if (options.exactRetryContent !== undefined && options.allowCleanTrackedReplacement === true) {
       if (tracked && !dirty) return;
       if (tracked && dirty) {
-        const index = yield* runCommand(git, ['-C', worktree, 'show', `:${safeRelativePath}`], {allowFailure: true});
+        const index = yield* runCommand(git, ['-C', worktree, 'show', `:${safeRelativePath}`, '--'], {
+          allowFailure: true,
+        });
         const allowed = (content: string) =>
           (expectedContent !== undefined && contentEquivalent(content, expectedContent)) ||
           contentEquivalent(content, options.exactRetryContent!);
@@ -789,7 +791,9 @@ const gitFileContent = Effect.fn('share.gitFileContent')(function* (
   rev: string,
   relativePath: string,
 ) {
-  const result = yield* runCommand('git', ['-C', worktree, 'show', `${rev}:${relativePath}`], {allowFailure: true});
+  const result = yield* runCommand('git', ['-C', worktree, 'show', `${rev}:${relativePath}`, '--'], {
+    allowFailure: true,
+  });
   return result.exitCode === 0 ? result.stdout : undefined;
 });
 

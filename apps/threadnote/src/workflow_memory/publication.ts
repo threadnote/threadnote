@@ -476,7 +476,7 @@ const verifyFinalGraph = Effect.fn('workflowPublication.verifyFinalGraph')(funct
             'Every final node needs its own verified Git commit receipt.',
           );
         yield* git(['merge-base', '--is-ancestor', receipt.commit, remoteCommit]);
-        const remoteContent = (yield* git(['show', `${remoteCommit}:${path}`])).stdout;
+        const remoteContent = (yield* git(['show', `${remoteCommit}:${path}`, '--'])).stdout;
         if (
           remoteContent !== node.prepared.memory ||
           (yield* readOptionalResource(config, node.prepared.memoryUri)) !== node.prepared.memory
@@ -509,7 +509,7 @@ const verifyFinalGraph = Effect.fn('workflowPublication.verifyFinalGraph')(funct
               'An approved external relation target changed or left the configured share.',
             );
           const targetPath = resourceUriToWorktreeRelative(config, target.uri, scope.team);
-          const remote = yield* git(['show', `${remoteCommit}:${targetPath}`]).pipe(Effect.result);
+          const remote = yield* git(['show', `${remoteCommit}:${targetPath}`, '--']).pipe(Effect.result);
           if (remote._tag === 'Failure' || remote.success.stdout !== target.content)
             return yield* workflowError(
               'publication-readback-conflict',

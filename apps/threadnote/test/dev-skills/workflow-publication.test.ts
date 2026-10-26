@@ -13,6 +13,7 @@ import {
   type WriteDurableMemoryParams,
 } from '../../src/mcp/server/memory.js';
 import {
+  gitFileContent,
   publishShareGitChangeVerified,
   writeSharedWorktreeFile,
   type ShareGitCommitReceipt,
@@ -198,6 +199,7 @@ describe('personal workflow publication', () => {
         expect(receipt.contentHash).toBe(sha256HexSync(content));
         const head = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
         expect(receipt.commit).toBe(head);
+        expect(yield* gitFileContent(f.worktree, receipt.commit, relativePath)).toBe(content);
         expect((yield* f.git(f.remote, ['show', `${receipt.commit}:${relativePath}`, '--'])).stdout).toBe(content);
         const replay = yield* publishShareGitChangeVerified(f.worktree, relativePath, 'replay long filename', {
           ...options,
