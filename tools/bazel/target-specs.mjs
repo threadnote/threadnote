@@ -15,6 +15,9 @@ import {Option as EffectOption} from 'effect';
 
 const defaultRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 export const createTargetSpecs = async (root = defaultRoot) => {
+  // The disposable extension executes inside the editor, whose runtime supplies
+  // this module. Keep the exemption scoped; application imports still need npm ownership.
+  const hostModules = {'apps/threadnote/test/fixtures/semantic/editor/probe.cjs': ['vscode']};
   const repositoryFiles = listRepositoryFiles(root);
   const ignoredNames = new Set([
     '.DS_Store',
@@ -229,6 +232,7 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         read: readSource,
         exists: applicationSourceExists,
         workspaces: applicationWorkspaces,
+        hostModules,
         imports: applicationSourceImports,
       });
       const closureFiles = new Set(closure.files);
@@ -926,5 +930,5 @@ export const createTargetSpecs = async (root = defaultRoot) => {
     },
   ];
 
-  return {targetSpecs, testSuites, staticTargets, virtualModules};
+  return {targetSpecs, testSuites, staticTargets, virtualModules, hostModules};
 };

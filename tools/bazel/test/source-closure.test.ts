@@ -13,6 +13,18 @@ const collect = (files: Record<string, string>, entries = ['src/0.ts'], workspac
     workspaces,
   });
 
+it('scopes editor-supplied modules to the declared fixture host', () => {
+  const files = {'fixture/probe.cjs': "require('vscode');", 'src/app.ts': "import 'vscode';"};
+  const options = {
+    read: (path: string) => files[path as keyof typeof files],
+    exists: (path: string) => path in files,
+    workspaces: new Map(),
+    hostModules: {'fixture/probe.cjs': ['vscode']},
+  };
+  expect(collectSourceClosure(['fixture/probe.cjs'], options)).toEqual({files: ['fixture/probe.cjs'], npm: []});
+  expect(collectSourceClosure(Object.keys(files), options).npm).toEqual(['vscode']);
+});
+
 it('retains namespace dependencies after interpolated templates', () => {
   const files = {
     'src/0.ts': 'const label = `${1}`; export * as ns from "./1.js";',
