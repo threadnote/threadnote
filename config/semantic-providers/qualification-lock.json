@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "phase": "P00",
-  "status": "incomplete",
+  "status": "candidate-feasibility-evidence",
   "observedOn": "2026-10-26",
   "requiredPlatformsSource": "scripts/release-targets.ts",
   "requiredPlatforms": [
@@ -26,9 +26,11 @@
         "nodeMinimum": ">=22.22.2"
       },
       "license": {
-        "reported": "Apache-2.0",
+        "reported": "Apache-2.0 AND MIT",
         "evidence": ["https://github.com/typescript-language-server/typescript-language-server/blob/v6.0.2/LICENSE"],
-        "redistribution": "not bundled; distribution obligations remain a release gate"
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680",
+        "inspectedArtifactLicenseSha256": "899d21038f87dd6243dd33b7ee82a078e639d4325a427c01e64d8116315b9680"
       },
       "artifacts": [
         {
@@ -46,7 +48,7 @@
         "darwin-arm64": {
           "status": "pilot-evidence",
           "evidence": [
-            "Exact cross-file unsaved definition, complete references and rename observed after didChange version 2; CRLF preserved; disk unchanged; owned process group drained without forced termination."
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
           ]
         },
         "darwin-x64": {
@@ -80,7 +82,35 @@
       },
       "productionQualified": false,
       "blockers": [
-        "JavaScript-specific fixture, code actions, full lifecycle, all other platform rows and final product conformance remain unqualified."
+        "Code actions, project variants, full lifecycle, all other platform rows and final product conformance remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "typescript",
+          "reportSha256": "59785af16aa25b59b5bf1e14b88b26b23ddaaa06713605b58a8fadddccaac1d6",
+          "configSha256": "088bf10c8b8fd88f339ae60bf6890d3fa1b172e36276f12bd32fbcee84c65e49",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "javascript",
+          "reportSha256": "cd13c6d95683b846161f2a3c25d80df98e6950bc23ce1c352daf1ecc4c220a91",
+          "configSha256": "eb1bf91073eec817cf7143d094ab4a51944ec0b508df496a0a5c174d8656d042",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
       ]
     },
     {
@@ -149,8 +179,10 @@
       },
       "license": {
         "reported": "MIT",
-        "evidence": ["https://github.com/DetachHead/basedpyright/blob/1.40.2/LICENSE.txt"],
-        "redistribution": "not bundled; distribution obligations remain a release gate"
+        "evidence": ["https://github.com/DetachHead/basedpyright/blob/v1.40.2/LICENSE.txt"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d",
+        "inspectedArtifactLicenseSha256": "f7c936bc43f132b08497ac952e9376cbc102e5eedb4bf6ec902ea8442bd9c68d"
       },
       "artifacts": [
         {
@@ -163,7 +195,7 @@
         "darwin-arm64": {
           "status": "pilot-evidence",
           "evidence": [
-            "Exact cross-file unsaved definition, complete references and rename observed after didChange version 2; CRLF preserved; disk unchanged; owned process group drained without forced termination."
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
           ]
         },
         "darwin-x64": {
@@ -198,6 +230,21 @@
       "productionQualified": false,
       "blockers": [
         "Representative edit-based code action, interpreter switching, dynamic analysis limits, other platforms and final product conformance remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "python",
+          "reportSha256": "abca66a1e8554af0a6c3e01f00e9556ef799039c927928c34bc314b1ec0516ae",
+          "configSha256": "d1fd6cb4c58ce686f0bd4183cc6492e6e3789d10f6be30f97b66907c93ebdbff",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
       ]
     },
     {
@@ -274,12 +321,17 @@
       "version": "v0.24.0",
       "runtime": {
         "goMinimum": "1.27.0",
-        "hostGoObserved": "1.25.14"
+        "goObserved": "1.27.3",
+        "initialHostGoObserved": "1.25.14",
+        "pilotExecutableSha256": "701228f3770992e76ba343b3855b0c164064a4225c699f1e5b765b274c7836af",
+        "pilotGoExecutableSha256": "aa355b078a81158d418079a3f8c776719eb99cc6f527e39ffa3250c66566aafb"
       },
       "license": {
         "reported": "BSD-3-Clause",
         "evidence": ["https://cs.opensource.google/go/x/tools/+/gopls/v0.24.0:LICENSE"],
-        "redistribution": "not bundled; distribution obligations remain a release gate"
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+        "inspectedArtifactLicenseSha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
       },
       "artifacts": [
         {
@@ -290,8 +342,10 @@
       ],
       "platforms": {
         "darwin-arm64": {
-          "status": "unqualified",
-          "evidence": []
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
         },
         "darwin-x64": {
           "status": "unqualified",
@@ -324,7 +378,22 @@
       },
       "productionQualified": false,
       "blockers": [
-        "Source artifact pinned; executable build/toolchain, process probe and every platform cell remain unqualified."
+        "Only an isolated Go1.27.3 macOS arm64 fixture is verified; project variants, full capability/lifecycle/platform matrix, dependency/license inventory and production conformance remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "go",
+          "reportSha256": "e02ce13cade633c421303e7feb2a7cc7a4823b8fc608158ccd9a64fc75bda150",
+          "configSha256": "10b41df35b68942243bf5253c412d5885176210144b8fecb457c5ce039892494",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
       ]
     },
     {
@@ -333,12 +402,28 @@
       "version": "2026-10-26",
       "runtime": {
         "kind": "native",
-        "cargoAndRustToolchain": "not qualified"
+        "observedServerVersion": "rust-analyzer 0.3.3097-standalone (0c4d74686b 2026-10-22)",
+        "rustcObserved": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+        "cargoObserved": "cargo 1.99.1 (5f94df478 2026-08-27)",
+        "pilotExecutableSha256": "29e8a7d408e7d6936c6d762f2982820812578d7f97a3f5013789de6fc8a711d4",
+        "pilotRustcExecutableSha256": "1ba7bb8e273bd64125f4048d2ecce530e0a6470e565ab1b3aecf0b82b532f7b1",
+        "pilotCargoExecutableSha256": "6d576d8058f8ca643e8fce55b64ee3c614ba64c9da2e536bae843e6a2e1f3951",
+        "rustSrc": "1.99.1 (isolated toolchain sysroot)"
       },
       "license": {
         "reported": "MIT OR Apache-2.0",
         "evidence": ["https://github.com/rust-lang/rust-analyzer/tree/2026-10-26"],
-        "redistribution": "not bundled; distribution obligations remain a release gate"
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSources": [
+          {
+            "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-MIT",
+            "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+          },
+          {
+            "url": "https://raw.githubusercontent.com/rust-lang/rust-analyzer/2026-10-26/LICENSE-APACHE",
+            "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+          }
+        ]
       },
       "artifacts": [
         {
@@ -389,85 +474,9 @@
       ],
       "platforms": {
         "darwin-arm64": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "darwin-x64": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "linux-arm64": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "linux-arm64-musl": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "linux-x64-baseline": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "linux-x64-musl-baseline": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "windows-arm64": {
-          "status": "unqualified",
-          "evidence": []
-        },
-        "windows-x64-baseline": {
-          "status": "unqualified",
-          "evidence": []
-        }
-      },
-      "productionQualified": false,
-      "blockers": [
-        "Provider process and toolchain/project fixtures have not run; all platform rows remain unqualified."
-      ]
-    },
-    {
-      "id": "jdtls",
-      "languages": ["java"],
-      "version": "1.63.0-202610191322",
-      "runtime": {
-        "javaMinimumObserved": "25",
-        "javaObserved": "Eclipse Temurin 25.0.5+8",
-        "projectJavaLevel": "21",
-        "documentationMismatch": "Upstream README says Java21 minimum; the exact distribution bundles org.eclipse.core.filesystem requiring JavaSE25. Java21 startup failed with exit13."
-      },
-      "license": {
-        "reported": "EPL-2.0",
-        "evidence": ["https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE"],
-        "redistribution": "not bundled; distribution obligations remain a release gate"
-      },
-      "artifacts": [
-        {
-          "url": "https://codeload.github.com/eclipse-jdtls/eclipse.jdt.ls/tar.gz/d98abba8f04cf041542d9ebb6df0d472a1395606",
-          "sha256": "59bf4c6a6442a61739e1f0bf7e35130a172b2c6b957b7f5e4f6fbd8376960c35",
-          "version": "v1.63.0",
-          "commit": "d98abba8f04cf041542d9ebb6df0d472a1395606",
-          "kind": "source-only"
-        },
-        {
-          "kind": "distribution",
-          "version": "1.63.0-202610191322",
-          "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
-          "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
-        },
-        {
-          "kind": "runtime-darwin-arm64",
-          "version": "25.0.5+8.0.LTS",
-          "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_mac_hotspot_25.0.5_8.tar.gz",
-          "sha256": "36dc14d797aaff6d89aab302cd053fdba6207dfdcf772052fa7b023a94b0e857"
-        }
-      ],
-      "platforms": {
-        "darwin-arm64": {
           "status": "pilot-evidence",
           "evidence": [
-            "Exact dirty definition/references/complete rename passed for a two-file Maven fixture with Unicode/CRLF and project language21; source disk unchanged; provider exit0 and owned group drained.",
-            "Java21 startup failed; Java25 matches the distribution requirement."
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
           ]
         },
         "darwin-x64": {
@@ -501,7 +510,175 @@
       },
       "productionQualified": false,
       "blockers": [
-        "Gradle, diagnostics/symbols/hover/actions, build-import denial, complete distribution licensing and all production/platform qualification remain unresolved. Kotlin is deferred."
+        "Early immediate shutdown produced a worker panic despite exit0; retained as negative lifecycle evidence. Current fixture waits for reported quiescence and rejects logged panics.",
+        "Enabled/disabled Cargo build-script markers passed; procedural macros, dependency download control, broader resource limits and production execution policy remain unqualified.",
+        "Standalone archive dependency/notice inventory and all other platform/project/capability cells remain unqualified."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "rust",
+          "reportSha256": "f95f90d2f791b5f6376af2615aeca8972d68b691278d86ec074a5600eea434e9",
+          "configSha256": "2fd04c4be47701b223f96e42bf07547f574dfff12c9a4e596236ce44c5d90b6c",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "rust-build-enabled",
+          "reportSha256": "0ce26080d4765cff5a8f07ce823b952e7ae5b91b65f4153c475b846be885559d",
+          "configSha256": "9ddc7b5f4dcd0a41a868da7c41ff8c730c82a38d2c4561a410f755794f9af623",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "rust-build-denied",
+          "reportSha256": "0cb99aab782152283c28afd596d3e587e73b70298142557e6bfb3f1837cba3f1",
+          "configSha256": "0e335b358ac047b2cf78035126b36764a8fabf848f91998c204757675970c817",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
+      ]
+    },
+    {
+      "id": "jdtls",
+      "languages": ["java"],
+      "version": "1.63.0-202610191322",
+      "runtime": {
+        "javaMinimumObserved": "25",
+        "javaObserved": "Eclipse Temurin 25.0.5+8",
+        "projectJavaLevel": "21",
+        "documentationMismatch": "Upstream README says Java21 minimum; the exact distribution bundles org.eclipse.core.filesystem requiring JavaSE25. Java21 startup failed with exit13.",
+        "gradleObserved": "9.8.2"
+      },
+      "license": {
+        "reported": "EPL-2.0",
+        "evidence": ["https://github.com/eclipse-jdtls/eclipse.jdt.ls/blob/v1.63.0/LICENSE"],
+        "redistribution": "not bundled; distribution obligations remain a release gate",
+        "inspectedSourceSha256": "209fe24bf55677bbf81c2b0481c1403201fab57b3b4c609971eba4ec8162b99c"
+      },
+      "artifacts": [
+        {
+          "url": "https://codeload.github.com/eclipse-jdtls/eclipse.jdt.ls/tar.gz/d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "sha256": "59bf4c6a6442a61739e1f0bf7e35130a172b2c6b957b7f5e4f6fbd8376960c35",
+          "version": "v1.63.0",
+          "commit": "d98abba8f04cf041542d9ebb6df0d472a1395606",
+          "kind": "source-only"
+        },
+        {
+          "kind": "distribution",
+          "version": "1.63.0-202610191322",
+          "url": "https://download.eclipse.org/jdtls/milestones/1.63.0/jdt-language-server-1.63.0-202610191322.tar.gz",
+          "sha256": "b1f2abe0b3cccb462cf64fb4a5587c7d09df60cf8be7748b152cbd89d018bdc4"
+        },
+        {
+          "kind": "runtime-darwin-arm64",
+          "version": "25.0.5+8.0.LTS",
+          "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_mac_hotspot_25.0.5_8.tar.gz",
+          "sha256": "36dc14d797aaff6d89aab302cd053fdba6207dfdcf772052fa7b023a94b0e857"
+        },
+        {
+          "url": "https://services.gradle.org/distributions/gradle-9.8.2-bin.zip",
+          "sha256": "21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607",
+          "kind": "gradle-pilot-runtime"
+        }
+      ],
+      "platforms": {
+        "darwin-arm64": {
+          "status": "pilot-evidence",
+          "evidence": [
+            "Exact cross-file dirty version2 definition, complete references and rename; Unicode/CRLF preserved; source files unchanged; no forced cleanup and owned POSIX group drained. Fixture-level evidence only."
+          ]
+        },
+        "darwin-x64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-arm64-musl": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "linux-x64-musl-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-arm64": {
+          "status": "unqualified",
+          "evidence": []
+        },
+        "windows-x64-baseline": {
+          "status": "unqualified",
+          "evidence": []
+        }
+      },
+      "productionQualified": false,
+      "blockers": [
+        "Maven and Gradle fixtures plus enabled/disabled Gradle import markers pass on macOS arm64 only. Diagnostics/symbols/hover/actions, production import policy, complete distribution licensing and other platform cells remain unqualified. Kotlin is deferred."
+      ],
+      "pilotEvidence": [
+        {
+          "fixture": "java-maven",
+          "reportSha256": "00d958a9fb22a8b4a6635ceddb9202b0f9f222cf499d4f578cda955cd01ece64",
+          "configSha256": "a2379cabbe391a2e80690340880f27add5be32e459a8712c9c04bd27f04f245c",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "java-gradle-enabled",
+          "reportSha256": "a83f4a979175feb4431b02426656c2672e4300f65a62d7ed80efa4f8ae40e838",
+          "configSha256": "a154f54682661e440f7653a1f7da3ef943f2fd76a5bc3d0db20d3ed197275def",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        },
+        {
+          "fixture": "java-gradle-denied",
+          "reportSha256": "1144b9669ec1a98e059c788014d295aecef6922563483dbf13a2fa2457354cb6",
+          "configSha256": "abee4bf61afe9ab3eb83c96a3940b4ab82eb34a5445e76e9a60191c2c2c79fc5",
+          "sourceHashes": {
+            "harness": "aac333d126120c4fea828fb0514c4360237d67018571f2c92dca9247c5ade27c",
+            "fixtures": "17870a062929a11a3802f2b3e2ce77be32d65272f0c6589840eabc387bebd1cc",
+            "transport": "f1aecc08bb40ef2230ea18dd024a076806f667b62a3f6557bf15ff4995e5f0d1",
+            "assertions": "385b0223f440d226627ee72184885d617b8b395148994a0d8a99ed8892cfe07c",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "outcome": "passed"
+        }
       ]
     },
     {
@@ -594,18 +771,54 @@
         "concurrent edit after first target",
         "ownership transfer after first target",
         "idempotent retry",
-        "unqualified client receives no edit",
+        "Framed initialize/initialized exchange denies generic and forged bridge clients; stolen proposal ID cannot apply; qualified private channel applies opaque proposal and safely retries.",
         "owned POSIX process group drained after complete host report"
       ],
       "status": "disposable-prototype-passed",
       "limitations": [
-        "In-memory authority and retry state only. Does not certify cross-process ownership, crash recovery, standard LSP mutation, resource operations or other OS/architectures.",
-        "Unqualified-client fixture tests a local branch only; it does not exercise a production LSP initialization/capability exchange. Process cleanup covers the owned POSIX process group; deliberately detached descendants and Windows tree cleanup are not qualified."
-      ]
+        "Private one-use fixture capability and in-memory authority/retry state only; production bridge enrollment, durable authority, crash recovery and resource operations remain unqualified.",
+        "The isolated test hosts require bounded termination after their complete reports; forced cleanup is recorded. This does not qualify graceful product lifecycle, deliberately detached descendants or Windows process trees."
+      ],
+      "receipts": {
+        "vscode": {
+          "reportSha256": "064b2ffde4a94f2b9294b7344b6bfd0bd9470e14f186619e58d43b87bf25898f",
+          "launcherSha256": "8ce2bebb778bca2c0724fe5c5c0f894a14c534c64b188ad728928f28393d47e9",
+          "sourceHashes": {
+            "runner": "bc07bff0f8b17d20618a48588ef2cdbb4ea019d3fbf73f47cde83593363c3978",
+            "probe": "3405090a862151ff2b55e2cd9819d31680ae9277cea18afa9bd0382ef33fec8a",
+            "wire": "3e7ed165138094867da5768fc1f0d0322c603f6ec859b57d8ef0f8eafa40cc81",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "terminatedAfterHostReport": true,
+          "forcedCleanup": true,
+          "ownedGroupDrained": true
+        },
+        "cursor": {
+          "reportSha256": "82eeec1eb6c374d8a15eb484ae9b3b892d956bbdedbd39a86e73a3138d8f9165",
+          "launcherSha256": "de63d7265e20da15329ee70250c8596851e39d08cfdc814d5f73c00b8c7962a1",
+          "sourceHashes": {
+            "runner": "bc07bff0f8b17d20618a48588ef2cdbb4ea019d3fbf73f47cde83593363c3978",
+            "probe": "3405090a862151ff2b55e2cd9819d31680ae9277cea18afa9bd0382ef33fec8a",
+            "wire": "3e7ed165138094867da5768fc1f0d0322c603f6ec859b57d8ef0f8eafa40cc81",
+            "process": "1e47268d16257c1c5c5125fbfaea5b8539982d4ebf1a0cff99090b0b63c3c1c8"
+          },
+          "terminatedAfterHostReport": true,
+          "forcedCleanup": true,
+          "ownedGroupDrained": true
+        }
+      }
     }
   },
   "releaseLanguages": ["typescript", "javascript", "python", "go", "rust", "java"],
   "deferredLanguages": {
     "kotlin": "Deferred by user direction 2026-10-26; mixed Java/Kotlin, Kotlin JVM, Android and KMP are not current release gates."
+  },
+  "selectedProviders": {
+    "typescript": "typescript-language-server",
+    "javascript": "typescript-language-server",
+    "python": "basedpyright",
+    "go": "gopls",
+    "rust": "rust-analyzer",
+    "java": "jdtls"
   }
 }

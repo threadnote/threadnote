@@ -12,6 +12,33 @@ const file = (uri: string, rootUri: string) => {
 const key = (name: string, range: Range) =>
   `${name}:${range.start.line}:${range.start.character}:${range.end.line}:${range.end.character}`;
 
+export function checkProbeShutdown(stop: {
+  code: number | null;
+  forced: boolean;
+  exitObserved: boolean;
+  exitTimedOut: boolean;
+  shutdownError?: string;
+  stderr: string;
+  panicObserved: boolean;
+  shutdownCompleted: boolean;
+  stdioClosed: boolean;
+  cleanup: {drained: boolean; scope: string};
+}): boolean {
+  return (
+    stop.code === 0 &&
+    stop.exitObserved &&
+    !stop.exitTimedOut &&
+    !stop.shutdownError &&
+    stop.shutdownCompleted &&
+    stop.stdioClosed &&
+    !stop.forced &&
+    stop.cleanup.drained &&
+    stop.cleanup.scope === 'posix-process-group' &&
+    !stop.panicObserved &&
+    !stop.stderr.includes('panicked at')
+  );
+}
+
 /** Independent oracle for the fixed, disposable two-file unsaved-symbol fixture. */
 export function checkProbeReferences(
   files: Record<string, string>,

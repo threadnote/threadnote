@@ -1,18 +1,322 @@
 import {fileURLToPath} from 'node:url';
-import {describe, expect, it} from 'vitest';
+// oxlint-disable-next-line effecttsgo/node-builtin-import -- Static checked-in fixture bytes for the inventory contract.
+import {readFileSync} from 'node:fs';
+import {probeGuardedExchange} from '../fixtures/semantic/editor/proposal-wire.cjs';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
+import {Schema} from 'effect';
+import {
+  ProbeConfig,
+  expandProbeScratch,
+  providerFixture,
+} from '../../../../tools/semantic/semantic_provider_fixture.js';
 import {
   ProbeFrameDecoder,
   encodeProbeFrame,
   startSemanticProbe,
+  observeProbeReadiness,
+  appendProbeStderr,
 } from '../../../../tools/semantic/semantic_lsp_probe.js';
 import {
   checkProbeDefinition,
   checkProbeReferences,
   checkProbeRename,
+  checkProbeShutdown,
 } from '../../../../tools/semantic/semantic_probe_assertions.js';
 
 describe('disposable semantic provider qualification', () => {
+  it('denies unqualified and forged bridge clients over framed JSON-RPC', async () => {
+    // Local socket boundary; real host fixtures additionally perform conditional buffer mutations.
+    let applyCalls = 0;
+    await probeGuardedExchange({
+      apply: async () => {
+        applyCalls++;
+        return {status: 'applied', applied: [0, 1, 2]};
+      },
+    });
+    expect(applyCalls).toBe(2);
+  });
+
+  it('covers the release inventory without advertising pilot evidence as production support', () => {
+    const ledger = JSON.parse(
+      readFileSync(new URL('../../../../config/semantic-providers/qualification-lock.json', import.meta.url), 'utf8'),
+    ) as {
+      automaticDownloadOrExecution: boolean;
+      requiredPlatforms: string[];
+      releaseLanguages: string[];
+      selectedProviders: Record<string, string>;
+      providers: {
+        id: string;
+        languages: string[];
+        productionQualified: boolean;
+        platforms: Record<string, unknown>;
+        pilotEvidence?: {reportSha256: string; configSha256: string; sourceHashes: Record<string, string>}[];
+      }[];
+    };
+    expect(ledger.automaticDownloadOrExecution).toBe(false);
+    const targetSource = readFileSync(new URL('../../../../scripts/release-targets.ts', import.meta.url), 'utf8');
+    const targets = [...targetSource.matchAll(/['"]bun-([a-z0-9-]+)['"]/gu)].map(match => match[1]);
+    expect(targets.length).toBeGreaterThan(0);
+    expect([...ledger.requiredPlatforms].sort()).toEqual(targets.sort());
+    expect([...ledger.releaseLanguages].sort()).toEqual(
+      ['typescript', 'javascript', 'python', 'go', 'rust', 'java'].sort(),
+    );
+    expect(Object.keys(ledger.selectedProviders).sort()).toEqual([...ledger.releaseLanguages].sort());
+    expect(new Set(ledger.providers.map(x => x.id)).size).toBe(ledger.providers.length);
+    for (const provider of ledger.providers) {
+      expect(provider.productionQualified).toBe(false);
+      expect(Object.keys(provider.platforms).sort()).toEqual([...ledger.requiredPlatforms].sort());
+    }
+    for (const [language, id] of Object.entries(ledger.selectedProviders)) {
+      const provider = ledger.providers.find(x => x.id === id);
+      expect(provider?.languages).toContain(language);
+      expect(provider?.pilotEvidence?.length).toBeGreaterThan(0);
+      for (const evidence of provider?.pilotEvidence ?? []) {
+        expect(evidence.reportSha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect(evidence.configSha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect(Object.keys(evidence.sourceHashes).sort()).toEqual(
+          ['harness', 'fixtures', 'transport', 'assertions', 'process'].sort(),
+        );
+        for (const hash of Object.values(evidence.sourceHashes)) expect(hash).toMatch(/^[a-f0-9]{64}$/u);
+      }
+    }
+  });
+
+  it('clamps each readiness request to the remaining overall deadline', async () => {
+    // Promise/timer boundary: no real provider or wall-clock wait is involved.
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
+    try {
+      const start = performance.now();
+      const requests: {at: number; budget: number}[] = [];
+      let result: Awaited<ReturnType<typeof observeProbeReadiness>> | undefined;
+      const pending = observeProbeReadiness(
+        budget => {
+          requests.push({at: performance.now(), budget});
+          return new Promise(resolve => setTimeout(() => resolve(null), budget));
+        },
+        () => false,
+        25_000,
+      ).then(value => {
+        result = value;
+      });
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(result?.ready).toBe(false);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) expect(request.at + request.budget).toBeLessThanOrEqual(start + 25_000);
+      await pending;
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds retained readiness observations without hiding the total attempt count', async () => {
+    vi.useFakeTimers({toFake: ['setTimeout', 'clearTimeout', 'performance']});
+    try {
+      const pending = observeProbeReadiness(
+        async () => null,
+        () => false,
+        10_000,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+      expect(result.ready).toBe(false);
+      expect(result.attemptCount).toBeGreaterThan(32);
+      expect(result.attempts).toHaveLength(32);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a logged provider panic or failed shutdown even with exit code zero', () => {
+    const clean = {
+      code: 0,
+      forced: false,
+      exitObserved: true,
+      exitTimedOut: false,
+      stderr: '',
+      panicObserved: false,
+      shutdownCompleted: true,
+      stdioClosed: true,
+      cleanup: {scope: 'posix-process-group', drained: true},
+    };
+    expect(checkProbeShutdown(clean)).toBe(true);
+    expect(checkProbeShutdown({...clean, stderr: 'WARNING: incubator module'})).toBe(true);
+    expect(
+      checkProbeShutdown({
+        ...clean,
+        stderr: "thread 'Worker9' (21426371) panicked at crates/rust-analyzer/src/reload.rs:308",
+      }),
+    ).toBe(false);
+    expect(checkProbeShutdown({...clean, shutdownError: 'request rejected'})).toBe(false);
+    expect(checkProbeShutdown({...clean, exitObserved: false})).toBe(false);
+    expect(checkProbeShutdown({...clean, shutdownCompleted: false})).toBe(false);
+    expect(checkProbeShutdown({...clean, stdioClosed: false})).toBe(false);
+    expect(checkProbeShutdown({...clean, panicObserved: true})).toBe(false);
+  });
+
+  it('retains panic observations across arbitrary stderr chunks and bounded tails', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.oneof(fc.string({maxLength: 512}), fc.constantFrom('pani', 'cked at', 'panicked at')), {
+          maxLength: 20,
+        }),
+        chunks => {
+          const result = chunks.reduce(appendProbeStderr, {stderr: '', panicObserved: false});
+          const complete = chunks.join('');
+          expect(result).toEqual({stderr: complete.slice(-4096), panicObserved: complete.includes('panicked at')});
+        },
+      ),
+      {numRuns: 100},
+    );
+  });
+
+  it('rejects a final panic whose header has fallen outside the retained stderr tail', async () => {
+    const peer = startSemanticProbe(
+      process.execPath,
+      [fileURLToPath(new URL('../fixtures/semantic/fake-provider.ts', import.meta.url)), 'panic-on-exit'],
+      process.cwd(),
+    );
+    try {
+      await peer.request('echo', {});
+    } finally {
+      const stopped = await peer.stop();
+      expect(stopped).toMatchObject({code: 0, panicObserved: true, shutdownCompleted: true, stdioClosed: true});
+      expect(stopped.stderr).toHaveLength(4096);
+      expect(stopped.stderr).not.toContain('panicked at');
+      expect(checkProbeShutdown(stopped)).toBe(false);
+    }
+  });
+
+  it('rejects an exit-zero provider that terminates before the shutdown handshake', async () => {
+    const peer = startSemanticProbe(
+      process.execPath,
+      [fileURLToPath(new URL('../fixtures/semantic/fake-provider.ts', import.meta.url))],
+      process.cwd(),
+    );
+    try {
+      await peer.request('exit-early', {});
+      await expect(peer.request('hang', {}, 1000)).rejects.toThrow();
+    } finally {
+      const stopped = await peer.stop();
+      expect(stopped).toMatchObject({code: 0, shutdownCompleted: false, stdioClosed: true});
+      expect(stopped.shutdownError).toBeTypeOf('string');
+      expect(checkProbeShutdown(stopped)).toBe(false);
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects final writes after the provider closes its input', async () => {
+    const peer = startSemanticProbe(
+      process.execPath,
+      [fileURLToPath(new URL('../fixtures/semantic/fake-provider.ts', import.meta.url)), 'close-input-on-shutdown'],
+      process.cwd(),
+    );
+    try {
+      await peer.request('echo', {});
+    } finally {
+      const stopped = await peer.stop();
+      expect(peer.events).toContain('probe/input-closed');
+      expect(stopped).toMatchObject({shutdownCompleted: false, stdioClosed: true, cleanup: {drained: true}});
+      expect(stopped.shutdownError).toBeTypeOf('string');
+      expect(checkProbeShutdown(stopped)).toBe(false);
+    }
+  });
+
+  it('observes provider notification payloads used for quiescence qualification', async () => {
+    const observed: unknown[] = [];
+    const peer = startSemanticProbe(
+      process.execPath,
+      [fileURLToPath(new URL('../fixtures/semantic/fake-provider.ts', import.meta.url))],
+      process.cwd(),
+      {},
+      (method, params) => observed.push({method, params}),
+    );
+    try {
+      const params = {health: 'ok', quiescent: true};
+      await peer.request('emit-status', params);
+      expect(observed).toContainEqual({method: 'experimental/serverStatus', params});
+    } finally {
+      expect(await peer.stop()).toMatchObject({code: 0, forced: false});
+    }
+  });
+
+  it.each([
+    ['typescript', 3],
+    ['javascript', 3],
+    ['python', 3],
+    ['go', 2],
+    ['rust', 4],
+    ['java', 3],
+  ] as const)('authors a deterministic two-file %s fixture with %i occurrences', (language, count) => {
+    const fixture = providerFixture({language});
+    expect(Object.keys(fixture.sources)).toHaveLength(2);
+    expect(
+      Object.values(fixture.sources)
+        .join('')
+        .match(/SavedName/gu),
+    ).toHaveLength(count);
+    expect(Object.values(fixture.sources).join('')).toContain('🧵');
+    for (const source of Object.values(fixture.sources)) {
+      expect(source.endsWith('\r\n')).toBe(true);
+      expect(source.replaceAll('\r\n', '')).not.toContain('\n');
+    }
+    const original = structuredClone(fixture);
+    fixture.sources[Object.keys(fixture.sources)[0]] = 'changed';
+    expect(providerFixture({language})).toEqual(original);
+  });
+
+  it('requires explicit build/import expectations and rejects mismatched fixture settings', () => {
+    const decode = Schema.decodeUnknownSync(ProbeConfig, {onExcessProperty: 'error'});
+    const base = {id: 'test', version: '1', command: 'provider', args: [], language: 'rust'};
+    expect(decode(base).fixture).toBeUndefined();
+    for (const extra of [
+      {fixture: 'java-gradle', expectedBuildExecution: true},
+      {fixture: 'rust-build-script'},
+      {expectedBuildExecution: false},
+      {buildScriptProbe: true},
+      {language: 'kotlin'},
+      {language: 'java'},
+    ])
+      expect(() => decode({...base, ...extra})).toThrow();
+    for (const expectedBuildExecution of [false, true]) {
+      const config = decode({...base, fixture: 'rust-build-script', expectedBuildExecution});
+      const fixture = providerFixture(config);
+      expect(fixture.executionMarker).toBe('probe-build-script-ran');
+      expect(fixture.projectFiles['build.rs']).toContain('"executed"');
+    }
+    const gradle = providerFixture(
+      decode({
+        ...base,
+        language: 'java',
+        configurationTemplate: 'jdt',
+        fixture: 'java-gradle',
+        expectedBuildExecution: false,
+      }),
+    );
+    expect(gradle.executionMarker).toBe('probe-gradle-import-ran');
+    expect(gradle.runtimeFiles['gradle/gradle.properties']).toContain('idletimeout=1000');
+    expect(gradle.projectFiles).not.toHaveProperty('pom.xml');
+    expect(providerFixture({language: 'java'}).projectFiles).toHaveProperty('pom.xml');
+  });
+
+  it('expands settings string values without corrupting Windows paths or JSON syntax', () => {
+    const scratch = 'C:\\temp\\"quoted"';
+    expect(expandProbeScratch({'{scratch}': ['{scratch}/cache', null, 3]}, scratch)).toEqual({
+      '{scratch}': [scratch + '/cache', null, 3],
+    });
+    fc.assert(
+      fc.property(fc.jsonValue(), value => {
+        const before = JSON.stringify(value);
+        const expanded = expandProbeScratch(Schema.decodeUnknownSync(Schema.Json)(value), scratch);
+        expect(expandProbeScratch(expanded, scratch)).toEqual(expanded);
+        expect(JSON.stringify(value)).toBe(before);
+        expect(JSON.stringify(JSON.parse(JSON.stringify(expanded)))).toBe(JSON.stringify(expanded));
+      }),
+      {numRuns: 100},
+    );
+  });
+
   it('does not qualify an incomplete reference set or rename preview', () => {
     const files = {'a.py': 'UnsavedName\r\n', 'b.py': 'UnsavedName\r\n'};
     const range = {start: {line: 0, character: 0}, end: {line: 0, character: 11}};

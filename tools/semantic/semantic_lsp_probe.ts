@@ -3,6 +3,11 @@ import {spawn} from 'node:child_process';
 import {ownedProbeGroup, releaseProbeHandles, withinProbeDeadline} from './semantic_probe_process.js';
 
 type Message = Record<string, unknown>;
+export function appendProbeStderr(previous: {stderr: string; panicObserved: boolean}, chunk: string) {
+  const text = previous.stderr + chunk;
+  return {stderr: text.slice(-4096), panicObserved: previous.panicObserved || text.includes('panicked at')};
+}
+
 export const encodeProbeFrame = (message: unknown) => {
   const body = Buffer.from(JSON.stringify(message));
   return Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`), body]);
@@ -42,7 +47,38 @@ export class ProbeFrameDecoder {
   }
 }
 
-export function startSemanticProbe(command: string, args: string[], cwd: string, settings: unknown = {}) {
+export async function observeProbeReadiness(
+  request: (timeoutMs: number) => Promise<unknown>,
+  matches: (value: unknown) => boolean,
+  maximumMilliseconds = 60_000,
+) {
+  if (!Number.isSafeInteger(maximumMilliseconds) || maximumMilliseconds < 1 || maximumMilliseconds > 60_000)
+    throw new Error('Invalid probe readiness budget');
+  const deadline = performance.now() + maximumMilliseconds;
+  const attempts: unknown[] = [];
+  let attemptCount = 0;
+  while (performance.now() < deadline) {
+    attemptCount++;
+    try {
+      const detail = await request(Math.min(20_000, Math.max(1, Math.ceil(deadline - performance.now()))));
+      if (attempts.length < 32) attempts.push(detail);
+      if (matches(detail)) return {ready: true, attemptCount, attempts};
+    } catch (error) {
+      if (attempts.length < 32) attempts.push({error: String(error)});
+    }
+    const remaining = deadline - performance.now();
+    if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(250, remaining)));
+  }
+  return {ready: false, attemptCount, attempts};
+}
+
+export function startSemanticProbe(
+  command: string,
+  args: string[],
+  cwd: string,
+  settings: unknown = {},
+  onNotification?: (method: string, params: unknown) => void,
+) {
   const child = spawn(command, args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -61,8 +97,10 @@ export function startSemanticProbe(command: string, args: string[], cwd: string,
   >();
   let nextId = 1;
   let failure: Error | undefined;
-  let stderr = '';
+  let diagnostics = {stderr: '', panicObserved: false};
   let shutdownError: string | undefined;
+  let shutdownCompleted = false;
+  let stdioClosed = false;
   const events: string[] = [];
   const write = (message: Message) => child.stdin.write(encodeProbeFrame(message));
   const fail = (error: Error) => {
@@ -89,15 +127,25 @@ export function startSemanticProbe(command: string, args: string[], cwd: string,
       resolve(observedExit);
     });
   });
-  child.stdin.on('error', fail);
+  const closed = new Promise<true>(resolve => {
+    child.once('close', () => {
+      stdioClosed = true;
+      resolve(true);
+    });
+  });
+  child.stdin.on('error', error => {
+    shutdownError ??= String(error);
+    fail(error);
+  });
   child.stderr.on('data', chunk => {
-    stderr = (stderr + String(chunk)).slice(-4096);
+    diagnostics = appendProbeStderr(diagnostics, String(chunk));
   });
   child.stdout.on('data', chunk => {
     try {
       for (const message of decoder.push(chunk)) {
         if (typeof message.method === 'string') {
           if (events.length < 64) events.push(message.method);
+          if (message.id === undefined) onNotification?.(message.method, message.params);
           if (message.id !== undefined) {
             let result: unknown = null;
             let error: unknown;
@@ -146,10 +194,21 @@ export function startSemanticProbe(command: string, args: string[], cwd: string,
   const finish = async () => {
     let exitTimedOut = false;
     try {
-      if (!failure) {
+      if (failure) shutdownError = String(failure);
+      else {
         try {
-          await request('shutdown', undefined, 2000);
-          write({jsonrpc: '2.0', method: 'exit'});
+          const handshake = async () => {
+            await request('shutdown', undefined, 2000);
+            return new Promise<true>((resolve, reject) => {
+              child.stdin.write(encodeProbeFrame({jsonrpc: '2.0', method: 'exit'}), error => {
+                if (error) reject(error);
+                else resolve(true);
+              });
+            });
+          };
+          if ((await withinProbeDeadline(handshake(), 2000)) !== true)
+            throw new Error('Provider shutdown handshake did not complete before its deadline');
+          shutdownCompleted = true;
         } catch (error) {
           shutdownError = String(error);
           kill();
@@ -170,6 +229,8 @@ export function startSemanticProbe(command: string, args: string[], cwd: string,
     } catch (error) {
       cleanup = {scope: 'unknown', drained: false, forced: true, error: String(error)};
     } finally {
+      if ((await withinProbeDeadline(closed, 2000)) === undefined)
+        shutdownError ??= 'Provider stdio closure was not observed before the shutdown deadline';
       fail(new Error('Provider probe stopped'));
       releaseProbeHandles(child);
     }
@@ -180,7 +241,9 @@ export function startSemanticProbe(command: string, args: string[], cwd: string,
       forced: cleanup.forced,
       cleanup: {...cleanup, drained: cleanup.drained && observedExit !== undefined},
       pid: child.pid,
-      stderr,
+      ...diagnostics,
+      shutdownCompleted: shutdownCompleted && shutdownError === undefined,
+      stdioClosed,
       shutdownError,
     };
   };
