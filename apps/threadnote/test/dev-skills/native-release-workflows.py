@@ -18,6 +18,11 @@ import sys
 from pathlib import Path
 
 
+def _run_utf8(*args, **kwargs):
+    """Use the native JSON/document wire encoding rather than the host locale."""
+    return subprocess.run(*args, encoding="utf-8", errors="strict", **kwargs)
+
+
 def run_workflows(root, binary, environment, generation):
     """Run desktop and both Personal Cloud profiles and return bounded evidence."""
     root = Path(root).resolve()
@@ -510,7 +515,7 @@ def _run_profile(fixture, binary, environment, generation, profile):
                     trace_setup = "enabled"
                 except Exception:
                     trace_setup = "reset-failed"
-            process = subprocess.run(
+            process = _run_utf8(
                 [*cli, "workflow-automation", "--home", str(home)],
                 input=json.dumps(request),
                 cwd=repo,
@@ -924,8 +929,8 @@ def _run_profile(fixture, binary, environment, generation, profile):
         remote_bodies = {}
         for node in publication["nodes"]:
             relative = node["canonicalUri"].split("/shared/default/", 1)[1]
-            raw = subprocess.run(["git", "-C", str(remote), "show", "main:" + relative], env=environment, check=True, capture_output=True, text=True, timeout=60).stdout
-            parsed = subprocess.run([memory_reader, node["canonicalUri"]], input=raw, env=environment,
+            raw = _run_utf8(["git", "-C", str(remote), "show", "main:" + relative], env=environment, check=True, capture_output=True, text=True, timeout=60).stdout
+            parsed = _run_utf8([memory_reader, node["canonicalUri"]], input=raw, env=environment,
                                     check=True, capture_output=True, text=True, timeout=30)
             durable_body = json.loads(parsed.stdout)["body"].strip() + "\n"
             assert hashlib.sha256(durable_body.encode()).hexdigest() == node["bodySha256"]
