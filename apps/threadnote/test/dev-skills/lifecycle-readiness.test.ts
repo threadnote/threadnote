@@ -15,7 +15,7 @@ const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 
 describe('installed workflow readiness', () => {
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const) {
-    effectIt.effect(`uses the native ${profile} core skill set without changing readiness probes`, () =>
+    effectIt.effect(`uses the native ${profile} core skill set without Python probes`, () =>
       Effect.gen(function* () {
         const f = yield* fixture();
         const provider = profile === 'codex-cloud-personal' ? 'codex-cloud' : 'cursor-cloud';
@@ -46,7 +46,7 @@ describe('installed workflow readiness', () => {
         const bin = f.path.join(f.root, 'bin');
         yield* f.fs.makeDirectory(bin);
         const executableFiles = new Set<string>();
-        for (const command of ['threadnote', 'git', 'rg', 'gh', 'python3']) {
+        for (const command of ['threadnote', 'git', 'rg', 'gh']) {
           const file = f.path.join(bin, command);
           yield* f.fs.writeFileString(file, 'fixture executable');
           yield* f.fs.chmod(file, 0o700);
@@ -63,6 +63,7 @@ describe('installed workflow readiness', () => {
               .pipe(Effect.map(info => (executableFiles.has(file) ? {...info, mode: info.mode | 0o111} : info))),
         });
         const executor = yield* CommandExecutor;
+        const probes: string[] = [];
         const run = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
           f.run(
             effect.pipe(
@@ -70,7 +71,10 @@ describe('installed workflow readiness', () => {
               Effect.provideService(FileSystem.FileSystem, probeFs),
               Effect.provideService(CommandExecutor, {
                 ...executor,
-                execute: () => Effect.succeed({exitCode: 0, stdout: '', stderr: ''}),
+                execute: executable => {
+                  probes.push(executable);
+                  return Effect.succeed({exitCode: 0, stdout: '', stderr: ''});
+                },
               }),
             ),
           );
@@ -91,6 +95,7 @@ describe('installed workflow readiness', () => {
         expect(result.readiness?.planning.state).toBe('unchecked');
         expect(result.readiness?.publication.state).toBe('unchecked');
         expect(result.readiness?.watch.state).toBe('unchecked');
+        expect(probes.some(executable => /python/iu.test(executable))).toBe(false);
         expect(yield* snapshot(f.root)).toEqual(before);
         yield* f.fs.remove(f.path.join(target.skillRoot, 'threadnote-memory', 'SKILL.md'));
         expect((yield* check).targets[0].readiness?.planning.reasons).toContainEqual(

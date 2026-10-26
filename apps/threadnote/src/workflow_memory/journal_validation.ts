@@ -1,11 +1,12 @@
 import {Schema} from 'effect';
 import {formatMemoryDocument, parseMemoryDocument} from '@threadnote/memory/document';
 import {memoryIdFromIdentityAlias, memoryIdentityAlias} from '@threadnote/memory/identity-alias';
-import {sha256HexSync} from '@threadnote/platform/sha256';
+import {sha256HexSync} from './native_digest.js';
 import {parseResourceId, resourceIdIsWithin} from '@threadnote/store/resource-id';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import {assertWorkflowArtifactIdentity} from './artifact_validation.js';
 import {assertWorkflowEvidenceSnapshot, workflowEvidenceScopes} from './evidence.js';
+import {immutableWorkflowImage, type WorkflowReadCache} from './read_cache.js';
 import {workflowFamilyStem, workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {
   workflowArtifactTopic,
@@ -70,8 +71,16 @@ function assertArtifact(binding: WorkflowBinding, artifact: WorkflowArtifact, ur
   }
 }
 
-function manifestArtifacts(state: WorkflowJournal, content: string): WorkflowJournal['artifacts'] {
+function manifestArtifacts(
+  state: WorkflowJournal,
+  content: string,
+  cache?: WorkflowReadCache,
+): WorkflowJournal['artifacts'] {
   check(typeof content === 'string');
+  const cached = cache?.manifests.find(
+    entry => entry.binding === state.binding && entry.manifestUri === state.manifestUri && entry.content === content,
+  );
+  if (cached) return cached.artifacts;
   const record = parseMemoryDocument(state.manifestUri, content);
   check(record && record.metadata.kind === 'handoff' && record.metadata.status === 'active');
   check(record.metadata.project === state.binding.project);
@@ -84,6 +93,12 @@ function manifestArtifacts(state: WorkflowJournal, content: string): WorkflowJou
   );
   const artifacts = parsed.artifacts as WorkflowJournal['artifacts'];
   for (const [uri, artifact] of Object.entries(artifacts)) assertArtifact(state.binding, artifact, uri);
+  if (cache) {
+    immutableWorkflowImage(state.binding);
+    immutableWorkflowImage(artifacts);
+    cache.manifests.unshift({binding: state.binding, manifestUri: state.manifestUri, content, artifacts});
+    if (cache.manifests.length > 2) cache.manifests.length = 2;
+  }
   return artifacts;
 }
 
@@ -189,6 +204,7 @@ function assertPreparedRelations(
     return;
   }
   const owned = workflowOwnedArtifacts(state);
+  const ownedUris = new Set(owned.map(artifact => artifact.canonicalUri));
   const sharedRoots = state.binding.profile === 'desktop' ? desktopSharedRoots : state.binding.sharedRoots;
   const scopes = [
     ...sharedRoots,
@@ -198,7 +214,7 @@ function assertPreparedRelations(
       ? [`${root(state.binding)}/durable`, `${root(state.binding)}/preferences`]
       : []),
   ];
-  const allowed = (uri: string) => scopes.some(scope => resourceIdIsWithin(uri, scope));
+  const allowed = (uri: string) => ownedUris.has(uri) || scopes.some(scope => resourceIdIsWithin(uri, scope));
   for (const target of operation.relations) {
     check(object(target) && typeof target.uri === 'string' && allowed(target.uri));
     check(typeof target.content === 'string');
@@ -212,7 +228,7 @@ function assertPreparedRelations(
       resourceIdIsWithin(target.uri, `${root(state.binding)}/handoffs`)
     )
       check(
-        owned.some(artifact => artifact.canonicalUri === target.uri) ||
+        ownedUris.has(target.uri) ||
           evidence !== undefined ||
           sharedRoots.some(scope => resourceIdIsWithin(target.uri, scope)),
       );
@@ -265,6 +281,7 @@ export function assertWorkflowJournalIntegrity(
   state: WorkflowJournal,
   currentManifestContent: string | undefined,
   desktopSharedRoots: readonly string[] = [],
+  cache?: WorkflowReadCache,
 ): void {
   check(state.protocolVersion === 1 && object(state.binding) && object(state.artifacts) && object(state.operations));
   const {bindingId, ...identity} = state.binding;
@@ -274,9 +291,18 @@ export function assertWorkflowJournalIntegrity(
     state.manifestUri ===
       `${root(state.binding)}/handoffs/active/${uriSegment(state.binding.project)}/${uriSegment(workflowStateTopic(state.binding))}.md`,
   );
-  const desired = manifestArtifacts(state, state.manifestContent);
+  const desired = manifestArtifacts(state, state.manifestContent, cache);
   check(same(desired, state.artifacts));
-  for (const [key, operation] of Object.entries(state.operations)) assertOperation(state, key, operation);
+  for (const [key, operation] of Object.entries(state.operations)) {
+    const checked = cache?.operations.get(operation);
+    if (checked?.binding === state.binding && checked.key === key) continue;
+    assertOperation(state, key, operation);
+    if (cache) {
+      immutableWorkflowImage(operation);
+      immutableWorkflowImage(state.binding);
+      cache.operations.set(operation, {binding: state.binding, key});
+    }
+  }
   for (const operation of Object.values(state.operations).filter(item => item.status === 'prepared')) {
     assertSourceOwned(operation, state.artifacts);
     assertPreparedRelations(state, operation, desktopSharedRoots);
@@ -288,18 +314,24 @@ export function assertWorkflowJournalIntegrity(
     check(Object.keys(state.artifacts).length === 0 && Object.keys(state.operations).length === 0);
     return;
   }
-  const previous = manifestArtifacts(state, currentManifestContent);
+  const previous = manifestArtifacts(state, currentManifestContent, cache);
   const changed = Object.keys({...previous, ...state.artifacts}).filter(
     uri => !same(previous[uri], state.artifacts[uri]),
   );
   if (changed.length === 0) return;
+  const changedUris = new Set(changed);
   check(
     Object.values(state.operations).some(operation => {
+      if (operation.status !== 'verified') return false;
+      // A normal receipt can only alter its destination and optional source.
+      // Deferred/citation receipts retain their complete original proof path.
       if (
-        operation.status !== 'verified' ||
-        !same(state.artifacts[operation.artifact.canonicalUri], operation.artifact)
+        operation.deferredCodeAnchor === undefined &&
+        !changedUris.has(operation.artifact.canonicalUri) &&
+        (operation.sourceUri === undefined || !changedUris.has(operation.sourceUri))
       )
         return false;
+      if (!same(state.artifacts[operation.artifact.canonicalUri], operation.artifact)) return false;
       const old = previous[operation.artifact.canonicalUri];
       if (changed.length === 1 && old && citationOnlyTransition(old, operation)) return true;
       try {

@@ -64,7 +64,9 @@ import {
   toggleMemorySelection,
   type LibraryScope,
 } from './library_model.js';
-import {LibraryExplorer} from './library_explorer.js';
+import {LibraryExplorer, LibraryHistoryControls} from './library_explorer.js';
+import {useLibrarySearch} from './library_search.js';
+import {canonicalizeLibraryHistory, emptyLibraryHistory, visitLibraryUri} from './library_navigation.js';
 import {useLibraryNavigatorResize} from './library_layout.js';
 import {settleManagerRefreshTasks} from '@threadnote/manager/refresh';
 import {Metadata, TargetFields} from '@threadnote/manager/ui/controls';
@@ -206,6 +208,7 @@ function App({
   const [doctorOutput, setDoctorOutput] = useState('');
   const [doctorAction, setDoctorAction] = useState<string | undefined>();
   const [selectedUri, setSelectedUri] = useState<string | undefined>();
+  const [libraryHistory, setLibraryHistory] = useState(emptyLibraryHistory);
   const [selectedUris, setSelectedUris] = useState<ReadonlySet<string>>(new Set());
   const [memory, setMemory] = useState<MemoryResponse | undefined>();
   const [loadedUri, setLoadedUri] = useState<string | undefined>();
@@ -243,6 +246,7 @@ function App({
   const scopedTree = useMemo(() => libraryScopeTree(tree, libraryScope), [tree, libraryScope]);
   const [showSystem, setShowSystem] = useState(false);
   const [navTreeTab, setNavTreeTab] = useState<NavTreeTab>('memories');
+  const librarySearch = useLibrarySearch(filter, libraryScope, panel === 'memory' && navTreeTab === 'memories', tree);
   const [toast, setToast] = useState('');
   const [output, setOutput] = useState('');
   const [workspaceProject, setWorkspaceProject] = useState('');
@@ -350,6 +354,7 @@ function App({
       .then(resolvedUri => {
         if (cancelled) return;
         if (resolvedUri && resolvedUri !== requestedUri) {
+          setLibraryHistory(current => canonicalizeLibraryHistory(current, requestedUri, resolvedUri));
           canonicalizedSelectionRef.current = resolvedUri;
           setSelectedUri(resolvedUri);
         }
@@ -1144,16 +1149,26 @@ function App({
     });
   }
 
-  async function selectTreeUri(uri: string): Promise<void> {
+  async function selectTreeUri(uri: string, historyIndex?: number): Promise<void> {
     if (uri !== selectedUri && !(await confirmDiscardDraft())) return;
     if (uri !== selectedUri) draftRef.current = undefined;
     setCreatingMemory(false);
     setLibraryDialog(undefined);
+    setLibraryHistory(current =>
+      historyIndex === undefined ? visitLibraryUri(current, uri) : {...current, index: historyIndex},
+    );
+    if (uri !== selectedUri) setMemoryViewMode('preview');
     setSelectedUri(uri);
     setPanel('memory');
     setNavTreeTab(isResourceUri(uri) ? 'resources' : 'memories');
     const node = uri === selectedUri ? selectedNode : findNodeInTrees([tree], uri);
     if (!isResourceUri(uri)) setLibraryScope(node?.sharedTeam ? `team:${node.sharedTeam}` : 'local');
+  }
+
+  function navigateLibraryHistory(direction: -1 | 1): void {
+    const index = libraryHistory.index + direction;
+    const uri = libraryHistory.entries[index];
+    if (uri) void selectTreeUri(uri, index);
   }
 
   async function switchLibrary(tab: NavTreeTab, scope = libraryScope): Promise<void> {
@@ -1263,6 +1278,13 @@ function App({
     selectedHasPendingCanonical ||
     !managerActionsAreAvailable(availability) ||
     Boolean(selectedUri && !selectedIsDir && !selectedIsReadable);
+  const historyBlocked =
+    manualEdit.pending ||
+    bulkAction !== undefined ||
+    savingMemory ||
+    libraryActionBusy ||
+    selectedHasPendingCanonical ||
+    availability.runtime !== 'connected';
   const busyOverlayMessage = bulkAction
     ? `${actionProgressLabel(bulkAction)} ${bulkCount} selected ${bulkCount === 1 ? 'memory' : 'memories'}...`
     : '';
@@ -1274,7 +1296,12 @@ function App({
 
   const authoringMemory =
     creatingMemory ||
-    (memoryViewMode === 'edit' && !!selectedUri && !selectedIsDir && !selectedIsResource && !selectedNode?.isSystem);
+    (memoryViewMode === 'edit' &&
+      selectedIsReadable &&
+      !!selectedUri &&
+      !selectedIsDir &&
+      !selectedIsResource &&
+      !selectedNode?.isSystem);
   const libraryDialogTitle =
     libraryDialog === 'consolidate' ? 'Consolidate memories' : selectedIsResource ? 'Source details' : 'Memory details';
   const consolidationPanel = (standalone = false) => (
@@ -1548,6 +1575,11 @@ function App({
                     </div>
                   </div>
                   <div className="library-toolbar">
+                    <LibraryHistoryControls
+                      backDisabled={historyBlocked || libraryHistory.index <= 0}
+                      forwardDisabled={historyBlocked || libraryHistory.index >= libraryHistory.entries.length - 1}
+                      onNavigate={navigateLibraryHistory}
+                    />
                     {navTreeTab === 'memories' ? (
                       <div className="library-scope">
                         <div className="segmented-control" aria-label="Memory scope">
@@ -1598,8 +1630,9 @@ function App({
                       <Search aria-hidden="true" />
                       <input
                         type="search"
-                        aria-label="Filter Library"
-                        placeholder={navTreeTab === 'memories' ? 'Filter memories' : 'Filter resources'}
+                        aria-label="Search Library"
+                        placeholder={navTreeTab === 'memories' ? 'Search memories by meaning' : 'Filter resources'}
+                        maxLength={1024}
                         value={filter}
                         disabled={controlsBlocked}
                         onChange={event => setFilter(event.target.value)}
@@ -1672,6 +1705,18 @@ function App({
                     busy={bulkAction !== undefined}
                     controlsBlocked={controlsBlocked}
                     filter={filter}
+                    recalledUris={navTreeTab === 'memories' ? librarySearch.result?.uris : undefined}
+                    searchStatus={
+                      navTreeTab === 'memories' && filter.trim()
+                        ? librarySearch.pending
+                          ? 'Searching memories…'
+                          : librarySearch.error
+                            ? 'Search unavailable. Showing title and path matches.'
+                            : librarySearch.result?.semantic !== 'available'
+                              ? 'Showing content, title and path matches. Semantic search is unavailable.'
+                              : 'Showing matches by meaning, content, title and path.'
+                        : undefined
+                    }
                     navTreeTab={navTreeTab}
                     onFilter={setFilter}
                     onRefresh={() => void refreshAll()}

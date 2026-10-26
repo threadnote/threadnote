@@ -4,6 +4,7 @@ import type {TreeNode} from '../../src/ui/contracts.js';
 import {
   descendantMemoryUris,
   libraryScopeTree,
+  librarySearchTree,
   memoryDocumentParts,
   reconcileMemorySelection,
   replaceMemoryBody,
@@ -22,6 +23,25 @@ const node = (name: string, children?: readonly TreeNode[], team?: string): Tree
 });
 
 describe('Library recursive selection', () => {
+  it('retains semantic and authored title matches with every ancestor while preserving the original tree', () => {
+    fc.assert(
+      fc.property(fc.uniqueArray(fc.nat({max: 1000}), {minLength: 1, maxLength: 30}), ids => {
+        const leaves = ids.map(id => node(`folder/nested/${id}.md`));
+        const original = node('root', [node('folder', [node('folder/nested', leaves)])]);
+        const selected = leaves.filter((_, index) => index % 2 === 0);
+        const recalled = new Set(selected.map(leaf => leaf.uri));
+        const before = JSON.stringify(original);
+        const result = librarySearchTree(original, 'unrelated query', recalled, false);
+        expect(descendantMemoryUris(result!)).toEqual(selected.map(leaf => leaf.uri));
+        expect(JSON.stringify(original)).toBe(before);
+        expect(librarySearchTree(result, 'unrelated query', recalled, false)).toEqual(result);
+      }),
+      {numRuns: 60},
+    );
+    const titled = {...node('opaque.md'), metadata: {topic: 'Authored title'} as TreeNode['metadata']};
+    expect(librarySearchTree(titled, 'authored', new Set(), false)).toBe(titled);
+    expect(librarySearchTree(node('.system.md'), 'system', new Set(), false)).toBeUndefined();
+  });
   it('selects collapsed descendants and preserves unrelated siblings when toggled', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.nat({max: 999}), {minLength: 1, maxLength: 30}), ids => {

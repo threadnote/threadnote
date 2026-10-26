@@ -1,10 +1,12 @@
 import {it as effectIt} from '@effect/vitest';
 import {Cause, Deferred, Effect, Exit, Fiber, FileSystem} from 'effect';
 import {TestClock} from 'effect/testing';
-import {expect} from 'vitest';
+import {afterAll, beforeAll, expect} from 'vitest';
 import fc from 'fast-check';
 import {ChildProcess, spawn, type ChildProcessWithoutNullStreams} from '@threadnote/testing/node-child-process';
 import {resolve} from '@threadnote/testing/node-path';
+import {mkdtemp, rm} from '@threadnote/testing/node-fs-promises';
+import {tmpdir} from '@threadnote/testing/node-os';
 import {TestError} from '@threadnote/testing/test-error';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 import {SystemInfo} from '@threadnote/platform/system';
@@ -16,16 +18,20 @@ import {handleManagerDevSkillsRequest} from '../../src/manager/dev_skills.js';
 import {devSkillsTestLayer, fixture, snapshot} from './service-fixture.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
-const harness = 'apps/threadnote/test/dev-skills/release-artifact.py';
-const holderProgram = `import importlib.util,sys
-from pathlib import Path
-spec=importlib.util.spec_from_file_location('release_fence_fixture',sys.argv[1])
-module=importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-with module.hold_account_mutation_lock(Path(sys.argv[2])):
-    print('ready',flush=True)
-    if sys.stdin.readline() != 'release\\n': raise RuntimeError('Invalid fixture release token')
-`;
+let harnessDirectory: string | undefined;
+let harness: string;
+beforeAll(async () => {
+  harnessDirectory = await mkdtemp(resolve(tmpdir(), 'threadnote-release-fence-'));
+  harness = resolve(harnessDirectory, process.platform === 'win32' ? 'release-artifact.exe' : 'release-artifact');
+  const build = await Bun.build({
+    entrypoints: [resolve('apps/threadnote/test/dev-skills/release-artifact.ts')],
+    compile: {outfile: harness},
+  });
+  expect(build.success, JSON.stringify(build.logs)).toBe(true);
+}, 30_000);
+afterAll(async () => {
+  if (harnessDirectory) await rm(harnessDirectory, {recursive: true, force: true});
+});
 
 const readinessFrame = () => {
   const prefix = [114, 101, 97, 100, 121];
@@ -45,9 +51,49 @@ const readinessFrame = () => {
     snapshot: () => ({matchedBytes, status}),
   };
 };
+const nativeFenceEnvironment = (environment: NodeJS.ProcessEnv, root: string): NodeJS.ProcessEnv => {
+  const childEnvironment: NodeJS.ProcessEnv = {
+    ...environment,
+    HOME: resolve(root, 'user'),
+    USERPROFILE: resolve(root, 'user'),
+    THREADNOTE_HOME: resolve(root, 'data'),
+    TMPDIR: root,
+    TMP: root,
+    TEMP: root,
+  };
+  // This child is a known standalone executable. BUN_BE_BUN switches it to the
+  // Bun interpreter and treats the fixture root as a module before our entrypoint.
+  // Windows environment names are case insensitive; remove only this variable.
+  for (const key of Object.keys(childEnvironment)) {
+    if (key.toUpperCase() === 'BUN_BE_BUN') delete childEnvironment[key];
+  }
+  return childEnvironment;
+};
+const environmentHas = (environment: NodeJS.ProcessEnv, key: string) =>
+  Object.keys(environment).some(name => name.toUpperCase() === key && environment[name] !== undefined);
+const launchFacts = new WeakMap<
+  ChildProcessWithoutNullStreams,
+  {
+    inputBunBeBunPresent: boolean;
+    childBunBeBunPresent: boolean;
+    nodeOptionsPresent: boolean;
+    bunOptionsPresent: boolean;
+    ipcDescriptorPresent: boolean;
+  }
+>();
+const boundedExitCode = (code: number | null) =>
+  code === null ? null : Number.isInteger(code) && code >= -2147483648 && code <= 4294967295 ? code : 'other';
+const closedSignal = (signal: string | null) =>
+  signal === null
+    ? null
+    : ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGABRT', 'SIGSEGV', 'SIGPIPE'].includes(signal)
+      ? signal
+      : 'other';
 const waitReady = (child: ChildProcessWithoutNullStreams) =>
   Effect.callback<void, Error>(resume => {
     const frame = readinessFrame();
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     const cleanup = () => {
       child.stdout.off('data', ready);
@@ -62,15 +108,35 @@ const waitReady = (child: ChildProcessWithoutNullStreams) =>
       resume(result);
     };
     const ready = (chunk: Buffer) => {
+      stdoutBytes = Math.min(65536, stdoutBytes + chunk.byteLength);
       const status = frame.push(chunk);
       if (status === 'ready') complete(Effect.void);
       else if (status === 'invalid')
         complete(Effect.fail(TestError.make({message: 'Invalid fixture readiness record'})));
     };
-    const failed = () => complete(Effect.fail(TestError.make({message: 'Fence child exited before ready'})));
+    const failed = (code: number | null, signal: string | null) =>
+      complete(
+        Effect.fail(
+          TestError.make({
+            message:
+              'Fence child exited before ready: ' +
+              JSON.stringify({
+                version: 1,
+                code: boundedExitCode(code),
+                signal: closedSignal(signal),
+                stdoutBytes,
+                stderrBytes,
+                frame: frame.snapshot(),
+                launch: launchFacts.get(child) ?? null,
+              }),
+          }),
+        ),
+      );
     const error = (cause: Error) => complete(Effect.fail(cause));
-    // Drain without retaining or echoing subprocess bytes in failure messages.
-    const stderr = () => {};
+    // Count a bounded number only. Never retain, classify or echo arbitrary child bytes.
+    const stderr = (chunk: Buffer) => {
+      stderrBytes = Math.min(65536, stderrBytes + chunk.byteLength);
+    };
     child.stdout.on('data', ready);
     child.stderr.on('data', stderr);
     child.once('close', failed);
@@ -93,25 +159,22 @@ const waitExit = (child: ChildProcessWithoutNullStreams) =>
       child.off('close', closed);
     });
   });
-const withPythonFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>) =>
+const withNativeFence = <A, E, R>(root: string, program: Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
     Effect.gen(function* () {
       const system = yield* SystemInfo;
       const environment = system.environment();
-      const python = environment.THREADNOTE_TEST_PYTHON ?? (system.platform === 'win32' ? 'python' : 'python3');
-      const child = spawn(python, ['-B', '-c', holderProgram, resolve(harness), root], {
-        env: {
-          ...environment,
-          HOME: resolve(root, 'user'),
-          USERPROFILE: resolve(root, 'user'),
-          THREADNOTE_HOME: resolve(root, 'data'),
-          TMPDIR: root,
-          TMP: root,
-          TEMP: root,
-          PYTHONDONTWRITEBYTECODE: '1',
-          PYTHONPATH: '',
-        },
+      const childEnvironment = nativeFenceEnvironment(environment, root);
+      const child = spawn(harness, ['--hold-account-lock', root], {
+        env: childEnvironment,
         stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      launchFacts.set(child, {
+        inputBunBeBunPresent: environmentHas(environment, 'BUN_BE_BUN'),
+        childBunBeBunPresent: environmentHas(childEnvironment, 'BUN_BE_BUN'),
+        nodeOptionsPresent: environmentHas(childEnvironment, 'NODE_OPTIONS'),
+        bunOptionsPresent: environmentHas(childEnvironment, 'BUN_OPTIONS'),
+        ipcDescriptorPresent: environmentHas(childEnvironment, 'NODE_CHANNEL_FD'),
       });
       child.stdin.on('error', () => {});
       return child;
@@ -204,7 +267,7 @@ effectIt.effect('fences the full Manager update preview while the actual settled
     const attempted = yield* Deferred.make<void>();
     const fs = observedFileSystem(f.fs, f.lock, attempted);
     let completed = false;
-    const reader = yield* withPythonFence(
+    const reader = yield* withNativeFence(
       f.root,
       Effect.gen(function* () {
         const token = yield* f.fs.readFileString(f.lock);
@@ -240,11 +303,11 @@ effectIt.effect('fences the full Manager update preview while the actual settled
   }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
 );
 
-effectIt.effect('interrupting the observation releases the Python fixture token and admits the settled reader', () =>
+effectIt.effect('interrupting the observation releases the native fixture token and admits the settled reader', () =>
   Effect.gen(function* () {
     const f = yield* makeFixture;
     const entered = yield* Deferred.make<void>();
-    const observer = yield* withPythonFence(
+    const observer = yield* withNativeFence(
       f.root,
       Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never)),
     ).pipe(Effect.forkChild);
@@ -254,6 +317,66 @@ effectIt.effect('interrupting the observation releases the Python fixture token 
     expect(yield* readSettledCanonicalMutationGeneration(f.fs, f.path, f.home, 'local')).toBe('');
     expect(yield* f.fs.exists(f.lock)).toBe(false);
   }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
+);
+
+effectIt.effect(
+  'launches the actual compiled fence despite inherited BUN_BE_BUN and preserves its full inventory',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const system = yield* SystemInfo;
+      const contaminated = {
+        ...system.environment(),
+        BUN_BE_BUN: '1',
+        bun_be_bun: '1',
+        THREADNOTE_FENCE_SENTINEL: 'kept',
+      };
+      const childEnvironment = nativeFenceEnvironment(contaminated, f.root);
+      expect(environmentHas(childEnvironment, 'BUN_BE_BUN')).toBe(false);
+      expect(
+        Object.entries(contaminated).every(
+          ([key, value]) =>
+            ['BUN_BE_BUN', 'HOME', 'USERPROFILE', 'THREADNOTE_HOME', 'TMPDIR', 'TMP', 'TEMP'].includes(
+              key.toUpperCase(),
+            ) || childEnvironment[key] === value,
+        ),
+      ).toBe(true);
+      const outside = yield* f.inventory;
+      const attempted = yield* Deferred.make<void>();
+      const fs = observedFileSystem(f.fs, f.lock, attempted);
+      let completed = false;
+      const reader = yield* withNativeFence(
+        f.root,
+        Effect.gen(function* () {
+          const token = yield* f.fs.readFileString(f.lock);
+          const owner = JSON.parse(token) as {version: number; processId: number; token: string};
+          expect(owner.version).toBe(1);
+          expect(owner.processId).toBeGreaterThan(0);
+          expect(owner.processId).not.toBe(process.pid);
+          expect(owner.token).toMatch(/^[0-9a-f]{32}$/);
+          const before = yield* f.inventory;
+          const reader = yield* readSettledCanonicalMutationGeneration(fs, f.path, f.home, 'local').pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                completed = true;
+              }),
+            ),
+            Effect.forkChild,
+          );
+          yield* Deferred.await(attempted);
+          expect(yield* f.fs.readFileString(f.lock)).toBe(token);
+          expect(yield* f.inventory).toEqual(before);
+          expect(completed).toBe(false);
+          return reader;
+        }),
+      ).pipe(Effect.provideService(SystemInfo, {...system, environment: () => contaminated}));
+      expect(yield* Fiber.join(reader)).toBe('');
+      expect(completed).toBe(true);
+      expect(yield* f.fs.exists(f.lock)).toBe(false);
+      expect(yield* f.inventory).toEqual(outside);
+      expect(contaminated.BUN_BE_BUN).toBe('1');
+      expect(contaminated.bun_be_bun).toBe('1');
+    }).pipe(TestClock.withLive, provideTestLayer(devSkillsTestLayer)),
 );
 
 fcEffectProp(
@@ -273,7 +396,7 @@ fcEffectProp(
       const fs = observedFileSystem(f.fs, f.lock, attempted);
       const original = TestError.make({message: 'original controlled preview failure'});
       let reader: Fiber.Fiber<string, unknown> | undefined;
-      const result = yield* withPythonFence(
+      const result = yield* withNativeFence(
         f.root,
         Effect.gen(function* () {
           const token = yield* f.fs.readFileString(f.lock);
@@ -387,6 +510,43 @@ effectIt.effect('readiness protocol preserves early spawn failure and refuses ea
       else expect(Exit.isFailure(result)).toBe(true);
       expectNoProtocolListeners(child);
     }
+  }),
+);
+
+effectIt.effect('reports bounded closed early-exit facts without retaining or exposing child output', () =>
+  Effect.gen(function* () {
+    const child = protocolChild();
+    const waiting = yield* waitReady(child).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    child.stdout.emit('data', Buffer.from('rea'));
+    child.stderr.emit('data', Buffer.from('/private/error/credential'.repeat(4096)));
+    child.emit('close', 1, 'SIGTERM');
+    const result = yield* Fiber.await(waiting);
+    expect(Exit.isFailure(result)).toBe(true);
+    if (Exit.isFailure(result)) {
+      const failure = Cause.squash(result.cause);
+      expect(failure).toBeInstanceOf(Error);
+      if (failure instanceof Error) {
+        expect(failure.message).toBe(
+          'Fence child exited before ready: ' +
+            JSON.stringify({
+              version: 1,
+              code: 1,
+              signal: 'SIGTERM',
+              stdoutBytes: 3,
+              stderrBytes: 65536,
+              frame: {matchedBytes: 3, status: 'pending'},
+              launch: null,
+            }),
+        );
+      }
+    }
+    expect(JSON.stringify(result)).not.toContain('/private');
+    expect(JSON.stringify(result)).not.toContain('credential');
+    expect(boundedExitCode(Number.POSITIVE_INFINITY)).toBe('other');
+    expect(boundedExitCode(2 ** 40)).toBe('other');
+    expect(closedSignal('/private/signal')).toBe('other');
+    expectNoProtocolListeners(child);
   }),
 );
 

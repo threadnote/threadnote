@@ -3,7 +3,7 @@ import {Effect, FileSystem, Layer, Path} from 'effect';
 import {SystemInfo} from '@threadnote/platform/system';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {TestCommandExecutorLayer, TestSystemInfoLayer} from '../helpers/system-layer.js';
-import {DevSkillsSource, loadDevSkillsBundleAt} from '../../src/dev_skills/manifest.js';
+import {DevSkillsSource, loadDevSkillsBundleAt, nativeRequirements} from '../../src/dev_skills/manifest.js';
 
 export const devSkillsTestLayer = Layer.mergeAll(
   BunServices.layer,
@@ -20,7 +20,8 @@ export const fixture = Effect.fn('test.devSkills.fixture')(function* () {
   const host = path.join(root, 'host');
   yield* fs.makeDirectory(host);
   const inventory = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    nativeRequirements,
     workflowProtocol: 1,
     stateSchema: 1,
     minimumRuntime: '5.3.0-beta.4',
@@ -107,7 +108,9 @@ export const devSkillsReleaseFixture = Effect.fn('test.devSkills.release')(funct
   yield* f.fs.writeFileString(f.path.join(bundleRoot, 'release.json'), JSON.stringify({version}));
   yield* f.fs.writeFileString(f.path.join(bundleRoot, 'threadnote'), 'fixture executable metadata only');
   const capabilities = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
+    manifestSchemas: [1, 2],
+    nativeFeatures: nativeRequirements,
     runtimeVersion: version,
     workflowProtocols: [1],
     stateSchemas: [1],

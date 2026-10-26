@@ -2,6 +2,7 @@ import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {fromPromiseInterruptible} from '@threadnote/platform/errors';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {trackPotentialWorkflowMutation, verifyWorkflowMutation} from './recall_refresh.js';
 import {formatMemoryDocument} from '@threadnote/memory/document';
 import {uriSegment} from '@threadnote/store/resource-segment';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
@@ -13,13 +14,21 @@ import {
   type WorkflowBinding,
   type WorkflowJournal,
   type WorkflowRequest,
+  type WorkflowOperationInspectionRequest,
 } from './protocol.js';
 import {verifyWorkflowBinding} from './profile.js';
 import {assertWorkflowJournalIntegrity} from './journal_validation.js';
 import {readWorkflowSharedRoots} from './scopes.js';
 import {verifyWorkflowEvidence} from './evidence.js';
-import {decodeWorkflowJournal, encodeWorkflowJournal} from './journal_codec.js';
+import {decodeWorkflowJournal, encodeWorkflowJournal, workflowJournalLimits} from './journal_codec.js';
 import {workflowStateTopic} from './naming.js';
+import {CurrentWorkflowReadCache, immutableWorkflowImage} from './read_cache.js';
+import {
+  decodeWorkflowJournalStorageImage,
+  hasPackedWorkflowScopes,
+  markPackedWorkflowScopes,
+  workflowJournalStorageImage,
+} from './journal_storage.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
   account: config.account,
@@ -67,9 +76,13 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   if (stat.type !== 'File' || Number(stat.size) > 16 * 1024 * 1024)
     return yield* workflowError('invalid-journal', 'Workflow journal is not a bounded regular file.');
   const text = yield* fs.readFileString(file);
-  return yield* fromPromiseInterruptible(
+  const cache = yield* CurrentWorkflowReadCache;
+  if (cache?.journal?.file === file && cache.journal.bytes === text) return cache.journal.state;
+  const state = yield* fromPromiseInterruptible(
     async signal => {
-      const parsed = JSON.parse(await decodeWorkflowJournal(text, signal)) as WorkflowJournal;
+      const parsed = decodeWorkflowJournalStorageImage(
+        JSON.parse(await decodeWorkflowJournal(text, signal)),
+      ) as WorkflowJournal;
       if (
         parsed.protocolVersion !== 1 ||
         parsed.binding?.bindingId !== bindingId ||
@@ -88,13 +101,17 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
         'Workflow task state is invalid; restore the original context instead of rebinding.',
       ),
   );
+  if (cache) cache.journal = {file, bytes: text, state: immutableWorkflowImage(state)};
+  return state;
 });
 
 export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
 ) {
-  const serialized = yield* validateWorkflowInput(() => serializeWorkflowJournal(state));
+  const cache = yield* CurrentWorkflowReadCache;
+  const compact = cache?.compactJournal || hasPackedWorkflowScopes(state.binding);
+  const serialized = yield* validateWorkflowInput(() => serializeWorkflowJournal(state, compact));
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* journalPath(config, state.binding.bindingId);
@@ -108,16 +125,39 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
   const temporary = `${file}.${yield* (yield* Crypto.Crypto).randomUUIDv4()}.tmp`;
   yield* fs.writeFileString(temporary, serialized, {mode: 0o600});
   yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
+  if (compact) markPackedWorkflowScopes(state.binding);
+  if (cache) cache.journal = {file, bytes: serialized, state: immutableWorkflowImage(state)};
 });
 
-export function serializeWorkflowJournal(state: WorkflowJournal): string {
-  const content = `${stableJson(state)}\n`;
+export const workflowJournalLogicalBytes = (state: WorkflowJournal, compact = false): number =>
+  new TextEncoder().encode(
+    stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
+  ).byteLength;
+
+export function serializeWorkflowJournal(state: WorkflowJournal, compact = false): string {
   try {
-    return encodeWorkflowJournal(content);
+    return encodeWorkflowJournal(
+      stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
+    );
   } catch {
     throw workflowError(
       'journal-capacity',
       'This workflow has reached its bounded task-state capacity. No new operation was applied; preserve its existing receipts.',
+    );
+  }
+}
+
+/** Plaintext below the disk limit is admissible without running compression for a preview. */
+export function assertWorkflowJournalCapacity(state: WorkflowJournal, compact = false): void {
+  const content =
+    stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n';
+  if (new TextEncoder().encode(content).byteLength <= workflowJournalLimits.diskBytes) return;
+  try {
+    encodeWorkflowJournal(content);
+  } catch {
+    throw workflowError(
+      'journal-capacity',
+      'This workflow has reached its bounded task-state capacity. Preserve its existing receipts.',
     );
   }
 }
@@ -131,8 +171,19 @@ export const reconcileManifest = Effect.fn('workflowMemory.reconcileManifest')(f
   const store = yield* ResourceStore;
   const current = yield* readOptionalResource(config, state.manifestUri);
   const sharedRoots = yield* readWorkflowSharedRoots(config, state.binding);
+  const cache = yield* CurrentWorkflowReadCache;
+  const roots = JSON.stringify(sharedRoots);
   yield* Effect.try({
-    try: () => assertWorkflowJournalIntegrity(state, current, sharedRoots),
+    try: () => {
+      if (
+        cache?.integrity?.state === state &&
+        cache.integrity.manifest === current &&
+        cache.integrity.sharedRoots === roots
+      )
+        return;
+      assertWorkflowJournalIntegrity(state, current, sharedRoots, cache);
+      if (cache) cache.integrity = {state: immutableWorkflowImage(state), manifest: current, sharedRoots: roots};
+    },
     catch: cause =>
       Schema.is(WorkflowMemoryError)(cause)
         ? cause
@@ -152,10 +203,14 @@ export const reconcileManifest = Effect.fn('workflowMemory.reconcileManifest')(f
       'binding-recovery-needed',
       'An interrupted workflow manifest update requires recovery before reading or previewing.',
     );
+  yield* trackPotentialWorkflowMutation(config, [state.manifestUri]);
   yield* store.write(workflowLocation(config), state.manifestUri, state.manifestContent, {
     mode: current === undefined ? 'create' : 'replace',
     ...(current === undefined ? {} : {expectedFingerprint: yield* store.fingerprint(current)}),
   });
+  if ((yield* store.read(workflowLocation(config), state.manifestUri)) !== state.manifestContent)
+    return yield* workflowError('readback-conflict', 'Manifest readback differs from the exact journaled document.');
+  yield* verifyWorkflowMutation(config, [state.manifestUri]);
 });
 
 export const loadWorkflowJournal = Effect.fn('workflowMemory.loadJournal')(function* (
@@ -206,6 +261,82 @@ export const inspectWorkflowJournal = Effect.fn('workflowMemory.inspectJournal')
   return {state, needsRecovery};
 });
 
+/** Internal capability: one already-held journal lock, never request-supplied. */
+export const withWorkflowJournalSession = <A, E, R>(
+  config: RuntimeConfig,
+  bindingId: string,
+  use: (session: {
+    readonly admission: Effect.Success<ReturnType<typeof inspectWorkflowJournal>>;
+    readonly run: <B, F, S>(
+      request: WorkflowRequest | WorkflowOperationInspectionRequest,
+      body: (state: WorkflowJournal) => Effect.Effect<B, F, S>,
+    ) => Effect.Effect<
+      B,
+      F | Effect.Error<ReturnType<typeof loadWorkflowJournal>>,
+      S | Effect.Services<ReturnType<typeof loadWorkflowJournal>>
+    >;
+  }) => Effect.Effect<A, E, R>,
+) =>
+  withWorkflowLock(
+    config,
+    bindingId,
+    Effect.gen(function* () {
+      const admission = yield* inspectWorkflowJournal(config, bindingId);
+      const owner = yield* Effect.fiberId;
+      let active = true;
+      let busy = false;
+      const run = <B, F, S>(
+        request: WorkflowRequest | WorkflowOperationInspectionRequest,
+        body: (state: WorkflowJournal) => Effect.Effect<B, F, S>,
+      ) =>
+        Effect.gen(function* () {
+          if (!active || (yield* Effect.fiberId) !== owner || busy || request.bindingId !== bindingId)
+            return yield* workflowError(
+              'binding-drift',
+              'The native memory session is inactive, foreign or already in use.',
+            );
+          return yield* Effect.acquireUseRelease(
+            Effect.sync(() => {
+              busy = true;
+            }),
+            () =>
+              Effect.gen(function* () {
+                const state = yield* readJournalFile(config, bindingId);
+                if (!state || stableJson(state.binding) !== stableJson(admission.state.binding))
+                  return yield* workflowError('binding-drift', 'The native memory session binding changed.');
+                const evidenceRefs =
+                  request.action === 'recover'
+                    ? state.operations[request.operationId ?? '']?.request.evidenceRefs
+                    : 'evidenceRefs' in request
+                      ? request.evidenceRefs
+                      : undefined;
+                yield* verifyWorkflowEvidence(config, state.binding, evidenceRefs);
+                yield* reconcileManifest(
+                  config,
+                  state,
+                  !['read', 'preflight', 'inspect-operation'].includes(request.action),
+                );
+                const result = yield* body(state);
+                if (['create', 'replace', 'recover'].includes(request.action))
+                  yield* verifyWorkflowBinding(config, state.binding);
+                return result;
+              }),
+            () =>
+              Effect.sync(() => {
+                busy = false;
+              }),
+          );
+        });
+      return yield* Effect.suspend(() => use({admission, run})).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            active = false;
+          }),
+        ),
+      );
+    }),
+  );
+
 const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['artifacts'], timestamp: string) =>
   formatMemoryDocument(
     'MEMORY',
@@ -222,7 +353,7 @@ const manifestDocument = (binding: WorkflowBinding, artifacts: WorkflowJournal['
     stableJson({protocolVersion: 1, binding, artifacts}),
   );
 
-const workflowTransition = (
+export const workflowTransition = (
   previous: WorkflowJournal,
   updated: WorkflowJournal,
   timestamp: string,
@@ -239,8 +370,9 @@ const validateTransition = Effect.fn('workflowMemory.validateTransition')(functi
   prepared: WorkflowJournal,
 ) {
   const sharedRoots = yield* readWorkflowSharedRoots(config, prepared.binding);
+  const cache = yield* CurrentWorkflowReadCache;
   yield* Effect.try({
-    try: () => assertWorkflowJournalIntegrity(prepared, previous.manifestContent, sharedRoots),
+    try: () => assertWorkflowJournalIntegrity(prepared, previous.manifestContent, sharedRoots, cache),
     catch: () =>
       workflowError(
         'operation-transition-conflict',
@@ -256,8 +388,11 @@ export const assertWorkflowTransition = Effect.fn('workflowMemory.transition')(f
   updated: WorkflowJournal,
 ) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
-  yield* validateWorkflowInput(() => serializeWorkflowJournal(prepared));
-  yield* validateWorkflowInput(() => serializeWorkflowJournal({...prepared, manifestCommitted: true}));
+  const cache = yield* CurrentWorkflowReadCache;
+  yield* validateWorkflowInput(() => assertWorkflowJournalCapacity(prepared, cache?.compactJournal));
+  yield* validateWorkflowInput(() =>
+    assertWorkflowJournalCapacity({...prepared, manifestCommitted: true}, cache?.compactJournal),
+  );
   yield* validateTransition(config, previous, prepared);
 });
 

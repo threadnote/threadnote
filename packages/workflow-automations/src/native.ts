@@ -1,6 +1,7 @@
 import {Schema} from 'effect';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {workflowFamilyStem, workflowTitleSlug} from './naming.js';
+import {NativeCycleRuntimeSchema, decodeNativeCycleRuntime} from './cycle_runtime.js';
 import {
   WorkflowAutomationError,
   type WorkflowArtifact,
@@ -11,6 +12,7 @@ import {
 export const nativeWorkflowProtocolVersion = 1 as const;
 export const nativeWorkflowExecutorVersion = 1 as const;
 export const nativeWorkflowStateVersion = 1 as const;
+export const nativeWorkflowOperationLimit = 4096;
 
 const fail = (code: string, message: string) => WorkflowAutomationError.make({code, message});
 const nonEmpty = (maximum: number) => Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(maximum));
@@ -19,6 +21,16 @@ const portableId = Schema.String.check(
   Schema.makeFilter(value =>
     value.includes('..') || value === 'constructor' || value === 'prototype' || value === '__proto__'
       ? 'Reserved identifiers are not allowed.'
+      : undefined,
+  ),
+);
+// Run IDs become filenames in native state storage. Keep that filesystem
+// portability constraint separate from logical identifiers such as
+// operationId, whose v1 grammar already admitted Windows device names.
+const safeRunId = portableId.check(
+  Schema.makeFilter(value =>
+    /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/iu.test(value)
+      ? 'Windows device names are not allowed for run IDs.'
       : undefined,
   ),
 );
@@ -83,13 +95,13 @@ const requestBase = {
   protocolVersion: Schema.Literal(nativeWorkflowProtocolVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
 } as const;
-const commonRun = {runId: portableId, generation} as const;
+const commonRun = {runId: safeRunId, generation} as const;
 const actionSchemas = [
   Schema.Struct({...requestBase, action: Schema.Literal('capabilities')}),
   Schema.Struct({
     ...requestBase,
     action: Schema.Literal('init'),
-    runId: portableId,
+    runId: safeRunId,
     project: portableId,
     featureId: portableId,
     title: Schema.optionalKey(nonEmpty(4096)),
@@ -110,6 +122,8 @@ const actionSchemas = [
   Schema.Struct({...requestBase, action: Schema.Literal('recover'), ...commonRun, operationId: portableId}),
 ] as const;
 
+export const NativeWorkflowInitRequestSchema = actionSchemas[1];
+export const NativeWorkflowReadRequestSchema = actionSchemas[3];
 export const NativeWorkflowRequestSchema = Schema.Union(actionSchemas);
 export type NativeWorkflowRequest = typeof NativeWorkflowRequestSchema.Type;
 
@@ -148,11 +162,48 @@ const nativeOperationSchema = Schema.Struct({
   intentDigest: digest,
   artifact: Schema.optionalKey(nativeArtifactSchema),
 });
-export const NativeWorkflowStateSchema = Schema.Struct({
+const byteLimit = 64 * 1024 * 1024;
+const boundedCount = Schema.Finite.check(
+  Schema.isInt(),
+  Schema.isBetween({minimum: 0, maximum: nativeWorkflowOperationLimit}),
+);
+const boundedBytes = Schema.Finite.check(Schema.isInt(), Schema.isBetween({minimum: 0, maximum: byteLimit}));
+export const NativeAuthoringSaveReservationSchema = Schema.Struct({
+  intentDigest: digest,
+  rootUri: Schema.NullOr(uri),
+  operationStart: boundedCount,
+  operationLimit: boundedCount,
+  prefixDigest: digest,
+  journalBytesAtStart: boundedBytes,
+  stateBytesAtStart: boundedBytes,
+  reservedBytes: boundedBytes,
+});
+export type NativeAuthoringSaveReservation = typeof NativeAuthoringSaveReservationSchema.Type;
+export const NativeCloseoutSaveReservationSchema = Schema.Struct({
+  reservedStoredBytes: boundedBytes,
+  journalStoredBytesAtStart: Schema.Finite.check(
+    Schema.isInt(),
+    Schema.isBetween({minimum: 0, maximum: 16 * 1024 * 1024}),
+  ),
+  transactionId: digest,
+  intentDigest: digest,
+  operationIds: Schema.Array(nonEmpty(256)).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(nativeWorkflowOperationLimit),
+  ),
+  operationStart: boundedCount,
+  operationLimit: boundedCount,
+  prefixDigest: digest,
+  journalBytesAtStart: boundedBytes,
+  stateBytesAtStart: boundedBytes,
+  reservedBytes: boundedBytes,
+});
+
+const nativeWorkflowStateFields = {
   format: Schema.Literal('threadnote-native-workflow'),
   stateVersion: Schema.Literal(nativeWorkflowStateVersion),
   executorVersion: Schema.Literal(nativeWorkflowExecutorVersion),
-  runId: portableId,
+  runId: safeRunId,
   project: portableId,
   featureId: portableId,
   title: Schema.optionalKey(nonEmpty(4096)),
@@ -161,9 +212,22 @@ export const NativeWorkflowStateSchema = Schema.Struct({
   profile,
   team: Schema.optionalKey(portableId),
   bindingId: digest,
-  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(512)),
+  authoringSave: Schema.optionalKey(NativeAuthoringSaveReservationSchema),
+  closeoutSave: Schema.optionalKey(NativeCloseoutSaveReservationSchema),
+  cycle: Schema.optionalKey(NativeCycleRuntimeSchema),
+} as const;
+export const NativeWorkflowStateSchema = Schema.Struct({
+  ...nativeWorkflowStateFields,
+  operations: Schema.Array(nativeOperationSchema).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
 });
 export type NativeWorkflowState = typeof NativeWorkflowStateSchema.Type;
+
+// The private decoder keeps the complete strict outer schema while admitting
+// operation objects to its identity cache only after full validation.
+const CachedNativeWorkflowStateSchema = Schema.Struct({
+  ...nativeWorkflowStateFields,
+  operations: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(nativeWorkflowOperationLimit)),
+});
 
 function sortedJson(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortedJson);
@@ -177,8 +241,103 @@ function sortedJson(value: unknown): unknown {
   return value;
 }
 
-export function nativeWorkflowIntentDigest(intent: WorkflowWriteIntent): string {
-  return sha256HexSync(`threadnote.native-workflow.intent.v1\n${JSON.stringify(sortedJson({version: 1, intent}))}`);
+export function nativeAuthoringPrefixDigest(operations: readonly {readonly intentDigest: string}[]): string {
+  return sha256HexSync(JSON.stringify(operations.map(operation => operation.intentDigest)));
+}
+
+/** Bound new packed journal/native content, including every growing permission table. */
+export function nativeAuthoringSaveByteBudget(input: {
+  readonly contentBytes: number;
+  readonly evidenceBytes: number;
+  readonly plannedOperations: number;
+  readonly scopeBytes: number;
+  readonly maximumScopeEntryBytes: number;
+  readonly requestMetadataBytes: number;
+}): number {
+  if (
+    Object.values(input).some(value => !Number.isSafeInteger(value) || value < 0) ||
+    input.plannedOperations < 1 ||
+    input.plannedOperations > nativeWorkflowOperationLimit
+  )
+    throw fail('authoring-capacity', 'Authoring capacity requires bounded nonnegative integer budgets.');
+  // A related operation stores one exact scope set, shared by its <=16 targets.
+  // Each set can add every planned child and all16 candidate URIs. The fixed
+  // allowance covers bounded citations (64KiB), relation/receipt metadata and
+  // manifest entries; variable request/binding metadata is charged separately.
+  const perOperation =
+    512 * 1024 +
+    4 * input.requestMetadataBytes +
+    input.scopeBytes +
+    (input.plannedOperations + 16) * input.maximumScopeEntryBytes;
+  const bytes = 4096 + 10 * input.contentBytes + 2 * input.evidenceBytes + input.plannedOperations * perOperation;
+  if (!Number.isSafeInteger(bytes)) throw fail('authoring-capacity', 'Authoring capacity exceeds its integer budget.');
+  return bytes;
+}
+
+/** A retry retains its original admission; completed children never consume headroom twice. */
+export function admitNativeAuthoringSave(
+  input: {
+    readonly intentDigest: string;
+    readonly rootUri: string | null;
+    readonly operationCount: number;
+    readonly plannedOperations: number;
+    readonly journalBytes: number;
+    readonly stateBytes: number;
+    readonly plannedBytes: number;
+    readonly prefixDigest: string;
+    readonly operationLimit?: number;
+  },
+  existing?: NativeAuthoringSaveReservation,
+): NativeAuthoringSaveReservation {
+  if (
+    [input.operationCount, input.plannedOperations, input.journalBytes, input.stateBytes, input.plannedBytes].some(
+      value => !Number.isSafeInteger(value) || value < 0,
+    ) ||
+    input.plannedOperations < 1
+  )
+    throw fail('authoring-capacity', 'Authoring capacity requires bounded nonnegative integer budgets.');
+  const limit = Math.min(input.operationLimit ?? nativeWorkflowOperationLimit, nativeWorkflowOperationLimit);
+  const reservation = existing ?? {
+    intentDigest: input.intentDigest,
+    rootUri: input.rootUri,
+    operationStart: input.operationCount,
+    operationLimit: input.operationCount + input.plannedOperations,
+    prefixDigest: input.prefixDigest,
+    journalBytesAtStart: input.journalBytes,
+    stateBytesAtStart: input.stateBytes,
+    reservedBytes: input.plannedBytes,
+  };
+  try {
+    Schema.decodeSync(NativeAuthoringSaveReservationSchema, {onExcessProperty: 'error'})(reservation);
+  } catch {
+    throw fail('authoring-capacity', 'The authoring save reservation exceeds its bounded schema.');
+  }
+  if (
+    reservation.intentDigest !== input.intentDigest ||
+    reservation.rootUri !== input.rootUri ||
+    reservation.prefixDigest !== input.prefixDigest ||
+    reservation.operationLimit - reservation.operationStart !== input.plannedOperations ||
+    reservation.reservedBytes !== input.plannedBytes
+  )
+    throw fail('pending-operation', 'Resume the exact authoring save admitted by this run.');
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    reservation.operationStart > input.operationCount ||
+    input.operationCount > reservation.operationLimit ||
+    reservation.operationLimit > limit ||
+    reservation.journalBytesAtStart + reservation.reservedBytes > byteLimit ||
+    reservation.stateBytesAtStart + reservation.reservedBytes > byteLimit
+  )
+    throw fail('authoring-capacity', 'This save exceeds the original run’s bounded capacity before new child writes.');
+  return reservation;
+}
+
+export function nativeWorkflowIntentDigest(
+  intent: WorkflowWriteIntent,
+  hash: (value: string) => string = sha256HexSync,
+): string {
+  return hash(`threadnote.native-workflow.intent.v1\n${JSON.stringify(sortedJson({version: 1, intent}))}`);
 }
 
 function decode<A>(schema: Schema.ConstraintDecoder<A>, input: unknown, code: string, message: string): A {
@@ -186,6 +345,70 @@ function decode<A>(schema: Schema.ConstraintDecoder<A>, input: unknown, code: st
     return Schema.decodeUnknownSync(schema, {onExcessProperty: 'error'})(input);
   } catch {
     throw fail(code, message);
+  }
+}
+
+function validateNativeWorkflowState(
+  state: NativeWorkflowState,
+  hash: (value: string) => string,
+  isCachedOperation: (operation: NativeOperation) => boolean = () => false,
+): void {
+  if (state.cycle) {
+    decodeNativeCycleRuntime(state.cycle);
+    if (state.cycle.state.plan.featureId !== state.featureId || state.cycle.state.plan.project !== state.project)
+      throw fail('invalid-state', 'Cycle and native run identities differ.');
+  }
+  if (state.naming) {
+    try {
+      workflowFamilyStem(state.naming);
+      if (!state.title || workflowTitleSlug(state.title) !== state.naming.slug)
+        throw fail('invalid-state', 'The native title differs from its pinned name family.');
+    } catch {
+      throw fail('invalid-state', 'The native name family is invalid.');
+    }
+  }
+  if (state.authoringSave) {
+    const save = state.authoringSave;
+    if (
+      save.operationStart > state.operations.length ||
+      state.operations.length > save.operationLimit ||
+      save.operationLimit <= save.operationStart ||
+      save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
+      save.journalBytesAtStart + save.reservedBytes > byteLimit ||
+      save.stateBytesAtStart + save.reservedBytes > byteLimit
+    )
+      throw fail('invalid-state', 'The authoring save reservation differs from its original receipts or capacity.');
+  }
+  if (state.closeoutSave) {
+    const save = state.closeoutSave;
+    if (
+      save.journalStoredBytesAtStart + save.reservedStoredBytes > 16 * 1024 * 1024 ||
+      state.authoringSave ||
+      save.operationStart > state.operations.length ||
+      state.operations.length > save.operationLimit ||
+      save.operationLimit - save.operationStart !== save.operationIds.length ||
+      new Set(save.operationIds).size !== save.operationIds.length ||
+      save.prefixDigest !== nativeAuthoringPrefixDigest(state.operations.slice(0, save.operationStart)) ||
+      save.journalBytesAtStart + save.reservedBytes > byteLimit ||
+      save.stateBytesAtStart + save.reservedBytes > byteLimit ||
+      state.operations
+        .slice(save.operationStart)
+        .some(operation => !save.operationIds.includes(operation.intent.operationId))
+    )
+      throw fail('invalid-state', 'The closeout reservation differs from its original receipts or capacity.');
+  }
+  const operationIds = new Set<string>();
+  for (const operation of state.operations) {
+    const {intent} = operation;
+    if (
+      operationIds.has(intent.operationId) ||
+      intent.bindingId !== state.bindingId ||
+      intent.sourceRunId !== state.runId ||
+      (!isCachedOperation(operation) && operation.intentDigest !== nativeWorkflowIntentDigest(intent, hash)) ||
+      (operation.status === 'prepared' ? operation.artifact !== undefined : operation.artifact === undefined)
+    )
+      throw fail('invalid-state', 'The native workflow state contains a conflicting operation or intent digest.');
+    operationIds.add(intent.operationId);
   }
 }
 
@@ -200,7 +423,10 @@ export function decodeNativeWorkflowRequest(input: unknown): NativeWorkflowReque
   return request;
 }
 
-export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
+export function decodeNativeWorkflowState(
+  input: unknown,
+  hash: (value: string) => string = sha256HexSync,
+): NativeWorkflowState {
   const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
   if (
     candidate?.format !== 'threadnote-native-workflow' ||
@@ -210,29 +436,67 @@ export function decodeNativeWorkflowState(input: unknown): NativeWorkflowState {
     throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
   }
   const state = decode(NativeWorkflowStateSchema, input, 'invalid-state', 'The native workflow state is malformed.');
-  if (state.naming) {
-    try {
-      workflowFamilyStem(state.naming);
-      if (!state.title || workflowTitleSlug(state.title) !== state.naming.slug)
-        throw fail('invalid-state', 'The native title differs from its pinned name family.');
-    } catch {
-      throw fail('invalid-state', 'The native name family is invalid.');
-    }
-  }
-  const operationIds = new Set<string>();
-  for (const operation of state.operations) {
-    const {intent} = operation;
-    if (
-      operationIds.has(intent.operationId) ||
-      intent.bindingId !== state.bindingId ||
-      intent.sourceRunId !== state.runId ||
-      operation.intentDigest !== nativeWorkflowIntentDigest(intent) ||
-      (operation.status === 'prepared' ? operation.artifact !== undefined : operation.artifact === undefined)
-    )
-      throw fail('invalid-state', 'The native workflow state contains a conflicting operation or intent digest.');
-    operationIds.add(intent.operationId);
-  }
+  validateNativeWorkflowState(state, hash);
   return state;
+}
+
+function deepFreeze<A>(value: A, seen = new WeakSet<object>()): A {
+  if (value !== null && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    for (const key of Reflect.ownKeys(value)) deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * Create a request-local decoder that reuses only previously validated,
+ * deeply immutable operation objects. The default exported decoder remains
+ * the full-validation boundary for parsed or otherwise uncached state.
+ */
+export function makeNativeWorkflowStateDecoder(
+  hash: (value: string) => string = sha256HexSync,
+): (input: unknown) => NativeWorkflowState {
+  const validatedOperations = new WeakSet<object>();
+  return input => {
+    const candidate = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+    if (
+      candidate?.format !== 'threadnote-native-workflow' ||
+      candidate.stateVersion !== nativeWorkflowStateVersion ||
+      candidate.executorVersion !== nativeWorkflowExecutorVersion
+    ) {
+      throw fail('unsupported-state', 'This workflow state version is unsupported. Start a fresh native workflow run.');
+    }
+    const decoded = decode(
+      CachedNativeWorkflowStateSchema,
+      input,
+      'invalid-state',
+      'The native workflow state is malformed.',
+    );
+    const freshOperations: NativeOperation[] = [];
+    const operations = decoded.operations.map(operation => {
+      if (typeof operation === 'object' && operation !== null && validatedOperations.has(operation))
+        return operation as NativeOperation;
+      const validated = decode(
+        nativeOperationSchema,
+        operation,
+        'invalid-state',
+        'The native workflow state contains a conflicting operation or intent digest.',
+      );
+      freshOperations.push(validated);
+      return validated;
+    });
+    const state = {...decoded, operations} as NativeWorkflowState;
+    validateNativeWorkflowState(state, hash, operation => validatedOperations.has(operation));
+    // Cache only after every state-wide invariant passed. Freezing all nested
+    // values prevents a caller from changing a cached operation through an
+    // array, relation, evidence reference, intent, or artifact reference.
+    for (const operation of freshOperations) {
+      deepFreeze(operation);
+      validatedOperations.add(operation);
+    }
+    return state;
+  };
 }
 
 export type {WorkflowArtifact, WorkflowEvidenceReference, WorkflowWriteIntent};

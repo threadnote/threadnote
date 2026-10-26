@@ -42,11 +42,13 @@ const graph: readonly WorkflowPublicationNode[] = [
     relations: [],
   },
 ];
-const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(function* () {
+const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(function* (
+  prefix = 'threadnote-publication-coordinator-',
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
-  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-publication-coordinator-'}));
+  const root = yield* fs.realPath(yield* fs.makeTempDirectoryScoped({prefix}));
   const home = path.join(root, 'home');
   const repo = path.join(root, 'repo');
   const remote = path.join(root, 'remote.git');
@@ -152,6 +154,104 @@ const fixture = Effect.fn('test.workflowPublicationCoordinator.fixture')(functio
 });
 
 describe('approved workflow graph publication', () => {
+  for (const boundary of process.platform === 'win32' ? [245, 247, 249] : [200, 206, 212]) {
+    effectIt.effect(`verifies exact final and external blobs with explicit revision boundaries ${boundary}`, () =>
+      Effect.gen(function* () {
+        const f = yield* fixture('tn-');
+        const commands = yield* CommandExecutor;
+        const reads: {spec: string; separated: boolean}[] = [];
+        const observed = CommandExecutor.of({
+          ...commands,
+          execute: (executable, args, options) => {
+            if (
+              args[0] === '-C' &&
+              args[1] === f.worktree &&
+              args[2] === 'show' &&
+              /^[a-f0-9]{40}(?:[a-f0-9]{24})?:/u.test(args[3] ?? '')
+            ) {
+              reads.push({spec: args[3], separated: args[4] === '--'});
+            }
+            return commands.execute(executable, args, options);
+          },
+        });
+        yield* Effect.gen(function* () {
+          const prefixBytes = Buffer.byteLength(f.path.join(f.worktree, 'durable/projects/fixture/x')) - 1;
+          const length = process.platform === 'win32' ? boundary - prefixBytes : boundary;
+          // Graph topic + binding suffix + .md is 20 bytes; external topic + .md is 3.
+          expect(length).toBeGreaterThan(20);
+          expect(length).toBeLessThanOrEqual(212);
+          const input = {
+            operation: 'create' as const,
+            bodyText: 'Independent external dependency — 仕様.\n',
+            metadata: {
+              kind: 'durable' as const,
+              status: 'active' as const,
+              project: 'fixture',
+              topic: 'e'.repeat(length - 3),
+              memoryId: `tn_${sha256HexSync(`external-${length}`).slice(0, 20)}`,
+              timestamp: '2026-10-20T00:00:00.000Z',
+              sourceAgentClient: 'test',
+            },
+          };
+          const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
+          const external = yield* prepareCursorCloudSharedMemory(f.config, scope, input);
+          expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
+          const node = {
+            ...graph[0],
+            topic: 'x'.repeat(length - 20),
+            body: 'Independent final body — 仕様.\n',
+            relations: [{type: 'depends_on', uri: external.memoryUri}],
+          };
+          const preview = yield* f.preview([node]);
+          if (!('nodes' in preview)) return yield* Effect.die('Expected publication preview');
+          for (const uri of [external.memoryUri, preview.nodes[0].canonicalUri]) {
+            const relative = uri.split('/shared/default/')[1];
+            expect(Buffer.byteLength(f.path.basename(relative))).toBe(length);
+            if (process.platform === 'win32') {
+              const absolute = f.path.join(f.worktree, relative);
+              expect(Buffer.byteLength(absolute)).toBe(prefixBytes + length);
+              expect(Buffer.byteLength(absolute)).toBeLessThan(260);
+              expect(absolute.length).toBeLessThan(260);
+              expect(absolute.length + 41).toBeGreaterThan(260);
+            }
+          }
+          yield* f.approve(preview.approvalDigest);
+          const before = reads.length;
+          const published = yield* f.publish(preview.approvalDigest);
+          expect(published).toMatchObject({status: 'ok', verifiedReadback: true});
+          expect(yield* f.guard).toEqual(published);
+          expect(yield* f.publish(preview.approvalDigest)).toEqual(published);
+          const relevant = reads.slice(before);
+          expect(relevant.some(read => read.spec.endsWith(external.memoryUri.split('/shared/default/')[1]))).toBe(true);
+          expect(
+            relevant.some(read => read.spec.endsWith(preview.nodes[0].canonicalUri.split('/shared/default/')[1])),
+          ).toBe(true);
+          expect(relevant.every(read => read.separated)).toBe(true);
+          expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
+          const remoteCommit = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+          for (const uri of [external.memoryUri, preview.nodes[0].canonicalUri]) {
+            const relative = uri.split('/shared/default/')[1];
+            expect((yield* f.git(f.remote, ['show', `${remoteCommit}:${relative}`, '--'])).stdout).toBe(
+              yield* readOptionalResource(f.config, uri),
+            );
+          }
+          expect(
+            parseMemoryDocument(
+              external.memoryUri,
+              (yield* readOptionalResource(f.config, external.memoryUri))!,
+            )?.body.trim(),
+          ).toBe(input.bodyText.trim());
+          expect(
+            parseMemoryDocument(
+              preview.nodes[0].canonicalUri,
+              (yield* readOptionalResource(f.config, preview.nodes[0].canonicalUri))!,
+            )?.body.trim(),
+          ).toBe(node.body.trim());
+        }).pipe(Effect.provideService(CommandExecutor, observed));
+      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+    );
+  }
+
   effectIt.effect('publishes and replays the three approved stages before admitting draft retirement', context => {
     const diagnostics = publicationDiagnostics();
     const report = (event: 'aborted' | 'finished') =>
@@ -359,166 +459,248 @@ describe('approved workflow graph publication', () => {
   for (const decision of ['reject', 'defer'] as const)
     effectIt.effect(
       `does not publish another binding's pending commit after its approval is revoked by ${decision}`,
-      () =>
-        Effect.gen(function* () {
-          const f = yield* fixture();
-          const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
-          const first = yield* f.preview([graph[0]]);
-          if (!('stages' in first)) return yield* Effect.die('Expected preview');
-          yield* f.approve(first.approvalDigest);
-          const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
-          yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {mode: 0o700});
-          const pending = yield* f.publish(first.approvalDigest);
-          expect(pending).toMatchObject({status: 'pending', committed: {version: 1}});
-          const firstCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
-          yield* f.approve(first.approvalDigest, decision);
-          yield* f.fs.remove(hook);
-          const binding = yield* resolveWorkflowBinding(f.config, {
-            protocolVersion: 1,
-            action: 'bind',
-            workflowRunId: 'independent-workflow',
-            project: 'fixture',
-            featureId: 'independent-feature',
-            generation: 'bundle-v1',
-          }).pipe(Effect.provideService(SystemInfo, f.context));
-          const state = yield* bindWorkflow(f.config, binding);
-          const call = (request: WorkflowPublicationRequest) =>
-            withWorkflowLock(f.config, binding.bindingId, runWorkflowPublication(f.config, state, request)).pipe(
-              Effect.provideService(SystemInfo, f.context),
-            );
-          const second = yield* call({
-            protocolVersion: 1,
-            bindingId: binding.bindingId,
-            action: 'publication-preview',
-            sourceCommit: f.sourceCommit,
-            graph: {nodes: [{...graph[0], topic: 'independent-design', body: 'Independently approved architecture.'}]},
-          });
-          yield* call({
-            protocolVersion: 1,
-            bindingId: binding.bindingId,
-            action: 'publication-approve',
-            approvalDigest: second.approvalDigest,
-            decision: 'approve',
-            approvalEvidence: 'Approve only the displayed independent graph.',
-          });
-          expect(
+      context => {
+        const diagnostics = publicationDiagnostics();
+        const report = (event: 'aborted' | 'finished') =>
+          process.stderr.write(
+            `WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({test: `revoked-${decision}`, event, ...diagnostics.snapshot()})}\n`,
+          );
+        const aborted = () => report('aborted');
+        context.signal.addEventListener('abort', aborted, {once: true});
+        context.onTestFinished(() => {
+          context.signal.removeEventListener('abort', aborted);
+          report('finished');
+        });
+        return Effect.gen(function* () {
+          const commands = yield* CommandExecutor;
+          return yield* Effect.gen(function* () {
+            diagnostics.phase('fixture');
+            const f = yield* fixture();
+            const remoteBefore = (yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim();
+            diagnostics.phase('first-preview');
+            const first = yield* f.preview([graph[0]]);
+            if (!('stages' in first)) return yield* Effect.die('Expected preview');
+            diagnostics.phase('first-approve');
+            yield* f.approve(first.approvalDigest);
+            const hook = f.path.join(f.remote, 'hooks', 'pre-receive');
+            yield* f.fs.writeFileString(hook, '#!/bin/sh\nexit 1\n', {mode: 0o700});
+            diagnostics.phase('first-blocked-push');
+            const pending = yield* f.publish(first.approvalDigest);
+            expect(pending).toMatchObject({status: 'pending', committed: {version: 1}});
+            const firstCommit = (yield* f.git(f.worktree, ['rev-parse', 'HEAD'])).stdout.trim();
+            diagnostics.phase('first-revoke');
+            yield* f.approve(first.approvalDigest, decision);
+            yield* f.fs.remove(hook);
+            const binding = yield* resolveWorkflowBinding(f.config, {
+              protocolVersion: 1,
+              action: 'bind',
+              workflowRunId: 'independent-workflow',
+              project: 'fixture',
+              featureId: 'independent-feature',
+              generation: 'bundle-v1',
+            }).pipe(Effect.provideService(SystemInfo, f.context));
+            const state = yield* bindWorkflow(f.config, binding);
+            const call = (request: WorkflowPublicationRequest) =>
+              withWorkflowLock(f.config, binding.bindingId, runWorkflowPublication(f.config, state, request)).pipe(
+                Effect.provideService(SystemInfo, f.context),
+              );
+            diagnostics.phase('second-binding-preview');
+            const second = yield* call({
+              protocolVersion: 1,
+              bindingId: binding.bindingId,
+              action: 'publication-preview',
+              sourceCommit: f.sourceCommit,
+              graph: {
+                nodes: [{...graph[0], topic: 'independent-design', body: 'Independently approved architecture.'}],
+              },
+            });
+            diagnostics.phase('second-approve');
             yield* call({
               protocolVersion: 1,
               bindingId: binding.bindingId,
-              action: 'publication-publish',
+              action: 'publication-approve',
               approvalDigest: second.approvalDigest,
-            }),
-          ).toMatchObject({status: 'pending'});
-          expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
-          expect(
-            (yield* f.git(f.worktree, [
-              'show',
-              `${firstCommit}:${first.nodes[0].canonicalUri.split('/shared/default/')[1]}`,
-            ])).stdout,
-          ).toBe(first.stages[0].content);
-          expect(yield* f.publish(first.approvalDigest).pipe(Effect.result)).toMatchObject({
-            _tag: 'Failure',
-            failure: {code: 'publication-approval-required'},
-          });
-          // Nothing was discarded: explicit renewed approval lets A publish, then B retries its own commit.
-          yield* f.approve(first.approvalDigest);
-          expect(yield* f.publish(first.approvalDigest)).toMatchObject({verifiedReadback: true});
-          expect(
-            yield* call({
-              protocolVersion: 1,
-              bindingId: binding.bindingId,
-              action: 'publication-publish',
-              approvalDigest: second.approvalDigest,
-            }),
-          ).toMatchObject({verifiedReadback: true});
-        }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+              decision: 'approve',
+              approvalEvidence: 'Approve only the displayed independent graph.',
+            });
+            diagnostics.phase('second-blocked-publish');
+            expect(
+              yield* call({
+                protocolVersion: 1,
+                bindingId: binding.bindingId,
+                action: 'publication-publish',
+                approvalDigest: second.approvalDigest,
+              }),
+            ).toMatchObject({status: 'pending'});
+            diagnostics.phase('revoked-approval-check');
+            expect((yield* f.git(f.remote, ['rev-parse', 'main'])).stdout.trim()).toBe(remoteBefore);
+            expect(
+              (yield* f.git(f.worktree, [
+                'show',
+                `${firstCommit}:${first.nodes[0].canonicalUri.split('/shared/default/')[1]}`,
+              ])).stdout,
+            ).toBe(first.stages[0].content);
+            expect(yield* f.publish(first.approvalDigest).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-approval-required'},
+            });
+            // Nothing was discarded: explicit renewed approval lets A publish, then B retries its own commit.
+            diagnostics.phase('renew-first-approval');
+            yield* f.approve(first.approvalDigest);
+            diagnostics.phase('resume-first');
+            expect(yield* f.publish(first.approvalDigest)).toMatchObject({verifiedReadback: true});
+            diagnostics.phase('resume-second');
+            expect(
+              yield* call({
+                protocolVersion: 1,
+                bindingId: binding.bindingId,
+                action: 'publication-publish',
+                approvalDigest: second.approvalDigest,
+              }),
+            ).toMatchObject({verifiedReadback: true});
+          }).pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) =>
+                  diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+              }),
+            ),
+          );
+        }).pipe(
+          Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        );
+      },
     );
 
   for (const change of ['delete', 'archive', 'replace'] as const)
-    effectIt.effect(`keeps drafts when an external target has a remote ${change} hidden by stale native cache`, () =>
-      Effect.gen(function* () {
-        const f = yield* fixture();
-        const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
-        const input = {
-          operation: 'create' as const,
-          bodyText: 'Approved external architecture dependency.',
-          metadata: {
-            kind: 'durable' as const,
-            status: 'active' as const,
-            project: 'fixture',
-            topic: 'external-dependency',
-            memoryId: 'tn_1234567890abcdef1234',
-            timestamp: '2026-10-20T00:00:00.000Z',
-            sourceAgentClient: 'test',
-          },
-        };
-        const external = yield* prepareCursorCloudSharedMemory(f.config, scope, input);
-        expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
-        const body = 'Private draft retained until the complete approved graph is remotely verified.\n';
-        const draft = (yield* runWorkflowMemory(f.config, {
-          protocolVersion: 1,
-          bindingId: f.binding.bindingId,
-          action: 'create',
-          operationId: 'private-draft',
-          artifactKey: 'draft',
-          sourceRunId: 'writer',
-          role: 'root',
-          body,
-          bodySha256: sha256HexSync(body),
-          expectedRevision: null,
-        }).pipe(Effect.provideService(SystemInfo, f.context))) as WorkflowReadResult;
-        const draftBefore = yield* readOptionalResource(f.config, draft.canonicalUri);
-        const preview = yield* f.preview([{...graph[0], relations: [{type: 'depends_on', uri: external.memoryUri}]}]);
-        yield* f.approve(preview.approvalDigest);
-        expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
-        const peer = f.path.join(f.home, `peer-${change}`);
-        yield* f.git(f.home, ['clone', f.remote, peer]);
-        yield* f.git(peer, ['config', 'user.email', 'peer@example.invalid']);
-        yield* f.git(peer, ['config', 'user.name', 'External Target Peer']);
-        const path = external.memoryUri.split('/shared/default/')[1];
-        if (change === 'delete') yield* f.git(peer, ['rm', path]);
-        else {
-          const record = parseMemoryDocument(external.memoryUri, external.memory)!;
-          const modified = formatMemoryDocument(
-            record.headerTitle,
-            {
-              ...record.metadata,
-              ...(change === 'archive' ? {status: 'archived' as const} : {memoryId: 'tn_abcdef1234567890abcd'}),
-            },
-            record.body,
+    effectIt.effect(
+      `keeps drafts when an external target has a remote ${change} hidden by stale native cache`,
+      context => {
+        const diagnostics = publicationDiagnostics();
+        const report = (event: 'aborted' | 'finished') =>
+          process.stderr.write(
+            `WORKFLOW_PUBLICATION_DIAGNOSTICS ${JSON.stringify({test: `external-${change}`, event, ...diagnostics.snapshot()})}\n`,
           );
-          yield* f.fs.writeFileString(f.path.join(peer, path), modified);
-          yield* f.git(peer, ['add', path]);
-        }
-        yield* f.git(peer, ['commit', '-m', `external dependency ${change}`]);
-        yield* f.git(peer, ['push', 'origin', 'main']);
-        expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
-        expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
+        const aborted = () => report('aborted');
+        context.signal.addEventListener('abort', aborted, {once: true});
+        context.onTestFinished(() => {
+          context.signal.removeEventListener('abort', aborted);
+          report('finished');
         });
-        expect(yield* f.guard.pipe(Effect.result)).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
-        });
-        expect(
-          yield* runWorkflowMemory(f.config, {
-            protocolVersion: 1,
-            bindingId: f.binding.bindingId,
-            action: 'archive',
-            operationId: 'retire-private-draft',
-            artifactKey: 'draft',
-            sourceRunId: 'writer',
-            role: 'root',
-            uri: draft.canonicalUri,
-            expectedRevision: draft.revision,
-          }).pipe(Effect.provideService(SystemInfo, f.context), Effect.result),
-        ).toMatchObject({
-          _tag: 'Failure',
-          failure: {code: 'publication-readback-conflict'},
-        });
-        expect(yield* readOptionalResource(f.config, draft.canonicalUri)).toBe(draftBefore);
-      }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+        return Effect.gen(function* () {
+          const commands = yield* CommandExecutor;
+          return yield* Effect.gen(function* () {
+            diagnostics.phase('fixture');
+            const f = yield* fixture();
+            const scope = {team: 'default', root: 'threadnote://user/tester/memories/shared/default'};
+            const input = {
+              operation: 'create' as const,
+              bodyText: 'Approved external architecture dependency.',
+              metadata: {
+                kind: 'durable' as const,
+                status: 'active' as const,
+                project: 'fixture',
+                topic: 'external-dependency',
+                memoryId: 'tn_1234567890abcdef1234',
+                timestamp: '2026-10-20T00:00:00.000Z',
+                sourceAgentClient: 'test',
+              },
+            };
+            const external = yield* prepareCursorCloudSharedMemory(f.config, scope, input);
+            expect((yield* writeCursorCloudSharedMemory(f.config, scope, input)).isError).not.toBe(true);
+            diagnostics.phase('preview');
+            const body = 'Private draft retained until the complete approved graph is remotely verified.\n';
+            const draft = (yield* runWorkflowMemory(f.config, {
+              protocolVersion: 1,
+              bindingId: f.binding.bindingId,
+              action: 'create',
+              operationId: 'private-draft',
+              artifactKey: 'draft',
+              sourceRunId: 'writer',
+              role: 'root',
+              body,
+              bodySha256: sha256HexSync(body),
+              expectedRevision: null,
+            }).pipe(Effect.provideService(SystemInfo, f.context))) as WorkflowReadResult;
+            const draftBefore = yield* readOptionalResource(f.config, draft.canonicalUri);
+            const preview = yield* f.preview([
+              {...graph[0], relations: [{type: 'depends_on', uri: external.memoryUri}]},
+            ]);
+            diagnostics.phase('approve');
+            yield* f.approve(preview.approvalDigest);
+            diagnostics.phase('publish');
+            expect(yield* f.publish(preview.approvalDigest)).toMatchObject({verifiedReadback: true});
+            const peer = f.path.join(f.home, `peer-${change}`);
+            yield* f.git(f.home, ['clone', f.remote, peer]);
+            yield* f.git(peer, ['config', 'user.email', 'peer@example.invalid']);
+            yield* f.git(peer, ['config', 'user.name', 'External Target Peer']);
+            const path = external.memoryUri.split('/shared/default/')[1];
+            if (change === 'delete') yield* f.git(peer, ['rm', path]);
+            else {
+              const record = parseMemoryDocument(external.memoryUri, external.memory)!;
+              const modified = formatMemoryDocument(
+                record.headerTitle,
+                {
+                  ...record.metadata,
+                  ...(change === 'archive' ? {status: 'archived' as const} : {memoryId: 'tn_abcdef1234567890abcd'}),
+                },
+                record.body,
+              );
+              yield* f.fs.writeFileString(f.path.join(peer, path), modified);
+              yield* f.git(peer, ['add', path]);
+            }
+            yield* f.git(peer, ['commit', '-m', `external dependency ${change}`]);
+            yield* f.git(peer, ['push', 'origin', 'main']);
+            expect(yield* readOptionalResource(f.config, external.memoryUri)).toBe(external.memory);
+            diagnostics.phase('remote-verification');
+            expect(yield* f.publish(preview.approvalDigest).pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('replay');
+            expect(yield* f.guard.pipe(Effect.result)).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('retirement-guard');
+            expect(
+              yield* runWorkflowMemory(f.config, {
+                protocolVersion: 1,
+                bindingId: f.binding.bindingId,
+                action: 'archive',
+                operationId: 'retire-private-draft',
+                artifactKey: 'draft',
+                sourceRunId: 'writer',
+                role: 'root',
+                uri: draft.canonicalUri,
+                expectedRevision: draft.revision,
+              }).pipe(Effect.provideService(SystemInfo, f.context), Effect.result),
+            ).toMatchObject({
+              _tag: 'Failure',
+              failure: {code: 'publication-readback-conflict'},
+            });
+            diagnostics.phase('canonical-readback');
+            expect(yield* readOptionalResource(f.config, draft.canonicalUri)).toBe(draftBefore);
+          }).pipe(
+            Effect.provideService(
+              CommandExecutor,
+              CommandExecutor.of({
+                ...commands,
+                execute: (executable, args, options) =>
+                  diagnostics.observe(executable, args, commands.execute(executable, args, options)),
+              }),
+            ),
+          );
+        }).pipe(
+          Effect.onExit(() => Effect.sync(() => diagnostics.phase('teardown'))),
+          TestClock.withLive,
+          provideTestLayer(ApplicationLayer),
+        );
+      },
     );
 
   it('rejects private references through bounded JSON and URL encoding layers', () => {

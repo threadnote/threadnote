@@ -1037,7 +1037,8 @@ function useRecallDatabase<A, E, R>(
 ): Effect.Effect<A, E, R> {
   return Effect.scoped(
     Layer.build(SqliteClient.layer({filename: databasePath}).pipe(Layer.orDie)).pipe(
-      Effect.flatMap(context => effect.pipe(Effect.provide(context))),
+      Effect.withSpan('recall.acquireDatabase'),
+      Effect.flatMap(context => effect.pipe(Effect.provide(context), Effect.withSpan('recall.databaseBody'))),
     ),
   );
 }

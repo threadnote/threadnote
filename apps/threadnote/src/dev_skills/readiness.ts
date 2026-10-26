@@ -1,7 +1,7 @@
 import {Effect, Path} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {readWorkflowReadiness} from '../workflow_memory/profile.js';
-import {findExecutable, findWorkingExecutable} from '../utils.js';
+import {findExecutable} from '../utils.js';
 import type {DevSkillsIssue, DevSkillsManifest, DevSkillsReadiness, DevSkillsTarget} from './contract.js';
 import {readOptional} from './files.js';
 import {
@@ -24,15 +24,6 @@ export const devSkillsReadiness = Effect.fn('devSkills.readiness')(function* (
   for (const command of ['threadnote', 'git', 'rg'])
     if (!(yield* findExecutable([command])))
       prerequisites.push({code: 'missing-command', message: `Install ${command} and expose it in the agent's PATH.`});
-  const python = yield* findWorkingExecutable(
-    ['python3', 'python', 'python3.14', 'python3.13', 'python3.12', 'python3.11', 'python3.10'],
-    ['-B', '-c', 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'],
-  ).pipe(Effect.orElseSucceed(() => undefined));
-  if (!python)
-    prerequisites.push({
-      code: 'missing-python',
-      message: 'Development workflow helpers require Python 3.10 or newer in PATH.',
-    });
   const path = yield* Path.Path;
   const coreSkills =
     target.profile === 'codex-cloud-personal'

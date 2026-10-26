@@ -11,6 +11,8 @@ Threadnote ships `dev-spec`, `dev-plan`, `dev-cycle` and the supporting `watch-p
 
 Invoke a skill using your agent host's skill picker or supported invocation syntax, for example `$dev-plan` in Codex. Installation makes the workflows available; it does not run them. Small tasks can use Threadnote's core context and memory skills directly.
 
+The dev-cycle orchestrator selects review lanes as needed. The optional simplicity lane checks duplication, unnecessary complexity and simpler equivalent designs.
+
 ## Install and manage
 
 Standard agent setup installs these workflows by default, including personal Codex and Cursor cloud bootstrap on supported platforms. Pass `--no-dev-skills` during setup to keep them disabled. Repeating setup or repairing an integration respects that choice; explicit `dev-skills install` enables them again.
@@ -30,7 +32,7 @@ Use `--scope project --cwd /path/to/repository` for a host that declares project
 
 Installation uses the bundle in the current Threadnote release and works offline without a sharing team. Repeating installation for the same generation is a no-op. `threadnote update` refreshes enabled workflow installations with the new release. Use `dev-skills update` to refresh one target from the currently installed payload without downloading a separate skill release.
 
-Restart or reload your agent host after installation or an update, then open its skill picker. A running workflow keeps its original helpers until that run finishes; reloading the host makes the new generation available for new tasks.
+Restart or reload your agent host after installation or an update, then open its skill picker. New invocations use the selected bundle generation. The native runtime validates existing workflow identities and state before reuse.
 
 ## Manager
 
@@ -40,7 +42,7 @@ The preview lists the file changes and shared consumers. Confirm that preview to
 
 ## Readiness
 
-Installation status and workflow readiness are separate. Planning requires Python 3.10 or newer, Git, ripgrep and the host's core Threadnote integration. PR operations also require GitHub CLI and working repository credentials. Status reports missing prerequisites; installing workflows does not silently configure MCP, hooks or agent instructions.
+Installation status and workflow readiness are separate. The skills use Threadnote's compiled workflow command; Python is not required. Planning needs Git, ripgrep and the host's core Threadnote integration. PR operations also need GitHub CLI and repository credentials. Status reports missing prerequisites; installing workflows does not configure MCP, hooks or agent instructions.
 
 Configuration checks do not prove that a task's repository, publication credentials or approved content are ready. Those are checked when the workflow runs. Private local planning does not need a Git sharing team. Durable publication follows the user's sharing rules and requires the configured destination and concrete approved content.
 
@@ -61,20 +63,18 @@ Cloud spec and plan drafts stay private to the task. They may be lost when an ep
 
 ## Ownership, updates and removal
 
-Each host target has a recorded owner and a complete copied helper generation. Shared targets list every consumer affected by an update. Existing runs retain their original helper generation; new invocations use the newly selected generation. Old generations are retained.
+Each host target has a recorded owner and a verified bundle generation. Shared targets list every consumer affected by an update. Retained generations preserve ownership and recovery records; native workflows execute through Threadnote rather than copied helper scripts.
 
-Manual and automatic Threadnote updates refresh recorded targets across data homes. Workflow refresh runs independently of optional local integration repair and post-update migration prompts. An edited or inaccessible target remains pending while other targets can finish. Status distinguishes the active Threadnote version from each workflow target's installed generation and last refresh result. Resolve the reported conflict and run `threadnote update` again, even when the active version is already current.
-
-The first public release with default workflow installation also includes the refresh stage. An updater from before this feature cannot run code it does not contain. If an unpublished development installation crosses that first upgrade with both legacy post-update actions disabled, run the newly active `threadnote update` again to refresh its workflows. In a personal cloud task, the profile's start command can also restore its existing enabled enrollment.
+Manual and automatic Threadnote updates refresh recorded targets across data homes. Workflow refresh runs independently of optional integration repair. An edited or inaccessible target remains pending while other targets can finish. Status distinguishes the active Threadnote version from each workflow target's installed generation and last refresh result. Resolve the reported conflict and run `threadnote update` again, even when the active version is already current.
 
 `threadnote update --check` and `--dry-run` do not write homes, caches, locks or refresh intents. Candidate workflow compatibility remains unchecked until the verified release is available during apply. Known incompatible runtime replacements are rejected before activation; inaccessible ownership remains explicitly unverified and pending.
 
-Edited files, extra files, symlinked paths and unowned copies are preserved and reported. Legacy manual or team-pack copies with the same skill names require an explicit migration: inspect the reported paths, move the old copies outside the host's discovery roots, then retry. Threadnote does not adopt matching files or remove team packs automatically.
+Edited files, extra files, symlinked paths and unowned copies are preserved and reported. For conflicting manual or team-pack copies, inspect the reported paths, back up local edits, move only the obsolete Threadnote entrypoints outside the host's discovery roots, then retry. Threadnote does not adopt matching files or remove team packs automatically.
 
-Removal disables the selected enrollment. Shared entrypoints remain while another consumer uses them. Final removal deletes only unchanged owned entrypoints and preserves edited content, other skills and retained helper generations. Full Threadnote uninstall uses the same ownership rules. Interrupted operations report recovery needed and retry the recorded transaction; conflicting external changes require inspection before retry.
+Removal disables the selected enrollment. Shared entrypoints remain while another consumer uses them. Final removal deletes only unchanged owned entrypoints and preserves edited content, other skills and retained bundle generations. Full Threadnote uninstall uses the same ownership rules. Interrupted operations report recovery needed and retry the recorded transaction; conflicting external changes require inspection before retry.
 
 ## Watching a PR
 
-`watch-pr` treats actionable CI failures and review feedback as work to investigate and address. The main agent makes scoped fixes, runs focused validation, commits and pushes when authorized, then watches the new head. The polling worker only collects events. Acknowledging an event does not resolve the issue.
+`watch-pr` treats actionable CI failures and review feedback as work to investigate and address. The main agent makes scoped fixes, runs focused validation, commits and pushes when authorized, then watches the new head. The native collector only delivers events. Acknowledging an event does not resolve the issue.
 
 Explicit monitoring-only or local-only instructions remain effective. Watching does not authorize merging, force-pushing, dismissing reviews or changing branch protection. A bounded repair budget prevents endless retries. Background monitoring can wake the conversation only when the agent host provides a supported wake mechanism.

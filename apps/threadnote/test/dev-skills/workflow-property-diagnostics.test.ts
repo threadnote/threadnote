@@ -822,6 +822,24 @@ describe('workflow execution diagnostics', () => {
     remove.mockRestore();
   });
 
+  it('keeps the default execution tag and permits the native authoring cloud tag', () => {
+    const defaultContext = lifecycle();
+    const defaultLines: string[] = [];
+    workflowExecutionDiagnostics(defaultContext, {write: line => defaultLines.push(line)});
+    defaultContext.finish();
+    expect(packets(defaultLines)[0]).toMatchObject({test: 'workflow-citation-recovery', event: 'finished'});
+
+    const nativeContext = lifecycle();
+    const nativeLines: string[] = [];
+    const diagnostics = workflowExecutionDiagnostics(nativeContext, {
+      testTag: 'native-authoring-cloud',
+      write: line => nativeLines.push(line),
+    });
+    expect(diagnostics.snapshot().test).toBe('native-authoring-cloud');
+    nativeContext.finish();
+    expect(packets(nativeLines)[0]).toMatchObject({test: 'native-authoring-cloud', event: 'finished'});
+  });
+
   it('abort retains the last work phase when an earlier listener already entered teardown', () => {
     const context = lifecycle();
     const lines: string[] = [];

@@ -1,5 +1,12 @@
+import fc from 'fast-check';
 import {describe, expect, it} from 'vitest';
-import {decodeNativeDocument, outlineNativeDocument, renderNativeDocument} from '../src/documents.js';
+import {sha256HexSync} from '@threadnote/platform/sha256';
+import {
+  decodeNativeDocument,
+  outlineNativeDocument,
+  readNativeDocumentSection,
+  renderNativeDocument,
+} from '../src/documents.js';
 
 const envelope = {
   schemaVersion: 1,
@@ -64,5 +71,88 @@ describe('native document envelopes', () => {
     });
     expect(JSON.stringify(outline)).not.toContain('Café and');
     expect(JSON.stringify(outline)).not.toContain('Review the result.');
+  });
+
+  it('accepts the complete native document kind set while retaining versioned strict decoding', () => {
+    for (const kind of [
+      'spec',
+      'plan',
+      'architecture-current',
+      'architecture-target',
+      'decisions',
+      'alternatives',
+      'phase',
+      'handoff',
+      'source',
+      'history',
+      'index',
+      'experience',
+    ] as const)
+      expect(decodeNativeDocument({...envelope, kind}).kind).toBe(kind);
+    expect(caught(() => decodeNativeDocument({...envelope, kind: 'python-plan'}))).toMatchObject({
+      code: 'invalid-document',
+    });
+  });
+
+  it('pages one section on UTF-8 boundaries and rejects stale digests, invalid offsets, and unbounded limits', () => {
+    const doc = {...envelope, sections: [{id: 'overview', heading: 'Overview', body: '🧭 café 🌊'}]};
+    const first = readNativeDocumentSection(doc, 'overview', {maxBytes: 4});
+    expect(first.content).toBe('🧭');
+    expect(new TextEncoder().encode(first.content).byteLength).toBe(4);
+    expect(first.nextOffsetBytes).toBe(4);
+    expect(first.sourceDigest).toBe(sha256HexSync(renderNativeDocument(doc)));
+    const second = readNativeDocumentSection(doc, 'overview', {
+      offsetBytes: first.nextOffsetBytes!,
+      maxBytes: 6,
+      sourceDigest: first.sourceDigest,
+    });
+    expect(second.content).toBe(' café');
+    expect(() => readNativeDocumentSection(doc, 'missing')).toThrow(/section does not exist/u);
+    expect(() => readNativeDocumentSection(doc, 'overview', {offsetBytes: 1})).toThrow(/splits a UTF-8/u);
+    expect(() => readNativeDocumentSection(doc, 'overview', {offsetBytes: Number.MAX_SAFE_INTEGER + 1})).toThrow(
+      /safe UTF-8 byte offsets/u,
+    );
+    expect(() => readNativeDocumentSection(doc, 'overview', {maxBytes: 16_001})).toThrow(/page size/u);
+    expect(() => readNativeDocumentSection(doc, 'overview', {maxBytes: 3})).toThrow(/page size/u);
+    expect(() =>
+      readNativeDocumentSection({...doc, title: 'Changed'}, 'overview', {sourceDigest: first.sourceDigest}),
+    ).toThrow(/document changed/u);
+  });
+
+  it('pages arbitrary bounded Unicode bodies losslessly with independently checked byte limits', () => {
+    fc.assert(
+      fc.property(
+        fc
+          .array(fc.constantFrom('a', 'é', 'e\u0301', '漢', '🧭', '🌊', '\n', ' '), {maxLength: 120})
+          .map(x => x.join('')),
+        generated => {
+          const doc = {...envelope, sections: [{id: 'overview', heading: 'Overview', body: generated}]};
+          const expected = generated.trim();
+          let offsetBytes = 0;
+          let sourceDigest: string | undefined;
+          let actual = '';
+          let complete = false;
+          for (let pageCount = 0; pageCount < 256 && !complete; pageCount += 1) {
+            const page = readNativeDocumentSection(doc, 'overview', {
+              offsetBytes,
+              maxBytes: 7,
+              ...(sourceDigest === undefined ? {} : {sourceDigest}),
+            });
+            expect(page.offsetBytes).toBe(offsetBytes);
+            expect(new TextEncoder().encode(page.content).byteLength).toBeLessThanOrEqual(7);
+            actual += page.content;
+            sourceDigest = page.sourceDigest;
+            if (page.nextOffsetBytes === null) complete = true;
+            else {
+              expect(page.nextOffsetBytes).toBeGreaterThan(offsetBytes);
+              offsetBytes = page.nextOffsetBytes;
+            }
+          }
+          expect(complete).toBe(true);
+          expect(new TextEncoder().encode(actual)).toEqual(new TextEncoder().encode(expected));
+        },
+      ),
+      {numRuns: 60},
+    );
   });
 });

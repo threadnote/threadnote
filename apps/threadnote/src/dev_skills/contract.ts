@@ -62,14 +62,21 @@ export interface DevSkillMember {
   readonly role: 'primary' | 'support';
   readonly files: readonly string[];
 }
+export interface NativeWorkflowRequirements {
+  readonly executorVersion: number;
+  readonly authoringVersion: number;
+  readonly cycleVersion: number;
+  readonly watchVersion: number;
+  readonly closeoutVersion: number;
+}
 export interface DevSkillsManifest {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
+  readonly nativeRequirements?: NativeWorkflowRequirements;
   readonly workflowProtocol: 1;
   readonly stateSchema: 1;
   readonly minimumRuntime: string;
   readonly releaseVersion: string;
   readonly prerequisites: {
-    readonly python: string;
     readonly commands: readonly string[];
     readonly prCommands: readonly string[];
   };
@@ -121,6 +128,8 @@ export interface DevSkillsStatus extends DevSkillsEnrollmentStatus {
 }
 
 export interface DevSkillsInstalled {
+  readonly manifestSchema?: 1 | 2;
+  readonly nativeRequirements?: NativeWorkflowRequirements;
   readonly releaseVersion: string;
   readonly digest: string;
   readonly workflowProtocol: number;
@@ -143,7 +152,9 @@ export interface DevSkillsEnrollmentStatus {
   readonly lastRefresh?: DevSkillsRefreshOutcome;
 }
 export interface DevSkillsRuntimeCapabilities {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
+  readonly manifestSchemas?: readonly number[];
+  readonly nativeFeatures?: NativeWorkflowRequirements;
   readonly runtimeVersion: string;
   readonly workflowProtocols: readonly number[];
   readonly stateSchemas: readonly number[];

@@ -5,13 +5,30 @@ import {ResourceStore} from '@threadnote/store/resource-store';
 import {ApplicationLayer} from '../../src/effect/runtime.js';
 import {runWorkflowAutomation} from '../../src/workflow_automation/index.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
+import {
+  classifyNativeProgress,
+  CurrentNativeProgress,
+  makeNativeProgressDiagnostics,
+  nativeProgressMethod,
+  nativeProgressFacades,
+  observeNativeBody,
+  reportNativeFailure,
+} from './native-authoring-progress-diagnostics.js';
 
 export const provideNative = <A, E, R>(program: Effect.Effect<A, E, R>) =>
-  program.pipe(provideTestLayer(ApplicationLayer));
+  Effect.gen(function* () {
+    const observer = makeNativeProgressDiagnostics(yield* Effect.tracer);
+    const inner = observeNativeBody(program, observer).pipe(Effect.provideService(CurrentNativeProgress, observer));
+    return yield* reportNativeFailure(
+      inner.pipe(provideTestLayer(ApplicationLayer), Effect.withTracer(observer.tracer)),
+      observer,
+    );
+  });
 
 export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function* (
   environment: Readonly<Record<string, string | undefined>> = {},
 ) {
+  const observer = yield* CurrentNativeProgress;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const system = yield* SystemInfo;
@@ -31,8 +48,11 @@ export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function
     manifestPath: path.join(home, 'manifest.json'),
   };
   const scopedSystem = {...system, currentDirectory: () => repo, environment: () => environment};
-  const call = (input: unknown, current = config) =>
+  const originalCall = (input: unknown, current = config) =>
     runWorkflowAutomation(current, input).pipe(Effect.provideService(SystemInfo, scopedSystem));
+  const call = observer
+    ? nativeProgressMethod(undefined, originalCall, classifyNativeProgress, observer)
+    : originalCall;
   const base = (action: string, runId = 'native-run', generation = 'skill-generation-v1') => ({
     protocolVersion: 1,
     executorVersion: 1,
@@ -60,5 +80,21 @@ export const nativeFixture = Effect.fn('test.nativeAutomation.fixture')(function
   const statePath = (runId = 'native-run') => path.join(home, 'workflow-automations', 'native-v1', `${runId}.json`);
   const journalPath = (bindingId: string) => path.join(home, 'workflow-memory', `${bindingId}.json`);
   const location = {account: config.account, home, user: config.user};
-  return {base, call, config, fs, home, init, journalPath, location, path, repo, root, statePath, store, write};
+  const returned = nativeProgressFacades(store, fs, statePath(), observer);
+  return {
+    base,
+    call,
+    config,
+    fs: returned.fs,
+    home,
+    init,
+    journalPath,
+    location,
+    path,
+    repo,
+    root,
+    statePath,
+    store: returned.store,
+    write,
+  };
 });

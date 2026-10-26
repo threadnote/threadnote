@@ -102,6 +102,7 @@ function createTarStreamParser(
   let globalPax: Readonly<Record<string, string>> = {};
   let nextLongPath: string | undefined;
   let nextPax: Readonly<Record<string, string>> | undefined;
+  const destinations = new Set<string>();
   let file:
     | {
         readonly chunks?: Uint8Array<ArrayBufferLike>[];
@@ -222,11 +223,21 @@ function createTarStreamParser(
       }
       nextLongPath = undefined;
       nextPax = undefined;
-      if (entry.type === 'directory' && isArchiveRootPath(effectivePath)) {
+      const rootEntry = entry.type === 'directory' && isArchiveRootPath(effectivePath);
+      const entryPath = rootEntry
+        ? path.resolve(destination)
+        : yield* attemptArchiveParse(() => safeArchivePath(path, destination, effectivePath));
+      const destinationKey = path.sep === '\\' ? entryPath.toLowerCase() : entryPath;
+      if (destinations.has(destinationKey)) {
+        return yield* ArchiveOperationError.make({
+          message: `Release archive contains a duplicate path: ${effectivePath}`,
+        });
+      }
+      destinations.add(destinationKey);
+      if (rootEntry) {
         paddingRemaining = tarPadding(effectiveSize);
         continue;
       }
-      const entryPath = yield* attemptArchiveParse(() => safeArchivePath(path, destination, effectivePath));
       if (entry.type === 'directory') {
         yield* fs.makeDirectory(entryPath, {recursive: true, mode: entry.mode});
         paddingRemaining = tarPadding(effectiveSize);

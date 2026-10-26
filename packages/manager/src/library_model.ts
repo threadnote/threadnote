@@ -77,3 +77,26 @@ export function libraryExplorerNodes(tree: TreeNode | undefined): readonly TreeN
   }
   return root === tree && root.isDir && root.relativePath === '' ? (root.children ?? []) : [root];
 }
+
+/** Prune search results without changing canonical nodes or folder selection. */
+export function librarySearchTree(
+  tree: TreeNode | undefined,
+  query: string,
+  recalledUris: ReadonlySet<string>,
+  showSystem: boolean,
+): TreeNode | undefined {
+  if (!tree || (!showSystem && tree.isSystem)) return undefined;
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return tree;
+  if (!tree.isDir) {
+    return recalledUris.has(tree.uri) ||
+      [tree.name, tree.uri, tree.metadata?.topic ?? ''].some(value => value.toLocaleLowerCase().includes(needle))
+      ? tree
+      : undefined;
+  }
+  const children = (tree.children ?? []).flatMap(child => {
+    const match = librarySearchTree(child, query, recalledUris, showSystem);
+    return match ? [match] : [];
+  });
+  return children.length ? {...tree, children} : undefined;
+}

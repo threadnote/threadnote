@@ -1,4 +1,4 @@
-import {Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {Context, Crypto, DateTime, Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {workflowMemoryStem} from '@threadnote/workflow-automations/naming';
 import {captureMemoryCodeCitations} from '@threadnote/context/citation/capture';
 import {
@@ -14,6 +14,7 @@ import {
 } from '@threadnote/memory/code/citation-policy';
 import {runCommandEffect} from '@threadnote/platform/command';
 import {sha256HexSync} from '@threadnote/platform/sha256';
+import {readAnonymousTelemetryDiagnostic} from '../telemetry/diagnostic.js';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {cursorCloudMemoryRoot} from '../cursor/cloud.js';
@@ -43,6 +44,7 @@ import {
   assertPublicationText,
   normalizePublicationNodes,
   publicationDigest,
+  PublicationWriterReasonSchema,
   publicationPreview,
   WorkflowPublicationRequestSchema,
   type PublicationIntent,
@@ -60,6 +62,55 @@ const invalidProjection = (cause: unknown) =>
         'invalid-publication-graph',
         cause instanceof Error ? cause.message : 'Publication projection is invalid.',
       );
+
+const nativeWriterErrorCodes = new Set([
+  'EACCES',
+  'EBUSY',
+  'EEXIST',
+  'EIO',
+  'EISDIR',
+  'EINVAL',
+  'ENAMETOOLONG',
+  'ENETUNREACH',
+  'ENOENT',
+  'ENOSPC',
+  'ENOTDIR',
+  'ENOTEMPTY',
+  'EPIPE',
+  'EROFS',
+  'ETIMEDOUT',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPERM',
+]);
+// Only fixed share/git.ts diagnostics may cross this privacy boundary.
+const pendingWriterReason = (text: string | undefined): typeof PublicationWriterReasonSchema.Type | undefined => {
+  if (text === 'Shared publication commit content changed.') return 'commit-content-changed';
+  if (text?.startsWith('Shared commit readback failed:')) return 'commit-readback-failed';
+  if (text?.startsWith('Shared publication verification failed:')) return 'git-verification-failed';
+  if (text?.startsWith('git commit failed:')) return 'git-commit-failed';
+  return undefined;
+};
+const pendingWriterCause = (result: {
+  readonly isError?: boolean;
+  readonly content?: readonly {readonly type: string; readonly text?: string}[];
+}) => {
+  const diagnostic = readAnonymousTelemetryDiagnostic(result);
+  const boundedErrorCode = result.content
+    ?.filter(item => item.type === 'text')
+    .flatMap(item => item.text?.match(/\bE[A-Z0-9]{2,12}\b/gu) ?? [])
+    .find(code => nativeWriterErrorCodes.has(code));
+  const reason = result.content
+    ?.filter(item => item.type === 'text')
+    .map(item => pendingWriterReason(item.text))
+    .find(value => value !== undefined);
+  return {
+    kind: 'shared-writer-error' as const,
+    errorType: diagnostic?.errorType ?? 'UnknownError',
+    ...(boundedErrorCode ? {nativeCode: boundedErrorCode} : {}),
+    ...(reason ? {reason} : {}),
+  };
+};
 
 const publicationScope = (binding: WorkflowBinding) => {
   if (binding.profile === 'desktop' || !binding.team || !binding.remote || !binding.branch)
@@ -425,7 +476,7 @@ const verifyFinalGraph = Effect.fn('workflowPublication.verifyFinalGraph')(funct
             'Every final node needs its own verified Git commit receipt.',
           );
         yield* git(['merge-base', '--is-ancestor', receipt.commit, remoteCommit]);
-        const remoteContent = (yield* git(['show', `${remoteCommit}:${path}`])).stdout;
+        const remoteContent = (yield* git(['show', `${remoteCommit}:${path}`, '--'])).stdout;
         if (
           remoteContent !== node.prepared.memory ||
           (yield* readOptionalResource(config, node.prepared.memoryUri)) !== node.prepared.memory
@@ -458,7 +509,7 @@ const verifyFinalGraph = Effect.fn('workflowPublication.verifyFinalGraph')(funct
               'An approved external relation target changed or left the configured share.',
             );
           const targetPath = resourceUriToWorktreeRelative(config, target.uri, scope.team);
-          const remote = yield* git(['show', `${remoteCommit}:${targetPath}`]).pipe(Effect.result);
+          const remote = yield* git(['show', `${remoteCommit}:${targetPath}`, '--']).pipe(Effect.result);
           if (remote._tag === 'Failure' || remote.success.stdout !== target.content)
             return yield* workflowError(
               'publication-readback-conflict',
@@ -579,15 +630,21 @@ export const runWorkflowPublication = Effect.fn('workflowPublication.run')(funct
           }).pipe(Effect.provide(journalServices)),
       },
     });
-    if (result.isError || !result.structuredContent?.publication)
+    if (result.isError || !result.structuredContent?.publication) {
+      const writerCause = result.isError ? pendingWriterCause(result) : undefined;
+      const cause = writerCause ?? {kind: 'publication-receipt-missing' as const};
       return {
         protocolVersion: 1 as const,
         status: 'pending' as const,
         approvalDigest: journal.approvalDigest,
-        stage: stage.key,
+        stage: stage.key.slice(0, 128),
         committed: journal.progress[stage.key]?.committed,
-        message: 'Publication remains pending. Restore the configured share and retry the same approved graph.',
+        cause,
+        message: writerCause
+          ? `The shared writer returned ${writerCause.errorType}${writerCause.nativeCode ? ` (${writerCause.nativeCode})` : ''}${writerCause.reason ? ` [${writerCause.reason}]` : ''}.`
+          : 'The shared writer returned no publication receipt.',
       };
+    }
     const receipt = result.structuredContent.publication as ShareGitPublicationReceipt;
     journal = {
       ...journal,
@@ -613,4 +670,34 @@ export const assertWorkflowPublicationVerified = Effect.fn('workflowPublication.
     );
   yield* revalidateCitations(config, state.binding, journal.intent, true);
   return yield* verifyFinalGraph(config, state.binding, journal);
+});
+
+/** Internal coordinated closeout authority; never accepted from a CLI request. */
+export const CurrentWorkflowArchivePublication = Context.Reference<
+  {readonly bindingId: string; readonly approvalDigest: string} | undefined
+>('threadnote/WorkflowArchivePublication', {defaultValue: () => undefined});
+
+export const assertWorkflowArchivePublication = Effect.fn('workflowPublication.assertArchive')(function* (
+  config: RuntimeConfig,
+  binding: import('./protocol.js').WorkflowBinding,
+) {
+  const approval = yield* CurrentWorkflowArchivePublication;
+  const publishing = approval ? (yield* loadWorkflowJournal(config, approval.bindingId)).binding : binding;
+  if (
+    publishing.home !== binding.home ||
+    publishing.repo !== binding.repo ||
+    publishing.project !== binding.project ||
+    publishing.featureId !== binding.featureId ||
+    publishing.profile !== binding.profile ||
+    publishing.team !== binding.team ||
+    stableJson(publishing.sharedRoots) !== stableJson(binding.sharedRoots)
+  )
+    return yield* workflowError(
+      'publication-binding-drift',
+      'Publication does not authorize this feature and destination.',
+    );
+  const verified = yield* assertWorkflowPublicationVerified(config, publishing.bindingId);
+  if (approval && verified.approvalDigest !== approval.approvalDigest)
+    return yield* workflowError('publication-approval-changed', 'The approved closeout publication changed.');
+  return verified;
 });

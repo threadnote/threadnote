@@ -100,7 +100,6 @@ export const createTargetSpecs = async (root = defaultRoot) => {
   ];
   const windowsSmokeEntries = [
     'apps/threadnote/test/dev-skills/bundle.test.ts',
-    'apps/threadnote/test/dev-skills/python-workflows.test.ts',
     'apps/threadnote/test/dev-skills/workflow-memory.test.ts',
     'apps/threadnote/test/dev-skills/workflow-publication.test.ts',
     'apps/threadnote/test/dev-skills/workflow-publication-coordinator.test.ts',
@@ -464,8 +463,6 @@ export const createTargetSpecs = async (root = defaultRoot) => {
         'tools/ci/selection.mjs',
         'tools/ci/bazel-run-selected.mjs',
         'tools/ci/bazel-select.mjs',
-        'tools/ci/windows-workflow-prerequisites.py',
-        'tools/ci/test/python/test_windows_workflow_prerequisites.py',
       ],
       dataRoots: ['.github/workflows'],
     },

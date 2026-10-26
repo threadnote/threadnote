@@ -1,6 +1,6 @@
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import {it as effectIt} from '@effect/vitest';
-import {Effect, FileSystem, Path} from 'effect';
+import {Effect, FileSystem, Path, Schema} from 'effect';
 import {describe, expect} from 'vitest';
 import {extractGzipTar, type ArchiveExtractionLimits} from '@threadnote/threadnote/effect/archive';
 import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
@@ -8,6 +8,63 @@ import {ApplicationLayer} from '@threadnote/threadnote/effect/runtime';
 const TAR_BLOCK_BYTES = 512;
 
 describe('bounded streaming release extraction', () => {
+  effectIt.effect('rejects duplicate files, directories, roots and effective PAX or GNU member paths', () =>
+    Effect.gen(function* () {
+      for (const entries of [
+        [tarEntry('./same.txt', bytes('first')), tarEntry('same.txt', bytes('second'))],
+        [tarEntry('./directory/', bytes(''), {type: '5'}), tarEntry('directory', bytes(''), {type: '5'})],
+        [tarEntry('./', bytes(''), {type: '5'}), tarEntry('.', bytes(''), {type: '5'})],
+        [
+          tarEntry('./same.txt', bytes('first')),
+          tarEntry('./PaxHeader/alias', paxRecords({path: './same.txt'}), {type: 'x'}),
+          tarEntry('./other.txt', bytes('second')),
+        ],
+        [
+          tarEntry('./same.txt', bytes('first')),
+          tarEntry('./LongLink', bytes('./same.txt\0'), {type: 'L'}),
+          tarEntry('./other.txt', bytes('second')),
+        ],
+      ]) {
+        const result = yield* extractFixture(tarArchive(entries));
+        expect(String(result.failure)).toMatch(/duplicate path/);
+        if (result.files.has('same.txt')) expect(result.files.get('same.txt')).toBe('first');
+      }
+    }),
+  );
+
+  effectIt.effect.prop(
+    'rejects normalized duplicate members without replacing earlier file bytes',
+    {value: Schema.Int, backslash: Schema.Boolean},
+    ({value, backslash}) =>
+      Effect.gen(function* () {
+        const name = `file-${value}.txt`;
+        const result = yield* extractFixture(
+          tarArchive([
+            tarEntry(`./nested/${name}`, bytes('first')),
+            tarEntry(backslash ? `nested\\${name}` : `nested/${name}`, bytes('second')),
+          ]),
+        );
+        expect(String(result.failure)).toMatch(/duplicate path/);
+        expect(result.files.get(`nested/${name}`)).toBe('first');
+      }),
+    {arbitrary: {runs: 8}},
+  );
+
+  effectIt.effect('refuses traversal, absolute paths, links and special members', () =>
+    Effect.gen(function* () {
+      for (const name of ['../escape.txt', '/absolute.txt', 'C:/absolute.txt', 'nested/../escape.txt']) {
+        const result = yield* extractFixture(tarArchive([tarEntry(name, bytes('forbidden'))]));
+        expect(String(result.failure)).toMatch(/unsafe path|escapes/);
+        expect(result.files.size).toBe(0);
+      }
+      for (const type of ['1', '2', '3', '6'] as const) {
+        const result = yield* extractFixture(tarArchive([tarEntry('special', bytes(''), {type})]));
+        expect(String(result.failure)).toMatch(/unsupported tar entry type/);
+        expect(result.files.size).toBe(0);
+      }
+    }),
+  );
+
   effectIt.effect('applies local PAX path and size overrides', () =>
     Effect.gen(function* () {
       const pax = paxRecords({path: './nested/local.txt', size: '5'});
@@ -142,7 +199,7 @@ function tarEntry(
   options: {
     readonly headerSize?: number;
     readonly mode?: number;
-    readonly type?: '0' | '5' | 'g' | 'x';
+    readonly type?: '0' | '1' | '2' | '3' | '5' | '6' | 'g' | 'x' | 'L';
   } = {},
 ): Uint8Array {
   const header = new Uint8Array(TAR_BLOCK_BYTES);

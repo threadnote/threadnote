@@ -1,3 +1,8 @@
+import {
+  parseNativeRequirements,
+  parseDevSkillsManifest,
+  parseDevSkillsInventory,
+} from '@threadnote/threadnote/dev_skills/manifest';
 import {integrationStaticFiles} from '@threadnote/threadnote/manager/static-files';
 import {provideScriptLayer, ScriptError} from './effect/errors.js';
 import {runBunBuild} from './effect/bun-build.js';
@@ -404,14 +409,18 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
   const value: unknown = yield* fs.readFileString(manifestPath).pipe(
     Effect.flatMap(content =>
       Effect.try({
-        try: () => JSON.parse(content) as unknown,
+        try: () => {
+          const parsed: unknown = JSON.parse(content);
+          parseDevSkillsInventory(parsed);
+          return parsed;
+        },
         catch: cause => ScriptError.make({message: 'Invalid development workflow manifest.', cause}),
       }),
     ),
   );
   if (
     !isRecord(value) ||
-    value.schemaVersion !== 1 ||
+    value.schemaVersion !== 2 ||
     value.workflowProtocol !== 1 ||
     value.stateSchema !== 1 ||
     typeof value.minimumRuntime !== 'string' ||
@@ -475,16 +484,17 @@ export const buildDevSkillsManifest = Effect.fn('build.devSkillsManifest')(funct
     }
   }
   const manifest = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
+    nativeRequirements: parseNativeRequirements(value.nativeRequirements),
     workflowProtocol: 1 as const,
     stateSchema: 1 as const,
     minimumRuntime: value.minimumRuntime,
     releaseVersion: version,
-    prerequisites: {python: '>=3.10', commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']},
+    prerequisites: {commands: ['threadnote', 'git', 'rg'], prCommands: ['gh']},
     skills: members,
     hashes: files,
   };
-  return {...manifest, digest: yield* sha256Hex(JSON.stringify(manifest))};
+  return parseDevSkillsManifest({...manifest, digest: yield* sha256Hex(JSON.stringify(manifest))});
 });
 
 if (import.meta.main) BunRuntime.runMain(provideScriptLayer(build, BunServices.layer));

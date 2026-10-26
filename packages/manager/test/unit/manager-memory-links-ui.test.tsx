@@ -84,6 +84,7 @@ let showReview: boolean;
 let manualSupport: boolean;
 let reviewActions: Record<string, unknown>[];
 let finishSlow: ((response: Response) => void) | undefined;
+let treeChildren: readonly TreeNode[];
 
 beforeEach(() => {
   Object.defineProperty(globalThis, 'IS_REACT_ACT_ENVIRONMENT', {configurable: true, value: true});
@@ -98,6 +99,7 @@ beforeEach(() => {
   manualSupport = false;
   reviewActions = [];
   finishSlow = undefined;
+  treeChildren = [source, latest];
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
     // Exercise the explicit REST compatibility path in this navigation fixture.
@@ -112,7 +114,7 @@ beforeEach(() => {
       });
     if (url.pathname === '/api/tree')
       return json({
-        tree: {...source, uri: base, relativePath: '', name: 'memories', isDir: true, children: [source, latest]},
+        tree: {...source, uri: base, relativePath: '', name: 'memories', isDir: true, children: treeChildren},
       });
     if (url.pathname === '/api/graphs') return json({repositories: [], builds: [], diagnostics: [], views: []});
     if (url.pathname === '/api/shares') return json({shares: [{name: 'team'}]});
@@ -301,6 +303,80 @@ it('opens canonical and shared alias links using the accepted node even outside 
   expect(button('Team').getAttribute('aria-pressed')).toBe('true');
   expect(host.querySelector<HTMLSelectElement>('[aria-label="Shared team"]')?.value).toBe('team');
   expect(requests).toEqual([source.uri, target.uri, source.uri, alias]);
+});
+
+it('keeps expanded navigator instances on the first memory open', async () => {
+  const folder = (path: string, children: readonly TreeNode[]): TreeNode => ({
+    ...source,
+    name: path.split('/').at(-1)!,
+    uri: `${base}/${path}`,
+    relativePath: path,
+    isDir: true,
+    children,
+  });
+  treeChildren = [
+    folder('durable', [folder('durable/projects', [folder('durable/projects/demo', [source]), latest])]),
+    latest,
+  ];
+  await act(async () => (await import('../../src/ui.js')).mountManager({integrations: []}));
+  await act(async () => button('Library').click());
+  const explorer = host.querySelector('.library-explorer');
+  const folders = [...host.querySelectorAll<HTMLDetailsElement>('.library-explorer details')];
+  await act(async () =>
+    folders.forEach(element => {
+      element.open = true;
+      element.dispatchEvent(new Event('toggle'));
+    }),
+  );
+  await act(async () => button('Source').click());
+  expect(host.querySelector('.library-explorer')).toBe(explorer);
+  expect([...host.querySelectorAll('.library-explorer details')]).toEqual(folders);
+  expect(folders.every(element => element.open)).toBe(true);
+});
+
+function historyButton(direction: 'Back' | 'Forward'): HTMLButtonElement {
+  return host.querySelector<HTMLButtonElement>(
+    `[aria-label="${direction} to ${direction === 'Back' ? 'previous' : 'next'} memory"]`,
+  )!;
+}
+
+it('revisits canonical shared memories, moves both ways, and clears forward history after a new visit', async () => {
+  await openSource();
+  expect(historyButton('Back').disabled).toBe(true);
+  await link('shared');
+  await act(async () => historyButton('Back').click());
+  expect(host.querySelector('.library-article')?.textContent).toContain('Source body');
+  expect(button('Local').getAttribute('aria-pressed')).toBe('true');
+  await act(async () => historyButton('Forward').click());
+  expect(requests.at(-1)).toBe(shared.uri);
+  // The response for the canonical URI is deliberately unavailable in this fixture.
+  // Back remains available after a failed read and returns to the previous body.
+  expect(historyButton('Back').disabled).toBe(false);
+  await act(async () => historyButton('Back').click());
+  await act(async () => button('Latest').click());
+  expect(historyButton('Forward').disabled).toBe(true);
+  expect(host.querySelector('.library-article')?.textContent).toContain('Latest body');
+});
+
+it('keeps history and unsaved text on cancel, then navigates only after draft discard', async () => {
+  await openSource();
+  await link('current');
+  await act(async () => button('Edit').click());
+  const editor = host.querySelector<HTMLTextAreaElement>('[aria-label="Test editor"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, '# Unsaved target');
+    editor.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  await act(async () => button('Preview').click());
+  await act(async () => historyButton('Back').click());
+  await act(async () => button('Cancel').click());
+  expect(host.querySelector('.library-article')?.textContent).toContain('Unsaved target');
+  expect(historyButton('Forward').disabled).toBe(true);
+  expect(requests).toEqual([source.uri, target.uri]);
+  await act(async () => historyButton('Back').click());
+  await act(async () => button('Discard changes').click());
+  expect(host.querySelector('.library-article')?.textContent).toContain('Source body');
+  expect(historyButton('Forward').disabled).toBe(false);
 });
 
 it('keeps a previewed dirty draft on cancel and follows its link only after discard', async () => {

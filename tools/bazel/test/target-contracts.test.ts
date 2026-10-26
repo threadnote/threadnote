@@ -106,7 +106,13 @@ describe('generated Bazel test contracts', () => {
     const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
 
     expect(targets.length).toBeGreaterThan(8);
-    expect(targets.length).toBeLessThan(50);
+    // Bound grouping overhead with corpus growth while retaining isolated provider targets.
+    const integrationTargets = targets.filter(candidate =>
+      candidate.label.startsWith('//apps/threadnote:test_integration_'),
+    );
+    const standardEntryCount =
+      entries.length - integrationTargets.reduce((count, candidate) => count + candidate.entries.length, 0);
+    expect(targets.length).toBeLessThanOrEqual(integrationTargets.length + Math.ceil(standardEntryCount / 12));
     expect(targets.every(candidate => candidate.workspace)).toBe(true);
     expect(targets.every(candidate => candidate.entries.length > 0 && candidate.entries.length <= 40)).toBe(true);
     expect(new Set(entries).size).toBe(entries.length);

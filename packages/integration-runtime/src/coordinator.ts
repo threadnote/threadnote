@@ -118,20 +118,31 @@ export const coordinatorPaths = Effect.fn('source.coordinatorPaths')(function* (
 });
 
 /** Reject symlinks and shared files before SQLite or endpoint readers follow them. */
-export const assertCoordinatorFile = Effect.fn('source.assertCoordinatorFile')(function* (filename: string) {
+export const assertCoordinatorFile = Effect.fn('source.assertCoordinatorFile')(function* (
+  filename: string,
+  allowDisappearance = false,
+) {
   const fs = yield* FileSystem.FileSystem;
   const system = yield* SystemInfo;
   const stat = yield* fromPromiseInterruptible(() => optionalStat(filename), fail);
   if (!stat) return;
-  const info = yield* fs.stat(filename);
+  if (!stat.isFile() || stat.isSymbolicLink() || (system.platform !== 'win32' && (Number(stat.mode) & 0o077) !== 0))
+    return yield* fail();
+  const info = yield* fs.stat(filename).pipe(
+    Effect.catchIf(
+      error => allowDisappearance && error.reason._tag === 'NotFound',
+      () =>
+        fromPromiseInterruptible(() => optionalStat(filename), fail).pipe(
+          // SQLite may remove a sidecar when its last peer closes. Accept only
+          // confirmed absence; a replacement must not bypass file validation.
+          Effect.flatMap(current => (current ? fail() : Effect.void)),
+        ),
+    ),
+  );
+  if (!info) return;
   if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
     Option.getOrUndefined(info.nlink) !== 1 ||
-    (system.platform !== 'win32' &&
-      (system.userId === undefined ||
-        Option.getOrUndefined(info.uid) !== system.userId ||
-        (Number(stat.mode) & 0o077) !== 0))
+    (system.platform !== 'win32' && (system.userId === undefined || Option.getOrUndefined(info.uid) !== system.userId))
   ) {
     return yield* fail();
   }
@@ -225,7 +236,7 @@ export const openCoordinatorStore = Effect.fn('source.openCoordinatorStore')(fun
   const fs = yield* FileSystem.FileSystem;
   const paths = yield* coordinatorPaths(config);
   for (const filename of [paths.database, `${paths.database}-wal`, `${paths.database}-shm`])
-    yield* assertCoordinatorFile(filename);
+    yield* assertCoordinatorFile(filename, filename !== paths.database);
   if (!(yield* fs.exists(paths.database)))
     yield* fs
       .writeFile(paths.database, new Uint8Array(), {flag: 'wx', mode: 0o600})

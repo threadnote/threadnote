@@ -30,6 +30,29 @@ export function recallUriScopePredicate(
   return recallUriColumnScopePredicate(`${alias}.uri`, allowedUriScopes);
 }
 
+/** Keep stable-identity SQL bounded when authorized owned-memory scopes grow with history. */
+export function recallIdentityUriScopePredicate(
+  alias: string,
+  allowedUriScopes: readonly string[] | undefined,
+): RecallSqlPredicate {
+  if (allowedUriScopes === undefined || allowedUriScopes.length === 0) {
+    return {params: [], restricted: false, sql: '1 = 1'};
+  }
+  const scopes = normalizeRecallUriScopes(allowedUriScopes);
+  if (scopes.length === 0) return {params: [], restricted: true, sql: '0 = 1'};
+  // Preserve direct SQL binding of malformed UTF-16; its transport can differ from JSON decoding.
+  if (scopes.some(scope => /[\uD800-\uDFFF]/u.test(scope))) return recallUriScopePredicate(alias, allowedUriScopes);
+  return {
+    params: [JSON.stringify(scopes)],
+    restricted: true,
+    sql: `EXISTS (
+      SELECT 1 FROM json_each(?) AS identity_scope
+      WHERE ${alias}.uri = identity_scope.value
+         OR (${alias}.uri >= (identity_scope.value || '/') AND ${alias}.uri < (identity_scope.value || '0'))
+    )`,
+  };
+}
+
 /** Apply a canonical URI boundary to a denormalized URI column before a physical scan limit. */
 export function recallUriColumnScopePredicate(
   column: string,
