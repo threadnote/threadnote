@@ -16,6 +16,8 @@ type Entry = {
   readonly scope: Scope.Closeable;
 };
 type Session = {readonly owner: number; active: boolean; busy: boolean; entry?: Entry};
+const closeDatabase = (scope: Scope.Closeable, exit: Exit.Exit<unknown, unknown>) =>
+  Scope.close(scope, exit).pipe(Effect.withSpan('recall.closeDatabase'));
 const CurrentSession = Context.Reference<Session | undefined>('threadnote/RecallDatabaseSession', {
   defaultValue: () => undefined,
 });
@@ -25,7 +27,7 @@ const releaseEntry = (session: Session, exit: Exit.Exit<unknown, unknown>) =>
     const entry = session.entry;
     // Revoke before running finalizers, including when closing defects.
     session.entry = undefined;
-    return entry ? Scope.close(entry.scope, exit) : Effect.void;
+    return entry ? closeDatabase(entry.scope, exit) : Effect.void;
   });
 
 /** One sequential native request may retain one connection through its normal flush. */
@@ -135,7 +137,7 @@ export function useRecallDatabase<A, E, R>(
                   if (Exit.isSuccess(exit)) return Effect.void;
                   session.entry = undefined;
                 }
-                return Scope.close(scope, exit);
+                return closeDatabase(scope, exit);
               }),
           );
         }),

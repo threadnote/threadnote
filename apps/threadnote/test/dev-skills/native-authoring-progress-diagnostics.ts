@@ -3,7 +3,8 @@ import {Context, Effect, Exit, type FileSystem, Tracer} from 'effect';
 import type {ResourceStoreShape} from '@threadnote/store/resource-store';
 import * as EffectRecord from 'effect/Record';
 
-// Test-only vocabulary: input, output, attributes, IDs, paths and errors never enter this recorder.
+// Test-only vocabulary: only fixed primitive refresh counters are read from attributes.
+// Input, output, arbitrary attributes, IDs, paths and errors never enter this recorder.
 export const nativeProgressBoundaries = [
   'init',
   'authoring-save',
@@ -35,6 +36,7 @@ export const nativeProgressSpanLabels = [
   'recall.loadMemoryIdentities',
   'recall.executeIndexQuery',
   'recall.acquireDatabase',
+  'recall.closeDatabase',
   'recall.databaseBody',
   'recall.initializeDatabase',
   'recall.initializeIdentityIndex',
@@ -43,6 +45,11 @@ export const nativeProgressSpanLabels = [
   'recall.ensureDatabaseFresh',
   'recall.scanSources',
   'recall.refreshDatabase',
+  'recall.assembleRefreshSources',
+  'recall.hashRefreshGeneration',
+  'recall.writeRefresh',
+  'recall.rebuildIdentityConflicts',
+  'recall.resolveLegacyMemoryLinks',
   'recall.refreshDerivedIndexesAfterCanonicalMutation',
   'external.loadAccess',
   'runCommandEffect',
@@ -68,6 +75,39 @@ type BoundaryRecord = {
 type SpanRecord = {label: string; sequence: number; startedMs: number};
 type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
 type Counts = {started: number; succeeded: number; failed: number};
+const refreshBucket = () => ({count: 0, scannedSources: 0, changedSources: 0, removedSources: 0, maxChangedSources: 0});
+const refreshDecision = (span: Tracer.Span) => {
+  const forceAllSources = span.attributes.get('recall.refresh.forceAllSources');
+  const forceRefresh = span.attributes.get('recall.refresh.forceRefresh');
+  const forceFromMarker = span.attributes.get('recall.refresh.forceFromMarker');
+  const canonicalMutationChanged = span.attributes.get('recall.refresh.canonicalMutationChanged');
+  const continuityAllowed = span.attributes.get('recall.refresh.continuityAllowed');
+  const scannedSources = span.attributes.get('recall.refresh.scannedSources');
+  const changedSources = span.attributes.get('recall.refresh.changedSources');
+  const removedSources = span.attributes.get('recall.refresh.removedSources');
+  if (
+    typeof forceAllSources !== 'boolean' ||
+    typeof forceRefresh !== 'boolean' ||
+    typeof forceFromMarker !== 'boolean' ||
+    typeof canonicalMutationChanged !== 'boolean' ||
+    typeof continuityAllowed !== 'boolean' ||
+    typeof scannedSources !== 'number' ||
+    typeof changedSources !== 'number' ||
+    typeof removedSources !== 'number' ||
+    ![scannedSources, changedSources, removedSources].every(value => Number.isInteger(value) && value >= 0)
+  )
+    return undefined;
+  return {
+    forceAllSources,
+    forceRefresh,
+    forceFromMarker,
+    canonicalMutationChanged,
+    continuityAllowed,
+    scannedSources: bounded(scannedSources),
+    changedSources: bounded(changedSources),
+    removedSources: bounded(removedSources),
+  };
+};
 
 export const classifyNativeProgress = (input: unknown): NativeProgressBoundary => {
   try {
@@ -125,6 +165,15 @@ export const makeNativeProgressDiagnostics = (
   );
   const counters = EffectRecord.fromEntries(counterEntries);
   const totals: Record<string, {started: number; ended: number; failed: number; inclusiveMs: number}> = {};
+  const refreshDecisions = {
+    observed: 0,
+    forceRefresh: 0,
+    forceFromMarker: 0,
+    canonicalMutationChanged: 0,
+    continuityMissing: 0,
+    allSources: refreshBucket(),
+    incremental: refreshBucket(),
+  };
   const active = new Map<Tracer.Span, SpanRecord>();
   const recent: SpanEnd[] = [];
   let sequence = 0;
@@ -178,6 +227,27 @@ export const makeNativeProgressDiagnostics = (
             if (recent.length > 32) {
               recent.shift();
               recentDropped = bounded(recentDropped + 1);
+            }
+            if (spanOptions.name === 'recall.refreshDatabase') {
+              const decision = refreshDecision(span);
+              if (!decision) return;
+              refreshDecisions.observed = bounded(refreshDecisions.observed + 1);
+              refreshDecisions.forceRefresh = bounded(refreshDecisions.forceRefresh + Number(decision.forceRefresh));
+              refreshDecisions.forceFromMarker = bounded(
+                refreshDecisions.forceFromMarker + Number(decision.forceFromMarker),
+              );
+              refreshDecisions.canonicalMutationChanged = bounded(
+                refreshDecisions.canonicalMutationChanged + Number(decision.canonicalMutationChanged),
+              );
+              refreshDecisions.continuityMissing = bounded(
+                refreshDecisions.continuityMissing + Number(!decision.continuityAllowed),
+              );
+              const bucket = decision.forceAllSources ? refreshDecisions.allSources : refreshDecisions.incremental;
+              bucket.count = bounded(bucket.count + 1);
+              bucket.scannedSources = bounded(bucket.scannedSources + decision.scannedSources);
+              bucket.changedSources = bounded(bucket.changedSources + decision.changedSources);
+              bucket.removedSources = bounded(bucket.removedSources + decision.removedSources);
+              bucket.maxChangedSources = Math.max(bucket.maxChangedSources, decision.changedSources);
             }
           });
         };
@@ -249,6 +319,11 @@ export const makeNativeProgressDiagnostics = (
         totals: EffectRecord.fromEntries(
           EffectArray.map(EffectRecord.toEntries(totals), ([label, total]) => [label, {...total}]),
         ),
+        refreshDecisions: {
+          ...refreshDecisions,
+          allSources: {...refreshDecisions.allSources},
+          incremental: {...refreshDecisions.incremental},
+        },
         activeCount,
         unlistedActiveCount: activeCount - active.size,
         active: EffectArray.map([...active.values()], entry => ({...entry, ageMs: bounded(at - entry.startedMs)})),

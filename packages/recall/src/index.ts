@@ -1395,6 +1395,16 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
     forceFromMarker ||
     (canonicalMutationGenerationChanged && !canonicalMutationContinuityAllowsIncrementalRefresh);
   const refreshCounts = yield* countRecallSourceChanges(sql, forceAllSources);
+  yield* Effect.annotateCurrentSpan({
+    'recall.refresh.forceAllSources': forceAllSources,
+    'recall.refresh.forceRefresh': forceRefresh,
+    'recall.refresh.forceFromMarker': forceFromMarker,
+    'recall.refresh.canonicalMutationChanged': canonicalMutationGenerationChanged,
+    'recall.refresh.continuityAllowed': canonicalMutationContinuityAllowsIncrementalRefresh,
+    'recall.refresh.scannedSources': sourceScan.scannedSourceCount,
+    'recall.refresh.changedSources': refreshCounts.changedSourceCount,
+    'recall.refresh.removedSources': refreshCounts.removedSourceCount,
+  });
   yield* onProgress?.({
     completed: 0,
     phase: 'indexing',
@@ -1451,12 +1461,14 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         total: refreshCounts.changedSourceCount,
       }) ?? Effect.void;
     }),
-  );
+  ).pipe(Effect.withSpan('recall.assembleRefreshSources'));
   const previousContentGeneration = previousMetadata.get('content_generation');
   const contentGeneration =
     refreshCounts.changedSourceCount === 0 && refreshCounts.removedSourceCount === 0 && previousContentGeneration
       ? previousContentGeneration
-      : yield* hashRecallRefreshGeneration(sql, previousContentGeneration);
+      : yield* hashRecallRefreshGeneration(sql, previousContentGeneration).pipe(
+          Effect.withSpan('recall.hashRefreshGeneration'),
+        );
   const previousValidatedAt = numericMetadata(previousMetadata, 'validated_at');
   const now = yield* Clock.currentTimeMillis;
   yield* onProgress?.({
@@ -1465,7 +1477,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
     removed: refreshCounts.removedSourceCount,
     total: refreshCounts.changedSourceCount,
   }) ?? Effect.void;
-  yield* sql.withTransaction(
+  const writeRefresh = sql.withTransaction(
     Effect.gen(function* () {
       yield* stageRecallRefreshAffectedTerms(sql);
       yield* sql.unsafe(`
@@ -1639,6 +1651,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
       yield* onProgress?.({documentCount, phase: 'activating'}) ?? Effect.void;
     }),
   );
+  yield* writeRefresh.pipe(Effect.withSpan('recall.writeRefresh'));
   yield* dropRecallSourceScan(sql);
   yield* fs.chmod(databasePath, 0o600);
   if (markerChanged && staleMarker) {

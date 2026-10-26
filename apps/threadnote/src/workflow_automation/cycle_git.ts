@@ -189,15 +189,16 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
   const path = yield* Path.Path;
   const root = yield* canonicalRepo(repo);
   const {head, baseTree} = yield* resolveSourceObjects(root, base);
-  if ((yield* git(root, ['ls-files', '--unmerged', '-z'])).length)
-    return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
   const status = yield* git(root, ['status', '--porcelain=v2', '-z', '--ignore-submodules=none']);
   const statusRecords = Effect2.pipe(status, EffectString.split('\0'));
+  let unmerged = false;
+  let dirtySubmodule = false;
   for (let index = 0; index < statusRecords.length; index++) {
     const record = statusRecords[index];
     if (!record) continue;
     const renamed = Effect2.pipe(record, EffectString.startsWith('2 '));
     if (renamed) index++; // porcelain-v2 -z stores the original path in the next NUL record
+    if (Effect2.pipe(record, EffectString.startsWith('u '))) unmerged = true;
     if (!Effect2.pipe(record, EffectString.startsWith('1 ')) && !renamed) continue;
     // oxlint-disable-next-line effecttsgo/prefer-effect-string -- The native split limit truncates results; Effect String split has no limit parameter.
     const submodule = record.split(' ', 4)[2];
@@ -207,8 +208,10 @@ export const captureNativeCycleSource = Effect.fn('workflowAutomation.cycle.capt
       ) &&
       Effect2.pipe(submodule, EffectString.slice(2)) !== '..'
     )
-      return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
+      dirtySubmodule = true;
   }
+  if (unmerged) return yield* fail('unmerged-index', 'Resolve index conflicts before taking a cycle snapshot.');
+  if (dirtySubmodule) return yield* fail('dirty-submodule', 'Run a separate cycle for dirty submodule content.');
   const indexName = Effect2.pipe(yield* git(root, ['rev-parse', '--git-path', 'index']), EffectString.trim);
   const realIndex = path.isAbsolute(indexName) ? indexName : path.resolve(root, indexName);
   if (Option.isSome(yield* fs.readLink(realIndex).pipe(Effect.option)))
