@@ -19,6 +19,12 @@ import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertWorkflowJournalIntegrity, workflowOwnedArtifacts} from '../../src/workflow_memory/journal_validation.js';
 import {assertWorkflowJournalCapacity, serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
 import {
+  workflowArtifactTopic,
+  workflowArtifactUri,
+  workflowArchiveUri,
+  workflowStateTopic,
+} from '../../src/workflow_memory/naming.js';
+import {
   stableJson,
   type WorkflowArtifact,
   type WorkflowBinding,
@@ -535,5 +541,239 @@ describe('workflow journal codec', async () => {
     const aborted = new AbortController();
     aborted.abort();
     await expect(decodeWorkflowJournal(JSON.stringify(good), aborted.signal)).rejects.toThrow();
+  });
+});
+
+describe('manifest transition witness support', () => {
+  const verified = (operation: WorkflowOperation): WorkflowOperation => ({...operation, status: 'verified'});
+  const equal = (left: unknown, right: unknown) => stableJson(left) === stableJson(right);
+  const apply = (previous: WorkflowJournal['artifacts'], operation: WorkflowOperation) => {
+    const next = {...previous, ...map(operation.artifact)};
+    if (operation.request.action === 'archive') delete next[operation.sourceUri!];
+    return next;
+  };
+  // Independent normal-mutation oracle: apply complete records, never consult a changed-key set.
+  const normalWitness = (
+    previous: WorkflowJournal['artifacts'],
+    current: WorkflowJournal['artifacts'],
+    receipts: readonly WorkflowOperation[],
+  ) =>
+    receipts.some(operation => {
+      if (operation.status !== 'verified' || !equal(current[operation.artifact.canonicalUri], operation.artifact))
+        return false;
+      if (operation.request.action === 'create') {
+        if (previous[operation.artifact.canonicalUri] !== undefined) return false;
+      } else if (previous[operation.sourceUri!]?.state !== 'active') return false;
+      return equal(apply(previous, operation), current);
+    });
+  const transition = (
+    previous: WorkflowJournal['artifacts'],
+    current: WorkflowJournal['artifacts'],
+    receipts: readonly WorkflowOperation[],
+  ): WorkflowJournal => ({
+    ...state(current, operations(...receipts)),
+    manifestCommitted: false,
+    previousManifestContent: manifest(previous),
+  });
+  const replacement = (source: WorkflowOperation): WorkflowOperation => {
+    const body = 'Complete replacement result.\n';
+    const request: WorkflowRequest = {
+      ...source.request,
+      action: 'replace',
+      operationId: 'replace-candidate',
+      uri: source.artifact.canonicalUri,
+      expectedRevision: source.artifact.revision,
+      body,
+      bodySha256: sha256HexSync(body),
+    };
+    const record = parseMemoryDocument(source.artifact.canonicalUri, source.desired)!;
+    const desired = formatMemoryDocument(record.headerTitle, record.metadata, body);
+    return {
+      ...source,
+      request,
+      desired,
+      before: source.desired,
+      sourceUri: source.artifact.canonicalUri,
+      intentDigest: sha256HexSync(stableJson(request)),
+      artifact: {...source.artifact, revision: sha256HexSync(desired), bodySha256: sha256HexSync(body)},
+      status: 'verified',
+    };
+  };
+
+  it('matches full-map mutation witnesses under irrelevant history and receipt permutations', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({min: 1, max: 12}),
+        fc.constantFrom('create', 'replace', 'archive', 'archive-source-only', 'archive-destination-only'),
+        fc.constantFrom('none', 'extra-change', 'missing-witness'),
+        fc.array(fc.integer({min: 0, max: 31}), {maxLength: 32}),
+        (count, action, alteration, order) => {
+          const history = Array.from({length: count}, (_, index) => verified(create(`history-${index}`)));
+          const source = action === 'create' ? undefined : verified(create('source-v2'));
+          const relevant =
+            action === 'create'
+              ? verified(create('new-v2'))
+              : action === 'replace'
+                ? replacement(source!)
+                : verified(archive(source!));
+          let previous: WorkflowJournal['artifacts'] = Object.fromEntries(
+            history.map(item => [item.artifact.canonicalUri, item.artifact]),
+          );
+          if (source) previous = {...previous, ...map(source.artifact)};
+          if (action === 'archive-source-only') previous = {...previous, ...map(relevant.artifact)};
+          let current =
+            action === 'archive-destination-only'
+              ? {...previous, ...map(relevant.artifact)}
+              : apply(previous, relevant);
+          if (alteration === 'extra-change') current = {...current, ...map(create('unwitnessed').artifact)};
+          const receipts = [
+            ...history,
+            ...(source ? [source] : []),
+            ...(alteration === 'missing-witness' ? [] : [relevant]),
+          ]
+            .map((operation, index) => ({operation, index, order: order[index] ?? index}))
+            .sort((left, right) => left.order - right.order || left.index - right.index)
+            .map(item => item.operation);
+          const expected = normalWitness(previous, current, receipts);
+          const next = transition(previous, current, receipts);
+          if (expected) expect(() => assertWorkflowJournalIntegrity(next, next.previousManifestContent)).not.toThrow();
+          else expect(() => assertWorkflowJournalIntegrity(next, next.previousManifestContent)).toThrow();
+        },
+      ),
+      {numRuns: 40},
+    );
+  });
+
+  it('does not hide relevant or irrelevant corrupted receipts before witness selection', () => {
+    const old = verified(create('old'));
+    const relevant = verified(create('new'));
+    const previous = map(old.artifact);
+    const current = {...previous, ...map(relevant.artifact)};
+    const mutations: readonly ((operation: WorkflowOperation) => WorkflowOperation)[] = [
+      operation => ({...operation, intentDigest: 'a'.repeat(64)}),
+      operation => ({...operation, desired: operation.desired + 'edited'}),
+      operation => ({...operation, artifact: {...operation.artifact, revision: 'b'.repeat(64)}}),
+      operation => ({...operation, artifact: {...operation.artifact, memoryId: 'tn_00000000000000000000'}}),
+      operation => ({
+        ...operation,
+        artifact: {...operation.artifact, canonicalUri: `threadnote://memory/${operation.artifact.memoryId}`},
+      }),
+      operation => {
+        const request = {...operation.request, bindingId: 'c'.repeat(64)};
+        return {...operation, request, intentDigest: sha256HexSync(stableJson(request))};
+      },
+    ];
+    for (const mutate of mutations)
+      for (const target of ['old', 'new']) {
+        const receipts = [target === 'old' ? mutate(old) : old, target === 'new' ? mutate(relevant) : relevant];
+        const next = transition(previous, current, receipts);
+        expect(() => assertWorkflowJournalIntegrity(next, next.previousManifestContent)).toThrow();
+      }
+    for (const changedBinding of [
+      {...binding, home: '/different/home'},
+      {...binding, account: 'other'},
+      {...binding, user: 'other'},
+    ]) {
+      const next = {...transition(previous, current, [old, relevant]), binding: changedBinding};
+      expect(() => assertWorkflowJournalIntegrity(next, next.previousManifestContent)).toThrow();
+    }
+  });
+
+  it('retains relevant relation scope checks and earlier prepared-receipt checks', () => {
+    const old = verified(create('old'));
+    const relevant = verified(create('new'));
+    const foreign = verified(create('foreign'));
+    const badRelations = [
+      {
+        uri: foreign.artifact.canonicalUri,
+        content: foreign.desired,
+        memoryId: foreign.artifact.memoryId,
+        allowedUriScopes: ['threadnote://user/tester/memories'],
+      },
+    ];
+    const previous = map(old.artifact);
+    const current = {...previous, ...map(relevant.artifact)};
+    const relevantTamper = transition(previous, current, [old, {...relevant, relations: badRelations}]);
+    expect(() => assertWorkflowJournalIntegrity(relevantTamper, relevantTamper.previousManifestContent)).toThrow();
+    const prepared = {...create('unrelated-prepared'), relations: badRelations};
+    const preparedTamper = transition(previous, current, [old, prepared, relevant]);
+    expect(() => assertWorkflowJournalIntegrity(preparedTamper, preparedTamper.previousManifestContent)).toThrow();
+  });
+
+  it('keeps exact named archive versions and the source-only removal witness', () => {
+    const namedIdentity = {...identity, naming: {policyVersion: 1 as const, slug: 'witness', ordinal: 2}};
+    const namedBinding: WorkflowBinding = {...namedIdentity, bindingId: sha256HexSync(stableJson(namedIdentity))};
+    const original = verified(create('versioned'));
+    const naming = {role: 'root', version: 2};
+    const request = {...original.request, bindingId: namedBinding.bindingId, nameHint: naming.role};
+    const memoryId = `tn_${sha256HexSync(`${namedBinding.bindingId}\nwriter\nversioned`).slice(0, 20)}`;
+    const record = parseMemoryDocument(original.artifact.canonicalUri, original.desired)!;
+    const desired = formatMemoryDocument(
+      record.headerTitle,
+      {
+        ...record.metadata,
+        memoryId,
+        topic: workflowArtifactTopic(namedBinding, 'versioned', naming),
+      },
+      record.body,
+    );
+    const source: WorkflowOperation = {
+      ...original,
+      request,
+      desired,
+      intentDigest: sha256HexSync(stableJson(request)),
+      artifact: {
+        ...original.artifact,
+        naming,
+        memoryId,
+        revision: sha256HexSync(desired),
+        canonicalUri: workflowArtifactUri(namedBinding, {...original.artifact, naming}),
+      },
+    };
+    const baseArchive = verified(archive(source));
+    const archivedNaming = {...naming, archiveOrdinal: 3};
+    const archiveRequest = {...baseArchive.request, bindingId: namedBinding.bindingId};
+    const retired: WorkflowOperation = {
+      ...baseArchive,
+      request: archiveRequest,
+      intentDigest: sha256HexSync(stableJson(archiveRequest)),
+      artifact: {
+        ...baseArchive.artifact,
+        naming: archivedNaming,
+        canonicalUri: workflowArchiveUri(namedBinding, {...baseArchive.artifact, naming: archivedNaming}, 'retire'),
+      },
+    };
+    const namedState = (artifacts: WorkflowJournal['artifacts'], receipts: readonly WorkflowOperation[]) => {
+      const topic = workflowStateTopic(namedBinding);
+      return {
+        ...state(artifacts, operations(...receipts)),
+        binding: namedBinding,
+        manifestUri: `${activeRoot}/${topic}.md`,
+        manifestContent: formatMemoryDocument(
+          'MEMORY',
+          {
+            kind: 'handoff',
+            status: 'active',
+            project: namedBinding.project,
+            topic,
+            memoryId: `tn_${namedBinding.bindingId.slice(0, 20)}`,
+            timestamp,
+            sourceAgentClient: 'threadnote',
+            sourceSessionId: namedBinding.workflowRunId,
+          },
+          stableJson({protocolVersion: 1, binding: namedBinding, artifacts}),
+        ),
+      };
+    };
+    const previous = namedState({...map(source.artifact), ...map(retired.artifact)}, [source, retired]);
+    const current = {
+      ...namedState(map(retired.artifact), [source, retired]),
+      manifestCommitted: false,
+      previousManifestContent: previous.manifestContent,
+    };
+    expect(() => assertWorkflowJournalIntegrity(current, previous.manifestContent)).not.toThrow();
+    const wrongOrdinal = {...retired, artifact: {...retired.artifact, naming: {...archivedNaming, archiveOrdinal: 4}}};
+    const invalid = {...current, operations: operations(source, wrongOrdinal)};
+    expect(() => assertWorkflowJournalIntegrity(invalid, previous.manifestContent)).toThrow();
   });
 });

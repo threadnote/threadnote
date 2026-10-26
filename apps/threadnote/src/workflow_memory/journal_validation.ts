@@ -319,13 +319,19 @@ export function assertWorkflowJournalIntegrity(
     uri => !same(previous[uri], state.artifacts[uri]),
   );
   if (changed.length === 0) return;
+  const changedUris = new Set(changed);
   check(
     Object.values(state.operations).some(operation => {
+      if (operation.status !== 'verified') return false;
+      // A normal receipt can only alter its destination and optional source.
+      // Deferred/citation receipts retain their complete original proof path.
       if (
-        operation.status !== 'verified' ||
-        !same(state.artifacts[operation.artifact.canonicalUri], operation.artifact)
+        operation.deferredCodeAnchor === undefined &&
+        !changedUris.has(operation.artifact.canonicalUri) &&
+        (operation.sourceUri === undefined || !changedUris.has(operation.sourceUri))
       )
         return false;
+      if (!same(state.artifacts[operation.artifact.canonicalUri], operation.artifact)) return false;
       const old = previous[operation.artifact.canonicalUri];
       if (changed.length === 1 && old && citationOnlyTransition(old, operation)) return true;
       try {
