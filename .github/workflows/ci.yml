@@ -39,12 +39,6 @@ jobs:
       - name: Install frozen workspace dependencies
         run: bun install --frozen-lockfile
 
-      - name: Prepare explicit website metadata
-        run: bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
-
-      - name: Verify generated Bazel declarations
-        run: bun tools/bazel/generate.mjs --check
-
       - id: selection
         name: Select affected Bazel targets
         env:
@@ -107,9 +101,13 @@ jobs:
         if: needs.bazel-plan.outputs.bazel_validation == 'true'
         run: bun install --frozen-lockfile
 
-      - name: Prepare explicit website metadata
+      - name: Prepare Bazel workspace
         if: needs.bazel-plan.outputs.bazel_validation == 'true'
-        run: bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
+        run: bun tools/bazel/prepare.mjs
+
+      - name: Verify generated Bazel declarations
+        if: needs.bazel-plan.outputs.bazel_validation == 'true'
+        run: bun tools/bazel/generate.mjs --check
 
       - name: Verify Bazel selection edge cases
         if: needs.bazel-plan.outputs.bazel_validation == 'true'
@@ -152,8 +150,8 @@ jobs:
       - name: Install frozen workspace dependencies
         run: bun install --frozen-lockfile
 
-      - name: Prepare explicit website metadata
-        run: bun apps/website/tools/site-prepared-metadata.ts --output apps/website/.bazel-inputs/metadata.json
+      - name: Prepare Bazel workspace
+        run: bun tools/bazel/prepare.mjs
 
       - uses: actions/download-artifact@v8
         with:

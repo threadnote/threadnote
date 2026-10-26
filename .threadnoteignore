@@ -3,7 +3,7 @@ node_modules/
 graphify-out/
 .claude/worktrees/
 .worktrees/
-bazel-*/
+bazel-*/**
 dist/
 build/
 out/
