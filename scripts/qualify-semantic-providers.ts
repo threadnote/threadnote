@@ -5,12 +5,15 @@ import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {parseArgs} from 'node:util';
-import {startSemanticProbe} from '../tools/semantic/semantic_lsp_probe.js';
+import {Schema} from 'effect';
+import {ProbeConfig, expandProbeScratch, providerFixture} from '../tools/semantic/semantic_provider_fixture.js';
+import {observeProbeReadiness, startSemanticProbe} from '../tools/semantic/semantic_lsp_probe.js';
 import {installProbeSignalCleanup} from '../tools/semantic/semantic_probe_process.js';
 import {
   checkProbeDefinition,
   checkProbeReferences,
   checkProbeRename,
+  checkProbeShutdown,
 } from '../tools/semantic/semantic_probe_assertions.js';
 
 const {values} = parseArgs({
@@ -23,45 +26,34 @@ const {values} = parseArgs({
 });
 if (!values.probe || !values.config || !values.output)
   throw new Error('Use --probe --config <local-probe.json> --output <report.json>');
-const config = JSON.parse(await readFile(values.config, 'utf8')) as {
-  id: string;
-  command: string;
-  args: string[];
-  language: 'python' | 'typescript' | 'java';
-  version: string;
-  settings?: unknown;
-  configurationTemplate?: string;
-};
-if (
-  !['python', 'typescript', 'java'].includes(config.language) ||
-  !Array.isArray(config.args) ||
-  !config.args.every(x => typeof x === 'string')
-) {
-  throw new Error(
-    'This disposable harness supports Python, TypeScript and Java fixtures only; Go/Rust probes remain to be implemented and Kotlin is deferred',
-  );
-}
-if (config.language === 'java' && typeof config.configurationTemplate !== 'string')
-  throw new Error('Java requires an explicit JDT LS configurationTemplate directory containing config.ini');
+const configText = await readFile(values.config, 'utf8');
+const input: unknown = JSON.parse(configText);
+const config = Schema.decodeUnknownSync(ProbeConfig, {onExcessProperty: 'error'})(input);
+const sourceHashes = Object.fromEntries(
+  await Promise.all(
+    [
+      ['harness', new URL(import.meta.url)],
+      ['fixtures', new URL('../tools/semantic/semantic_provider_fixture.ts', import.meta.url)],
+      ['transport', new URL('../tools/semantic/semantic_lsp_probe.ts', import.meta.url)],
+      ['assertions', new URL('../tools/semantic/semantic_probe_assertions.ts', import.meta.url)],
+      ['process', new URL('../tools/semantic/semantic_probe_process.ts', import.meta.url)],
+    ].map(async ([name, url]) => [
+      String(name),
+      createHash('sha256')
+        .update(await readFile(url))
+        .digest('hex'),
+    ]),
+  ),
+);
+const RustStatus = Schema.Struct({health: Schema.Literals(['ok', 'warning', 'error']), quiescent: Schema.Boolean});
+let rustStatus: typeof RustStatus.Type | undefined;
+
 const scratch = await realpath(await mkdtemp(join(tmpdir(), 'threadnote-semantic-provider-')));
 const root = join(scratch, 'project');
-const python = config.language === 'python';
 const java = config.language === 'java';
-const files: Record<string, string> = python
-  ? {
-      'a.py': 'class SavedName:\r\n    def value(self):\r\n        return "🧵"\r\n',
-      'b.py': 'from a import SavedName\r\nresult = SavedName().value()\r\n',
-    }
-  : java
-    ? {
-        'src/main/java/demo/Subject.java':
-          'package demo;\r\n/* 🧵 */ class SavedName { String value() { return "🧵"; } }\r\n',
-        'src/main/java/demo/Usage.java': 'package demo;\r\nclass Usage { SavedName value = new SavedName(); }\r\n',
-      }
-    : {
-        'a.ts': 'export /* 🧵 */ class SavedName { value() { return "🧵"; } }\r\n',
-        'b.ts': 'import { SavedName } from "./a";\r\nconst result = new SavedName().value();\r\n',
-      };
+const fixture = providerFixture(config);
+const files = fixture.sources;
+const settings = config.settings === undefined ? undefined : expandProbeScratch(config.settings, scratch);
 const unsaved = Object.fromEntries(
   Object.entries(files).map(([name, text]) => [name, text.replaceAll('SavedName', 'UnsavedName')]),
 );
@@ -78,19 +70,25 @@ try {
     await writeFile(join(root, name), text);
     hashes[name] = hash(text);
   }
+  for (const [base, entries] of [
+    [root, fixture.projectFiles],
+    [scratch, fixture.runtimeFiles],
+  ] as const) {
+    for (const [name, text] of Object.entries(entries)) {
+      await mkdir(dirname(join(base, name)), {recursive: true});
+      await writeFile(join(base, name), text);
+    }
+  }
   if (java) {
-    await writeFile(
-      join(root, 'pom.xml'),
-      '<project xmlns="http://maven.apache.org/POM/4.0.0"><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>semantic-fixture</artifactId><version>1.0</version><properties><maven.compiler.source>21</maven.compiler.source><maven.compiler.target>21</maven.compiler.target></properties></project>',
-    );
     await mkdir(join(scratch, 'configuration'));
     await mkdir(join(scratch, 'home'));
     // Copy authored configuration only; never reuse a previous provider's mutable cache.
     await copyFile(join(config.configurationTemplate!, 'config.ini'), join(scratch, 'configuration/config.ini'));
-  } else if (!python)
-    await writeFile(join(root, 'tsconfig.json'), JSON.stringify({compilerOptions: {strict: true}, include: ['*.ts']}));
+  }
   const args = config.args.map(arg => arg.replaceAll('{scratch}', scratch));
-  const peer = startSemanticProbe(resolve(config.command), args, root, config.settings);
+  const peer = startSemanticProbe(resolve(config.command), args, root, settings, (method, params) => {
+    if (method === 'experimental/serverStatus' && Schema.is(RustStatus)(params)) rustStatus = params;
+  });
   signalCleanup = installProbeSignalCleanup(async signal => {
     const stopped = await peer.stop();
     await writeFile(
@@ -122,15 +120,16 @@ try {
         workspaceFolders: [{uri: pathToFileURL(root).href, name: 'disposable'}],
         capabilities: {
           general: {positionEncodings: ['utf-16']},
+          ...(config.language === 'rust' ? {experimental: {serverStatusNotification: true}} : {}),
           workspace: {configuration: true, applyEdit: false, workspaceEdit: {documentChanges: true}},
           textDocument: {synchronization: {didSave: true}, rename: {prepareSupport: true}},
         },
-        initializationOptions: java ? {settings: config.settings ?? {}} : config.settings,
+        initializationOptions: java ? {settings: settings ?? {}} : settings,
       },
       java ? 120_000 : 20_000,
     );
     peer.notify('initialized', {});
-    peer.notify('workspace/didChangeConfiguration', {settings: config.settings ?? {}});
+    peer.notify('workspace/didChangeConfiguration', {settings: settings ?? {}});
     for (const [name, text] of Object.entries(files)) {
       peer.notify('textDocument/didOpen', {
         textDocument: {
@@ -148,6 +147,25 @@ try {
       });
     }
     const [declaration, dependent] = Object.keys(files);
+    if (config.language === 'rust') {
+      const readiness = await observeProbeReadiness(
+        timeoutMs =>
+          peer.request(
+            'textDocument/definition',
+            {
+              textDocument: {uri: pathToFileURL(join(root, dependent)).href},
+              position: {line: 1, character: unsaved[dependent].split('\n')[1].indexOf('UnsavedName') + 2},
+            },
+            timeoutMs,
+          ),
+        detail => checkProbeDefinition(unsaved, detail, pathToFileURL(root).href),
+      );
+      results.push({
+        name: 'bounded-project-readiness',
+        status: readiness.ready ? 'passed' : 'failed',
+        detail: readiness,
+      });
+    }
     const document = {uri: pathToFileURL(join(root, declaration)).href};
     const declarationLine = unsaved[declaration].split('\n').findIndex(line => line.includes('UnsavedName'));
     const position = {
@@ -207,14 +225,55 @@ try {
         ? 'passed'
         : 'failed',
     });
+    if (fixture.executionMarker) {
+      const deadline = performance.now() + 10_000;
+      while (performance.now() < deadline) {
+        try {
+          await readFile(join(root, fixture.executionMarker));
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, Math.min(100, Math.max(1, deadline - performance.now()))));
+      }
+    }
+    if (config.language === 'rust') {
+      const quiescence = await observeProbeReadiness(
+        async () => rustStatus,
+        detail => Schema.is(RustStatus)(detail) && detail.quiescent && detail.health !== 'error',
+        30_000,
+      );
+      results.push({
+        name: 'provider-quiescent-before-stop',
+        status: quiescence.ready ? 'passed' : 'failed',
+        detail: quiescence,
+      });
+    }
   } finally {
     stop = await peer.stop();
     results.push({
       name: 'clean-owned-process-shutdown',
-      status:
-        stop.code === 0 && !stop.forced && stop.cleanup.drained && stop.cleanup.scope === 'posix-process-group'
-          ? 'passed'
-          : 'failed',
+      status: checkProbeShutdown(stop) ? 'passed' : 'failed',
+    });
+  }
+  if (fixture.executionMarker) {
+    let observation: 'absent' | 'executed' | 'unexpected' = 'absent';
+    try {
+      observation =
+        (await readFile(join(root, fixture.executionMarker), 'utf8')) === 'executed' ? 'executed' : 'unexpected';
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    results.push({
+      name: 'build-execution-marker',
+      status: observation === (config.expectedBuildExecution ? 'executed' : 'absent') ? 'passed' : 'failed',
+      detail: {
+        fixture: config.fixture,
+        expected: config.expectedBuildExecution,
+        observation,
+        phase: 'after-provider-stop',
+        settleLimitMilliseconds: 10_000,
+      },
     });
   }
   for (const name of Object.keys(hashes)) {
@@ -231,7 +290,11 @@ try {
       schemaVersion: 1,
       kind: 'provider-feasibility',
       provider: config.id,
+      configSha256: hash(configText),
+      sourceHashes,
       declaredVersion: config.version,
+      language: config.language,
+      fixture: config.fixture ?? 'standard',
       executableSha256: hash(await readFile(resolve(config.command))),
       platform: process.platform,
       architecture: process.arch,

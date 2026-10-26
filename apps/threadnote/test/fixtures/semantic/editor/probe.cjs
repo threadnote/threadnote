@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const vscode = require('vscode');
+const {probeGuardedExchange} = require('./proposal-wire.cjs');
 
 const original = 'const before = 1;\r\n// unsaved 🧵\r\n';
 const changed = original.replace('before', 'after');
@@ -32,8 +33,6 @@ function bridge(targets) {
   let owner = 1;
   let result;
   return {
-    transfer: () => owner++,
-    publicProposal: qualified => (qualified ? {proposalId: 'disposable-proposal'} : {status: 'unsupported'}),
     apply: async ({raceIndex = -1, transferAfterFirst = false} = {}) => {
       if (result) return result;
       const applied = [];
@@ -121,9 +120,19 @@ exports.run = async () => {
     );
   });
   await record('unqualified-client-receives-no-edit', async () => {
-    const candidate = bridge([]);
-    assert.deepEqual(candidate.publicProposal(false), {status: 'unsupported'});
-    assert.deepEqual(candidate.publicProposal(true), {proposalId: 'disposable-proposal'});
+    const targets = await fixtures('wire');
+    const candidate = bridge(targets);
+    await probeGuardedExchange(candidate);
+    const versions = targets.map(t => t.doc.version);
+    await candidate.apply();
+    assert.deepEqual(
+      targets.map(t => t.doc.version),
+      versions,
+    );
+    for (const target of targets) {
+      assert.equal(target.doc.getText(), changed);
+      assert.equal(await fs.readFile(target.doc.uri.fsPath, 'utf8'), '// saved baseline\r\n');
+    }
   });
   const report = {
     schemaVersion: 1,

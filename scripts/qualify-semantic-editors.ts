@@ -4,6 +4,7 @@ import {createHash} from 'node:crypto';
 import {mkdtemp, mkdir, readFile, readdir, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {parseArgs} from 'node:util';
 import {
   installProbeSignalCleanup,
@@ -22,6 +23,22 @@ if (!values.probe || !values.editor || !values.output) {
 
 const editor = resolve(values.editor);
 const extension = resolve('apps/threadnote/test/fixtures/semantic/editor');
+const sourceHashes = Object.fromEntries(
+  await Promise.all(
+    [
+      ['runner', fileURLToPath(import.meta.url)],
+      ['probe', join(extension, 'probe.cjs')],
+      ['wire', join(extension, 'proposal-wire.cjs')],
+      ['process', resolve('tools/semantic/semantic_probe_process.ts')],
+    ].map(async ([name, path]) => [
+      name,
+      createHash('sha256')
+        .update(await readFile(path))
+        .digest('hex'),
+    ]),
+  ),
+);
+
 const scratch = await mkdtemp(join(tmpdir(), 'threadnote-semantic-editor-'));
 const workspace = join(scratch, 'workspace');
 await mkdir(workspace);
@@ -134,6 +151,7 @@ try {
   const report = JSON.parse(await readFile(join(workspace, 'editor-result.json'), 'utf8'));
   const receipt = {
     ...report,
+    sourceHashes,
     platform: process.platform,
     architecture: process.arch,
     launcherSha256: createHash('sha256')
