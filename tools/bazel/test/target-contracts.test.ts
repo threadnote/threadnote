@@ -106,7 +106,7 @@ describe('generated Bazel test contracts', () => {
     const suite = inventory.testSuites.find(candidate => candidate.package === 'apps/threadnote');
 
     expect(targets.length).toBeGreaterThan(8);
-    // Keep shard overhead proportional to corpus growth; provider integration targets stay isolated.
+    // Bound grouping overhead with corpus growth while retaining isolated provider targets.
     const integrationTargets = targets.filter(candidate =>
       candidate.label.startsWith('//apps/threadnote:test_integration_'),
     );

@@ -1,5 +1,6 @@
 import {it as effectIt} from '@effect/vitest';
-import {Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path} from 'effect';
+import * as BunFileSystem from '@effect/platform-bun/BunFileSystem';
+import {Cause, Context, Effect, Exit, FileSystem, Layer, Option, Path, PlatformError} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {describe, expect} from 'vitest';
@@ -199,6 +200,7 @@ describe('Context Health graph observation', () => {
       const neighbor = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-readonly-neighbor-'});
       yield* fs.writeFileString(path.join(neighbor, 'untouched.txt'), SOURCE);
       let bodyVerified = false;
+      let bodyRemovalCompleted = false;
       const result = yield* Effect.scoped(
         Effect.gen(function* () {
           const root = yield* makeReadonlyFixtureRoot(fs);
@@ -207,12 +209,73 @@ describe('Context Health graph observation', () => {
           bodyVerified = true;
           // Simulate disappearance only AFTER every live-body oracle has passed.
           yield* fs.remove(root, {recursive: true});
+          bodyRemovalCompleted = true;
         }),
       ).pipe(Effect.exit);
-      expect(bodyVerified).toBe(true);
-      expect(Exit.isSuccess(result)).toBe(true);
+      const diagnostic = readonlyFixtureExitDiagnostic(result, bodyVerified, bodyRemovalCompleted);
+      expect(bodyVerified, diagnostic).toBe(true);
+      expect(Exit.isSuccess(result), diagnostic).toBe(true);
       expect(yield* fs.readFileString(path.join(neighbor, 'untouched.txt'))).toBe(SOURCE);
     }).pipe(provideTestLayer(ApplicationLayer), TestClock.withLive),
+  );
+
+  effectIt.effect('distinguishes strict body removal errors from scoped fixture release defects', () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const sandbox = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-readonly-phase-errors-'});
+      for (const failingPhase of ['body', 'release'] as const) {
+        const removalError = PlatformError.systemError({
+          _tag: 'PermissionDenied',
+          module: 'FileSystem',
+          method: 'remove',
+          description: `controlled ${failingPhase} removal failure`,
+        });
+        const removals: Array<{root: string; options: Parameters<FileSystem.FileSystem['remove']>[1]}> = [];
+        const fixtureFs: FileSystem.FileSystem = {
+          ...fs,
+          makeTempDirectory: options => fs.makeTempDirectory({...options, directory: sandbox}),
+          remove: (root, options) => {
+            removals.push({root, options});
+            const phase = options?.force === true ? 'release' : 'body';
+            return phase === failingPhase ? Effect.fail(removalError) : fs.remove(root, options);
+          },
+        };
+        let ownedRoot = '';
+        let bodyVerified = false;
+        let bodyRemovalCompleted = false;
+        const result = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const root = yield* makeReadonlyFixtureRoot(fixtureFs);
+            ownedRoot = root;
+            expect(yield* fs.exists(root)).toBe(true);
+            bodyVerified = true;
+            yield* fixtureFs.remove(root, {recursive: true});
+            bodyRemovalCompleted = true;
+          }),
+        ).pipe(Effect.exit);
+        expect(bodyVerified).toBe(true);
+        expect(bodyRemovalCompleted).toBe(failingPhase === 'release');
+        expect(removals).toEqual([
+          {root: ownedRoot, options: {recursive: true}},
+          {root: ownedRoot, options: {force: true, recursive: true}},
+        ]);
+        expect(yield* fs.exists(ownedRoot)).toBe(false);
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result)) {
+          const failures = result.cause.reasons.filter(Cause.isFailReason);
+          const defects = result.cause.reasons.filter(Cause.isDieReason);
+          expect(failures).toHaveLength(failingPhase === 'body' ? 1 : 0);
+          expect(defects).toHaveLength(failingPhase === 'release' ? 1 : 0);
+          if (failingPhase === 'body') expect(failures[0]?.error).toBe(removalError);
+          else expect(defects[0]?.defect).toBe(removalError);
+          const diagnostic = readonlyFixtureExitDiagnostic(result, bodyVerified, bodyRemovalCompleted);
+          expect(diagnostic).toContain('bodyVerified=true');
+          expect(diagnostic).toContain(`bodyRemovalCompleted=${failingPhase === 'release'}`);
+          expect(diagnostic).toContain(removalError.message);
+          expect(() => expect(Exit.isSuccess(result), diagnostic).toBe(true)).toThrow(diagnostic);
+        }
+      }
+    }).pipe(provideTestLayer(BunFileSystem.layer), TestClock.withLive),
   );
 
   effectIt.effect('keeps missing or changed live read-only fixtures visible as body failures', () =>
@@ -244,6 +307,14 @@ describe('Context Health graph observation', () => {
 const SOURCE = 'export const price = (amount: number) => amount * 2;\n';
 const makeReadonlyFixtureRoot = (fs: FileSystem.FileSystem) =>
   makeIdempotentFixtureTempDirectoryScoped(fs, 'threadnote-status-readonly-');
+const readonlyFixtureExitDiagnostic = (
+  result: Exit.Exit<unknown, unknown>,
+  bodyVerified: boolean,
+  bodyRemovalCompleted: boolean,
+) =>
+  `bodyVerified=${bodyVerified}; bodyRemovalCompleted=${bodyRemovalCompleted}${
+    Exit.isFailure(result) ? `\n${Cause.pretty(result.cause)}` : ''
+  }`;
 const assertReadonlyFixture = Effect.fn('test.health.assertReadonlyFixture')(function* (
   fs: FileSystem.FileSystem,
   root: string,
