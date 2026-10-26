@@ -183,6 +183,7 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
         ? {
             reviewId: prior.reviewId,
             state: prior.candidates[0].state,
+            outcome: prior.maintenance!.proposal.draft.outcome,
             evidenceRevision: prior.maintenance!.basis.observationRevision,
             verified: written && prior.candidates[0].state === 'applied' && approval.stage === 'written',
             canFinishVerification: written && prior.candidates[0].state === 'applying' && approval.stage === 'prepared',
@@ -194,8 +195,17 @@ const automaticStatus = Effect.fn('managerAutomaticMemory.status')(function* (
         ? 'reviewed'
         : 'unknown';
     let reason: string | undefined = prepared?.omissions.join(', ') || undefined;
+    const noUpdate =
+      review?.state === 'pending' &&
+      (review.outcome === 'insufficient-evidence' || review.outcome === 'policy-conflict');
     if (review?.verified && !active && !pending) state = 'reviewed';
-    else if (review && !review.verified && ['pending', 'applying', 'deferred', 'conflict'].includes(review.state)) {
+    else if (noUpdate) {
+      state = active ? 'generating' : pending ? 'queued' : 'policy';
+      reason =
+        review.outcome === 'insufficient-evidence'
+          ? 'No update proposed. Waiting for sufficient evidence.'
+          : 'No update proposed. Waiting for the source policy conflict to change.';
+    } else if (review && !review.verified && ['pending', 'applying', 'deferred', 'conflict'].includes(review.state)) {
       state =
         review.canFinishVerification || review.state === 'applying'
           ? 'verification'

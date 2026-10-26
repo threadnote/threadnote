@@ -19,6 +19,7 @@ export function MemoryExcerpt(props: {
   readonly children: React.ReactNode;
   readonly label?: string;
   readonly markdown?: boolean;
+  readonly onOpenMemory?: (uri: string) => void;
   readonly tone?: 'info' | 'protected';
 }): React.ReactElement {
   return (
@@ -29,7 +30,7 @@ export function MemoryExcerpt(props: {
       </figcaption>
       <blockquote>
         {props.markdown && typeof props.children === 'string' ? (
-          <MarkdownViewer markdown={props.children} />
+          <MarkdownViewer markdown={props.children} onOpenMemory={props.onOpenMemory} />
         ) : (
           props.children
         )}

@@ -221,6 +221,7 @@ function App({
   const [savingMemory, setSavingMemory] = useState(false);
   const saveOwned = useRef(false);
   const manualEdit = useManualSupportEdit({
+    onOpenMemory: uri => void selectTreeUri(uri),
     selectedUri,
     onError: toastMessage,
     onApplied: uri => {

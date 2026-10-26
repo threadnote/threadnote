@@ -2,6 +2,7 @@
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
+import {topicMaintenanceObsidianCitationId} from '@threadnote/memory/topic-maintenance';
 import type {MemoryObsidianEvidenceV1} from '@threadnote/memory/document';
 import type {ManagerContextMaintenancePacketV2} from '../../src/attention/contracts.js';
 import type {ManagerTopicReviewV1} from '../../src/attention/topic_contracts.js';
@@ -122,6 +123,7 @@ const privateReview: ManagerTopicReviewV1 = {
   },
   canApply: true,
 };
+let activePrivateReview = privateReview;
 let root: Root;
 let revoked: boolean;
 let evidence: ManagerContextMaintenancePacketV2;
@@ -141,6 +143,7 @@ beforeEach(() => {
   const host = document.createElement('div');
   document.body.append(host);
   root = createRoot(host);
+  activePrivateReview = privateReview;
   revoked = false;
   evidence = packet();
   captureGate = undefined;
@@ -187,12 +190,34 @@ beforeEach(() => {
             ],
           });
         if (maintenanceReadDenied) return response({error: 'Private source access denied.'}, 403);
-        if (maintenanceReadUnavailable && evidence.topicEvidence?.version === 2)
+        const selectedPacket =
+          maintenanceReadUnavailable && evidence.topicEvidence?.version === 2
+            ? {
+                ...evidence,
+                topicEvidence: {...evidence.topicEvidence, outcome: 'unavailable', body: undefined, obsidian: {}},
+              }
+            : evidence;
+        if (init?.method === 'POST')
           return response({
-            ...evidence,
-            topicEvidence: {...evidence.topicEvidence, outcome: 'unavailable', body: undefined, obsidian: {}},
+            outcome: 'ready',
+            item: {
+              caseId: 'case-note',
+              project: 'notes',
+              memoryId: 'memory-note',
+              family: 'topic-maintenance',
+              slot: 'declared-support',
+              evidenceRevision: selectedPacket.evidenceRevision,
+              disposition: maintenanceReadUnavailable ? 'waiting-evidence' : 'needs-decision',
+              reason: 'note changed',
+              firstSeen: 'now',
+              lastSeen: 'now',
+              lastChecked: 'now',
+              attemptCount: 1,
+              events: [],
+            },
+            packet: selectedPacket,
           });
-        return packetUnavailable ? response({error: 'Source evidence changed.'}, 409) : response(evidence);
+        return packetUnavailable ? response({error: 'Source evidence changed.'}, 409) : response(selectedPacket);
       }
       if (url.pathname === '/api/attention/topic-review' && init?.method === 'POST') {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -233,7 +258,7 @@ beforeEach(() => {
             state: 'rejected',
           });
         }
-        return response(privateReview);
+        return response(activePrivateReview);
       }
       if (url.pathname === '/api/attention/topic-review' && url.searchParams.has('caseId'))
         return response({error: 'No qualified saved review for this case.'}, 404);
@@ -250,7 +275,7 @@ beforeEach(() => {
             state: rejectedRecovery ? 'rejected' : 'pending',
             ...(rejectedRecovery ? {} : {recovery: {action: 'reject'}}),
           });
-        return revoked ? response({error: 'Private review unavailable.'}, 404) : response(privateReview);
+        return revoked ? response({error: 'Private review unavailable.'}, 404) : response(activePrivateReview);
       }
       if (url.pathname === '/api/attention/topic-enrollment') {
         if (revoked) return response({error: 'Private source unavailable.'}, 409);
@@ -403,11 +428,10 @@ it.each(['denied', 'unavailable'] as const)(
     expect(dialog?.textContent).toContain('Original private note.');
     expect(dialog?.textContent).toContain('Accepted private note.');
     expect(dialog?.textContent).toContain('🙂 Exact supporting note.');
-    await renderMaintenanceReview(true);
-    await renderMaintenanceReview(false);
     if (outcome === 'denied') maintenanceReadDenied = true;
     else maintenanceReadUnavailable = true;
-    await act(async () => button('Revalidate review evidence').click());
+    await renderMaintenanceReview(true);
+    await renderMaintenanceReview(false);
     expect(document.querySelector('dialog')).toBe(dialog);
     expect(dialog?.textContent).not.toMatch(/Original private|Accepted private|Exact supporting note/u);
     expect(dialog?.textContent).not.toContain('Keep selected excerpt');
@@ -447,7 +471,7 @@ it('offers only exact rejection recovery for a redacted imported review and acce
   );
   expect(button('Discard stale review')).toBeDefined();
   expect(document.body.textContent).not.toMatch(
-    /Accepted private|Proposed private|Approved private|Original private|Generate draft|Accept update|Resume review/u,
+    /Accepted private|Proposed private|Approved private|Original private|Generate draft|Apply update|Resume review/u,
   );
   const gate = Promise.withResolvers<void>();
   rejectGate = gate.promise;
@@ -496,4 +520,102 @@ it('enrolls with explicit paragraph annotations and exact preview approval, then
   await act(async () => button('Refresh source access').click());
   expect(document.body.textContent).not.toContain('Accepted private memory.');
   expect(document.body.textContent).not.toContain('Keep this policy.');
+});
+
+it.each(['manual', 'dirty'] as const)(
+  'immediately hides ready-parent %s private review while fresh authorization is pending',
+  async mode => {
+    evidence = packet('review-note');
+    if (mode === 'dirty') activePrivateReview = editablePrivateReview();
+    await renderMaintenanceReview(false);
+    expect(document.body.textContent).toContain('Approved private full document.');
+    if (mode === 'dirty') {
+      const editor = document.querySelector<HTMLTextAreaElement>(
+        'textarea[aria-label="Proposed descriptive paragraph 1"]',
+      )!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(
+          editor,
+          'Unsaved private edit.',
+        );
+        editor.dispatchEvent(new Event('input', {bubbles: true}));
+      });
+      expect(editor.value).toBe('Unsaved private edit.');
+    }
+    const gate = Promise.withResolvers<void>();
+    readGate = gate.promise;
+    revoked = true;
+    await act(async () => button('Refresh evidence').click());
+    expect(document.body.textContent).not.toMatch(
+      /Accepted private|Proposed private|Approved private|Original private|Private note topic|Unsaved private edit/u,
+    );
+    await act(async () => gate.resolve());
+    expect(document.body.textContent).not.toMatch(
+      /Accepted private|Proposed private|Approved private|Original private|Unsaved private edit/u,
+    );
+    expect(posted).toHaveLength(0);
+  },
+);
+
+function editablePrivateReview(): ManagerTopicReviewV1 {
+  return {
+    ...privateReview,
+    generation: {...privateReview.generation, origin: 'model'},
+    paragraphs: [
+      {
+        ordinal: 0,
+        hash,
+        role: 'descriptive',
+        support: 'direct',
+        citationIds: [topicMaintenanceObsidianCitationId(citation)],
+      },
+    ],
+    support: [
+      {
+        handleId: `current:${topicMaintenanceObsidianCitationId(citation)}`,
+        citationId: topicMaintenanceObsidianCitationId(citation),
+        variant: 'current',
+        path: 'Decision.md',
+        provenance: 'current-verified',
+      },
+    ],
+    draft: {
+      ...privateReview.draft,
+      outcome: 'propose-update',
+      operations: [
+        {
+          ordinal: 0,
+          beforeHash: hash,
+          text: 'Proposed private memory.',
+          supportHandles: [`current:${topicMaintenanceObsidianCitationId(citation)}`],
+          rationale: 'Selected note changed.',
+        },
+      ],
+    },
+  };
+}
+
+it('restores an unsaved private draft only after the ready-parent refresh authorizes it again', async () => {
+  evidence = packet('review-note');
+  activePrivateReview = editablePrivateReview();
+  await renderMaintenanceReview(false);
+  const editor = document.querySelector<HTMLTextAreaElement>(
+    'textarea[aria-label="Proposed descriptive paragraph 1"]',
+  )!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, 'Unsaved private edit.');
+    editor.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  const gate = Promise.withResolvers<void>();
+  readGate = gate.promise;
+  await act(async () => button('Refresh evidence').click());
+  expect(document.body.textContent).not.toMatch(
+    /Accepted private|Proposed private|Approved private|Original private|Unsaved private edit/u,
+  );
+  await act(async () => gate.resolve());
+  expect(
+    document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Proposed descriptive paragraph 1"]')?.value,
+  ).toBe('Unsaved private edit.');
+  expect(button('Apply update').disabled).toBe(true);
+  expect(posted).toHaveLength(0);
 });

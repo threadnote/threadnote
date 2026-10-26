@@ -311,12 +311,10 @@ it('preserves an independent unsaved draft when an automatic update is applied a
   await fill(container.querySelector<HTMLTextAreaElement>('[aria-label="Test Markdown editor"]')!, authored);
   await click('Back to Library');
   await click('Review update');
-  await click('Preview exact update');
   expect(container.querySelector('.automatic-review-exact pre')?.textContent).toBe(updated);
   expect(canonical).toBe(accepted);
-  expect(button('Confirm and apply').disabled).toBe(true);
-  await act(async () => container.querySelector<HTMLInputElement>('.review-confirmation input')!.click());
-  await click('Confirm and apply');
+  expect(button('Apply update').disabled).toBe(false);
+  await click('Apply update');
   expect(actions).toEqual([
     {action: 'preview', project: 'project', reviewId, revision: 1},
     {action: 'apply', project: 'project', reviewId, revision: 2, approvalDigest: hash, approved: true},

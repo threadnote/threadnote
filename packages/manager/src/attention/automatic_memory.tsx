@@ -91,6 +91,7 @@ export function AutomaticMemoryPanel(props: {
   readonly project: string;
   readonly uri?: string;
   readonly onChanged?: () => void;
+  readonly onOpenMemory?: (uri: string) => void;
   readonly onReview?: (reviewId: string) => void;
   readonly onApplied?: (review: ManagerAutomaticReview) => void;
   readonly onSummaryChange?: (
@@ -301,7 +302,9 @@ export function AutomaticMemoryPanel(props: {
                   ? 'Finish verification'
                   : item.state === 'deferred'
                     ? 'Open deferred review'
-                    : 'Review update'}
+                    : item.state === 'policy'
+                      ? 'View assessment'
+                      : 'Review update'}
               </button>
             ) : item.state === 'failed' ? (
               <p>Refresh source access or model setup, then wait for changed evidence. Automatic retries are finite.</p>
@@ -396,6 +399,7 @@ export function AutomaticMemoryPanel(props: {
           key={`${selection}:${selected}`}
           project={props.project}
           reviewId={selected}
+          onOpenMemory={props.onOpenMemory}
           onClose={() => setSelected(undefined)}
           onChanged={() => {
             mutation.current++;

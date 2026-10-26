@@ -236,6 +236,8 @@ export interface ManagerContextMaintenanceStatusV2 {
 }
 
 export interface ManagerContextMaintenancePacketV2 {
+  readonly reference?: {readonly path: string; readonly citationId: string; readonly status: string};
+  readonly repairFinding?: ContextHealthReportV1['findings'][number];
   readonly reviewId?: string;
   readonly coverage?: 'declared-only';
   readonly topicEvidence?: TopicMaintenanceEvidencePacket;
@@ -272,3 +274,16 @@ export interface ManagerContextMaintenancePacketV2 {
     readonly publication: {readonly instructions: string};
   };
 }
+
+/** A refresh observes selected evidence; it never approves or repairs memory content. */
+export type ManagerMaintenanceRefreshResultV1 =
+  | {
+      readonly outcome: 'ready' | 'resolved';
+      readonly item: ManagerContextMaintenanceCaseV2;
+      readonly packet: ManagerContextMaintenancePacketV2;
+    }
+  | {
+      readonly outcome: 'changing' | 'unavailable' | 'superseded';
+      readonly reason: string;
+      readonly item?: ManagerContextMaintenanceCaseV2;
+    };

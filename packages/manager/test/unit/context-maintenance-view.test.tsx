@@ -12,7 +12,8 @@ import {
 } from '@threadnote/memory/code/citation';
 import {ContextHealthPanel} from '@threadnote/manager/attention-view';
 import {ManagerNavigation, useContextHealthDecisionCount} from '../../src/navigation.js';
-import {ContextMaintenanceView} from '@threadnote/manager/attention/maintenance-view';
+import {ContextMaintenanceView, adoptMaintenanceEvidence} from '@threadnote/manager/attention/maintenance-view';
+import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 import {HealthDetail} from '../../src/attention_details.js';
 import {TopicReviewContent} from '../../src/attention/topic_review.js';
 import type {ManagerTopicReviewV1, ManagerAutomaticReview} from '@threadnote/manager/attention/topic-contracts';
@@ -149,7 +150,7 @@ describe('context maintenance view', () => {
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(healthReads()).toBe(2);
   });
-  it('keeps a stale review frozen until an explicit successful evidence read', async () => {
+  it('automatically recovers a stale review after a successful current evidence read', async () => {
     const finding = {
       id: 'citation-one',
       category: 'citation-changed',
@@ -174,13 +175,8 @@ describe('context maintenance view', () => {
       [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(button =>
         button.textContent?.includes('Preview repair'),
       );
-    expect(preview()?.disabled).toBe(true);
+    expect(preview()?.disabled).toBe(false);
     await act(async () => root?.render(detail(false)));
-    expect(preview()?.disabled).toBe(true);
-    const revalidate = [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(button =>
-      button.textContent?.includes('Revalidate review evidence'),
-    );
-    await act(async () => revalidate?.click());
     expect(preview()?.disabled).toBe(false);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(
@@ -494,8 +490,7 @@ describe('context maintenance view', () => {
         await act(async () => button!.click());
       };
       await click('Review update');
-      await act(async () => document.querySelector<HTMLInputElement>('input[type=checkbox]')!.click());
-      await click('Confirm and apply');
+      await click('Apply update');
       expect(applying).toBe(true);
       if (result === 'verified') {
         expect(document.querySelector('dialog')).toBeNull();
@@ -660,6 +655,25 @@ describe('context maintenance view', () => {
           return new Response(JSON.stringify(saved));
         }
         if (url.pathname === '/api/attention/context-maintenance') {
+          if (init?.method === 'POST')
+            return new Response(
+              JSON.stringify({
+                outcome: 'ready',
+                item,
+                packet: {
+                  version: 2,
+                  project: 'threadnote',
+                  caseId,
+                  memoryUri: uri,
+                  evidenceRevision: hash,
+                  expectedContentHash: hash,
+                  reason: 'source-changed',
+                  choices: [],
+                  allowedOperations: [],
+                  instructions: 'Review current evidence.',
+                },
+              }),
+            );
           if (url.searchParams.get('caseId') && url.searchParams.get('view') !== 'status')
             return new Response(JSON.stringify({error: 'The accepted baseline changed.'}), {status: 409});
           return new Response(JSON.stringify(snapshot));
@@ -906,7 +920,7 @@ describe('context maintenance view', () => {
         await act(async () => button!.click());
       };
       await click('Review memory and evidence');
-      await click('Preview exact final document');
+      expect(document.querySelector('[aria-label="Exact final document"]')).not.toBeNull();
       deferPoll = true;
       await act(async () => vi.advanceTimersByTimeAsync(30_000));
       await click('Confirm unchanged');
@@ -1458,6 +1472,28 @@ describe('context maintenance view', () => {
           const fetch = vi.fn(async (input: string, _init?: RequestInit) => {
             const url = new URL(input, 'http://manager.test');
             const response = (value: unknown, code = 200) => new Response(JSON.stringify(value), {status: code});
+            if (_init?.method === 'POST') {
+              expect(JSON.parse(String(_init.body))).toMatchObject({
+                action: 'refresh-case',
+                project: 'threadnote',
+                caseId: item.caseId,
+              });
+              return outcome.maintenanceFailure
+                ? response({error: 'Synthetic maintenance failure'}, 503)
+                : response({
+                    outcome: 'ready',
+                    item,
+                    packet: {
+                      version: 2,
+                      project: 'threadnote',
+                      caseId: item.caseId,
+                      memoryUri: evidence.left.recordUri,
+                      evidenceRevision: item.evidenceRevision,
+                      family: item.family,
+                      semanticEvidence: evidence,
+                    },
+                  });
+            }
             if (url.pathname === '/api/context-health')
               return outcome.reportFailure
                 ? response({error: 'Synthetic report failure'}, 503)
@@ -1510,7 +1546,11 @@ describe('context maintenance view', () => {
             expect(HTMLDialogElement.prototype.showModal).toHaveBeenCalledTimes(1);
             expect(HTMLDialogElement.prototype.close).not.toHaveBeenCalled();
           }
-          expect(fetch.mock.calls.every(([, init]) => init?.method !== 'POST')).toBe(true);
+          expect(
+            fetch.mock.calls
+              .filter(([, init]) => init?.method === 'POST')
+              .every(([, init]) => JSON.parse(String(init?.body)).action === 'refresh-case'),
+          ).toBe(true);
           await act(async () =>
             root?.render(<ContextHealthPanel {...props} project="other" refreshGeneration={revision} />),
           );
@@ -2029,4 +2069,129 @@ describe('context maintenance view', () => {
     expect(openMemory).toHaveBeenCalledWith(receipt.subjectUri);
     expect(document.body.textContent).not.toContain('Change undone');
   });
+});
+
+it('refreshes a stale selected source and displays changed current code without rewriting its citation', async () => {
+  const uri = 'threadnote://memory/selected';
+  const item = {
+    caseId: 'selected-source',
+    project: 'threadnote',
+    memoryId: 'selected',
+    family: 'citation',
+    slot: 'anchor',
+    evidenceRevision: 'old',
+    disposition: 'needs-decision' as const,
+    reason: 'source-changed',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const openMemory = vi.fn();
+  const fetch = vi.fn(async (path: string, init?: RequestInit) => {
+    if (path.startsWith('/api/memory')) return new Response(JSON.stringify({content: 'Saved advice.'}));
+    if (init?.method === 'POST') {
+      expect(JSON.parse(String(init.body))).toEqual({
+        action: 'refresh-case',
+        project: 'threadnote',
+        caseId: item.caseId,
+      });
+      return new Response(
+        JSON.stringify({
+          outcome: 'ready',
+          item: {...item, evidenceRevision: 'fresh'},
+          packet: {
+            version: 2,
+            project: 'threadnote',
+            caseId: item.caseId,
+            memoryUri: uri,
+            evidenceRevision: 'fresh',
+            expectedContentHash: 'same-memory',
+            reason: 'source-changed',
+            choices: [],
+            allowedOperations: [],
+            instructions: 'Compare.',
+            reference: {path: 'source.ts', citationId: 'citation-one', status: 'changed'},
+            evidence: {
+              coverage: 'available',
+              generation: 'fresh',
+              attemptedSteps: [],
+              excerpts: [
+                {
+                  content: 'recorded source',
+                  provenance: 'historical-verified',
+                  supportsCitation: true,
+                  excerptHash: 'recorded',
+                  startLine: 1,
+                  source: {path: 'source.ts'},
+                },
+                {
+                  content: 'changed current source',
+                  provenance: 'current-verified',
+                  supportsCitation: false,
+                  excerptHash: 'current',
+                  startLine: 1,
+                  source: {path: 'source.ts'},
+                },
+              ],
+            },
+          },
+        }),
+      );
+    }
+    if (path.includes('view=status')) return new Response(JSON.stringify({version: 2, cases: [item]}));
+    return new Response(JSON.stringify({error: 'Saved observation is stale.'}), {status: 409});
+  });
+  vi.stubGlobal('fetch', fetch);
+  await render(
+    <MaintenanceCaseDialog
+      project="threadnote"
+      caseId={item.caseId}
+      initialCase={item}
+      onClose={() => {}}
+      onTask={() => {}}
+      onOpenLibrary={openMemory}
+    />,
+  );
+  expect(document.querySelector('dialog')?.textContent).toContain('recorded source');
+  expect(document.querySelector('dialog')?.textContent).toContain('changed current source');
+  expect(document.querySelector('dialog')?.textContent).toContain(
+    'Source changed. Review the claim before updating its citation.',
+  );
+  const edit = [...document.querySelectorAll('button')].find(
+    button => button.textContent === 'Edit advice for source.ts',
+  );
+  await act(async () => edit!.click());
+  expect(openMemory).toHaveBeenCalledWith(uri);
+  expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+});
+
+it('adopts one refreshed case when live status already includes its old and new observations', () => {
+  const current = {
+    caseId: 'new',
+    project: 'threadnote',
+    memoryId: 'selected',
+    family: 'semantic-contradiction',
+    slot: 'pair',
+    evidenceRevision: 'fresh',
+    disposition: 'needs-decision' as const,
+    reason: 'opposing-canonical-claims',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const before = {...current, caseId: 'before'};
+  const after = {...current, caseId: 'after'};
+  const historical = {...current, caseId: 'old', disposition: 'historical' as const};
+  for (const selected of [
+    [historical, current],
+    [current, historical],
+  ]) {
+    const adopted = adoptMaintenanceEvidence([before, ...selected, after], current, historical.caseId);
+    expect(adopted.map(item => item.caseId)).toEqual(['before', 'new', 'after']);
+    expect(adoptMaintenanceEvidence(adopted, current, historical.caseId)).toEqual(adopted);
+  }
 });

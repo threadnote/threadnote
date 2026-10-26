@@ -19,7 +19,9 @@ import {handleManagerAutomaticMemory} from '../../src/manager/automatic_memory.j
 import {requestAutomaticMemoryReview} from '../../src/memory/context/maintenance_draft.js';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 
-const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* () {
+const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* (
+  outcome: 'propose-update' | 'propose-revalidation' | 'insufficient-evidence' | 'policy-conflict' = 'propose-update',
+) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const home = yield* fs.makeTempDirectoryScoped({prefix: 'review-loading-'});
@@ -78,17 +80,20 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* () 
       targetHash: packet.basis.targetHash,
       observationRevision: packet.basis.observationRevision,
       packetDigest: packet.basis.packetDigest,
-      outcome: 'propose-update',
-      operations: [
-        {
-          ordinal: 0,
-          beforeHash: packet.basis.paragraphs[0].hash,
-          text: 'The timeout is 60 seconds.',
-          supportHandles: [handle.handleId],
-          rationale: 'Synthetic current code.',
-        },
-      ],
-      reviewedHandles: [handle.handleId],
+      outcome,
+      operations:
+        outcome === 'propose-update'
+          ? [
+              {
+                ordinal: 0,
+                beforeHash: packet.basis.paragraphs[0].hash,
+                text: 'The timeout is 60 seconds.',
+                supportHandles: [handle.handleId],
+                rationale: 'Synthetic current code.',
+              },
+            ]
+          : [],
+      reviewedHandles: outcome === 'propose-revalidation' || outcome === 'propose-update' ? [handle.handleId] : [],
       rationale: 'Synthetic explicit review.',
       unresolvedQuestions: [],
       removedClaims: [],
@@ -97,8 +102,8 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* () 
           ordinal: 0,
           beforeHash: packet.basis.paragraphs[0].hash,
           role: 'descriptive',
-          support: 'direct',
-          evidenceIds: [handle.descriptor.id],
+          support: outcome === 'propose-update' || outcome === 'propose-revalidation' ? 'direct' : 'unresolved',
+          evidenceIds: outcome === 'propose-update' || outcome === 'propose-revalidation' ? [handle.descriptor.id] : [],
         },
       ],
     }),
@@ -117,6 +122,7 @@ const fixture = Effect.fn('managerAutomaticReviewLoading.fixture')(function* () 
     path,
     root,
     target,
+    uri,
     content,
     config,
     review: yield* candidates.loadCandidateReview(home, proposed.reviewId),
@@ -154,6 +160,62 @@ effectIt.effect(
       expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
     }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
 );
+
+for (const outcome of ['propose-update', 'propose-revalidation', 'insufficient-evidence', 'policy-conflict'] as const) {
+  effectIt.effect(`classifies ${outcome} through the real status, read and preparation adapters`, () =>
+    Effect.gen(function* () {
+      const f = yield* fixture(outcome);
+      const call = (method: string, url: string, body: Record<string, unknown> = {}) =>
+        handleManagerAutomaticMemory({
+          config: f.config,
+          method,
+          url: new URL(url, 'http://manager.test'),
+          body: Effect.succeed(body),
+        });
+      const actionable = outcome === 'propose-update' || outcome === 'propose-revalidation';
+      const listing = yield* call(
+        'GET',
+        `/api/attention/automatic-memory?project=fixture&uri=${encodeURIComponent(f.uri)}`,
+      );
+      expect(listing).toMatchObject({
+        status: 200,
+        body: {items: [{state: actionable ? 'ready' : 'policy', reviewId: f.review.reviewId}]},
+      });
+      const opened = yield* f.read();
+      if (!opened || !('kind' in opened.body) || opened.body.kind !== 'automatic-memory-review')
+        throw new Error('Expected an authorized synthetic review.');
+      expect(opened.body.revision).toBe(f.review.revision);
+      expect(opened.body.approval).toBeUndefined();
+      expect(opened.body.proposal.draft.outcome).toBe(outcome);
+      if (!actionable) expect(opened.body.proposal.body).toBe(opened.body.acceptedBody);
+      const selection = {
+        action: 'preview',
+        project: 'fixture',
+        reviewId: opened.body.reviewId,
+        revision: opened.body.revision,
+      };
+      const prepared = yield* call('POST', '/api/attention/automatic-review', selection);
+      if (actionable) {
+        expect(prepared).toMatchObject({
+          status: 200,
+          body: {revision: f.review.revision + 1, canApply: true, approval: {stage: 'preview'}},
+        });
+        const stale = yield* call('POST', '/api/attention/automatic-review', selection);
+        expect(stale?.status).toBe(409);
+      } else {
+        expect(prepared).toMatchObject({
+          status: 409,
+          body: {error: 'Topic maintenance acceptance: automatic review has no acceptable update.'},
+        });
+        const unchanged = yield* candidates.loadCandidateReview(f.config.agentContextHome, f.review.reviewId);
+        expect(unchanged.revision).toBe(f.review.revision);
+        expect(unchanged.maintenanceApproval).toBeUndefined();
+        expect(unchanged.candidates[0].state).toBe('pending');
+      }
+      expect(yield* f.fs.readFileString(f.target)).toBe(f.content);
+    }).pipe(TestClock.withLive, provideTestLayer(ApplicationLayer)),
+  );
+}
 
 const status: CodeGraphStatus = {
   databasePath: '/synthetic/graph.sqlite',

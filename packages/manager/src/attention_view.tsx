@@ -256,6 +256,7 @@ export function ReviewsPanel(props: AttentionPanelProps): React.ReactElement {
       ) : null}
       {activeSelection?.kind === 'automatic-memory' ? (
         <AutomaticMemoryReviewDialog
+          onOpenMemory={props.onOpenLibrary}
           key={`${activeSelection.project}:${activeSelection.reviewId}`}
           project={activeSelection.project}
           reviewId={activeSelection.reviewId}

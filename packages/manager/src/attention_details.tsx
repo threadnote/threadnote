@@ -1,3 +1,4 @@
+import type {ManagerMaintenanceRefreshResultV1, ManagerContextMaintenanceCaseV2} from './attention/contracts.js';
 import {SemanticResolutionReview} from './attention/semantic_comparison.js';
 import {ArrowRight, BookOpen, FileCode2, Sparkles} from 'lucide-react';
 import {MemoryExcerpt, ReviewBadge, ReviewNotice} from './review_presentation.js';
@@ -310,19 +311,22 @@ export function HealthDetail(props: {
   readonly onRefresh?: () => void;
   readonly onOpenLibrary: (uri?: string) => void;
   readonly stale?: boolean;
+  readonly onEvidenceUpdated?: (item: ManagerContextMaintenanceCaseV2) => void;
 }): React.ReactElement {
+  const [currentFinding, setCurrentFinding] = useState(props.finding);
   const [proposal, setProposal] = useState<RepairProposal>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [frozen, setFrozen] = useState(false);
-  const staleRef = useRef(props.stale);
-  staleRef.current = props.stale;
-  useEffect(() => {
-    if (props.stale) setFrozen(true);
-  }, [props.stale]);
-  const reviewFrozen = !!props.stale || frozen;
-  const finding = props.finding;
+  const [semanticEvidence, setSemanticEvidence] = useState(props.finding.semanticEvidence);
+  const [semanticChecking, setSemanticChecking] = useState(false);
+  const [semanticUnavailable, setSemanticUnavailable] = useState('');
+  const semanticRequest = useRef<AbortController | undefined>(undefined);
+  const reviewFrozen = frozen || semanticChecking;
+  const finding = currentFinding;
+  const supportsSelectedRefresh =
+    finding.category === 'semantic-contradiction' || finding.category.startsWith('citation-');
   const sourceUri =
     finding.repair.subjectUri ?? finding.uris.find(uri => uri !== finding.repair.targetUri && !uri.includes('#'));
   const targetUri = finding.repair.targetUri;
@@ -375,34 +379,95 @@ export function HealthDetail(props: {
     }
   }
   async function revalidate(): Promise<void> {
-    if (busy || props.stale) return;
+    if (busy) return;
+    if (supportsSelectedRefresh && finding.caseId) {
+      await refreshSemanticEvidence();
+      return;
+    }
+    semanticRequest.current?.abort();
+    const controller = new AbortController();
+    semanticRequest.current = controller;
     setBusy(true);
+    setFrozen(true);
     setError('');
     try {
       const current = await api<ManagerContextHealthResponseV1>(
         `/api/context-health?project=${encodeURIComponent(props.project)}`,
+        undefined,
+        {signal: controller.signal, timeoutMilliseconds: 30_000},
       );
+      if (controller.signal.aborted) return;
       const sameFinding = current.findings.find(item => item.id === finding.id);
-      if (!sameFinding || JSON.stringify(sameFinding) !== JSON.stringify(finding)) {
-        setError('This decision changed. Close and reopen it to review current evidence.');
+      if (!sameFinding) {
+        setNotice('This check is no longer present in current evidence. No repair was applied.');
         return;
       }
-      if (!staleRef.current) {
-        setProposal(undefined);
-        setFrozen(false);
-      }
+      setCurrentFinding(sameFinding);
+      setProposal(undefined);
+      setFrozen(false);
     } catch (cause) {
       setError(errorMessage(cause));
     } finally {
       setBusy(false);
     }
   }
+  async function refreshSemanticEvidence() {
+    if (!finding.caseId) return;
+    semanticRequest.current?.abort();
+    const controller = new AbortController();
+    semanticRequest.current = controller;
+    setSemanticChecking(true);
+    setFrozen(true);
+    setSemanticUnavailable('');
+    try {
+      const result = await api<ManagerMaintenanceRefreshResultV1>(
+        '/api/attention/context-maintenance',
+        {action: 'refresh-case', project: props.project, caseId: finding.caseId},
+        {signal: controller.signal, timeoutMilliseconds: 30_000},
+      );
+      if (controller.signal.aborted) return;
+      if (result.outcome === 'ready' || result.outcome === 'resolved') {
+        setFrozen(false);
+        if (result.packet.semanticEvidence) {
+          setSemanticEvidence(result.packet.semanticEvidence);
+          setCurrentFinding(value => ({
+            ...value,
+            caseId: result.item.caseId,
+            semanticEvidence: result.packet.semanticEvidence,
+          }));
+        }
+        if (result.packet.repairFinding) {
+          setCurrentFinding(result.packet.repairFinding);
+          setProposal(undefined);
+        }
+        props.onEvidenceUpdated?.(result.item);
+        if (result.outcome === 'resolved') {
+          setProposal(undefined);
+          setNotice('This check now passes. No memory content was changed.');
+        }
+      } else {
+        setSemanticEvidence(undefined);
+        if (result.item) props.onEvidenceUpdated?.(result.item);
+        setSemanticUnavailable('reason' in result ? result.reason : 'Current evidence is unavailable.');
+        setError('reason' in result ? result.reason : 'Current evidence is unavailable.');
+      }
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (Schema.is(ManagerApiError)(cause) && [403, 404].includes(cause.status)) setSemanticEvidence(undefined);
+      setSemanticUnavailable(errorMessage(cause));
+    } finally {
+      if (!controller.signal.aborted) setSemanticChecking(false);
+    }
+  }
+  useEffect(() => {
+    if (props.stale) void revalidate();
+  }, [props.stale, props.project, finding.caseId, supportsSelectedRefresh]);
+  useEffect(() => () => semanticRequest.current?.abort(), []);
   const frozenNotice = (
     <p role={reviewFrozen ? 'alert' : undefined} style={{visibility: reviewFrozen ? 'visible' : 'hidden'}}>
-      This review is paused because its evidence may have changed. If revalidation stays unavailable, close and reopen
-      the decision.{' '}
-      <button type="button" disabled={!reviewFrozen || busy || !!props.stale} onClick={() => void revalidate()}>
-        Revalidate review evidence
+      {semanticChecking ? 'Checking current evidence…' : 'Check the current evidence before confirming this repair.'}{' '}
+      <button type="button" disabled={busy || semanticChecking} onClick={() => void revalidate()}>
+        Check current evidence
       </button>
     </p>
   );
@@ -412,23 +477,35 @@ export function HealthDetail(props: {
         title="Compare conflicting memories"
         onClose={props.onClose}
         className="semantic-review-dialog"
-        footer={finding.semanticEvidence ? undefined : frozenNotice}
+        footer={
+          semanticUnavailable ? (
+            <p role="alert">
+              {semanticUnavailable}{' '}
+              <button type="button" disabled={semanticChecking} onClick={() => void refreshSemanticEvidence()}>
+                Check current evidence
+              </button>
+            </p>
+          ) : undefined
+        }
       >
-        {finding.semanticEvidence ? (
+        {semanticEvidence ? (
           <SemanticResolutionReview
             project={props.project}
-            evidence={finding.semanticEvidence}
+            evidence={semanticEvidence}
             onOpenLibrary={props.onOpenLibrary}
             onResolved={() => {
               props.onChanged();
               props.onClose();
             }}
-            onRefresh={() => {
-              (props.onRefresh ?? props.onChanged)();
-              props.onClose();
-            }}
-            writesDisabled={reviewFrozen}
-            reviewNotice={frozenNotice}
+            onRefresh={refreshSemanticEvidence}
+            writesDisabled={semanticChecking || !!semanticUnavailable}
+            reviewNotice={
+              semanticChecking ? (
+                <p role="status">Checking current statements…</p>
+              ) : semanticUnavailable ? (
+                <p role="alert">{semanticUnavailable}</p>
+              ) : undefined
+            }
           />
         ) : (
           <>

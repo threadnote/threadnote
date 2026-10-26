@@ -80,6 +80,9 @@ function json(body: unknown, status = 200) {
 }
 let host: HTMLDivElement;
 let requests: string[];
+let showReview: boolean;
+let manualSupport: boolean;
+let reviewActions: Record<string, unknown>[];
 let finishSlow: ((response: Response) => void) | undefined;
 
 beforeEach(() => {
@@ -91,8 +94,11 @@ beforeEach(() => {
     this.open = false;
   });
   requests = [];
+  showReview = false;
+  manualSupport = false;
+  reviewActions = [];
   finishSlow = undefined;
-  vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input), 'http://localhost');
     // Exercise the explicit REST compatibility path in this navigation fixture.
     if (url.pathname === '/api/live-session')
@@ -112,10 +118,122 @@ beforeEach(() => {
     if (url.pathname === '/api/shares') return json({shares: [{name: 'team'}]});
     if (url.pathname === '/api/home')
       return json({version: 1, project: '', lanes: [], handoffs: [], stats: {memories: 2}});
+    if (url.pathname === '/api/attention/automatic-memory')
+      return json({
+        version: 1,
+        project: 'demo',
+        omitted: 0,
+        items: showReview
+          ? [
+              {
+                uri: source.uri,
+                title: 'Source',
+                state: 'ready',
+                reviewId: 'review-links',
+                targetHash: 'a'.repeat(64),
+                coverage: {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 0},
+                paragraphs: [],
+                route: 'personal-review',
+                legacyUncited: false,
+              },
+            ]
+          : [],
+      });
+    if (url.pathname === '/api/attention/automatic-review') {
+      const action = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined;
+      if (action) reviewActions.push(action);
+      return json({
+        version: 1,
+        kind: 'automatic-memory-review',
+        project: 'demo',
+        reviewId: 'review-links',
+        revision: 2,
+        state: 'pending',
+        purpose: action?.action === 'manual-preview' ? 'manual-edit' : 'automatic',
+        targetUri: source.uri,
+        targetHash: action?.expectedContentHash ?? 'a'.repeat(64),
+        evidenceRevision: 'a'.repeat(64),
+        acceptedBody: markdown,
+        proposal: {body: markdown, draft: {paragraphDecisions: []}},
+        sourceEvidence: [],
+        coverage: {outcome: 'unknown', scope: 'none', searchedScopes: [], omittedSources: 0},
+        canApply: true,
+        canFinishVerification: false,
+        verified: false,
+        approval: {
+          stage: 'preview',
+          reviewRevision: 2,
+          approvalDigest: 'a'.repeat(64),
+          contentHash: 'a'.repeat(64),
+          content: 'Exact document',
+          metadataDiff: [],
+        },
+      });
+    }
+    if (url.pathname === '/api/context-health')
+      return json({
+        version: 1,
+        project: 'demo',
+        findings: [],
+        recordPreviews: [],
+        omittedFindings: 0,
+        recordsScanned: 1,
+        repositoryEvidence: {state: 'unavailable', reason: 'repository-unavailable'},
+        status: 'unknown',
+        semanticCompleteness: {
+          version: 2,
+          state: 'partial',
+          eligibleRecords: 1,
+          analyzedRecords: 0,
+          unknownReasons: [],
+        },
+        maintenance: {
+          version: 2,
+          actionableFindings: 0,
+          affectedMemories: 0,
+          automaticallyManagedFindings: 0,
+          historicalFindings: 0,
+        },
+      });
+    if (url.pathname === '/api/attention/context-maintenance')
+      return json({
+        version: 2,
+        state: 'waiting-evidence',
+        generation: 'links',
+        paused: false,
+        projects: [],
+        cases: [],
+        receipts: [],
+      });
+    if (url.pathname === '/api/reviews')
+      return json({
+        version: 1,
+        project: '',
+        items: showReview
+          ? [
+              {
+                kind: 'automatic-memory',
+                project: 'demo',
+                reviewId: 'review-links',
+                revision: 2,
+                topic: 'Source',
+                task: 'Review Source update',
+                createdAt: '2026-10-23T00:00:00Z',
+                candidates: [{candidateId: 'candidate-links', state: 'pending', reason: 'Updated source'}],
+              },
+            ]
+          : [],
+      });
     if (url.pathname === '/api/memory') {
       const uri = url.searchParams.get('uri')!;
       requests.push(uri);
-      if (uri === source.uri) return json(record(source, markdown));
+      if (uri === source.uri)
+        return json(
+          record(
+            source,
+            manualSupport ? 'MEMORY\nkind: durable\nreviewed_support: synthetic\n\n' + markdown : markdown,
+          ),
+        );
       if (uri === target.uri) return json(record(target, '# Target body'));
       if (uri === alias) return json(record(shared, '# Shared target body\n\n[self](<' + shared.uri + '>)'));
       if (uri === latest.uri) return json(record(latest, '# Latest body'));
@@ -226,4 +344,95 @@ it('does not let a late linked-memory response replace a newer selection', async
   expect(host.querySelector('.library-article h2')?.textContent).toBe('Latest');
   expect(host.textContent).not.toContain('Obsolete slow body');
   expect(requests).toEqual([source.uri, slow.uri, latest.uri]);
+});
+
+it.each(['accepted', 'proposed'] as const)(
+  'opens the %s automatic Library preview link through authorized memory reads',
+  async part => {
+    showReview = true;
+    await openSource();
+    await act(async () => button('Review update').click());
+    const selector = part === 'accepted' ? '.memory-excerpt' : '.review-proposal-preview';
+    const anchor = [...host.querySelectorAll<HTMLAnchorElement>(`.automatic-review-comparison ${selector} a`)].find(
+      node => node.textContent === 'shared',
+    )!;
+    expect(anchor.getAttribute('href')).toBe(alias);
+    await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+    expect(requests).toEqual([source.uri, alias]);
+    expect(host.querySelector('.library-article h2')?.textContent).toBe('Shared target');
+    expect(host.querySelector('.automatic-review-dialog')).toBeNull();
+    expect(reviewActions).toEqual([]);
+  },
+);
+
+it('follows automatic Reviews preview links and clears unavailable destinations', async () => {
+  showReview = true;
+  await openSource();
+  await act(async () => button('Reviews').click());
+  const openReview = host.querySelector<HTMLButtonElement>('[data-review-id="review-links"]')!;
+  await act(async () => openReview.click());
+  expect(host.querySelector('.automatic-review-dialog')).not.toBeNull();
+  const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
+    node => node.textContent === 'missing',
+  )!;
+  await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+  expect(requests).toEqual([source.uri, missing]);
+  expect(host.querySelector('.automatic-review-dialog')).toBeNull();
+  expect(host.querySelector('.library-article')).toBeNull();
+  expect(host.textContent).toContain('Record unavailable until it loads.');
+  expect(reviewActions).toEqual([]);
+});
+
+it('keeps the manual support review and authored draft when link navigation is cancelled', async () => {
+  manualSupport = true;
+  await openSource();
+  await act(async () => button('Edit').click());
+  const input = host.querySelector<HTMLTextAreaElement>('[aria-label="Test editor"]')!;
+  const draft = input.value + '\n\nAuthored support edit';
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(input, draft);
+    input.dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  await act(async () => button('Save').click());
+  expect(reviewActions.map(action => action.action)).toEqual(['manual-preview']);
+  expect(host.querySelector('.automatic-review-dialog')?.textContent).toContain('Review your memory edit');
+  const follow = async () => {
+    const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
+      node => node.textContent === 'current',
+    )!;
+    expect(anchor.getAttribute('href')).toBe(target.uri);
+    await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+  };
+  await follow();
+  await act(async () => button('Cancel').click());
+  expect(requests).toEqual([source.uri]);
+  expect(host.querySelector('.automatic-review-dialog')).not.toBeNull();
+  expect(host.querySelector<HTMLTextAreaElement>('[aria-label="Test editor"]')?.value).toBe(draft);
+  await follow();
+  await act(async () => button('Discard changes').click());
+  expect(requests).toEqual([source.uri, target.uri]);
+  expect(host.querySelector('.automatic-review-dialog')).toBeNull();
+  expect(host.querySelector('.library-article h2')?.textContent).toBe('Target');
+  expect(reviewActions.map(action => action.action)).toEqual(['manual-preview']);
+});
+
+it('opens automatic Context health preview links using the same authorized Library navigation', async () => {
+  showReview = true;
+  await openSource();
+  await act(async () => button('Context Health').click());
+  const project = host.querySelector<HTMLSelectElement>('[aria-label="Workspace project"]')!;
+  await act(async () => {
+    project.value = 'demo';
+    project.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  await act(async () => button('Review update').click());
+  const anchor = [...host.querySelectorAll<HTMLAnchorElement>('.automatic-review-comparison a')].find(
+    node => node.textContent === 'current',
+  )!;
+  expect(anchor.getAttribute('href')).toBe(target.uri);
+  await act(async () => anchor.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true})));
+  expect(requests).toEqual([source.uri, target.uri]);
+  expect(host.querySelector('.automatic-review-dialog')).toBeNull();
+  expect(host.querySelector('.library-article h2')?.textContent).toBe('Target');
+  expect(reviewActions).toEqual([]);
 });

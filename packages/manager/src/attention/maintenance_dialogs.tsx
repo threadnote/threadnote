@@ -1,3 +1,4 @@
+import {HealthDetail} from '../attention_details.js';
 import {SemanticResolutionReview} from './semantic_comparison.js';
 import {TopicReviewContent} from './topic_review.js';
 import type {ManagerTopicReviewAppliedV1} from './topic_contracts.js';
@@ -13,6 +14,7 @@ import type {
   ManagerContextMaintenanceCaseV2,
   ManagerContextMaintenancePacketV2,
   ManagerContextMaintenanceStatusV2,
+  ManagerMaintenanceRefreshResultV1,
 } from './contracts.js';
 import {
   healthDecisionTask,
@@ -76,6 +78,7 @@ export function MaintenanceCaseDialog(props: {
   readonly onChanged?: () => void;
   readonly onApplied?: (result: ManagerTopicReviewAppliedV1) => void;
   readonly stale?: boolean;
+  readonly onEvidenceUpdated?: (item: ManagerContextMaintenanceCaseV2, previousCaseId?: string) => void;
 }): React.ReactElement {
   const [caseId, setCaseId] = useState(props.caseId);
   const [item, setItem] = useState(props.initialCase);
@@ -83,40 +86,99 @@ export function MaintenanceCaseDialog(props: {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
+  const [repairOpen, setRepairOpen] = useState(false);
   const [selection, setSelection] = useState<{memoryUri: string; citationId: string}>();
-  const [frozen, setFrozen] = useState(false);
+  const [blocked, setBlocked] = useState(false);
+  const [outcome, setOutcome] = useState('');
   const [redactedScopes, setRedactedScopes] = useState<ReadonlySet<string>>(() => new Set());
   const scopeKey = JSON.stringify([props.project, caseId]);
-  const staleRef = useRef(props.stale);
-  const explicitRevalidation = useRef(false);
-  staleRef.current = props.stale;
+  const explicitRefresh = useRef(false);
+  const selectedRefresh = useRef<(() => Promise<ManagerContextMaintenancePacketV2 | undefined>) | undefined>(undefined);
+  const onEvidenceUpdated = useRef(props.onEvidenceUpdated);
+  onEvidenceUpdated.current = props.onEvidenceUpdated;
   useEffect(() => {
-    if (props.stale) setFrozen(true);
+    if (props.stale) {
+      explicitRefresh.current = true;
+      setRefresh(value => value + 1);
+    }
   }, [props.stale]);
-  const reviewFrozen = !!props.stale || frozen;
   useEffect(() => {
     const controller = new AbortController();
-    const revalidating = explicitRevalidation.current;
+    const refreshing = explicitRefresh.current;
+    explicitRefresh.current = false;
     setLoading(true);
     setError('');
-    if (!revalidating) setPacket(undefined);
+    setOutcome('');
     const current = () => !controller.signal.aborted;
     const options = {signal: controller.signal, timeoutMilliseconds: 30_000};
+    const selectedUri =
+      selection?.memoryUri ??
+      (props.initialCase?.family === 'topic-maintenance' || item?.family === 'topic-maintenance'
+        ? undefined
+        : props.memoryUri);
+    async function refreshSelected() {
+      const result = await api<ManagerMaintenanceRefreshResultV1>(
+        '/api/attention/context-maintenance',
+        {
+          action: 'refresh-case',
+          project: props.project,
+          caseId,
+          ...(selectedUri ? {memoryUri: selectedUri} : {}),
+          ...(selection ? {citationId: selection.citationId} : {}),
+        },
+        options,
+      );
+      if (!current()) return;
+      if (!['ready', 'resolved', 'unavailable', 'changing', 'superseded'].includes(result.outcome))
+        throw new Error('The selected evidence check returned an incomplete response. Check again.');
+      if (result.outcome !== 'ready' && result.outcome !== 'resolved') {
+        setBlocked(true);
+        setPacket(undefined);
+        setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
+        if (result.item) {
+          setItem(result.item);
+          onEvidenceUpdated.current?.(result.item, caseId);
+        }
+        setOutcome('reason' in result ? result.reason : 'Current evidence is unavailable.');
+        return;
+      }
+      if (result.packet.project !== props.project || result.packet.caseId !== result.item.caseId)
+        throw new Error('The refreshed decision does not match the selected memory.');
+      setItem(result.item);
+      if (result.item.caseId !== caseId) setCaseId(result.item.caseId);
+      setPacket(result.packet);
+      if (result.packet.topicEvidence?.version === 2 && result.packet.topicEvidence.outcome === 'unavailable') {
+        setBlocked(true);
+        setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
+        setOutcome(
+          result.packet.topicEvidence.reason ??
+            'Private source access is unavailable. Restore access before reviewing this update.',
+        );
+        onEvidenceUpdated.current?.(result.item, caseId);
+        return result.packet;
+      }
+      setBlocked(false);
+      setRedactedScopes(scopes => {
+        const next = new Set(scopes);
+        next.delete(scopeKey);
+        return next;
+      });
+      onEvidenceUpdated.current?.(result.item, caseId);
+      if (result.outcome === 'resolved') setOutcome('This check now passes. No memory content was changed.');
+      return result.packet;
+    }
+    selectedRefresh.current = refreshSelected;
     async function load() {
       try {
+        if (refreshing) {
+          await refreshSelected();
+          return;
+        }
         const path = `/api/attention/context-maintenance?project=${encodeURIComponent(props.project)}&caseId=${encodeURIComponent(caseId)}`;
         const details = await api<ManagerContextMaintenanceStatusV2>(`${path}&view=status`, undefined, options);
         if (!current()) return;
         const currentCase = details.cases?.find(value => value.caseId === caseId);
-        if (revalidating && !currentCase) {
-          setPacket(undefined);
-          setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
-          setFrozen(true);
-          setError('This case is no longer available. Close and reopen it to review current evidence.');
-          return;
-        }
-        setItem(currentCase);
-        const selectedUri = selection?.memoryUri ?? props.memoryUri;
+        if (currentCase) setItem(currentCase);
         const result = await api<ManagerContextMaintenancePacketV2>(
           `${path}${selectedUri ? `&memoryUri=${encodeURIComponent(selectedUri)}` : ''}${selection ? `&citationId=${encodeURIComponent(selection.citationId)}` : ''}`,
           undefined,
@@ -124,72 +186,61 @@ export function MaintenanceCaseDialog(props: {
         );
         if (!current()) return;
         if (result.version !== 2 || result.project !== props.project || result.caseId !== caseId)
-          throw new Error('The selected maintenance case changed. Refresh its evidence.');
-        if (revalidating && result.topicEvidence?.version === 2 && result.topicEvidence.outcome === 'unavailable') {
-          setPacket(undefined);
+          throw new Error('The selected maintenance case changed. Check its evidence again.');
+        setPacket(result);
+        if (result.topicEvidence?.version === 2 && result.topicEvidence.outcome === 'unavailable') {
+          setBlocked(true);
           setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
-          setFrozen(true);
-          setError('Private source access is unavailable. Close this review and refresh source access.');
+          setOutcome(result.topicEvidence.reason ?? 'Private source access is unavailable.');
           return;
         }
-        if (revalidating && packet) {
-          const sameEvidence =
-            currentCase?.evidenceRevision === result.evidenceRevision &&
-            result.evidenceRevision === packet.evidenceRevision &&
-            result.expectedContentHash === packet.expectedContentHash &&
-            result.reviewId === packet.reviewId &&
-            result.topicEvidence?.outcome === packet.topicEvidence?.outcome &&
-            result.topicEvidence?.observationRevision === packet.topicEvidence?.observationRevision &&
-            result.topicEvidence?.targetHash === packet.topicEvidence?.targetHash;
-          if (!sameEvidence) {
-            setFrozen(true);
-            setError('This case changed. Close and reopen it to review current evidence.');
+        setBlocked(false);
+        if (currentCase) onEvidenceUpdated.current?.(currentCase);
+      } catch (failure) {
+        let cause = failure;
+        if (!current()) return;
+        if (!refreshing && Schema.is(ManagerApiError)(cause) && cause.status === 409) {
+          try {
+            await refreshSelected();
             return;
+          } catch (refreshError) {
+            cause = refreshError;
           }
-        } else {
-          setPacket(result);
         }
-        setRedactedScopes(scopes => {
-          if (!scopes.has(scopeKey)) return scopes;
-          const next = new Set(scopes);
-          next.delete(scopeKey);
-          return next;
-        });
-        if (revalidating && !staleRef.current) setFrozen(false);
-      } catch (cause) {
-        if (current()) {
-          if (revalidating && Schema.is(ManagerApiError)(cause) && [403, 404, 409].includes(cause.status)) {
-            setPacket(undefined);
-            setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
-            setFrozen(true);
-          }
-          setError(errorMessage(cause));
+        if (!current()) return;
+        if (
+          packet?.topicEvidence?.version === 2 ||
+          (Schema.is(ManagerApiError)(cause) && [403, 404].includes(cause.status))
+        ) {
+          setPacket(undefined);
+          setRedactedScopes(scopes => new Set(scopes).add(scopeKey));
         }
+        setBlocked(true);
+        setError(errorMessage(cause));
       } finally {
-        if (current()) {
-          explicitRevalidation.current = false;
-          setLoading(false);
-        }
+        if (current()) setLoading(false);
       }
     }
     void load();
     return () => controller.abort();
   }, [props.project, props.memoryUri, caseId, refresh, selection]);
+  const reviewFrozen = loading || blocked;
+  function refreshEvidence() {
+    explicitRefresh.current = true;
+    setRefresh(value => value + 1);
+  }
   const revalidate = (
-    <p role={reviewFrozen ? 'alert' : undefined} style={{visibility: reviewFrozen ? 'visible' : 'hidden'}}>
-      This review is paused because its evidence may have changed. If revalidation stays unavailable, close and reopen
-      the case. {error ? `${error} ` : ''}
-      <button
-        type="button"
-        disabled={!reviewFrozen || loading || !!props.stale}
-        onClick={() => {
-          explicitRevalidation.current = true;
-          setRefresh(value => value + 1);
-        }}
-      >
-        Revalidate review evidence
-      </button>
-    </p>
+    <>
+      {outcome ? <p role="status">{outcome}</p> : null}
+      {blocked ? (
+        <p role="alert">
+          {error || outcome}{' '}
+          <button type="button" disabled={loading} onClick={refreshEvidence}>
+            Check current evidence
+          </button>
+        </p>
+      ) : null}
+    </>
   );
   const uri = selection?.memoryUri ?? props.memoryUri ?? packet?.memoryUri ?? maintenanceCaseMemoryUri(item);
   const reason = packet?.reason ?? item?.reason;
@@ -215,6 +266,23 @@ export function MaintenanceCaseDialog(props: {
       <Copy size={14} aria-hidden="true" /> Review with agent…
     </button>
   );
+  if (repairOpen && packet?.repairFinding)
+    return (
+      <HealthDetail
+        finding={packet.repairFinding}
+        project={props.project}
+        repairsAvailable
+        onClose={() => setRepairOpen(false)}
+        onChanged={() => {
+          setRepairOpen(false);
+          refreshEvidence();
+          props.onChanged?.();
+        }}
+        onOpenLibrary={uri => {
+          if (uri) props.onOpenLibrary(uri);
+        }}
+      />
+    );
   if (topicReview)
     return (
       <DetailModal
@@ -229,6 +297,7 @@ export function MaintenanceCaseDialog(props: {
             project={props.project}
             caseId={caseId}
             initialPacket={packet}
+            onRefreshEvidence={() => selectedRefresh.current?.() ?? Promise.resolve(undefined)}
             onChanged={() => props.onChanged?.()}
             onApplied={props.onApplied}
             onClose={props.onClose}
@@ -256,7 +325,7 @@ export function MaintenanceCaseDialog(props: {
             onChange={event => {
               setSelection(undefined);
               setPacket(undefined);
-              setFrozen(false);
+              setBlocked(false);
               setCaseId(event.target.value);
               setItem(props.relatedCases?.find(value => value.caseId === event.target.value));
             }}
@@ -294,7 +363,7 @@ export function MaintenanceCaseDialog(props: {
       <section aria-label="Case evidence" aria-busy={loading}>
         <header className="health-dialog-section-heading">
           <h3>{semanticReview ? 'Compare the original statements' : 'Source evidence'}</h3>
-          <button disabled={loading} type="button" onClick={() => setRefresh(value => value + 1)}>
+          <button disabled={loading} type="button" onClick={refreshEvidence}>
             <RefreshCw size={14} aria-hidden="true" /> Refresh evidence
           </button>
         </header>
@@ -303,8 +372,7 @@ export function MaintenanceCaseDialog(props: {
           <div role="alert">
             <p>{error}</p>
             <p>
-              You can still open the memory or copy a review task. If the case is stale, run maintenance to refresh it,
-              then reopen this review.
+              You can still open the memory or copy a review task. If the case is stale, check current evidence again.
             </p>
           </div>
         ) : null}
@@ -337,7 +405,7 @@ export function MaintenanceCaseDialog(props: {
                   props.onChanged?.();
                   props.onClose();
                 }}
-                onRefresh={() => setRefresh(value => value + 1)}
+                onRefresh={refreshEvidence}
                 secondaryAction={reviewWithAgent}
                 ownerInstructions={packet.ownerProposal?.publication.instructions}
                 writesDisabled={reviewFrozen}
@@ -369,6 +437,28 @@ export function MaintenanceCaseDialog(props: {
             ) : null}
             {!semanticReview ? (
               <>
+                {packet.reference ? (
+                  <section aria-label="Selected source reference">
+                    <h3>{packet.reference.path}</h3>
+                    <p>
+                      {packet.reference.status === 'exact' || packet.reference.status === 'relocated'
+                        ? 'The current source supports this reference.'
+                        : packet.reference.status === 'changed'
+                          ? 'This source changed. Compare the recorded and current code above before updating the advice.'
+                          : 'Current support for this reference could not be verified. The recorded source remains preserved.'}
+                    </p>
+                    {packet.repairFinding ? (
+                      <button type="button" onClick={() => setRepairOpen(true)}>
+                        Review repair for this reference
+                      </button>
+                    ) : null}
+                    {uri ? (
+                      <button type="button" onClick={() => props.onOpenLibrary(uri)}>
+                        Edit advice for {packet.reference.path}
+                      </button>
+                    ) : null}
+                  </section>
+                ) : null}
                 <h3>What you can do</h3>
                 <ul>
                   {packet.choices.map(choice => (

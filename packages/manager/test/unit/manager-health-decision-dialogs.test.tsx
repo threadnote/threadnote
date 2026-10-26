@@ -103,7 +103,10 @@ function serveCase(readPacket: () => Promise<Response>) {
     if (input.startsWith('/api/memory?'))
       return response({content: 'MEMORY\nkind: durable\n\n# Stored claim\nKeep ownership explicit.'});
     if (input.includes('view=status')) return response({version: 2, cases: [item]});
-    return await readPacket();
+    const result = await readPacket();
+    return _init?.method === 'POST' && result.ok
+      ? response({outcome: 'ready', item, packet: await result.json()})
+      : result;
   });
   vi.stubGlobal('fetch', fetch);
   return fetch;
@@ -151,7 +154,7 @@ it('keeps case errors inside the open review and recovers after refreshing evide
   await render(<MaintenanceCaseDialog {...base} />);
   expect(document.querySelector('dialog')?.open).toBe(true);
   expect(document.querySelector('dialog [role="alert"]')?.textContent).toContain('case is stale');
-  expect(document.querySelector('dialog')?.textContent).toContain('run maintenance');
+  expect(document.querySelector('dialog')?.textContent).toContain('check current evidence');
   failed = false;
   await click('Refresh evidence');
   expect(document.querySelector('dialog [role="alert"]')).toBeNull();
@@ -256,6 +259,11 @@ it('uses the existing conflict-action footer for a health finding during stale r
     records: [memory('a', 'Timeout is 60 seconds.'), memory('b', 'Timeout must be 30 seconds.')],
     now: new Date('2026-06-01'),
   }).findings[0];
+  const pending = Promise.withResolvers<Response>();
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => pending.promise),
+  );
   await render(
     <HealthDetail
       project="threadnote"
@@ -269,7 +277,10 @@ it('uses the existing conflict-action footer for a health finding during stale r
   );
   expect(document.querySelectorAll('dialog footer')).toHaveLength(1);
   expect(document.querySelector('dialog footer')?.getAttribute('aria-label')).toBe('Conflict resolution actions');
-  expect(document.querySelector('dialog footer')?.textContent).toContain('Revalidate review evidence');
+  expect(document.querySelector('dialog footer')?.textContent).toContain('Checking current statements');
+  await act(async () =>
+    pending.resolve(response({outcome: 'unavailable', reason: 'Current evidence is unavailable.'})),
+  );
 });
 
 it('reviews the chosen memory in a case spanning several subjects and preserves that choice in its task', async () => {

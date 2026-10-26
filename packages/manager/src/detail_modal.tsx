@@ -43,8 +43,14 @@ export function DetailModal(props: {
   );
 }
 
-export function MemoryBody({content}: {readonly content: string}): React.ReactElement {
-  return <MarkdownViewer markdown={content} />;
+export function MemoryBody({
+  content,
+  onOpenMemory,
+}: {
+  readonly content: string;
+  readonly onOpenMemory?: (uri: string) => void;
+}): React.ReactElement {
+  return <MarkdownViewer markdown={content} onOpenMemory={onOpenMemory} />;
 }
 
 export function MemoryDetailModal(props: {
@@ -75,7 +81,7 @@ export function MemoryDetailModal(props: {
       ) : content === undefined ? (
         <p role="status">Loading memory…</p>
       ) : (
-        <MemoryBody content={content} />
+        <MemoryBody content={content} onOpenMemory={props.onOpenLibrary} />
       )}
       <footer>
         <button onClick={() => props.onOpenLibrary(props.uri)} type="button">

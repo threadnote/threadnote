@@ -1470,7 +1470,18 @@ export const requestAutomaticMemoryDraft = Effect.fn('automaticMaintenance.reque
     prior &&
     ['rejected', 'deferred'].includes(prior.candidates[0]?.state ?? '') &&
     prior.maintenance?.basis.observationRevision !== packet.basis.observationRevision;
-  if (prior && prior.candidates[0]?.state !== 'applied' && !changedDecision)
+  // An unanswered assessment is not an approval or user decision. New material evidence may
+  // replace only that exact unapproved assessment; publication still echoes its revision under lock.
+  const changedAssessment =
+    prior?.candidates[0]?.state === 'pending' &&
+    !prior.maintenanceApproval &&
+    prior.maintenance?.version === 3 &&
+    prior.maintenance.proposal.draft.purpose === 'automatic' &&
+    ['insufficient-evidence', 'policy-conflict'].includes(prior.maintenance.proposal.draft.outcome) &&
+    prior.maintenance.basis.targetUri === packet.basis.targetUri &&
+    prior.maintenance.basis.targetHash === packet.basis.targetHash &&
+    prior.maintenance.basis.observationRevision !== packet.basis.observationRevision;
+  if (prior && prior.candidates[0]?.state !== 'applied' && !changedDecision && !changedAssessment)
     return yield* blocked(
       prior,
       prior.candidates[0]?.state === 'applying'

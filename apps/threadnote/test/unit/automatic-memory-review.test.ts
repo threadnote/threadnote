@@ -972,6 +972,139 @@ describe('ordinary memory exact public review', () => {
       ).pipe(provideTestLayer(ApplicationLayer)),
   );
 
+  for (const outcome of ['insufficient-evidence', 'policy-conflict'] as const) {
+    for (const raceDecision of [false, true]) {
+      effectIt.effect(
+        `redrafts ${outcome} only for new evidence and preserves ${raceDecision ? 'a concurrent decision' : 'the resulting actionable review'}`,
+        () =>
+          Effect.gen(function* () {
+            const f = yield* fixture();
+            const input = {
+              uri: f.uri,
+              expectedContentHash: sha256HexSync(f.content),
+              backend: 'local-ai' as const,
+              modelId: 'gemma-4-e4b-it-q4',
+            };
+            const packet = yield* requestAutomaticMemoryReview(f.config, input);
+            if ('reviewId' in packet) throw new Error('Expected a source packet.');
+            const noUpdate = JSON.parse(draft(packet, packet.basis.body));
+            noUpdate.outcome = outcome;
+            noUpdate.reviewedHandles = [];
+            noUpdate.paragraphDecisions = [
+              {
+                ordinal: 0,
+                beforeHash: packet.basis.paragraphs[0].hash,
+                role: 'unknown',
+                support: 'unresolved',
+                evidenceIds: [],
+              },
+            ];
+            const initial = yield* requestAutomaticMemoryReview(f.config, {
+              ...input,
+              draftJson: JSON.stringify(noUpdate),
+            });
+            if (!('reviewId' in initial)) throw new Error('Expected a saved assessment.');
+            const catalog = yield* LocalModelCatalog;
+            const manifest = yield* catalog.get(input.modelId);
+            const store = yield* LocalModelStore;
+            const installed = LocalModelStore.of({
+              ...store,
+              status: (_home, selected) =>
+                Effect.succeed({
+                  bytes: selected.size,
+                  installed: true,
+                  modelId: selected.id,
+                  partialBytes: 0,
+                  path: '/synthetic/model.gguf',
+                  verified: true,
+                }),
+            });
+            // The concurrent user decision belongs to the test fixture, not the provider's service contract.
+            const reviewContext = yield* Effect.context<Effect.Services<ReturnType<typeof f.review>>>();
+            let calls = 0;
+            const generator: typeof runSelectedDraft = (_config, _backend, _model, prompt, _purpose, basis) =>
+              Effect.gen(function* () {
+                calls++;
+                if (!basis || basis.version !== 3) throw new Error('Expected automatic basis.');
+                if (raceDecision) {
+                  const decision = yield* f
+                    .review({
+                      action: 'reject',
+                      reviewId: initial.reviewId,
+                      revision: initial.revision,
+                    })
+                    .pipe(Effect.provideContext(reviewContext));
+                  expect(decision.isError).not.toBe(true);
+                }
+                const current = JSON.parse(prompt.split('\n').at(-1)!);
+                return {
+                  text: JSON.stringify(
+                    compactAutomaticTopicDraftFixture(
+                      basis,
+                      JSON.parse(
+                        draft(
+                          {...current, basis, reviewEvidence: current.currentSources},
+                          current.currentSources[0].content,
+                        ),
+                      ),
+                    ),
+                  ),
+                  backendIdentity: 'local-ai',
+                  modelIdentity: input.modelId,
+                  modelVersion: `${manifest.revision}:${manifest.sha256}`,
+                  usage: {status: 'unavailable' as const},
+                  settings: localDraftGenerationSettings(input.modelId, 'topic-maintenance'),
+                };
+              });
+            const run = () =>
+              requestAutomaticMemoryDraft(f.config, input, generator).pipe(
+                Effect.provideService(LocalModelStore, installed),
+                Effect.result,
+              );
+            expect(Result.isFailure(yield* run())).toBe(true);
+            expect(calls).toBe(0);
+            const changedTarget = f.content.replace('30 seconds', '31 seconds');
+            yield* f.fs.writeFileString(f.targetPath, changedTarget);
+            expect(
+              Result.isFailure(
+                yield* requestAutomaticMemoryDraft(
+                  f.config,
+                  {...input, expectedContentHash: sha256HexSync(changedTarget)},
+                  generator,
+                ).pipe(Effect.provideService(LocalModelStore, installed), Effect.result),
+              ),
+            ).toBe(true);
+            expect(calls).toBe(0);
+            expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(initial.revision);
+            yield* f.fs.writeFileString(f.targetPath, f.content);
+            const source = yield* f.fs.readFileString(f.sourcePath);
+            yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '90 seconds'));
+            const result = yield* run();
+            expect(calls).toBe(1);
+            const saved = yield* loadCandidateReview(f.home, initial.reviewId);
+            expect(saved.auditEvents.slice(0, initial.auditEvents.length)).toEqual(initial.auditEvents);
+            if (raceDecision) {
+              expect(Result.isFailure(result)).toBe(true);
+              expect(saved.candidates[0].state).toBe('rejected');
+              expect(saved.maintenance?.proposal.draft.outcome).toBe(outcome);
+            } else {
+              expect(Result.isSuccess(result)).toBe(true);
+              expect(saved.revision).toBe(initial.revision + 1);
+              expect(saved.maintenance?.proposal.draft.outcome).toBe('propose-update');
+              expect(saved.candidates[0].proposedText).toBe('The timeout is 90 seconds.');
+              expect(saved.maintenanceApproval).toBeUndefined();
+              // Another source change cannot replace an actionable human review.
+              yield* f.fs.writeFileString(f.sourcePath, source.replace('60 seconds', '120 seconds'));
+              expect(Result.isFailure(yield* run())).toBe(true);
+              expect(calls).toBe(1);
+              expect((yield* loadCandidateReview(f.home, initial.reviewId)).revision).toBe(saved.revision);
+            }
+            expect(yield* f.fs.readFileString(f.targetPath)).toBe(f.content);
+          }).pipe(provideTestLayer(ApplicationLayer)),
+      );
+    }
+  }
+
   effectIt.effect(
     'manual preview keeps a complete body larger than the model limit and supports another manual edit',
     () =>

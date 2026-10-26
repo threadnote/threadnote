@@ -1,3 +1,4 @@
+import {refreshContextMaintenanceCase} from '../memory/context/maintenance_refresh.js';
 import {isManagerProjectName} from './project/name.js';
 import {Cause, Clock, Crypto, DateTime, Effect, Exit, Fiber, Result, Schema, Scope} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
@@ -125,6 +126,35 @@ export const handleManagerAttentionAction = Effect.fn('managerAttention.action')
     }
     if (request.method !== 'POST') return undefined;
     const body = yield* request.body;
+    if (body.action === 'refresh-case') {
+      if (
+        typeof body.project !== 'string' ||
+        !isManagerProjectName(body.project) ||
+        typeof body.caseId !== 'string' ||
+        body.caseId.length > 256
+      )
+        return invalid('Select one decision in a valid project.');
+      if (
+        (body.memoryUri !== undefined && typeof body.memoryUri !== 'string') ||
+        (body.citationId !== undefined && typeof body.citationId !== 'string')
+      )
+        return invalid('Select an exact reference from this decision.');
+      const root = yield* managerAttentionProjectRoot(request.config, body.project);
+      const result = yield* refreshContextMaintenanceCase(
+        request.config,
+        {
+          project: body.project,
+          caseId: body.caseId,
+          cwd: root.state === 'available' ? root.cwd : (yield* SystemInfo).currentDirectory(),
+        },
+        {memoryUri: body.memoryUri, citationId: body.citationId},
+      );
+      if ('packet' in result && result.packet && 'topicEvidence' in result.packet) {
+        const reviewId = yield* managerTopicPacketReviewId(request.config, result.packet);
+        return {status: 200, body: {...result, packet: {...result.packet, ...(reviewId ? {reviewId} : {})}}};
+      }
+      return {status: 200, body: result};
+    }
     if (body.action === 'pause' || body.action === 'resume')
       return {status: 200, body: yield* setContextMaintenancePaused(request.config, body.action === 'pause')};
     if (body.action === 'undo' && typeof body.receiptId === 'string') {

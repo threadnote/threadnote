@@ -238,6 +238,25 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     if (previous.project === props.project && previous.refresh !== refresh && !legacyStatus) live.invalidate();
   }, [props.project, refresh, legacyStatus]);
 
+  function adoptEvidence(item: ManagerContextMaintenanceCaseV2, previousCaseId = item.caseId) {
+    if (item.project !== activeProject.current) return;
+    setSnapshot(previous =>
+      previous?.project === item.project
+        ? {
+            ...previous,
+            status: {
+              ...previous.status,
+              cases: adoptMaintenanceEvidence(previous.status.cases, item, previousCaseId),
+            },
+          }
+        : previous,
+    );
+    setInspectedCase(previous =>
+      previous?.caseId === previousCaseId
+        ? {...previous, caseId: item.caseId, evidenceRevision: item.evidenceRevision}
+        : previous,
+    );
+  }
   function refreshEvidence() {
     setNotice('');
     mutationEpoch.current += 1;
@@ -405,6 +424,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   return (
     <section aria-busy={busy} className="panel attention-panel context-health is-active">
       <AutomaticMemoryPanel
+        onOpenMemory={props.onOpenLibrary}
         key={props.project}
         project={props.project}
         onChanged={props.onChanged}
@@ -1068,7 +1088,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       ) : null}
       {inspectedCase ? (
         <MaintenanceCaseDialog
-          key={`${props.project}:${inspectedCase.caseId}:${inspectedCase.memoryUri ?? ''}`}
+          key={props.project}
           project={props.project}
           caseId={inspectedCase.caseId}
           memoryUri={inspectedCase.memoryUri}
@@ -1088,6 +1108,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
               cases.find(item => item.caseId === inspectedCase.caseId)?.evidenceRevision !==
                 inspectedCase.evidenceRevision)
           }
+          onEvidenceUpdated={adoptEvidence}
           onClose={() => setInspectedCase(undefined)}
           onChanged={refreshAfterDecision}
           onApplied={result => {
@@ -1129,6 +1150,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
             statusUnconfirmed ||
             JSON.stringify(report.findings.find(item => item.id === selected.id)) !== JSON.stringify(selected)
           }
+          onEvidenceUpdated={adoptEvidence}
           onClose={() => setSelected(undefined)}
           onChanged={refreshAfterDecision}
           onRefresh={refreshEvidence}
@@ -1149,5 +1171,18 @@ function Metric(props: {
       <span>{props.label}</span>
       <strong>{props.value}</strong>
     </div>
+  );
+}
+
+/** Replace either observation at its first position and retain one current case. */
+export function adoptMaintenanceEvidence(
+  cases: readonly ManagerContextMaintenanceCaseV2[],
+  item: ManagerContextMaintenanceCaseV2,
+  previousCaseId = item.caseId,
+): readonly ManagerContextMaintenanceCaseV2[] {
+  const first = cases.findIndex(value => value.caseId === previousCaseId || value.caseId === item.caseId);
+  if (first < 0) return [...cases, item];
+  return cases.flatMap((value, index) =>
+    value.caseId === previousCaseId || value.caseId === item.caseId ? (index === first ? [item] : []) : [value],
   );
 }

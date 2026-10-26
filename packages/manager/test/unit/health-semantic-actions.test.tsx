@@ -1,4 +1,7 @@
 // @vitest-environment happy-dom
+import fc from 'fast-check';
+import {retainSemanticChoice, semanticEvidenceIdentity} from '../../src/attention/semantic_recovery.js';
+import {MaintenanceCaseDialog} from '../../src/attention/maintenance_dialogs.js';
 import React, {act} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {afterEach, beforeEach, expect, it, vi} from 'vitest';
@@ -190,14 +193,14 @@ it('clears a stale preview and offers refresh without reporting a successful cha
   await act(async () => host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
   await click('Confirm and move memory B to history');
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(
-    'This comparison is out of date. Refresh to review the latest memories, then choose again.',
+    'Checking the current statements. Your choice is retained; review the refreshed outcome before confirming.',
   );
   expect(host.textContent).not.toContain('ResourceConflict');
   expect(host.textContent).not.toContain('threadnote://user/test/');
   expect(host.textContent).not.toContain('fresh evidence');
   expect(host.querySelectorAll('[role="alert"]')).toHaveLength(1);
   expect(host.textContent).not.toContain('Confirm and move');
-  await click('Refresh comparison');
+  expect(host.querySelector<HTMLInputElement>('input[value="left"]')?.checked).toBe(true);
   expect(refresh).toHaveBeenCalledOnce();
   expect(resolved).not.toHaveBeenCalled();
 });
@@ -284,31 +287,296 @@ it('keeps a non-conflict operational error retryable without claiming that the m
   expect(resolved).not.toHaveBeenCalled();
 });
 
-it('refreshes a stale finding without reporting a saved change', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => response({error: 'Comparison changed'}, 409)),
+it('revalidates a stale finding in place and retains the human choice', async () => {
+  const item = {
+    caseId: finding.caseId!,
+    project: 'threadnote',
+    memoryId: 'a',
+    family: 'semantic-contradiction',
+    slot: 'pair',
+    evidenceRevision: 'new-corpus',
+    disposition: 'needs-decision',
+    reason: 'opposing-canonical-claims',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
+    path.endsWith('/semantic/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
+      : path.endsWith('/semantic/apply')
+        ? response({result: {status: 'applied', choice: 'both'}})
+        : response({
+            outcome: 'ready',
+            item,
+            packet: {
+              version: 2,
+              project: 'threadnote',
+              caseId: finding.caseId,
+              evidenceRevision: 'new-corpus',
+              semanticEvidence: evidence,
+            },
+          }),
   );
+  vi.stubGlobal('fetch', fetch);
   vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
   vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(() => {});
   const close = vi.fn();
+  const detail = (stale: boolean) => (
+    <HealthDetail
+      finding={finding}
+      project="threadnote"
+      repairsAvailable
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onChanged={resolved}
+      onRefresh={refresh}
+      onClose={close}
+    />
+  );
+  await act(async () => root.render(detail(false)));
+  await choose('both');
+  await click('Preview my choice');
+  await act(async () => root.render(detail(true)));
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
+  expect(host.textContent).not.toContain('paused because');
+  expect(host.textContent).toContain('Keep memory A current');
+  await click('Confirm both apply');
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/apply'))).toHaveLength(1);
+  expect(resolved).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledOnce();
+});
+
+it('keeps a retained semantic preview through unrelated invalidation and adopts the new scan revision', async () => {
+  const item = {
+    caseId: 'case-one',
+    project: 'threadnote',
+    memoryId: 'a',
+    family: 'semantic-contradiction',
+    slot: 'pair',
+    evidenceRevision: 'scan-one',
+    disposition: 'needs-decision' as const,
+    reason: 'opposing-canonical-claims',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const packet = {
+    version: 2,
+    project: 'threadnote',
+    caseId: item.caseId,
+    evidenceRevision: 'scan-one',
+    expectedContentHash: 'hash',
+    reason: item.reason,
+    choices: [],
+    allowedOperations: [],
+    instructions: 'Compare.',
+    semanticEvidence: evidence,
+  };
+  const adopted = vi.fn();
+  const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
+    path.endsWith('/semantic/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both'}})
+      : path.endsWith('/semantic/apply')
+        ? response({result: {status: 'applied', choice: 'both'}})
+        : _init?.method === 'POST'
+          ? response({
+              outcome: 'ready',
+              item: {...item, evidenceRevision: 'scan-two'},
+              packet: {...packet, evidenceRevision: 'scan-two'},
+            })
+          : path.includes('view=status')
+            ? response({version: 2, cases: [item]})
+            : response(packet),
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const element = (stale: boolean) => (
+    <MaintenanceCaseDialog
+      project="threadnote"
+      caseId={item.caseId}
+      initialCase={item}
+      stale={stale}
+      onEvidenceUpdated={adopted}
+      onOpenLibrary={() => {}}
+      onTask={() => {}}
+      onClose={() => {}}
+      onChanged={resolved}
+    />
+  );
+  await act(async () => root.render(element(false)));
+  await choose('both');
+  await click('Preview my choice');
+  await act(async () => root.render(element(true)));
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
+  expect(adopted).toHaveBeenLastCalledWith(expect.objectContaining({evidenceRevision: 'scan-two'}), 'case-one');
+  await click('Confirm both apply');
+  expect(resolved).toHaveBeenCalledOnce();
+  expect(fetch.mock.calls.filter(([path]) => path.endsWith('/semantic/apply'))).toHaveLength(1);
+});
+
+it('retains a URI choice after source changes and requires a fresh preview before confirmation', async () => {
+  let revision = 'first';
+  const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
+    path.endsWith('/preview')
+      ? response({preview: {...preview, choice: 'both', mode: 'keep-both', revision}})
+      : response({result: {status: 'applied', choice: 'both'}}),
+  );
+  vi.stubGlobal('fetch', fetch);
+  await render();
+  await choose('both');
+  await click('Preview my choice');
+  const changed = {
+    ...evidence,
+    left: {...evidence.left, text: 'Timeout is 90 seconds.', recordContentFingerprint: 'new-source'},
+  };
+  revision = 'second';
   await act(async () =>
     root.render(
-      <HealthDetail
-        finding={finding}
+      <SemanticResolutionReview
         project="threadnote"
-        repairsAvailable
+        evidence={changed}
         onOpenLibrary={() => {}}
-        onChanged={resolved}
+        onResolved={resolved}
         onRefresh={refresh}
-        onClose={close}
       />,
     ),
   );
-  await choose('left');
+  expect(host.querySelector<HTMLInputElement>('input[value="both"]')?.checked).toBe(true);
+  expect(host.textContent).toContain('Timeout is 90 seconds.');
+  expect(host.textContent).not.toContain('Confirm both apply');
   await click('Preview my choice');
-  await click('Refresh comparison');
-  expect(refresh).toHaveBeenCalledOnce();
-  expect(resolved).not.toHaveBeenCalled();
-  expect(close).toHaveBeenCalledOnce();
+  await click('Confirm both apply');
+  const applied = fetch.mock.calls.filter(([path]) => path.endsWith('/apply'));
+  expect(applied).toHaveLength(1);
+  expect(JSON.parse(String(applied[0][1]?.body)).revision).toBe('second');
+});
+
+it('preserves source identity through bounded arbitrary refresh and ordering sequences', () => {
+  fc.assert(
+    fc.property(fc.constantFrom('left', 'right', 'both'), fc.array(fc.boolean(), {maxLength: 24}), (initial, swaps) => {
+      let current = evidence;
+      let choice = initial as 'left' | 'right' | 'both' | undefined;
+      const selectedUri = initial === 'both' ? undefined : evidence[initial].recordUri;
+      for (const swap of swaps) {
+        const next = swap ? {...current, left: current.right, right: current.left} : {...current};
+        expect(semanticEvidenceIdentity(next)).toBe(semanticEvidenceIdentity(current));
+        choice = retainSemanticChoice(choice, current, next);
+        expect(choice === 'both' ? initial : next[choice!].recordUri).toBe(initial === 'both' ? 'both' : selectedUri);
+        current = next;
+      }
+      expect(
+        retainSemanticChoice(choice, current, {...current, left: {...current.left, recordUri: 'threadnote://other'}}),
+      ).toBeUndefined();
+    }),
+    {numRuns: 32},
+  );
+});
+
+it('redacts selected semantic evidence after source access is revoked and sends no confirmation', async () => {
+  const item = {
+    caseId: 'private-case',
+    project: 'threadnote',
+    memoryId: 'a',
+    family: 'semantic-contradiction',
+    slot: 'pair',
+    evidenceRevision: 'scan',
+    disposition: 'needs-decision' as const,
+    reason: 'opposing-canonical-claims',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const fetch = vi.fn(async (path: string, init?: RequestInit) =>
+    init?.method === 'POST'
+      ? response({error: 'Source access is unavailable.'}, 403)
+      : path.includes('view=status')
+        ? response({version: 2, cases: [item]})
+        : response({
+            version: 2,
+            project: 'threadnote',
+            caseId: item.caseId,
+            evidenceRevision: 'scan',
+            semanticEvidence: evidence,
+          }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const element = (stale: boolean) => (
+    <MaintenanceCaseDialog
+      project="threadnote"
+      caseId={item.caseId}
+      initialCase={item}
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onTask={() => {}}
+      onClose={() => {}}
+    />
+  );
+  await act(async () => root.render(element(false)));
+  await choose('both');
+  expect(host.textContent).toContain(evidence.left.text);
+  await act(async () => root.render(element(true)));
+  expect(host.textContent).not.toContain(evidence.left.text);
+  expect(host.textContent).not.toContain('Confirm both apply');
+  expect(fetch.mock.calls.some(([path]) => path.endsWith('/semantic/apply'))).toBe(false);
+});
+
+it('revalidates a real duplicate finding through current health evidence despite its projected caseId', async () => {
+  const health = buildContextHealthReport({
+    project: 'threadnote',
+    records: [
+      record('duplicate-a', 'Identical retained advice.'),
+      record('duplicate-b', 'Identical retained advice.'),
+    ].map(value => ({
+      ...value,
+      uri:
+        value.uri.replace('threadnote://memory/', 'threadnote://user/tester/memories/durable/projects/threadnote/') +
+        '.md',
+      metadata: {...value.metadata, topic: 'same-advice'},
+    })),
+    now: new Date('2026-06-01'),
+  });
+  const duplicate = health.findings.find(item => item.category === 'exact-duplicate')!;
+  expect(duplicate.caseId).toBeTruthy();
+  const fetch = vi.fn(async (path: string, _init?: RequestInit) =>
+    path.startsWith('/api/context-health?')
+      ? response({...health, recordPreviews: [], repositoryEvidence: {state: 'available'}})
+      : path === '/api/context-health/preview'
+        ? response({
+            proposal: {
+              proposalId: 'repair',
+              revision: 'revision',
+              summary: 'Archive the duplicate.',
+              mutation: {kind: 'archive-memory'},
+              preconditions: [],
+            },
+          })
+        : response({outcome: 'unavailable', reason: 'Unsupported family.'}),
+  );
+  vi.stubGlobal('fetch', fetch);
+  vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(() => {});
+  const element = (stale: boolean) => (
+    <HealthDetail
+      finding={duplicate}
+      project="threadnote"
+      repairsAvailable
+      stale={stale}
+      onOpenLibrary={() => {}}
+      onChanged={() => {}}
+      onClose={() => {}}
+    />
+  );
+  await act(async () => root.render(element(false)));
+  await act(async () => root.render(element(true)));
+  await act(async () => root.render(element(false)));
+  await click('Preview repair');
+  expect(host.textContent).toContain('Archive the duplicate.');
+  expect(fetch.mock.calls.some(([path]) => path === '/api/attention/context-maintenance')).toBe(false);
 });

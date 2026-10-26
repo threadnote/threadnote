@@ -10,6 +10,7 @@ import {memoryDocumentParts} from '../library_model.js';
 /** Holds the authored draft until the existing acceptance controller verifies the exact write. */
 export function useManualSupportEdit(props: {
   readonly selectedUri?: string;
+  readonly onOpenMemory?: (uri: string) => void;
   readonly onError: (message: string) => void;
   readonly onApplied: (uri: string) => void;
 }) {
@@ -76,6 +77,7 @@ export function useManualSupportEdit(props: {
           project={review.project}
           reviewId={review.reviewId}
           initialReview={review}
+          onOpenMemory={props.onOpenMemory}
           onRead={result => {
             lastRead.current = result;
           }}
