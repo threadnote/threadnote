@@ -1,13 +1,12 @@
 /* oxlint-disable effecttsgo/node-builtin-import -- CI artifact and Bazel subprocess boundary. */
-import {readFileSync} from 'node:fs';
+import {readPreparedInventory} from '../bazel/prepare.mjs';
 import {resolve} from 'node:path';
 import {bazelPath} from '../bazel/cli-tools.mjs';
 
 const root = resolve(import.meta.dir, '../..');
-const selection = JSON.parse(
-  readFileSync(resolve(root, process.argv[2] ?? '.context/bazel-selection/selection.json'), 'utf8'),
-);
-const inventory = JSON.parse(readFileSync(resolve(root, 'tools/bazel/targets.json'), 'utf8'));
+const selection = await Bun.file(resolve(root, process.argv[2] ?? '.context/bazel-selection/selection.json')).json();
+if (!selection.generation) throw new Error('Selection is missing its prepared generation');
+const {inventory} = await readPreparedInventory({root, expectedGeneration: selection.generation});
 const allowed = new Set(inventory.targets.map(target => target.label));
 if (!Array.isArray(selection.targets) || selection.targets.some(label => !allowed.has(label)))
   throw new Error('Invalid modeled target selection');

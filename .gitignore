@@ -36,6 +36,12 @@ docs/effect.md
 docs/**/*-implementation-plan.md
 docs/**/adr/
 
+# Generator-owned Bazel declarations; handwritten BUILD files remain tracked.
+/BUILD.bazel
+/apps/*/BUILD.bazel
+/packages/*/BUILD.bazel
+/tools/bazel/targets.json
+
 # Bazel output symlinks; action state lives outside source.
 /bazel-*
 

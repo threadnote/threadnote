@@ -24,7 +24,7 @@
     "archive:release": "bun scripts/archive-release.ts",
     "bazel": "bun tools/bazel/run.ts",
     "bazel:affected": "bun tools/ci/bazel-select.mjs --base origin/main",
-    "bazel:check": "bun tools/bazel/generate.mjs --check && bun tools/bazel/run.ts build --nobuild //... && bun tools/bazel/run.ts test //:tooling_test",
+    "bazel:check": "bun tools/bazel/prepare.mjs && bun tools/bazel/generate.mjs --check && bun tools/bazel/run.ts build --nobuild //... && bun tools/bazel/run.ts test //:tooling_test",
     "bazel:generate": "bun tools/bazel/generate.mjs",
     "build": "bun scripts/check-embedded-core-model.ts && bun run generate:code-graph-languages && bun run clean && bun scripts/build.ts",
     "check:repo": "bun run bazel:check && bun run lint && bun run prettier:check && bun run typecheck",

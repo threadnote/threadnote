@@ -2,6 +2,17 @@
 import ts from 'typescript-compiler';
 import {posix} from 'node:path';
 
+/** Authored inputs include tracked and legitimate untracked files, using Git's ignore policy. */
+export const listRepositoryFiles = root => {
+  const child = Bun.spawnSync(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+    cwd: root,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (child.exitCode !== 0) throw new Error('Unable to enumerate repository source files with git ls-files');
+  return new Set(new TextDecoder().decode(child.stdout).split('\0').filter(Boolean));
+};
+
 const callPathFunctions = new Set([
   'access',
   'accessSync',

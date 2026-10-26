@@ -22,6 +22,7 @@ import {
 } from '../../src/workflow_automation/store.js';
 import {loadNativeCloseoutInputs} from '../../src/workflow_automation/closeout_inputs.js';
 import {nativeFixture} from './native-automation-fixture.js';
+import {observeCloseoutGraph, observeCloseoutStage} from './native-closeout-diagnostics.js';
 
 export type CloseoutProfile = 'desktop' | 'codex-cloud-personal' | 'cursor-cloud-personal';
 const generation = 'skill-generation-v1';
@@ -121,7 +122,7 @@ const loadedRootSchema = Schema.Struct({
   authoring: Schema.Struct({root: AuthoringReferenceSchema, readiness: Schema.Literal('ready')}),
 });
 
-export const nativeCloseoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
+const closeoutFixture = Effect.fn('test.nativeCloseout.fixture')(function* (
   withSpec = false,
   profile: CloseoutProfile = 'desktop',
   controllerRunId = 'controller',
@@ -131,11 +132,19 @@ export const nativeCloseoutFixture = Effect.fn('test.nativeCloseout.fixture')(fu
     Object.entries(system.environment()).filter(([key]) => !key.startsWith('THREADNOTE_')),
   );
   if (profile === 'cursor-cloud-personal') environment.THREADNOTE_CURSOR_CLOUD_TEAM = 'default';
-  const f = yield* nativeFixture(environment);
+  const f = yield* observeCloseoutStage('provisioning', nativeFixture(environment));
   const config = {...f.config, ...(profile === 'desktop' ? {} : {manifestSource: 'bundled-example' as const})};
   const scopedSystem = {...system, currentDirectory: () => f.repo, environment: () => environment};
-  const call = (request: unknown) => f.call(request, config).pipe(Effect.provideService(SystemInfo, scopedSystem));
-  const git = (cwd: string, args: readonly string[]) => runCommandEffect('git', ['-C', cwd, ...args]);
+  const call = (request: unknown) => {
+    const input = request && typeof request === 'object' ? (request as Record<string, unknown>) : {};
+    const program = f.call(request, config).pipe(Effect.provideService(SystemInfo, scopedSystem));
+    return observeCloseoutStage(
+      input.command ?? input.action,
+      input.action === 'graph-ready' ? observeCloseoutGraph(program) : program,
+    );
+  };
+  const git = (cwd: string, args: readonly string[]) =>
+    observeCloseoutStage('fixture-git', runCommandEffect('git', ['-C', cwd, ...args]));
   yield* git(f.repo, ['config', 'user.email', 'fixture@example.invalid']);
   yield* git(f.repo, ['config', 'user.name', 'Closeout Fixture']);
   yield* git(f.repo, ['add', 'source.ts']);
@@ -165,8 +174,9 @@ export const nativeCloseoutFixture = Effect.fn('test.nativeCloseout.fixture')(fu
         },
       }),
     );
-    if (profile === 'codex-cloud-personal') yield* persistCodexCloudProfile(config, ['default']);
-    else yield* persistCursorCloudIdentityProfile(config);
+    if (profile === 'codex-cloud-personal')
+      yield* observeCloseoutStage('cloud-profile', persistCodexCloudProfile(config, ['default']));
+    else yield* observeCloseoutStage('cloud-profile', persistCursorCloudIdentityProfile(config));
   }
   const initRun = (runId: string) =>
     call({
@@ -301,26 +311,29 @@ export const nativeCloseoutFixture = Effect.fn('test.nativeCloseout.fixture')(fu
       })),
     },
   );
-  yield* withNativeWorkflowLock(
-    config,
-    controllerRunId,
-    false,
-    writeNativeWorkflowState(
+  yield* observeCloseoutStage(
+    'controller-state',
+    withNativeWorkflowLock(
       config,
-      {
-        ...controller.state,
-        cycle: {
-          state: decodeNativeCycleState(cycle),
-          plans: [cyclePlan],
-          baselines: {},
-          reviewLimits: {},
-          reviewExpansions: [],
-          snapshots: [],
-          reviews: [],
-          attempts: [],
+      controllerRunId,
+      false,
+      writeNativeWorkflowState(
+        config,
+        {
+          ...controller.state,
+          cycle: {
+            state: decodeNativeCycleState(cycle),
+            plans: [cyclePlan],
+            baselines: {},
+            reviewLimits: {},
+            reviewExpansions: [],
+            snapshots: [],
+            reviews: [],
+            attempts: [],
+          },
         },
-      },
-      controller.revision,
+        controller.revision,
+      ),
     ),
   );
 
@@ -334,10 +347,13 @@ export const nativeCloseoutFixture = Effect.fn('test.nativeCloseout.fixture')(fu
     profile,
     controllerRunId,
     load: () =>
-      loadNativeCloseoutInputs(config, controllerRunId, generation, call).pipe(
+      observeCloseoutStage('load', loadNativeCloseoutInputs(config, controllerRunId, generation, call)).pipe(
         Effect.provideService(SystemInfo, scopedSystem),
       ),
     closeout: (command: string, fields: Record<string, unknown> = {}) =>
       call({...f.base('closeout', controllerRunId), command, ...fields}),
   };
 });
+
+export const nativeCloseoutFixture = (...args: Parameters<typeof closeoutFixture>) =>
+  observeCloseoutStage('fixture', closeoutFixture(...args));

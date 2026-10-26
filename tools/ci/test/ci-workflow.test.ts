@@ -54,7 +54,7 @@ it('uses one authoritative Bazel plan and parallel execution matrix', async () =
   expect(Object.keys(jobs)).toContain('bazel-plan');
   expect(Object.keys(jobs)).toContain('bazel-plan-validation');
   expect(Object.keys(jobs)).toContain('bazel-shards');
-  expect(step(jobs['bazel-plan'], 'Verify generated Bazel declarations')?.run).toBe(
+  expect(step(jobs['bazel-plan-validation'], 'Verify generated Bazel declarations')?.run).toBe(
     'bun tools/bazel/generate.mjs --check',
   );
   expect(step(jobs['bazel-plan'], 'Select affected Bazel targets')).toMatchObject({

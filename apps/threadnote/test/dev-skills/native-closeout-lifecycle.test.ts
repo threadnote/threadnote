@@ -1,6 +1,5 @@
 import {it as effectIt} from '@effect/vitest';
 import {Effect, FileSystem, PlatformError, Result} from 'effect';
-import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {ResourceIoFailed, ResourceStore} from '@threadnote/store/resource-store';
 import {CurrentNativeOperationLimit, readNativeWorkflowState} from '../../src/workflow_automation/store.js';
@@ -8,7 +7,7 @@ import {decodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js'
 import {decodeWorkflowJournalStorageImage} from '../../src/workflow_memory/journal_storage.js';
 import {decodeBoundedWorkflowJson} from '../../src/workflow_memory/journal_codec.js';
 import {nativeCloseoutFixture} from './native-closeout-fixture.js';
-import {provideNative} from './native-automation-fixture.js';
+import {runCloseout} from './native-closeout-diagnostics.js';
 
 type Fixture = ReturnType<typeof nativeCloseoutFixture> extends Effect.Effect<infer A, infer _E, infer _R> ? A : never;
 
@@ -136,7 +135,7 @@ describe('native closeout lifecycle', () => {
       expect(yield* f.fs.readFileString(f.statePath(f.controllerRunId))).toBe(before);
       expect(yield* f.fs.exists(f.statePath(f.controllerRunId) + '.closeout.json')).toBe(false);
       yield* assertOwnedState(f, loaded.owned, 'active');
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
   effectIt.effect(
     'completes desktop architecture-only closeout and preserves linked decisions and unrelated artifacts',
@@ -203,7 +202,7 @@ describe('native closeout lifecycle', () => {
           archived: loaded.owned.length,
         });
         expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
-      }).pipe(TestClock.withLive, provideNative),
+      }).pipe(runCloseout),
   );
 
   effectIt.effect('completes a spec-backed desktop closeout with independent verified behavior readback', () =>
@@ -224,7 +223,7 @@ describe('native closeout lifecycle', () => {
       expect(yield* relationTargets(f, stringField(observed, 'uri'), stringField(observed, 'revision'))).toContain(
         image.outputs.architecture.uri,
       );
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   effectIt.effect('rejects missing acceptance and changed source without retiring any owned draft', () =>
@@ -247,7 +246,7 @@ describe('native closeout lifecycle', () => {
       expect(Result.isFailure(finish)).toBe(true);
       yield* assertOwnedState(f, loaded.owned, 'active');
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   effectIt.effect('preserves every remaining draft when an owned artifact is edited after admission', () =>
@@ -279,7 +278,7 @@ describe('native closeout lifecycle', () => {
       }
       expect(proposal.phaseEvidence).toHaveLength(1);
       expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   effectIt.effect('recovers the original archive intent after its first response is lost', () =>
@@ -332,7 +331,7 @@ describe('native closeout lifecycle', () => {
         const observed = yield* readArtifact(f, archive.uri, item.runId);
         expect(observed).toMatchObject({uri: archive.uri, state: 'archived', memoryId: item.memoryId});
       }
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   effectIt.effect('recovers spec-backed archive interruption when authoring and controller share one native run', () =>
@@ -406,7 +405,7 @@ describe('native closeout lifecycle', () => {
       expect(replay.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
       expect(proposal.phaseEvidence).toHaveLength(1);
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   effectIt.effect('recovers a committed final behavior write whose response is lost before receipt save', () =>
@@ -525,7 +524,7 @@ describe('native closeout lifecycle', () => {
       const replay = object(yield* f.closeout('finish'));
       expect(replay.closeout).toMatchObject({state: 'complete', archived: loaded.owned.length});
       expect(yield* f.fs.readFileString(receiptFile)).toBe(bytes);
-    }).pipe(TestClock.withLive, provideNative),
+    }).pipe(runCloseout),
   );
 
   for (const profile of ['codex-cloud-personal', 'cursor-cloud-personal'] as const)
@@ -546,6 +545,6 @@ describe('native closeout lifecycle', () => {
         const image = yield* journalImage(f);
         expect(Object.keys(image.archives)).toHaveLength(0);
         expect((yield* readArtifact(f, f.unrelated.uri, 'plan-run')).state).toBe('active');
-      }).pipe(TestClock.withLive, provideNative),
+      }).pipe(runCloseout),
     );
 });

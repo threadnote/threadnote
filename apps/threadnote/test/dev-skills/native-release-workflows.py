@@ -780,11 +780,13 @@ def _run_profile(fixture, binary, environment, generation, profile):
         assert closeout_summary["state"] == "complete"
         assert closeout_summary["owned"] == closeout_summary["archived"] == len(owned_uris)
         assert read_artifact(unrelated_uri)["state"] == "active"
+        memory_reader = shutil.which("memory-read", path=environment["PATH"])
+        assert memory_reader, "The isolated native memory reader must be available"
         remote_bodies = {}
         for node in publication["nodes"]:
             relative = node["canonicalUri"].split("/shared/default/", 1)[1]
             raw = subprocess.run(["git", "-C", str(remote), "show", "main:" + relative], env=environment, check=True, capture_output=True, text=True, timeout=60).stdout
-            parsed = subprocess.run(["memory-read", node["canonicalUri"]], input=raw, env=environment,
+            parsed = subprocess.run([memory_reader, node["canonicalUri"]], input=raw, env=environment,
                                     check=True, capture_output=True, text=True, timeout=30)
             durable_body = json.loads(parsed.stdout)["body"].strip() + "\n"
             assert hashlib.sha256(durable_body.encode()).hexdigest() == node["bodySha256"]

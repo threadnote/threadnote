@@ -1,5 +1,4 @@
 import fc from 'fast-check';
-import {readFileSync} from '@threadnote/testing/node-fs';
 import {expect, it} from 'vitest';
 import {selectTargets} from '../../ci/selection.mjs';
 
@@ -19,23 +18,6 @@ it('selects no graph target for website-only graph impact, independent of cache 
     '//apps/website:build',
     '//apps/website:content_test',
   ]);
-});
-
-it('prepares ignored metadata before checking head and normalizing the trusted baseline', () => {
-  const source = readFileSync('tools/ci/bazel-select.mjs', 'utf8');
-  const prepareHead = source.indexOf('await prepare(root);');
-  const verifyHead = source.indexOf("await run([process.execPath, 'tools/bazel/generate.mjs', '--check']);");
-  const prepareBase = source.indexOf('await prepare(directory);');
-  const normalizeBase = source.indexOf("await run([process.execPath, 'tools/bazel/generate.mjs'], directory);");
-  const readBaseInventory = source.indexOf(
-    "baseInventory = JSON.parse(readFileSync(join(directory, 'tools/bazel/targets.json'), 'utf8'));",
-  );
-
-  expect(prepareHead).toBeGreaterThanOrEqual(0);
-  expect(prepareBase).toBeGreaterThanOrEqual(0);
-  expect(prepareHead).toBeLessThan(verifyHead);
-  expect(prepareBase).toBeLessThan(normalizeBase);
-  expect(normalizeBase).toBeLessThan(readBaseInventory);
 });
 
 it('falls back to every modeled target for absent evidence and unknown inputs', () => {

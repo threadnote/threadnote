@@ -19,9 +19,11 @@ bun install --frozen-lockfile
 bun run check:repo
 ```
 
-`check:repo` verifies generated Bazel declarations, analyzes every target, runs the
+`check:repo` prepares ignored Bazel declarations and website metadata, verifies
+generated semantics and byte-stable regeneration, analyzes every target, runs the
 Bazel/tooling contract tests, and applies workspace, lint, formatting, and type
-checks. Run the narrowest Vitest or Bazel test target for the behavior you change.
+checks. Fresh checkouts need no generated files committed to Git. Run the
+narrowest Vitest or Bazel test target for the behavior you change.
 The pull request runs the complete affected suite and platform matrix.
 
 Run the source CLI or MCP server during development with:
@@ -92,14 +94,14 @@ that was already on this development line is not misclassified as new during the
 
 ### Bazel CI selection
 
-Pull-request CI computes the affected Bazel graph from the complete base/head diff. Colocated package tests are selected through their source closures, so `apps/website` changes do not run `packages/graph` tests. Shared dependency changes select all dependent checks. The Threadnote application suite is automatically grouped by feature with bounded target sizes and inferred repository inputs; `//apps/threadnote:test` expands to every generated group when a contributor explicitly runs the aggregate. Adding a normal test does not require editing Bazel metadata. Missing baselines, unrecognized inputs, or failed graph analysis select the complete inventory.
+Pull-request CI computes the affected Bazel graph from the complete base/head diff. Colocated package tests are selected through their source closures, so `apps/website` changes do not run `packages/graph` tests. Shared dependency changes select all dependent checks. The Threadnote application suite is automatically grouped by feature with bounded target sizes and inferred repository inputs; `//apps/threadnote:test` expands to every generated group when a contributor explicitly runs the aggregate. Adding a normal test does not require editing Bazel metadata. Missing baselines, unrecognized inputs, or failed base/hash analysis select the complete valid head inventory. Invalid head preparation fails the planner.
 
-The same inventory selects Actionlint, recall quality, Windows smoke, and release matrices. `tools/ci/bazel-select.mjs` writes the selection artifact and `tools/ci/bazel-run-selected.mjs` executes the Bun, Vitest, build, and native Go targets. The planner releases the matrix before the slower selector regression validation finishes, and the aggregate check requires both. Each of the eight CI runners executes one Bazel test target at a time so Vitest owns that runner's parallelism instead of competing with another test process. Selection determinism, monotonicity, generated grouping, inferred inputs, file additions, deletions, renames, and dependency-edge changes are covered by focused property and real Bazel tests.
+The same inventory selects Actionlint, recall quality, Windows smoke, and release matrices. Selection and shard artifacts include generation fingerprints; workers reject mismatched head, source, or inventory. `tools/ci/bazel-select.mjs` writes the selection artifact and `tools/ci/bazel-run-selected.mjs` executes the Bun, Vitest, build, and native Go targets. The planner releases the matrix before the slower selector regression validation finishes, and the aggregate check requires both. Each of the eight CI runners executes one Bazel test target at a time so Vitest owns that runner's parallelism instead of competing with another test process. Selection determinism, monotonicity, generated grouping, inferred inputs, file additions, deletions, renames, and dependency-edge changes are covered by focused property and real Bazel tests.
 
 Use the checked-in command aliases instead of installing Bazel or bazel-diff globally:
 
 ```bash
-# Regenerate BUILD files after changing sources, tests, manifests, or target specs.
+# Explicitly prepare or repair ignored BUILD files, inventory, and website metadata.
 bun run bazel:generate
 
 # Preview the targets and platform lanes affected relative to origin/main.
@@ -109,9 +111,16 @@ bun run bazel:affected
 bun run bazel -- test //packages/graph:test
 ```
 
-Do not edit generated `BUILD.bazel` files or `tools/bazel/targets.json`. Edit
-`tools/bazel/target-specs.mjs`, a hand-written resource/infra BUILD file, or the
-shared rules and regenerate. A branch based on a commit without the Bazel graph
+The supported wrapper and selection commands prepare a fresh checkout
+automatically. Before invoking raw pinned Bazel directly, run
+`bun run bazel:generate`. Direct `bun tools/bazel/generate.mjs --check` only
+verifies existing output; it does not repair it.
+
+Generated root, app, and package `BUILD.bazel` files and
+`tools/bazel/targets.json` are ignored local artifacts. Do not edit or commit them.
+Edit source, manifests, `tools/bazel/target-specs.mjs`, or shared rules and
+regenerate. Handwritten resource, infrastructure, tooling, and training BUILD
+files remain tracked. A branch based on a commit without the Bazel graph
 will conservatively preview every target; after the migration lands, ordinary
 base/head comparisons are selective.
 
