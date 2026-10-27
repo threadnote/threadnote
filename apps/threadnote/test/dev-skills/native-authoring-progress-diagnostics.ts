@@ -140,6 +140,8 @@ type BoundaryRecord = {
 type SpanRecord = {label: string; sequence: number; startedMs: number};
 type SpanEnd = SpanRecord & {outcome: Outcome; inclusiveMs: number};
 type Counts = {started: number; succeeded: number; failed: number};
+type CpuReading = {user: number; system: number};
+type BodyCpu = {available: false} | {available: true; userMs: number; systemMs: number};
 type RefreshTransaction = {
   start: bigint;
   invalid: boolean;
@@ -261,6 +263,7 @@ export const makeNativeProgressDiagnostics = (
   delegate: Tracer.Tracer,
   options: {
     now?: () => number;
+    cpuUsage?: () => unknown;
     sink?: (line: string) => void;
     serialize?: (value: unknown) => string;
   } = {},
@@ -272,6 +275,19 @@ export const makeNativeProgressDiagnostics = (
       process.stderr.write(line + '\n');
     });
   const serialize = options.serialize ?? JSON.stringify;
+  const readCpu = (): CpuReading | undefined => {
+    try {
+      // Access the optional runtime API only at an observed body boundary.
+      const cpuUsage = options.cpuUsage;
+      const value = cpuUsage ? cpuUsage() : process.cpuUsage?.();
+      if (typeof value !== 'object' || value === null) return undefined;
+      const {user, system} = value as CpuReading;
+      if (!Number.isSafeInteger(user) || user < 0 || !Number.isSafeInteger(system) || system < 0) return undefined;
+      return {user, system};
+    } catch {
+      return undefined;
+    }
+  };
   let lastClock = 0;
   const clock = () => {
     safely(() => {
@@ -329,6 +345,8 @@ export const makeNativeProgressDiagnostics = (
   let bodyExited = false;
   let bodyStartedMs = 0;
   let bodyEndedMs = 0;
+  let cpuStart: CpuReading | undefined;
+  let bodyCpu: BodyCpu = {available: false};
   let reported = false;
   const progress = () => ({
     counters: Object.fromEntries(nativeProgressBoundaries.map(label => [label, {...counters[label]}])),
@@ -482,13 +500,27 @@ export const makeNativeProgressDiagnostics = (
       lastBoundary = {...entry, outcome, elapsedMs: bounded(elapsed() - entry.elapsedMs)};
     },
     enterBody() {
+      const repeated = bodyEntered || bodyExited;
       bodyEntered = true;
       bodyStartedMs = elapsed();
+      cpuStart = repeated ? undefined : readCpu();
+      bodyCpu = {available: false};
     },
     exitBody() {
+      const repeated = !bodyEntered || bodyExited;
       bodyExited = true;
       bodyEndedMs = elapsed();
       bodyExitSnapshot = progress();
+      const end = !repeated && cpuStart ? readCpu() : undefined;
+      bodyCpu =
+        end && cpuStart && end.user >= cpuStart.user && end.system >= cpuStart.system
+          ? {
+              available: true,
+              userMs: bounded((end.user - cpuStart.user) / 1000),
+              systemMs: bounded((end.system - cpuStart.system) / 1000),
+            }
+          : {available: false};
+      cpuStart = undefined;
     },
     snapshot() {
       const at = elapsed();
@@ -500,6 +532,12 @@ export const makeNativeProgressDiagnostics = (
         elapsedMs: at,
         bodyMs: bodyEntered ? bounded((bodyExited ? bodyEndedMs : at) - bodyStartedMs) : undefined,
         cleanupObservedMs: bodyExited ? bounded(at - bodyEndedMs) : undefined,
+        bodyCpu: {
+          ...bodyCpu,
+          scope: 'worker-process-all-threads-excludes-children',
+          limits:
+            'includes-other-worker-activity-and-boundary-skew;cpu-may-exceed-wall;not-serialization-or-io-attribution',
+        },
         clocks: {
           facades: 'diagnostic-monotonic-ms',
           activeAges: 'diagnostic-monotonic-ms',

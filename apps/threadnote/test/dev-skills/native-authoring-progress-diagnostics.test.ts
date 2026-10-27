@@ -31,7 +31,12 @@ const spanOptions = (name: string, parent: Option.Option<Tracer.AnySpan> = Optio
   sampled: true,
 });
 const make = (options: Parameters<typeof makeNativeProgressDiagnostics>[1] = {}) =>
-  makeNativeProgressDiagnostics(Tracer.nativeTracer, {now: () => 0, sink: () => {}, ...options});
+  makeNativeProgressDiagnostics(Tracer.nativeTracer, {
+    now: () => 0,
+    sink: () => {},
+    cpuUsage: () => ({user: 0, system: 0}),
+    ...options,
+  });
 
 effectIt.effect('forwards the original call/read Effects, arguments, options and receivers exactly once', () =>
   Effect.gen(function* () {
@@ -183,6 +188,147 @@ effectIt.effect('retains the single original program, body snapshot and scope ow
     expect(outer.snapshot().totals).toEqual({}); // Public wrapper names are intentionally new to the outer allowlist.
     native!.reportFailure();
     expect(packets).toHaveLength(1);
+  }),
+);
+
+effectIt.effect('reads worker CPU only at the existing body boundaries and preserves wall-clock ordering', () =>
+  Effect.sync(() => {
+    const calls: string[] = [];
+    const lines: string[] = [];
+    const first = {user: 1000, system: 2000, PRIVATE: 'path and ID'};
+    const last = {user: 5500, system: 3500, PRIVATE: 'result'};
+    let reads = 0;
+    const observer = make({
+      now: () => {
+        calls.push('wall');
+        return 0;
+      },
+      cpuUsage: () => {
+        calls.push('cpu');
+        return reads++ === 0 ? first : last;
+      },
+      sink: line => lines.push(line),
+    });
+    expect(calls).toEqual(['wall']);
+    expect(observer.snapshot().bodyCpu).toMatchObject({available: false});
+    observer.enterBody();
+    first.user = 9000; // The observer copies primitive endpoints instead of retaining the reader's object.
+    expect(observer.snapshot().bodyCpu).toMatchObject({available: false});
+    observer.exitBody();
+    expect(calls).toEqual(['wall', 'wall', 'wall', 'cpu', 'wall', 'wall', 'cpu']);
+    const snapshot = observer.snapshot();
+    expect(snapshot.bodyCpu).toEqual({
+      available: true,
+      userMs: 5,
+      systemMs: 2,
+      scope: 'worker-process-all-threads-excludes-children',
+      limits:
+        'includes-other-worker-activity-and-boundary-skew;cpu-may-exceed-wall;not-serialization-or-io-attribution',
+    });
+    expect(snapshot.bodyMs).toBe(0); // CPU is never capped to wall time or reported as exclusive wait.
+    if (snapshot.bodyCpu.available) snapshot.bodyCpu.userMs = -1;
+    last.user = 0;
+    expect(observer.snapshot().bodyCpu).toMatchObject({available: true, userMs: 5, systemMs: 2});
+    expect(reads).toBe(2);
+    expect(lines).toHaveLength(0);
+    observer.reportFailure();
+    observer.reportFailure();
+    expect(reads).toBe(2);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect.prop(
+  'bounds monotonic safe-integer CPU endpoint differences independently of wall time',
+  {
+    userA: Schema.Literals([0, 499, 500, 1000, 2_147_483_648_000, Number.MAX_SAFE_INTEGER]),
+    userB: Schema.Literals([0, 499, 500, 1000, 2_147_483_648_000, Number.MAX_SAFE_INTEGER]),
+    systemA: Schema.Literals([0, 499, 500, 1000, 2_147_483_648_000, Number.MAX_SAFE_INTEGER]),
+    systemB: Schema.Literals([0, 499, 500, 1000, 2_147_483_648_000, Number.MAX_SAFE_INTEGER]),
+  },
+  ({userA, userB, systemA, systemB}) =>
+    Effect.sync(() => {
+      const endpoints = [
+        {user: Math.min(userA, userB), system: Math.min(systemA, systemB)},
+        {user: Math.max(userA, userB), system: Math.max(systemA, systemB)},
+      ];
+      let reads = 0;
+      const observer = make({cpuUsage: () => endpoints[reads++]});
+      observer.enterBody();
+      observer.exitBody();
+      const cpu = observer.snapshot().bodyCpu;
+      expect(cpu).toMatchObject({
+        available: true,
+        userMs: Math.min(2_147_483_647, Math.round(Math.abs(userA - userB) / 1000)),
+        systemMs: Math.min(2_147_483_647, Math.round(Math.abs(systemA - systemB) / 1000)),
+      });
+      expect(reads).toBe(2);
+    }),
+  {arbitrary: {runs: 25}},
+);
+
+effectIt.effect('marks missing, throwing, malformed and decreasing CPU readings unavailable without zero values', () =>
+  Effect.sync(() => {
+    const valid = {user: 1000, system: 1000};
+    const malformed: unknown[] = [undefined, null, false, 'PRIVATE', {}, {user: 0}];
+    for (const key of ['user', 'system'])
+      for (const value of ['PRIVATE', null, false, NaN, Infinity, -Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])
+        malformed.push({...valid, [key]: value});
+    malformed.push({
+      get user() {
+        throw new Error('PRIVATE getter');
+      },
+    });
+    for (const bad of malformed)
+      for (const at of [0, 1]) {
+        let reads = 0;
+        const observer = make({cpuUsage: () => (reads++ === at ? bad : valid)});
+        observer.enterBody();
+        observer.exitBody();
+        expect(observer.snapshot().bodyCpu).toMatchObject({available: false});
+        expect(observer.snapshot().bodyCpu).not.toHaveProperty('userMs');
+        expect(observer.snapshot().bodyCpu).not.toHaveProperty('systemMs');
+        expect(reads).toBeLessThanOrEqual(2);
+        expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+      }
+    for (const end of [
+      {user: 999, system: 1000},
+      {user: 1000, system: 999},
+    ]) {
+      let reads = 0;
+      const observer = make({cpuUsage: () => (reads++ === 0 ? valid : end)});
+      observer.enterBody();
+      observer.exitBody();
+      expect(observer.snapshot().bodyCpu).toMatchObject({available: false});
+    }
+    const deferredAccess = makeNativeProgressDiagnostics(Tracer.nativeTracer, {
+      get cpuUsage(): () => unknown {
+        throw new Error('PRIVATE API missing');
+      },
+    });
+    deferredAccess.enterBody();
+    deferredAccess.exitBody();
+    expect(deferredAccess.snapshot().bodyCpu).toMatchObject({available: false});
+  }),
+);
+
+effectIt.effect('invalidates repeated or out-of-order CPU boundaries without resampling', () =>
+  Effect.sync(() => {
+    for (const sequence of [
+      ['exitBody'],
+      ['exitBody', 'enterBody', 'exitBody'],
+      ['enterBody', 'enterBody', 'exitBody'],
+      ['enterBody', 'exitBody', 'exitBody'],
+      ['enterBody', 'exitBody', 'enterBody', 'exitBody'],
+    ] as const) {
+      let reads = 0;
+      const observer = make({cpuUsage: () => ({user: reads++ * 1000, system: 0})});
+      for (const boundary of sequence) observer[boundary]();
+      expect(observer.snapshot().bodyCpu).toMatchObject({available: false});
+      expect(observer.snapshot().bodyCpu).not.toHaveProperty('userMs');
+      expect(reads).toBeLessThanOrEqual(2);
+    }
   }),
 );
 
@@ -1216,13 +1362,24 @@ effectIt.effect('bounds all active/recent data, clocks, durations, snapshots and
 effectIt.effect('broken clocks, sink, serialization, snapshots and bookkeeping cannot replace any exit', () =>
   Effect.gen(function* () {
     const value = {PRIVATE: true};
-    for (const broken of ['clock', 'sink', 'serialize', 'snapshot', 'start', 'end', 'enterBody', 'exitBody'] as const) {
+    for (const broken of [
+      'clock',
+      'cpu',
+      'sink',
+      'serialize',
+      'snapshot',
+      'start',
+      'end',
+      'enterBody',
+      'exitBody',
+    ] as const) {
       for (const outcome of ['success', 'failure', 'defect', 'interruption'] as const) {
         const crash = () => {
           throw new Error('PRIVATE diagnostic failure');
         };
         const observer = make({
           now: broken === 'clock' ? crash : () => 0,
+          cpuUsage: broken === 'cpu' ? crash : () => ({user: 0, system: 0}),
           sink: broken === 'sink' ? crash : () => {},
           serialize: broken === 'serialize' ? crash : JSON.stringify,
         });
