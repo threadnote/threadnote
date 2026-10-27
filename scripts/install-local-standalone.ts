@@ -668,6 +668,11 @@ export const activateLocalStandaloneRelease = Effect.fn('developmentInstall.acti
       cleanupIssues.add('process-inspection');
     } else {
       if (live.value.truncated || live.value.unverified.length > 0) cleanupIssues.add('process-inspection');
+      else {
+        for (const processId of unresolvedProcessIds) {
+          if (system.isProcessRunning(processId) === false) unresolvedProcessIds.delete(processId);
+        }
+      }
       const superseded = [...live.value.verified, ...live.value.unverified].filter(
         lease => lease.version !== input.version,
       );

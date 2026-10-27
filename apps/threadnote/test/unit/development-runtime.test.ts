@@ -2,7 +2,7 @@ import {it as effectIt} from '@effect/vitest';
 import {TestError} from '@threadnote/testing/test-error';
 import {provideTestLayer} from '../helpers/effect-layer.js';
 import fc from 'fast-check';
-import {Effect, FileSystem, Option, Path} from 'effect';
+import {Effect, FileSystem, Option, Path, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect, it} from 'vitest';
 import {
@@ -2186,3 +2186,186 @@ function refreshDevelopmentReceipt(
     if (process.platform !== 'win32') yield* fs.chmod(receiptPath, 0o600);
   });
 }
+
+type CleanupRace = 'exited' | 'alive' | 'missing-lease' | 'scan-failed' | 'scan-truncated' | 'reused';
+function activateWithCleanupRace(race: CleanupRace, processCount = 1) {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const baseSystem = yield* SystemInfo;
+      const root = yield* fs.makeTempDirectoryScoped({prefix: 'threadnote-cleanup-race-'});
+      const installRoot = path.join(root, 'install'),
+        binRoot = path.join(root, 'bin');
+      const sourceCommit = '8'.repeat(40),
+        version = developmentBuildVersion('4.0.0-beta.30', sourceCommit);
+      const oldVersion = '4.0.0-beta.29',
+        releaseRoot = path.join(installRoot, 'versions', version);
+      const executableName = baseSystem.platform === 'win32' ? 'threadnote.exe' : 'threadnote';
+      yield* writeDevelopmentReleaseFixture(
+        fs,
+        path,
+        releaseRoot,
+        version,
+        sourceCommit,
+        executableName,
+        'cleanup-race-release',
+      );
+      const leasesRoot = path.join(installRoot, 'leases'),
+        oldLeasesRoot = path.join(leasesRoot, oldVersion);
+      yield* fs.makeDirectory(oldLeasesRoot, {recursive: true});
+      const processIds = Array.from({length: processCount}, (_, index) => 46_001 + index);
+      const running = new Set(processIds),
+        observed = new Set<number>();
+      const signals: Array<readonly [number, NodeJS.Signals]> = [],
+        trace: string[] = [];
+      let finalBoundary = false;
+      const leasePath = (pid: number) => path.join(oldLeasesRoot, `${pid}.json`);
+      for (const pid of processIds)
+        yield* fs.writeFileString(
+          leasePath(pid),
+          JSON.stringify({
+            processId: pid,
+            processStartIdentity: `stored-${pid}`,
+            retirementPolicy: 'terminate',
+            startedAt: '2026-08-02T08:00:00.000Z',
+            token: `fixture-${pid}`,
+            version: oldVersion,
+          }),
+        );
+      const observe = (pid: number) =>
+        Effect.sync(() => {
+          if (running.has(pid) && !observed.has(pid)) {
+            observed.add(pid);
+            trace.push(`unverified:${pid}`);
+          }
+          return finalBoundary && race === 'reused' ? 'different-process-instance' : undefined;
+        });
+      const testSystem = SystemInfo.of({
+        ...baseSystem,
+        processId: 99_999,
+        environment: () => ({
+          ...baseSystem.environment(),
+          THREADNOTE_INSTALL_ROOT: installRoot,
+          THREADNOTE_BIN_DIR: binRoot,
+        }),
+        isProcessRunning: pid => running.has(pid),
+        canonicalProcessStartIdentity: observe,
+        processStartIdentity: observe,
+        signalProcess: (pid, signal) => {
+          signals.push([pid, signal]);
+        },
+      });
+      const boundaryFileSystem = FileSystem.FileSystem.of({
+        ...fs,
+        readDirectory: directory =>
+          Effect.gen(function* () {
+            if (directory === leasesRoot) {
+              if (observed.size === processIds.length && !finalBoundary) {
+                finalBoundary = true;
+                trace.push('final-verification-boundary');
+                if (race === 'exited') running.clear();
+                if (race === 'missing-lease')
+                  for (const pid of processIds) yield* fs.remove(leasePath(pid), {force: true});
+              } else trace.push(finalBoundary ? 'later-lease-scan' : 'initial-lease-scan');
+              if (finalBoundary && race === 'scan-failed')
+                return yield* fs.readDirectory(path.join(root, 'missing-fixture-directory'));
+            }
+            const entries = yield* fs.readDirectory(directory);
+            return finalBoundary && race === 'scan-truncated' && directory === oldLeasesRoot
+              ? [...entries, 'malformed-entry']
+              : entries;
+          }),
+      });
+      const installed = yield* activateLocalStandaloneRelease({
+        canonicalInstallRoot: yield* fs.realPath(installRoot),
+        canonicalVersionsRoot: yield* fs.realPath(path.join(installRoot, 'versions')),
+        commit: sourceCommit,
+        executableName,
+        releaseRoot,
+        reused: true,
+        sourceCheckoutId: 'a'.repeat(64),
+        stagedRoot: Option.none(),
+        ownershipAuthorization: undefined,
+        terminateSuperseded: true,
+        version,
+      }).pipe(
+        Effect.provideService(CommandExecutor, versionCommandExecutor(version)),
+        Effect.provideService(SystemInfo, testSystem),
+        Effect.provideService(FileSystem.FileSystem, boundaryFileSystem),
+      );
+      const remainingLeaseFiles = yield* Effect.forEach(processIds, pid => fs.exists(leasePath(pid)));
+      const activeVersion = (
+        JSON.parse(yield* fs.readFileString(path.join(installRoot, 'active-release.json'))) as {version: string}
+      ).version;
+      return {installed, signals, trace, observed: [...observed], remainingLeaseFiles, activeVersion};
+    }),
+  ).pipe(provideTestLayer(ApplicationLayer));
+}
+
+effectIt.effect('reconciles an unresolved process that exits before complete final verification', () =>
+  Effect.gen(function* () {
+    const result = yield* activateWithCleanupRace('exited');
+    expect(result.observed).toEqual([46_001]);
+    expect(result.trace.slice(0, 3)).toEqual(['initial-lease-scan', 'unverified:46001', 'final-verification-boundary']);
+    expect(result.signals).toEqual([]);
+    expect(result.remainingLeaseFiles).toEqual([false]);
+    expect({
+      cleanupComplete: result.installed.cleanupComplete,
+      remaining: result.installed.remainingSupersededProcesses,
+      issues: result.installed.cleanupIssues,
+    }).toEqual({cleanupComplete: true, remaining: 0, issues: []});
+    expect(result.installed).toMatchObject({
+      active: true,
+      doctorVerified: true,
+      launchersVerified: true,
+      terminatedSupersededProcesses: 0,
+    });
+    expect(result.activeVersion).toBe(result.installed.version);
+  }),
+);
+
+effectIt.effect.each([
+  {race: 'alive', issues: ['process-inspection'], leaseExists: true},
+  {race: 'missing-lease', issues: [], leaseExists: false},
+  {race: 'reused', issues: [], leaseExists: false},
+  {race: 'scan-failed', issues: ['process-inspection', 'release-pruning'], leaseExists: true},
+  {race: 'scan-truncated', issues: ['process-inspection', 'release-pruning'], leaseExists: true},
+] as const)('keeps unresolved cleanup evidence for $race', ({race, issues, leaseExists}) =>
+  Effect.gen(function* () {
+    const result = yield* activateWithCleanupRace(race);
+    expect(result.trace).toContain('final-verification-boundary');
+    expect(result.observed).toEqual([46_001]);
+    expect(result.signals).toEqual([]);
+    expect(result.remainingLeaseFiles).toEqual([leaseExists]);
+    expect(result.installed).toMatchObject({
+      active: true,
+      cleanupComplete: false,
+      remainingSupersededProcesses: 1,
+      cleanupIssues: [...issues],
+      doctorVerified: true,
+      launchersVerified: true,
+    });
+    expect(result.activeVersion).toBe(result.installed.version);
+  }),
+);
+
+effectIt.effect.prop(
+  'provably exited historical processes do not change complete cleanup accounting',
+  [Schema.Int.check(Schema.isBetween({minimum: 1, maximum: 4}))],
+  ([count]) =>
+    Effect.gen(function* () {
+      const result = yield* activateWithCleanupRace('exited', count);
+      expect(result.observed).toHaveLength(count);
+      expect(result.trace).toContain('final-verification-boundary');
+      expect(result.remainingLeaseFiles).toEqual(Array.from({length: count}, () => false));
+      expect(result.signals).toEqual([]);
+      expect(result.installed).toMatchObject({
+        cleanupComplete: true,
+        remainingSupersededProcesses: 0,
+        cleanupIssues: [],
+        terminatedSupersededProcesses: 0,
+      });
+    }),
+  {arbitrary: {runs: 16}},
+);
