@@ -2,6 +2,7 @@ export interface RecallIndexForegroundFreshness {
   readonly observedCanonicalMutationGeneration: string;
   readonly forceRefresh: boolean;
   readonly initialized: boolean;
+  readonly sourceValidationRequired?: boolean;
   readonly integrityCurrent: boolean;
   readonly observedStaleGeneration: string;
   readonly persistedCanonicalMutationGeneration: string;
@@ -42,6 +43,7 @@ export interface RecallIndexMergedCanonicalMutationContinuity {
 export function recallIndexForegroundRefreshRequired(input: RecallIndexForegroundFreshness): boolean {
   return (
     input.forceRefresh ||
+    input.sourceValidationRequired === true ||
     !input.initialized ||
     !input.integrityCurrent ||
     input.persistedCanonicalMutationGeneration !== input.observedCanonicalMutationGeneration ||

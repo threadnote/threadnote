@@ -178,3 +178,6 @@ const nextStaleMarkerGenerationCounter = Effect.sync(() => {
   staleMarkerGenerationCounter += 1;
   return staleMarkerGenerationCounter;
 });
+
+/** Independent continuity: clearing identity hints never consumes pending lexical hints. */
+export const identityStaleMarkerBasePath = (lexicalBasePath: string): string => `${lexicalBasePath}.identity`;

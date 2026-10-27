@@ -185,6 +185,13 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Frozen v1 quality and indexed-recall smoke
         run: bun run eval:recall
+      - name: Preserve recall performance observations
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recall-production-observations-${{ github.run_attempt }}
+          path: artifacts/recall-production-10000.json
+          if-no-files-found: ignore
       - name: Frozen native code graph quality gate
         run: bun run eval:code-graph
       - name: Bounded cross-repository workset quality smoke

@@ -147,7 +147,7 @@ it.effect.each(['empty', 'partial', 'explicit-full'] as const)(
         }),
       );
       const initialDdl = observed.filter(row => row.phase === 'initial' && isSchemaDdl(row.text));
-      expect(initialDdl).toHaveLength(37);
+      expect(initialDdl).toHaveLength(49);
       expect(initialDdl.every(row => row.transaction === (initial !== 'partial'))).toBe(true);
       const bootstrap = observed.filter(
         row =>
@@ -155,10 +155,10 @@ it.effect.each(['empty', 'partial', 'explicit-full'] as const)(
           ((row.text.startsWith('INSERT INTO metadata') && row.text.endsWith('ON CONFLICT(key) DO NOTHING')) ||
             row.text.includes("WHERE key = 'schema_version'")),
       );
-      expect(bootstrap).toHaveLength(3);
+      expect(bootstrap).toHaveLength(4);
       expect(bootstrap.every(row => row.transaction === (initial !== 'partial'))).toBe(true);
       const warm = observed.filter(row => row.phase === 'warm');
-      expect(warm.filter(row => isSchemaDdl(row.text))).toHaveLength(37);
+      expect(warm.filter(row => isSchemaDdl(row.text))).toHaveLength(49);
       expect(warm.some(row => row.text === 'BEGIN IMMEDIATE')).toBe(false);
       expect(warm.filter(row => isSchemaDdl(row.text)).every(row => !row.transaction)).toBe(true);
       expect(observed.filter(row => row.text.startsWith('PRAGMA ')).every(row => !row.transaction)).toBe(true);

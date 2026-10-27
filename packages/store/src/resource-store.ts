@@ -37,6 +37,57 @@ import {threadnoteStorageLayout} from '@threadnote/store/layout';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ExternalSourcePolicy, externalResourceAccess} from './external-resource.js';
 
+export class ResourceAccountCheckOwnershipError extends Schema.TaggedError<ResourceAccountCheckOwnershipError>()(
+  'ResourceAccountCheckOwnershipError',
+  {message: Schema.String},
+) {}
+type CheckScope = {readonly owner: number; readonly home: string; readonly account: string; active: boolean};
+const CurrentCheck = Context.Reference<CheckScope | undefined>('threadnote/ResourceAccountCheck', {
+  defaultValue: () => undefined,
+});
+
+/** Store-internal: invoked only by the actual account-lock body, solely around CHECK. */
+const withResourceAccountCheck = <A, E, R>(
+  location: {readonly home: string; readonly account: string},
+  check: Effect.Effect<A, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    Effect.map(Effect.fiberId, (owner): CheckScope => ({
+      owner,
+      home: location.home,
+      account: location.account,
+      active: true,
+    })),
+    scope => check.pipe(Effect.provideService(CurrentCheck, scope)),
+    scope =>
+      Effect.sync(() => {
+        scope.active = false;
+      }),
+  );
+
+export const assertResourceAccountCheck = (home: string, account: string) =>
+  Effect.withFiber(fiber => {
+    const scope = Context.get(fiber.context, CurrentCheck);
+    return scope?.active && scope.owner === fiber.id && scope.home === home && scope.account === account
+      ? Effect.void
+      : Effect.fail(
+          ResourceAccountCheckOwnershipError.make({
+            message: 'Identity CHECK requires the active same-fiber account lock proof.',
+          }),
+        );
+  });
+
+/** Admission may never wait for index/account ownership from inside CHECK, including inherited/expired scopes. */
+export const assertOutsideResourceAccountCheck = Effect.withFiber(fiber =>
+  Context.get(fiber.context, CurrentCheck) === undefined
+    ? Effect.void
+    : Effect.fail(
+        ResourceAccountCheckOwnershipError.make({
+          message: 'Cannot acquire identity ownership inside an account CHECK scope.',
+        }),
+      ),
+);
+
 export interface ResourceStoreLocation {
   readonly account: string;
   readonly home: string;
@@ -483,7 +534,9 @@ function createResourceStoreOperations(
       yield* withLock(
         location,
         resolved.id,
-        check.pipe(Effect.andThen(writeResourceUnlocked(location, resolved, content, options))),
+        withResourceAccountCheck(location, check).pipe(
+          Effect.andThen(writeResourceUnlocked(location, resolved, content, options)),
+        ),
       );
       return {fingerprint, uri: resolved.id.canonicalUri};
     });
@@ -529,7 +582,7 @@ function createResourceStoreOperations(
               ? preflight.pipe(Effect.catchTag('ResourceNotFound', () => Effect.void))
               : preflight;
           }
-          yield* check;
+          yield* withResourceAccountCheck(location, check);
           for (const {mutation, resolved} of prepared) {
             if (mutation.type === 'write') {
               yield* writeResourceUnlocked(location, resolved, mutation.content, mutation.options);

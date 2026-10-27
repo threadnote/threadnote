@@ -1,4 +1,4 @@
-import {Cause, Clock, Crypto, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
+import {Cause, Clock, Context, Effect, FileSystem, Layer, Option, Path, Predicate, Schema} from 'effect';
 import {
   recallCodeLinkMatchesResult,
   recallExactMatchesResult,
@@ -8,7 +8,14 @@ import {
 } from './index/result.js';
 import * as SqliteClient from '@effect/sql-sqlite-bun/SqliteClient';
 import * as SqlClient from 'effect/sql/SqlClient';
-import {useRecallDatabase} from './index/database.js';
+import {useRecallDatabase, probeRecallDatabase} from './index/database.js';
+import {assertResourceAccountCheck, assertOutsideResourceAccountCheck} from '@threadnote/store/resource-store';
+import {
+  reconcileIdentityProjection,
+  selectIdentityProjection,
+  RecallIdentityLeaseError,
+  RecallIdentityProjectionCorrupt,
+} from './index/identity_projection.js';
 import {
   initializeRecallSchema,
   RECALL_INDEX_DATABASE_VERSION,
@@ -16,28 +23,19 @@ import {
   type RecallMetadataRow,
 } from './index/schema.js';
 export {withRecallDatabaseSession} from './index/database.js';
-import {SEED_STATE_FILE} from '@threadnote/workspace/constants';
-import {sha256Hex} from '@threadnote/platform/digest';
 import {withExclusiveFileLock} from '@threadnote/platform/file/lock';
 import {resourceAccountMutationLockPath} from '@threadnote/store/resource/lock';
 import {
   isExternalResourceUri,
   loadExternalResourceAccess,
   externalResourceAccess,
-  parseExternalResourceIdentity,
-  readExternalDocumentManifest,
 } from '@threadnote/store/external-resource';
 import {
   readCanonicalMutationGeneration,
   type CanonicalMutationGenerationTransition,
 } from '@threadnote/store/resource/mutation_generation';
 import {SystemInfo} from '@threadnote/platform/system';
-import {parseSeedManifest} from '@threadnote/workspace/manifest';
-import {parseMemoryDocument} from '@threadnote/memory/document';
-import type {ProjectManifest} from '@threadnote/workspace/config';
 import {errorMessage} from '@threadnote/platform/errors';
-import {globToRegExp} from '@threadnote/platform/glob';
-import {expandPath} from '@threadnote/platform/paths';
 import {
   candidatePostings,
   indexTerms,
@@ -52,7 +50,7 @@ import {
   type RecallCorpusStatistics,
 } from './rank.js';
 import {normalizeRecallSearchText} from './tokenize.js';
-import {indexCandidate, recallExactSearchText, recallIndexCandidateIsEligible} from './index/candidate.js';
+import {recallExactSearchText, recallIndexCandidateIsEligible} from './index/candidate.js';
 import {removeLegacyRecallIndexArtifacts} from './index/cleanup.js';
 import {recallEligibilityPolicyRestrictsCandidates, type RecallEligibilityPolicy} from './eligibility.js';
 import {recallCandidateIsValid} from './candidate_validation.js';
@@ -75,6 +73,7 @@ import {
   recallIndexForegroundRefreshRequired,
 } from './index/freshness.js';
 import {
+  identityStaleMarkerBasePath,
   clearRecallStaleMarkerInvalidations as clearStaleMarkerInvalidations,
   readRecallStaleMarker as readStaleMarker,
   type RecallStaleMarker,
@@ -99,6 +98,10 @@ import {
   selectTopRecallPostingsByTerms,
 } from './index/selection.js';
 import {
+  assembleRecallSourceCandidate,
+  loadCanonicalResourcePolicy,
+  RecallIndexOperationError,
+  recallProjectionObservedChanges,
   countRecallSourceChanges,
   dropRecallSourceScan,
   forEachChangedRecallSourcePage,
@@ -113,21 +116,10 @@ import {
   RECALL_REFRESH_SOURCE_TABLE,
   scanRecallSources,
   stageRecallRefreshAffectedTerms,
-  type CanonicalResourcePolicy,
   type IndexedRecallSource,
 } from './index/refresh.js';
 
 export {recallUriMatchesScopes} from './index/scope.js';
-
-class RecallIndexOperationError extends Schema.TaggedError<RecallIndexOperationError>()('RecallIndexOperationError', {
-  cause: Schema.optionalKey(Schema.Defect()),
-  message: Schema.String,
-}) {}
-
-interface SeedStateEntry {
-  readonly mtimeMs: number;
-  readonly size: number;
-}
 
 interface RecallIndexConfig {
   readonly account: string;
@@ -201,7 +193,6 @@ const INACTIVE_DATABASE_FILENAME = `with-inactive-v${RECALL_INDEX_DATABASE_VERSI
 const DEFAULT_QUERY_RESULT_LIMIT = 100;
 const QUERY_POSTING_POOL_MULTIPLIER = 5;
 const MINIMUM_QUERY_POSTING_POOL = 500;
-const SEED_FILE_MTIME_TOLERANCE_MILLISECONDS = 1;
 let staleGenerationCounter = 0;
 
 interface RecallIndexPointer {
@@ -471,14 +462,240 @@ export const loadRecallIndex = Effect.fn('recall.loadIndex')(function* (
   return (yield* loadRecallIndexData(config, options)).candidates;
 });
 
+type IdentityLease = {
+  readonly owner: number;
+  readonly home: string;
+  readonly account: string;
+  readonly path: string;
+  readonly pointerPath: string;
+  readonly pointer: string | undefined;
+  readonly identity: NonNullable<Effect.Success<ReturnType<typeof probeRecallDatabase>>>;
+  readonly sql: SqlClient.SqlClient;
+  active: boolean;
+  busy: boolean;
+};
+const CurrentIdentityLease = Context.Reference<IdentityLease | undefined>('threadnote/RecallIdentityClientLease', {
+  defaultValue: () => undefined,
+});
+const hasRecallIdentityClientLease = Effect.map(CurrentIdentityLease, lease => lease !== undefined);
+const assertOutsideRecallIdentityClientLease = Effect.gen(function* () {
+  if (yield* hasRecallIdentityClientLease)
+    return yield* RecallIdentityLeaseError.make({message: 'Identity client lease cannot be reacquired.'});
+  yield* assertOutsideResourceAccountCheck;
+});
+
+/** Called inside the real index lock, after schema/pointer admission and before store account acquisition. */
+function withRecallIdentityClientLease<A, E, R>(
+  path: string,
+  home: string,
+  account: string,
+  program: Effect.Effect<A, E, R>,
+) {
+  return Effect.gen(function* () {
+    yield* assertOutsideRecallIdentityClientLease;
+    const sql = yield* SqlClient.SqlClient;
+    const current = yield* probeRecallDatabase(path, true);
+    if (current === undefined)
+      return yield* RecallIdentityLeaseError.make({message: 'Identity database cannot establish a live client lease.'});
+    const fs = yield* FileSystem.FileSystem;
+    const pointerPath = recallIndexPointerPath(yield* Path.Path, home, false);
+    const pointer = yield* readIdentityLeasePointer(fs, pointerPath);
+    return yield* Effect.acquireUseRelease(
+      Effect.map(Effect.fiberId, (owner): IdentityLease => ({
+        owner,
+        home,
+        account,
+        path,
+        pointerPath,
+        pointer,
+        sql,
+        identity: current,
+        active: true,
+        busy: false,
+      })),
+      lease => program.pipe(Effect.provideService(CurrentIdentityLease, lease)),
+      lease =>
+        Effect.sync(() => {
+          lease.active = false;
+        }),
+    );
+  });
+}
+
+const readIdentityLeasePointer = (fs: FileSystem.FileSystem, path: string) =>
+  Effect.gen(function* () {
+    return (yield* fs.exists(path)) ? yield* fs.readFileString(path) : undefined;
+  });
+
+/** No recovery or lock acquisition is possible through this borrow; stale/inherited/reentrant scopes fail. */
+function borrowRecallIdentityClient<A, E, R>(
+  home: string,
+  account: string,
+  query: (sql: SqlClient.SqlClient, path: string) => Effect.Effect<A, E, R>,
+) {
+  return Effect.withFiber(fiber =>
+    Effect.gen(function* () {
+      const lease = Context.get(fiber.context, CurrentIdentityLease);
+      if (!lease?.active || lease.busy || lease.owner !== fiber.id || lease.home !== home || lease.account !== account)
+        return yield* RecallIdentityLeaseError.make({
+          message: 'Identity query requires a matching active same-fiber index/client lease.',
+        });
+      yield* assertResourceAccountCheck(home, account);
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          lease.busy = true;
+        }),
+        () =>
+          Effect.gen(function* () {
+            const current = yield* probeRecallDatabase(lease.path, true);
+            if (current?.files !== lease.identity.files)
+              return yield* RecallIdentityLeaseError.make({message: 'Identity database changed inside CHECK.'});
+            const fs = yield* FileSystem.FileSystem;
+            if ((yield* readIdentityLeasePointer(fs, lease.pointerPath)) !== lease.pointer)
+              return yield* RecallIdentityLeaseError.make({message: 'Identity database pointer changed inside CHECK.'});
+            const result = yield* query(lease.sql, lease.path);
+            if (
+              (yield* probeRecallDatabase(lease.path, true))?.files !== lease.identity.files ||
+              (yield* readIdentityLeasePointer(fs, lease.pointerPath)) !== lease.pointer
+            )
+              return yield* RecallIdentityLeaseError.make({
+                message: 'Identity database changed before CHECK completed.',
+              });
+            return result;
+          }),
+        () =>
+          Effect.sync(() => {
+            lease.busy = false;
+          }),
+      );
+    }),
+  );
+}
+
+/** Internal algorithm choice, never caller-supplied ownership or public workflow payload. */
+export type MemoryIdentityEngine = 'lexical' | 'identity-projection';
+
+/** Targets/evidence are prepared by the caller before admission; the real store takes account ownership next. */
+export function withRecallIdentityProjectionLease<A, E, R>(config: RecallIndexConfig, program: Effect.Effect<A, E, R>) {
+  return withIdentityProjectionLease(config, program);
+}
+
+function withIdentityProjectionLease<A, E, R>(
+  config: RecallIndexConfig,
+  program: Effect.Effect<A, E, R>,
+  replaceDatabase?: string,
+) {
+  return Effect.gen(function* () {
+    yield* assertOutsideRecallIdentityClientLease;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const fixed = recallIndexDatabasePath(path, config.agentContextHome, false);
+    yield* fs.makeDirectory(path.dirname(fixed), {recursive: true, mode: 0o700});
+    return yield* withRecallIndexLock(fs, path, config.agentContextHome, false, () =>
+      Effect.gen(function* () {
+        const active = yield* resolveActiveRecallDatabasePath(fs, path, config.agentContextHome, false);
+        let admitted = false;
+        const run = (database: string) =>
+          useRecallDatabase(
+            database,
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* initializeRecallDatabase(sql, fs, path, config, false, true);
+              yield* fs.chmod(database, 0o600);
+              admitted = true;
+              return yield* withRecallIdentityClientLease(database, config.agentContextHome, config.account, program);
+            }),
+          );
+        const replace = Effect.gen(function* () {
+          const system = yield* SystemInfo;
+          const relative = path.join(
+            'generations',
+            `active-${yield* Clock.currentTimeMillis}-${system.processId}-${nextRecallGenerationCounter()}.sqlite`,
+          );
+          const replacement = path.join(recallIndexRoot(path, config.agentContextHome), relative);
+          yield* fs.makeDirectory(path.dirname(replacement), {recursive: true, mode: 0o700});
+          // Complete recovery and close the replacement before publishing it; no source reconciliation is admitted here.
+          yield* useRecallDatabase(
+            replacement,
+            Effect.gen(function* () {
+              const sql = yield* SqlClient.SqlClient;
+              yield* initializeRecallDatabase(sql, fs, path, config, false, true);
+              yield* fs.chmod(replacement, 0o600);
+              yield* sql.unsafe('PRAGMA wal_checkpoint(TRUNCATE)');
+              yield* sql.unsafe('PRAGMA journal_mode = DELETE');
+            }),
+            false,
+          ).pipe(Effect.ensuring(removeRecallDatabaseAuxiliaryFiles(fs, replacement).pipe(Effect.ignore)));
+          yield* writeActiveRecallDatabasePointer(fs, path, config.agentContextHome, false, relative);
+          return yield* run(replacement);
+        });
+        if (replaceDatabase === active) return yield* replace;
+        return yield* run(active).pipe(
+          Effect.catchCauseIf(
+            cause => !admitted && isRecoverableRecallIndexCause(cause),
+            () => replace,
+          ),
+        );
+      }),
+    );
+  });
+}
+
+const loadIdentityProjection = Effect.fn('recall.loadIdentityProjection')(function* (
+  config: RecallIndexConfig,
+  options: {readonly allowedUriScopes: readonly string[]; readonly memoryIds: readonly string[]},
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const marker = identityStaleMarkerBasePath(recallIndexDatabasePath(path, config.agentContextHome, false));
+  const query = (sql: SqlClient.SqlClient, checked: boolean) =>
+    Effect.gen(function* () {
+      yield* reconcileIdentityProjection(sql, fs, path, marker, config, checked);
+      return yield* selectIdentityProjection(sql, config, options);
+    });
+  if (yield* hasRecallIdentityClientLease)
+    return yield* borrowRecallIdentityClient(config.agentContextHome, config.account, (sql, database) =>
+      Effect.gen(function* () {
+        const active = yield* resolveActiveRecallDatabasePath(fs, path, config.agentContextHome, false);
+        if (active !== database)
+          return yield* RecallIdentityLeaseError.make({message: 'Identity database pointer changed inside CHECK.'});
+        const metadata = yield* loadRecallMetadata(sql);
+        if (metadata.get('schema_version') !== String(RECALL_INDEX_DATABASE_VERSION))
+          return yield* RecallIdentityLeaseError.make({message: 'Identity database schema changed inside CHECK.'});
+        return yield* query(sql, true);
+      }),
+    );
+  // Ordinary identity reads use index -> account. The lease is borrowed exclusively by real CHECK queries.
+  let failedDatabase: string | undefined;
+  const read = withCanonicalResourceMutationLock(
+    fs,
+    path,
+    config.agentContextHome,
+    config.account,
+    Effect.gen(function* () {
+      failedDatabase = (yield* CurrentIdentityLease)?.path;
+      return yield* query(yield* SqlClient.SqlClient, false);
+    }),
+  );
+  // Recovery belongs only to this read-only entry, after both leases unwind. Never replay an arbitrary write program.
+  return yield* withIdentityProjectionLease(config, read).pipe(
+    Effect.catchCauseIf(
+      cause => Schema.is(RecallIdentityProjectionCorrupt)(Cause.squash(cause)) || isRecoverableRecallIndexCause(cause),
+      () => withIdentityProjectionLease(config, read, failedDatabase),
+    ),
+  );
+});
+
 export const loadRecallMemoryIdentities = Effect.fn('recall.loadMemoryIdentities')(function* (
   config: RecallIndexConfig,
   options: {
     readonly allowedUriScopes: readonly string[];
     readonly memoryIds: readonly string[];
     readonly validateNow?: boolean;
+    readonly engine?: MemoryIdentityEngine;
   },
 ) {
+  if (options.engine === 'identity-projection') return yield* loadIdentityProjection(config, options);
   const data = yield* loadRecallIndexData(config, {
     allowedUriScopes: options.allowedUriScopes,
     includeInactive: false,
@@ -712,6 +929,12 @@ export const expireRecallIndexValidation = Effect.fn('recall.expireValidation')(
   const databasePath = recallIndexDatabasePath(pathService, agentContextHome, includeInactive);
   yield* fs.makeDirectory(pathService.dirname(databasePath), {recursive: true, mode: 0o700});
   yield* writeStaleGeneration(fs, databasePath, invalidatedUris, canonicalMutationGeneration);
+  yield* writeStaleGeneration(
+    fs,
+    identityStaleMarkerBasePath(databasePath),
+    invalidatedUris,
+    canonicalMutationGeneration,
+  );
 });
 
 const selectRecallIndexData = Effect.fn('recall.selectIndexData')(function* (
@@ -1147,6 +1370,7 @@ function recallIndexForegroundFreshness(
   return {
     forceRefresh: options.forceRefresh === true,
     initialized: metadata.get('initialized') === 'true',
+    sourceValidationRequired: metadata.get('source_validation_required') === 'true',
     integrityCurrent: RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata),
     observedCanonicalMutationGeneration: canonicalMutationGeneration,
     observedStaleGeneration: staleMarker?.generation ?? '',
@@ -1203,6 +1427,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
   );
   const forceAllSources =
     forceRefresh ||
+    previousMetadata.get('source_validation_required') === 'true' ||
     forceFromMarker ||
     (canonicalMutationGenerationChanged && !canonicalMutationContinuityAllowsIncrementalRefresh);
   const refreshCounts = yield* countRecallSourceChanges(sql, forceAllSources);
@@ -1229,24 +1454,11 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         page,
         source =>
           Effect.gen(function* () {
-            const content = yield* fs.readFileString(source.path);
-            const canonicalResource = yield* verifyCanonicalResource(fs, source.uri, content, canonicalResourcePolicy);
-            const memory = isExternalResourceUri(source.uri) ? undefined : parseMemoryDocument(source.uri, content);
-            const externalIdentity = parseExternalResourceIdentity(source.uri);
-            const externalManifest =
-              externalIdentity === undefined
-                ? undefined
-                : yield* readExternalDocumentManifest(
-                    {home: config.agentContextHome, account: config.account, user: config.user},
-                    externalIdentity.sourceId,
-                    externalIdentity.documentId,
-                  );
-            const candidate = indexCandidate(
-              source.uri,
-              content,
-              canonicalResource,
-              memory,
-              externalManifest?.fetchedAt,
+            const {candidate, memory} = yield* assembleRecallSourceCandidate(
+              fs,
+              config,
+              source,
+              canonicalResourcePolicy,
             );
             const memoryLinkProjection = deriveIndexedRecallMemoryLinks(memory);
             const postings = candidatePostings(candidate);
@@ -1288,6 +1500,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
     removed: refreshCounts.removedSourceCount,
     total: refreshCounts.changedSourceCount,
   }) ?? Effect.void;
+  const observedSourceChanges = yield* recallProjectionObservedChanges(sql, 'lexical');
   const writeRefresh = sql.withTransaction(
     Effect.gen(function* () {
       yield* stageRecallRefreshAffectedTerms(sql);
@@ -1438,6 +1651,7 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         ['document_count', String(documentCount)],
         ['include_inactive', includeInactive ? 'true' : 'false'],
         ['initialized', 'true'],
+        ['source_validation_required', 'false'],
         ['memory_identity_conflict_generation', contentGeneration],
         ['logical_document_count', String(logicalDocumentCount)],
         ['logical_total_document_length', String(logicalTotalDocumentLength)],
@@ -1446,6 +1660,14 @@ const refreshRecallDatabase = Effect.fn('recall.refreshDatabase')(function* (
         ['total_document_length', String(totalDocumentLength)],
         ['validated_at', String(Math.max(now, previousValidatedAt + 1))],
       ] as const;
+      if (
+        observedSourceChanges &&
+        previousMetadata.get('identity_initialized') === 'true' &&
+        previousMetadata.get('identity_canonical_mutation_generation') === canonicalMutationGeneration
+      ) {
+        yield* sql.unsafe(`INSERT INTO metadata (key, value) VALUES ('identity_source_validation_required', 'true')
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+      }
       yield* sql.unsafe(
         `INSERT INTO metadata (key, value) VALUES ${metadataEntries.map(() => '(?, ?)').join(', ')}
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
@@ -1629,185 +1851,6 @@ function chunkValues<Value>(values: readonly Value[], size: number): readonly (r
     chunks.push(values.slice(index, index + size));
   }
   return chunks;
-}
-
-function loadCanonicalResourcePolicy(
-  config: RecallIndexConfig,
-): Effect.Effect<CanonicalResourcePolicy, never, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
-  const manifestPath = config.manifestPath;
-  if (!manifestPath) {
-    return Effect.succeed({entryKeyByUri: new Map(), sourcePathByUri: new Map()});
-  }
-  return Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    const manifestRaw = yield* fs.readFileString(manifestPath);
-    const manifest = yield* Effect.try({
-      try: () => parseSeedManifest(manifestRaw, manifestPath),
-      catch: cause =>
-        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
-    });
-    const seedStateRaw = yield* fs.readFileString(pathService.join(config.agentContextHome, SEED_STATE_FILE));
-    const seedState = yield* Effect.try({
-      try: () => parseSeedState(seedStateRaw),
-      catch: cause =>
-        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
-    });
-    const entryKeyByUri = new Map<string, string>();
-    const sourcePathByUri = new Map<string, string>();
-    for (const [uri, recorded] of [...seedState].sort(([left], [right]) => left.localeCompare(right))) {
-      const source = yield* resolveSeededResourceSource(fs, manifest.projects, uri, recorded);
-      if (!source) {
-        continue;
-      }
-      const match = seededResourceMatch(manifest.projects, uri);
-      if (!match) {
-        continue;
-      }
-      sourcePathByUri.set(uri, source);
-      entryKeyByUri.set(
-        uri,
-        yield* sha256Hex(
-          JSON.stringify({
-            project: {
-              path: yield* expandPath(match.project.path),
-              seed: [...match.project.seed],
-              uri: normalizedResourceRoot(match.project.uri),
-            },
-            recorded,
-            source,
-            uri,
-          }),
-        ),
-      );
-    }
-    return {entryKeyByUri, sourcePathByUri};
-  }).pipe(
-    Effect.orElseSucceed(() => ({
-      entryKeyByUri: new Map<string, string>(),
-      sourcePathByUri: new Map<string, string>(),
-    })),
-  );
-}
-
-function parseSeedState(raw: string): ReadonlyMap<string, SeedStateEntry> {
-  const value: unknown = JSON.parse(raw);
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    !('version' in value) ||
-    value.version !== 1 ||
-    !('files' in value) ||
-    typeof value.files !== 'object' ||
-    value.files === null
-  ) {
-    return new Map();
-  }
-  const entries: Array<[string, SeedStateEntry]> = [];
-  for (const [uri, entry] of Object.entries(value.files)) {
-    if (
-      typeof entry === 'object' &&
-      entry !== null &&
-      'mtimeMs' in entry &&
-      typeof entry.mtimeMs === 'number' &&
-      Number.isFinite(entry.mtimeMs) &&
-      'size' in entry &&
-      typeof entry.size === 'number' &&
-      Number.isFinite(entry.size)
-    ) {
-      entries.push([uri, {mtimeMs: entry.mtimeMs, size: entry.size}]);
-    }
-  }
-  return new Map(entries);
-}
-
-function resolveSeededResourceSource(
-  fs: FileSystem.FileSystem,
-  projects: readonly ProjectManifest[],
-  uri: string,
-  recorded: SeedStateEntry,
-): Effect.Effect<string | undefined, never, Path.Path | SystemInfo> {
-  return Effect.gen(function* () {
-    const pathService = yield* Path.Path;
-    const match = seededResourceMatch(projects, uri);
-    if (!match) {
-      return undefined;
-    }
-    const projectRoot = yield* expandPath(match.project.path);
-    const sourcePath = pathService.join(projectRoot, ...match.relativePath.split('/'));
-    const relativeSourcePath = pathService.relative(projectRoot, sourcePath);
-    if (
-      relativeSourcePath === '' ||
-      relativeSourcePath.startsWith(`..${pathService.sep}`) ||
-      relativeSourcePath === '..' ||
-      pathService.isAbsolute(relativeSourcePath)
-    ) {
-      return undefined;
-    }
-    const [realProjectRoot, realSourcePath, info] = yield* Effect.all([
-      fs.realPath(projectRoot),
-      fs.realPath(sourcePath),
-      fs.stat(sourcePath),
-    ]);
-    const realRelativePath = pathService.relative(realProjectRoot, realSourcePath);
-    if (
-      realRelativePath.startsWith(`..${pathService.sep}`) ||
-      realRelativePath === '..' ||
-      pathService.isAbsolute(realRelativePath) ||
-      info.type !== 'File' ||
-      Number(info.size) !== recorded.size
-    ) {
-      return undefined;
-    }
-    const modifiedAt = Option.getOrUndefined(info.mtime)?.getTime();
-    if (modifiedAt === undefined || Math.abs(modifiedAt - recorded.mtimeMs) > SEED_FILE_MTIME_TOLERANCE_MILLISECONDS) {
-      return undefined;
-    }
-    return sourcePath;
-  }).pipe(Effect.orElseSucceed(() => undefined));
-}
-
-function seededResourceMatch(
-  projects: readonly ProjectManifest[],
-  uri: string,
-): {readonly project: ProjectManifest; readonly relativePath: string} | undefined {
-  for (const project of projects) {
-    const root = normalizedResourceRoot(project.uri);
-    if (!uri.startsWith(`${root}/`)) {
-      continue;
-    }
-    const relativePath = uri.slice(root.length + 1).replaceAll('\\', '/');
-    if (
-      relativePath.length === 0 ||
-      relativePath.startsWith('/') ||
-      relativePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
-      !project.seed.some(pattern => globToRegExp(pattern.replaceAll('\\', '/')).test(relativePath))
-    ) {
-      continue;
-    }
-    return {project, relativePath};
-  }
-  return undefined;
-}
-
-function normalizedResourceRoot(uri: string): string {
-  return stripRecallAnchor(uri).replace(/\/+$/, '');
-}
-
-function verifyCanonicalResource(
-  fs: FileSystem.FileSystem,
-  uri: string,
-  indexedContent: string,
-  policy: CanonicalResourcePolicy,
-): Effect.Effect<boolean, never> {
-  const sourcePath = policy.sourcePathByUri.get(uri);
-  if (!sourcePath) {
-    return Effect.succeed(false);
-  }
-  return fs.readFileString(sourcePath).pipe(
-    Effect.map(sourceContent => sourceContent === indexedContent),
-    Effect.orElseSucceed(() => false),
-  );
 }
 
 function filterExternalRecallResult<A>(

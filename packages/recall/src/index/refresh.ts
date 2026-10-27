@@ -1,9 +1,23 @@
-import {Effect, FileSystem, Path} from 'effect';
+import {Crypto, Effect, FileSystem, Option, Path, Schema} from 'effect';
+import {SEED_STATE_FILE} from '@threadnote/workspace/constants';
+import {sha256Hex} from '@threadnote/platform/digest';
+import {SystemInfo} from '@threadnote/platform/system';
+import {parseSeedManifest} from '@threadnote/workspace/manifest';
+import type {ProjectManifest} from '@threadnote/workspace/config';
+import {globToRegExp} from '@threadnote/platform/glob';
+import {expandPath} from '@threadnote/platform/paths';
 import * as SqlClient from 'effect/sql/SqlClient';
 import {forEachFileWithinBoundary} from '@threadnote/platform/safe_scan';
 import {uriSegment} from '@threadnote/workspace/manifest';
 import {canonicalResourceUri, parseResourceId} from '@threadnote/store/resource-id';
-import {isExternalResourceUri, loadExternalResourceAccess} from '@threadnote/store/external-resource';
+import {
+  isExternalResourceUri,
+  loadExternalResourceAccess,
+  parseExternalResourceIdentity,
+  readExternalDocumentManifest,
+} from '@threadnote/store/external-resource';
+import {parseMemoryDocument} from '@threadnote/memory/document';
+import {indexCandidate} from './candidate.js';
 import type {IndexedRecallCodeLink} from '../code_links.js';
 import {memoryLinkLocatorDigest, type IndexedRecallMemoryLink} from '../memory/links.js';
 import {recallIndexScopeProject} from '../eligibility.js';
@@ -63,7 +77,8 @@ interface RecallRefreshIndexedCodeLinkGenerationRow {
   readonly uri: string;
 }
 
-interface RecallRefreshConfig {
+export interface RecallRefreshConfig {
+  readonly manifestPath?: string;
   readonly account: string;
   readonly agentContextHome: string;
   readonly user: string;
@@ -96,8 +111,9 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   includeInactive: boolean,
   canonicalResourcePolicy: CanonicalResourcePolicy,
   invalidatedUris: ReadonlySet<string>,
+  projection: RecallSourceProjection = 'lexical',
 ) {
-  yield* prepareRecallSourceScan(sql);
+  yield* prepareRecallSourceScan(sql, projection);
   const externalAccess = yield* loadExternalResourceAccess({
     home: config.agentContextHome,
     account: config.account,
@@ -177,18 +193,28 @@ export const scanRecallSources = Effect.fn('recall.scanSources')(function* (
   return {scannedSourceCount, skippedOversizedDocumentCount};
 });
 
-export function countRecallSourceChanges(sql: SqlClient.SqlClient, forceRefresh: boolean) {
+export type RecallSourceProjection = 'lexical' | 'identity';
+
+function sourceRelation(projection: RecallSourceProjection) {
+  return projection === 'identity' ? 'identity_documents' : 'documents';
+}
+
+export function countRecallSourceChanges(
+  sql: SqlClient.SqlClient,
+  forceRefresh: boolean,
+  projection: RecallSourceProjection = 'lexical',
+) {
   return sql
     .unsafe<{readonly changed_source_count: number; readonly removed_source_count: number}>(
       `SELECT
         (SELECT COUNT(*) FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS source
-         LEFT JOIN documents AS document ON document.uri = source.uri
+         LEFT JOIN ${sourceRelation(projection)} AS document ON document.uri = source.uri
          WHERE (? = 1 OR source.invalidated = 1 OR document.id IS NULL
            OR document.source_path <> source.source_path
            OR document.source_modified_at IS NOT source.source_modified_at
            OR document.source_size <> source.source_size
            OR document.authority_policy_key IS NOT source.authority_policy_key)) AS changed_source_count,
-        (SELECT COUNT(*) FROM documents AS document
+        (SELECT COUNT(*) FROM ${sourceRelation(projection)} AS document
          LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = document.uri
          WHERE source.uri IS NULL) AS removed_source_count`,
       [forceRefresh ? 1 : 0],
@@ -205,6 +231,7 @@ export function forEachChangedRecallSourcePage<A, E, R>(
   sql: SqlClient.SqlClient,
   forceRefresh: boolean,
   visitPage: (page: readonly RecallIndexSource[]) => Effect.Effect<A, E, R>,
+  projection: RecallSourceProjection = 'lexical',
 ) {
   return Effect.gen(function* () {
     let cursor: string | undefined;
@@ -213,7 +240,7 @@ export function forEachChangedRecallSourcePage<A, E, R>(
       const rows = yield* sql.unsafe<RecallRefreshSourceRow>(
         `SELECT source.uri, source.source_path, source.source_modified_at, source.source_size
          FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS source
-         LEFT JOIN documents AS document ON document.uri = source.uri
+         LEFT JOIN ${sourceRelation(projection)} AS document ON document.uri = source.uri
          WHERE (? = 1 OR source.invalidated = 1 OR document.id IS NULL
            OR document.source_path <> source.source_path
            OR document.source_modified_at IS NOT source.source_modified_at
@@ -483,7 +510,7 @@ export function dropRecallSourceScan(sql: SqlClient.SqlClient) {
   });
 }
 
-function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
+function prepareRecallSourceScan(sql: SqlClient.SqlClient, projection: RecallSourceProjection) {
   return Effect.gen(function* () {
     yield* sql.unsafe('PRAGMA temp_store = FILE');
     yield* dropRecallSourceScan(sql);
@@ -495,6 +522,7 @@ function prepareRecallSourceScan(sql: SqlClient.SqlClient) {
       source_path TEXT NOT NULL, source_modified_at TEXT,
       source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
       invalidated INTEGER NOT NULL CHECK (invalidated IN (0, 1))) WITHOUT ROWID`);
+    if (projection === 'identity') return;
     yield* sql.unsafe(`CREATE TEMP TABLE ${RECALL_REFRESH_INDEXED_DOCUMENT_TABLE} (
       uri TEXT PRIMARY KEY NOT NULL, project TEXT,
       approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),
@@ -561,4 +589,239 @@ function excludedFile(path: string): boolean {
     /\/\.(?:abstract|overview)\.md$/.test(normalized) ||
     normalized.includes('/agent-artifacts/packs/')
   );
+}
+
+/** Both projections read and authorize the same full candidate; only lexical derives search/link rows. */
+export const assembleRecallSourceCandidate = Effect.fn('recall.assembleSourceCandidate')(function* (
+  fs: FileSystem.FileSystem,
+  config: RecallRefreshConfig,
+  source: RecallIndexSource,
+  policy: CanonicalResourcePolicy,
+) {
+  const content = yield* fs.readFileString(source.path);
+  const sourcePath = policy.sourcePathByUri.get(source.uri);
+  const canonicalResource =
+    sourcePath === undefined
+      ? false
+      : yield* fs.readFileString(sourcePath).pipe(
+          Effect.map(sourceContent => sourceContent === content),
+          Effect.orElseSucceed(() => false),
+        );
+  const memory = isExternalResourceUri(source.uri) ? undefined : parseMemoryDocument(source.uri, content);
+  const externalIdentity = parseExternalResourceIdentity(source.uri);
+  const externalManifest =
+    externalIdentity === undefined
+      ? undefined
+      : yield* readExternalDocumentManifest(
+          {home: config.agentContextHome, account: config.account, user: config.user},
+          externalIdentity.sourceId,
+          externalIdentity.documentId,
+        );
+  return {
+    candidate: indexCandidate(source.uri, content, canonicalResource, memory, externalManifest?.fetchedAt),
+    memory,
+  };
+});
+
+/** Compare the observed source postimage with the peer baseline, never invalidate merely for force-selected rows. */
+export function recallProjectionObservedChanges(sql: SqlClient.SqlClient, projection: RecallSourceProjection) {
+  const ownRelation = sourceRelation(projection);
+  const peerRelation = sourceRelation(projection === 'identity' ? 'lexical' : 'identity');
+  const staged = projection === 'identity' ? 'recall_identity_candidates' : RECALL_REFRESH_INDEXED_DOCUMENT_TABLE;
+  return sql
+    .unsafe<{readonly changed: number}>(
+      `SELECT EXISTS (
+    SELECT 1 FROM temp.${RECALL_REFRESH_SOURCE_TABLE} AS source
+    LEFT JOIN ${peerRelation} AS document ON document.uri = source.uri
+    LEFT JOIN ${ownRelation} AS baseline ON baseline.uri = source.uri
+    LEFT JOIN temp.${staged} AS indexed ON indexed.uri = source.uri
+    WHERE document.id IS NULL OR document.source_path <> source.source_path
+      OR document.source_modified_at IS NOT source.source_modified_at
+      OR document.source_size <> source.source_size
+      OR document.authority_policy_key IS NOT source.authority_policy_key
+      OR COALESCE(indexed.candidate_json, baseline.candidate_json) IS NOT document.candidate_json
+    UNION ALL SELECT 1 FROM ${peerRelation} AS document
+    LEFT JOIN temp.${RECALL_REFRESH_SOURCE_TABLE} AS source ON source.uri = document.uri
+    WHERE source.uri IS NULL
+  ) AS changed`,
+    )
+    .pipe(Effect.map(rows => rows[0]?.changed === 1));
+}
+
+export class RecallIndexOperationError extends Schema.TaggedError<RecallIndexOperationError>()(
+  'RecallIndexOperationError',
+  {
+    cause: Schema.optionalKey(Schema.Defect()),
+    message: Schema.String,
+  },
+) {}
+
+interface SeedStateEntry {
+  readonly mtimeMs: number;
+  readonly size: number;
+}
+
+const SEED_FILE_MTIME_TOLERANCE_MILLISECONDS = 1;
+
+export function loadCanonicalResourcePolicy(
+  config: RecallRefreshConfig,
+): Effect.Effect<CanonicalResourcePolicy, never, Crypto.Crypto | FileSystem.FileSystem | Path.Path | SystemInfo> {
+  const manifestPath = config.manifestPath;
+  if (!manifestPath) {
+    return Effect.succeed({entryKeyByUri: new Map(), sourcePathByUri: new Map()});
+  }
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const pathService = yield* Path.Path;
+    const manifestRaw = yield* fs.readFileString(manifestPath);
+    const manifest = yield* Effect.try({
+      try: () => parseSeedManifest(manifestRaw, manifestPath),
+      catch: cause =>
+        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
+    });
+    const seedStateRaw = yield* fs.readFileString(pathService.join(config.agentContextHome, SEED_STATE_FILE));
+    const seedState = yield* Effect.try({
+      try: () => parseSeedState(seedStateRaw),
+      catch: cause =>
+        RecallIndexOperationError.make({cause, message: cause instanceof Error ? cause.message : String(cause)}),
+    });
+    const entryKeyByUri = new Map<string, string>();
+    const sourcePathByUri = new Map<string, string>();
+    for (const [uri, recorded] of [...seedState].sort(([left], [right]) => left.localeCompare(right))) {
+      const source = yield* resolveSeededResourceSource(fs, manifest.projects, uri, recorded);
+      if (!source) {
+        continue;
+      }
+      const match = seededResourceMatch(manifest.projects, uri);
+      if (!match) {
+        continue;
+      }
+      sourcePathByUri.set(uri, source);
+      entryKeyByUri.set(
+        uri,
+        yield* sha256Hex(
+          JSON.stringify({
+            project: {
+              path: yield* expandPath(match.project.path),
+              seed: [...match.project.seed],
+              uri: normalizedResourceRoot(match.project.uri),
+            },
+            recorded,
+            source,
+            uri,
+          }),
+        ),
+      );
+    }
+    return {entryKeyByUri, sourcePathByUri};
+  }).pipe(
+    Effect.orElseSucceed(() => ({
+      entryKeyByUri: new Map<string, string>(),
+      sourcePathByUri: new Map<string, string>(),
+    })),
+  );
+}
+
+function parseSeedState(raw: string): ReadonlyMap<string, SeedStateEntry> {
+  const value: unknown = JSON.parse(raw);
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    !('version' in value) ||
+    value.version !== 1 ||
+    !('files' in value) ||
+    typeof value.files !== 'object' ||
+    value.files === null
+  ) {
+    return new Map();
+  }
+  const entries: Array<[string, SeedStateEntry]> = [];
+  for (const [uri, entry] of Object.entries(value.files)) {
+    if (
+      typeof entry === 'object' &&
+      entry !== null &&
+      'mtimeMs' in entry &&
+      typeof entry.mtimeMs === 'number' &&
+      Number.isFinite(entry.mtimeMs) &&
+      'size' in entry &&
+      typeof entry.size === 'number' &&
+      Number.isFinite(entry.size)
+    ) {
+      entries.push([uri, {mtimeMs: entry.mtimeMs, size: entry.size}]);
+    }
+  }
+  return new Map(entries);
+}
+
+function resolveSeededResourceSource(
+  fs: FileSystem.FileSystem,
+  projects: readonly ProjectManifest[],
+  uri: string,
+  recorded: SeedStateEntry,
+): Effect.Effect<string | undefined, never, Path.Path | SystemInfo> {
+  return Effect.gen(function* () {
+    const pathService = yield* Path.Path;
+    const match = seededResourceMatch(projects, uri);
+    if (!match) {
+      return undefined;
+    }
+    const projectRoot = yield* expandPath(match.project.path);
+    const sourcePath = pathService.join(projectRoot, ...match.relativePath.split('/'));
+    const relativeSourcePath = pathService.relative(projectRoot, sourcePath);
+    if (
+      relativeSourcePath === '' ||
+      relativeSourcePath.startsWith(`..${pathService.sep}`) ||
+      relativeSourcePath === '..' ||
+      pathService.isAbsolute(relativeSourcePath)
+    ) {
+      return undefined;
+    }
+    const [realProjectRoot, realSourcePath, info] = yield* Effect.all([
+      fs.realPath(projectRoot),
+      fs.realPath(sourcePath),
+      fs.stat(sourcePath),
+    ]);
+    const realRelativePath = pathService.relative(realProjectRoot, realSourcePath);
+    if (
+      realRelativePath.startsWith(`..${pathService.sep}`) ||
+      realRelativePath === '..' ||
+      pathService.isAbsolute(realRelativePath) ||
+      info.type !== 'File' ||
+      Number(info.size) !== recorded.size
+    ) {
+      return undefined;
+    }
+    const modifiedAt = Option.getOrUndefined(info.mtime)?.getTime();
+    if (modifiedAt === undefined || Math.abs(modifiedAt - recorded.mtimeMs) > SEED_FILE_MTIME_TOLERANCE_MILLISECONDS) {
+      return undefined;
+    }
+    return sourcePath;
+  }).pipe(Effect.orElseSucceed(() => undefined));
+}
+
+function seededResourceMatch(
+  projects: readonly ProjectManifest[],
+  uri: string,
+): {readonly project: ProjectManifest; readonly relativePath: string} | undefined {
+  for (const project of projects) {
+    const root = normalizedResourceRoot(project.uri);
+    if (!uri.startsWith(`${root}/`)) {
+      continue;
+    }
+    const relativePath = uri.slice(root.length + 1).replaceAll('\\', '/');
+    if (
+      relativePath.length === 0 ||
+      relativePath.startsWith('/') ||
+      relativePath.split('/').some(segment => segment === '' || segment === '.' || segment === '..') ||
+      !project.seed.some(pattern => globToRegExp(pattern.replaceAll('\\', '/')).test(relativePath))
+    ) {
+      continue;
+    }
+    return {project, relativePath};
+  }
+  return undefined;
+}
+
+function normalizedResourceRoot(uri: string): string {
+  return stripRecallAnchor(uri).replace(/\/+$/, '');
 }

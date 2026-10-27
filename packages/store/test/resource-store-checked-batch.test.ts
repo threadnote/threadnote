@@ -9,7 +9,7 @@ import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceRecallInvalidation} from '@threadnote/store/resource/recall-invalidation';
 import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceStore, assertResourceAccountCheck} from '@threadnote/store/resource-store';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 
 const systemLayer = SystemInfo.layer.pipe(
@@ -158,6 +158,49 @@ describe('checked ResourceStore batches', () => {
         expect(yield* store.read(location(home), archiveUri)).toBe('after contention');
       }).pipe(Effect.provide(storeContext), TestClock.withLive);
     }).pipe(provideLayer(dependencies)),
+  );
+
+  effectIt.effect(
+    'issues the private account proof only for the actual same-fiber CHECK and ignores extra location fields',
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* fs.makeTempDirectoryScoped({prefix: 'store-check-proof-'});
+        const observed: string[] = [];
+        const absent = (stage: string) =>
+          Effect.gen(function* () {
+            expect((yield* Effect.result(assertResourceAccountCheck(home, 'local')))._tag).toBe('Failure');
+            observed.push(stage);
+          });
+        const store = yield* ResourceStore.pipe(
+          provideLayer(
+            ResourceStore.layerWith({
+              onMutationLockAcquired: () => absent('acquired'),
+              onMutationLockCompleted: () => absent('completed'),
+            }),
+          ),
+        );
+        let expired: Effect.Effect<void, unknown> = Effect.void;
+        const actual = {...location(home), owner: -1};
+        yield* store.writeChecked(
+          actual,
+          sourceUri,
+          'checked',
+          {mode: 'create'},
+          Effect.gen(function* () {
+            yield* assertResourceAccountCheck(home, 'local');
+            expect((yield* Effect.result(assertResourceAccountCheck(home, 'other')))._tag).toBe('Failure');
+            const inherited = yield* assertResourceAccountCheck(home, 'local').pipe(
+              Effect.result,
+              Effect.forkChild({startImmediately: true}),
+            );
+            expect((yield* Fiber.join(inherited))._tag).toBe('Failure');
+            expired = assertResourceAccountCheck(home, 'local').pipe(Effect.provide(yield* Effect.context<never>()));
+          }),
+        );
+        expect((yield* Effect.result(expired))._tag).toBe('Failure');
+        expect(observed).toEqual(['acquired', 'completed']);
+      }).pipe(TestClock.withLive, provideLayer(testLayer)),
   );
 
   fcEffectProp(

@@ -242,3 +242,93 @@ describe('stable identity URI scope SQL', () => {
     }).pipe(withDatabase),
   );
 });
+
+effectIt.effect.each(['lexical', 'identity'] as const)(
+  'preserves full scoped eligibility/conflicts and 400-ID batches in %s projection',
+  projection =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const relation = projection === 'identity' ? 'identity_documents' : 'documents';
+      const conflictRelation = projection === 'identity' ? 'identity_memory_conflicts' : 'memory_identity_conflicts';
+      yield* sql.unsafe(`CREATE TABLE ${relation} (id INTEGER PRIMARY KEY, uri TEXT NOT NULL, candidate_json TEXT NOT NULL,
+      project TEXT, approved_authoritative INTEGER NOT NULL)`);
+      yield* sql.unsafe(
+        `CREATE INDEX ${relation}_memory_identity ON ${relation}(json_extract(candidate_json, '$.memoryId'), json_extract(candidate_json, '$.contentHash'))`,
+      );
+      yield* sql.unsafe(`CREATE TABLE ${conflictRelation} (memory_id TEXT PRIMARY KEY NOT NULL)`);
+      const ids = Array.from({length: 805}, (_, index) => `tn_batch${index}`);
+      const rows = [
+        ...ids.map((memoryId, index) => ({uri: `${root}/${index}.md`, memoryId, contentHash: 'a', status: 'active'})),
+        {uri: `${root}/archived-match.md`, memoryId: ids[0], contentHash: 'b', status: 'archived'},
+        {uri: `${root}/same-hash-alias.md`, memoryId: ids[1], contentHash: 'a', status: 'active'},
+        {uri: `${root}0/unauthorized.md`, memoryId: ids[2], contentHash: 'c', status: 'active'},
+      ];
+      yield* sql.unsafe(
+        `INSERT INTO ${relation} (uri, candidate_json, project, approved_authoritative)
+      SELECT json_extract(value, '$.uri'), value, 'allowed', 1 FROM json_each(?)`,
+        [JSON.stringify(rows)],
+      );
+      const externalA = 'threadnote://resources/external/github/source/doc-a.md';
+      const externalB = 'threadnote://resources/external/github/source/doc-b.md';
+      for (const [uri, contentHash] of [
+        [externalA, 'a'],
+        [externalB, 'b'],
+      ])
+        yield* sql.unsafe(
+          `INSERT INTO ${relation} (uri, candidate_json, project, approved_authoritative) VALUES (?, ?, 'allowed', 1)`,
+          [uri, JSON.stringify({uri, memoryId: ids[2], contentHash, status: 'active'})],
+        );
+      const statements: string[] = [];
+      const observed = new Proxy(sql, {
+        get(actual, key, receiver) {
+          if (key !== 'unsafe') return Reflect.get(actual, key, receiver);
+          return <A extends object>(text: string, parameters: readonly unknown[] = []) => {
+            statements.push(text);
+            return actual.unsafe<A>(text, parameters);
+          };
+        },
+      });
+      const eligibility = {
+        kind: 'candidate-policy' as const,
+        authority: 'approved-authoritative' as const,
+        projects: {mode: 'allow-projects-and-projectless' as const, projects: ['allowed']},
+      };
+      const selected = yield* selectRecallDocumentRowsByMemoryIds(observed, ids, [root], eligibility, projection);
+      expect(selected).toHaveLength(807);
+      expect(statements).toHaveLength(3);
+      expect(selected.some(row => row.uri.startsWith(`${root}0/`))).toBe(false);
+      const conflicts = createRecallIdentityConflictLoader(sql, projection);
+      expect(yield* conflicts([root], eligibility, ids)).toEqual(new Set([ids[0]]));
+      expect(yield* conflicts([root], undefined, [ids[1], ids[2]])).toEqual(new Set());
+      expect(yield* selectRecallDocumentRowsByMemoryIds(sql, ids, ['#invalid'], eligibility, projection)).toEqual([]);
+      expect(yield* conflicts(['#invalid'], eligibility, ids)).toEqual(new Set());
+      const externalPolicy = {...eligibility, externalResources: {[externalA]: 'a', [externalB]: 'wrong-hash'}};
+      expect(
+        (yield* selectRecallDocumentRowsByMemoryIds(
+          sql,
+          [ids[2]],
+          ['threadnote://resources'],
+          externalPolicy,
+          projection,
+        )).map(row => row.uri),
+      ).toEqual([externalA]);
+      expect(yield* conflicts(['threadnote://resources'], externalPolicy, [ids[2]])).toEqual(new Set());
+      expect(
+        yield* createRecallIdentityConflictLoader(sql, projection)(
+          ['threadnote://resources'],
+          {...externalPolicy, externalResources: {[externalA]: 'a', [externalB]: 'b'}},
+          [ids[2]],
+        ),
+      ).toEqual(new Set([ids[2]]));
+
+      expect(
+        yield* selectRecallDocumentRowsByMemoryIds(
+          sql,
+          ids,
+          [root],
+          {...eligibility, projects: {mode: 'deny-all'}},
+          projection,
+        ),
+      ).toEqual([]);
+    }).pipe(withDatabase),
+);

@@ -3,7 +3,7 @@ import {parseMemoryDocument} from '@threadnote/memory/document';
 import {isMemoryId, memoryIdFromIdentityAlias} from '@threadnote/memory/identity-alias';
 import {loadMemoryRelocationIdentityWitnesses} from '@threadnote/memory/relocation';
 import {resourceIdIsWithin} from '@threadnote/store/resource-id';
-import {loadRecallMemoryIdentities} from '../index.js';
+import {loadRecallMemoryIdentities, type MemoryIdentityEngine} from '../index.js';
 
 interface MemoryIdentityRuntime {
   readonly account: string;
@@ -60,7 +60,7 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
   config: MemoryIdentityRuntime,
   inputs: readonly string[],
   allowedUriScopes: readonly string[],
-  options: {readonly validateNow?: boolean} = {},
+  options: {readonly validateNow?: boolean; readonly engine?: MemoryIdentityEngine} = {},
 ) {
   const memoryIds = [...new Set(inputs.flatMap(input => memoryIdFromIdentityAlias(input) ?? []).filter(isMemoryId))];
   if (memoryIds.length === 0) {
@@ -77,6 +77,7 @@ export const resolveMemoryIdentityAliases = Effect.fn('recall.resolveMemoryIdent
     allowedUriScopes,
     memoryIds,
     validateNow: options.validateNow,
+    engine: options.engine,
   });
   const indexedResolutions = new Map(
     memoryIds.map(

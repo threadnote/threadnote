@@ -15,6 +15,7 @@ import {
   memoryIdFromIdentityAlias,
 } from '@threadnote/memory/identity-alias';
 import {readMemoryWithRelocations} from '@threadnote/memory/relocation';
+import type {MemoryIdentityEngine} from '@threadnote/recall/index';
 import {resolveMemoryIdentityAliases, verifyResolvedMemoryIdentity} from '@threadnote/recall/memory/identity';
 
 export class MemoryRelationWriteError extends Data.TaggedError('MemoryRelationWriteError')<{
@@ -115,6 +116,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     readonly allowedUriScopes: readonly string[];
     readonly sourceMemoryId?: string;
     readonly sourceUri?: string;
+    readonly identityEngine?: MemoryIdentityEngine;
   },
 ) {
   const resourceIds = makeResourceIdScopeChecker();
@@ -150,6 +152,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
     config,
     relations.map(relation => relation.uri),
     allowedUriScopes,
+    {engine: options.identityEngine},
   );
   const liveTargets = yield* Effect.forEach(initiallyResolved, (resolved, index) =>
     Effect.gen(function* () {
@@ -185,6 +188,7 @@ export const resolveAuthoredMemoryRelations = Effect.fn('memory.resolveAuthoredR
           config,
           identityBearing.map(target => memoryIdentityAlias(target.memoryId)),
           allowedUriScopes,
+          {engine: options.identityEngine},
         );
   const identityByMemoryId = new Map(
     identityBearing.map((target, index) => [target.memoryId, identityChecks[index]] as const),
@@ -239,6 +243,7 @@ export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.ve
       readonly memoryId?: string;
       readonly uri: string;
     }[],
+    identityEngine: MemoryIdentityEngine = 'lexical',
   ) {
     const store = yield* ResourceStore;
     const grouped = new Map<string, typeof targets>();
@@ -259,7 +264,7 @@ export const verifyAuthoredMemoryRelationTargetIdentities = Effect.fn('memory.ve
         config,
         targetsInScope.map(target => memoryIdentityAlias(target.memoryId!)),
         allowedUriScopes,
-        {validateNow: true},
+        {validateNow: true, engine: identityEngine},
       ).pipe(
         Effect.mapError(() =>
           relationError('A relation target identity became ambiguous or moved during the write; refresh and retry.'),

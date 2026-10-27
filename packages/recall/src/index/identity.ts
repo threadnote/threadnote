@@ -38,12 +38,15 @@ export function recallIndexMetadataIsCurrent(metadata: ReadonlyMap<string, strin
 
 export const rebuildRecallIdentityConflicts = Effect.fn('recall.rebuildIdentityConflicts')(function* (
   sql: SqlClient.SqlClient,
+  projection: 'lexical' | 'identity' = 'lexical',
 ) {
-  yield* sql.unsafe('DELETE FROM memory_identity_conflicts');
+  const conflicts = projection === 'identity' ? 'identity_memory_conflicts' : 'memory_identity_conflicts';
+  const documents = projection === 'identity' ? 'identity_documents' : 'documents';
+  yield* sql.unsafe(`DELETE FROM ${conflicts}`);
   yield* sql.unsafe(`
-    INSERT INTO memory_identity_conflicts (memory_id)
+    INSERT INTO ${conflicts} (memory_id)
     SELECT json_extract(candidate_json, '$.memoryId') AS memory_id
-    FROM documents
+    FROM ${documents}
     WHERE json_type(candidate_json, '$.memoryId') = 'text'
       AND json_type(candidate_json, '$.contentHash') = 'text'
     GROUP BY json_extract(candidate_json, '$.memoryId')
@@ -55,7 +58,10 @@ export const rebuildRecallIdentityConflicts = Effect.fn('recall.rebuildIdentityC
  * Resolve divergent identities against the full authorized lexical corpus,
  * independently of the bounded posting and candidate windows used by a query.
  */
-export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
+export function createRecallIdentityConflictLoader(
+  sql: SqlClient.SqlClient,
+  projection: 'lexical' | 'identity' = 'lexical',
+) {
   const cache = new Map<string, ReadonlySet<string>>();
   return Effect.fn('recall.loadIdentityConflicts')(function* (
     allowedUriScopes: readonly string[] | undefined,
@@ -80,14 +86,14 @@ export function createRecallIdentityConflictLoader(sql: SqlClient.SqlClient) {
         ...(!scope.restricted
           ? yield* sql.unsafe<RecallIdentityConflictRow>(
               `SELECT memory_id
-               FROM memory_identity_conflicts
+               FROM ${projection === 'identity' ? 'identity_memory_conflicts' : 'memory_identity_conflicts'}
                WHERE memory_id IN (${memoryIdParameters})
                ORDER BY memory_id`,
               batch,
             )
           : yield* sql.unsafe<RecallIdentityConflictRow>(
               `SELECT json_extract(d.candidate_json, '$.memoryId') AS memory_id
-               FROM documents AS d
+               FROM ${projection === 'identity' ? 'identity_documents' : 'documents'} AS d
                WHERE ${scope.sql}
                  AND json_extract(d.candidate_json, '$.memoryId') IN (${memoryIdParameters})
                  AND json_type(d.candidate_json, '$.memoryId') = 'text'
@@ -113,5 +119,16 @@ export function markRecallIdentityConflicts(
     candidate.memoryId && conflictingMemoryIds.has(candidate.memoryId)
       ? {...candidate, identityConflict: true}
       : candidate,
+  );
+}
+
+export function identityProjectionMetadataIsCurrent(metadata: ReadonlyMap<string, string>): boolean {
+  const generation = metadata.get('identity_content_generation');
+  const sequence = metadata.get('identity_mutation_sequence');
+  return (
+    generation !== undefined &&
+    metadata.get('identity_conflict_generation') === generation &&
+    sequence !== undefined &&
+    sequence === metadata.get('identity_integrity_sequence')
   );
 }

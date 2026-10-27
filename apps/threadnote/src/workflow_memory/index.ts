@@ -1,3 +1,4 @@
+import type {MemoryIdentityEngine} from '@threadnote/recall/index';
 import {Effect, Schema} from 'effect';
 import type {RuntimeConfig} from '@threadnote/workspace/config';
 import {
@@ -105,6 +106,7 @@ const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
   config: RuntimeConfig,
   state: WorkflowJournal,
   request: WorkflowRequest,
+  identityEngine: MemoryIdentityEngine = 'lexical',
 ) {
   if (request.action === 'read')
     return yield* readWorkflowArtifact(
@@ -114,7 +116,7 @@ const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
       request.evidenceRefs,
     );
   if (request.action === 'preflight') {
-    const prepared = yield* prepareWorkflowOperation(config, state, request);
+    const prepared = yield* prepareWorkflowOperation(config, state, request, identityEngine);
     return {
       protocolVersion: 1 as const,
       status: 'ok' as const,
@@ -131,7 +133,7 @@ const runLoadedRequest = Effect.fn('workflowMemory.loadedRequest')(function* (
       (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive'))
   )
     yield* assertWorkflowArchivePublication(config, state.binding);
-  return yield* executeWorkflowOperation(config, state, request);
+  return yield* executeWorkflowOperation(config, state, request, identityEngine);
 });
 
 type NativeSessionCall = (
@@ -166,7 +168,7 @@ export const withNativeWorkflowMemorySession = <A, E, R>(
         return yield* session.run(request, state => {
           if (request.action === 'recover' && state.operations[request.operationId ?? '']?.request.action === 'archive')
             return Effect.fail(workflowError('invalid-request', 'Native child sessions cannot recover archives.'));
-          return runLoadedRequest(config, state, request);
+          return runLoadedRequest(config, state, request, 'identity-projection');
         });
       });
     return use(session.admission, call);

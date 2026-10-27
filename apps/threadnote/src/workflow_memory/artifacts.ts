@@ -1,3 +1,4 @@
+import {withRecallIdentityProjectionLease, type MemoryIdentityEngine} from '@threadnote/recall/index';
 import {DateTime, Effect, FileSystem, Schema} from 'effect';
 import {sha256Hex} from '@threadnote/platform/digest';
 import {ResourceStore, ResourceNotFound} from '@threadnote/store/resource-store';
@@ -211,13 +212,23 @@ export const readWorkflowArtifact = Effect.fn('workflowMemory.readArtifact')(fun
   } satisfies WorkflowReadResult;
 });
 
-export const prepareWorkflowOperation = (config: RuntimeConfig, state: WorkflowJournal, request: WorkflowRequest) =>
-  prepareWorkflowOperationWithCapture(config, state, request, () =>
-    captureMemoryCodeCitationsForMcp(
-      config,
-      {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
-      'workflow-memory',
-    ),
+export const prepareWorkflowOperation = (
+  config: RuntimeConfig,
+  state: WorkflowJournal,
+  request: WorkflowRequest,
+  identityEngine: MemoryIdentityEngine = 'lexical',
+) =>
+  prepareWorkflowOperationWithCapture(
+    config,
+    state,
+    request,
+    () =>
+      captureMemoryCodeCitationsForMcp(
+        config,
+        {callerCwd: state.binding.repo, project: state.binding.project, refs: request.codeRefs ?? []},
+        'workflow-memory',
+      ),
+    identityEngine,
   );
 
 const workflowCitationCaptureError = (failure: unknown) =>
@@ -283,6 +294,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
   state: WorkflowJournal,
   request: WorkflowRequest,
   capture: () => ReturnType<typeof captureMemoryCodeCitationsForMcp>,
+  identityEngine: MemoryIdentityEngine = 'lexical',
 ) {
   const resourceIds = makeResourceIdScopeChecker();
   const action = request.action === 'preflight' ? request.mutation : request.action;
@@ -369,7 +381,9 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
           'out-of-scope',
           'Relation targets must belong to this workflow or its configured shares.',
         );
-    const candidates = yield* resolveMemoryIdentityAliases(config, relationUris, relationScopes);
+    const candidates = yield* resolveMemoryIdentityAliases(config, relationUris, relationScopes, {
+      engine: identityEngine,
+    });
     for (const candidate of candidates) {
       if (!relationScopes.some(scope => resourceIds.isWithin(candidate.canonicalUri, scope)))
         return yield* workflowError('out-of-scope', 'The resolved relation target is outside this workflow scope.');
@@ -383,6 +397,7 @@ const prepareWorkflowOperationWithCapture = Effect.fn('workflowMemory.prepareOpe
         ...ownedArtifacts(state).map(artifact => artifact.canonicalUri),
         ...candidates.map(candidate => candidate.canonicalUri),
       ],
+      identityEngine,
       sourceMemoryId: memoryId,
       sourceUri,
     });
@@ -479,6 +494,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   config: RuntimeConfig,
   initial: WorkflowJournal,
   request: WorkflowRequest,
+  identityEngine: MemoryIdentityEngine = 'lexical',
 ) {
   const operationId = yield* validateWorkflowInput(() => portableKey(request.operationId, 'operationId'));
   const existing = initial.operations[operationId];
@@ -490,7 +506,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
   const intentDigest = yield* sha256Hex(stableJson({...request, mutation: undefined}));
   if (existing && request.action !== 'recover' && existing.intentDigest !== intentDigest)
     return yield* workflowError('operation-intent-conflict', 'This operationId already belongs to different intent.');
-  let operation = existing ?? (yield* prepareWorkflowOperation(config, initial, request));
+  let operation = existing ?? (yield* prepareWorkflowOperation(config, initial, request, identityEngine));
   let prepared = {...initial, operations: {...initial.operations, [operationId]: operation}};
   const finalArtifacts = {...prepared.artifacts, [operation.artifact.canonicalUri]: operation.artifact};
   if (operation.request.action === 'archive' && operation.sourceUri) delete finalArtifacts[operation.sourceUri];
@@ -577,7 +593,7 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               request: operation.deferredCodeAnchor,
             })
           : undefined;
-        yield* store.writeChecked(
+        const write = store.writeChecked(
           workflowLocation(config),
           artifact.canonicalUri,
           operation.desired,
@@ -587,10 +603,14 @@ export const executeWorkflowOperation = Effect.fn('workflowMemory.executeOperati
               ? {}
               : {expectedFingerprint: yield* store.fingerprint(operation.before)}),
           },
-          verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations).pipe(
+          verifyAuthoredMemoryRelationTargetIdentities(config, operation.relations, identityEngine).pipe(
             Effect.andThen(verifyWorkflowEvidenceBytes(config, initial.binding, operation.request.evidenceRefs)),
           ),
         );
+        const needsIdentityLease =
+          identityEngine === 'identity-projection' &&
+          operation.relations.some(target => Boolean(target.memoryId && target.allowedUriScopes?.length));
+        yield* needsIdentityLease ? withRecallIdentityProjectionLease(config, write) : write;
         if (staged) yield* discardOtherDeferredCodeAnchorIntents(config, artifact.canonicalUri, staged.intentId);
         else yield* discardDeferredCodeAnchorIntent(config, artifact.canonicalUri);
       }

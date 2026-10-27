@@ -71,6 +71,7 @@ export function selectRecallDocumentRowsByMemoryIds(
   memoryIds: readonly string[],
   allowedUriScopes: readonly string[] | undefined,
   eligibility: RecallEligibilityPolicy | undefined,
+  projection: 'lexical' | 'identity' = 'lexical',
 ) {
   return Effect.gen(function* () {
     const rows: RecallDocumentSampleRow[] = [];
@@ -84,7 +85,7 @@ export function selectRecallDocumentRowsByMemoryIds(
       rows.push(
         ...(yield* sql.unsafe<RecallDocumentSampleRow>(
           `SELECT d.id, d.uri, d.candidate_json
-           FROM documents AS d
+           FROM ${projection === 'identity' ? 'identity_documents' : 'documents'} AS d
            WHERE ${scope.sql}
              AND json_extract(d.candidate_json, '$.memoryId') IN (${parameters})
            ORDER BY d.uri`,

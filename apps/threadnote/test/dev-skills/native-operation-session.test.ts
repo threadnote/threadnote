@@ -1,10 +1,13 @@
+import {Database} from 'bun:sqlite';
 import {it} from '@effect/vitest';
 import {Deferred, Effect, Fiber, Result, Schema} from 'effect';
 import {TestClock} from 'effect/testing';
 import {describe, expect} from 'vitest';
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {SystemInfo} from '@threadnote/platform/system';
-import {ResourceStore} from '@threadnote/store/resource-store';
+import {ResourceStore, assertResourceAccountCheck} from '@threadnote/store/resource-store';
+import {readCanonicalMutationGeneration} from '@threadnote/store/resource/mutation_generation';
+import {recallIndexDatabaseFilename} from '@threadnote/recall/index';
 import {withNativeWorkflowMemorySession, runWorkflowMemory} from '../../src/workflow_memory/index.js';
 import {readNativeWorkflowState} from '../../src/workflow_automation/store.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
@@ -87,6 +90,189 @@ describe('native child lower-memory sessions', () => {
       ).toBe(true);
       expect(reads).toBe(0);
     }).pipe(run),
+  );
+
+  it.effect(
+    'uses the private identity projection at native preflight/prepare/CHECK and keeps standalone lexical selection',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const database = f.path.join(
+          f.config.agentContextHome,
+          'indexes',
+          'lexical',
+          recallIndexDatabaseFilename(false),
+        );
+        const metadata = () =>
+          Effect.sync(() => {
+            const db = new Database(database);
+            try {
+              return new Map(
+                (db.query('SELECT key, value FROM metadata').all() as {key: string; value: string}[]).map(row => [
+                  row.key,
+                  row.value,
+                ]),
+              );
+            } finally {
+              db.close();
+            }
+          });
+        const request = {
+          protocolVersion: 1,
+          action: 'preflight',
+          mutation: 'create',
+          bindingId: f.bindingId,
+          operationId: 'native-identity-linked',
+          artifactKey: 'linked-note',
+          role: 'note',
+          sourceRunId: 'native-run',
+          storageKind: 'durable',
+          body: 'Native identity lease integration.\n',
+          bodySha256: sha256HexSync('Native identity lease integration.\n'),
+          relations: [{type: 'references', uri: `threadnote://memory/${f.artifact.memoryId}`}],
+        };
+        const before = yield* metadata();
+        yield* runWorkflowMemory(f.config, request).pipe(Effect.provideService(SystemInfo, f.scopedSystem));
+        expect((yield* metadata()).get('identity_initialized')).toBe(before.get('identity_initialized'));
+        let checked = false;
+        const writeChecked: typeof f.store.writeChecked = (location, uri, content, options, check) =>
+          Effect.gen(function* () {
+            // Generation changes after preparation, immediately before the real store CHECK takes account ownership.
+            yield* f.store.write(
+              location,
+              'threadnote://resources/unrelated-native-write.md',
+              'unrelated canonical change',
+              {mode: 'upsert'},
+            );
+            return yield* f.store.writeChecked(
+              location,
+              uri,
+              content,
+              options,
+              check.pipe(
+                Effect.andThen(
+                  Effect.gen(function* () {
+                    yield* assertResourceAccountCheck(location.home, location.account);
+                    expect((yield* metadata()).get('identity_canonical_mutation_generation')).toBe(
+                      yield* readCanonicalMutationGeneration(f.fs, f.path, location.home, location.account),
+                    );
+                    checked = true;
+                  }).pipe(Effect.orDie),
+                ),
+              ),
+            );
+          });
+        const store = {...f.store, writeChecked};
+        yield* withNativeWorkflowMemorySession(f.config, f.bindingId, (_admission, call) =>
+          Effect.gen(function* () {
+            yield* call(request);
+            expect((yield* metadata()).get('identity_initialized')).toBe('true');
+            expect(Result.isFailure(yield* call({...request, engine: 'identity-projection'}).pipe(Effect.result))).toBe(
+              true,
+            );
+            const {mutation: _mutation, ...create} = request;
+            const result = yield* call({...create, action: 'create'});
+            expect(result).toMatchObject({body: 'Native identity lease integration.\n'});
+          }),
+        ).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.provideService(ResourceStore, store));
+        expect(checked).toBe(true);
+      }).pipe(run),
+  );
+
+  it.effect(
+    'writes an unlinked native artifact with an unavailable index while retaining CHECK, body and CAS guards',
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        const index = f.path.join(f.config.agentContextHome, 'indexes', 'lexical');
+        const hidden = `${index}-unavailable`;
+        let unavailable = false;
+        const restore = Effect.suspend(() =>
+          unavailable
+            ? f.fs.remove(index).pipe(
+                Effect.andThen(f.fs.rename(hidden, index)),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    unavailable = false;
+                  }),
+                ),
+              )
+            : Effect.void,
+        );
+        let checked = 0;
+        const writeChecked: typeof f.store.writeChecked = (location, uri, content, options, check) =>
+          f.store
+            .writeChecked(
+              location,
+              uri,
+              content,
+              options,
+              check.pipe(
+                Effect.tap(() =>
+                  Effect.gen(function* () {
+                    yield* assertResourceAccountCheck(location.home, location.account);
+                    expect((yield* f.fs.stat(index)).type).toBe('File');
+                    expect(options.expectedFingerprint).toBe(f.artifact.revision);
+                    checked++;
+                  }).pipe(Effect.orDie),
+                ),
+              ),
+            )
+            .pipe(Effect.tap(() => restore.pipe(Effect.orDie)));
+        const store = {...f.store, writeChecked};
+        const body = 'Unlinked canonical replacement.\n';
+        const request = {
+          protocolVersion: 1,
+          action: 'replace',
+          bindingId: f.bindingId,
+          operationId: 'unlinked-no-index',
+          artifactKey: 'plan-root',
+          role: 'root',
+          sourceRunId: 'native-run',
+          uri: f.artifact.uri,
+          expectedRevision: f.artifact.revision,
+          storageKind: 'durable',
+          body,
+          bodySha256: sha256HexSync(body),
+        };
+        yield* Effect.acquireUseRelease(
+          f.fs.rename(index, hidden).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                unavailable = true;
+              }),
+            ),
+            Effect.andThen(f.fs.writeFileString(index, 'Derived index unavailable during canonical CHECK.')),
+          ),
+          () =>
+            withNativeWorkflowMemorySession(f.config, f.bindingId, (_admission, call) =>
+              Effect.gen(function* () {
+                expect(
+                  Result.isFailure(
+                    yield* call({...request, operationId: 'invalid-body-no-index', bodySha256: '0'.repeat(64)}).pipe(
+                      Effect.result,
+                    ),
+                  ),
+                ).toBe(true);
+                expect(checked).toBe(0);
+                expect(
+                  yield* f.store.read(
+                    {home: f.config.agentContextHome, account: f.config.account, user: f.config.user},
+                    f.artifact.uri,
+                  ),
+                ).not.toContain(body.trim());
+                expect(yield* call(request)).toMatchObject({canonicalUri: f.artifact.uri, body});
+                expect(checked).toBe(1);
+                expect(
+                  Result.isFailure(yield* call({...request, operationId: 'stale-cas-no-index'}).pipe(Effect.result)),
+                ).toBe(true);
+                expect(checked).toBe(1);
+                expect(yield* call(f.read)).toMatchObject({body});
+              }),
+            ).pipe(Effect.provideService(SystemInfo, f.scopedSystem), Effect.provideService(ResourceStore, store)),
+          () => restore.pipe(Effect.orDie),
+        );
+      }).pipe(run),
   );
 
   it.effect('rejects another binding, forbidden actions, foreign fibers and reentrant use before IO', () =>

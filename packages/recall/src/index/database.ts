@@ -51,7 +51,7 @@ function identity(value: Option.Option<FileSystemIdentity>): string | undefined 
     : undefined;
 }
 
-const probe = (path: string, requireAuxiliaries = false) =>
+export const probeRecallDatabase = (path: string, requireAuxiliaries = false) =>
   Effect.scoped(
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -108,7 +108,7 @@ export function useRecallDatabase<A, E, R>(
       }),
       () =>
         Effect.gen(function* () {
-          const before = yield* probe(path, session.entry !== undefined);
+          const before = yield* probeRecallDatabase(path, session.entry !== undefined);
           if (session.entry && (session.entry.path !== path || session.entry.identity.files !== before?.files)) {
             yield* releaseEntry(session, Exit.void);
           }
@@ -125,7 +125,7 @@ export function useRecallDatabase<A, E, R>(
                 const result = yield* body(effect, context);
                 // Initial fresh closes remove auxiliaries. Let this successful real
                 // body establish them before deciding whether its scope can survive.
-                const after = before === undefined ? undefined : yield* probe(path, true);
+                const after = before === undefined ? undefined : yield* probeRecallDatabase(path, true);
                 if (before !== undefined && after !== undefined && before.database === after.database) {
                   session.entry = {path, identity: after, context, scope};
                 }

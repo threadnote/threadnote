@@ -988,7 +988,6 @@ describe('native cycle lifecycle', () => {
         const f = yield* fixture(['independent', 'one', 'two'], 'local');
         yield* completeLocalPhase(f, 'independent');
         yield* f.git(['checkout', '-b', 'feature/one']);
-        yield* f.mutate('begin-phase', {phaseId: 'one'});
         yield* completeLocalPhase(f, 'one');
         const before = decodeNativeCycleRuntime(JSON.parse(yield* f.fs.readFileString(f.statePath())).cycle);
         const phases = f.document.phases.map(phase =>

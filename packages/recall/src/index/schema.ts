@@ -2,7 +2,7 @@ import {Effect, Schema} from 'effect';
 import type * as SqlClient from 'effect/sql/SqlClient';
 import * as RecallIndexIdentity from './identity.js';
 
-export const RECALL_INDEX_DATABASE_VERSION = 13;
+export const RECALL_INDEX_DATABASE_VERSION = 14;
 
 export interface RecallMetadataRow {
   readonly key: string;
@@ -42,6 +42,28 @@ export const initializeRecallSchema = Effect.fnUntraced(function* (sql: SqlClien
       memory_links_truncated INTEGER NOT NULL CHECK (memory_links_truncated IN (0, 1))
     )
   `);
+  yield* sql.unsafe(`
+    CREATE TABLE IF NOT EXISTS identity_documents (
+      id INTEGER PRIMARY KEY, uri TEXT UNIQUE NOT NULL, project TEXT,
+      approved_authoritative INTEGER NOT NULL CHECK (approved_authoritative IN (0, 1)),
+      workspace_scope TEXT, source_path TEXT NOT NULL, source_modified_at TEXT, recorded_at TEXT,
+      source_size INTEGER NOT NULL CHECK (source_size >= 0), authority_policy_key TEXT,
+      candidate_json TEXT NOT NULL, logical_key TEXT NOT NULL
+    )
+  `);
+  yield* sql.unsafe(`CREATE TABLE IF NOT EXISTS identity_memory_conflicts (
+    memory_id TEXT PRIMARY KEY NOT NULL) WITHOUT ROWID`);
+  yield* sql.unsafe(`CREATE INDEX IF NOT EXISTS identity_documents_memory_identity
+    ON identity_documents(json_extract(candidate_json, '$.memoryId'), json_extract(candidate_json, '$.contentHash'))`);
+  yield* sql`INSERT INTO metadata (key, value) VALUES ('identity_mutation_sequence', '0') ON CONFLICT(key) DO NOTHING`;
+  for (const table of ['identity_documents', 'identity_memory_conflicts'] as const) {
+    for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
+      yield* sql.unsafe(`CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${operation.toLowerCase()}
+        AFTER ${operation} ON ${table} BEGIN
+          UPDATE metadata SET value = CAST(value AS INTEGER) + 1 WHERE key = 'identity_mutation_sequence';
+        END`);
+    }
+  }
   yield* sql.unsafe(`
     CREATE TABLE IF NOT EXISTS postings (
       term TEXT NOT NULL,
@@ -144,7 +166,14 @@ export const initializeRecallSchema = Effect.fnUntraced(function* (sql: SqlClien
     ON CONFLICT(key) DO NOTHING
   `;
   yield* sql`INSERT INTO metadata (key, value) VALUES ('mutation_sequence', '0') ON CONFLICT(key) DO NOTHING`;
-  for (const table of ['documents', 'postings', 'term_statistics', 'code_links', 'memory_links'] as const) {
+  for (const table of [
+    'documents',
+    'postings',
+    'term_statistics',
+    'code_links',
+    'memory_links',
+    'memory_identity_conflicts',
+  ] as const) {
     for (const operation of ['INSERT', 'UPDATE', 'DELETE'] as const) {
       yield* sql.unsafe(`
         CREATE TRIGGER IF NOT EXISTS ${table}_integrity_${operation.toLowerCase()}
