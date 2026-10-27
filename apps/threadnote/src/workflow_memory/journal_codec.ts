@@ -35,14 +35,16 @@ export function encodeBoundedWorkflowJson(content: string, format: string): stri
       sha256: digest(plainBytes),
       payload: encodeBase64(compressed),
     });
-  const nativeCompressed = Bun.gzipSync(plainBytes, {level: 6});
-  // The OS field is advisory; normalize it so the same deterministic payload is emitted on every host.
-  nativeCompressed[9] = 255;
-  const nativeEnvelope = makeEnvelope(nativeCompressed);
-  const nativeStoredBytes = encoder.encode(nativeEnvelope).byteLength;
-  // Compression is optional: it must never shrink the capacity of valid plain journals.
-  if (plainBytes.byteLength <= DISK_LIMIT && nativeStoredBytes >= plainBytes.byteLength) return content;
-  if (nativeStoredBytes <= DISK_LIMIT) return nativeEnvelope;
+  for (const level of [3, 6] as const) {
+    const nativeCompressed = Bun.gzipSync(plainBytes, {level});
+    // The OS field is advisory; normalize it so the same deterministic payload is emitted on every host.
+    nativeCompressed[9] = 255;
+    const nativeEnvelope = makeEnvelope(nativeCompressed);
+    const nativeStoredBytes = encoder.encode(nativeEnvelope).byteLength;
+    // Compression is optional: it must never shrink the capacity of valid plain journals.
+    if (plainBytes.byteLength <= DISK_LIMIT && nativeStoredBytes >= plainBytes.byteLength) return content;
+    if (nativeStoredBytes <= DISK_LIMIT) return nativeEnvelope;
+  }
 
   // Keep the prior codec as a bounded compatibility fallback for histories whose native gzip
   // representation crosses the stored limit but whose established fflate representation fits.

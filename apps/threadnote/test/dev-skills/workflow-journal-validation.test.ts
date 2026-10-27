@@ -2,11 +2,13 @@ import {gzipSync} from 'fflate';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from '@threadnote/testing/node-crypto';
 import {
+  decodeBoundedWorkflowJson,
   decodeWorkflowJournal,
+  encodeBoundedWorkflowJson,
   encodeWorkflowJournal,
   workflowJournalLimits,
 } from '../../src/workflow_memory/journal_codec.js';
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {
   formatMemoryDocument,
@@ -381,6 +383,13 @@ describe('workflow journal ownership validation', () => {
 
 const digest = (value: Uint8Array) => createHash('sha256').update(value).digest('hex');
 const format = 'threadnote-workflow-journal-gzip-v1';
+const envelopeFor = (plain: Uint8Array, compressed: Uint8Array, marker = format) =>
+  JSON.stringify({
+    format: marker,
+    expandedBytes: plain.byteLength,
+    sha256: digest(plain),
+    payload: Buffer.from(compressed).toString('base64'),
+  });
 describe('workflow journal codec', async () => {
   it('emits deterministic native gzip readable by independent zlib and journal readers', async () => {
     const logical = `${JSON.stringify({payload: 'UTF-8 journal — 雪 and 🌊. '.repeat(90_000)})}\n`;
@@ -391,8 +400,68 @@ describe('workflow journal codec', async () => {
     const compressed = Uint8Array.from(atob(envelope.payload), character => character.charCodeAt(0));
     expect(compressed.slice(4, 8)).toEqual(new Uint8Array(4));
     expect(compressed[9]).toBe(255);
+    const fast = Bun.gzipSync(new TextEncoder().encode(logical), {level: 3});
+    fast[9] = 255;
+    expect(compressed).toEqual(fast);
     expect(new TextDecoder().decode(gunzipSync(compressed))).toBe(logical);
     expect(await decodeWorkflowJournal(encoded)).toBe(logical);
+  });
+
+  it.each(['native-6', 'fflate-6'] as const)(
+    'retains %s capacity after valid oversized native output',
+    async fallback => {
+      const logical = `${JSON.stringify({payload: 'x'.repeat(workflowJournalLimits.diskBytes)})}\n`;
+      const plain = new TextEncoder().encode(logical);
+      const nativeGzip = Bun.gzipSync;
+      const legacy = fallback === 'native-6' ? nativeGzip(plain, {level: 6}) : gzipSync(plain, {level: 6, mtime: 0});
+      if (fallback === 'native-6') legacy[9] = 255;
+      const expected = envelopeFor(plain, legacy);
+      expect(Buffer.byteLength(expected)).toBeLessThanOrEqual(workflowJournalLimits.diskBytes);
+      // Level3 fits this real input. Substitute valid level0 gzip for the same bytes
+      // to exercise overflow, without pretending it is a natural level3 counterexample.
+      const oversized = gzipSync(plain, {level: 0, mtime: 0});
+      expect(Buffer.byteLength(envelopeFor(plain, oversized))).toBeGreaterThan(workflowJournalLimits.diskBytes);
+      expect(new TextDecoder().decode(gunzipSync(oversized))).toBe(logical);
+      const compressor = vi
+        .spyOn(Bun, 'gzipSync')
+        .mockImplementation((bytes, options) =>
+          fallback === 'fflate-6' || options?.level === 3 ? oversized : nativeGzip(bytes, options),
+        );
+      let encoded: string;
+      try {
+        encoded = encodeWorkflowJournal(logical);
+        expect(compressor.mock.calls.map(([, options]) => options?.level)).toEqual([3, 6]);
+      } finally {
+        compressor.mockRestore();
+      }
+      expect(encoded).toBe(expected);
+      expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(workflowJournalLimits.diskBytes);
+      expect(await decodeWorkflowJournal(encoded)).toBe(logical);
+      expect(new TextDecoder().decode(gunzipSync(Buffer.from(JSON.parse(encoded).payload, 'base64')))).toBe(logical);
+    },
+  );
+
+  it('preserves accepted native capacity and round trips both existing markers', async () => {
+    await fc.assert(
+      fc.asyncProperty(fc.uint8Array({minLength: 32, maxLength: 128}), async bytes => {
+        const motif = Buffer.from(bytes).toString('base64');
+        const logical = `${JSON.stringify({payload: motif.repeat(Math.ceil(workflowJournalLimits.diskBytes / motif.length))})}\n`;
+        const plain = new TextEncoder().encode(logical);
+        expect(plain.byteLength).toBeGreaterThan(workflowJournalLimits.diskBytes);
+        const legacy = Bun.gzipSync(plain, {level: 6});
+        legacy[9] = 255;
+        for (const marker of [format, 'threadnote-native-workflow-state-gzip-v1']) {
+          expect(Buffer.byteLength(envelopeFor(plain, legacy, marker))).toBeLessThanOrEqual(
+            workflowJournalLimits.diskBytes,
+          );
+          const encoded = encodeBoundedWorkflowJson(logical, marker);
+          expect(Buffer.byteLength(encoded)).toBeLessThanOrEqual(workflowJournalLimits.diskBytes);
+          expect(encodeBoundedWorkflowJson(logical, marker)).toBe(encoded);
+          expect(await decodeBoundedWorkflowJson(encoded, marker)).toBe(logical);
+        }
+      }),
+      {numRuns: 3},
+    );
   });
 
   it('keeps capacity admission equivalent at the disk edge and for compressible histories above it', async () => {
