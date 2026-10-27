@@ -321,26 +321,55 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     const saturated = await snapshot();
     expect(saturated.slice(0, 127)).toEqual(prefix);
     const concurrent = async () => {
-      const child = Bun.spawn([proxy, '-C', repo, 'show', `${sha}:${sentinel}`], {
+      const child = spawn(proxy, ['-C', repo, 'show', `${sha}:${sentinel}`], {
         env: environment(true),
-        stdout: 'pipe',
-        stderr: 'pipe',
-        timeout: 15_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
-      const [status, stdout, stderr] = await Promise.all([
-        child.exited,
-        new Response(child.stdout).arrayBuffer(),
-        new Response(child.stderr).text(),
-      ]);
-      expect(status).toBe(0);
-      expect(Buffer.from(stdout).equals(content)).toBe(true);
-      expect(stderr).toBe('');
-      return io(child.pid);
+      let failure: Error | undefined;
+      // close covers process exit and closure of both stdio streams.
+      const completed = new Promise<{code: number | null; signal: string | null}>(resolve => {
+        child.once('error', error => {
+          failure ??= error;
+        });
+        child.once('close', (code, signal) => resolve({code, signal}));
+      });
+      const output: Buffer[] = [];
+      const errors: Buffer[] = [];
+      const timer = setTimeout(() => child.kill(), 15_000);
+      try {
+        const streamFailure = (error: Error) => {
+          failure ??= error;
+        };
+        child.stdout.once('error', streamFailure);
+        child.stderr.once('error', streamFailure);
+        child.stdout.on('data', chunk => output.push(Buffer.from(chunk)));
+        child.stderr.on('data', chunk => errors.push(Buffer.from(chunk)));
+        const exit = await completed;
+        if (failure) throw failure;
+        expect(exit.code).toBe(0);
+        expect(exit.signal).toBeNull();
+        expect(Buffer.concat(output).equals(content)).toBe(true);
+        expect(Buffer.concat(errors).length).toBe(0);
+        expect(child.stdout.destroyed).toBe(true);
+        expect(child.stderr.destroyed).toBe(true);
+        if (child.pid === undefined) throw new Error('Expected a compiled fixture process.');
+        return await io(child.pid);
+      } finally {
+        clearTimeout(timer);
+        if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) child.kill();
+        await completed;
+      }
+    };
+    const concurrentBatch = async () => {
+      // A peer failure must not enter directory cleanup before every producer closes.
+      const settled = await Promise.allSettled(Array.from({length: 4}, concurrent));
+      return settled.map(result => {
+        if (result.status === 'rejected') throw result.reason;
+        return result.value;
+      });
     };
     // Fresh processes observe the terminal claim once per event, with no opens.
-    expect(await Promise.all(Array.from({length: 4}, concurrent))).toEqual(
-      Array.from({length: 4}, () => ({checks: 3, opens: 0})),
-    );
+    expect(await concurrentBatch()).toEqual(Array.from({length: 4}, () => ({checks: 3, opens: 0})));
     const exhausted = invoke(`${sha}:${sentinel}`, true);
     expect(exhausted.status).toBe(0);
     expect(exhausted.stdout.equals(content)).toBe(true);
@@ -358,7 +387,7 @@ it('captures bounded closed producer diagnostics only when the compiled Git fixt
     await rm(trace, {recursive: true});
     await mkdir(trace);
     for (let slot = 0; slot < 124; slot++) await writeFile(resolve(trace, `${slot}.json`), saturated[slot] ?? '');
-    await Promise.all(Array.from({length: 4}, concurrent));
+    await concurrentBatch();
     expect(await readdir(trace)).toHaveLength(128);
     const raced = await snapshot();
     expect(raced.slice(0, 124)).toEqual(saturated.slice(0, 124));
