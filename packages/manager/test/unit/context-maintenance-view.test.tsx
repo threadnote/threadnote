@@ -21,6 +21,8 @@ import {createReviewedSupportSnapshot} from '@threadnote/memory/reviewed-support
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import type {
   ManagerContextHealthResponseV1,
+  ManagerContextMaintenanceCaseV2,
+  ManagerContextMaintenancePacketV2,
   ManagerContextMaintenanceStatusV2,
 } from '@threadnote/manager/attention/contracts';
 import {ManagerLiveProvider, useManagerLiveResource} from '../../src/live/provider.js';
@@ -2580,3 +2582,472 @@ it.each(['project-change', 'unmount'] as const)(
     expect(document.body.textContent).not.toContain('LATE_SOURCE_MUST_NOT_ADOPT');
   },
 );
+
+async function pollingEvidenceCase() {
+  const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/polling.md';
+  let item: ManagerContextMaintenanceCaseV2 = {
+    caseId: 'polling-selected-case',
+    project: 'threadnote',
+    memoryId: 'polling-selected-memory',
+    subjectUri: uri,
+    subjectContentHashes: [{uri, hash: 'same-memory'}],
+    family: 'citation',
+    slot: 'anchor',
+    evidenceRevision: 'selected-current',
+    disposition: 'needs-decision',
+    reason: 'graph-stale',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const packet = (): ManagerContextMaintenancePacketV2 => ({
+    version: 2,
+    project: item.project,
+    caseId: item.caseId,
+    memoryUri: uri,
+    evidenceRevision: item.evidenceRevision,
+    expectedContentHash: 'same-memory',
+    reason: item.reason,
+    choices: [],
+    allowedOperations: [],
+    instructions: 'Review the selected evidence.',
+    evidenceSelectors: Array.from({length: 4}, (_, i) => ({
+      caseId: item.caseId,
+      memoryUri: uri,
+      citationId: `reference-${i}`,
+      anchorId: `anchor-${i}`,
+    })),
+  });
+  const response = (body: unknown, code = 200) => new Response(JSON.stringify(body), {status: code});
+  const selected = Promise.withResolvers<Response>();
+  const polls: {resolve: (value: Response) => void; health: boolean}[] = [];
+  const posts: {signal?: AbortSignal | null; body: unknown}[] = [];
+  const reads: string[] = [];
+  let holdPolls = false,
+    holdSelected = true,
+    selectedStatus = 200,
+    parentStatus = 200;
+  const snapshot = () => ({...status(), cases: [item], counts: {'needs-decision': 1, decisionMemories: 1}});
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(input, 'http://manager.test');
+      if (init?.method !== 'POST') reads.push(url.pathname + url.search);
+      if (url.pathname === '/api/memory') return response({content: 'Retained polling memory.'});
+      if (url.pathname === '/api/attention/context-maintenance' && init?.method === 'POST') {
+        posts.push({signal: init.signal, body: JSON.parse(String(init.body))});
+        if (selectedStatus !== 200) return response({error: 'Selected access failed'}, selectedStatus);
+        if (!holdSelected) return response({outcome: 'ready', item, packet: packet()});
+        if (posts.length > 1) return response({error: 'Controlled operation is still occupied'}, 503);
+        const observer = Promise.withResolvers<Response>();
+        const abort = () => observer.reject(new DOMException('Cancelled observer', 'AbortError'));
+        init?.signal?.addEventListener('abort', abort, {once: true});
+        // Aborting the observer deliberately does not complete the simulated server operation.
+        void selected.promise.then(value => {
+          init?.signal?.removeEventListener('abort', abort);
+          observer.resolve(value);
+        });
+        return observer.promise;
+      }
+      const health = url.pathname === '/api/context-health';
+      if (health || (url.pathname === '/api/attention/context-maintenance' && !url.searchParams.has('caseId'))) {
+        if (holdPolls) {
+          const pending = Promise.withResolvers<Response>();
+          polls.push({resolve: pending.resolve, health});
+          return pending.promise;
+        }
+        return parentStatus === 200
+          ? response(health ? report() : snapshot())
+          : response({error: 'Parent access failed'}, parentStatus);
+      }
+      if (url.pathname === '/api/attention/context-maintenance')
+        return response(url.searchParams.get('view') === 'status' ? snapshot() : packet());
+      return response({version: 1, project: 'threadnote', items: [], omitted: 0});
+    }),
+  );
+  await render(<ContextHealthPanel {...props} project="threadnote" refreshGeneration={0} />);
+  const open = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+    button => button.textContent?.trim() === 'Review memory and evidence',
+  );
+  expect(open).toBeDefined();
+  await act(async () => open!.click());
+  const refresh = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
+      button => button.textContent?.trim() === 'Refresh evidence',
+    )!;
+  return {
+    posts,
+    polls,
+    reads,
+    refresh,
+    setHoldPolls: (value: boolean) => {
+      holdPolls = value;
+    },
+    settlePolls: async (healthFirst = true) => {
+      holdPolls = false;
+      const pending = polls
+        .splice(0)
+        .sort((a, b) => (healthFirst ? Number(b.health) - Number(a.health) : Number(a.health) - Number(b.health)));
+      for (const poll of pending)
+        await act(async () =>
+          poll.resolve(
+            parentStatus === 200
+              ? response(poll.health ? report() : snapshot())
+              : response({error: 'Parent access failed'}, parentStatus),
+          ),
+        );
+    },
+    completeSelected: async () =>
+      act(async () => {
+        holdSelected = false;
+        selected.resolve(response({outcome: 'ready', item, packet: packet()}));
+      }),
+    setSelectedStatus: (value: number) => {
+      selectedStatus = value;
+      holdSelected = false;
+    },
+    setParentStatus: (value: number) => {
+      parentStatus = value;
+    },
+    changeRevision: () => {
+      item = {...item, evidenceRevision: 'selected-changed'};
+    },
+  };
+}
+
+it('keeps one manual selected observation through unchanged real-parent pending and settled polls', async () => {
+  vi.useFakeTimers();
+  const fixture = await pollingEvidenceCase();
+  try {
+    await act(async () => vi.advanceTimersByTimeAsync(29_000));
+    await act(async () => fixture.refresh().click());
+    expect(fixture.posts).toHaveLength(1);
+    fixture.setHoldPolls(true);
+    await act(async () => vi.advanceTimersByTimeAsync(1_000));
+    expect(fixture.polls.length).toBeGreaterThan(0);
+    await fixture.settlePolls();
+    await act(async () => vi.advanceTimersByTimeAsync(1_500));
+    expect({
+      selected: fixture.posts.map(post => ({body: post.body, aborted: post.signal?.aborted})),
+      references: document.querySelectorAll('.health-evidence-selectors button').length,
+    }).toEqual({
+      selected: [
+        {
+          body: {
+            action: 'refresh-case',
+            project: 'threadnote',
+            caseId: 'polling-selected-case',
+            memoryUri: 'threadnote://user/tester/memories/durable/projects/threadnote/polling.md',
+          },
+          aborted: false,
+        },
+      ],
+      references: 4,
+    });
+    expect(document.querySelector('dialog')?.textContent).not.toContain('Current evidence could not be checked.');
+  } finally {
+    await fixture.completeSelected();
+  }
+  expect(document.querySelector('dialog [aria-label="Case evidence"]')?.getAttribute('aria-busy')).toBe('false');
+});
+
+it('keeps selected observations invariant under bounded unchanged parent poll sequences', async () => {
+  vi.useFakeTimers();
+  await fc.assert(
+    fc.asyncProperty(fc.array(fc.boolean(), {minLength: 1, maxLength: 4}), async order => {
+      const fixture = await pollingEvidenceCase();
+      try {
+        await fixture.completeSelected();
+        await act(async () => fixture.refresh().click());
+        expect(fixture.posts).toHaveLength(1);
+        for (const healthFirst of order) {
+          fixture.setHoldPolls(true);
+          await act(async () => vi.advanceTimersByTimeAsync(30_000));
+          expect(fixture.polls.length).toBeGreaterThan(0);
+          const run = [...document.querySelectorAll<HTMLButtonElement>('button')].find(
+            button => button.textContent?.trim() === 'Run maintenance now',
+          );
+          expect(run).toBeDefined();
+          expect(run!.disabled).toBe(true);
+          await fixture.settlePolls(healthFirst);
+          expect(fixture.posts).toHaveLength(1);
+          expect(document.querySelectorAll('.health-evidence-selectors button')).toHaveLength(4);
+          expect(document.querySelector('dialog')?.textContent).not.toContain('Current evidence could not be checked.');
+        }
+      } finally {
+        await act(async () => root?.unmount());
+        root = undefined;
+        document.body.replaceChildren();
+      }
+    }),
+    {numRuns: 16},
+  );
+});
+
+it('refreshes a genuinely changed selected revision while unrelated poll progress remains read-only', async () => {
+  vi.useFakeTimers();
+  const fixture = await pollingEvidenceCase();
+  await fixture.completeSelected();
+  fixture.changeRevision();
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(fixture.posts).toHaveLength(1);
+  expect(document.querySelector('dialog')?.textContent).toContain('selected-changed');
+  expect(document.querySelectorAll('.health-evidence-selectors button')).toHaveLength(4);
+  const before = fixture.reads.length;
+  await act(async () =>
+    [...document.querySelectorAll<HTMLButtonElement>('.health-evidence-selectors button')][1].click(),
+  );
+  expect(
+    fixture.reads
+      .slice(before)
+      .some(path => new URL(path, 'http://manager.test').searchParams.get('citationId') === 'reference-1'),
+  ).toBe(true);
+  expect(fixture.posts).toHaveLength(1);
+});
+
+it('retains actual selected failure after three attempts until an explicit successful retry', async () => {
+  vi.useFakeTimers();
+  const fixture = await pollingEvidenceCase();
+  await fixture.completeSelected();
+  fixture.setSelectedStatus(503);
+  await act(async () => fixture.refresh().click());
+  await act(async () => vi.advanceTimersByTimeAsync(1_500));
+  expect(fixture.posts).toHaveLength(3);
+  expect(document.querySelector('dialog')?.textContent).toContain('Current evidence could not be checked.');
+  expect(document.querySelectorAll('.health-evidence-selectors button')).toHaveLength(4);
+  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  expect(fixture.posts).toHaveLength(3);
+  expect(document.querySelector('dialog')?.textContent).toContain('Current evidence could not be checked.');
+  fixture.setSelectedStatus(200);
+  await act(async () => fixture.refresh().click());
+  expect(fixture.posts).toHaveLength(4);
+  expect(document.querySelector('dialog')?.textContent).not.toContain('Current evidence could not be checked.');
+});
+
+it.each([401, 403, 404])('redacts a selected observation after access status %s without retrying it', async code => {
+  vi.useFakeTimers();
+  const fixture = await pollingEvidenceCase();
+  await fixture.completeSelected();
+  fixture.setSelectedStatus(code);
+  await act(async () => fixture.refresh().click());
+  expect(fixture.posts).toHaveLength(1);
+  expect(document.querySelectorAll('.health-evidence-selectors button')).toHaveLength(0);
+  expect(document.querySelector('dialog')?.textContent).toContain('Selected access failed');
+});
+
+it.each([401, 403, 404])(
+  'unmounts the selected review when its actual parent poll loses access with %s',
+  async code => {
+    vi.useFakeTimers();
+    const fixture = await pollingEvidenceCase();
+    await fixture.completeSelected();
+    expect(document.querySelector('dialog[open]')).not.toBeNull();
+    fixture.setParentStatus(code);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect(document.body.textContent).not.toContain('Retained polling memory.');
+    expect(fixture.posts).toHaveLength(0);
+  },
+);
+
+async function pendingParentDenial(kind: 'cases' | 'receipts' | 'pause' | 'undo', holdEvidence = false) {
+  const uri = 'threadnote://user/tester/memories/durable/projects/threadnote/private-pagination.md';
+  const item: ManagerContextMaintenanceCaseV2 = {
+    caseId: 'pending-parent-case',
+    project: 'threadnote',
+    memoryId: 'pending-parent-memory',
+    subjectUri: uri,
+    subjectContentHashes: [{uri, hash: 'private-hash'}],
+    family: 'citation',
+    slot: 'anchor',
+    evidenceRevision: 'private-current',
+    disposition: 'needs-decision',
+    reason: 'source-changed',
+    firstSeen: 'now',
+    lastSeen: 'now',
+    lastChecked: 'now',
+    attemptCount: 1,
+    events: [],
+  };
+  const snapshot = {
+    ...status(),
+    cases: [item],
+    receipts: [
+      {
+        receiptId: 'private-receipt',
+        project: 'threadnote',
+        subjectUri: uri,
+        timestamp: '2026-10-03T10:00:00Z',
+        postHash: 'a'.repeat(64),
+        state: 'applied' as const,
+      },
+    ],
+    page: {generation: 'private-history', caseNextCursor: 'cases-next', receiptNextCursor: 'receipts-next'},
+  };
+  const packet: ManagerContextMaintenancePacketV2 = {
+    version: 2,
+    project: item.project,
+    caseId: item.caseId,
+    memoryUri: uri,
+    evidenceRevision: item.evidenceRevision,
+    expectedContentHash: 'private-hash',
+    reason: item.reason,
+    choices: [],
+    allowedOperations: [],
+    instructions: 'PRIVATE SELECTED EVIDENCE',
+  };
+  const response = (body: unknown, code = 200) => new Response(JSON.stringify(body), {status: code});
+  const pending = Promise.withResolvers<Response>(),
+    memory = Promise.withResolvers<Response>(),
+    evidence = Promise.withResolvers<Response>();
+  const requests: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const url = new URL(input, 'http://manager.test');
+      if (
+        (init?.method === 'POST' && ['pause', 'undo'].includes(JSON.parse(String(init.body)).action)) ||
+        url.searchParams.has('caseCursor') ||
+        url.searchParams.has('receiptCursor')
+      ) {
+        requests.push(
+          init?.method === 'POST'
+            ? JSON.parse(String(init.body)).action
+            : url.searchParams.has('caseCursor')
+              ? 'cases'
+              : 'receipts',
+        );
+        return pending.promise;
+      }
+      if (url.pathname === '/api/memory')
+        return holdEvidence ? memory.promise : response({content: 'PRIVATE STORED MEMORY'});
+      if (url.pathname === '/api/attention/context-maintenance')
+        return url.searchParams.has('caseId') && url.searchParams.get('view') !== 'status'
+          ? holdEvidence
+            ? evidence.promise
+            : response(packet)
+          : response(snapshot);
+      return response({version: 1, project: 'threadnote', items: [], omitted: 0});
+    }),
+  );
+  await render(<ContextMaintenanceView {...props} project="threadnote" report={report()} />);
+  const button = (label: string) =>
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find(value => value.textContent?.trim() === label)!;
+  await act(async () => button('History').click());
+  const details = [...document.querySelectorAll('details')].find(
+    value => value.querySelector('summary')?.textContent === 'Bounded maintenance diagnostics',
+  )!;
+  await act(async () => details.querySelector('summary')!.click());
+  expect(details.open).toBe(true);
+  await act(async () =>
+    button(
+      kind === 'cases'
+        ? 'Load more retained cases'
+        : kind === 'receipts'
+          ? 'Load more retained changes and undo'
+          : kind === 'undo'
+            ? 'Undo this change'
+            : 'Pause automatic maintenance',
+    ).click(),
+  );
+  expect(requests).toEqual([kind]);
+  const inspect = button('Inspect exact case and evidence');
+  expect(inspect.disabled).toBe(false);
+  await act(async () => inspect.click());
+  expect(document.querySelector('dialog[open]')).not.toBeNull();
+  return {
+    finish: async (code: number) => act(async () => pending.resolve(response({error: 'PARENT REQUEST DENIED'}, code))),
+    memory: async () => act(async () => memory.resolve(response({content: 'PRIVATE STORED MEMORY'}))),
+    packet: async () => act(async () => evidence.resolve(response(packet))),
+  };
+}
+
+it.each([401, 403, 404])('redacts an open review when gated history pagination returns %s', async code => {
+  const pending = await pendingParentDenial('cases');
+  expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE STORED MEMORY');
+  expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
+  await pending.finish(code);
+  expect(document.querySelector('dialog[open]')).toBeNull();
+  expect(document.body.textContent).not.toContain('PRIVATE STORED MEMORY');
+  expect(document.body.textContent).not.toContain('PRIVATE SELECTED EVIDENCE');
+});
+
+it.each([401, 403, 404])('redacts an open review when a gated same-parent pause action returns %s', async code => {
+  const pending = await pendingParentDenial('pause');
+  expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE STORED MEMORY');
+  expect(document.querySelector('dialog')?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
+  await pending.finish(code);
+  expect(document.querySelector('dialog[open]')).toBeNull();
+  expect(document.body.textContent).not.toContain('PRIVATE STORED MEMORY');
+  expect(document.body.textContent).not.toContain('PRIVATE SELECTED EVIDENCE');
+});
+
+it('redacts protected review state independently of delayed history/action and evidence completion order', async () => {
+  const orders = [
+    ['memory', 'packet', 'denial'],
+    ['packet', 'denial', 'memory'],
+    ['denial', 'memory', 'packet'],
+    ['packet', 'memory', 'denial'],
+    ['memory', 'denial', 'packet'],
+    ['denial', 'packet', 'memory'],
+  ] as const;
+  await fc.assert(
+    fc.asyncProperty(
+      fc.constantFrom('cases' as const, 'receipts' as const, 'pause' as const),
+      fc.constantFrom(401, 403, 404),
+      fc.constantFrom(...orders),
+      async (kind, code, order) => {
+        const pending = await pendingParentDenial(kind, true);
+        try {
+          let denied = false;
+          for (const event of order) {
+            if (event === 'denial') {
+              await pending.finish(code);
+              denied = true;
+            } else await pending[event]();
+            if (denied) {
+              expect(document.querySelector('dialog[open]')).toBeNull();
+              expect(document.body.textContent).not.toContain('PRIVATE STORED MEMORY');
+              expect(document.body.textContent).not.toContain('PRIVATE SELECTED EVIDENCE');
+            }
+          }
+        } finally {
+          await pending.memory();
+          await pending.packet();
+          await act(async () => root?.unmount());
+          root = undefined;
+          document.body.replaceChildren();
+        }
+      },
+    ),
+    {numRuns: 24},
+  );
+});
+
+it.each(['cases', 'receipts', 'pause'] as const)(
+  'preserves an authorized open review after transient %s request failure',
+  async kind => {
+    const pending = await pendingParentDenial(kind);
+    const dialog = document.querySelector('dialog[open]');
+    await pending.finish(503);
+    expect(document.querySelector('dialog[open]')).toBe(dialog);
+    expect(dialog?.textContent).toContain('PRIVATE STORED MEMORY');
+    expect(dialog?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
+    expect(document.body.textContent).toContain('PARENT REQUEST DENIED');
+  },
+);
+
+it('keeps the exact open review and undo409 conflict handling after a delayed undo conflict', async () => {
+  const pending = await pendingParentDenial('undo');
+  const dialog = document.querySelector('dialog[open]');
+  await pending.finish(409);
+  expect(document.querySelector('dialog[open]')).toBe(dialog);
+  expect(dialog?.textContent).toContain('PRIVATE STORED MEMORY');
+  expect(dialog?.textContent).toContain('PRIVATE SELECTED EVIDENCE');
+  expect(document.body.textContent).toContain('Undo stopped: PARENT REQUEST DENIED.');
+  expect([...document.querySelectorAll('button')].some(button => button.textContent === 'Inspect current memory')).toBe(
+    true,
+  );
+});

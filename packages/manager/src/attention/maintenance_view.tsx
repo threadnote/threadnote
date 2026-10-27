@@ -113,6 +113,12 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     checking ||
     !!error ||
     (live.active && live.snapshot.status !== 'ready' && !(legacyStatus && legacyStatusFreshProject === props.project));
+  function redactProjectEvidence(project: string) {
+    setBlockedProject(project);
+    setSnapshot(undefined);
+    setSelected(undefined);
+    setInspectedCase(undefined);
+  }
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -190,10 +196,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
       } catch (cause) {
         if (!cancelled && mutationEpoch.current === epoch) {
           if (maintenanceReadRequiresRedaction(cause)) {
-            setBlockedProject(props.project);
-            setSnapshot(undefined);
-            setSelected(undefined);
-            setInspectedCase(undefined);
+            redactProjectEvidence(props.project);
           }
           setLegacyStatusFreshProject(undefined);
           setError(errorMessage(cause));
@@ -213,10 +216,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
     if (legacyStatus || live.snapshot.status !== 'ready' || actionBusy.current) return;
     const result = live.snapshot.data;
     if (!validMaintenanceStatus(result)) {
-      setBlockedProject(props.project);
-      setSnapshot(undefined);
-      setSelected(undefined);
-      setInspectedCase(undefined);
+      redactProjectEvidence(props.project);
       setError('Maintenance status is unavailable. Refresh after updating Threadnote.');
       return;
     }
@@ -256,10 +256,7 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
   useEffect(() => {
     if (legacyStatus || live.snapshot.status !== 'error') return;
     if (maintenanceReadRequiresRedaction(live.snapshot.error)) {
-      setBlockedProject(props.project);
-      setSnapshot(undefined);
-      setSelected(undefined);
-      setInspectedCase(undefined);
+      redactProjectEvidence(props.project);
     }
     setChecking(false);
     setError(errorMessage(live.snapshot.error));
@@ -340,7 +337,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         if (action === 'undo' && Schema.is(ManagerApiError)(cause) && cause.status === 409) {
           setError(maintenanceUndoConflictMessage(cause.message));
           setConflictSubjectUri(status?.receipts.find(item => item.receiptId === receiptId)?.subjectUri);
-        } else setError(errorMessage(cause));
+        } else {
+          if (maintenanceReadRequiresRedaction(cause)) redactProjectEvidence(project);
+          setError(errorMessage(cause));
+        }
       }
     } finally {
       if (mounted.current && activeProject.current === project && projectEpoch.current === epoch) {
@@ -368,8 +368,10 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
         previous?.status.page?.generation === current.page?.generation ? {project, status: merged} : previous,
       );
     } catch (cause) {
-      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
+      if (mounted.current && activeProject.current === project && projectEpoch.current === epoch) {
+        if (maintenanceReadRequiresRedaction(cause)) redactProjectEvidence(project);
         setError(errorMessage(cause));
+      }
     } finally {
       if (mounted.current && activeProject.current === project && projectEpoch.current === epoch)
         setLoadingHistory(false);
@@ -1164,11 +1166,9 @@ export function ContextMaintenanceView(props: Props): React.ReactElement {
           }
           title={inspectedCase.title}
           stale={
-            !!props.healthLiveStale ||
-            statusUnconfirmed ||
-            (inspectedCase.evidenceRevision !== undefined &&
-              cases.find(item => item.caseId === inspectedCase.caseId)?.evidenceRevision !==
-                inspectedCase.evidenceRevision)
+            inspectedCase.evidenceRevision !== undefined &&
+            cases.find(item => item.caseId === inspectedCase.caseId)?.evidenceRevision !==
+              inspectedCase.evidenceRevision
           }
           onEvidenceUpdated={adoptEvidence}
           onClose={() => setInspectedCase(undefined)}
