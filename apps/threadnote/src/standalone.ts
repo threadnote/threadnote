@@ -36,6 +36,7 @@ const isModelSetupRequest = arguments_[0] === 'model-setup-request';
 const isLocalModelWorker = arguments_[0] === LOCAL_MODEL_WORKER_ARGUMENT;
 const isCodeGraphEmbeddingWorker = arguments_[0] === CODE_GRAPH_EMBEDDING_WORKER_ARGUMENT;
 const isIntegrationSyncWorker = arguments_[0] === INTEGRATION_SYNC_WORKER_ARGUMENT;
+const isSemanticCoordinator = arguments_[0] === '__semantic-coordinator';
 const isCodeGraphParserWorker = arguments_[0] === CODE_GRAPH_PARSER_WORKER_ARGUMENT;
 const isCodeGraphCompactionWorker = arguments_[0] === CODE_GRAPH_COMPACTION_WORKER_ARGUMENT;
 const isCodeGraphDeepDiagnosticsWorker = arguments_[0] === CODE_GRAPH_DEEP_DIAGNOSTICS_WORKER_ARGUMENT;
@@ -109,27 +110,29 @@ if (
         ? await graphEmbeddingWorkerProgram(arguments_.slice(1))
         : isIntegrationSyncWorker
           ? await integrationSyncWorkerProgram(arguments_.slice(1))
-          : isRemoteMemoryService
-            ? await remoteMemoryServiceProgram()
-            : isOAuthM2MGraphCredentialHelper
-              ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
-              : isOAuthM2MRegistryCredentialHelper
-                ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
-                : isOAuthM2MPublisherRegistryCredentialHelper
-                  ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
-                  : isOAuthUserRegistryCredentialHelper
-                    ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
-                    : isGraphOAuthUserHelper
-                      ? await graphOAuthHelperProgram(arguments_.slice(1))
-                      : isRemoteMemoryOperator
-                        ? await remoteMemoryOperatorProgram(arguments_.slice(1))
-                        : isLocalModelWorker
-                          ? await localModelWorkerProgram(arguments_)
-                          : isCodeGraphParserWorker
-                            ? await codeGraphParserWorkerProgram(arguments_)
-                            : isGitWorktreeRegistrationWorker
-                              ? await gitWorktreeRegistrationWorkerProgram()
-                              : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
+          : isSemanticCoordinator
+            ? await semanticCoordinatorWorkerProgram(arguments_.slice(1))
+            : isRemoteMemoryService
+              ? await remoteMemoryServiceProgram()
+              : isOAuthM2MGraphCredentialHelper
+                ? await oauthM2MGraphCredentialHelperProgram(arguments_.slice(1))
+                : isOAuthM2MRegistryCredentialHelper
+                  ? await oauthM2MRegistryCredentialHelperProgram(arguments_.slice(1))
+                  : isOAuthM2MPublisherRegistryCredentialHelper
+                    ? await oauthM2MPublisherRegistryCredentialHelperProgram(arguments_.slice(1))
+                    : isOAuthUserRegistryCredentialHelper
+                      ? await oauthUserRegistryCredentialHelperProgram(arguments_.slice(1))
+                      : isGraphOAuthUserHelper
+                        ? await graphOAuthHelperProgram(arguments_.slice(1))
+                        : isRemoteMemoryOperator
+                          ? await remoteMemoryOperatorProgram(arguments_.slice(1))
+                          : isLocalModelWorker
+                            ? await localModelWorkerProgram(arguments_)
+                            : isCodeGraphParserWorker
+                              ? await codeGraphParserWorkerProgram(arguments_)
+                              : isGitWorktreeRegistrationWorker
+                                ? await gitWorktreeRegistrationWorkerProgram()
+                                : await applicationProgram(arguments_, isMcpServer, isMcpBroker);
   const program: Effect.Effect<void, unknown, never> = selectedProgram.pipe(
     Effect.provide(Layer.merge(telemetryChildEnvironmentPolicyLayer, runtimeEntrypointLayer)),
     withCliDiagnostics,
@@ -141,6 +144,7 @@ if (
       isModelSetupWorker ||
       isLocalModelWorker ||
       isIntegrationSyncWorker ||
+      isSemanticCoordinator ||
       isCodeGraphEmbeddingWorker ||
       isCodeGraphParserWorker ||
       isGitWorktreeRegistrationWorker ||
@@ -509,6 +513,26 @@ async function codeGraphParserWorkerProgram(arguments_: readonly string[]) {
       treeSitter.TreeSitterRuntime.layer.pipe(
         Layer.provideMerge(Layer.merge(systemModule.SystemInfo.layer, BunServices.layer)),
       ),
+    ),
+  );
+}
+
+async function semanticCoordinatorWorkerProgram(arguments_: readonly string[]) {
+  const [coordinator, system, command] = await Promise.all([
+    import('./semantic/coordinator.js'),
+    import('@threadnote/platform/system'),
+    import('@threadnote/platform/command'),
+  ]);
+  const ports = command.CommandExecutor.layer.pipe(
+    Layer.provideMerge(system.SystemInfo.layer),
+    Layer.provideMerge(BunServices.layer),
+  );
+  return coordinator.runSemanticCoordinatorWorker(arguments_).pipe(
+    Effect.provide(ports),
+    Effect.tapCause(cause =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.void
+        : Console.error('Semantic coordinator unavailable; inspect semantic prerequisites.'),
     ),
   );
 }
