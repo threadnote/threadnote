@@ -1321,6 +1321,164 @@ effectIt.effect('bounds CPU trace/frame/key/output work and emits only source-re
   }),
 );
 
+effectIt.effect('classifies only verified native frames with fixed labels and bounded metadata vocabularies', () =>
+  Effect.gen(function* () {
+    const labels = {
+      stringify: 'STRINGIFY',
+      parse: 'PARSE',
+      gzipSync: 'GZIP',
+      encode: 'ENCODE',
+      toBase64: 'BASE64',
+      CryptoHasher: 'HASH_CONSTRUCTOR',
+      update: 'UPDATE',
+      digest: 'DIGEST',
+      entries: 'ENTRIES',
+      cloneObject: 'CLONE_OBJECT',
+      profile: 'PROFILER',
+    };
+    const native = {
+      ...cpuFrameFixture(),
+      sourceID: 4_294_967_295,
+      sourceURL: undefined,
+      category: 'Unknown Executable',
+    };
+    const frames = [
+      ...Object.keys(labels).map(name => ({
+        ...native,
+        name,
+        category: name === 'CryptoHasher' ? 'Host' : native.category,
+      })),
+      {...native, name: 'stringify', sourceID: 1},
+      {...native, name: 'gzipSync', category: 'FTL', flags: 1},
+      {...native, name: 'PRIVATE_NAME'},
+      {...native, name: 'gzipSync', sourceURL: 'https://PRIVATE_HOST/PRIVATE_PATH'},
+      {...native, name: '__proto__'},
+      {...native, name: 'stringify', category: 'PRIVATE_CATEGORY'},
+    ];
+    const profile = cpuProfileFixture();
+    profile.stackTraces.traces = frames.map((frame, timestamp) => ({timestamp, frames: [frame]}));
+    const lines: string[] = [];
+    const exit = yield* reportNativeFailure(Effect.fail('original'), make({sink: line => lines.push(line)}), {
+      enabled: true,
+      load: async () => done => done().then(() => profile),
+    }).pipe(Effect.exit);
+    expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBe('original');
+    const [packet] = cpuPackets(lines);
+    expect(packet.self.filter((row: {file: string}) => row.file === 'NATIVE')).toEqual(
+      Object.values(labels).map(name => ({file: 'NATIVE', name, line: 0, samples: 1})),
+    );
+    expect(packet.self.find((row: {file: string}) => row.file === 'OTHER').samples).toBe(6);
+    expect(packet.selfSources).toEqual({
+      empty: 0,
+      sourceful: 1,
+      sourceLessNative: 13,
+      sourceLessBuiltin: 1,
+      sourceLessOther: 2,
+    });
+    expect(packet.selfCategories).toEqual({
+      LLInt: 0,
+      Baseline: 0,
+      DFG: 0,
+      FTL: 1,
+      Host: 1,
+      UnknownExecutable: 14,
+      OTHER: 1,
+    });
+    expect(packet.callerKinds.sourceLessOnly).toBe(16);
+    expect(packet.callerKinds.rejectedSourceOnly).toBe(1);
+    expect(packet.callers).toEqual([{file: 'OTHER', name: 'OTHER', line: 0, samples: 17}]);
+    expect(lines.join('\n')).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect('retains observed database and filesystem native names as generic fixed labels', () =>
+  Effect.gen(function* () {
+    const labels = {
+      all: 'ALL',
+      get: 'GET',
+      run: 'RUN',
+      prepare: 'PREPARE',
+      open: 'OPEN',
+      close: 'CLOSE',
+      readFileSync: 'READ_FILE_SYNC',
+      writeFileSync: 'WRITE_FILE_SYNC',
+      openSync: 'OPEN_SYNC',
+      statSync: 'STAT_SYNC',
+      renameSync: 'RENAME_SYNC',
+      fsyncSync: 'FSYNC_SYNC',
+    };
+    const profile = cpuProfileFixture();
+    profile.stackTraces.traces = Object.keys(labels).map((name, timestamp) => ({
+      timestamp,
+      frames: [
+        {...cpuFrameFixture(name), sourceID: 4_294_967_295, sourceURL: undefined, category: 'Unknown Executable'},
+      ],
+    }));
+    const lines: string[] = [];
+    yield* reportNativeFailure(Effect.fail('original'), make({sink: line => lines.push(line)}), {
+      enabled: true,
+      load: async () => done => done().then(() => profile),
+    }).pipe(Effect.exit);
+    const [packet] = cpuPackets(lines);
+    expect(packet.self).toEqual(Object.values(labels).map(name => ({file: 'NATIVE', name, line: 0, samples: 1})));
+    expect(packet.selfSources.sourceLessNative).toBe(12);
+    expect(packet.callers).toEqual([{file: 'OTHER', name: 'OTHER', line: 0, samples: 12}]);
+  }),
+);
+
+effectIt.effect('counts caller fallback reasons without inventing production ancestors for native frames', () =>
+  Effect.gen(function* () {
+    const native = {...cpuFrameFixture('stringify'), sourceID: 4_294_967_295, sourceURL: undefined, category: 'Host'};
+    const application = cpuFrameFixture();
+    const dependency = {
+      ...cpuFrameFixture('runLoop'),
+      sourceURL: new URL('../../../../node_modules/effect/dist/internal/effect.js', import.meta.url).href,
+    };
+    const rejected = {...cpuFrameFixture('PRIVATE_NAME'), sourceURL: 'file:///PRIVATE_PATH'};
+    const stacks = [
+      [native, application],
+      [native, dependency],
+      [native, rejected],
+      [native],
+      [],
+      [...Array.from({length: 32}, () => native), application],
+    ];
+    const profile = cpuProfileFixture();
+    profile.stackTraces.traces = stacks.map((frames, timestamp) => ({timestamp, frames}));
+    const lines: string[] = [];
+    yield* reportNativeFailure(Effect.fail('original'), make({sink: line => lines.push(line)}), {
+      enabled: true,
+      load: async () => done => done().then(() => profile),
+    }).pipe(Effect.exit);
+    const [packet] = cpuPackets(lines);
+    expect(packet.callerKinds).toEqual({
+      application: 1,
+      dependencyOnly: 1,
+      rejectedSourceOnly: 1,
+      sourceLessOnly: 1,
+      empty: 1,
+      truncatedWithoutApplication: 1,
+    });
+    expect(packet.callers).toEqual([
+      {file: 'OTHER', name: 'OTHER', line: 0, samples: 5},
+      {
+        file: 'apps/threadnote/src/workflow_memory/journal_codec.ts',
+        name: 'encodeBoundedWorkflowJson',
+        line: 27,
+        samples: 1,
+      },
+    ]);
+    for (const histogram of [packet.selfSources, packet.selfCategories, packet.callerKinds])
+      expect(Object.values(histogram).reduce((sum: number, count) => sum + Number(count), 0)).toBe(
+        packet.analyzedTraces,
+      );
+    expect(packet.framesOmitted).toBe(1);
+    expect(packet.selfSources.empty).toBe(1);
+    expect(packet.selfCategories.OTHER).toBe(1);
+    expect(lines.join('\n')).not.toContain('PRIVATE');
+  }),
+);
+
 effectIt.effect('retains timed-out sampler ownership through late rejection and never writes a late packet', () =>
   Effect.gen(function* () {
     const lines: string[] = [];

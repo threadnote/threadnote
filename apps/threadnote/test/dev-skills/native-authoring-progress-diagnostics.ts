@@ -245,9 +245,43 @@ const cpuRoot = decodeURIComponent(new URL('../../../../', import.meta.url).path
   '$1',
 );
 const cpuOther = {file: 'OTHER', name: 'OTHER', line: 0};
+const cpuNativeNames: Readonly<Record<string, string>> = {
+  stringify: 'STRINGIFY',
+  parse: 'PARSE',
+  gzipSync: 'GZIP',
+  encode: 'ENCODE',
+  toBase64: 'BASE64',
+  CryptoHasher: 'HASH_CONSTRUCTOR',
+  update: 'UPDATE',
+  digest: 'DIGEST',
+  entries: 'ENTRIES',
+  cloneObject: 'CLONE_OBJECT',
+  profile: 'PROFILER',
+  all: 'ALL',
+  get: 'GET',
+  run: 'RUN',
+  prepare: 'PREPARE',
+  open: 'OPEN',
+  close: 'CLOSE',
+  readFileSync: 'READ_FILE_SYNC',
+  writeFileSync: 'WRITE_FILE_SYNC',
+  openSync: 'OPEN_SYNC',
+  statSync: 'STAT_SYNC',
+  renameSync: 'RENAME_SYNC',
+  fsyncSync: 'FSYNC_SYNC',
+};
+const cpuNative = (frame?: SamplingProfileStackFrame): boolean =>
+  !!frame &&
+  !frame.sourceURL &&
+  frame.sourceID === 4_294_967_295 &&
+  (frame.category === 'Unknown Executable' || frame.category === 'Host');
 const cpuFrame = (frame?: SamplingProfileStackFrame): Omit<CpuRow, 'samples'> => {
   const source = frame?.sourceURL;
-  if (!source) return cpuOther;
+  if (!source) {
+    if (frame && cpuNative(frame) && Object.hasOwn(cpuNativeNames, frame.name))
+      return {file: 'NATIVE', name: cpuNativeNames[frame.name], line: 0};
+    return cpuOther;
+  }
   let path: string;
   try {
     path = source.startsWith('file:') ? decodeURIComponent(new URL(source).pathname) : source;
@@ -277,6 +311,16 @@ const summarizeCpu = (profile: SamplingProfile) => {
   const traces = profile.stackTraces.traces;
   const self = new Map<string, CpuRow>();
   const callers = new Map<string, CpuRow>();
+  const selfSources = {empty: 0, sourceful: 0, sourceLessNative: 0, sourceLessBuiltin: 0, sourceLessOther: 0};
+  const selfCategories = {LLInt: 0, Baseline: 0, DFG: 0, FTL: 0, Host: 0, UnknownExecutable: 0, OTHER: 0};
+  const callerKinds = {
+    application: 0,
+    dependencyOnly: 0,
+    rejectedSourceOnly: 0,
+    sourceLessOnly: 0,
+    empty: 0,
+    truncatedWithoutApplication: 0,
+  };
   let keysOmitted = 0;
   let framesOmitted = 0;
   const add = (rows: Map<string, CpuRow>, frame: Omit<CpuRow, 'samples'>) => {
@@ -293,8 +337,30 @@ const summarizeCpu = (profile: SamplingProfile) => {
   const analyzed = Math.min(traces.length, 65_536);
   for (let index = 0; index < analyzed; index++) {
     const frames = traces[index].frames;
-    add(self, cpuFrame(frames[0]));
+    const head = frames[0];
+    add(self, cpuFrame(head));
+    if (!head) selfSources.empty++;
+    else if (head.sourceURL) selfSources.sourceful++;
+    else if (cpuNative(head)) selfSources.sourceLessNative++;
+    else if (head.flags === 1) selfSources.sourceLessBuiltin++;
+    else selfSources.sourceLessOther++;
+    switch (head?.category) {
+      case 'LLInt':
+      case 'Baseline':
+      case 'DFG':
+      case 'FTL':
+      case 'Host':
+        selfCategories[head.category]++;
+        break;
+      case 'Unknown Executable':
+        selfCategories.UnknownExecutable++;
+        break;
+      default:
+        selfCategories.OTHER++;
+    }
     let caller = cpuOther;
+    let dependency = false;
+    let rejectedSource = false;
     framesOmitted = bounded(framesOmitted + Math.max(0, frames.length - 32));
     for (let frame = 0; frame < Math.min(frames.length, 32); frame++) {
       const candidate = cpuFrame(frames[frame]);
@@ -302,8 +368,23 @@ const summarizeCpu = (profile: SamplingProfile) => {
         caller = candidate;
         break;
       }
+      dependency ||= candidate.file.startsWith('node_modules/');
+      rejectedSource ||= !!frames[frame].sourceURL && candidate.file === 'OTHER';
     }
     add(callers, caller);
+    const callerKind =
+      caller !== cpuOther
+        ? 'application'
+        : frames.length > 32
+          ? 'truncatedWithoutApplication'
+          : dependency
+            ? 'dependencyOnly'
+            : rejectedSource
+              ? 'rejectedSourceOnly'
+              : frames.length
+                ? 'sourceLessOnly'
+                : 'empty';
+    callerKinds[callerKind]++;
   }
   const top = (rows: Map<string, CpuRow>) => [...rows.values()].sort((a, b) => b.samples - a.samples).slice(0, 16);
   return {
@@ -314,6 +395,9 @@ const summarizeCpu = (profile: SamplingProfile) => {
     tracesOmitted: bounded(traces.length - analyzed),
     framesOmitted,
     keysOmitted,
+    selfSources,
+    selfCategories,
+    callerKinds,
     self: top(self),
     callers: top(callers),
   };
