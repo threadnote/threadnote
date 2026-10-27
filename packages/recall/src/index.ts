@@ -819,11 +819,12 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
         } satisfies RecallIndexStatus;
       }
       if (metadata.get('initialized') !== 'true') {
+        const untouched = yield* RecallIndexIdentity.recallLexicalProjectionIsUntouched(sql, metadata);
         return {
           databasePath,
           documentCount: 0,
           ready: false,
-          reason: 'not initialized; run `threadnote repair`',
+          reason: untouched ? 'not built; run `threadnote repair`' : 'not initialized; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
       if (!RecallIndexIdentity.recallIndexMetadataIsCurrent(metadata)) {
@@ -884,6 +885,15 @@ export const recallIndexStatus = Effect.fn('recall.indexStatus')(function* (
           documentCount,
           ready: false,
           reason: 'missing content generation; run `threadnote repair`',
+        } satisfies RecallIndexStatus;
+      }
+      if (metadata.get('source_validation_required') === 'true') {
+        return {
+          databasePath,
+          documentCount,
+          generation,
+          ready: false,
+          reason: 'canonical documents changed; run `threadnote repair`',
         } satisfies RecallIndexStatus;
       }
       return {

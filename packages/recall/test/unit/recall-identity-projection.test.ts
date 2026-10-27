@@ -1,7 +1,7 @@
 import {Database} from 'bun:sqlite';
 import * as BunServices from '@effect/platform-bun/BunServices';
 import {it} from '@effect/vitest';
-import {Effect, FileSystem, Layer, Path} from 'effect';
+import {Effect, FileSystem, Layer, Option, Path} from 'effect';
 import {TestClock} from 'effect/testing';
 import fc from 'fast-check';
 import {expect} from 'vitest';
@@ -9,6 +9,9 @@ import {ChildEnvironmentPolicy} from '@threadnote/platform/child-environment-pol
 import {RuntimeEntrypoint} from '@threadnote/platform/runtime-entrypoint';
 import {SystemInfo} from '@threadnote/platform/system';
 import {ResourceStore} from '@threadnote/store/resource-store';
+import {LocalModelCatalog} from '@threadnote/inference/models/catalog';
+import {LocalModelStore} from '@threadnote/inference/models/store';
+import {LocalModelRuntime} from '@threadnote/inference/engine/local-model-runtime';
 import {
   consumeResourceRecallInvalidationReceipt,
   CurrentResourceRecallInvalidationObserver,
@@ -19,8 +22,15 @@ import {
   loadRecallMemoryIdentities,
   recallIndexDatabaseFilename,
   expireRecallIndexValidation,
+  recallIndexStatus,
+  currentRecallCorpusGeneration,
 } from '@threadnote/recall/index';
 import {recallResourceInvalidationLayer} from '@threadnote/recall/resource-invalidation';
+import {
+  lexicalRefreshDisposition,
+  refreshRecallDerivedIndexesAfterCanonicalMutation,
+} from '@threadnote/recall/mcp/refresh';
+import {identityStaleMarkerBasePath, writeRecallStaleGeneration} from '@threadnote/recall/index/stale_marker';
 import {resolveMemoryIdentityAliases} from '@threadnote/recall/memory/identity';
 import {fcEffectProp} from '@threadnote/testing/fast-check-property';
 
@@ -35,7 +45,26 @@ const system = SystemInfo.layer.pipe(
     ),
   ),
 );
-const base = Layer.mergeAll(BunServices.layer, system, recallResourceInvalidationLayer);
+const unusedModel = Effect.die('Lexical refresh without model selection must not use model services.');
+const unusedModels = Layer.mergeAll(
+  Layer.succeed(LocalModelCatalog, {get: () => unusedModel, list: () => unusedModel, selected: () => unusedModel}),
+  Layer.succeed(LocalModelStore, {
+    install: () => unusedModel,
+    remove: () => unusedModel,
+    status: () => unusedModel,
+    verify: () => unusedModel,
+    path: () => {
+      throw new Error('Unexpected model path in lexical-only refresh.');
+    },
+  }),
+  Layer.succeed(LocalModelRuntime, {
+    diagnostics: unusedModel,
+    embedMany: () => unusedModel,
+    generate: () => unusedModel,
+    rerank: () => unusedModel,
+  }),
+);
+const base = Layer.mergeAll(BunServices.layer, system, recallResourceInvalidationLayer, unusedModels);
 const layer = Layer.merge(base, ResourceStore.layer.pipe(Layer.provide(base)));
 const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.scoped(Layer.build(layer).pipe(Effect.flatMap(context => effect.pipe(Effect.provide(context)))));
@@ -75,6 +104,210 @@ const fixture = Effect.gen(function* () {
     });
   return {fs, path, home, config, location, store, database, identity, lexical, snapshot};
 });
+
+const mutate = (file: string, sql: string) =>
+  Effect.sync(() => {
+    const db = new Database(file);
+    try {
+      db.exec(sql);
+    } finally {
+      db.close();
+    }
+  });
+const cold = Effect.gen(function* () {
+  const f = yield* fixture;
+  yield* f.store.write(f.location, uri, body('identity baseline'), {mode: 'create'});
+  yield* f.identity();
+  return f;
+});
+const assertUnsafeStatus = (f: Effect.Success<typeof fixture>) =>
+  Effect.gen(function* () {
+    const before = yield* f.fs.readFile(f.database);
+    const status = yield* recallIndexStatus(f.config, false);
+    expect(status.ready).toBe(false);
+    expect(lexicalRefreshDisposition(status)).toBe('unsafe');
+    expect(Option.isNone(yield* currentRecallCorpusGeneration(f.config))).toBe(true);
+    expect(yield* f.fs.readFile(f.database)).toEqual(before);
+  });
+const identityMetadata = (metadata: ReadonlyMap<string, string>) =>
+  new Map([...metadata].filter(([key]) => key.startsWith('identity_')));
+
+it.effect(
+  'flushes a proven identity-only cold database through the real trusted refresh without advancing its peer',
+  () =>
+    Effect.gen(function* () {
+      const f = yield* cold;
+      // The identity snapshot may legitimately precede the final canonical write.
+      const observation = makeResourceRecallInvalidationObservation(f.location);
+      observation.expect([uri]);
+      yield* f.store
+        .write(f.location, uri, body('canonical write after identity'), {mode: 'replace'})
+        .pipe(Effect.provideService(CurrentResourceRecallInvalidationObserver, observation.observer));
+      observation.verify([uri]);
+      const receipt = observation.finish(true, [uri]);
+      expect(receipt).toBeDefined();
+      const before = yield* f.snapshot();
+      const identityMarker = yield* f.fs.readFileString(`${f.database}.identity.stale`);
+      const lexicalMarker = yield* f.fs.readFileString(`${f.database}.stale`);
+      const status = yield* recallIndexStatus(f.config, false);
+      expect(status).toMatchObject({ready: false, reason: 'not built; run `threadnote repair`'});
+      expect(lexicalRefreshDisposition(status)).toBe('refreshable');
+      expect(Option.isNone(yield* currentRecallCorpusGeneration(f.config))).toBe(true);
+      expect(yield* f.snapshot()).toEqual(before);
+      expect(yield* f.fs.readFileString(`${f.database}.stale`)).toBe(lexicalMarker);
+      expect(yield* f.fs.readFileString(`${f.database}.identity.stale`)).toBe(identityMarker);
+      expect(yield* refreshRecallDerivedIndexesAfterCanonicalMutation(f.config, [uri], receipt)).toEqual({
+        state: 'unavailable',
+      });
+      // Status is checked before any lazy lexical query can repair a missed flush.
+      expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+      const after = yield* f.snapshot();
+      expect(identityMetadata(after.metadata)).toEqual(identityMetadata(before.metadata));
+      expect(after.identity).toEqual(before.identity);
+      expect(yield* f.fs.readFileString(`${f.database}.identity.stale`)).toBe(identityMarker);
+      expect(after.lexical).not.toEqual(before.lexical);
+      expect(Option.getOrUndefined(yield* currentRecallCorpusGeneration(f.config))).toBe(
+        after.metadata.get('content_generation'),
+      );
+    }).pipe(TestClock.withLive, provide),
+);
+
+it.effect.each([
+  'initialized',
+  'canonical_mutation_generation',
+  'content_generation',
+  'memory_identity_conflict_generation',
+  'integrity_sequence',
+  'document_count',
+  'include_inactive',
+  'logical_document_count',
+  'total_document_length',
+  'logical_total_document_length',
+  'oversized_document_count',
+  'stale_generation',
+  'validated_at',
+  'source_validation_required',
+])('keeps cold lexical publication metadata %s unsafe even when its value looks empty', key =>
+  Effect.gen(function* () {
+    const f = yield* cold;
+    const db = new Database(f.database);
+    try {
+      db.query('INSERT INTO metadata (key, value) VALUES (?, ?)').run(key, key === 'initialized' ? 'false' : '0');
+    } finally {
+      db.close();
+    }
+    yield* assertUnsafeStatus(f);
+  }).pipe(TestClock.withLive, provide),
+);
+
+it.effect.each([
+  ['nonzero mutation', "UPDATE metadata SET value = '1' WHERE key = 'mutation_sequence'"],
+  ['invalid mutation', "UPDATE metadata SET value = 'invalid' WHERE key = 'mutation_sequence'"],
+  ['missing mutation', "DELETE FROM metadata WHERE key = 'mutation_sequence'"],
+  ['uninitialized identity', "UPDATE metadata SET value = 'false' WHERE key = 'identity_initialized'"],
+  ['identity conflict witness', "UPDATE metadata SET value = 'wrong' WHERE key = 'identity_conflict_generation'"],
+  ['identity integrity witness', "UPDATE metadata SET value = 'wrong' WHERE key = 'identity_integrity_sequence'"],
+  [
+    'empty identity generation',
+    "UPDATE metadata SET value = '' WHERE key IN ('identity_content_generation', 'identity_conflict_generation')",
+  ],
+  ['unsupported schema', "UPDATE metadata SET value = '0' WHERE key = 'schema_version'"],
+  ['missing lexical relation', 'DROP TABLE postings'],
+  ['incompatible lexical relation', 'DROP TABLE postings; CREATE TABLE postings (unexpected TEXT)'],
+])('keeps %s cold state unsafe and read-only', ([_name, sql]) =>
+  Effect.gen(function* () {
+    const f = yield* cold;
+    yield* mutate(f.database, sql);
+    yield* assertUnsafeStatus(f);
+  }).pipe(TestClock.withLive, provide),
+);
+
+it.effect.each([
+  [
+    'documents',
+    "INSERT INTO documents (uri, approved_authoritative, source_path, source_size, candidate_json, logical_key, document_length, memory_links_truncated) VALUES ('threadnote://resources/partial.md', 0, '/partial', 0, '{}', 'partial', 0, 0)",
+  ],
+  ['postings', "INSERT INTO postings VALUES ('partial', 1, 1, 1)"],
+  ['exact_search', "INSERT INTO exact_search (rowid, content) VALUES (1, 'orphan partial FTS')"],
+  ['term_statistics', "INSERT INTO term_statistics VALUES ('partial', 1)"],
+  [
+    'code_links',
+    "INSERT INTO code_links VALUES (1, 'threadnote://resources/partial.md', 0, 'file-path', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')",
+  ],
+  [
+    'memory_links',
+    "INSERT INTO memory_links VALUES (1, 'threadnote://resources/partial.md', 'tn_partial', 'tn_target', '', 'references', 'relation', 0)",
+  ],
+  ['memory_identity_conflicts', "INSERT INTO memory_identity_conflicts VALUES ('tn_partial')"],
+])('refuses partial rows in %s even with a reset bootstrap lexical counter', ([_name, sql]) =>
+  Effect.gen(function* () {
+    const f = yield* cold;
+    yield* mutate(f.database, `${sql}; UPDATE metadata SET value = '0' WHERE key = 'mutation_sequence'`);
+    yield* assertUnsafeStatus(f);
+  }).pipe(TestClock.withLive, provide),
+);
+
+it.effect('reports an isolated same-generation identity-discovered lexical dirty flag before any lexical demand', () =>
+  Effect.gen(function* () {
+    const f = yield* cold;
+    yield* f.lexical();
+    yield* f.identity();
+    const before = yield* f.snapshot();
+    const lexicalMarker = yield* f.fs.readFileString(`${f.database}.stale`);
+    const canonical = f.path.join(f.home, 'data', 'local', 'user', 'me', 'memories', 'durable', 'source.md');
+    yield* f.fs.writeFileString(
+      canonical,
+      body('untracked same generation policy').replace('project: test', 'project: changed'),
+    );
+    yield* writeRecallStaleGeneration(f.fs, identityStaleMarkerBasePath(f.database));
+    expect((yield* f.identity())[0]?.text).toContain('untracked same generation');
+    const dirty = yield* f.snapshot();
+    const identityMarker = yield* f.fs.readFileString(`${f.database}.identity.stale`);
+    expect(dirty.metadata.get('source_validation_required')).toBe('true');
+    for (const key of [
+      'canonical_mutation_generation',
+      'stale_generation',
+      'content_generation',
+      'integrity_sequence',
+      'mutation_sequence',
+    ])
+      expect(dirty.metadata.get(key)).toBe(before.metadata.get(key));
+    expect(dirty.lexical).toEqual(before.lexical);
+    expect(yield* f.fs.readFileString(`${f.database}.stale`)).toBe(lexicalMarker);
+    const status = yield* recallIndexStatus(f.config, false);
+    expect(status).toMatchObject({ready: false, reason: 'canonical documents changed; run `threadnote repair`'});
+    expect(lexicalRefreshDisposition(status)).toBe('refreshable');
+    expect(Option.isNone(yield* currentRecallCorpusGeneration(f.config))).toBe(true);
+    expect(yield* f.snapshot()).toEqual(dirty);
+    expect(yield* refreshRecallDerivedIndexesAfterCanonicalMutation(f.config, [])).toEqual({state: 'unavailable'});
+    expect((yield* recallIndexStatus(f.config, false)).ready).toBe(true);
+    const after = yield* f.snapshot();
+    expect(after.metadata.get('source_validation_required')).toBe('false');
+    expect(after.lexical).toEqual(after.identity);
+    expect(identityMetadata(after.metadata)).toEqual(identityMetadata(dirty.metadata));
+    expect(yield* f.fs.readFileString(`${f.database}.identity.stale`)).toBe(identityMarker);
+  }).pipe(TestClock.withLive, provide),
+);
+
+it.effect.each([
+  ['integrity', "UPDATE metadata SET value = 'wrong' WHERE key = 'integrity_sequence'"],
+  ['count', "UPDATE metadata SET value = '99' WHERE key = 'document_count'"],
+  [
+    'generation',
+    "UPDATE metadata SET value = '' WHERE key IN ('content_generation', 'memory_identity_conflict_generation')",
+  ],
+])('does not let a lexical dirty flag hide poisoned %s state', ([_name, sql]) =>
+  Effect.gen(function* () {
+    const f = yield* cold;
+    yield* f.lexical();
+    yield* mutate(
+      f.database,
+      `${sql}; INSERT INTO metadata (key, value) VALUES ('source_validation_required', 'true') ON CONFLICT(key) DO UPDATE SET value = 'true'`,
+    );
+    yield* assertUnsafeStatus(f);
+    expect((yield* refreshRecallDerivedIndexesAfterCanonicalMutation(f.config, [])).state).toBe('deferred');
+  }).pipe(TestClock.withLive, provide),
+);
 
 it.effect('advances each projection alone and preserves the other marker/cursor, then converges full candidates', () =>
   Effect.gen(function* () {

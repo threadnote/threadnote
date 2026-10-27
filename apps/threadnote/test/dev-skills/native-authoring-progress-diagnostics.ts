@@ -32,6 +32,9 @@ export const nativeProgressSpanLabels = [
   'workflowMemory.verifyBinding',
   'recall.resolveMemoryIdentityAliases',
   'recall.loadMemoryIdentities',
+  'recall.loadIdentityProjection',
+  'recall.reconcileIdentityProjection',
+  'recall.selectIdentityProjection',
   'recall.executeIndexQuery',
   'recall.acquireDatabase',
   'recall.closeDatabase',
@@ -176,21 +179,13 @@ const transactionIntervals = (span: Tracer.Span, transaction: RefreshTransaction
   }
 };
 const refreshBucket = () => ({count: 0, scannedSources: 0, changedSources: 0, removedSources: 0, maxChangedSources: 0});
-const refreshDecision = (span: Tracer.Span) => {
-  const forceAllSources = span.attributes.get('recall.refresh.forceAllSources');
-  const forceRefresh = span.attributes.get('recall.refresh.forceRefresh');
-  const forceFromMarker = span.attributes.get('recall.refresh.forceFromMarker');
-  const canonicalMutationChanged = span.attributes.get('recall.refresh.canonicalMutationChanged');
-  const continuityAllowed = span.attributes.get('recall.refresh.continuityAllowed');
-  const scannedSources = span.attributes.get('recall.refresh.scannedSources');
-  const changedSources = span.attributes.get('recall.refresh.changedSources');
-  const removedSources = span.attributes.get('recall.refresh.removedSources');
+const sourceCounts = (span: Tracer.Span, prefix: 'recall.refresh' | 'recall.identity') => {
+  const forceAllSources = span.attributes.get(`${prefix}.forceAllSources`);
+  const scannedSources = span.attributes.get(`${prefix}.scannedSources`);
+  const changedSources = span.attributes.get(`${prefix}.changedSources`);
+  const removedSources = span.attributes.get(`${prefix}.removedSources`);
   if (
     typeof forceAllSources !== 'boolean' ||
-    typeof forceRefresh !== 'boolean' ||
-    typeof forceFromMarker !== 'boolean' ||
-    typeof canonicalMutationChanged !== 'boolean' ||
-    typeof continuityAllowed !== 'boolean' ||
     typeof scannedSources !== 'number' ||
     typeof changedSources !== 'number' ||
     typeof removedSources !== 'number' ||
@@ -199,13 +194,41 @@ const refreshDecision = (span: Tracer.Span) => {
     return undefined;
   return {
     forceAllSources,
+    scannedSources: bounded(scannedSources),
+    changedSources: bounded(changedSources),
+    removedSources: bounded(removedSources),
+  };
+};
+const addSourceCounts = (
+  bucket: ReturnType<typeof refreshBucket>,
+  counts: NonNullable<ReturnType<typeof sourceCounts>>,
+) => {
+  bucket.count = bounded(bucket.count + 1);
+  bucket.scannedSources = bounded(bucket.scannedSources + counts.scannedSources);
+  bucket.changedSources = bounded(bucket.changedSources + counts.changedSources);
+  bucket.removedSources = bounded(bucket.removedSources + counts.removedSources);
+  bucket.maxChangedSources = Math.max(bucket.maxChangedSources, counts.changedSources);
+};
+const refreshDecision = (span: Tracer.Span) => {
+  const counts = sourceCounts(span, 'recall.refresh');
+  const forceRefresh = span.attributes.get('recall.refresh.forceRefresh');
+  const forceFromMarker = span.attributes.get('recall.refresh.forceFromMarker');
+  const canonicalMutationChanged = span.attributes.get('recall.refresh.canonicalMutationChanged');
+  const continuityAllowed = span.attributes.get('recall.refresh.continuityAllowed');
+  if (
+    !counts ||
+    typeof forceRefresh !== 'boolean' ||
+    typeof forceFromMarker !== 'boolean' ||
+    typeof canonicalMutationChanged !== 'boolean' ||
+    typeof continuityAllowed !== 'boolean'
+  )
+    return undefined;
+  return {
+    ...counts,
     forceRefresh,
     forceFromMarker,
     canonicalMutationChanged,
     continuityAllowed,
-    scannedSources: bounded(scannedSources),
-    changedSources: bounded(changedSources),
-    removedSources: bounded(removedSources),
   };
 };
 
@@ -294,6 +317,7 @@ export const makeNativeProgressDiagnostics = (
     allSources: refreshBucket(),
     incremental: refreshBucket(),
   };
+  const identityReconciliations = {observed: 0, allSources: refreshBucket(), incremental: refreshBucket()};
   const active = new Map<Tracer.Span, SpanRecord>();
   const recent: SpanEnd[] = [];
   let sequence = 0;
@@ -416,11 +440,15 @@ export const makeNativeProgressDiagnostics = (
                 refreshDecisions.continuityMissing + Number(!decision.continuityAllowed),
               );
               const bucket = decision.forceAllSources ? refreshDecisions.allSources : refreshDecisions.incremental;
-              bucket.count = bounded(bucket.count + 1);
-              bucket.scannedSources = bounded(bucket.scannedSources + decision.scannedSources);
-              bucket.changedSources = bounded(bucket.changedSources + decision.changedSources);
-              bucket.removedSources = bounded(bucket.removedSources + decision.removedSources);
-              bucket.maxChangedSources = Math.max(bucket.maxChangedSources, decision.changedSources);
+              addSourceCounts(bucket, decision);
+            } else if (spanOptions.name === 'recall.reconcileIdentityProjection') {
+              const counts = sourceCounts(span, 'recall.identity');
+              if (!counts) return;
+              identityReconciliations.observed = bounded(identityReconciliations.observed + 1);
+              addSourceCounts(
+                counts.forceAllSources ? identityReconciliations.allSources : identityReconciliations.incremental,
+                counts,
+              );
             }
           });
         };
@@ -491,6 +519,11 @@ export const makeNativeProgressDiagnostics = (
           ...refreshDecisions,
           allSources: {...refreshDecisions.allSources},
           incremental: {...refreshDecisions.incremental},
+        },
+        identityReconciliations: {
+          ...identityReconciliations,
+          allSources: {...identityReconciliations.allSources},
+          incremental: {...identityReconciliations.incremental},
         },
         transactionBoundaries: {...transactionBoundaries},
         commandCohorts: Object.fromEntries(

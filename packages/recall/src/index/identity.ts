@@ -132,3 +132,50 @@ export function identityProjectionMetadataIsCurrent(metadata: ReadonlyMap<string
     sequence === metadata.get('identity_integrity_sequence')
   );
 }
+
+const LEXICAL_PUBLICATION_METADATA = [
+  'initialized',
+  'canonical_mutation_generation',
+  'content_generation',
+  'memory_identity_conflict_generation',
+  'integrity_sequence',
+  'document_count',
+  'include_inactive',
+  'logical_document_count',
+  'total_document_length',
+  'logical_total_document_length',
+  'oversized_document_count',
+  'stale_generation',
+  'validated_at',
+  'source_validation_required',
+] as const;
+
+/** Supported-schema caller only: identity publication can leave a completely untouched lexical baseline. */
+export const recallLexicalProjectionIsUntouched = Effect.fn('recall.lexicalProjectionIsUntouched')(function* (
+  sql: SqlClient.SqlClient,
+  metadata: ReadonlyMap<string, string>,
+) {
+  if (
+    metadata.get('identity_initialized') !== 'true' ||
+    !identityProjectionMetadataIsCurrent(metadata) ||
+    !metadata.get('identity_content_generation') ||
+    metadata.get('mutation_sequence') !== '0' ||
+    LEXICAL_PUBLICATION_METADATA.some(key => metadata.has(key))
+  )
+    return false;
+  // Read the logical FTS relation, whose shadow/config tables contain normal bootstrap rows.
+  // Naming required columns also refuses missing or incompatible relations without repairing them.
+  const rows = yield* sql.unsafe<{readonly has_rows: number}>(`SELECT
+    EXISTS (SELECT id, uri, project, approved_authoritative, workspace_scope, source_path,
+      source_modified_at, recorded_at, source_size, authority_policy_key, candidate_json,
+      logical_key, document_length, memory_links_truncated FROM documents)
+    OR EXISTS (SELECT term, document_id, field_weight, term_frequency FROM postings)
+    OR EXISTS (SELECT rowid, content FROM exact_search)
+    OR EXISTS (SELECT term, document_frequency FROM term_statistics)
+    OR EXISTS (SELECT document_id, document_uri, citation_ordinal, selector_kind, selector_digest FROM code_links)
+    OR EXISTS (SELECT source_document_id, source_uri, source_memory_id, target_memory_id,
+      target_locator_digest, relation_type, relation_origin, relation_ordinal FROM memory_links)
+    OR EXISTS (SELECT memory_id FROM memory_identity_conflicts)
+    AS has_rows`);
+  return rows[0]?.has_rows === 0;
+});

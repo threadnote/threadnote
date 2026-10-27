@@ -496,6 +496,151 @@ effectIt.effect('records database lifetime labels without retaining their privat
   }),
 );
 
+const identityLabels = [
+  'recall.loadIdentityProjection',
+  'recall.reconcileIdentityProjection',
+  'recall.selectIdentityProjection',
+] as const;
+const identityAttributes = (forceAllSources = false) => ({
+  forceAllSources,
+  scannedSources: 8,
+  changedSources: 1,
+  removedSources: 0,
+});
+const annotateIdentity = (span: Tracer.Span, attributes: Record<string, unknown>) => {
+  for (const [key, value] of Object.entries(attributes)) span.attribute(`recall.identity.${key}`, value);
+};
+
+effectIt.effect('retains only the exact existing identity labels and delegates every end unchanged', () =>
+  Effect.sync(() => {
+    const lines: string[] = [];
+    const ends: [Tracer.Span, bigint, Exit.Exit<unknown, unknown>][] = [];
+    const created: Tracer.Span[] = [];
+    const delegate = Tracer.make({
+      span(options) {
+        const span = Tracer.nativeTracer.span(options);
+        created.push(span);
+        const end = span.end.bind(span);
+        span.end = (at, exit) => {
+          ends.push([span, at, exit]);
+          end(at, exit);
+        };
+        return span;
+      },
+    });
+    const observer = makeNativeProgressDiagnostics(delegate, {now: () => 0, sink: line => lines.push(line)});
+    const passed = Exit.succeed({PRIVATE: 'result'});
+    const failed = Exit.fail({PRIVATE: 'error'});
+    for (const [index, label] of identityLabels.entries()) {
+      const options = spanOptions(label);
+      const span = observer.tracer.span(options);
+      expect(span).toBe(created[index]);
+      expect(span.annotations).toBe(options.annotations);
+      annotateIdentity(span, {...identityAttributes(), PRIVATE: {PRIVATE: 'paths and IDs'}});
+      span.event('PRIVATE', 1n, {PRIVATE: 'event'});
+      expect(observer.snapshot().identityReconciliations.observed).toBe(Number(index === 2));
+      span.end(3_000_000n, passed);
+      span.end(4_000_000n, failed);
+      expect(ends.slice(-2)).toEqual([
+        [span, 3_000_000n, passed],
+        [span, 4_000_000n, failed],
+      ]);
+      expect(ends.at(-2)![2]).toBe(passed);
+      expect(ends.at(-1)![2]).toBe(failed);
+      expect(observer.snapshot().totals[label]).toEqual({started: 1, ended: 1, failed: 0, inclusiveMs: 2});
+    }
+    for (const label of ['recall.identityProjection', ...identityLabels.map(label => `${label}.PRIVATE`)]) {
+      const span = observer.tracer.span(spanOptions(label));
+      annotateIdentity(span, identityAttributes(true));
+      span.end(3_000_000n, failed);
+    }
+    expect(Object.keys(observer.snapshot().totals)).toEqual(identityLabels);
+    expect(observer.snapshot().identityReconciliations).toMatchObject({
+      observed: 1,
+      incremental: {count: 1, scannedSources: 8, changedSources: 1, removedSources: 0, maxChangedSources: 1},
+    });
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(lines).toHaveLength(0);
+    observer.reportFailure();
+    observer.reportFailure();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain('PRIVATE');
+  }),
+);
+
+effectIt.effect.prop(
+  'clamps identity source counters and their aggregates without retaining source attributes',
+  {
+    events: Schema.Array(
+      Schema.Struct({
+        forceAllSources: Schema.Boolean,
+        scannedSources: Schema.Literals([0, 1, 8, 2_147_483_648, Number.MAX_VALUE]),
+        changedSources: Schema.Literals([0, 1, 8, 2_147_483_648, Number.MAX_VALUE]),
+        removedSources: Schema.Literals([0, 1, 8, 2_147_483_648, Number.MAX_VALUE]),
+      }),
+    ).check(Schema.isMaxLength(20)),
+  },
+  ({events}) =>
+    Effect.sync(() => {
+      const observer = make();
+      for (const event of events) {
+        const span = observer.tracer.span(spanOptions('recall.reconcileIdentityProjection'));
+        annotateIdentity(span, {...event, PRIVATE: {PRIVATE: 'source data'}});
+        span.end(3_000_000n, Exit.void);
+        span.end(4_000_000n, Exit.fail('PRIVATE'));
+      }
+      const snapshot = observer.snapshot();
+      expect(snapshot.identityReconciliations.observed).toBe(events.length);
+      for (const [all, name] of [
+        [true, 'allSources'],
+        [false, 'incremental'],
+      ] as const) {
+        const matching = events.filter(event => event.forceAllSources === all);
+        const clamp = (value: number) => Math.min(2_147_483_647, value);
+        expect(snapshot.identityReconciliations[name]).toEqual({
+          count: matching.length,
+          scannedSources: clamp(matching.reduce((sum, event) => sum + event.scannedSources, 0)),
+          changedSources: clamp(matching.reduce((sum, event) => sum + event.changedSources, 0)),
+          removedSources: clamp(matching.reduce((sum, event) => sum + event.removedSources, 0)),
+          maxChangedSources: clamp(Math.max(0, ...matching.map(event => event.changedSources))),
+        });
+        snapshot.identityReconciliations[name].count = -1;
+        expect(observer.snapshot().identityReconciliations[name].count).toBe(matching.length);
+      }
+      expect(JSON.stringify(snapshot)).not.toContain('PRIVATE');
+    }),
+  {arbitrary: {runs: 25}},
+);
+
+effectIt.effect('refuses malformed identity counters, missing attributes and lexical counter aliases', () =>
+  Effect.sync(() => {
+    const observer = make();
+    const privateValue = {
+      get PRIVATE() {
+        throw new Error('PRIVATE getter');
+      },
+    };
+    for (const key of Object.keys(identityAttributes())) {
+      const invalid: unknown[] = [undefined, null, 'PRIVATE', privateValue, NaN, Infinity, -Infinity, -1, 0.5];
+      if (key !== 'forceAllSources') invalid.push(true, false);
+      for (const malformed of invalid) {
+        const span = observer.tracer.span(spanOptions('recall.reconcileIdentityProjection'));
+        annotateIdentity(span, {...identityAttributes(), [key]: malformed});
+        span.end(3_000_000n, Exit.fail(privateValue));
+      }
+    }
+    for (const label of identityLabels) {
+      const span = observer.tracer.span(spanOptions(label));
+      for (const [key, value] of Object.entries(identityAttributes())) span.attribute(`recall.refresh.${key}`, value);
+      span.end(3_000_000n, Exit.void);
+    }
+    expect(observer.snapshot().identityReconciliations.observed).toBe(0);
+    expect(observer.snapshot().refreshDecisions.observed).toBe(0);
+    expect(observer.snapshot().activeCount).toBe(0);
+    expect(JSON.stringify(observer.snapshot())).not.toContain('PRIVATE');
+  }),
+);
+
 const refreshAttributes = (forceAllSources = false) => ({
   forceAllSources,
   forceRefresh: false,
