@@ -28,6 +28,7 @@ import {
   hasPackedWorkflowScopes,
   markPackedWorkflowScopes,
   workflowJournalStorageImage,
+  workflowJournalStorageImagePair,
 } from './journal_storage.js';
 
 export const workflowLocation = (config: RuntimeConfig) => ({
@@ -105,13 +106,19 @@ const readJournalFile = Effect.fn('workflowMemory.readJournalFile')(function* (
   return state;
 });
 
-export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(function* (
+interface JournalImage {
+  readonly state: WorkflowJournal;
+  readonly compact: boolean;
+  readonly content: () => string;
+}
+
+// Only this module associates exact logical images with their canonical content.
+const writeJournalImage = Effect.fn('workflowMemory.writeJournalFile')(function* (
   config: RuntimeConfig,
-  state: WorkflowJournal,
+  image: JournalImage,
 ) {
-  const cache = yield* CurrentWorkflowReadCache;
-  const compact = cache?.compactJournal || hasPackedWorkflowScopes(state.binding);
-  const serialized = yield* validateWorkflowInput(() => serializeWorkflowJournal(state, compact));
+  const {state, compact} = image;
+  const serialized = yield* validateWorkflowInput(() => serializeJournalContent(image.content));
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const file = yield* journalPath(config, state.binding.bindingId);
@@ -126,31 +133,47 @@ export const writeJournalFile = Effect.fn('workflowMemory.writeJournalFile')(fun
   yield* fs.writeFileString(temporary, serialized, {mode: 0o600});
   yield* fs.rename(temporary, file).pipe(Effect.ensuring(fs.remove(temporary, {force: true}).pipe(Effect.ignore)));
   if (compact) markPackedWorkflowScopes(state.binding);
+  const cache = yield* CurrentWorkflowReadCache;
   if (cache) cache.journal = {file, bytes: serialized, state: immutableWorkflowImage(state)};
 });
+
+export const writeJournalFile = (config: RuntimeConfig, state: WorkflowJournal) =>
+  Effect.gen(function* () {
+    const cache = yield* CurrentWorkflowReadCache;
+    const compact = cache?.compactJournal || hasPackedWorkflowScopes(state.binding);
+    yield* writeJournalImage(config, {
+      state,
+      compact,
+      content: () => stableJson(workflowJournalStorageImage(state, compact)) + '\n',
+    });
+  });
 
 export const workflowJournalLogicalBytes = (state: WorkflowJournal, compact = false): number =>
   new TextEncoder().encode(
     stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
   ).byteLength;
 
-export function serializeWorkflowJournal(state: WorkflowJournal, compact = false): string {
+const writeCapacityError = () =>
+  workflowError(
+    'journal-capacity',
+    'This workflow has reached its bounded task-state capacity. No new operation was applied; preserve its existing receipts.',
+  );
+
+function serializeJournalContent(content: () => string): string {
   try {
-    return encodeWorkflowJournal(
-      stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
-    );
+    return encodeWorkflowJournal(content());
   } catch {
-    throw workflowError(
-      'journal-capacity',
-      'This workflow has reached its bounded task-state capacity. No new operation was applied; preserve its existing receipts.',
-    );
+    throw writeCapacityError();
   }
 }
 
-/** Plaintext below the disk limit is admissible without running compression for a preview. */
-export function assertWorkflowJournalCapacity(state: WorkflowJournal, compact = false): void {
-  const content =
-    stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n';
+export function serializeWorkflowJournal(state: WorkflowJournal, compact = false): string {
+  return serializeJournalContent(
+    () => stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
+  );
+}
+
+function assertJournalContentCapacity(content: string): void {
   if (new TextEncoder().encode(content).byteLength <= workflowJournalLimits.diskBytes) return;
   try {
     encodeWorkflowJournal(content);
@@ -160,6 +183,23 @@ export function assertWorkflowJournalCapacity(state: WorkflowJournal, compact = 
       'This workflow has reached its bounded task-state capacity. Preserve its existing receipts.',
     );
   }
+}
+
+/** Plaintext below the disk limit is admissible without running compression for a preview. */
+export function assertWorkflowJournalCapacity(state: WorkflowJournal, compact = false): void {
+  assertJournalContentCapacity(
+    stableJson(workflowJournalStorageImage(state, compact || hasPackedWorkflowScopes(state.binding))) + '\n',
+  );
+}
+
+function transitionImages(prepared: WorkflowJournal) {
+  const frozen = immutableWorkflowImage(prepared);
+  const committed = immutableWorkflowImage({...frozen, manifestCommitted: true});
+  const content = workflowJournalStorageImagePair(frozen);
+  return Object.freeze({
+    prepared: Object.freeze({state: frozen, compact: true, content: content.prepared}),
+    committed: Object.freeze({state: committed, compact: true, content: content.committed}),
+  });
 }
 
 /** Only replay an exact journaled manifest transition; never reconstruct missing committed state. */
@@ -389,10 +429,16 @@ export const assertWorkflowTransition = Effect.fn('workflowMemory.transition')(f
 ) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
   const cache = yield* CurrentWorkflowReadCache;
-  yield* validateWorkflowInput(() => assertWorkflowJournalCapacity(prepared, cache?.compactJournal));
-  yield* validateWorkflowInput(() =>
-    assertWorkflowJournalCapacity({...prepared, manifestCommitted: true}, cache?.compactJournal),
-  );
+  if (cache?.compactJournal) {
+    const images = yield* validateWorkflowInput(() => transitionImages(prepared));
+    yield* validateWorkflowInput(() => assertJournalContentCapacity(images.prepared.content()));
+    yield* validateWorkflowInput(() => assertJournalContentCapacity(images.committed.content()));
+  } else {
+    yield* validateWorkflowInput(() => assertWorkflowJournalCapacity(prepared, cache?.compactJournal));
+    yield* validateWorkflowInput(() =>
+      assertWorkflowJournalCapacity({...prepared, manifestCommitted: true}, cache?.compactJournal),
+    );
+  }
   yield* validateTransition(config, previous, prepared);
 });
 
@@ -403,6 +449,15 @@ export const persistWorkflowState = Effect.fn('workflowMemory.persistState')(fun
 ) {
   const prepared = workflowTransition(previous, updated, DateTime.formatIso(yield* DateTime.now));
   yield* validateTransition(config, previous, prepared);
+  const cache = yield* CurrentWorkflowReadCache;
+  if (cache?.compactJournal) {
+    const images = yield* Effect.try({try: () => transitionImages(prepared), catch: writeCapacityError});
+    yield* writeJournalImage(config, images.prepared);
+    yield* reconcileManifest(config, images.prepared.state, true);
+    // Encode the committed bytes only after the live manifest fence has succeeded.
+    yield* writeJournalImage(config, images.committed);
+    return images.committed.state;
+  }
   yield* writeJournalFile(config, prepared);
   yield* reconcileManifest(config, prepared, true);
   const committed = {...prepared, manifestCommitted: true};

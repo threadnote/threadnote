@@ -1,5 +1,5 @@
 import {nativeWorkflowOperationLimit} from '@threadnote/workflow-automations/native';
-import type {WorkflowBinding, WorkflowJournal} from './protocol.js';
+import {stableJson, type WorkflowBinding, type WorkflowJournal} from './protocol.js';
 
 const format = 'threadnote-workflow-journal-shared-values-v1';
 // Cover every known slot of a full native run; the outer 64 MiB image bound remains independent.
@@ -60,6 +60,10 @@ export const markPackedWorkflowScopes = (binding: WorkflowBinding): void => {
 /** Lossless storage image. Exact scope sets and selected text values are shared after decoding. */
 export function workflowJournalStorageImage(state: WorkflowJournal, compact: boolean): unknown {
   if (!compact) return state;
+  return compactJournalImage(state);
+}
+
+function compactJournalImage(state: WorkflowJournal) {
   const scopeSets: string[][] = [];
   const textValues: string[] = [];
   const textIndexes = new Map<string, number>();
@@ -119,6 +123,41 @@ export function workflowJournalStorageImage(state: WorkflowJournal, compact: boo
   );
   const packedJournal = replaceJournalText({...state, operations}, internText);
   return {journalStorage: format, scopeSets, textValues, journal: packedJournal};
+}
+
+// Partition only a container frame; large child values keep the native canonical encoder.
+function partitionFrame(value: Record<string, unknown>, slot: string) {
+  const ordered = Object.fromEntries(
+    Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+  );
+  const keys = Object.keys(ordered);
+  const index = keys.indexOf(slot);
+  if (index < 0) throw invalid();
+  const entry = (key: string) => `${JSON.stringify(key)}:${stableJson(ordered[key])}`;
+  const before = keys.slice(0, index).map(entry);
+  const after = keys.slice(index + 1).map(entry);
+  return {
+    prefix: `{${[...before, `${JSON.stringify(slot)}:`].join(',')}`,
+    suffix: `${after.length ? ',' : ''}${after.join(',')}}`,
+  };
+}
+
+// This closure retains only canonical fragments, not the packed object graph or both full strings.
+function siblingContents(prefix: string, suffix: string) {
+  return Object.freeze({
+    prepared: () => `${prefix}false${suffix}`,
+    committed: () => `${prefix}true${suffix}`,
+  });
+}
+
+/** Pure formatting for one private, immutable native transition; no persistence or scope authority. */
+export function workflowJournalStorageImagePair(prepared: WorkflowJournal) {
+  const image = compactJournalImage(prepared);
+  const journal = partitionFrame(image.journal, 'manifestCommitted');
+  const envelope = partitionFrame(image, 'journal');
+  return siblingContents(envelope.prefix + journal.prefix, journal.suffix + envelope.suffix + '\n');
 }
 
 /** Ordinary journals are untouched; packed journals still undergo the full ownership validator. */

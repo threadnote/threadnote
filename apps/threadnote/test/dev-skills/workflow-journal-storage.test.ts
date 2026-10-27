@@ -1,17 +1,25 @@
-import {describe, expect, it} from 'vitest';
+import {describe, expect, it, vi} from 'vitest';
 import fc from 'fast-check';
 import {Effect} from 'effect';
 import {TestClock} from 'effect/testing';
 import {it as effectIt} from '@effect/vitest';
 import {decodeWorkflowJournal, encodeWorkflowJournal} from '../../src/workflow_memory/journal_codec.js';
 import {nativeAuthoringSaveByteBudget} from '@threadnote/workflow-automations/native';
+import {ResourceStore} from '@threadnote/store/resource-store';
 import {
   decodeWorkflowJournalStorageImage,
   hasPackedWorkflowScopes,
   workflowJournalStorageImage,
+  workflowJournalStorageImagePair,
 } from '../../src/workflow_memory/journal_storage.js';
 import {stableJson, type WorkflowJournal} from '../../src/workflow_memory/protocol.js';
-import {withWorkflowReadCache} from '../../src/workflow_memory/read_cache.js';
+import {immutableWorkflowImage, withWorkflowReadCache} from '../../src/workflow_memory/read_cache.js';
+import {
+  assertWorkflowTransition,
+  persistWorkflowState,
+  serializeWorkflowJournal,
+  withWorkflowLock,
+} from '../../src/workflow_memory/journal.js';
 import {nativeFixture, provideNative} from './native-automation-fixture.js';
 
 // This fixture tests storage fidelity, not native journal admission.
@@ -61,6 +69,65 @@ const image = (
   }) as unknown as WorkflowJournal;
 
 describe('workflow journal scope-set storage', () => {
+  it('formats complete sibling images exactly across appends, replacements and pool-order changes', async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.array(fc.string({maxLength: 40}), {maxLength: 8}), {minLength: 1, maxLength: 5}),
+        fc.oneof(
+          fc.array(fc.integer({min: 0, max: 0xffff}), {maxLength: 60}).map(units => String.fromCharCode(...units)),
+          fc.constant('"manifestCommitted":false\n雪🙂\ud800x\udfff'),
+        ),
+        async (scopes, text) => {
+          const initial = image(scopes, {
+            manifestContent: text,
+            previousManifestContent: text,
+            requestBody: text,
+            desired: text,
+            before: text,
+            relationContent: text,
+          });
+          const child = image([[...scopes[0], 'new-scope']]).operations['operation-0'];
+          const appended = {...initial, operations: {...initial.operations, '0-child': child}};
+          const replaced = {
+            ...appended,
+            operations: {
+              ...appended.operations,
+              'operation-0': {...child, desired: text + '\nreplacement'},
+            },
+          };
+          const reordered = {
+            ...replaced,
+            operations: Object.fromEntries(Object.entries(replaced.operations).reverse()),
+          };
+          for (const current of [initial, appended, replaced, reordered]) {
+            const prepared = immutableWorkflowImage({
+              ...current,
+              manifestCommitted: false,
+              '4294967295': [undefined, text],
+              '10': {manifestCommitted: false, nested: [text]},
+              '2': text,
+              '01': undefined,
+              '4294967294': {optional: undefined},
+            });
+            const before = stableJson(prepared);
+            const pair = workflowJournalStorageImagePair(prepared);
+            for (const committed of [false, true]) {
+              const state = {...prepared, manifestCommitted: committed};
+              const content = committed ? pair.committed() : pair.prepared();
+              expect(content).toBe(stableJson(workflowJournalStorageImage(state, true)) + '\n');
+              const stored = encodeWorkflowJournal(content);
+              expect(stored).toBe(serializeWorkflowJournal(state, true));
+              const decoded = decodeWorkflowJournalStorageImage(JSON.parse(await decodeWorkflowJournal(stored)));
+              expect(stableJson(decoded)).toBe(stableJson(state));
+            }
+            expect(stableJson(prepared)).toBe(before);
+          }
+        },
+      ),
+      {numRuns: 32},
+    );
+  });
+
   it('preserves every scope and text byte without changing ordinary storage', async () => {
     await fc.assert(
       fc.asyncProperty(
@@ -443,6 +510,132 @@ describe('workflow journal scope-set storage', () => {
     );
     expect(stableJson(decoded)).toBe(stableJson(postimage));
   });
+
+  effectIt.effect('checks both native sibling capacities before mutation', () =>
+    Effect.gen(function* () {
+      const f = yield* nativeFixture();
+      const initialized = yield* f.init();
+      const journalFile = f.journalPath(initialized.bindingId);
+      const original = yield* f.fs.readFileString(journalFile);
+      const previous = decodeWorkflowJournalStorageImage(
+        JSON.parse(yield* Effect.promise(() => decodeWorkflowJournal(original))),
+      ) as WorkflowJournal;
+      const manifestBefore = yield* f.store.read(f.location, previous.manifestUri);
+      const updated = {...previous, retainedJson: 'x'.repeat(17 * 1024 * 1024)};
+      const flags: boolean[] = [];
+      const nativeGzip = Bun.gzipSync;
+      const result = yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          vi.spyOn(Bun, 'gzipSync').mockImplementation((bytes, options) => {
+            const logical = decodeWorkflowJournalStorageImage(
+              JSON.parse(typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes)),
+            ) as WorkflowJournal;
+            flags.push(logical.manifestCommitted);
+            if (flags.length === 2) throw new Error('second capacity codec failure');
+            return nativeGzip(bytes, options);
+          }),
+        ),
+        () =>
+          withWorkflowLock(
+            f.config,
+            initialized.bindingId,
+            withWorkflowReadCache(assertWorkflowTransition(f.config, previous, updated), {compactJournal: true}),
+          ).pipe(Effect.result),
+        spy => Effect.sync(() => spy.mockRestore()),
+      );
+      expect(flags).toEqual([false, true]);
+      expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'journal-capacity'}});
+      expect(yield* f.fs.readFileString(journalFile)).toBe(original);
+      expect(yield* f.store.read(f.location, previous.manifestUri)).toBe(manifestBefore);
+    }).pipe(TestClock.withLive, provideNative),
+  );
+
+  effectIt.effect('keeps native pair codec failures at the original write fences and recovers exact receipts', () =>
+    Effect.gen(function* () {
+      for (const failAt of [1, 2]) {
+        const f = yield* nativeFixture();
+        const initialized = yield* f.init();
+        const journalFile = f.journalPath(initialized.bindingId);
+        const original = yield* f.fs.readFileString(journalFile);
+        const previous = decodeWorkflowJournalStorageImage(
+          JSON.parse(yield* Effect.promise(() => decodeWorkflowJournal(original))),
+        ) as WorkflowJournal;
+        const manifestBefore = yield* f.store.read(f.location, previous.manifestUri);
+        const updated = {...previous, retainedJson: 'x'.repeat(2 * 1024 * 1024)};
+        yield* Effect.sleep('2 millis');
+        const events: string[] = [];
+        const monitored: typeof f.store = {
+          ...f.store,
+          read: (...args) =>
+            f.store.read(...args).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (args[1] === previous.manifestUri) events.push('manifest-read');
+                }),
+              ),
+            ),
+          write: (...args) =>
+            f.store.write(...args).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (args[1] === previous.manifestUri) events.push('manifest-written');
+                }),
+              ),
+            ),
+        };
+        const nativeGzip = Bun.gzipSync;
+        let codecs = 0;
+        const result = yield* Effect.acquireUseRelease(
+          Effect.sync(() =>
+            vi.spyOn(Bun, 'gzipSync').mockImplementation((bytes, options) => {
+              const logical = decodeWorkflowJournalStorageImage(
+                JSON.parse(typeof bytes === 'string' ? bytes : new TextDecoder().decode(bytes)),
+              ) as WorkflowJournal;
+              events.push(logical.manifestCommitted ? 'codec:committed' : 'codec:prepared');
+              if (++codecs === failAt) throw new Error('pair write codec failure');
+              return nativeGzip(bytes, options);
+            }),
+          ),
+          () =>
+            withWorkflowLock(
+              f.config,
+              initialized.bindingId,
+              withWorkflowReadCache(persistWorkflowState(f.config, previous, updated), {compactJournal: true}),
+            ).pipe(Effect.provideService(ResourceStore, monitored), Effect.result),
+          spy => Effect.sync(() => spy.mockRestore()),
+        );
+        expect(result).toMatchObject({_tag: 'Failure', failure: {code: 'journal-capacity'}});
+        const failedBytes = yield* f.fs.readFileString(journalFile);
+        const pending = decodeWorkflowJournalStorageImage(
+          JSON.parse(yield* Effect.promise(() => decodeWorkflowJournal(failedBytes))),
+        ) as WorkflowJournal;
+        if (failAt === 1) {
+          expect(events).toEqual(['codec:prepared']);
+          expect(failedBytes).toBe(original);
+          expect(yield* f.store.read(f.location, previous.manifestUri)).toBe(manifestBefore);
+        } else {
+          expect(events).toEqual([
+            'codec:prepared',
+            'manifest-read',
+            'manifest-written',
+            'manifest-read',
+            'codec:committed',
+          ]);
+          expect(pending.manifestCommitted).toBe(false);
+          expect(failedBytes).toBe(serializeWorkflowJournal(pending, true));
+          expect(yield* f.store.read(f.location, previous.manifestUri)).toBe(pending.manifestContent);
+        }
+        const recovered = yield* withWorkflowLock(
+          f.config,
+          initialized.bindingId,
+          withWorkflowReadCache(persistWorkflowState(f.config, pending, pending), {compactJournal: true}),
+        );
+        expect(recovered.manifestCommitted).toBe(true);
+        expect(yield* f.fs.readFileString(journalFile)).toBe(serializeWorkflowJournal(recovered, true));
+        expect(yield* f.store.read(f.location, recovered.manifestUri)).toBe(recovered.manifestContent);
+      }
+    }).pipe(TestClock.withLive, provideNative),
+  );
 
   effectIt.effect(
     'reads packed authority through ordinary native calls and refuses corrupted references without writes',

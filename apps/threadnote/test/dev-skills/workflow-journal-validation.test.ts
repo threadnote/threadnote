@@ -20,6 +20,7 @@ import {createMemoryCodeCitation, MEMORY_SCHEMA_VERSION} from '@threadnote/memor
 import {sha256HexSync} from '@threadnote/platform/sha256';
 import {assertWorkflowJournalIntegrity, workflowOwnedArtifacts} from '../../src/workflow_memory/journal_validation.js';
 import {assertWorkflowJournalCapacity, serializeWorkflowJournal} from '../../src/workflow_memory/journal.js';
+import {workflowJournalStorageImagePair} from '../../src/workflow_memory/journal_storage.js';
 import {
   workflowArtifactTopic,
   workflowArtifactUri,
@@ -391,6 +392,55 @@ const envelopeFor = (plain: Uint8Array, compressed: Uint8Array, marker = format)
     payload: Buffer.from(compressed).toString('base64'),
   });
 describe('workflow journal codec', async () => {
+  it('keeps both pair images byte-equal when their independent capacity checks straddle the disk limit', async () => {
+    const empty = {...state(), manifestCommitted: false, manifestContent: ''};
+    const overhead = new TextEncoder().encode(workflowJournalStorageImagePair(empty).prepared()).byteLength;
+    for (const targetBytes of [workflowJournalLimits.diskBytes, workflowJournalLimits.diskBytes + 1]) {
+      const prepared = {...empty, manifestContent: 'x'.repeat(targetBytes - overhead)};
+      const pair = workflowJournalStorageImagePair(prepared);
+      expect(new TextEncoder().encode(pair.prepared()).byteLength).toBe(targetBytes);
+      expect(new TextEncoder().encode(pair.committed()).byteLength).toBe(targetBytes - 1);
+      for (const manifestCommitted of [false, true]) {
+        const sibling = {...prepared, manifestCommitted};
+        const content = manifestCommitted ? pair.committed() : pair.prepared();
+        const encoded = encodeWorkflowJournal(content);
+        expect(encoded).toBe(serializeWorkflowJournal(sibling, true));
+        expect(() => assertWorkflowJournalCapacity(sibling, true)).not.toThrow();
+        expect(await decodeWorkflowJournal(encoded)).toBe(content);
+      }
+    }
+  });
+
+  it('preserves ordinary serializer fallback for getters and toJSON', () => {
+    let reads = 0;
+    const accessor = Object.freeze({
+      get text() {
+        reads += 1;
+        return '雪\ud800x\udfff';
+      },
+    });
+    let conversions = 0;
+    const withToJSON = Object.freeze({
+      toJSON() {
+        conversions += 1;
+        return {converted: 'ordinary'};
+      },
+    });
+    for (const extension of [accessor, withToJSON]) {
+      const input = {...state(), extension};
+      const expected = encodeWorkflowJournal(stableJson(input) + '\n');
+      const expectedReads = reads;
+      const expectedConversions = conversions;
+      reads = 0;
+      conversions = 0;
+      expect(serializeWorkflowJournal(input)).toBe(expected);
+      expect(reads).toBe(expectedReads);
+      expect(conversions).toBe(expectedConversions);
+      reads = 0;
+      conversions = 0;
+    }
+  });
+
   it('emits deterministic native gzip readable by independent zlib and journal readers', async () => {
     const logical = `${JSON.stringify({payload: 'UTF-8 journal — 雪 and 🌊. '.repeat(90_000)})}\n`;
     const encoded = encodeWorkflowJournal(logical);
