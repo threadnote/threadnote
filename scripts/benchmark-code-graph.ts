@@ -682,6 +682,7 @@ const benchmarkCodeGraph = Effect.scoped(
               path.join(bootstrapRoot, 'not-created.sqlite'),
               benchmarkSamplerCheckpointPath(path, bootstrapRoot, options.outputPath, 'bootstrap'),
               'bootstrap',
+              options.rssPeakDiagnostics,
             ),
             (sampler, exit) => sampler.stop(Exit.isSuccess(exit) ? 'complete' : 'aborted').pipe(Effect.ignore),
           )
@@ -774,6 +775,7 @@ const benchmarkCodeGraph = Effect.scoped(
             benchmarkLayout.databasePath,
             benchmarkSamplerCheckpointPath(path, samplerRoot, options.outputPath, 'cold'),
             'cold',
+            options.rssPeakDiagnostics,
           )
         : succeedUndefined,
       (timeline, sampler) =>
@@ -1002,6 +1004,7 @@ const benchmarkCodeGraph = Effect.scoped(
                   benchmarkLayout.databasePath,
                   benchmarkSamplerCheckpointPath(path, samplerRoot, options.outputPath, 'incremental'),
                   'incremental',
+                  options.rssPeakDiagnostics,
                 )
               : succeedUndefined,
             (timeline, sampler) =>
@@ -1148,6 +1151,7 @@ const benchmarkCodeGraph = Effect.scoped(
                         'same-overlay-reference',
                       ),
                       'same-overlay-reference',
+                      options.rssPeakDiagnostics,
                     )
                   : succeedUndefined,
                 (timeline, sampler) =>
@@ -3524,6 +3528,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
   databasePath: string,
   checkpointPath: string,
   name: 'bootstrap' | 'cold' | 'incremental' | 'same-overlay-reference',
+  rssPeakDiagnostics = false,
 ) {
   yield* fs.makeDirectory(samplerRoot, {recursive: true});
   const phasePath = path.join(samplerRoot, `${name}.phase`);
@@ -3565,6 +3570,7 @@ export const startExternalSampler = Effect.fn('benchmarkCodeGraph.startExternalS
       '1000',
       '--ready',
       readyPath,
+      ...(rssPeakDiagnostics ? ['--rss-peak-diagnostics', 'true'] : []),
     ],
     stderr: 'pipe',
     stdout: 'ignore',
@@ -5910,6 +5916,7 @@ export interface CodeGraphBenchmarkOptions {
   readonly referenceHomePath?: string;
   readonly repository?: string;
   readonly retainHomes: boolean;
+  readonly rssPeakDiagnostics?: true;
   readonly samples: number;
   readonly scaleSymbols?: number;
   readonly sqliteWriterProfile?: CodeGraphSqliteWriterProfile;
@@ -5940,6 +5947,7 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
   let referenceHomePath: string | undefined;
   let repository: string | undefined;
   let retainHomes = false;
+  let rssPeakDiagnostics = false;
   let samples = 25;
   let scaleSymbols: number | undefined;
   let sqliteWriterProfile: CodeGraphSqliteWriterProfile | undefined;
@@ -5979,6 +5987,7 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
     } else if (argument === '--profile-files') profileFiles = integer(args[++index], argument, 2);
     else if (argument === '--profile-symbols') profileSymbols = integer(args[++index], argument, 2);
     else if (argument === '--quiet') quiet = true;
+    else if (argument === '--rss-peak-diagnostics') rssPeakDiagnostics = true;
     else if (argument === '--samples') samples = integer(args[++index], argument, 1);
     else if (argument === '--scale-symbols') scaleSymbols = integer(args[++index], argument, 1);
     else if (argument === '--sqlite-writer-profile') {
@@ -6125,6 +6134,7 @@ export function parseCodeGraphBenchmarkArguments(args: readonly string[]): CodeG
     referenceHomePath,
     repository,
     retainHomes,
+    ...(rssPeakDiagnostics ? {rssPeakDiagnostics: true as const} : {}),
     samples,
     scaleSymbols,
     sqliteWriterProfile,
